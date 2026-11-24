@@ -2067,7 +2067,9 @@ fn wasm_numbers_bodies_link_their_internal_wasm_op_by_exact_intrinsic_identity()
             .filter(|symbol| {
                 let facts = libraries.intrinsic_facts();
                 match &symbol.signature {
-                    KlibIrSignature::FileLocal { .. } => false,
+                    KlibIrSignature::FileLocal { .. } | KlibIrSignature::TypeParameter { .. } => {
+                        false
+                    }
                     KlibIrSignature::Public(signature) => {
                         let intrinsic = facts.get(&KlibDependencyCallable {
                             module: callable.identity().module.clone(),

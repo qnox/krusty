@@ -5,13 +5,16 @@
 //! that realizes `KCallable.name` as a member of its reference objects reads it here, so each one
 //! answers the same name for the same reference.
 
-use crate::ir::{IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable, IrFile};
+use crate::ir::{
+    IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable, IrFile,
+    IrReferencedProperty,
+};
 
 use super::CheckedBackendCallables;
 
 /// The Kotlin name of the declaration `reference` names, which `KCallable.name` answers.
 ///
-/// `None` when the declaration's name cannot be read, or for a property's function value. A
+/// `None` when the declaration's name cannot be read, or for a property's function-typed value. A
 /// reference that cannot say its own name gets no `name` member rather than a wrong one.
 pub fn callable_reference_name(
     ir: &IrFile,
@@ -43,7 +46,19 @@ pub fn callable_reference_name(
             Some(format!("suspendConversion{ordinal}"))
         }
         IrCallableReferenceTarget::FunctionInvoke => Some("invoke".to_string()),
-        // A function value has no `name`; only the property reference itself does.
+        // A function value has no `name`; only the property reference itself does, a
+        // `KProperty` value its target realizes as a function value.
+        IrCallableReferenceTarget::Property(property) if property.reflective => {
+            match property.referenced_property()? {
+                IrReferencedProperty::Module(property) => ir
+                    .checked_properties
+                    .get(&property)
+                    .map(|property| property.name.clone()),
+                IrReferencedProperty::External(property) => callables
+                    .property(property)
+                    .map(|property| property.name.to_string()),
+            }
+        }
         IrCallableReferenceTarget::Property(_) => None,
         IrCallableReferenceTarget::Classifier { operation, .. } => Some(
             match operation {

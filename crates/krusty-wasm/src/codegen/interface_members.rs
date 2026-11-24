@@ -55,8 +55,7 @@ pub(super) type Signature = (Vec<ValType>, Vec<ValType>);
 pub(super) fn member_signature(params: &[Ty], result: Ty) -> Result<Signature, Unsupported> {
     let mut carriers = vec![REFERENCE];
     for param in params {
-        carriers
-            .push(parameter_carrier_of(*param)?.ok_or_else(|| "a `Unit` parameter".to_string())?);
+        carriers.push(parameter_carrier_of(*param)?);
     }
     Ok((carriers, carrier(result)?.into_iter().collect()))
 }
@@ -1030,21 +1029,39 @@ impl FileRecorder<'_, '_, '_> {
                 None,
             ),
             None => {
-                let function = edge
-                    .implementation_function
-                    .or_else(|| {
-                        implementation.and_then(|callable| {
-                            ir.checked_callable_functions.get(&callable).copied()
-                        })
-                    })
-                    .ok_or_else(|| {
-                        self.declined("a dependency's interface member with no body here")
-                    })?;
-                let key = function_key(ir, owner, function);
-                let slot =
-                    self.classes.tables.slot(owner, &key).ok_or_else(|| {
-                        self.declined("a dependency's interface member with no slot")
-                    })?;
+                let function = edge.implementation_function.or_else(|| {
+                    implementation
+                        .and_then(|callable| ir.checked_callable_functions.get(&callable).copied())
+                });
+                let slot = match function {
+                    Some(function) => {
+                        let key = function_key(ir, owner, function);
+                        self.classes.tables.slot(owner, &key)
+                    }
+                    // A member the class inherits from a superclass an earlier file laid out:
+                    // the slot that file's table holds it at. A dependency member, an accessor
+                    // among them, is found by its declaration's slot identity: the callable
+                    // identity another module's file gave it numbers nothing here.
+                    None => {
+                        let callables = self.recording.callables;
+                        self.classes
+                            .laid_out_superclass(self.id)
+                            .and_then(|superclass| match edge.implementation {
+                                ResolvedFunctionOverrideTarget::Module(callable) => superclass
+                                    .table
+                                    .members
+                                    .get(&PlanKey::Callable(callable))
+                                    .copied(),
+                                ResolvedFunctionOverrideTarget::External(target) => callables
+                                    .callable(target)
+                                    .and_then(BackendCallableFact::member_slot_identity)
+                                    .and_then(|identity| {
+                                        superclass.declaration_slots.get(&identity).copied()
+                                    }),
+                            })
+                    }
+                }
+                .ok_or_else(|| self.declined("a dependency's interface member with no slot"))?;
                 if self.slot_is_abstract(slot) {
                     return Ok(None);
                 }

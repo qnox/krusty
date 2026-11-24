@@ -281,14 +281,16 @@ pub fn build_numbered(
     representation: &dyn Representation,
     ir: &IrFile,
     plan: &module_slots::ModuleSlotPlan,
+    extended: &mut module_interfaces::ExtendedNumbers,
     laid_out: &dyn Fn(TypeName) -> Option<LaidOutSuperclass>,
 ) -> Result<NumberedClassTables, Unsupported> {
     let superclasses = laid_out_superclasses(ir, laid_out);
     let (mut tables, order, interfaces) = class_tables(representation, ir, plan, &superclasses)?;
+    let numbers = plan.interfaces().with_installed(ir, extended)?;
     let interface_tables = planned_itable::interface_tables(
         representation,
         ir,
-        plan.interfaces(),
+        &numbers,
         &order,
         &tables,
         &superclasses,
@@ -312,6 +314,7 @@ pub fn build_numbered(
         interfaces,
         interface_tables,
         members,
+        numbers,
     })
 }
 
@@ -367,6 +370,8 @@ pub struct NumberedClassTables {
     pub interface_tables: planned_itable::InterfaceTables,
     /// Each class's [`LaidOutSuperclass::members`]. Indexed by `ClassId`.
     pub members: Vec<HashMap<module_slots::PlanKey, u32>>,
+    /// The module's interface numbers, extended with the interfaces this file's IR installed.
+    pub numbers: module_interfaces::ModuleInterfaces,
 }
 
 impl NumberedClassTables {

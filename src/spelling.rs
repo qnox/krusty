@@ -50,6 +50,10 @@ pub struct Spelled {
     /// arguments. These become the abbreviated `Type`'s own `argument` list, so each carries the
     /// `Ty` it resolved to as well as its own spelling. Empty when `alias` is `None`.
     pub alias_args: Vec<(Ty, Spelled)>,
+    /// The alias's own expansion is nullable and this use did not mark it `?`
+    /// (`typealias MaybeNames = Names?` written `MaybeNames`): the type is nullable, its
+    /// abbreviation is not.
+    pub alias_absorbs_nullability: bool,
     /// Spellings of the EXPANDED type's arguments, positionally parallel to
     /// [`Ty::type_args`](crate::types::Ty::type_args).
     ///
@@ -98,6 +102,7 @@ const EMPTY: Spelled = Spelled {
     definitely_non_null: false,
     use_site_definitely_non_null: false,
     alias: None,
+    alias_absorbs_nullability: false,
     alias_args: Vec::new(),
     args: Vec::new(),
     annotations: Vec::new(),

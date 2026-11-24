@@ -708,14 +708,16 @@ fn members_in_hierarchy_for(
     name: &str,
     view: HierarchyMemberView,
 ) -> Callables {
-    // A function type carries its callable shape directly in `FnSig`; it is not named by deriving a
-    // `FunctionN` classifier from the parameter count. For ordinary member lookup its declared
-    // classifier is the arity-independent `Function<R>`, whose hierarchy supplies `Any` members.
-    // `invoke` remains a member of the `FnSig` itself and is handled by the caller from that signature.
+    // A function type is an instance of its function classifier (`(A) -> R` is `Function1<A, R>`,
+    // `suspend A.() -> R` is `SuspendFunction1<A, R>`), so its member scope is that classifier's:
+    // the operator `invoke` it declares, then `Function<R>` and `Any`. kotlinc resolves an
+    // implicit-receiver `invoke(a)` inside `fun ((A) -> R).f()` through this scope.
     let intersection_parts =
         super::hierarchy_projection::intersection_components(receiver.non_null());
     let receiver = match receiver.non_null().kind() {
-        TyKind::Fun(signature) => Ty::obj_args("kotlin/Function", &[signature.ret]),
+        TyKind::Fun(_) => {
+            crate::libraries::function_classifiers::supertype_classifier(receiver.non_null())
+        }
         TyKind::Unit => Ty::obj("kotlin/Unit"),
         TyKind::Nothing => Ty::obj("kotlin/Nothing"),
         _ => receiver,

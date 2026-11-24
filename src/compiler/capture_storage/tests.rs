@@ -191,6 +191,7 @@ fn physical_compaction_preserves_other_fields_and_their_side_effects() {
             source_order: 0,
             receiver: Ty::String,
             ty: Ty::Int,
+            context_params: Vec::new(),
             is_var: false,
             is_abstract: false,
             modifiers: Default::default(),

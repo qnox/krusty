@@ -141,7 +141,7 @@ fn an_enum_constant_resolves_in_the_reading_body_s_producer_graph() {
 }
 
 #[test]
-fn an_enum_with_members_beyond_its_generated_ones_declines() {
+fn an_enum_storing_member_properties_declines() {
     let Some(root) = distribution_root() else {
         return;
     };
@@ -162,7 +162,7 @@ fn an_enum_with_members_beyond_its_generated_ones_declines() {
     assert_eq!(
         super::super::enum_classes::authenticate_entry(bodies, module, &option).err(),
         Some(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "an enum class with member properties"
+            "an enum class with stored member properties"
         ))
     );
 }

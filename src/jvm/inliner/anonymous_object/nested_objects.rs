@@ -42,6 +42,10 @@ impl AnonymousObjects for NestedObjects<'_, '_> {
         self.regeneration.same_module
     }
 
+    fn class_regeneration(&self) -> bool {
+        true
+    }
+
     fn regenerate_singleton(
         &mut self,
         class: &str,

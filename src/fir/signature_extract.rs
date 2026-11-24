@@ -1475,13 +1475,29 @@ impl SignatureConstraintExtractor {
                     Some(args) => {
                         let lexical_callee =
                             self.lexical_receiver_function_value(file, expression, name.as_str());
+                        let explicit =
+                            self.call_arguments(file, expression, args, scope, origin)?;
+                        let type_arguments =
+                            self.call_type_arguments(file, expression, scope, origin);
+                        let later = self.source_member_call(
+                            receiver,
+                            name,
+                            SourceMemberCall {
+                                arguments: explicit,
+                                type_arguments,
+                                trailing_lambda: file
+                                    .call_has_trailing_lambda
+                                    .contains(&expression.0),
+                            },
+                            scope,
+                            selector_origin,
+                        );
                         if let Some(callee) = lexical_callee {
                             // A safe extension-function-value invocation still binds its guarded
                             // receiver as the function type's receiver parameter. Keep the local
                             // binding and explicit receiver in the compact invoke shape; member
-                            // lookup cannot discover a parameter such as `b` in `a?.b(1)`.
-                            let explicit =
-                                self.call_arguments(file, expression, args, scope, origin)?;
+                            // lookup cannot discover a parameter such as `b` in `a?.b(1)`. A value
+                            // that cannot take the arguments leaves the call to that lookup.
                             let mut arguments =
                                 Vec::with_capacity(self.graph.call_arguments(explicit).len() + 1);
                             arguments.push(SigCallArgument {
@@ -1498,26 +1514,10 @@ impl SignatureConstraintExtractor {
                                 arguments,
                                 scope,
                                 origin: node_origin,
-                                later: None,
+                                later: Some(later),
                             })
                         } else {
-                            let arguments =
-                                self.call_arguments(file, expression, args, scope, origin)?;
-                            let type_arguments =
-                                self.call_type_arguments(file, expression, scope, origin);
-                            self.source_member_call(
-                                receiver,
-                                name,
-                                SourceMemberCall {
-                                    arguments,
-                                    type_arguments,
-                                    trailing_lambda: file
-                                        .call_has_trailing_lambda
-                                        .contains(&expression.0),
-                                },
-                                scope,
-                                selector_origin,
-                            )
+                            later
                         }
                     }
                     None => self.member(receiver, name, scope, selector_origin),
@@ -1752,41 +1752,16 @@ impl SignatureConstraintExtractor {
                         }
                         let lexical_callee =
                             self.lexical_receiver_function_value(file, expression, name.as_str());
-                        if let Some(callee) = lexical_callee {
-                            // An extension-function value is invoked with its written receiver as the
-                            // function type's receiver parameter. Preserve that lexical binding in the
-                            // compact graph instead of turning `value.block()` into a deferred member
-                            // lookup that can never find the local parameter declaration.
-                            let receiver_argument_origin = origin(
-                                file.expr_span(*receiver)
-                                    .expect("a signature receiver must retain its source span"),
-                            );
-                            let receiver = self.expression(file, *receiver, scope, origin)?;
-                            let explicit =
-                                self.call_arguments(file, expression, args, scope, origin)?;
-                            let mut arguments =
-                                Vec::with_capacity(self.graph.call_arguments(explicit).len() + 1);
-                            arguments.push(SigCallArgument {
-                                value: receiver,
-                                origin: receiver_argument_origin,
-                                name: None,
-                                spread: false,
-                                lambda: false,
-                            });
-                            arguments.extend(self.graph.call_arguments(explicit).iter().copied());
-                            let arguments = self.graph.add_call_arguments(arguments);
-                            self.graph.add_expr(SigExpr::Invoke {
-                                callee,
-                                arguments,
-                                scope,
-                                origin: node_origin,
-                                later: None,
-                            })
-                        } else if let Some(path) =
+                        let explicit =
+                            self.call_arguments(file, expression, args, scope, origin)?;
+                        // A function value that cannot take the arguments leaves the call to the
+                        // member or extension the call would otherwise select. Both read the
+                        // written receiver once.
+                        let mut written_receiver = None;
+                        let later = if let Some(path) =
                             qualified_calls::callable_path(self, file, *callee)
                         {
-                            let arguments =
-                                self.call_arguments(file, expression, args, scope, origin)?;
+                            let arguments = explicit;
                             let type_arguments =
                                 self.call_type_arguments(file, expression, scope, origin);
                             let trailing_lambda =
@@ -1833,8 +1808,8 @@ impl SignatureConstraintExtractor {
                             })
                         } else {
                             let receiver = self.expression(file, *receiver, scope, origin)?;
-                            let arguments =
-                                self.call_arguments(file, expression, args, scope, origin)?;
+                            written_receiver = Some(receiver);
+                            let arguments = explicit;
                             let type_arguments =
                                 self.call_type_arguments(file, expression, scope, origin);
                             self.source_member_call(
@@ -1850,6 +1825,40 @@ impl SignatureConstraintExtractor {
                                 scope,
                                 selector_origin,
                             )
+                        };
+                        if let Some(callee) = lexical_callee {
+                            // An extension-function value is invoked with its written receiver as the
+                            // function type's receiver parameter. Preserve that lexical binding in the
+                            // compact graph instead of turning `value.block()` into a deferred member
+                            // lookup that can never find the local parameter declaration.
+                            let receiver_argument_origin = origin(
+                                file.expr_span(*receiver)
+                                    .expect("a signature receiver must retain its source span"),
+                            );
+                            let receiver = match written_receiver {
+                                Some(receiver) => receiver,
+                                None => self.expression(file, *receiver, scope, origin)?,
+                            };
+                            let mut arguments =
+                                Vec::with_capacity(self.graph.call_arguments(explicit).len() + 1);
+                            arguments.push(SigCallArgument {
+                                value: receiver,
+                                origin: receiver_argument_origin,
+                                name: None,
+                                spread: false,
+                                lambda: false,
+                            });
+                            arguments.extend(self.graph.call_arguments(explicit).iter().copied());
+                            let arguments = self.graph.add_call_arguments(arguments);
+                            self.graph.add_expr(SigExpr::Invoke {
+                                callee,
+                                arguments,
+                                scope,
+                                origin: node_origin,
+                                later: Some(later),
+                            })
+                        } else {
+                            later
                         }
                     }
                     Expr::IntLit(_)

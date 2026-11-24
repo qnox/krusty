@@ -99,6 +99,17 @@ const HIDES_MEMBERS_PRIORITY: u8 = 0;
 const MEMBER_PRIORITY: u8 = 1;
 const EXTENSION_PRIORITY: u8 = 2;
 
+/// Whether `callable` is prioritized above members by `@kotlin.internal.HidesMembers`. kotlinc
+/// honors the annotation only for calls named by its resolve-annotation name set (`forEach` and
+/// `addSuppressed`, `annotationsForResolve.kt`); any other annotated extension is an ordinary
+/// extension, so a member that applies still wins over it.
+pub(crate) fn hides_members(callable: &crate::libraries::LibraryCallable) -> bool {
+    matches!(callable.name.as_str(), "forEach" | "addSuppressed")
+        && callable
+            .annotations
+            .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
+}
+
 /// The [`OverloadTowerRank`] of a candidate whose `receiver_rank` is already recorded.
 pub(crate) fn callable_tower_rank(overload: &FunctionInfo) -> OverloadTowerRank {
     if overload.kind == FnKind::Member {
@@ -113,12 +124,7 @@ pub(crate) fn extension_tower_rank(
     receiver_rank: u32,
     overload: &FunctionInfo,
 ) -> OverloadTowerRank {
-    if overload.is_extension()
-        && overload
-            .callable
-            .annotations
-            .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
-    {
+    if overload.is_extension() && hides_members(&overload.callable) {
         (HIDES_MEMBERS_PRIORITY, (0, 0), receiver_rank)
     } else {
         (

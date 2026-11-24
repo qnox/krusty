@@ -276,6 +276,11 @@ pub enum FirIntrinsic {
     PrimitiveArrayNew {
         element: ResolvedTy,
     },
+    /// `enumValues<T>()` of a reified type parameter, inside the inline function that declares it.
+    /// Inline specialization names the enum; until then `classifier` is that parameter.
+    EnumValues {
+        classifier: ResolvedTy,
+    },
 }
 
 /// Language-defined callable contributed by a classifier. Its identity is the classifier plus this

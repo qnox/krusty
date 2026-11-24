@@ -143,6 +143,10 @@ impl Backend for WasmBackend {
         Some(krusty::backend::CommonIrPreparation {
             counted_loops: COUNTED_LOOPS,
             enums: krusty::backend::enums::Contract::KotlinWasm,
+            // Every reference object is a function value (`crate::callable_references`), a
+            // `KProperty` one included: its entry reads the property, and its `get` forwards to
+            // that entry.
+            property_reference_values: true,
         })
     }
 

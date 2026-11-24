@@ -331,6 +331,9 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
         | IrIntrinsic::EnumValueOf {
             classifier: operand,
         }
+        | IrIntrinsic::EnumValues {
+            classifier: operand,
+        }
         | IrIntrinsic::EnumEntries {
             classifier: operand,
         }
@@ -346,6 +349,7 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
         | IrIntrinsic::StringGet
         | IrIntrinsic::StringLength
         | IrIntrinsic::EnumOrdinal
+        | IrIntrinsic::EnumName
         | IrIntrinsic::NullableAnyToString
         | IrIntrinsic::CoroutineContext => {}
     }
@@ -614,8 +618,12 @@ fn specialize_checked_operation(
             target,
             substitutions,
             adaptation,
+            function_type,
             ..
         } => {
+            if let Some(function_type) = function_type {
+                specialize_ty(function_type, bindings);
+            }
             specialize_property_reference_target(target, bindings);
             for substitution in substitutions {
                 specialize_checked_substitution(substitution, bindings);

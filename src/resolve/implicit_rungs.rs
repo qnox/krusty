@@ -6,7 +6,18 @@
 //! path. Each side supplies its own receiver representation and says which classifier's instance
 //! a receiver is.
 
-use crate::types::TypeName;
+use crate::types::{Ty, TyKind, TypeName};
+
+/// Whether an implicit receiver of type `ty` has a member scope the tower consults before its
+/// extensions: a classifier (`String` included), a type variable through its bounds, or a function
+/// type, whose members are its function classifier's (`invoke(a)` inside `fun ((A) -> R).f()`).
+pub(super) fn receiver_has_member_scope(ty: Ty) -> bool {
+    ty == Ty::String
+        || matches!(
+            ty.kind(),
+            TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::Var(..) | TyKind::Fun(..)
+        )
+}
 
 /// One rung of the unqualified tower, nearest first.
 pub(super) enum ImplicitRung<R> {

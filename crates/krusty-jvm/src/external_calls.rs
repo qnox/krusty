@@ -1038,6 +1038,11 @@ fn realize_expressions(
                     classifier: semantic_ret,
                 })
             }
+            Some(krusty::libraries::CompilerIntrinsic::EnumValues) => {
+                unreachable!(
+                    "the frontend selects `enumValues` of a reified parameter as an operation"
+                )
+            }
             Some(krusty::libraries::CompilerIntrinsic::EnumEntries) => {
                 let classifier = substitutions.iter().find_map(|substitution| {
                     matches!(
@@ -1078,6 +1083,9 @@ fn realize_expressions(
             ) => {
                 unreachable!("a Native continuation intrinsic cannot reach JVM call realization")
             }
+            Some(krusty::libraries::CompilerIntrinsic::InterceptedContinuation) => {
+                unreachable!("a Wasm continuation intrinsic cannot reach JVM call realization")
+            }
             Some(
                 krusty::libraries::CompilerIntrinsic::UnsignedDivide { .. }
                 | krusty::libraries::CompilerIntrinsic::UnsignedRemainder { .. }
@@ -1113,7 +1121,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::ListStorageConstruction(_)
                 | krusty::libraries::CompilerIntrinsic::CharCode
                 | krusty::libraries::CompilerIntrinsic::StringLength
-                | krusty::libraries::CompilerIntrinsic::Assert
+                | krusty::libraries::CompilerIntrinsic::Assert { .. }
                 | krusty::libraries::CompilerIntrinsic::AssertFailsWith
                 | krusty::libraries::CompilerIntrinsic::Print
                 | krusty::libraries::CompilerIntrinsic::Println
@@ -1121,7 +1129,6 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::CoroutineContext
                 | krusty::libraries::CompilerIntrinsic::CoroutineSuspended
                 | krusty::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
-                | krusty::libraries::CompilerIntrinsic::EnumValues
                 | krusty::libraries::CompilerIntrinsic::EnumName
                 | krusty::libraries::CompilerIntrinsic::IsEmpty
                 | krusty::libraries::CompilerIntrinsic::IsNotEmpty

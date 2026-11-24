@@ -599,6 +599,7 @@ impl<'u, 's> Linker<'u, 's> {
         // A boxed instance dispatches to the class's overrides, as an ordinary class's does: each
         // one the program's closure selected, with every declaration it overrides. An override
         // left out keeps its slot unrealized, which a call reaching it declines on.
+        let realized_earlier = self.realized_classes.contains(&classifier);
         for function in value_class_overrides(&header) {
             if self.selects_override(&contract.module, function) {
                 self.declare_dispatched(ir, member.clone(), header.arena, function)?;
@@ -607,7 +608,11 @@ impl<'u, 's> Linker<'u, 's> {
         // The unit materializing a value class owns its box construction, exported under the
         // primary constructor's identity: a later unit, or a body common preparation adds to this
         // one, constructs a box through that export instead of materializing the class again.
-        if let Some(primary) = &contract.primary_constructor {
+        if let Some(primary) = contract
+            .primary_constructor
+            .as_ref()
+            .filter(|_| !realized_earlier)
+        {
             let constructor = KlibDependencyCallable {
                 module: contract.module.clone(),
                 declaration: KlibDeclarationSignature::Public(primary.clone()),
@@ -662,13 +667,16 @@ impl<'u, 's> Linker<'u, 's> {
     /// The class a member of the final ordinary class `header` declares belongs to: the class
     /// the constructors that initialize it materialize, which created every instance the member
     /// is called on.
-    fn materialize_ordinary_member_class(
+    pub(super) fn materialize_ordinary_member_class(
         &mut self,
         ir: &mut IrFile,
         header: &super::super::class_headers::ClassMemberHeader<'s, 's>,
     ) -> Result<super::MemberClass<'s>, KlibBodyDeclineReason> {
         let contract = header.contract;
-        let class = if contract.kind == crate::libraries::TypeKind::Object {
+        let class = if contract.kind == crate::libraries::TypeKind::Enum {
+            // Every constant is an instance of the enum class the unit materializes for them.
+            self.materialize_member_enum(ir, header)?
+        } else if contract.kind == crate::libraries::TypeKind::Object {
             // An object's instance is the one its own private constructor created.
             let primary = contract.primary_constructor.as_ref().ok_or(
                 KlibBodyDeclineReason::UnsupportedDeclaration(
@@ -815,6 +823,19 @@ impl<'u, 's> Linker<'u, 's> {
             if from_class && self.declared_member(body).is_none() {
                 if let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) {
                     let selected = callables[0];
+                    // A superclass an earlier unit realized keeps its members there: this unit's
+                    // class inherits them from that class, and the edge names the earlier unit's
+                    // member by its frozen declaration.
+                    if self.class_realized_earlier(selected) {
+                        self.record_inherited_implementation(
+                            ir,
+                            owner,
+                            body,
+                            Some(selected),
+                            implemented,
+                        );
+                        continue;
+                    }
                     let (arena, function) =
                         self.sources.bodies.function(body).ok_or_else(|| {
                             KlibBodyDeclineReason::SignatureMismatch(
@@ -824,7 +845,7 @@ impl<'u, 's> Linker<'u, 's> {
                     self.declare(ir, body, Some(selected), arena, function)?;
                 }
             }
-            self.record_inherited_implementation(ir, owner, body, implemented);
+            self.record_inherited_implementation(ir, owner, body, None, implemented);
         }
         Ok(())
     }
@@ -860,12 +881,31 @@ impl<'u, 's> Linker<'u, 's> {
         ir: &mut IrFile,
         owner: crate::types::TypeName,
         body: &KlibDependencyCallable,
+        realized: Option<KlibBodyCallable<'s>>,
         implemented: &[KlibDependencyCallable],
     ) {
-        let Some(method) = self.declared_member(body) else {
-            return;
+        // The implementation's own method when this unit declared it, and otherwise the
+        // declaration the earlier unit exported (`realized`), which the edge names by callable.
+        let (method, name, params, result) = match realized {
+            None => {
+                let Some(method) = self.declared_member(body) else {
+                    return;
+                };
+                let function = &ir.functions[method as usize];
+                (
+                    Some(method),
+                    function.name.clone(),
+                    function.params.clone(),
+                    function.ret,
+                )
+            }
+            Some(selected) => (
+                None,
+                selected.name().to_owned(),
+                selected.params().to_vec(),
+                selected.ret(),
+            ),
         };
-        let name = ir.functions[method as usize].name.clone();
         for declared in implemented {
             let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(declared)
             else {
@@ -899,15 +939,11 @@ impl<'u, 's> Linker<'u, 's> {
             if records.iter().any(|edge| edge.overridden == overridden) {
                 continue;
             }
-            let (params, result) = (
-                ir.functions[method as usize].params.clone(),
-                ir.functions[method as usize].ret,
-            );
             records.push(crate::ir::IrFunctionOverride {
                 implementation: crate::fir::ResolvedFunctionOverrideTarget::External(
                     implementation,
                 ),
-                implementation_function: Some(method),
+                implementation_function: method,
                 implementation_owner: owner,
                 overridden,
                 overridden_owner: interface,
@@ -919,7 +955,7 @@ impl<'u, 's> Linker<'u, 's> {
                 declared_result: overridden_declaration.ret(),
                 applied_parameters: overridden_declaration.params().to_vec(),
                 applied_result: overridden_declaration.ret(),
-                implementation_parameters: params,
+                implementation_parameters: params.clone(),
                 implementation_parameter_identities: Vec::new(),
                 overridden_parameter_identities: overridden_declaration
                     .parameter_identities()
@@ -1012,6 +1048,7 @@ impl<'u, 's> Linker<'u, 's> {
             ));
         }
         let class = member.class;
+        let realized_earlier = self.realized_classes.contains(&member.contract.classifier);
         let declared = if function.body.is_some() {
             self.queue(
                 ir,
@@ -1070,6 +1107,12 @@ impl<'u, 's> Linker<'u, 's> {
                 has_kotlin_superclass_override: false,
                 depth: 0,
             });
+        }
+        if realized_earlier {
+            // An earlier unit published this member; this unit's copy only completes the class's
+            // table and is called through that export.
+            self.functions.remove(&identity);
+            self.member_receivers.remove(&identity);
         }
         Ok(())
     }

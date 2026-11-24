@@ -100,6 +100,22 @@ fn entries_of(expression: &IrExpr) -> Option<TypeName> {
     }
 }
 
+/// The enum whose `values()` an expression reads: `E.values()`, or the `enumValues<E>()` intrinsic
+/// with its type argument known.
+fn values_of(expression: &IrExpr) -> Option<TypeName> {
+    match expression {
+        IrExpr::EnumValues { classifier } => Some(*classifier),
+        IrExpr::Call { callee, .. } => match &**callee {
+            Callee::Intrinsic {
+                operation: IrIntrinsic::EnumValues { classifier },
+                ..
+            } => classifier.non_null().obj_internal(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn rewrite_one(
     ir: &mut IrFile,
     realized: &HashMap<TypeName, Realized>,
@@ -151,8 +167,10 @@ fn rewrite_one(
                 value: Some(read),
             }
         }
-        IrExpr::EnumValues { classifier } => {
-            let Some(enum_class) = realized.get(classifier) else {
+        // `E.values()`, and `enumValues<E>()` once inline specialization has named the enum.
+        node if values_of(node).is_some() => {
+            let classifier = values_of(node).expect("matched above");
+            let Some(enum_class) = realized.get(&classifier) else {
                 return;
             };
             IrExpr::Call {

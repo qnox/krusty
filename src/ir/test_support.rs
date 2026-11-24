@@ -39,6 +39,7 @@ pub fn blank_class(fq: &str) -> IrClass {
         pre_super_param_fields: Vec::new(),
         explicit_param_stores: false,
         methods: Vec::new(),
+        installed_interface_overrides: Vec::new(),
         is_interface: false,
         is_fun_interface: false,
         is_annotation: false,

@@ -171,10 +171,24 @@ release() {
 # caches. A warm-up that could not download something (a repository or the plugin portal refused
 # it) stops the run: the offline builds cannot fetch it later, and a retry would only extend a block
 # the repository placed on this host. Any other warm-up failure is the build's own, which the
-# reference build then reports.
+# reference build then reports. Gradle reports a refused download as "not found" whichever
+# repository refused it, so before stopping, the repositories are probed and their HTTP status is
+# recorded in <name>.warmup.http.tsv and on stderr: a dead host (000, 5xx) and a throttled one (429)
+# then read differently from a missing artifact.
 unreachable='Could not (resolve|GET|HEAD)|could not resolve plugin artifact|Connection reset|timed out|Name or service not known|No such host'
+# Prints "<status> <url>" for each repository the warm-up log names, and for the default
+# ones (CORPUS_PROBE_URLS overrides those, for hosts a test must not reach).
+probe_repositories() {
+  local url code
+  local defaults=${CORPUS_PROBE_URLS-https://repo.maven.apache.org/maven2/ https://maven.google.com/ https://plugins.gradle.org/m2/}
+  for url in $(grep -oE 'maven\(https?://[^)]+\)' "$logs/$name.warmup.log" | sed -E 's/^maven\(|\)$//g' | sort -u) $defaults; do
+    code=$(curl -s -o /dev/null -I -w '%{http_code}' --max-time 20 "$url") || true
+    echo "$code $url" | tee -a "$logs/$name.warmup.http.tsv" >&2
+  done
+}
 build warmup
 if [ "$status" -ne 0 ] && grep -qE "$unreachable" "$logs/$name.warmup.log"; then
+  probe_repositories
   echo "$name: the warm-up could not download what the build needs; see $name.warmup.log" >&2
   exit 1
 fi

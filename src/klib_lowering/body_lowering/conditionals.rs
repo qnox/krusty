@@ -115,7 +115,12 @@ impl BodyLowering<'_> {
         generated: bool,
     ) -> Lowered<ExprId> {
         let (conditions, otherwise) = self.split_else(branches)?;
-        if otherwise.is_none() && ty != Ty::Unit {
+        // kotlinc's `else` of a `when` it proved exhaustive is the failure its fall-through is;
+        // common IR records the `when` as exhaustive without one, as checked FIR lowering does.
+        let proven_exhaustive =
+            otherwise.is_some_and(|otherwise| self.no_branch_matched(otherwise));
+        let otherwise = otherwise.filter(|_| !proven_exhaustive);
+        if otherwise.is_none() && !proven_exhaustive && ty != Ty::Unit {
             return Err(mismatch("a `when` without an `else` is not typed `Unit`"));
         }
         let mut lowered = Vec::with_capacity(branches.len());
@@ -139,10 +144,26 @@ impl BodyLowering<'_> {
             lowered.push((None, result?));
         }
         let when = self.ir.add_expr(IrExpr::When { branches: lowered });
-        if otherwise.is_some() {
+        if otherwise.is_some() || proven_exhaustive {
             self.ir.whens.exhaustive.insert(when, ty);
         }
         Ok(when)
+    }
+
+    /// Whether `result` is exactly kotlinc's call of `noWhenBranchMatchedException()`.
+    fn no_branch_matched(&self, result: KlibIrExprId) -> bool {
+        matches!(
+            &self.arena.expr(result).kind,
+            KlibIrExprKind::Call { access, super_qualifier: None }
+                if access.type_arguments.is_empty()
+                    && super::calls::arguments(access).is_empty()
+                    && matches!(
+                        &access.symbol.signature,
+                        crate::metadata::klib_ir::KlibIrSignature::Public(callee)
+                            if self.builtins.operator(callee)
+                                == Some(super::super::ir_builtins::BuiltinOperator::NoWhenBranchMatched)
+                    )
+        )
     }
 
     /// A subjectless `when`'s branch result: the value itself, of the `when`'s type or `Nothing`,

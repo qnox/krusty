@@ -288,11 +288,20 @@ fn declared_properties(
         .1
         .overloads
         .into_iter()
-        .filter(|property| {
-            property.kind == kind
-                && property.context_count == 0
-                && property.visibility != Visibility::Private
-        })
+        .filter(|property| property.kind == kind && property.visibility != Visibility::Private)
+        .collect()
+}
+
+/// [`declared_properties`] without context parameters: an inherited interface implementation is
+/// matched by its property type alone, so it never pairs declarations that take a context.
+fn declared_contextless_properties(
+    source: &dyn crate::symbol_source::SymbolSource,
+    owner: Ty,
+    name: &str,
+) -> Vec<PropertyInfo> {
+    declared_properties(source, owner, name, false)
+        .into_iter()
+        .filter(|property| property.context_count == 0)
         .collect()
 }
 
@@ -743,10 +752,10 @@ fn publish_inherited_interface_property_plans(
         };
         for name in &interface.declared_callable_order {
             let raw = declarations_by_target(
-                declared_properties(source, Ty::obj_name(supertype.classifier), name, false),
+                declared_contextless_properties(source, Ty::obj_name(supertype.classifier), name),
                 |property| target(index, property),
             );
-            for applied in declared_properties(source, supertype.applied.get(), name, false) {
+            for applied in declared_contextless_properties(source, supertype.applied.get(), name) {
                 let Some(overridden) = target(index, &applied) else {
                     continue;
                 };
@@ -796,7 +805,11 @@ fn publish_inherited_interface_property_plans(
                     continue;
                 };
                 let implementation_declarations = declarations_by_target(
-                    declared_properties(source, Ty::obj_name(implementation.owner), name, false),
+                    declared_contextless_properties(
+                        source,
+                        Ty::obj_name(implementation.owner),
+                        name,
+                    ),
                     |property| target(index, property),
                 );
                 let Some(implementation_declared) =

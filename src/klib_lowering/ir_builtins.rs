@@ -88,6 +88,10 @@ pub(super) enum BuiltinOperator {
     /// data class (or a value class) generates for an array property, which is the content of
     /// the array, not its identity.
     DataClassArrayMember(DataClassArrayMember),
+    /// `noWhenBranchMatchedException(): Nothing`, the `else` kotlinc gives a `when` it proved
+    /// exhaustive. Common IR records such a `when` as exhaustive without an `else`, and each
+    /// backend fails its fall-through as Kotlin does.
+    NoWhenBranchMatched,
 }
 
 /// The `Any` member a data class generates over an array property's content.
@@ -195,6 +199,12 @@ impl IrBuiltinOperators {
             }
         }
         declare(builtins, "EQEQ", vec![&any, &any], BuiltinOperator::Equals);
+        declare(
+            builtins,
+            "noWhenBranchMatchedException",
+            Vec::new(),
+            BuiltinOperator::NoWhenBranchMatched,
+        );
         declare(
             builtins,
             "EQEQEQ",
@@ -569,6 +579,12 @@ mod tests {
                     "ieee754equals".to_owned(),
                     13_180_658_955_541_877_466,
                     ieee(Ty::Float)
+                ),
+                (
+                    "kotlin.internal.ir".to_owned(),
+                    "noWhenBranchMatchedException".to_owned(),
+                    4_817_835_423_198_531_271,
+                    BuiltinOperator::NoWhenBranchMatched
                 ),
             ]
         );

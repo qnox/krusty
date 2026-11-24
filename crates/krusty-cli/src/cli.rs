@@ -25,11 +25,11 @@ mod language_features;
 mod source_roots;
 mod warning_policy;
 
-pub use arguments::CLASSPATH_SEPARATOR;
 use arguments::{
-    apply, finish_jvm_target, finish_language_settings, finish_warning_policy,
+    apply, finish_jvm_target, finish_language_settings, finish_warning_policy, take_defect_fixes,
     take_reference_version, unsupported, ParsedSettings,
 };
+pub use arguments::{CLASSPATH_SEPARATOR, FIX_KOTLINC_DEFECTS};
 use source_roots::{duplicate_source_root, SourceRoots};
 pub use warning_policy::{WarningDisposition, WarningLevel, WarningPolicy};
 
@@ -170,6 +170,9 @@ pub struct Options {
     /// (diagnostic wording, class-file details) this compilation reproduces. `None` leaves the
     /// choice to `KRUSTY_LANGUAGE_VERSION`, then the newest supported release.
     pub kotlin_reference_version: Option<KotlinVersion>,
+    /// `-Xfix-kotlinc-defects`: fix the reference release's defects instead of reproducing them,
+    /// so the compilation no longer matches kotlinc where one applies.
+    pub kotlinc_defects: krusty::kotlin_version::KotlincDefects,
     /// `-Xmetadata-version <major.minor>`: the artifact stamp written as every `@kotlin.Metadata`
     /// `mv` and as the `.kotlin_module` header version (`[X, Y, 0]`). This does not select language
     /// semantics. `None` keeps the default stamp, the implemented language version.
@@ -177,8 +180,8 @@ pub struct Options {
     /// `-Xexplicit-api=strict|warning|disable`: kotlinc's explicit API mode, applied to the
     /// language settings once they are built.
     pub explicit_api: Option<String>,
-    /// `-Xassertions=always-enable|always-disable`: an unconditional `assert(...)` mode, applied to
-    /// the language settings once they are built.
+    /// `-Xassertions=always-enable|always-disable|legacy`: the `assert(...)` mode, applied to the
+    /// language settings once they are built.
     pub assertions: Option<String>,
     /// `-Xstring-concat=inline`: build every string concatenation with `StringBuilder`, whatever
     /// the JVM target.
@@ -239,6 +242,7 @@ impl Default for Options {
             jvm_target_major: None,
             jdk_release: None,
             kotlin_reference_version: None,
+            kotlinc_defects: krusty::kotlin_version::KotlincDefects::Reproduce,
             metadata_version: None,
             jvm_default: JvmDefaultMode::default(),
             java_parameters: false,
@@ -374,6 +378,7 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
     let mut argfile_problems = Vec::new();
     let expanded = kotlinc_arguments::argfile::expand(argv, &mut argfile_problems);
     let arguments = take_reference_version(expanded, &mut opts);
+    let arguments = take_defect_fixes(arguments, &mut opts);
     let reference_version = opts.kotlin_reference_version.unwrap_or_else(|| {
         krusty::kotlin_version::configured_target().unwrap_or_else(|_| KotlinVersion::newest())
     });
@@ -784,12 +789,15 @@ Common options (kotlinc-compatible):
                         pass an option to a plugin
   -Xkotlin-reference-version=<v>
                         reproduce this supported kotlinc release (default: the newest)
+  -Xfix-kotlinc-defects fix the reference release's defects (programs it rejects or compiles
+                        wrongly) instead of reproducing them; output then differs from kotlinc
   -help                 print this help and exit
 
 Sources may be .kt, .kts or .java files, or directories (scanned recursively).
 Arguments are parsed by kotlinc's rules for the selected release. A kotlinc argument krusty does not
 implement is an error, as are invalid values; an unknown option is kotlinc's own error or warning.
-krusty never compiles a command line into anything other than what kotlinc would produce.";
+krusty never compiles a command line into anything other than what kotlinc would produce, except
+where -Xfix-kotlinc-defects asks it to.";
 
 #[cfg(test)]
 mod tests {
@@ -845,6 +853,25 @@ mod tests {
             assert_eq!(parsed.kotlin_reference_version, None, "{bad:?}");
             assert_eq!(parsed.errors.len(), 1, "{bad:?}: {:?}", parsed.errors);
         }
+    }
+
+    /// `-Xfix-kotlinc-defects` is krusty's own switch: it is read before kotlinc's table, so it is
+    /// neither an unknown argument nor a source, and the default reproduces kotlinc's defects.
+    #[test]
+    fn the_defect_fixes_flag_is_krustys_own_switch() {
+        use krusty::kotlin_version::KotlincDefects;
+        let parsed = parse_args(&["-Xfix-kotlinc-defects", "x.kt"]);
+        assert_eq!(parsed.kotlinc_defects, KotlincDefects::Fix);
+        assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
+        assert_eq!(parsed.errors, Vec::<String>::new());
+        assert_eq!(parsed.unknown_extra_flags, Vec::<String>::new());
+        assert_eq!(parsed.ignored, Vec::<String>::new());
+        assert_eq!(
+            parse_args(&["x.kt"]).kotlinc_defects,
+            KotlincDefects::Reproduce
+        );
+        let after_separator = parse_args(&["--", "-Xfix-kotlinc-defects"]);
+        assert_eq!(after_separator.kotlinc_defects, KotlincDefects::Reproduce);
     }
 
     #[test]
@@ -1124,13 +1151,14 @@ mod tests {
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
     }
 
-    /// The unconditional assertion modes reach the frontend; the runtime-checked ones and an
-    /// unknown mode are refused, the unknown one in kotlinc's words.
+    /// The unconditional assertion modes and kotlinc's default `legacy` reach the frontend; the
+    /// `jvm` shape and an unknown mode are refused, the unknown one in kotlinc's words.
     #[test]
-    fn assertions_select_the_unconditional_modes_only() {
+    fn assertions_select_the_modes_krusty_emits() {
         for (mode, feature) in [
             ("always-enable", "AssertionsAlwaysEnable"),
             ("always-disable", "AssertionsAlwaysDisable"),
+            ("legacy", "AssertionsLegacy"),
         ] {
             let parsed = parse_args(&[&format!("-Xassertions={mode}"), "x.kt"]);
             assert_eq!(parsed.errors, Vec::<String>::new(), "{mode}");

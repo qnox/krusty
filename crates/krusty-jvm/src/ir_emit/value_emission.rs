@@ -832,8 +832,12 @@ impl super::Emitter<'_> {
                     | krusty::ir::IrIntrinsic::StringGet
                     | krusty::ir::IrIntrinsic::StringLength
                     | krusty::ir::IrIntrinsic::EnumOrdinal
+                    | krusty::ir::IrIntrinsic::EnumName
                     | krusty::ir::IrIntrinsic::NullableAnyToString) => {
                         self.emit_builtin_member(e, op, dispatch_receiver.unwrap(), args, code)
+                    }
+                    krusty::ir::IrIntrinsic::EnumValues { classifier } => {
+                        self.emit_enum_values(*classifier, code);
                     }
                     krusty::ir::IrIntrinsic::EnumEntries { classifier } => {
                         self.emit_enum_entries(*classifier, code);
@@ -1587,9 +1591,7 @@ impl super::Emitter<'_> {
                 code.push_int(key, self.cw);
             }
             IrExpr::EnumValues { classifier } => {
-                let fq = classifier.render();
-                let m = self.cw.methodref(&fq, "values", &format!("()[L{fq};"));
-                code.invokestatic(m, 0, 1);
+                self.emit_enum_values(Ty::obj_name(*classifier), code);
             }
             IrExpr::EnumEntries { classifier } => {
                 let fq = classifier.render();

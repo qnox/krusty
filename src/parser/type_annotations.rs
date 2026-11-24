@@ -13,9 +13,15 @@ impl Parser<'_> {
             let at = self.tok().span.lo;
             self.bump(); // '@'
             let (name, annotation_span) = self.parse_annotation_reference();
-            // `@Ann("a") String` owns the parentheses, while `@Composable () -> Unit` leaves them
-            // for the function type. The balanced lookahead identifies the latter exact shape.
-            if self.at(TokenKind::LParen) && !self.paren_group_precedes_arrow(self.i) {
+            // In a type, whitespace before `(` is significant (kotlinc's
+            // `WITH_SIGNIFICANT_WHITESPACE_BEFORE_ARGUMENTS`): `@Ann("a") String` owns the
+            // parentheses, while `@Composable (() -> Unit)?` and `@Composable () -> Unit` leave
+            // them for the parenthesized or function type. The balanced lookahead still
+            // identifies the adjacent `@Ann() -> Unit` shape.
+            if self.at(TokenKind::LParen)
+                && self.token_adjoins_previous(self.i)
+                && !self.paren_group_precedes_arrow(self.i)
+            {
                 let arguments = self.parse_annotation_args();
                 self.record_type_annotation_arguments(annotation_span, arguments);
             }
@@ -35,5 +41,11 @@ impl Parser<'_> {
             self.file.type_annotations.insert(span.lo, annotations);
         }
         span
+    }
+
+    /// Whether the token at `at` starts exactly where the previous token ends, with no whitespace
+    /// or comment between them.
+    pub(super) fn token_adjoins_previous(&self, at: usize) -> bool {
+        at > 0 && self.t[at - 1].span.hi == self.t[at].span.lo
     }
 }

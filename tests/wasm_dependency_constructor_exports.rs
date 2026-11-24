@@ -30,6 +30,19 @@ fn wasm_official_dependency_class_members_lower_from_their_bodies() {
     );
 }
 
+/// A library function that tests a value against a file-private interface of its library and calls
+/// that interface's member lowers from the official producer's body through the interface's
+/// installed class.
+#[test]
+fn wasm_official_dependency_file_private_interface_dispatches_through_its_installed_class() {
+    run_against_official_producer(
+        include_str!(
+            "box_regressions/multimodule/dependencyInstalledInterfaceTypeTestAndMemberCall.kt"
+        ),
+        "DependencyInstalledInterfaceTypeTestAndMemberCall",
+    );
+}
+
 #[test]
 fn wasm_official_dependency_nested_classes_lower_from_their_bodies() {
     run_against_official_producer(
@@ -195,6 +208,27 @@ fn wasm_official_dependency_inherited_members_implement_indirect_interfaces() {
     );
 }
 
+/// A later checked source realizes a subclass of a library class an earlier one already realized
+/// and exported: the subclass inherits the superclass's members from the earlier realization, as
+/// its own interface implementations, instead of realizing the superclass again.
+#[test]
+fn wasm_official_dependency_subclasses_inherit_members_realized_by_an_earlier_source() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyCrossUnitInheritedMembers.kt"),
+        "DependencyCrossUnitInheritedMembers",
+    );
+}
+
+/// A library body reads an abstract accessor of a class an earlier source realized: the read
+/// dispatches through that class's frozen declaration rather than declaring the accessor again.
+#[test]
+fn wasm_official_dependency_reads_abstract_accessors_of_a_class_an_earlier_source_realized() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyCrossUnitAbstractAccessor.kt"),
+        "DependencyCrossUnitAbstractAccessor",
+    );
+}
+
 /// A subclass implements a library interface member with the body it inherits from its
 /// superclass, which does not declare the interface and which no body calls.
 #[test]
@@ -222,6 +256,16 @@ fn wasm_official_dependency_definitely_non_null_assertions_lower_from_their_bodi
     run_against_official_producer(
         include_str!("box_regressions/multimodule/dependencyDefinitelyNonNullAssertion.kt"),
         "DependencyDefinitelyNonNullAssertion",
+    );
+}
+
+/// Two files of the consumer each install a different file-private interface of the library:
+/// their members take distinct module-wide numbers, so each call reaches its own member.
+#[test]
+fn wasm_official_dependency_interfaces_installed_by_two_files_keep_distinct_numbers() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyInstalledInterfacesInTwoFiles.kt"),
+        "DependencyInstalledInterfacesInTwoFiles",
     );
 }
 
