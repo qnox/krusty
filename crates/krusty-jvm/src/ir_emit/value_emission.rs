@@ -832,6 +832,7 @@ impl super::Emitter<'_> {
                     | krusty::ir::IrIntrinsic::StringGet
                     | krusty::ir::IrIntrinsic::StringLength
                     | krusty::ir::IrIntrinsic::EnumOrdinal
+                    | krusty::ir::IrIntrinsic::EnumName
                     | krusty::ir::IrIntrinsic::NullableAnyToString) => {
                         self.emit_builtin_member(e, op, dispatch_receiver.unwrap(), args, code)
                     }
