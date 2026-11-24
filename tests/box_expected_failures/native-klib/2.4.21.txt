@@ -1214,7 +1214,6 @@ ranges/forInDownTo/forIntInNonOptimizedDownTo.kt
 ranges/forInDownTo/forLongInDownTo.kt
 ranges/forInDownTo/forNullableIntInDownTo.kt
 ranges/forInFloatRangeWithCustomIterator.kt
-ranges/forInIndices/forInArrayListIndices.kt
 ranges/forInIndices/forInCollectionImplicitReceiverIndices.kt
 ranges/forInIndices/forInCollectionIndices.kt
 ranges/forInIndices/forInCollectionTypeParameterIndices.kt
