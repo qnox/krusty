@@ -421,26 +421,21 @@ jobs:
           path: target/cache/kotlin-native/${{ steps.max-version.outputs.version }}
           key: kotlin-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.max-version.outputs.version }}
       # The Wasm unit tests and the KLIB coverage ratchet read each release's exact wasm-wasi stdlib
-      # KLIB from the dependency cache. Left to the tests it is downloaded from Maven Central in the
-      # middle of the run, by whichever test needs it first, and a refused download surfaces only as
-      # "the exact target stdlib must be provisioned". Restore what the conformance-deps job holds
-      # (same key) and fetch what is missing before any test starts, so a refusal fails this step
-      # naming the URL.
-      - name: restore the extra conformance libraries
-        id: conformance-deps
+      # KLIB from KRUSTY_DEPS_CACHE and download it on demand when it is missing. Without a cache
+      # restored here, every run downloaded it from Maven Central in the middle of the tests, and a
+      # refused download surfaced only as "the exact target stdlib must be provisioned". Restore the
+      # newest entry the e2e and conformance jobs saved; a master run saves it grown.
+      - name: restore the Maven artifacts
+        id: maven-deps
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/krusty-deps
-          key: conformance-deps-v1-${{ hashFiles('scripts/fetch-conformance-deps.sh', 'kotlin-versions', 'src/toolchain.rs') }}
-      - name: provision the libraries of every Kotlin release
-        if: steps.conformance-deps.outputs.cache-hit != 'true'
-        env:
-          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
-        run: |
-          set -euo pipefail
-          while read -r kotlin; do
-            scripts/fetch-conformance-deps.sh "$kotlin"
-          done < <(just kotlin-versions)
+          key: krusty-deps-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          restore-keys: |
+            krusty-deps-
+      - name: count the restored Maven artifacts
+        id: maven-deps-restored
+        run: echo "files=$(find target/cache/krusty-deps -type f 2> /dev/null | wc -l)" >> "$GITHUB_OUTPUT"
       - name: provision Native for the normal test suites
         run: |
           root=$(just kotlin-native "$(just max-version)")
@@ -506,6 +501,22 @@ jobs:
             rm -rf "$PWD/target/cache/kotlin-native/$version"
             echo "::endgroup::"
           done
+      - name: check for new Maven artifacts
+        id: maven-deps-grown
+        if: github.ref == 'refs/heads/master' && success()
+        env:
+          RESTORED: ${{ steps.maven-deps-restored.outputs.files }}
+        run: |
+          now=$(find target/cache/krusty-deps -type f 2> /dev/null | wc -l)
+          echo "Maven artifacts: $RESTORED restored, $now now"
+          [ "$now" -gt "$RESTORED" ] || exit 0
+          echo "grown=true" >> "$GITHUB_OUTPUT"
+      - name: save the Maven artifacts entry
+        if: steps.maven-deps-grown.outputs.grown == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: ${{ steps.maven-deps.outputs.cache-primary-key }}
       - name: save Kotlin Toolchain oracle output
         if: github.ref == 'refs/heads/master' && steps.toolchain-oracle.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
