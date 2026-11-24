@@ -7,20 +7,18 @@
 //! common-IR shape Krusty can currently serialize completely: `return value is/!is T` in an inline
 //! function with a reified own type parameter.
 
+use super::ir_tables::{
+    declaration_table, entry_table, lattice, per_file, symbol, IrTables, CONSTRUCTOR_SYMBOL,
+    FUNCTION_SYMBOL, RECEIVER_PARAMETER_SYMBOL, TYPE_PARAMETER_SYMBOL, VALUE_PARAMETER_SYMBOL,
+};
 use crate::fx_hash::HashMap;
 use crate::ir::{FunId, IrExpr, IrFile, IrParameterRole, IrTypeOp, IrTypeParameter};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::protobuf::Pb;
-use crate::types::{Ty, TyKind, TypeName, TypeVariance};
+use crate::types::{Ty, TyKind, TypeVariance};
 
 const MAIN_PREFIX: &str = "default/ir/";
 const PREPARED_PREFIX: &str = "default/ir_inlinable_functions/";
-const FUNCTION_SYMBOL: u64 = 0;
-const CONSTRUCTOR_SYMBOL: u64 = 1;
-const VALUE_PARAMETER_SYMBOL: u64 = 4;
-const CLASS_SYMBOL: u64 = 6;
-const TYPE_PARAMETER_SYMBOL: u64 = 7;
-const RECEIVER_PARAMETER_SYMBOL: u64 = 11;
 
 /// Exact metadata identities of declarations written into the KLIB fragment, including an
 /// `@InlineOnly` template that deliberately has no standalone target realization.
@@ -415,20 +413,20 @@ fn component_artifacts(
                 "one ordinary IrFile cannot contain declarations from different packages"
             );
             if package.is_empty() {
-                vec![u64::from(writer.string(""))]
+                vec![u64::from(writer.tables.string(""))]
             } else {
                 package
                     .segments()
                     .iter()
-                    .map(|segment| u64::from(writer.string(segment)))
+                    .map(|segment| u64::from(writer.tables.string(segment)))
                     .collect::<Vec<_>>()
             }
         }
         // Kotlin's prepared-inline component uses one synthetic root file rather than any
         // declaration's source package. Its IrFile records that root as one empty segment.
-        Component::Prepared => vec![u64::from(writer.string(""))],
+        Component::Prepared => vec![u64::from(writer.tables.string(""))],
     };
-    let root_file_entry = writer.file_entry(component.root_file_name());
+    let root_file_entry = writer.tables.file_entry(component.root_file_name());
     let mut file = Pb::new();
     file.field_packed_varints(1, &ids);
     file.field_packed_varints(3, &package);
@@ -437,19 +435,23 @@ fn component_artifacts(
         ("files.knf", per_file(file.into_bytes())),
         (
             "fileEntries.knf",
-            per_file(entry_table(&writer.file_entries)),
+            per_file(entry_table(&writer.tables.file_entries)),
         ),
-        ("bodies.knb", per_file(entry_table(&writer.bodies))),
+        ("bodies.knb", per_file(entry_table(&writer.tables.bodies))),
         (
             "irDeclarations.knd",
             per_file(declaration_table(&declarations)),
         ),
-        ("types.knt", per_file(entry_table(&writer.types))),
-        ("signatures.knt", per_file(entry_table(&writer.signatures))),
+        ("types.knt", per_file(entry_table(&writer.tables.types))),
+        (
+            "signatures.knt",
+            per_file(entry_table(&writer.tables.signatures)),
+        ),
         (
             "strings.knt",
             per_file(entry_table(
                 &writer
+                    .tables
                     .strings
                     .iter()
                     .map(|value| value.as_bytes().to_vec())
@@ -466,21 +468,17 @@ fn component_artifacts(
 
 #[derive(Default)]
 struct FileWriter {
-    strings: Vec<String>,
-    signatures: Vec<Vec<u8>>,
-    types: Vec<Vec<u8>>,
-    bodies: Vec<Vec<u8>>,
-    file_entries: Vec<Vec<u8>>,
+    tables: IrTables,
 }
 
 impl FileWriter {
     fn function(&mut self, function: &PreparedFunction, component: Component) -> (u32, Vec<u8>) {
-        let declaration_signature = self.public_signature(&function.signature);
+        let declaration_signature = self.tables.public_signature(&function.signature);
         let symbol_signature = match component {
             Component::Main => declaration_signature,
             Component::Prepared => {
-                let file = self.file_signature();
-                self.composite_signature(file, declaration_signature)
+                let file = self.tables.file_signature();
+                self.tables.composite_signature(file, declaration_signature)
             }
         };
         let declaration_symbol = symbol(symbol_signature, FUNCTION_SYMBOL);
@@ -494,7 +492,9 @@ impl FileWriter {
                 // identity beneath its private file-scoped function identity; a bare scoped
                 // local cannot be matched to the callee's type parameter during reified
                 // substitution.
-                let signature = self.type_parameter_signature(symbol_signature, index);
+                let signature = self
+                    .tables
+                    .type_parameter_signature(symbol_signature, index);
                 let symbol = symbol(signature, TYPE_PARAMETER_SYMBOL);
                 (index, parameter, symbol)
             })
@@ -502,7 +502,7 @@ impl FileWriter {
         let parameter_symbols = (0..function.parameters.len()
             + usize::from(function.dispatch_receiver.is_some()))
             .map(|slot| {
-                let signature = self.local_signature();
+                let signature = self.tables.local_signature();
                 let logical_slot =
                     slot.checked_sub(usize::from(function.dispatch_receiver.is_some()));
                 let receiver = function.dispatch_receiver.is_some_and(|_| slot == 0)
@@ -521,7 +521,7 @@ impl FileWriter {
             .collect::<Vec<_>>();
         let mut base = Pb::new();
         base.field_varint(1, declaration_symbol);
-        base.field_varint(2, u64::from(self.string("DEFINED")));
+        base.field_varint(2, u64::from(self.tables.string("DEFINED")));
         let flags = match component {
             Component::Main => function.flags,
             // A prepared declaration is a private copy even when the metadata and ordinary IR
@@ -537,12 +537,12 @@ impl FileWriter {
         let result = self.ty(function.result, &type_parameters);
         let mut function_base = Pb::new();
         function_base.field_message(1, &base);
-        let name = self.string(&function.name);
+        let name = self.tables.string(&function.name);
         function_base.field_varint(2, lattice(name, result));
         for (_, parameter, parameter_symbol) in &type_parameters {
             let mut declaration = Pb::new();
             declaration.field_varint(1, *parameter_symbol);
-            declaration.field_varint(2, u64::from(self.string("DEFINED")));
+            declaration.field_varint(2, u64::from(self.tables.string("DEFINED")));
             let variance = match parameter.variance {
                 TypeVariance::In => 0,
                 TypeVariance::Out => 1,
@@ -551,7 +551,7 @@ impl FileWriter {
             declaration.field_varint(4, (variance << 1) | (u64::from(parameter.reified) << 3));
             let mut encoded = Pb::new();
             encoded.field_message(1, &declaration);
-            encoded.field_varint(2, u64::from(self.string(&parameter.name)));
+            encoded.field_varint(2, u64::from(self.tables.string(&parameter.name)));
             let bounds = parameter
                 .bounds
                 .iter()
@@ -600,7 +600,7 @@ impl FileWriter {
         let mut function_wrapper = Pb::new();
         function_wrapper.field_message(1, &function_base);
         if matches!(component, Component::Prepared) {
-            let file_entry = self.file_entry(&function.file_name);
+            let file_entry = self.tables.file_entry(&function.file_name);
             function_wrapper.field_varint(3, u64::from(file_entry));
         }
         let mut declaration = Pb::new();
@@ -618,9 +618,9 @@ impl FileWriter {
     ) -> Pb {
         let mut base = Pb::new();
         base.field_varint(1, symbol);
-        base.field_varint(2, u64::from(self.string("DEFINED")));
+        base.field_varint(2, u64::from(self.tables.string("DEFINED")));
         let ty = self.ty(ty, parameters);
-        let name = self.string(name);
+        let name = self.tables.string(name);
         let mut parameter = Pb::new();
         parameter.field_message(1, &base);
         parameter.field_varint(2, lattice(name, ty));
@@ -661,7 +661,7 @@ impl FileWriter {
             },
         )
         .expect("InlineOnly has an empty signable constructor");
-        let constructor = symbol(self.public_signature(&signature), CONSTRUCTOR_SYMBOL);
+        let constructor = symbol(self.tables.public_signature(&signature), CONSTRUCTOR_SYMBOL);
         let mut annotation = Pb::new();
         annotation.field_varint(1, constructor);
         annotation.field_varint(2, 0);
@@ -677,8 +677,8 @@ impl FileWriter {
         let mut expression = Pb::new();
         expression.field_varint(2, u64::from(ty));
         expression.field_message(5, &constant);
-        let id = u32::try_from(self.bodies.len()).expect("body table fits u32");
-        self.bodies.push(expression.canonical().into_bytes());
+        let id = u32::try_from(self.tables.bodies.len()).expect("body table fits u32");
+        self.tables.bodies.push(expression.canonical().into_bytes());
         id
     }
 
@@ -730,249 +730,17 @@ impl FileWriter {
         block.repeated_message(1, &statement);
         let mut body = Pb::new();
         body.field_message(4, &block);
-        let id = u32::try_from(self.bodies.len()).expect("body table fits u32");
-        self.bodies.push(body.canonical().into_bytes());
+        let id = u32::try_from(self.tables.bodies.len()).expect("body table fits u32");
+        self.tables.bodies.push(body.canonical().into_bytes());
         id
     }
 
     fn ty(&mut self, ty: Ty, parameters: &[(usize, &PreparedTypeParameter, u64)]) -> u32 {
-        let (inner, nullability) = match ty.kind() {
-            TyKind::Nullable(inner) => (inner, 0),
-            _ => (ty, 1),
-        };
-        let (classifier, arguments) = match inner.kind() {
-            TyKind::Unit => (self.class_symbol(TypeName::from("kotlin/Unit")), &[][..]),
-            TyKind::Nothing => (self.class_symbol(TypeName::from("kotlin/Nothing")), &[][..]),
-            TyKind::BOOLEAN => (self.class_symbol(TypeName::from("kotlin/Boolean")), &[][..]),
-            TyKind::Obj(classifier, arguments) => {
-                (self.class_symbol(classifier), arguments.as_slice())
-            }
-            TyKind::TyParam(..) => {
-                let (_, _, symbol) = parameters
-                    .iter()
-                    .find(|(_, parameter, _)| parameter.ty == inner)
-                    .expect("supported type parameter is declared by the function");
-                (*symbol, &[][..])
-            }
-            _ => unreachable!("unsupported types are filtered before serialization"),
-        };
-        let mut simple = Pb::new();
-        simple.field_varint(2, classifier);
-        // `MARKED_NULLABLE` is protobuf zero, so omission does not mean non-null. Kotlin writes
-        // `NOT_SPECIFIED` explicitly for an ordinary type-parameter occurrence.
-        simple.field_varint(3, nullability);
-        let arguments = arguments
+        let scope = parameters
             .iter()
-            .map(|argument| {
-                let (variance, ty) = match argument.kind() {
-                    TyKind::InProjection(inner) => (2, inner),
-                    TyKind::OutProjection(inner) => (3, inner),
-                    TyKind::StarProjection(_) => return 0,
-                    _ => (1, *argument),
-                };
-                (u64::from(self.ty(ty, parameters)) << 2) | variance
-            })
+            .map(|(_, parameter, symbol)| (parameter.ty, *symbol))
             .collect::<Vec<_>>();
-        simple.field_packed_varints(4, &arguments);
-        let mut encoded = Pb::new();
-        encoded.field_message(5, &simple);
-        let bytes = encoded.canonical().into_bytes();
-        if let Some(index) = self.types.iter().position(|existing| existing == &bytes) {
-            return u32::try_from(index).expect("type table fits u32");
-        }
-        let index = u32::try_from(self.types.len()).expect("type table fits u32");
-        self.types.push(bytes);
-        index
-    }
-
-    fn class_symbol(&mut self, classifier: TypeName) -> u64 {
-        let signature = KlibPublicIdSignature::classifier(classifier);
-        let slot = self.public_signature(&signature);
-        symbol(slot, CLASS_SYMBOL)
-    }
-
-    fn public_signature(&mut self, signature: &KlibPublicIdSignature) -> u32 {
-        let package = signature
-            .package()
-            .segments()
-            .iter()
-            .map(|segment| u64::from(self.string(segment)))
-            .collect::<Vec<_>>();
-        let declaration = signature
-            .declaration()
-            .segments()
-            .iter()
-            .map(|segment| u64::from(self.string(segment)))
-            .collect::<Vec<_>>();
-        let mut common = Pb::new();
-        common.field_packed_varints(1, &package);
-        common.field_packed_varints(2, &declaration);
-        if let Some(member) = signature.member_id() {
-            common.field_fixed64(6, member);
-        }
-        if signature.mask() != 0 {
-            common.field_varint(4, signature.mask());
-        }
-        let mut encoded = Pb::new();
-        encoded.field_message(1, &common);
-        self.signature(encoded.canonical().into_bytes())
-    }
-
-    fn file_signature(&mut self) -> u32 {
-        let mut encoded = Pb::new();
-        encoded.field_message(7, &Pb::new());
-        self.signature(encoded.into_bytes())
-    }
-
-    fn composite_signature(&mut self, container: u32, inner: u32) -> u32 {
-        let mut composite = Pb::new();
-        composite.field_varint(1, u64::from(container));
-        composite.field_varint(2, u64::from(inner));
-        let mut encoded = Pb::new();
-        encoded.field_message(5, &composite);
-        self.signature(encoded.canonical().into_bytes())
-    }
-
-    fn type_parameter_signature(&mut self, function: u32, index: usize) -> u32 {
-        let name = self.string("<TP>");
-        let mut local = Pb::new();
-        local.field_packed_varints(1, &[u64::from(name)]);
-        local.field_varint(
-            2,
-            u64::try_from(index).expect("type-parameter index fits u64"),
-        );
-        let mut encoded = Pb::new();
-        encoded.field_message(6, &local);
-        let local = self.signature(encoded.canonical().into_bytes());
-        self.composite_signature(function, local)
-    }
-
-    fn local_signature(&mut self) -> u32 {
-        let mut encoded = Pb::new();
-        encoded.field_varint(4, self.signatures.len() as u64);
-        self.signature(encoded.into_bytes())
-    }
-
-    fn signature(&mut self, bytes: Vec<u8>) -> u32 {
-        if let Some(index) = self
-            .signatures
-            .iter()
-            .position(|existing| existing == &bytes)
-        {
-            return u32::try_from(index).expect("signature table fits u32");
-        }
-        let index = u32::try_from(self.signatures.len()).expect("signature table fits u32");
-        self.signatures.push(bytes);
-        index
-    }
-
-    fn string(&mut self, value: &str) -> u32 {
-        if let Some(index) = self.strings.iter().position(|existing| existing == value) {
-            return u32::try_from(index).expect("string table fits u32");
-        }
-        let index = u32::try_from(self.strings.len()).expect("string table fits u32");
-        self.strings.push(value.to_owned());
-        index
-    }
-
-    fn file_entry(&mut self, name: &str) -> u32 {
-        let name = self.string(name);
-        let mut entry = Pb::new();
-        entry.field_varint(4, u64::from(name));
-        let bytes = entry.into_bytes();
-        if let Some(index) = self
-            .file_entries
-            .iter()
-            .position(|existing| existing == &bytes)
-        {
-            return u32::try_from(index).expect("file-entry table fits u32");
-        }
-        let index = u32::try_from(self.file_entries.len()).expect("file-entry table fits u32");
-        self.file_entries.push(bytes);
-        index
-    }
-}
-
-fn symbol(signature: u32, kind: u64) -> u64 {
-    (u64::from(signature) << 8) | kind
-}
-
-/// Kotlin IR's `BinaryLattice`: even bits carry the name, odd bits the type index.
-fn lattice(name: u32, ty: u32) -> u64 {
-    fn spread(mut value: u64) -> u64 {
-        value &= 0xffff_ffff;
-        value = (value | (value << 16)) & 0x0000_ffff_0000_ffff;
-        value = (value | (value << 8)) & 0x00ff_00ff_00ff_00ff;
-        value = (value | (value << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
-        value = (value | (value << 2)) & 0x3333_3333_3333_3333;
-        (value | (value << 1)) & 0x5555_5555_5555_5555
-    }
-    spread(u64::from(name)) | (spread(u64::from(ty)) << 1)
-}
-
-fn entry_table(entries: &[Vec<u8>]) -> Vec<u8> {
-    let count = i32::try_from(entries.len()).expect("entry count fits i32");
-    let mut bytes = (-count).to_be_bytes().to_vec();
-    for entry in entries {
-        leb128(
-            u64::try_from(entry.len()).expect("entry length fits u64"),
-            &mut bytes,
-        );
-    }
-    for entry in entries {
-        bytes.extend_from_slice(entry);
-    }
-    bytes
-}
-
-fn declaration_table(declarations: &[(u32, Vec<u8>)]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(
-        &u32::try_from(declarations.len())
-            .expect("declaration count fits u32")
-            .to_be_bytes(),
-    );
-    let mut offset = 4 + declarations.len() * 12;
-    for (signature, declaration) in declarations {
-        bytes.extend_from_slice(&signature.to_be_bytes());
-        bytes.extend_from_slice(
-            &u32::try_from(offset)
-                .expect("declaration offset fits u32")
-                .to_be_bytes(),
-        );
-        bytes.extend_from_slice(
-            &u32::try_from(declaration.len())
-                .expect("declaration length fits u32")
-                .to_be_bytes(),
-        );
-        offset += declaration.len();
-    }
-    for (_, declaration) in declarations {
-        bytes.extend_from_slice(declaration);
-    }
-    bytes
-}
-
-fn per_file(file: Vec<u8>) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8 + file.len());
-    bytes.extend_from_slice(&1u32.to_be_bytes());
-    bytes.extend_from_slice(
-        &u32::try_from(file.len())
-            .expect("per-file data fits u32")
-            .to_be_bytes(),
-    );
-    bytes.extend(file);
-    bytes
-}
-
-fn leb128(mut value: u64, bytes: &mut Vec<u8>) {
-    loop {
-        let byte = (value & 0x7f) as u8;
-        value >>= 7;
-        bytes.push(byte | if value == 0 { 0 } else { 0x80 });
-        if value == 0 {
-            return;
-        }
+        self.tables.ty(ty, &scope)
     }
 }
 
@@ -990,6 +758,7 @@ mod tests {
         read_declaration_trees, read_inlinable_declaration_trees,
         read_inlinable_declaration_trees_where, KlibIrSignature,
     };
+    use crate::types::TypeName;
 
     fn take_varint(bytes: &[u8], cursor: &mut usize) -> u64 {
         let mut value = 0u64;
