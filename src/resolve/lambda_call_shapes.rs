@@ -105,52 +105,6 @@ impl Checker<'_> {
             && self.semantic_sam_signature(target.non_null()).is_none()
     }
 
-    /// The declared parameter of a lambda argument whose selection left it no function shape. A
-    /// lambda with a written parameter that names no type is probed by its arity alone; when the
-    /// selected parameter is a bare type variable of the callee that nothing else constrained, the
-    /// selection binds the variable to that probe, which is no inference: the lambda is analysed as
-    /// a standalone literal under the variable's own bound, and the call owes the variable's report.
-    pub(super) fn lambda_bound_only_the_callee_variable(
-        &mut self,
-        call: ExprId,
-        argument: ExprId,
-        probed_actual: Ty,
-        declared: Ty,
-        expected: Ty,
-    ) -> Option<Ty> {
-        if !matches!(self.file.expr(argument), Expr::Lambda { .. })
-            || !self
-                .untyped_named_lambda_parameters(argument)
-                .contains(&true)
-            || expected != probed_actual
-            || self.file.call_type_args.contains_key(&call.0)
-            || !self.probe_binds_no_parameter(probed_actual)
-        {
-            return None;
-        }
-        let (TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) = declared.kind() else {
-            return None;
-        };
-        let name = crate::types::type_parameter_source_name(formal.as_str());
-        self.unshaped_lambda_formals
-            .insert(argument, (call, name.to_string()));
-        // The probe analysed the lambda under no real shape; that analysis is void, so the
-        // unshaped path owes it again.
-        self.expr_lowers.remove(&argument);
-        Some(declared)
-    }
-
-    /// Whether a lambda's probe type gave its parameters no type of their own: selection then took
-    /// the lambda's written arity for the whole shape. A receiver or an earlier argument that
-    /// already bound the variable leaves the probe with that binding's parameter types instead.
-    fn probe_binds_no_parameter(&self, probed: Ty) -> bool {
-        matches!(
-            probed.kind(),
-            TyKind::Fun(signature)
-                if signature.params.iter().all(|&parameter| parameter == Ty::obj("kotlin/Any"))
-        )
-    }
-
     /// Collect an argument's symbolic result before overload selection without finalizing whether
     /// a result-only type variable is uninferrable. The selected parameter immediately rechecks the
     /// argument and exclusively owns that diagnostic decision.

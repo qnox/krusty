@@ -383,13 +383,15 @@ impl Checker<'_> {
             // only its own arity-probe gave a shape, is still unshaped: the selection took the
             // probe's function type for the variable, which would hide the missing inference.
             let expected = self
-                .lambda_bound_only_the_callee_variable(
+                .lambda_bound_only_the_callee_variable(&unshaped_lambdas::LambdaParameterBinding {
                     call,
                     argument,
+                    parameter,
                     probed_actual,
-                    declared,
                     expected,
-                )
+                    declared_parameters: declared_params,
+                    declared,
+                })
                 .unwrap_or(expected);
             let actual = self.selected_argument_type(
                 scope,

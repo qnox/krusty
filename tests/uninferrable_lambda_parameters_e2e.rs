@@ -99,3 +99,20 @@ fn a_variable_bound_by_an_explicit_type_argument_or_receiver_needs_no_lambda_inf
         0,
     );
 }
+
+#[test]
+fn a_function_shape_of_any_that_the_receiver_supplies_is_not_a_missing_inference() {
+    assert_same(
+        "receiver_any_shape",
+        "class MyList<T> {\n\
+         \x20   operator fun plusAssign(element: T) {}\n\
+         }\n\
+         class Plain<T>\n\
+         operator fun <T> Plain<T>.plusAssign(element: T) {}\n\
+         fun f(members: MyList<(Any) -> Unit>, extensions: Plain<(Any) -> Unit>) {\n\
+         \x20   members.plusAssign({ x -> })\n\
+         \x20   extensions.plusAssign({ x -> })\n\
+         }\n",
+        0,
+    );
+}
