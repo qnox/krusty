@@ -41,6 +41,7 @@ names! {
     any => "kotlin/Any",
     unsafe_variance => "kotlin/UnsafeVariance",
     kclass => "kotlin/reflect/KClass",
+    jvm_class_mapping_facade => "kotlin/jvm/JvmClassMappingKt",
     ktype => "kotlin/reflect/KType",
     comparable => "kotlin/Comparable",
     array => "kotlin/Array",
