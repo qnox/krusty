@@ -53,6 +53,9 @@ struct Defect {
     with_defect: Outcome,
     /// What a release without it gives, and what the fix mode gives.
     fixed: Outcome,
+    /// What a release that has another defect gives instead of `fixed`, when that defect rejects
+    /// the program before this one shows.
+    masked_by: &'static [(Quirk, Outcome)],
 }
 
 /// KT-84393: a function value returning `String` passed where `() -> Unit` is expected.
@@ -106,6 +109,30 @@ const LIST_ADD_ALL_OF_ITS_RANGE: &str = "fun box(): String {\n\
     \x20   return \"$answer $list\"\n\
     }\n";
 
+/// `InterfaceBlockPropertyInitializerProhibited`: a constant of an interface's `companion { … }`
+/// block, whose initializer the first 2.4 releases take for an interface property's.
+const INTERFACE_BLOCK_CONSTANT: &str = "// LANGUAGE: +CompanionBlocks\n\
+    interface Source {\n\
+    \x20   companion {\n\
+    \x20       const val fixed: String = \"OK\"\n\
+    \x20   }\n\
+    }\n\
+    fun box(): String = Source.fixed\n";
+
+/// `InterfaceBlockPropertyFieldIsPrivateStatic`: a stored property of an interface's
+/// `companion { … }` block, which the JVM only admits in a class of its own.
+const INTERFACE_BLOCK_STORED_PROPERTY: &str = "// LANGUAGE: +CompanionBlocks\n\
+    interface Source {\n\
+    \x20   companion {\n\
+    \x20       var current: String = \"O\"\n\
+    \x20       val fixed: String = \"K\"\n\
+    \x20   }\n\
+    }\n\
+    fun box(): String {\n\
+    \x20   Source.current = \"O\"\n\
+    \x20   return Source.current + Source.fixed\n\
+    }\n";
+
 /// The program that shows `quirk`, for a defect. Every quirk is named, so a new one has to say
 /// here whether it is a defect and, if so, which program shows it.
 fn defect(quirk: Quirk) -> Option<Defect> {
@@ -116,6 +143,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             source: UNIT_CONVERSION,
             with_defect: Outcome::Rejected,
             fixed: Outcome::Answer("OK".to_string()),
+            masked_by: &[],
         }),
         Quirk::VarargReferenceTakesTypeVariableInputAsElement => Some(Defect {
             platforms: &[Platform::Jvm],
@@ -123,6 +151,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             source: VARARG_REFERENCE,
             with_defect: Outcome::Answer("1".to_string()),
             fixed: Outcome::Answer("2".to_string()),
+            masked_by: &[],
         }),
         Quirk::ContextArgumentEvaluatedBeforeExtensionReceiver => Some(Defect {
             platforms: &[Platform::Jvm],
@@ -130,6 +159,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             source: CONTEXT_ARGUMENT_ORDER,
             with_defect: Outcome::Answer("crv".to_string()),
             fixed: Outcome::Answer("rcv".to_string()),
+            masked_by: &[],
         }),
         Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument => Some(Defect {
             platforms: &[Platform::Native, Platform::WasmJs, Platform::WasmWasi],
@@ -137,6 +167,28 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             source: LIST_ADD_ALL_OF_ITS_RANGE,
             with_defect: Outcome::Answer("raised [1, 2, 3, null, null]".to_string()),
             fixed: Outcome::Answer("appended [1, 2, 3, 1, 2]".to_string()),
+            masked_by: &[],
+        }),
+        Quirk::InterfaceBlockPropertyInitializerProhibited => Some(Defect {
+            platforms: &[Platform::Jvm],
+            fixed_on: &[],
+            source: INTERFACE_BLOCK_CONSTANT,
+            with_defect: Outcome::Rejected,
+            fixed: Outcome::Answer("OK".to_string()),
+            masked_by: &[],
+        }),
+        Quirk::InterfaceBlockPropertyFieldIsPrivateStatic => Some(Defect {
+            platforms: &[Platform::Jvm],
+            fixed_on: &[],
+            source: INTERFACE_BLOCK_STORED_PROPERTY,
+            with_defect: Outcome::Answer(
+                "ERROR:ClassFormatError:Illegal field modifiers in class Source: 0xA".to_string(),
+            ),
+            fixed: Outcome::Answer("OK".to_string()),
+            masked_by: &[(
+                Quirk::InterfaceBlockPropertyInitializerProhibited,
+                Outcome::Rejected,
+            )],
         }),
         Quirk::DelegateFailureNamesFirstRungOnly
         | Quirk::SuspendUnitTailCallKeepsCalleeResult
@@ -158,7 +210,11 @@ fn defects() -> Vec<(Quirk, Defect, Outcome)> {
             let reference = if release.has(quirk) {
                 defect.with_defect.clone()
             } else {
-                defect.fixed.clone()
+                defect
+                    .masked_by
+                    .iter()
+                    .find(|(masking, _)| release.has(*masking))
+                    .map_or_else(|| defect.fixed.clone(), |(_, outcome)| outcome.clone())
             };
             Some((quirk, defect, reference))
         })

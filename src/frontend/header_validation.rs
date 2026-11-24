@@ -193,11 +193,19 @@ fn validate_interface_block_members(
         let Decl::Property(property) = file.decl(member.declaration) else {
             continue;
         };
-        if let Some(diagnostic) =
+        let initializer = property.init.and_then(|init| file.expr_span(init));
+        for diagnostic in [
+            crate::declaration_validation::interface_block_initializer_diagnostic(
+                initializer,
+                crate::kotlin_version::Quirks::target(),
+            ),
             crate::declaration_validation::interface_block_property_diagnostics(
                 property,
                 member.private_modifier,
-            )
+            ),
+        ]
+        .into_iter()
+        .flatten()
         {
             diagnostics.error(diagnostic.span, diagnostic.message.to_string());
         }

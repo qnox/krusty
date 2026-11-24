@@ -133,6 +133,15 @@ pub(super) fn in_interface_storage_class(ir: &IrFile, index: u32) -> bool {
     ir.companion_blocks.is_storage(index)
         && !storage.is_const
         && owning_interface(ir, index).is_some()
+        && !field_stays_in_interface()
+}
+
+/// Whether the reproduced release keeps an interface's block-property fields in the interface
+/// itself, as private statics, instead of its storage classes
+/// ([`krusty::kotlin_version::Quirk::InterfaceBlockPropertyFieldIsPrivateStatic`]).
+pub(super) fn field_stays_in_interface() -> bool {
+    krusty::kotlin_version::Quirks::target()
+        .has(krusty::kotlin_version::Quirk::InterfaceBlockPropertyFieldIsPrivateStatic)
 }
 
 /// The storage class `group` of interface `interface`'s block properties.
