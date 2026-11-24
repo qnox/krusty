@@ -265,9 +265,14 @@ impl LangFeatures {
     }
 
     /// Whether enabling `name` under these settings changes nothing krusty does not model: the
-    /// feature is modeled, or every effect it has is gated off by a feature these settings enable.
+    /// feature is modeled, only another platform's checkers consult it, or every effect it has is
+    /// gated off by a feature these settings enable.
     pub fn models_enabled(&self, name: &str) -> bool {
         Self::models(name)
+            || self
+                .table()
+                .get(name)
+                .is_some_and(LanguageFeature::is_consumed_only_off_jvm)
             || SUBSUMED_FEATURES
                 .iter()
                 .any(|&(feature, by)| feature == name && self.has(by))

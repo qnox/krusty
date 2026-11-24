@@ -215,7 +215,7 @@ pub(super) fn unmodeled_progressive_error(
 ) -> Option<String> {
     progressive
         .iter()
-        .find(|setting| !LangFeatures::models(&setting.feature) && !before.has(&setting.feature))
+        .find(|setting| !before.models_enabled(&setting.feature) && !before.has(&setting.feature))
         .map(|setting| {
             format!(
                 "krusty does not implement the language feature '{}' selected by '-progressive'",

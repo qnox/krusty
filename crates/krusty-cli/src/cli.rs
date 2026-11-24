@@ -872,7 +872,7 @@ mod tests {
                 if before.has(&feature.name) {
                     continue;
                 }
-                if LangFeatures::models(&feature.name) {
+                if before.models_enabled(&feature.name) {
                     assert!(
                         o.language_settings.features.has(&feature.name),
                         "kotlinc {label} {}",
