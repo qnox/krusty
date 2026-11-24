@@ -1030,11 +1030,14 @@ jobs:
         if: matrix.target == 'native'
         id: native_box
         continue-on-error: true
-        # Complete migration runs exceeded the former 600-second corpus budget. Keep ordinary
-        # and focused deadlines unchanged; a corpus timeout still fails this row.
+        # The corpus deadline fits a cold row on the slowest pool: an evicted recordings cache
+        # must slow a row down, not fail it. A cold 2.4.21 row (no kotlinc-native recordings, no
+        # KLIB references) took 1,157 s on a 4-vCPU GitHub-class runner; the slowest pool compiles
+        # up to 2.4x slower, about 2,780 s, and this budget keeps a quarter on top of that. Keep
+        # ordinary and focused deadlines unchanged; a corpus timeout still fails this row.
         env:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
-          KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "1800"
+          KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "3500"
           KRUSTY_NATIVE_BYTE_REPORT: ${{ github.workspace }}/native-byte-equality.txt
           KRUSTY_KLIB_REFERENCE_CACHE: ${{ github.workspace }}/target/cache/klib-references
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
@@ -1085,10 +1088,11 @@ jobs:
           node-version: '22'
       - name: run wasm box conformance ${{ matrix.version }}
         if: startsWith(matrix.target, 'wasm-')
-        # Each case now also compiles kotlinc's KLIB reference, so the corpus step gets the same
-        # budget the Native corpus step has.
+        # Each case also compiles kotlinc's KLIB reference when no recording exists. A cold
+        # 2.4.21 wasm-js row took 825 s on a 4-vCPU GitHub-class runner; at the slowest pool's up
+        # to 2.4x that is about 1,980 s, and this budget keeps a quarter on top of that.
         env:
-          KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "1800"
+          KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "2500"
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
           KRUSTY_WASM_JS_BYTE_REPORT: ${{ github.workspace }}/wasm-js-byte-equality.txt
           KRUSTY_WASM_WASI_BYTE_REPORT: ${{ github.workspace }}/wasm-wasi-byte-equality.txt
