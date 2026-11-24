@@ -131,8 +131,10 @@ globalWarningSuppression_incorrect.args
 headerMode.args
 help.args
 hmpp/commaInFragmentDependency.args
+hmpp/intermediateHasNonExistentDependency.args
 hmpp/jvmDependenciesInCommonClasspath_dir.args
 hmpp/jvmDependenciesInCommonClasspath_friends.args
+hmpp/jvmDependenciesInCommonClasspath_friendsWithKlib.args
 hmpp/jvmDependenciesInCommonClasspath_jar.args
 hmpp/successfulCompilation.args
 hmpp/successfulCompilation2.args
