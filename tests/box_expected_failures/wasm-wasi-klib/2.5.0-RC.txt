@@ -2349,7 +2349,6 @@ wasm-old-exception-handling/tryCatchFinallyWithHandleResult.kt
 wasm-old-exception-handling/tryCatchWithHandleResult.kt
 wasm-old-exception-handling/tryFinallyInsideInlineLambda.kt
 wasm-old-exception-handling/tryFinallyWithHandleResult.kt
-when/NoWhenBranchMatchedException.kt
 when/enumOptimization/bigEnum.kt
 when/enumOptimization/duplicatingItems.kt
 when/enumOptimization/enumInsideClassObject.kt
