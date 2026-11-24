@@ -22,10 +22,14 @@ impl Checker<'_> {
         {
             return;
         }
-        let Some(Some(facade)) = property.extension_facade else {
+        if property.extension_facade.is_none() || property.name != "javaClass" {
             return;
-        };
-        if facade != crate::types::wk::jvm_class_mapping_facade() || property.name != "javaClass" {
+        }
+        let declared_in_kotlin_jvm = matches!(
+            property.getter.declaration_owner,
+            Some(crate::types::SemanticCallableOwner::Package(package)) if package.matches("kotlin/jvm")
+        );
+        if !declared_in_kotlin_jvm {
             return;
         }
         self.report_deprecation_error(
