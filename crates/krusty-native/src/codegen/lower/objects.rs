@@ -1971,12 +1971,6 @@ impl<'a> FileLowering<'a> {
                 let func_ref = body.func_ref(initializer);
                 body.emit_call(func_ref, &[])?;
             }
-            if let Some(owner) = owner {
-                body.activate_class_through(owner, ClassActivation::BeforeOwnCompanion)?;
-                if body.terminated {
-                    return Ok(());
-                }
-            }
             let slot_address = body.data_address(slot);
             let current = body
                 .builder
@@ -1988,6 +1982,24 @@ impl<'a> FileLowering<'a> {
             body.builder.ins().brif(is_null, construct, &[], done, &[]);
 
             body.continue_in(construct);
+            // Only the access that finds the companion uninitialized walks its owner's
+            // supertypes, so a hierarchy of companions is not traversed again by each getter
+            // it reaches once they exist. Initializing them may have reached this getter and
+            // built the instance; that one stands.
+            if let Some(owner) = owner {
+                body.activate_class_through(owner, ClassActivation::BeforeOwnCompanion)?;
+                if body.terminated {
+                    return Ok(());
+                }
+                let current = body
+                    .builder
+                    .ins()
+                    .load(types::I64, trusted(), slot_address, 0);
+                let is_null = body.is_null(current);
+                let build = body.builder.create_block();
+                body.builder.ins().brif(is_null, build, &[], done, &[]);
+                body.continue_in(build);
+            }
             body.runtime_call("kt_gc_add_global_root", &[any()], Ty::Unit, &[slot_address])?;
             let instance = body.allocate(descriptor, size)?;
             body.builder
