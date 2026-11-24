@@ -55,7 +55,11 @@ fn both(stem: &str, files: &[(&str, &str)]) -> (Vec<Reported>, Vec<Reported>) {
 
 fn assert_same(stem: &str, files: &[(&str, &str)], expected_count: usize) {
     let (reference, krusty) = both(stem, files);
-    assert_eq!(reference.len(), expected_count, "reference ledger: {reference:#?}");
+    assert_eq!(
+        reference.len(),
+        expected_count,
+        "reference ledger: {reference:#?}"
+    );
     assert_eq!(reference, krusty);
 }
 
