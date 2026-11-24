@@ -440,6 +440,15 @@ jobs:
       - &install-maven
         name: install Maven
         run: scripts/install-maven.sh 3.9.11
+      # Maven Central and the Gradle Plugin Portal through Infragnite's package cache
+      # (maven.infragnite.dev), for the tests' Gradle builds and the Maven embedder.
+      - name: send Gradle's and Maven's downloads through the package cache
+        uses: infragnite/package-cache-action@0390145ce4d6ed169d553bad09fa3921643a6f35 # main
+        env:
+          # The init script goes to the Gradle user home the tests' builds use.
+          GRADLE_USER_HOME: ${{ runner.temp }}/krusty-build-tools-gradle-user-home
+        with:
+          maven: 'true'
       # Coverage measures these same suites, instrumented, every night (.github/workflows/coverage.yml).
       - name: own test suites
         id: own-tests
@@ -1372,7 +1381,7 @@ jobs:
       # (maven.infragnite.dev): an init script in GRADLE_USER_HOME, so set that first.
       - &package-cache
         name: send Gradle's downloads through the package cache
-        uses: infragnite/package-cache-action@5cd7255a5e35c78b5419b88db30c367650cd1c73 # main
+        uses: infragnite/package-cache-action@0390145ce4d6ed169d553bad09fa3921643a6f35 # main
       - name: build portable local-Maven distribution
         run: |
           set -euo pipefail
@@ -1732,6 +1741,14 @@ jobs:
           cache-dependency-path: tools/krusty-maven/pom.xml
       - *restore-maven
       - *install-maven
+      # Maven Central through the package cache: a mirror added to ~/.m2/settings.xml, so after
+      # setup-java, which rewrites that file.
+      - &package-cache-maven
+        name: send Maven's downloads through the package cache
+        uses: infragnite/package-cache-action@0390145ce4d6ed169d553bad09fa3921643a6f35 # main
+        with:
+          gradle: 'false'
+          maven: 'true'
       - name: build portable local-Maven distribution
         run: |
           set -euo pipefail
@@ -1768,6 +1785,7 @@ jobs:
           cache-dependency-path: tools/krusty-maven/pom.xml
       - *restore-maven
       - *install-maven
+      - *package-cache-maven
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
