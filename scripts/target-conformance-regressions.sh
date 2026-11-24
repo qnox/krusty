@@ -23,6 +23,7 @@ case "$target" in
     export KRUSTY_REQUIRE_NATIVE_CONFORMANCE=1
     filter=kotlin_box_native_conformance::
     skips=(--skip kotlin_box_native_conformance::kotlin_codegen_box_native_conformance)
+    threads=1
     ;;
   wasm)
     : "${KRUSTY_KOTLINC:?wasm target regressions require KRUSTY_KOTLINC}"
@@ -35,6 +36,11 @@ case "$target" in
       --skip kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance
       --skip kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance
     )
+    # The focused Wasm tests are independent in-process compiles plus a Node run, so they share
+    # the runner's cores instead of queueing behind one another. Same CPU probe and cap as
+    # scripts/conformance-regressions.sh (tests/test_harness_sharding_e2e.rs asserts the count).
+    threads="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)"
+    [ "$threads" -gt 4 ] && threads=4
     ;;
   *)
     echo "unknown target regression lane: $target" >&2
@@ -46,7 +52,7 @@ export KRUSTY_LANGUAGE_VERSION="$v"
 export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}"
 set +e
 run_with_deadline "$KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS" \
-  "$bin" "$filter" "${skips[@]}" --test-threads 1
+  "$bin" "$filter" "${skips[@]}" --test-threads "$threads"
 focused_status=$?
 set -e
 if [ "$focused_status" -eq 124 ]; then

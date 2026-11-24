@@ -1929,12 +1929,9 @@ pub struct File {
     /// in the structural alias tables rather than `Decl`; this exact owner set lets semantic annotation
     /// resolution use file scope without guessing from names or source text.
     pub type_alias_declaration_starts: crate::fx_hash::HashSet<u32>,
-    /// `// ASSERTIONS_MODE: always-enable` — `assert(...)` is emitted UNGUARDED (always checks + throws),
-    /// not behind the per-class `desiredAssertionStatus()` guard. From the test directive / `-Xassertions`.
-    pub assert_always_enabled: bool,
-    /// `// ASSERTIONS_MODE: always-disable` — `assert(...)` is elided entirely (the condition is not even
-    /// evaluated). Mutually exclusive with `assert_always_enabled`; both unset ⇒ the per-class guard.
-    pub assert_always_disabled: bool,
+    /// The `assert(...)` mode `-Xassertions` / `// ASSERTIONS_MODE:` selects, or `None` for the
+    /// platform's default (kotlinc's JVM default is `legacy`: an ordinary inline call).
+    pub assertions: Option<crate::types::AssertionCompilation>,
     /// `+ExplicitContextArguments`: named context parameters may be supplied at a call site instead
     /// of being selected from the implicit receiver and lexical scope.
     pub explicit_context_arguments: bool,

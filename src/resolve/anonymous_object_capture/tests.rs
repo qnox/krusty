@@ -1,6 +1,8 @@
-use crate::diag::DiagSink;
-use crate::fir::{FirBody, FirExprId, FirExprKind, FirLocalClassCaptureSource, SourceFileId};
-use crate::types::Ty;
+use crate::diag::{DiagSink, Severity};
+use crate::fir::{
+    FirBody, FirCapturedReceiver, FirExprId, FirExprKind, FirLocalClassCaptureSource, SourceFileId,
+};
+use crate::types::{CapturedContextKind, Ty};
 
 fn retained_inline_body(source: &str) -> FirBody {
     let inputs = [crate::source::SourceInput::kotlin(source).with_file_stem("PublishedCapture")];
@@ -135,4 +137,56 @@ fn published_replay_refreshes_parameter_and_local_bindings_after_unrelated_decla
         })
         .collect::<Vec<_>>();
     assert_eq!(fields, [(object.declaration, 0), (object.declaration, 1)]);
+}
+
+#[test]
+fn an_unresolved_context_receiver_is_not_published_as_a_lambda() {
+    let failed = super::published_context_receiver(CapturedContextKind::Anonymous, [Ty::Error], 0);
+    assert!(
+        !matches!(failed, Some(FirCapturedReceiver::Lambda(_))),
+        "a failed context type is not a lambda receiver: {failed:?}"
+    );
+    assert!(
+        failed.is_none(),
+        "an unpublishable context receiver is omitted"
+    );
+    let published =
+        super::published_context_receiver(CapturedContextKind::Anonymous, [Ty::String], 0);
+    assert!(
+        matches!(published, Some(FirCapturedReceiver::Context { .. })),
+        "a resolved context receiver keeps its context kind: {published:?}"
+    );
+
+    let source = "context(_: Missing)\nfun f() = object {}\n";
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set(
+        &[source],
+        crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
+        &mut diagnostics,
+    );
+    assert!(
+        diagnostics
+            .diags
+            .iter()
+            .any(|diagnostic| diagnostic.severity == Severity::Error),
+        "the unresolved context type keeps its frontend diagnostic"
+    );
+    let info = analysis
+        .types
+        .first()
+        .and_then(Option::as_ref)
+        .expect("the unresolved type still publishes the checked captures");
+    let captures = info
+        .anonymous_object_captures_by_construction
+        .values()
+        .chain(info.anonymous_object_captures_by_class.values())
+        .chain(info.local_class_captures_by_class.values());
+    for captures in captures {
+        assert!(
+            captures.iter().all(|capture| {
+                !matches!(capture.receiver, Some(FirCapturedReceiver::Lambda(_)))
+            }),
+            "a failed context receiver was published as a lambda"
+        );
+    }
 }
