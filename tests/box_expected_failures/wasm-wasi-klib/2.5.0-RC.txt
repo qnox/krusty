@@ -256,7 +256,6 @@ constants/comparisonFalse.kt
 constants/divisionByZero.kt
 constants/float.kt
 constants/kt9532.kt
-contextParameters/callableReferences/contextual/companion.kt
 contextParameters/callableReferences/contextual/delegation/boundExtensionReceiver.kt
 contextParameters/callableReferences/contextual/delegation/boundReceiver.kt
 contextParameters/callableReferences/contextual/delegation/localProperty.kt
@@ -267,11 +266,8 @@ contextParameters/callableReferences/contextual/delegation/thisAsContextArg.kt
 contextParameters/callableReferences/contextual/delegation/unboundReceiver.kt
 contextParameters/callableReferences/contextual/delegation/unboundReceiverVar.kt
 contextParameters/callableReferences/contextual/delegation/varProperty.kt
-contextParameters/callableReferences/contextual/fakeOverride.kt
 contextParameters/callableReferences/contextual/funInterfaceEquality.kt
 contextParameters/callableReferences/contextual/generic.kt
-contextParameters/callableReferences/contextual/propertyEquality.kt
-contextParameters/callableReferences/contextual/shapes.kt
 contextParameters/callableReferences/contextual/simple.kt
 contextParameters/contextPropertyInInterface.kt
 contextParameters/contextualCallableReferenceEquality.kt
@@ -279,8 +275,6 @@ contextParameters/evaluationOrder.kt
 contextParameters/explicitPassing.kt
 contextParameters/kt51863.kt
 contextParameters/kt65953.kt
-contextParameters/propertyCompoundAssignment.kt
-contextParameters/substitutedContextReceivers.kt
 contextParameters/suspendContextParemetersWithExtension.kt
 contracts/contractForCast.kt
 contracts/isNullString.kt

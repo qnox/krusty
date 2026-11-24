@@ -225,10 +225,8 @@ compileKotlinAgainstKotlin/useDeserializedFunInterface.kt
 constants/comparisonFalse.kt
 constants/comparisonTrue.kt
 constants/float.kt
-contextParameters/callableReferences/contextual/companion.kt
 contextParameters/callableReferences/contextual/delegation/boundExtensionReceiver.kt
 contextParameters/callableReferences/contextual/delegation/boundReceiver.kt
-contextParameters/callableReferences/contextual/delegation/localProperty.kt
 contextParameters/callableReferences/contextual/delegation/multipleBoundValues.kt
 contextParameters/callableReferences/contextual/delegation/singleContextArgUnboundReceiver.kt
 contextParameters/callableReferences/contextual/delegation/smartCastContextArg.kt
@@ -236,13 +234,8 @@ contextParameters/callableReferences/contextual/delegation/thisAsContextArg.kt
 contextParameters/callableReferences/contextual/delegation/unboundReceiver.kt
 contextParameters/callableReferences/contextual/delegation/unboundReceiverVar.kt
 contextParameters/callableReferences/contextual/delegation/varProperty.kt
-contextParameters/callableReferences/contextual/fakeOverride.kt
 contextParameters/callableReferences/contextual/generic.kt
-contextParameters/callableReferences/contextual/propertyEquality.kt
-contextParameters/callableReferences/contextual/shapes.kt
-contextParameters/callableReferences/contextual/simple.kt
 contextParameters/contextPropertyInInterface.kt
-contextParameters/contextualCallableReferenceEquality.kt
 contextParameters/contextualCallableReferenceReturnType.kt
 contextParameters/evaluationOrder.kt
 contextParameters/explicitPassing.kt
