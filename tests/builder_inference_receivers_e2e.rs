@@ -422,6 +422,8 @@ fn a_builder_variable_used_by_the_tail_a_cast_or_an_anonymous_function_is_inferr
          fun tail() = build {{ get() }}\n\
          fun cast() = build {{ this as Derived<*>; get() }}\n\
          fun anonymous() {{ build {{ fun(): Buildee<Target> = this }} }}\n\
+         fun consume(value: Any?) {{}}\n\
+         fun used() {{ build {{ this as Derived<*>; val value = get(); consume(value) }} }}\n\
          fun <T> Buildee<T>.declared(): T {{ this as Derived<*>; return get() }}\n"
     ));
 }
@@ -437,11 +439,14 @@ fn builder_variables_without_evidence_and_a_mismatched_anonymous_body_are_reject
                 "{BUILDEE_DECLARATIONS}\
                  fun cast() {{ build {{ this as Derived<*> }} }}\n\
                  fun declaration() {{ build {{ val derived = this as Derived<*> }} }}\n\
+                 fun consume(value: Any?) {{}}\n\
+                 fun argument() {{ build {{ this as Derived<*>; consume(get()) }} }}\n\
+                 fun typed() {{ build {{ this as Derived<*>; val value: Any? = get() }} }}\n\
                  fun mismatch() {{ val f = fun(): Int = \"s\" }}\n"
             ),
         )],
         &[common::stdlib_jar()],
     );
-    assert_eq!(common::compiler_errors(&result.reference_stderr).len(), 3);
+    assert_eq!(common::compiler_errors(&result.reference_stderr).len(), 5);
     common::expect_identical_rejection(&result, "builder variables without evidence");
 }

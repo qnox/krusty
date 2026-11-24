@@ -11,6 +11,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         receivers: &mut [ImplicitReceiver],
         name: &str,
+        expected: Option<Ty>,
     ) {
         let Some(path) = self.current_receiver_path(scope) else {
             return;
@@ -19,6 +20,14 @@ impl Checker<'_> {
         let Some(projected) = self.intersection_member_receiver(&bounds, name) else {
             return;
         };
+        // kotlinc completes a call that must satisfy a proper expected type apart from the
+        // builder's variables, so a result reached through the smart-cast receiver no longer
+        // carries them.
+        if self.postponed_call_mentions(projected)
+            && expected.is_some_and(|expected| !self.postponed_call_mentions(expected))
+        {
+            return;
+        }
         if let Some(current) = receivers.iter_mut().find(|receiver| receiver.current) {
             current.ty = projected;
         }

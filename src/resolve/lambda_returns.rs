@@ -412,6 +412,23 @@ impl Checker<'_> {
         }
     }
 
+    /// kotlinc forbids `return` as the whole body of an anonymous function that has an expression
+    /// body and no declared return type.
+    fn report_return_in_implicit_expression_body(&mut self, lambda: ExprId, body: ExprId) {
+        if !self.file.anon_fun_expression_bodies.contains(&lambda.0)
+            || self.file.anon_fun_ret.contains_key(&lambda.0)
+        {
+            return;
+        }
+        let result = super::conditional_branch::branch_value_expression(self.file, body);
+        if matches!(self.file.expr(result), Expr::Return { .. }) {
+            self.diags.error(
+                self.span(result),
+                "returns are prohibited in functions with expression body and without explicit return type. Use block body '{...}' or add an explicit return type.".to_string(),
+            );
+        }
+    }
+
     /// Type the lambda body once. Labelled exits are resolved and recorded by that ordinary
     /// checker traversal; the owning block uses those records immediately before checking its
     /// trailing expression.
@@ -423,6 +440,7 @@ impl Checker<'_> {
         coerce_return_to_unit: bool,
         result_constraint: LambdaResultConstraint,
     ) -> (Ty, bool) {
+        self.report_return_in_implicit_expression_body(lambda, body);
         let checked = self.check_lambda_body(scope, body, coerce_return_to_unit, result_constraint);
         let unit_from_exits = self.lambda_returns.take_unit_from_exits(lambda);
         self.record_lambda_result_enhancement(
