@@ -140,6 +140,7 @@ mod method_signatures;
 mod must_inline_lambdas;
 mod non_local_jumps;
 mod non_null_operands;
+mod null_assertions;
 mod nullable_sam;
 mod numeric_comparison;
 mod object_static_initialization;
@@ -241,8 +242,8 @@ use member_schedule::{
 };
 pub use metadata_policy::KotlinMetadata;
 use metadata_policy::{
-    continuation_class_xi, finish_local_synthetic_class, is_continuation_class,
-    is_coroutine_state_machine, synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PUBLIC,
+    continuation_class_xi, finish_local_synthetic_class, synthetic_class_xi, SYNTHETIC_LOCAL,
+    SYNTHETIC_PUBLIC,
 };
 use method_defaults::{
     emit_default_stub, emit_facade_default_stub, static_default_stub_marker, DefaultStubSource,
@@ -1937,7 +1938,7 @@ fn emit_class(
     if ir.specialized_anonymous_classes.contains_key(&class_id) {
         start_regenerated_anonymous_source_map(ir, class_id, &mut cw);
     } else {
-        enclosure::start_inline_body_source_map(ir, c, &mut cw);
+        enclosure::start_inline_body_source_map(ir, env.override_results, c, facade, &mut cw);
     }
     let transformed = env.run.transformed_coroutine(&fq_name);
     let transformed_metadata = env
@@ -1980,7 +1981,8 @@ fn emit_class(
     // (`class Box<T>(var a: T)` → `(TT;)V`); a PARAMETERIZED concrete-type param reads its full generic
     // signature (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`). `None` when no param needs it.
     // Computed once here: the pool seeder interns it and the `<init>` emission attaches it.
-    let is_continuation = is_continuation_class(c);
+    let is_continuation = super::coroutine_classes::is_continuation_class(c);
+    let state_machine = super::coroutine_classes::is_coroutine_state_machine(c);
     let has_continuation_receiver = c.ctor_args.iter().any(|argument| {
         argument.provenance == krusty::ir::IrCtorParameterProvenance::ContinuationDispatchReceiver
     });
@@ -2009,7 +2011,7 @@ fn emit_class(
     );
     // An anonymous object carries kotlinc's minimal record (see the metadata assembly below) and
     // the same debug tables, so it is seeded like any class with a computed record.
-    let byte_parity = !is_coroutine_state_machine(c)
+    let byte_parity = !state_machine
         && opts.emit_class_metadata
         && (c.is_anonymous_object || build_class_metadata(ir, c, opts, env).is_some());
     let pool_seed = || PlainClassPoolSeed {
@@ -2662,8 +2664,7 @@ fn emit_class(
         })
         .flatten();
     // A value class visits generated nullability before its class-level `@JvmInline`.
-    let early_value_nullability =
-        c.is_value && computed.is_some() && !is_coroutine_state_machine(c);
+    let early_value_nullability = c.is_value && computed.is_some() && !state_machine;
     if early_value_nullability {
         attach_synth_nullability(ir, c, env.run, &mut cw);
         // `set_class_annotations` visits the deferred underlying field first, so a generic
@@ -2671,7 +2672,7 @@ fn emit_class(
         cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
     }
     // Debug tables + nullability annotations follow a successfully computed `@Metadata` shape.
-    if computed.is_some() && !is_coroutine_state_machine(c) {
+    if computed.is_some() && !state_machine {
         attach_synth_debug_tables(
             ir,
             env.override_results,
@@ -2741,7 +2742,7 @@ fn emit_class(
     // Intern the `EnclosingMethod` refs, then every retained `InnerClasses` row's outer-class ref
     // and simple name, at kotlinc's post-metadata pool position, in the table's sorted order. An
     // ANONYMOUS class has neither for its own row; its enclosing refs use the window in `finish`.
-    if !is_coroutine_state_machine(c) && !c.is_anonymous_object {
+    if !state_machine && !c.is_anonymous_object {
         cw.intern_post_metadata_attribute_refs();
     }
     env.run.finish_class(cw)
@@ -5144,28 +5145,13 @@ impl<'a> Emitter<'a> {
                 match local_updates::iinc_delta(self.ir, e, var, value, jt) {
                     Some(delta) if !deferred => code.iinc(self.slots[&var].0, delta),
                     _ => {
-                        // An erased `FunctionN.invoke` stored into an `Object` slot stays `Object`.
-                        // The consumer after the store narrows it; casting at the store would put
-                        // the checkcast inside the protected range.
-                        // `FunctionN.invoke` returns `Object` even when the function type says
-                        // `Unit`. A `Unit` consumer pops that object; an `Object` slot stores it.
-                        let keep_erased_invoke = jvm_is_erased_top(jt)
-                            && matches!(
-                                self.ir.expr(value),
-                                IrExpr::InvokeFunction { ret, .. } if *ret != Ty::Nothing
-                            );
-                        if keep_erased_invoke {
-                            self.erased_invocations.insert(value);
-                        }
-                        self.emit_value(value, code);
-                        if keep_erased_invoke {
-                            self.erased_invocations.remove(&value);
-                        }
+                        let (source, keep_erased_invoke) =
+                            self.emit_assignment_operand(value, jt, code);
                         // Coerced to the slot's type as the initializer is: a value of another
                         // class is cast to the declared one, which is what a join of the two
                         // stores reads back. The erased invoke already left `Object`.
                         if !keep_erased_invoke {
-                            self.adapt_physical_operand_for(value, self.value_ty(value), jt, code);
+                            self.adapt_physical_operand_for(value, source, jt, code);
                         }
                         // An inlined `return` stores on the return's line, after the value.
                         self.mark_expression_start(e, code);
@@ -5251,18 +5237,9 @@ impl<'a> Emitter<'a> {
             });
         let declaration_ty = *physical.unwrap_or(operation.ty);
         if let Some(realization) = self.property_realizations.get(operation.expression) {
-            let access = match realization {
-                crate::property_realizations::PropertyRealization::Physical(access) => {
-                    Some(access.clone())
-                }
-                crate::property_realizations::PropertyRealization::Local(target) => self
-                    .local_property_read_access(
-                        *target,
-                        selected.map(|(name, _)| name.as_str()),
-                        operation.interface,
-                        receiver_class,
-                    ),
-            };
+            let selected_accessor = selected.map(|(name, _)| name.as_str());
+            let access =
+                self.realized_property_read_access(&operation, realization, selected_accessor);
             if let Some(mut access) = access {
                 self.retarget_explicit_backing_read(&operation, &mut access);
                 return self.emit_realized_property_read(&operation, access, code);
@@ -5356,14 +5333,7 @@ impl<'a> Emitter<'a> {
         let access = self
             .property_realizations
             .get(operation.expression)
-            .map(|realization| match realization {
-                crate::property_realizations::PropertyRealization::Physical(access) => {
-                    access.clone()
-                }
-                crate::property_realizations::PropertyRealization::Local(target) => self
-                    .local_property_write_access(*target, receiver_class)
-                    .expect("a realized local member property write has exact JVM access"),
-            })
+            .map(|realization| self.realized_property_write_access(&operation, realization))
             .or_else(|| {
                 self.ir
                     .property_external_accessors

@@ -9,9 +9,11 @@ on:
   pull_request:
     types: [opened, edited, reopened]
 
+# Writing pull requests lets the check remove the footer an integration appends to the body. A fork's
+# pull request gets a read-only token whatever this asks for.
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
 
 # A new edit replaces the queued run. Repeated title or body updates were leaving several copies
 # of this check waiting on a runner.
@@ -22,11 +24,14 @@ concurrency:
 jobs:
   attribution:
     # Fork PRs run on ubuntu-latest: self-hosted runners never take fork PR jobs.
-    runs-on: ${{ (github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "helper-1c-1gb"]') }}
+    runs-on: ${{ (github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "utility"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Read the current title and body rather than the event payload: an integration may append a
       # footer at creation that is removed right after, and a re-run must see the edited text.
+      # That footer is removed here instead of failing the check: the body is written back without
+      # it, and the rest of the text is checked as usual. An edit made with this token starts no
+      # new run.
       # Dependabot's text is quoted upstream release notes, which may name an assistant that
       # contributed upstream; it says nothing about who wrote this change.
       - name: title and body
@@ -35,7 +40,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json title,body --jq '.title + "\n\n" + .body' > "$RUNNER_TEMP/pr.txt"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" > "$RUNNER_TEMP/pr.json"
+          jq -r '.body // ""' "$RUNNER_TEMP/pr.json" > "$RUNNER_TEMP/body.txt"
+          scripts/check-attribution.sh --strip-footer "$RUNNER_TEMP/body.txt" > "$RUNNER_TEMP/clean.txt"
+          if ! cmp -s "$RUNNER_TEMP/body.txt" "$RUNNER_TEMP/clean.txt"; then
+            if ! gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$PR" -F "body=@$RUNNER_TEMP/clean.txt" > /dev/null; then
+              echo "::error title=attribution::could not remove the footer from the pull request body; remove it by hand"
+              exit 1
+            fi
+            echo "::notice title=attribution::removed the footer from the pull request body"
+          fi
+          { jq -r .title "$RUNNER_TEMP/pr.json"; echo; cat "$RUNNER_TEMP/clean.txt"; } > "$RUNNER_TEMP/pr.txt"
           scripts/check-attribution.sh --text "$RUNNER_TEMP/pr.txt" "pull request text"
       # A squash merge is authored by whoever opened the pull request, so a squash-merged PR opened
       # by an assistant's app account lands on master under that account. Warn so it is merged with

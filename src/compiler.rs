@@ -11,9 +11,11 @@ mod dependency_inline_templates;
 mod diagnostic_recovery;
 mod emission_session;
 mod local_visibility;
+mod lowering_failure;
 mod metadata_handoff;
 #[cfg(test)]
 mod streaming_tests;
+mod target_emission;
 
 use crate::ast::File;
 pub use crate::backend::{Artifact, Backend, CheckedIrFile};
@@ -84,22 +86,26 @@ pub fn emit_analyzed_with_origins_to<B: Backend>(
 ) {
     let mut state = B::State::default();
     let mut dependency_support = dependency_body_emission::DependencySupportState::default();
-    emit_analyzed_into(
+    let mut target = TargetEmission {
+        backend,
+        state: &mut state,
+        dependency_support: &mut dependency_support,
+    };
+    let checked = emit_analyzed_into(
         analysis,
         stems,
-        TargetEmission {
-            backend,
-            state: &mut state,
-            dependency_support: &mut dependency_support,
-        },
+        &mut target,
         module_name,
         diags,
         PassTwoHooks {
             before_target: &mut |_, _| {},
             checked_bodies: &mut NoObserver,
-            artifacts: sink,
+            artifacts: &mut *sink,
         },
     );
+    if let Some(module) = checked.filter(|_| !diags.has_errors()) {
+        target_emission::emit_program(vec![module], &mut target, diags, sink);
+    }
     if !diags.has_errors() {
         backend.check_module(&state, diags);
     }
@@ -143,16 +149,12 @@ struct PassTwoHooks<'a> {
 fn emit_analyzed_into<B: Backend>(
     analysis: impl Into<StreamingSourceSetAnalysis>,
     stems: &[String],
-    target: TargetEmission<'_, B>,
+    emission: &mut TargetEmission<'_, B>,
     module_name: &str,
     diags: &mut DiagSink,
     hooks: PassTwoHooks<'_>,
-) {
-    let TargetEmission {
-        backend,
-        state,
-        dependency_support,
-    } = target;
+) -> Option<target_emission::CheckedModule> {
+    let backend = emission.backend;
     let PassTwoHooks {
         before_target,
         checked_bodies,
@@ -175,7 +177,7 @@ fn emit_analyzed_into<B: Backend>(
                 backend.compilation_target()
             ),
         );
-        return;
+        return None;
     }
     let Some(streamed) = streamed else {
         crate::trace_compiler!(
@@ -188,7 +190,7 @@ fn emit_analyzed_into<B: Backend>(
                 "internal error: module signatures were not finalized before body lowering",
             );
         }
-        return;
+        return None;
     };
     let mut symbols = symbols;
     let crate::frontend::StreamedPassState {
@@ -197,7 +199,7 @@ fn emit_analyzed_into<B: Backend>(
     } = streamed;
     if diagnostic_recovery || diags.has_errors() {
         recover_pass_two_diagnostics(&reparse_sources, &mut symbols, module, diags);
-        return;
+        return None;
     }
     debug_assert!(
         module.index().declaration_count() >= module.index().len(),
@@ -208,9 +210,10 @@ fn emit_analyzed_into<B: Backend>(
             Span::new(0, 0),
             "internal error: source files, stems, and checked types have different lengths",
         );
-        return;
+        return None;
     }
     let (mut index, mut inline_bodies, mut default_arguments, mut source_map) = module.into_parts();
+    let dispatched_classes = backend.dispatched_dependency_classes();
     let backend_module_facts = match crate::backend::BackendModuleFacts::from_resolved_index(&index)
     {
         Ok(facts) if backend.numbers_slots() => facts.with_classes(&index),
@@ -222,7 +225,7 @@ fn emit_analyzed_into<B: Backend>(
                     "internal error: cannot freeze finalized backend classifier facts: {error:?}"
                 ),
             );
-            return;
+            return None;
         }
     };
     let source_line_counts = reparse_sources
@@ -243,6 +246,7 @@ fn emit_analyzed_into<B: Backend>(
         source_map: &source_map,
         sources: &observed_sources,
     });
+    let mut retained = target_emission::RetainedFiles::default();
     for (raw_source, source) in reparse_sources.iter().enumerate() {
         // Java declaration headers participated in Pass 1 through the platform provider. Java
         // executable bodies belong to javac and are never reparsed or lowered as Kotlin units.
@@ -299,7 +303,10 @@ fn emit_analyzed_into<B: Backend>(
         if let Err(error) = sink.accept_inline_bodies(&index, &inline_bodies) {
             diags.error(
                 Span::new(0, 0),
-                format!("internal error: cannot consume inline FIR: {error:?}"),
+                format!(
+                    "internal error: cannot consume inline FIR: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
             );
             default_arguments.take_for_source(&index, source_id);
             continue;
@@ -313,7 +320,10 @@ fn emit_analyzed_into<B: Backend>(
             crate::trace_compiler!("fir", "default FIR lowering failed: {error:?}");
             diags.error(
                 Span::new(0, 0),
-                format!("internal error: default FIR lowering failed: {error:?}"),
+                format!(
+                    "internal error: default FIR lowering failed: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
             );
             continue;
         }
@@ -414,7 +424,8 @@ fn emit_analyzed_into<B: Backend>(
             diags.error(
                 Span::new(0, 0),
                 format!(
-                    "internal error: cannot consume completed body-local inline FIR: {error:?}"
+                    "internal error: cannot consume completed body-local inline FIR: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
                 ),
             );
             source_failed = true;
@@ -429,7 +440,10 @@ fn emit_analyzed_into<B: Backend>(
             crate::trace_compiler!("fir", "default FIR lowering failed: {error:?}");
             diags.error(
                 Span::new(0, 0),
-                format!("internal error: default FIR lowering failed: {error:?}"),
+                format!(
+                    "internal error: default FIR lowering failed: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
             );
             source_failed = true;
         }
@@ -449,7 +463,10 @@ fn emit_analyzed_into<B: Backend>(
             crate::trace_compiler!("fir", "FIR lowering failed: {error:?}");
             diags.error(
                 Span::new(0, 0),
-                format!("internal error: FIR lowering failed: {error:?}"),
+                format!(
+                    "internal error: FIR lowering failed: {}",
+                    lowering_failure::describe(&error, symbols.semantic_platform())
+                ),
             );
             continue;
         }
@@ -471,6 +488,9 @@ fn emit_analyzed_into<B: Backend>(
                 stems,
                 origins: source_map.origins(),
                 common_ir_coroutines: common_ir_preparation.is_some(),
+                dispatched_classes: &dispatched_classes,
+                appends_char_sequences_by_index: backend.appends_char_sequences_by_index(),
+                collections_through_interfaces: backend.reads_collections_through_interfaces(),
             },
             diags,
         ) else {
@@ -486,71 +506,33 @@ fn emit_analyzed_into<B: Backend>(
                 symbols.semantic_platform(),
                 preparation,
                 symbols.coroutine_runtime(),
+                &dispatched_classes,
             ) {
                 backend.report_common_ir_preparation_error(&error, diags);
                 continue;
             }
         }
-        // A target emitting library bodies builds a range class it does not lay out through the
-        // library's own declaration, which support emission below then selects.
+        // A target emitting library bodies emits each file once the whole program is checked, so
+        // its dependency support closes over every file's uses.
         if backend.emits_dependency_support() {
-            if let Err(error) = crate::backend::range_constructions::realize(
-                &mut file.ir,
-                &file.callables,
-                &|classifier| backend.represents_dependency_classifier(classifier),
-            ) {
-                diags.error(Span::new(0, 0), format!("internal error: {error}"));
-                continue;
-            }
-        }
-        dependency_body_emission::emit_dependencies(
-            &file,
-            &symbols,
-            &backend_module_facts,
-            backend,
-            state,
-            dependency_support,
-            diags,
-        )
-        .into_iter()
-        .for_each(|artifact| {
-            artifacts(
-                ArtifactOrigin::DependencySupport {
-                    requested_by: raw_source,
-                },
-                artifact,
-            )
-        });
-        if diags.has_errors() {
-            continue;
-        }
-        let initializer_requests = if backend.emits_dependency_support() {
-            match crate::backend::initializer_declarations(&file) {
-                Ok(requests) => requests,
-                Err(reason) => {
-                    diags.error(Span::new(0, 0), format!("internal error: {reason}"));
-                    continue;
-                }
-            }
+            retained.retain(raw_source, file);
         } else {
-            Vec::new()
-        };
-        let outputs = backend.lower_ir_file(file, state, diags);
-        if !diags.has_errors() {
-            for declaration in &initializer_requests {
-                if backend.emitted_constructor_initializer(state, declaration) {
-                    dependency_support.record_initializer(declaration);
-                }
-            }
+            target_emission::emit_file(raw_source, file, emission, diags, artifacts);
         }
-        outputs
-            .into_iter()
-            .for_each(|artifact| artifacts(ArtifactOrigin::Source(raw_source), artifact));
     }
     assert!(
         default_arguments.is_empty(),
         "Pass 2 must consume every checked signature default"
     );
+    backend.emits_dependency_support().then(|| {
+        retained.into_module(
+            module_name,
+            stems,
+            symbols,
+            backend_module_facts,
+            source_map,
+        )
+    })
 }
 
 /// Lowers for whatever target the analysis was checked for: common IR is target-neutral.
@@ -607,10 +589,11 @@ pub(crate) fn lower_analyzed_observing(
     let analysis = analysis.into();
     let backend = DiscardCommonIr(analysis.target);
     let mut dependency_support = dependency_body_emission::DependencySupportState::default();
-    emit_analyzed_into(
+    // A backend without dependency support emits each file as it is checked: nothing is retained.
+    let _ = emit_analyzed_into(
         analysis,
         stems,
-        TargetEmission {
+        &mut TargetEmission {
             backend: &backend,
             state: &mut (),
             dependency_support: &mut dependency_support,
@@ -1117,7 +1100,10 @@ fn consume_body_group(
                 if let Err(error) = sink.accept_streamed_body(index, inline_bodies, owner, body) {
                     diags.error(
                         Span::new(0, 0),
-                        format!("internal error: checked FIR lowering failed: {error:?}"),
+                        format!(
+                            "internal error: checked FIR lowering failed: {}",
+                            lowering_failure::describe(&error, symbols.semantic_platform())
+                        ),
                     );
                     return false;
                 }

@@ -43,6 +43,77 @@ fn shared_diagnostic_wording_matches_kotlinc() {
     );
 }
 
+/// An inline function's inlinable parameter may only be invoked or passed on to an inline
+/// parameter of another inline function. Every other read is `USAGE_IS_NOT_INLINABLE`: an
+/// argument of a non-inline function (also through a safe call) or of a `noinline` parameter, the
+/// receiver of a safe call, `!!` or an extension call, and a value stored in a local. A `noinline`
+/// parameter is an ordinary value, and a contract only names the parameter.
+#[test]
+fn an_inline_parameter_is_only_invoked_or_inlined_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "InlineParameterUsage.kt",
+            "fun plain(f: (Int) -> Unit): (Int) -> Int = { it }\n\
+             inline fun inlined(f: (Int) -> Unit): (Int) -> Int = { it }\n\
+             inline fun takesNoinline(noinline f: (Int) -> Unit) = f\n\
+             inline fun ((Int) -> Unit).extension() {}\n\
+             class Box {\n\
+             \x20   inline fun call(f: (Int) -> Unit) { f(0) }\n\
+             \x20   fun plainCall(f: (Int) -> Unit) { f(0) }\n\
+             }\n\
+             inline fun safe(box: Box?, i: Int?, s: (Int) -> Unit) {\n\
+             \x20   box?.call(s)\n\
+             \x20   box?.plainCall(s)\n\
+             \x20   i?.let(s)\n\
+             }\n\
+             inline fun use(s: (Int) -> Unit, noinline n: ((Int) -> Unit)?, noinline k: (Int) -> Unit) {\n\
+             \x20   plain(s)\n\
+             \x20   inlined(s)\n\
+             \x20   takesNoinline(s)\n\
+             \x20   s(1)\n\
+             \x20   s.invoke(2)\n\
+             \x20   s?.invoke(3)\n\
+             \x20   s!!.invoke(4)\n\
+             \x20   s.extension()\n\
+             \x20   val t = s\n\
+             \x20   plain(k)\n\
+             \x20   plain(n ?: {})\n\
+             \x20   run { s(5) }\n\
+             \x20   listOf(1).forEach(s)\n\
+             \x20   if (t != k) println(t)\n\
+             }\n\
+             @OptIn(kotlin.contracts.ExperimentalContracts::class)\n\
+             inline fun once(s: () -> Unit) {\n\
+             \x20   kotlin.contracts.contract { callsInPlace(s, kotlin.contracts.InvocationKind.EXACTLY_ONCE) }\n\
+             \x20   s()\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
+/// The forwarded-lambda program the box suite once ran: `c` passes its inlinable parameter to the
+/// non-inline `callIt`, which needs it as a value, so kotlinc rejects the whole input. The runtime
+/// behaviour is covered by the box suite's `noinline` variant.
+#[test]
+fn an_inline_parameter_forwarded_to_a_non_inline_function_is_rejected_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "InlineLambdaForwarded.kt",
+            "inline fun a(f: () -> Int): Int = f()\n\
+             inline fun b(f: () -> Int): Int = a(f) + 1\n\
+             fun callIt(f: () -> Int): Int = f()\n\
+             inline fun c(f: () -> Int): Int = callIt(f) * 2\n\
+             fun box(): String {\n\
+             \x20   if (b { 5 } != 6) return \"f0\"\n\
+             \x20   if (c { 7 } != 14) return \"f1\"\n\
+             \x20   return \"OK\"\n\
+             }\n",
+        )],
+        &[],
+    );
+}
+
 #[test]
 fn prohibited_script_returns_match_kotlinc() {
     let stdlib = common::stdlib_jar();
@@ -233,6 +304,133 @@ fn a_script_return_is_prohibited_in_its_result_position_like_kotlinc() {
             ("Declared.kts", "println(1)\nreturn\nfun g() {}\n"),
             ("Looped.kts", "println(1)\nwhile (true) return\n"),
         ],
+        &[],
+    );
+}
+
+/// Only a contextual one-parameter function type introduces a lambda's implicit `it`. Without one
+/// (an `Any` expectation, a `() -> R` parameter, a conditional branch, or no expectation at all) a
+/// lambda that omits its parameter list declares no parameter and `it` is unresolved. A lexical
+/// `it` is still captured, and a contextual one-parameter function type still binds it.
+#[test]
+fn implicit_it_needs_a_one_parameter_function_type_like_kotlinc() {
+    let source = "fun take(f: () -> Unit) {}\n\
+                  fun anyExpected() { val f: Any = { it } }\n\
+                  fun noParameters() { take { it } }\n\
+                  fun branch() { val g = if (true) { { it } } else null }\n\
+                  fun bare() { val f = { it.toString() } }\n\
+                  fun captured(it: Int) = { it + 1 }\n\
+                  fun contextual() = listOf(1).map { { it } }";
+    let stdlib = common::stdlib_jar();
+    let result =
+        common::compiler_diagnostics(&[("ImplicitIt.kt", source)], std::slice::from_ref(&stdlib));
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc unexpectedly accepted source"
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    assert_eq!(krusty_errors, errors(&result.reference_stderr));
+    assert_eq!(
+        krusty_errors
+            .iter()
+            .map(|error| (error.line, error.column, error.message.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (2, 36, "unresolved reference 'it'."),
+            (3, 29, "unresolved reference 'it'."),
+            (4, 38, "unresolved reference 'it'."),
+            (5, 24, "unresolved reference 'it'."),
+        ]
+    );
+}
+
+/// A lambda that omits its parameter list fits both `() -> Unit` and `(Int) -> Unit`, whether or
+/// not its body spells `it`, so the call is ambiguous. A written parameter list, even an empty
+/// `{ -> }`, fixes the arity and selects one overload.
+#[test]
+fn lambda_arity_comes_from_its_written_parameter_list_like_kotlinc() {
+    let source = "fun f(g: () -> Unit) = 0\n\
+                  fun f(g: (Int) -> Unit) = 1\n\
+                  fun spelled() = f { it }\n\
+                  fun empty() = f { }\n\
+                  fun arrow(): Int = f { -> }\n\
+                  fun named(): Int = f { x -> }";
+    let sources = [("LambdaArity.kt", source)];
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(&sources, std::slice::from_ref(&stdlib));
+    assert_eq!(
+        result.reference_code, 1,
+        "kotlinc: {}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        result.krusty_code, 1,
+        "krusty: {}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+    let expected = common::reference_error_blocks(&sources, &[]);
+    assert_eq!(
+        common::krusty_error_blocks_with_args(&sources, &[]),
+        expected
+    );
+    assert_eq!(
+        expected,
+        [
+            "LambdaArity.kt:3:17: overload resolution ambiguity between candidates:",
+            "| fun f(g: () -> Unit): Int",
+            "| fun f(g: (Int) -> Unit): Int",
+            "LambdaArity.kt:3:21: unresolved reference 'it'.",
+            "LambdaArity.kt:4:15: overload resolution ambiguity between candidates:",
+            "| fun f(g: () -> Unit): Int",
+            "| fun f(g: (Int) -> Unit): Int",
+        ]
+    );
+}
+
+/// Every contextual one-parameter function type still binds `it`.
+#[test]
+fn implicit_it_with_a_one_parameter_function_type_runs_like_kotlinc() {
+    let source = include_str!("box_regressions/implicitItContext.kt");
+    assert_eq!(common::kotlinc_box_result(source), "OK");
+    common::expect_box_ok_with_stdlib(source, "ImplicitItContext");
+}
+
+/// A lambda whose selected parameter is a bare type parameter is analysed standalone, and its
+/// natural function type infers that parameter, as kotlinc does.
+#[test]
+fn a_lambda_for_a_bare_type_parameter_infers_it_like_kotlinc() {
+    let source = include_str!("box_regressions/lambdaToBareTypeParameter.kt");
+    assert_eq!(common::kotlinc_box_result(source), "OK");
+    common::expect_box_ok_with_stdlib(source, "LambdaToBareTypeParameter");
+}
+
+/// A SAM conversion takes the method's parameters as a function type takes its own, so a lambda's
+/// written parameter type must be a supertype of each. A star-projected SAM method takes the
+/// projection's upper bound (`Any!`, `Any?`), unlike a star-projected `Function1`, whose
+/// parameter is `Nothing` and so takes `{ i: Int -> i }`.
+#[test]
+fn a_sam_lambda_with_written_parameter_types_fits_the_method_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[(
+            "SamLambdaParameters.kt",
+            "fun interface F<R, P> { fun execute(p: P): R }\n\
+             fun bar1(x: java.util.function.Function<*, *>) {}\n\
+             fun bar2(x: Function1<*, *>) {}\n\
+             fun bar3(x: F<*, *>) {}\n\
+             fun bar4(x: java.util.function.Function<Any?, Any?>) {}\n\
+             fun bar5(x: F<Any?, Int>) {}\n\
+             fun test() {\n\
+             \x20   bar1 { i: Int -> i }\n\
+             \x20   bar2 { i: Int -> i }\n\
+             \x20   bar3 { i: Int -> i }\n\
+             \x20   bar4 { i: Int -> i }\n\
+             \x20   bar5 { i: Int -> i }\n\
+             \x20   bar5 { i: Number -> i }\n\
+             \x20   bar5 { i -> i }\n\
+             }\n",
+        )],
         &[],
     );
 }

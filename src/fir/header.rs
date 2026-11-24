@@ -42,6 +42,7 @@ use visibility_suppressions::HeaderVisibilitySuppressionArena;
 
 mod actualization;
 
+pub(crate) use actualization::InheritedDependencyMember;
 pub use actualization::{
     actualization, actualized_declaration_pairs, matched_expect_declarations, Actualization,
     ActualizationTypeBindings, ActualizedDeclarationPair, UnactualizedMembers,
@@ -2620,6 +2621,16 @@ impl StreamedHeaderModule {
     pub fn source_simple_name(&self, stub: &DeclarationStub) -> Option<&str> {
         let path = self.lookup_names.get(stub.lookup_name?)?;
         path.rsplit('.').next()
+    }
+
+    /// The source declaration segment recorded before hoisting replaced a classifier's lookup path.
+    pub fn classifier_source_spelling(&self, declaration: DeclarationId) -> Option<&str> {
+        let HeaderDeclarationKind::Classifier { source_name, .. } =
+            self.syntax.declaration(declaration)?.kind
+        else {
+            return None;
+        };
+        self.lookup_names.get(source_name)
     }
 
     pub fn owned_stubs(&self, owner: DeclarationId) -> impl Iterator<Item = &DeclarationStub> + '_ {

@@ -65,6 +65,14 @@ pub struct IrPropertyFunctionReference {
     pub binding: crate::fir::FirCallableReferenceBinding,
     pub bound_extension_receiver: bool,
     pub mutable: bool,
+    /// The program uses this value as the `KProperty` itself, not only as a function to invoke.
+    /// Common lowering keeps such a reference checked; a target that realizes it as a function
+    /// value (`crate::backend::property_reference_values`) sets this.
+    pub reflective: bool,
+    /// The adapter writing the property of a reflective mutable reference, in a unit that writes
+    /// through one: the reference's
+    /// captures and receiver operands as the read adapter takes them, then the written value.
+    pub writer: Option<FunId>,
     pub substitutions: Vec<IrCheckedSubstitution>,
 }
 
@@ -115,6 +123,7 @@ impl IrPropertyFunctionReference {
         &self,
         bound_receiver: Option<ExprId>,
         adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
+        function_type: Ty,
     ) -> IrCheckedOperation {
         let (dispatch_receiver, extension_receiver) = if self.bound_extension_receiver {
             (None, bound_receiver)
@@ -130,8 +139,18 @@ impl IrPropertyFunctionReference {
             mutable: self.mutable,
             substitutions: self.substitutions.clone(),
             adaptation,
+            function_type: Some(function_type),
         }
     }
+}
+
+/// A value-class context a function reference binds, which the physical target takes as the
+/// class's underlying.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoundContextUnbox {
+    pub value_class: TypeName,
+    /// The declared context type is nullable: `null` stays `null` rather than being unboxed.
+    pub nullable: bool,
 }
 
 /// The selected constructor declaration, retained independently of its invocation adapter.
@@ -181,7 +200,54 @@ pub struct IrCallableReference {
     pub reflection_owner: Option<crate::types::TypeName>,
 }
 
+impl IrCallableReference {
+    /// The `captures` slots holding values bound for the declaration's context parameters. They
+    /// are the leading captures, and two references to the same declaration are equal only when
+    /// these values are equal as well, exactly as for the bound receiver.
+    pub fn bound_context_slots(&self) -> std::ops::Range<usize> {
+        0..self.bound_contexts as usize
+    }
+}
+
 impl IrFile {
+    /// Build the implementation body of a function-like reference after the frontend has selected
+    /// its target and adaptation. Kotlin `Unit` is `void` only at a declared-call boundary; a
+    /// `FunctionN.invoke` result is a value and therefore returns the `kotlin.Unit` singleton after
+    /// discarding the selected callable's result.
+    pub(crate) fn callable_reference_adapter_body(
+        &mut self,
+        value: ExprId,
+        selected_result: crate::types::Ty,
+        reference_result: crate::types::Ty,
+    ) -> ExprId {
+        let mut statements = Vec::with_capacity(2);
+        // A `Unit` function type discards the selected result, but the invocation still runs.
+        // Publish that call as an effect of the returned value: the splice emits only this value,
+        // so a bare `Unit` singleton would drop the call.
+        let result = if reference_result == crate::types::Ty::Unit {
+            let unit = self.add_expr(IrExpr::UnitInstance);
+            self.add_expr(IrExpr::Block {
+                stmts: vec![value],
+                value: Some(unit),
+            })
+        } else if selected_result == reference_result {
+            value
+        } else {
+            self.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: value,
+                type_operand: reference_result,
+            })
+        };
+        statements.push(self.add_expr(IrExpr::Return(Some(result))));
+        let body = self.add_expr(IrExpr::Block {
+            stmts: statements,
+            value: None,
+        });
+        self.callable_reference_adapter_results.insert(body, result);
+        body
+    }
+
     /// The checked invocation template of a callable reference consumed as an inline argument.
     /// Callable-reference lowering published the returned expression directly; this projection
     /// combines it with the reference's ordered captures/bound receiver and adapter signature
@@ -306,6 +372,10 @@ pub struct FuncRef {
     /// (`Z(42)::ext`). The receiver is stored boxed as `Object`; the emitter `checkcast`s it to the box
     /// class then `unbox-impl`s it to the underlying before the mangled `invokestatic ext-<hash>(under)`.
     pub staticbound_recv_unbox: Option<TypeName>,
+    /// Per value bound for a leading context parameter: the value class whose underlying the
+    /// physical target takes. The value is stored boxed in `boundContextArguments`; `invoke`
+    /// unboxes it before the target call.
+    pub bound_context_unbox: Vec<Option<BoundContextUnbox>>,
     /// The carrier's own specialized `invoke`: a common-IR instance method of this class whose body
     /// calls the referenced declaration directly, as kotlinc's `FunctionReferenceLowering` builds
     /// it. The backend then writes that method and the erased `FunctionN.invoke` bridge to it

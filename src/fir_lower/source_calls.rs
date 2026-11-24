@@ -12,8 +12,8 @@ use crate::fir::{
     FirAnnotationDefaultValue, FirConstant, ResolvedTy,
 };
 use crate::ir::{
-    Callee, ExprId, IrCheckedArgument, IrConst, IrDebugLocalProvenance, IrExpr, IrInlineLocalRole,
-    IrTypeOp,
+    Callee, ExprId, IrCheckedArgument, IrConst, IrContextArgumentRole, IrDebugLocalProvenance,
+    IrExpr, IrInlineLocalRole, IrTypeOp,
 };
 use crate::types::{Ty, TypeName};
 
@@ -124,6 +124,7 @@ pub(super) struct ExternalPropertyRequest<'a> {
     pub(super) dispatch_receiver: DispatchOperand,
     pub(super) extension_receiver: Option<ExprId>,
     pub(super) arguments: &'a [IrCheckedArgument],
+    pub(super) substitutions: &'a [crate::fir::FirTypeSubstitution],
     pub(super) write: bool,
 }
 
@@ -259,32 +260,7 @@ impl BodyLowering<'_> {
             return None;
         };
         let lambda = self.expression_with_conversion(*value, *conversion).ok()?;
-        let (implementation, capture_count, arity) = match self.ir.expr(lambda) {
-            IrExpr::Lambda {
-                impl_fn,
-                captures,
-                arity,
-                inline_body: Some(_),
-                ..
-            } => (*impl_fn, captures.len(), *arity),
-            _ => return None,
-        };
-        if arity != 1 {
-            return None;
-        }
-        let continuation_ty = *self
-            .ir
-            .functions
-            .get(implementation as usize)?
-            .params
-            .get(capture_count)?;
-        let continuation = self.ir.add_expr(IrExpr::CurrentContinuation);
-        let invocation = self.ir.add_expr(IrExpr::InvokeFunction {
-            func: lambda,
-            args: vec![continuation],
-            params: vec![continuation_ty],
-            ret: self.ir.functions.get(implementation as usize)?.ret,
-        });
+        let invocation = self.ir.invoke_with_current_continuation(lambda)?;
         // The unintercepted primitive is kotlinc's own inline intrinsic: the block it is given
         // opens a frame named after it.
         let crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn { callee } = operation
@@ -295,6 +271,7 @@ impl BodyLowering<'_> {
             invocation,
             super::inlining::LambdaParameterBinding::Declared {
                 callee: Some(callee),
+                specialization: None,
             },
         )?;
         // The primitive is `@InlineOnly`: where the block's body starts on the call's line,
@@ -320,12 +297,8 @@ impl BodyLowering<'_> {
                 }
             }
         }
-        self.ir.intrinsic_suspension_points.insert(
-            invocation,
-            crate::ir::IrIntrinsicSuspensionPoint {
-                result: result.get(),
-            },
-        );
+        self.ir
+            .mark_unintercepted_suspension(invocation, result.get());
         Some(invocation)
     }
 
@@ -347,6 +320,7 @@ impl BodyLowering<'_> {
                 },
             extension_receiver,
             arguments,
+            substitutions,
             write,
         } = request;
         let source_receiver = dispatch_receiver
@@ -390,6 +364,7 @@ impl BodyLowering<'_> {
                 arguments,
                 parameters: parameter_types,
                 result: result.get(),
+                substitutions: super::checked::lower_substitutions(substitutions),
                 source_receiver,
             }
         } else {
@@ -407,6 +382,7 @@ impl BodyLowering<'_> {
                 arguments,
                 parameters: parameter_types,
                 result: result.get(),
+                substitutions: super::checked::lower_substitutions(substitutions),
                 source_receiver,
             }
         };
@@ -1755,10 +1731,27 @@ impl BodyLowering<'_> {
             .and_then(|owner| self.ir.checked_enum_entry_classes.get(&owner).copied());
         let mut statements = Vec::new();
         // kotlinc passes a call's operands in physical order: the context arguments, then the
-        // extension receiver, then the value arguments. A context argument is an implicit value
-        // (a context parameter or an implicit receiver), so passing the receiver after it still
-        // evaluates every operand once, in source order.
-        let direct = argument_boundaries::follow_parameter_order(arguments, None);
+        // extension receiver, then the value arguments. A receiver-ordered context argument
+        // (`receiver().f(context = value())`) is evaluated after the receiver, as it is written,
+        // so one with an effect to order reorders the call unless the receiver itself has none.
+        let context_count = callable.shape.context_parameter_count;
+        let receiver_precedes_contexts = extension_receiver.is_none_or(|receiver| {
+            self.passes_reordered_operand_in_place(receiver)
+                || arguments.iter().all(|argument| match argument {
+                    IrCheckedArgument::Expression {
+                        parameter,
+                        value,
+                        context,
+                    } => {
+                        *parameter >= context_count
+                            || *context != IrContextArgumentRole::AfterReceiver
+                            || self.passes_reordered_operand_in_place(*value)
+                    }
+                    IrCheckedArgument::Default { .. } | IrCheckedArgument::Vararg { .. } => true,
+                })
+        });
+        let direct = argument_boundaries::follow_parameter_order(arguments, None)
+            && receiver_precedes_contexts;
         let bindings = substitutions
             .iter()
             .filter_map(|substitution| match substitution.parameter {
@@ -1819,7 +1812,7 @@ impl BodyLowering<'_> {
         let mut slots = normalized.slots;
         let mut inline_lambdas = normalized.inline_lambdas;
 
-        let extension_position = callable.shape.context_parameter_count as usize;
+        let extension_position = context_count as usize;
         if let Some(receiver) = extension_receiver {
             if extension_position > slots.len() {
                 return None;
@@ -2132,6 +2125,17 @@ impl BodyLowering<'_> {
         let mut statements = Vec::new();
         let mut inline_lambdas = vec![None; parameter_types.len()];
         let mut defaults = Vec::new();
+        let implicit_context_values = arguments
+            .iter()
+            .filter_map(|argument| match argument {
+                IrCheckedArgument::Expression {
+                    value,
+                    context: IrContextArgumentRole::Implicit,
+                    ..
+                } => Some(*value),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         let slots = materialize_checked_arguments(
             arguments,
             parameter_types.len(),
@@ -2157,7 +2161,9 @@ impl BodyLowering<'_> {
                         let value = if preserve || self.ir.is_delegated_property_operand(value) {
                             value
                         } else if direct
-                            || (passable && self.passes_reordered_operand_in_place(value))
+                            || (passable
+                                && (implicit_context_values.contains(&value)
+                                    || self.passes_reordered_operand_in_place(value)))
                         {
                             self.direct_call_operand(value, parameter_ty)
                         } else {

@@ -64,10 +64,6 @@ pub(super) fn is_lazy(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/Lazy"])
 }
 
-pub(super) fn is_read_write_property(internal: TypeName) -> bool {
-    is_identity(internal, &["kotlin/properties/ReadWriteProperty"])
-}
-
 pub(super) fn is_read_only_property(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/properties/ReadOnlyProperty"])
 }
@@ -164,11 +160,13 @@ pub(super) fn runtime_member_classes() -> [(TypeName, &'static str); 1] {
 /// companions of the built-in types, the bases a source class's layout extends (`Number` and the
 /// throwables), the shared empty set, text, the arrays, the unsigned integers (carried as the value
 /// they wrap), the builder it constructs, the integral ranges and progressions, and the standard
-/// collection implementations. A dependency body's call of such
-/// a member, or read of such an object, is lowered here as a source one is.
+/// collection implementations. A dependency body's call of such a member, or read of such an
+/// object, is lowered here as a source one is.
 pub(in super::super) fn represents_dependency_classifier(internal: TypeName) -> bool {
     super::super::super::intrinsics::is_any(internal)
         || internal == krusty::types::wk::unit()
+        // Every enum constant is laid out with the runtime's `kotlin.Enum` base.
+        || internal == krusty::types::wk::kotlin_enum()
         || super::super::super::intrinsics::builtin_companion(internal).is_some()
         || super::super::super::intrinsics::runtime_object(internal).is_some()
         || internal == krusty::types::wk::string()
@@ -366,12 +364,8 @@ pub(super) fn collection_check_descriptor(
     }
 }
 
-/// The native runtime marker for a checked function role.
-///
-/// Native function values publish one marker per ordinary source arity through 22. Suspend
-/// functions have a distinct semantic role, but this runtime does not yet construct suspend
-/// function values or publish suspend markers. Wider ordinary functions likewise have no marker,
-/// so both remain an explicit decline instead of being mistaken for another function family.
+/// The native runtime marker for a checked function role. Suspend markers use source arity;
+/// function markers use the physical `FunctionN` arity.
 pub(super) fn function_check_descriptor(role: TypeCheckRole) -> Option<&'static str> {
     const ARITIES: [&str; 23] = [
         "kt_type_function0",
@@ -398,9 +392,37 @@ pub(super) fn function_check_descriptor(role: TypeCheckRole) -> Option<&'static 
         "kt_type_function21",
         "kt_type_function22",
     ];
+    const SUSPEND_ARITIES: [&str; 23] = [
+        "kt_type_suspend_function0",
+        "kt_type_suspend_function1",
+        "kt_type_suspend_function2",
+        "kt_type_suspend_function3",
+        "kt_type_suspend_function4",
+        "kt_type_suspend_function5",
+        "kt_type_suspend_function6",
+        "kt_type_suspend_function7",
+        "kt_type_suspend_function8",
+        "kt_type_suspend_function9",
+        "kt_type_suspend_function10",
+        "kt_type_suspend_function11",
+        "kt_type_suspend_function12",
+        "kt_type_suspend_function13",
+        "kt_type_suspend_function14",
+        "kt_type_suspend_function15",
+        "kt_type_suspend_function16",
+        "kt_type_suspend_function17",
+        "kt_type_suspend_function18",
+        "kt_type_suspend_function19",
+        "kt_type_suspend_function20",
+        "kt_type_suspend_function21",
+        "kt_type_suspend_function22",
+    ];
     match role {
         TypeCheckRole::FunctionOfArity(arity) => ARITIES.get(usize::from(arity)).copied(),
-        TypeCheckRole::SuspendFunctionOfArity(_) | TypeCheckRole::MutableCollection(_) => None,
+        TypeCheckRole::SuspendFunctionOfArity(arity) => {
+            SUSPEND_ARITIES.get(usize::from(arity)).copied()
+        }
+        TypeCheckRole::MutableCollection(_) => None,
     }
 }
 
@@ -416,11 +438,18 @@ pub(super) fn function_supertype_descriptors(
 ) -> Vec<&'static str> {
     let mut descriptors = Vec::new();
     for role in roles {
-        let physical_arity = match role {
-            TypeCheckRole::FunctionOfArity(arity) => Some(arity),
-            TypeCheckRole::SuspendFunctionOfArity(arity) => arity.checked_add(1),
+        let (physical_arity, semantic_suspend_arity) = match role {
+            TypeCheckRole::FunctionOfArity(arity) => (Some(arity), None),
+            TypeCheckRole::SuspendFunctionOfArity(arity) => (arity.checked_add(1), Some(arity)),
             TypeCheckRole::MutableCollection(_) => continue,
         };
+        if let Some(arity) = semantic_suspend_arity.and_then(|arity| {
+            function_check_descriptor(TypeCheckRole::SuspendFunctionOfArity(arity))
+        }) {
+            if !descriptors.contains(&arity) {
+                descriptors.push(arity);
+            }
+        }
         if let Some(arity) = physical_arity
             .and_then(|arity| function_check_descriptor(TypeCheckRole::FunctionOfArity(arity)))
         {
@@ -468,7 +497,9 @@ pub(super) fn class_runtime_interface_descriptors(
     descriptors
 }
 
-/// The native runtime marker for a published non-suspend function classifier.
+/// The physical FunctionN marker for a published function classifier. A suspend function's
+/// physical carrier is Function(source arity + 1); semantic membership uses the separate marker
+/// selected by `function_check_descriptor` at the `is`/`as?` boundary.
 pub(super) fn function_type_descriptor(
     classifiers: &dyn BackendClassifierSource,
     internal: TypeName,
@@ -476,10 +507,17 @@ pub(super) fn function_type_descriptor(
     if internal == krusty::types::wk::function_root() {
         return Some("kt_type_function");
     }
-    let ClassifierRole::FunctionOfArity(arity) = classifiers.classifier(internal)?.role? else {
-        return None;
-    };
-    function_check_descriptor(TypeCheckRole::FunctionOfArity(arity))
+    match classifiers.classifier(internal)?.role? {
+        ClassifierRole::FunctionOfArity(arity) => {
+            function_check_descriptor(TypeCheckRole::FunctionOfArity(arity))
+        }
+        ClassifierRole::SuspendFunctionOfArity(arity) => {
+            arity.checked_add(1).and_then(|physical| {
+                function_check_descriptor(TypeCheckRole::FunctionOfArity(physical))
+            })
+        }
+        ClassifierRole::MappedCollection(_) => None,
+    }
 }
 
 /// The runtime marker of one of Kotlin's mapped collection interfaces, or `None` where the runtime
@@ -503,9 +541,7 @@ pub(super) fn mapped_collection_descriptor(collection: MappedCollection) -> Opti
         CollectionKind::Map => Some("kt_type_map_interface"),
         CollectionKind::MapEntry if collection.mutable => Some("kt_type_mutable_map_entry"),
         CollectionKind::MapEntry => Some("kt_type_map_entry"),
-        // The runtime has no distinct ListIterator interface marker. Its provider-published
-        // Iterator supertype is visited separately and supplies the marker this target has.
-        CollectionKind::ListIterator => None,
+        CollectionKind::ListIterator => Some("kt_type_list_iterator_interface"),
     }
 }
 
@@ -513,8 +549,9 @@ pub(super) fn mapped_collection_descriptor(collection: MappedCollection) -> Opti
 /// the marker an `is` check tests stands for another interface too.
 pub(super) fn exact_collection_descriptor(collection: MappedCollection) -> Option<&'static str> {
     match collection.kind {
-        // `kt_type_iterator_interface` is what `MutableIterator` is tested by as well.
-        CollectionKind::Iterator if collection.mutable => None,
+        // `kt_type_iterator_interface` and `kt_type_list_iterator_interface` are what
+        // `MutableIterator` and `MutableListIterator` are tested by as well.
+        CollectionKind::Iterator | CollectionKind::ListIterator if collection.mutable => None,
         _ => mapped_collection_descriptor(collection),
     }
 }
@@ -622,7 +659,8 @@ impl<'a> FileLowering<'a> {
     /// interface written on `ListQueue`. That superclass is someone else's declaration, so its
     /// frozen supertypes name the interface. A superclass this file does declare stays its own
     /// arm; the subclass is not a second one, because an instance test of the superclass already
-    /// matches it.
+    /// matches it. An abstract superclass is no arm, so its concrete subclasses are, through it:
+    /// a dependency support unit's object literal extending a materialized abstract class.
     pub(super) fn implementors_of(&self, internal: TypeName) -> Vec<ClassId> {
         (0..self.ir.classes.len() as ClassId)
             .filter(|&id| {
@@ -632,6 +670,28 @@ impl<'a> FileLowering<'a> {
                     && self.class_stands_behind(class, internal)
             })
             .collect()
+    }
+
+    /// How many concrete classes of this file the instance tests of `arms` answer for: each arm and
+    /// every concrete class below it, since an instance test of a class also matches its
+    /// subclasses.
+    pub(super) fn classes_answered_by(&self, arms: &[ClassId]) -> usize {
+        let answered_by_arm = |mut class: ClassId| loop {
+            if arms.contains(&class) {
+                return true;
+            }
+            let superclass = self.ir.classes[class as usize].superclass;
+            match self.ir.class_id_by_name(superclass) {
+                Some(next) if next != class => class = next,
+                _ => return false,
+            }
+        };
+        (0..self.ir.classes.len() as ClassId)
+            .filter(|&id| {
+                let class = &self.ir.classes[id as usize];
+                !class.is_interface && !class.is_abstract && answered_by_arm(id)
+            })
+            .count()
     }
 
     /// Whether a concrete class of this file can be an instance of `internal`.
@@ -650,8 +710,19 @@ impl<'a> FileLowering<'a> {
             if named == internal {
                 return true;
             }
-            if self.ir.class_id_by_name(named).is_none() {
-                external_supertypes.push(named);
+            match self.ir.class_id_by_name(named) {
+                None => external_supertypes.push(named),
+                // An abstract superclass is no arm of its own, so a concrete class stands behind
+                // what it implements.
+                Some(superclass) => {
+                    let superclass = &self.ir.classes[superclass as usize];
+                    if superclass.is_abstract
+                        && !superclass.is_interface
+                        && self.class_stands_behind(superclass, internal)
+                    {
+                        return true;
+                    }
+                }
             }
         }
         external_supertypes
@@ -860,7 +931,37 @@ mod tests {
         );
         assert_eq!(
             function_check_descriptor(TypeCheckRole::SuspendFunctionOfArity(0)),
-            None
+            Some("kt_type_suspend_function0")
+        );
+        assert_eq!(
+            function_check_descriptor(TypeCheckRole::SuspendFunctionOfArity(22)),
+            Some("kt_type_suspend_function22")
+        );
+        assert_eq!(
+            function_supertype_descriptors([TypeCheckRole::SuspendFunctionOfArity(0)]),
+            vec![
+                "kt_type_suspend_function0",
+                "kt_type_function1",
+                "kt_type_function"
+            ]
+        );
+    }
+
+    #[test]
+    fn suspend_classifier_keeps_physical_function_marker_separate_from_membership() {
+        let suspend_zero = type_name("kotlin/coroutines/SuspendFunction0");
+        let mut facts = Facts::default();
+        facts.0.insert(
+            suspend_zero,
+            interface_fact(&[], Some(ClassifierRole::SuspendFunctionOfArity(0))),
+        );
+        assert_eq!(
+            function_type_descriptor(&facts, suspend_zero),
+            Some("kt_type_function1")
+        );
+        assert_eq!(
+            function_check_descriptor(TypeCheckRole::SuspendFunctionOfArity(0)),
+            Some("kt_type_suspend_function0")
         );
     }
 
@@ -891,7 +992,12 @@ mod tests {
                 TypeCheckRole::FunctionOfArity(1),
                 TypeCheckRole::SuspendFunctionOfArity(1),
             ]),
-            vec!["kt_type_function1", "kt_type_function", "kt_type_function2"]
+            vec![
+                "kt_type_function1",
+                "kt_type_function",
+                "kt_type_suspend_function1",
+                "kt_type_function2"
+            ]
         );
     }
 }

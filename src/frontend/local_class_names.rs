@@ -87,6 +87,27 @@ impl SettledGeneratedClassNames {
     }
 }
 
+/// Checking used the hoisted lookup path. The retained source shows the name that was written.
+pub(super) fn restore_retained_classifier_source_names(mut files: Vec<File>) -> Vec<File> {
+    for file in &mut files {
+        let locals = file.local_class_decls.values().copied().collect::<Vec<_>>();
+        for declaration in locals {
+            let Some(source_name) = file
+                .hoisted_classifier_source_names
+                .get(&declaration)
+                .cloned()
+            else {
+                continue;
+            };
+            let Decl::Class(class) = file.decl_mut(declaration) else {
+                continue;
+            };
+            class.name = source_name;
+        }
+    }
+    files
+}
+
 /// Replay the naming walk of `file` knowing which values resolution converted, from the sequence
 /// positions its first walk started at. Local and anonymous classifiers keep the names the first
 /// walk gave them: their identities are published with the file's declarations before any body is
@@ -463,6 +484,16 @@ impl Inventor<'_> {
         }
         for constructor in constructors {
             self.secondary_constructor(constructor, chain);
+        }
+        // An interface member property initializes nothing, so it takes no place in the
+        // initialization order, but its accessor bodies still declare what they declare.
+        for (index, property) in class.body_props.iter().enumerate() {
+            let initialized = class.init_order.iter().any(
+                |step| matches!(step, ClassInit::PropInit(initialized) if *initialized == index),
+            );
+            if !initialized {
+                self.property(property, chain, initializer.clone());
+            }
         }
         for (index, method) in class.methods.iter().enumerate() {
             let identity = AnonymousEnclosingFunction::Member {

@@ -1,6 +1,7 @@
 //! Index-based arena AST (data-oriented: no `Box`/`Rc` graph, all edges are `u32` ids into
 //! parallel `Vec`s, so a file's whole AST is one bulk-freeable allocation block).
 
+mod language_policy;
 mod retained_defaults;
 mod return_labels;
 mod span_index;
@@ -29,6 +30,7 @@ mod operators;
 mod property_initializers;
 mod property_shape;
 mod type_refs;
+pub use language_policy::FileLanguagePolicy;
 pub use type_refs::{QualifierArgumentLists, QualifierSegmentArguments, TrFlags, TypeRef};
 mod use_site_annotations;
 mod value_class_syntax;
@@ -1563,6 +1565,8 @@ impl<'a> IntoIterator for &'a CallTypeArguments {
 /// One parsed source file: its package, and arenas for every node kind.
 #[derive(Default)]
 pub struct File {
+    /// The language-feature decisions the parser derives for this file.
+    pub language: FileLanguagePolicy,
     pub package: Option<String>,
     pub is_script: bool,
     /// Common-source role supplied by the source-set driver, not parsed from Kotlin syntax.
@@ -1831,6 +1835,10 @@ pub struct File {
     /// checker types it as a `suspend (…) -> …` function type; the lowerer builds a
     /// `SuspendLambda` state machine for it instead of a plain `FunctionN` closure.
     pub suspend_lambdas: crate::fx_hash::HashSet<u32>,
+    /// `ExprId.0` of each name reference written as underscores only and without back-ticks (`_`,
+    /// `__`). Such a name is reserved: kotlinc reports its use once the reference resolves, so the
+    /// checker consults this syntax fact rather than re-reading the spelling.
+    pub unescaped_underscore_names: crate::fx_hash::HashSet<u32>,
     /// The EXPLICIT label a lambda literal was written with (`list.forEach outer@{ … }`), keyed by the
     /// lambda's `ExprId.0`. A labelled lambda REPLACES the implicit label (the callee's name) a
     /// `return@name` inside it targets, so the splicer must register `outer`, not `forEach`. Absent ⇒
@@ -1930,9 +1938,6 @@ pub struct File {
     /// `+ExplicitContextArguments`: named context parameters may be supplied at a call site instead
     /// of being selected from the implicit receiver and lexical scope.
     pub explicit_context_arguments: bool,
-    /// `+CallableReferencesToContextual`: a reference to a declaration with context parameters
-    /// selects those arguments from the reference site and exposes only the value parameters.
-    pub callable_references_to_contextual: bool,
     /// `+ContextSensitiveResolutionUsingExpectedType`: an otherwise-unbound simple classifier or
     /// classifier value may be selected from the expected type's nested classifier hierarchy.
     pub context_sensitive_resolution_using_expected_type: bool,
@@ -2127,6 +2132,7 @@ impl File {
         self.local_delegates = Default::default();
         self.anon_fun_receivers = Default::default();
         self.suspend_lambdas = Default::default();
+        self.unescaped_underscore_names = Default::default();
         self.lambda_labels = Default::default();
         self.lambda_call_labels = Default::default();
         self.destructuring = Default::default();
@@ -2421,11 +2427,6 @@ impl File {
             Stmt::LocalClass(_) | Stmt::LocalTypeAlias(_) => false,
             Stmt::CompoundAssign { target, value, .. } => fe(*target) || fe(*value),
         }
-    }
-
-    pub fn expr_uses_name(&self, e: ExprId, name: &str) -> bool {
-        let names: crate::fx_hash::HashSet<&str> = std::iter::once(name).collect();
-        expr_refs_name(self, e, &names)
     }
 
     pub fn expr_uses_any_name(&self, e: ExprId, names: &crate::fx_hash::HashSet<&str>) -> bool {

@@ -1170,24 +1170,6 @@ fn a_class_that_publishes_no_names_fails_naming_its_descriptor() {
 }
 
 #[test]
-fn a_property_read_through_an_unknown_delegate_fails_naming_it() {
-    run_driver_expecting_failure(
-        "rw_property_get_unknown_delegate",
-        "krusty: a ReadWriteProperty read of a pkg.CustomDelegate, which is neither \
-         Delegates.notNull() nor Delegates.observable()\n",
-    );
-}
-
-#[test]
-fn a_property_write_through_an_unknown_delegate_fails_naming_it() {
-    run_driver_expecting_failure(
-        "rw_property_set_unknown_delegate",
-        "krusty: a ReadWriteProperty write of a pkg.CustomDelegate, which is neither \
-         Delegates.notNull() nor Delegates.observable()\n",
-    );
-}
-
-#[test]
 fn each_primitive_boxes_to_its_kind_and_small_values_share_a_box() {
     run_driver("boxing");
 }
@@ -1203,7 +1185,7 @@ fn a_pairs_members_answer_componentwise() {
 }
 
 #[test]
-fn lazy_observable_and_not_null_delegates_keep_kotlins_order() {
+fn a_lazy_runs_its_initializer_once_on_the_first_read() {
     run_driver("delegates");
 }
 
@@ -1407,6 +1389,11 @@ fn an_indexed_value_hash_code_wraps() {
 #[test]
 fn an_array_list_of_negative_capacity_raises() {
     run_driver_against_kotlin("array_list_negative_capacity");
+}
+
+#[test]
+fn a_read_only_lists_list_iterator_steps_both_ways_and_checks_its_index() {
+    run_driver_against_kotlin("list_list_iterator");
 }
 
 #[test]
@@ -2326,6 +2313,7 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         format!(
             "cargo:rerun-if-changed=runtime/krusty_rt.c\n\
+cargo:rerun-if-changed=runtime/krusty_string_search.c\n\
              cargo:rerun-if-changed=runtime/krusty_unsigned_arrays.c\n\
              cargo:rerun-if-changed=runtime/krusty_collections.c\n\
              cargo:rerun-if-changed=runtime/krusty_maps.c\n\
@@ -2366,7 +2354,7 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
          /// The runtime sources every target's objects were compiled from, in the table's order. Only\n\
          /// the test that checks the table against them reads it.\n\
          #[cfg(test)]\n\
-         pub const SOURCES: &[&str] = &[\"krusty_rt.c\", \"krusty_unsigned_arrays.c\", \"krusty_collections.c\", \"krusty_maps.c\", \"krusty_classes.c\", \"krusty_lang.c\", \"krusty_appendable.c\", \"krusty_fp.c\", \"krusty_gc.c\", \"krusty_threads.c\", \"krusty_start.c\", \"krusty_posix_thread.c\", \"krusty_posix_io.c\", \"krusty_posix_net.c\", \"krusty_posix_process.c\", \"krusty_posix_string.c\"];\n"
+         pub const SOURCES: &[&str] = &[\"krusty_rt.c\", \"krusty_string_search.c\", \"krusty_unsigned_arrays.c\", \"krusty_collections.c\", \"krusty_maps.c\", \"krusty_classes.c\", \"krusty_lang.c\", \"krusty_appendable.c\", \"krusty_fp.c\", \"krusty_gc.c\", \"krusty_threads.c\", \"krusty_start.c\", \"krusty_posix_thread.c\", \"krusty_posix_io.c\", \"krusty_posix_net.c\", \"krusty_posix_process.c\", \"krusty_posix_string.c\"];\n"
     );
 }
 
@@ -2397,6 +2385,7 @@ fn a_failing_runtime_compiler_fails_the_build() {
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         format!(
             "cargo:rerun-if-changed=runtime/krusty_rt.c\n\
+cargo:rerun-if-changed=runtime/krusty_string_search.c\n\
              cargo:rerun-if-changed=runtime/krusty_unsigned_arrays.c\n\
              cargo:rerun-if-changed=runtime/krusty_collections.c\n\
              cargo:rerun-if-changed=runtime/krusty_maps.c\n\
@@ -2468,6 +2457,7 @@ fn a_runtime_compiler_that_emits_another_machines_code_fails_the_build() {
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         format!(
             "cargo:rerun-if-changed=runtime/krusty_rt.c\n\
+cargo:rerun-if-changed=runtime/krusty_string_search.c\n\
              cargo:rerun-if-changed=runtime/krusty_unsigned_arrays.c\n\
              cargo:rerun-if-changed=runtime/krusty_collections.c\n\
              cargo:rerun-if-changed=runtime/krusty_maps.c\n\
@@ -2552,6 +2542,7 @@ fn a_runtime_object_aligned_past_the_targets_page_fails_the_build() {
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         format!(
             "cargo:rerun-if-changed=runtime/krusty_rt.c\n\
+cargo:rerun-if-changed=runtime/krusty_string_search.c\n\
              cargo:rerun-if-changed=runtime/krusty_unsigned_arrays.c\n\
              cargo:rerun-if-changed=runtime/krusty_collections.c\n\
              cargo:rerun-if-changed=runtime/krusty_maps.c\n\

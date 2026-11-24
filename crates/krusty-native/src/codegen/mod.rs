@@ -19,6 +19,10 @@
 
 use krusty::compilation_target::CompilationTarget;
 mod dependency_intrinsics;
+#[cfg(feature = "test-support")]
+mod driver_entries;
+#[cfg(feature = "test-support")]
+pub use driver_entries::DriverEntry;
 mod lower;
 mod reference_identity;
 
@@ -72,6 +76,8 @@ pub struct CraneliftBackend {
     target: NativeTarget,
     entry: krusty::backend::ProgramEntry,
     verify: bool,
+    #[cfg(feature = "test-support")]
+    driver_exports: Option<driver_entries::DriverExports>,
 }
 
 impl CraneliftBackend {
@@ -80,6 +86,8 @@ impl CraneliftBackend {
             target,
             entry: krusty::backend::ProgramEntry::new(Entry::Main),
             verify: false,
+            #[cfg(feature = "test-support")]
+            driver_exports: None,
         }
     }
 
@@ -103,11 +111,24 @@ impl CraneliftBackend {
         self.entry = self.entry.in_module(module.into());
         self
     }
+
+    /// Owned C fixtures select declarations before emission. Only reference arguments and
+    /// reference/Unit results are admitted, from the backend's actual physical frame.
+    #[cfg(feature = "test-support")]
+    pub fn with_driver_entries(mut self, module: &str, entries: Vec<DriverEntry>) -> Self {
+        self.driver_exports = Some(driver_entries::DriverExports {
+            module: module.into(),
+            entries,
+        });
+        self
+    }
 }
 
 /// What the backend accumulates across the files of one module.
 #[derive(Default)]
 pub struct CodegenModule {
+    #[cfg(feature = "test-support")]
+    driver_entries: driver_entries::PublishedEntries,
     /// The file that declared `main`, so a second one is an error rather than two entry points.
     entry_file: Option<String>,
     /// The prebuilt runtime's defined symbols, read by the first file that needs them.
@@ -126,8 +147,11 @@ pub struct CodegenModule {
     dependency_symbols:
         krusty::fx_hash::HashMap<krusty::backend::KlibDependencyCallable, DependencyExport>,
     /// Stable imported-interface member numbers, shared by every file in each source module.
-    dependency_interface_numbers:
-        krusty::fx_hash::HashMap<String, krusty::fx_hash::HashMap<Vec<u8>, u32>>,
+    dependency_interface_numbers: krusty::fx_hash::HashMap<String, lower::ModuleInterfaceNumbers>,
+    /// The dependency interface members, by cross-module identity, that a class implements with a
+    /// library default whose body lowering does not model: a call through one declines with the
+    /// reason, rather than reaching an instance nothing implements it on.
+    unimplementable_interface_members: krusty::fx_hash::HashMap<Vec<u8>, String>,
     /// The exported entry answering each object instance and enum constant another file reads,
     /// linked by the instance (see `krusty::backend::instance_links`).
     instances: krusty::backend::module_links::ModuleLinks<
@@ -205,6 +229,7 @@ impl Backend for CraneliftBackend {
         Some(krusty::backend::CommonIrPreparation {
             counted_loops: COUNTED_LOOPS,
             enums: krusty::backend::enums::Contract::KotlinNative,
+            property_reference_values: false,
         })
     }
 
@@ -276,7 +301,8 @@ impl Backend for CraneliftBackend {
         file.ir.realize_local_class_names_in_packages();
         // The accessors a reference to a DEPENDENCY property is reached through, which the
         // generator's own object is built from; see `native::dependency_references`.
-        let properties = super::dependency_references::realize_properties(&mut file.ir);
+        let properties =
+            super::dependency_references::realize_properties(&mut file.ir, &file.callables);
         if state.runtime_symbols.is_none() {
             match super::linker::runtime_symbols(self.target) {
                 Ok(symbols) => {
@@ -551,7 +577,15 @@ impl Backend for CraneliftBackend {
                 dependency_symbols: &state.dependency_symbols,
                 dependency_instances: &instance_reads,
                 dependency_interface_numbers: &mut dependency_interface_numbers,
+                unimplementable_interface_members: &mut state.unimplementable_interface_members,
                 laid_out: &state.laid_out,
+                #[cfg(feature = "test-support")]
+                driver_entries: self
+                    .driver_exports
+                    .as_ref()
+                    .filter(|exports| exports.module == file.module_name)
+                    .map(|exports| exports.entries.as_slice())
+                    .unwrap_or_default(),
             },
             self.target,
             &object_stem,
@@ -583,11 +617,51 @@ impl Backend for CraneliftBackend {
         for (identity, symbol) in lowered.class_descriptors {
             state.laid_out.publish_descriptor(identity, symbol);
         }
+        for (identity, entries) in lowered.value_boxes {
+            state.laid_out.publish_value_boxes(identity, entries);
+        }
         state.abi.extend(lowered.abi);
+        #[cfg(feature = "test-support")]
+        if file.kind == krusty::backend::CheckedIrUnitKind::Source {
+            if let Some(exports) = self
+                .driver_exports
+                .as_ref()
+                .filter(|exports| exports.module == file.module_name)
+            {
+                // lower_file succeeded, so every selected id present here produced its validated
+                // driver record and trampoline. Do not authenticate a missing id by C spelling.
+                state.driver_entries.extend(
+                    exports
+                        .entries
+                        .iter()
+                        .filter(|entry| {
+                            file.ir
+                                .checked_callable_functions
+                                .contains_key(&entry.callable)
+                        })
+                        .map(|entry| entry.callable),
+                );
+            }
+        }
         for (class, record) in lowered.laid_out {
             state.laid_out.insert(class, record);
         }
         vec![(format!("{object_stem}.o"), lowered.object)]
+    }
+
+    fn emitted_constructor_initializer(
+        &self,
+        state: &mut Self::State,
+        declaration: &krusty::backend::ConstructorInitializerDeclaration,
+    ) -> bool {
+        // The entry takes the allocated object, then the declared frame, and returns nothing.
+        state
+            .laid_out
+            .published_constructor(&declaration.class, &declaration.constructor)
+            .is_some_and(|signature| {
+                signature.params.len() == declaration.parameters.len() + 1
+                    && signature.returns.is_empty()
+            })
     }
 
     fn check_module(&self, state: &Self::State, diags: &mut DiagSink) {
@@ -595,6 +669,20 @@ impl Backend for CraneliftBackend {
         // diagnostic already explains why the module is not emitted.
         if diags.error_count() > 0 {
             return;
+        }
+        #[cfg(feature = "test-support")]
+        if let Some(exports) = &self.driver_exports {
+            for entry in &exports.entries {
+                let count = state.abi.iter().filter(|record| matches!(record,
+                    super::c_abi::Record::Declaration { symbol, .. } if symbol == &entry.symbol
+                )).count();
+                if count != 1 || !state.driver_entries.contains(&entry.callable) {
+                    diags.error(
+                        krusty::diag::Span::new(0, 0),
+                        "a selected driver entry was not emitted exactly once",
+                    );
+                }
+            }
         }
         if let Some(instance) = state.instances.undefined().next() {
             // Boundary conversion for a diagnostic.
@@ -607,6 +695,12 @@ impl Backend for CraneliftBackend {
                 }
                 krusty::backend::instance_links::InstanceEntry::ConstructorDefaults { .. } => {
                     "a constructor's default-argument entry".to_owned()
+                }
+                krusty::backend::instance_links::InstanceEntry::TypeTest(classifier) => {
+                    format!(
+                        "a type test against `{}`",
+                        classifier.render().replace('/', ".")
+                    )
                 }
                 krusty::backend::instance_links::InstanceEntry::EnumMember {
                     classifier,

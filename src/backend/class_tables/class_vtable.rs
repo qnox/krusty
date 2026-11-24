@@ -3,8 +3,8 @@
 
 use crate::fx_hash::HashMap;
 
-use crate::fir::ResolvedFunctionOverrideTarget;
-use crate::ir::{ClassId, FunId, IrClass, IrFile, IrFunction};
+use crate::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
+use crate::ir::{FunId, IrClass, IrFile, IrFunction};
 use crate::types::{Ty, TyKind};
 
 use super::members::{
@@ -12,17 +12,29 @@ use super::members::{
     overridden_properties, overridden_property_slot, property_accessor_key, property_type,
 };
 use super::module_interfaces::ModuleInterfaces;
-use super::{any_vtable, ClassTable, Representation, Slot, SlotKey, Unsupported, FUNCTION_SLOT};
+use super::module_slots::PlanKey;
+use super::{
+    any_vtable, ClassTable, LaidOutSuperclass, Representation, Slot, SlotKey, TabledClass,
+    Unsupported, FUNCTION_SLOT,
+};
 
-/// Build the table of class `id`, whose superclass in this file (already tabled) is `parent`.
+/// Build the table of `tabled`, whose superclass in this file (already tabled) is its `parent`.
+///
+/// A local class extending a superclass another file laid out starts from that file's table, each
+/// number [`Slot::Inherited`], and replaces the members it overrides by their identities there
+/// ([`LaidOutSuperclass::members`]).
 pub(super) fn class_table(
     representation: &dyn Representation,
     ir: &IrFile,
-    id: ClassId,
-    superclass: Option<ClassId>,
-    parent: Option<&ClassTable>,
+    tabled: TabledClass<'_>,
     numbered: &ModuleInterfaces,
 ) -> Result<ClassTable, Unsupported> {
+    let TabledClass {
+        id,
+        superclass,
+        parent,
+        laid_out,
+    } = tabled;
     let class = &ir.classes[id as usize];
     // Bridges against an INTERFACE's member numbers, which are placed program-wide rather than in
     // this table. Filled below wherever an implementation and the interface's declaration disagree
@@ -35,9 +47,10 @@ pub(super) fn class_table(
     // A root class starts from `kotlin.Any`'s table. What fills those three slots for a base the
     // target's runtime owns — a `Throwable` renders as `qualified.Name: message` rather than by
     // identity — is the target's to say; here they are `kotlin.Any`'s members, by role.
-    let (mut vtable, mut slots) = match parent {
-        Some(parent) => (parent.vtable.clone(), parent.slots.clone()),
-        None => any_vtable(),
+    let (mut vtable, mut slots) = match (parent, laid_out) {
+        (Some(parent), _) => (parent.vtable.clone(), parent.slots.clone()),
+        (None, Some((_, superclass))) => inherited_vtable(superclass),
+        (None, None) => any_vtable(),
     };
     // The FUNCTION SLOT follows `kotlin.Any`'s three in every table, whether or not the class is a
     // function. A class that becomes one lower in the hierarchy — `class B : A(), () -> String` —
@@ -111,7 +124,7 @@ pub(super) fn class_table(
         .iter()
         .filter_map(|&function| property_accessor_key(ir, id, function).map(|key| (function, key)))
         .collect();
-    let overridden_functions = overridden_functions(ir, class, numbered, false)?;
+    let overridden_functions = overridden_functions(ir, class, numbered, laid_out.is_some())?;
     let overridden_properties = overridden_properties(ir, id, class)?;
 
     for &fid in &class.methods {
@@ -171,6 +184,9 @@ pub(super) fn class_table(
         // The edge by which this method overrides a function classifier's `invoke`, if it does.
         // Read once, because both the fixed slot below and the stand-in that covers a representation
         // mismatch are the same question about the same exact edge.
+        // Before the search below consumes them.
+        let edges = override_edges.clone();
+        let has_override_edge = edges.clone().next().is_some();
         let invoke_edge = override_edges.find(|edge| {
             edge.overridden_semantic_role
                 == Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
@@ -234,6 +250,11 @@ pub(super) fn class_table(
                 bridged.push((slot, overridden));
             }
         }
+        if class_replaces.is_none() {
+            if let Some((_, superclass)) = laid_out {
+                class_replaces = laid_out_override(representation, edges, superclass)?;
+            }
+        }
         let replaces = match replaces {
             Some(slot) => Some(slot),
             None => match class_replaces {
@@ -274,6 +295,21 @@ pub(super) fn class_table(
                 },
             },
         };
+        // A value class's own member that overrides nothing is called directly: no table slot
+        // carries it, so every unit that emits some of the class's members lays its table out as
+        // the others do. A recorded override edge is an override too, a dependency interface's
+        // member (`Collection.iterator` under `UIntArray`) among them.
+        if class.is_value
+            && !has_override_edge
+            && replaces.is_none()
+            && interface_keys.is_empty()
+            && bridged.is_empty()
+            && accessor_bridged.is_empty()
+            && function_bridge.is_none()
+            && matches!(own_key, SlotKey::Function(_))
+        {
+            continue;
+        }
         let slot = match replaces {
             Some(slot) => {
                 vtable[slot as usize] = entry;
@@ -428,7 +464,7 @@ pub(super) fn class_table(
 
     Ok(ClassTable {
         superclass,
-        laid_out_superclass: None,
+        laid_out_superclass: laid_out.map(|(name, _)| name),
         first_field: parent.map_or(0, |parent| {
             let parent_class = superclass.expect("a parent table is a superclass's");
             parent.first_field + ir.classes[parent_class as usize].fields.len() as u32
@@ -438,6 +474,60 @@ pub(super) fn class_table(
         interface_bridges,
         direct_methods: Default::default(),
     })
+}
+
+/// The table of a superclass another file laid out, as a class extending it begins: every number
+/// that file's, and the members it declares there reachable by identity only.
+fn inherited_vtable(superclass: &LaidOutSuperclass) -> (Vec<Slot>, HashMap<SlotKey, u32>) {
+    let (_, mut slots) = any_vtable();
+    for (member, &slot) in &superclass.members {
+        let key = match *member {
+            PlanKey::Getter(property) => {
+                SlotKey::Getter(ResolvedPropertyOverrideTarget::Module(property))
+            }
+            PlanKey::Setter(property) => {
+                SlotKey::Setter(ResolvedPropertyOverrideTarget::Module(property))
+            }
+            // A function of another file has no id here; an override finds it by its identity.
+            _ => continue,
+        };
+        slots.insert(key, slot);
+    }
+    let vtable = (0..superclass.slots)
+        .map(|slot| Slot::Inherited { slot })
+        .collect();
+    (vtable, slots)
+}
+
+/// The slot of the member of the superclass another file laid out that a method overrides through
+/// one of `edges`, which must carry it alike: a bridge would need that member's own declaration.
+fn laid_out_override<'e>(
+    representation: &dyn Representation,
+    mut edges: impl Iterator<Item = &'e crate::ir::IrFunctionOverride>,
+    superclass: &LaidOutSuperclass,
+) -> Result<Option<u32>, Unsupported> {
+    let Some((edge, slot)) = edges.find_map(|edge| {
+        (!edge.overridden_is_interface)
+            .then(|| superclass.members.get(&PlanKey::function(edge.overridden)))
+            .flatten()
+            .map(|&slot| (edge, slot))
+    }) else {
+        return Ok(None);
+    };
+    let alike = edge.declared_parameters.len() == edge.implementation_parameters.len()
+        && edge
+            .declared_parameters
+            .iter()
+            .zip(&edge.implementation_parameters)
+            .all(|(&declared, &implemented)| representation.same(declared, implemented))
+        && representation.same(edge.declared_result, edge.implementation_result);
+    if !alike {
+        return Err(format!(
+            "an override carried differently from the member of another file it overrides (`{}`)",
+            edge.name
+        ));
+    }
+    Ok(Some(slot))
 }
 
 /// Point an interface's member numbers at implementations this class INHERITS rather than declares.

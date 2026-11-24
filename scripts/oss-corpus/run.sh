@@ -18,6 +18,7 @@
 
 # Setup fails fast: a failed fetch, checkout, patch or version-pin rewrite stops the run before
 # anything is measured. Only the two Gradle builds' exit statuses are captured rather than fatal.
+# A failed reference build fails the run once everything has been compared.
 set -euo pipefail
 
 name=$1
@@ -44,6 +45,10 @@ if [ "$lane" = lsp ]; then
   echo "$name is in the language-server metric set; this corpus does not build it" >&2
   exit 2
 fi
+# A Bazel project (one with a `bazel/<name>` target set) builds through `bazel.sh`.
+if [ -d "${CORPUS_BAZEL:-$here/bazel}/$name" ]; then
+  exec "$here/bazel.sh" "$name" "$work" "$krusty"
+fi
 IFS=$'\t' read -r _ _ _ gradle_root jdk _ android_variant <<<"$row"
 checkout=$work/src/$name
 logs=$work/logs
@@ -56,6 +61,15 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8
 if [ "${android_variant:--}" != - ]; then
   export CORPUS_ANDROID_VARIANT=$android_variant
 fi
+# A project too large to build whole lists its target set in gradle/<name>.targets: the Gradle tasks
+# whose compiles, with everything they depend on, are compared, and the test tasks that are run.
+targets=${CORPUS_TARGETS_DIR:-$here/gradle}/$name.targets
+if [ -f "$targets" ]; then
+  export CORPUS_TARGETS=$targets
+else
+  unset CORPUS_TARGETS
+fi
+. "$here/toolchains.sh"
 
 # One build of the Gradle root. The init scripts read every project of the build, so the
 # configuration cache and isolated projects are off. The Gradle exit status is left in `status`.
@@ -68,15 +82,17 @@ build() {
   local root=$checkout/$gradle_root
   local manifest=$logs/$name.$mode.compilations.tsv
   local start code=0 offline=()
+  local deps=$logs/$name.$mode.deps.tsv
   [ "$mode" = warmup ] || offline=(--offline)
-  rm -f "$manifest"
+  rm -f "$manifest" "$deps"
   start=$(date +%s)
   (
     cd "$root"
     CORPUS_COMPILATIONS=$manifest CORPUS_TASK_TIMES=$logs/$name.$mode.tasks.tsv \
+      CORPUS_TASK_DEPS=$deps \
       python3 "$here/measure.py" "$logs/$name.$mode.metrics.json" \
       timeout 5400 ./gradlew --no-daemon -I "$here/corpus.init.gradle" \
-      "${offline[@]}" "$@" corpusCompile --continue --rerun-tasks --no-configure-on-demand \
+      "${toolchains[@]}" "${offline[@]}" "$@" corpusCompile --continue --rerun-tasks --no-configure-on-demand \
       --no-configuration-cache -Dorg.gradle.isolated-projects=false
   ) >"$logs/$name.$mode.log" 2>&1 || code=$?
   echo "$name $mode exit $code seconds $(($(date +%s) - start))" >>"$logs/STATUS"
@@ -102,7 +118,7 @@ run_tests() {
     cd "$root"
     CORPUS_TESTS=$manifest python3 "$here/measure.py" "$logs/$name.$mode.tests.metrics.json" \
       timeout "${CORPUS_TEST_TIMEOUT:-3600}" ./gradlew --no-daemon -I "$here/corpus.init.gradle" \
-      "$@" corpusTest --continue --no-configure-on-demand --no-configuration-cache \
+      "${toolchains[@]}" "$@" corpusTest --continue --no-configure-on-demand --no-configuration-cache \
       -Dorg.gradle.isolated-projects=false
   ) >"$logs/$name.$mode.tests.log" 2>&1 || code=$?
   echo "$name $mode tests exit $code seconds $(($(date +%s) - start))" >>"$logs/STATUS"
@@ -152,8 +168,30 @@ release() {
 # The warm-up build downloads everything the build needs (dependencies, Gradle and compiler plugins,
 # toolchains) and is not compared; its cost goes unrecorded and its outputs are dropped. The two
 # measured builds then run offline, so neither pays for the network and both start from the same
-# caches.
+# caches. A warm-up that could not download something (a repository or the plugin portal refused
+# it) stops the run: the offline builds cannot fetch it later, and a retry would only extend a block
+# the repository placed on this host. Any other warm-up failure is the build's own, which the
+# reference build then reports. Gradle reports a refused download as "not found" whichever
+# repository refused it, so before stopping, the repositories are probed and their HTTP status is
+# recorded in <name>.warmup.http.tsv and on stderr: a dead host (000, 5xx) and a throttled one (429)
+# then read differently from a missing artifact.
+unreachable='Could not (resolve|GET|HEAD)|could not resolve plugin artifact|Connection reset|timed out|Name or service not known|No such host'
+# Prints "<status> <url>" for each repository the warm-up log names, and for the default
+# ones (CORPUS_PROBE_URLS overrides those, for hosts a test must not reach).
+probe_repositories() {
+  local url code
+  local defaults=${CORPUS_PROBE_URLS-https://repo.maven.apache.org/maven2/ https://maven.google.com/ https://plugins.gradle.org/m2/}
+  for url in $(grep -oE 'maven\(https?://[^)]+\)' "$logs/$name.warmup.log" | sed -E 's/^maven\(|\)$//g' | sort -u) $defaults; do
+    code=$(curl -s -o /dev/null -I -w '%{http_code}' --max-time 20 "$url") || true
+    echo "$code $url" | tee -a "$logs/$name.warmup.http.tsv" >&2
+  done
+}
 build warmup
+if [ "$status" -ne 0 ] && grep -qE "$unreachable" "$logs/$name.warmup.log"; then
+  probe_repositories
+  echo "$name: the warm-up could not download what the build needs; see $name.warmup.log" >&2
+  exit 1
+fi
 snapshot warmup
 rm -rf "$work/out/$name/warmup" "$logs/$name.warmup.metrics.json" "$logs/$name.warmup.tasks.tsv"
 CORPUS_PLUGIN_SURVEY=$logs/$name.plugins.tsv build kotlinc
@@ -179,6 +217,7 @@ if [ -n "${CORPUS_PERF:-}" ]; then
 fi
 KRUSTY_PLUGIN_REPOSITORY=$plugin_repository KRUSTY_PLUGIN_VERSION=$plugin_version \
   build krusty -I "$here/krusty.init.gradle" -Pkrusty.binary="$krusty"
+krusty_build=$status
 if [ -n "${CORPUS_PERF:-}" ]; then
   kill -INT "$perf_pid"
   wait "$perf_pid" || true
@@ -211,3 +250,15 @@ verified=$status
 snapshot verify
 rm -rf "$work/out/$name/verify" "$logs/$name.verify.metrics.json" "$logs/$name.verify.tasks.tsv"
 python3 "$here/compare.py" "$work" "$name" "$reference" "$kotlinc_tests" "$krusty_tests" "$verified"
+# A failed reference build is still compared as far as it got, then fails the run: every project is
+# meant to build with kotlinc, and a project that does not measures only what its build reached.
+if [ "$reference" -ne 0 ]; then
+  echo "$name: the reference kotlinc build failed (exit $reference); see $name.kotlinc.log" >&2
+  exit 1
+fi
+# A project krusty cannot build is as much a failure as one kotlinc cannot: its job is red, and the
+# comparison above has already recorded what krusty reached, so the report still carries it.
+if [ "$krusty_build" -ne 0 ]; then
+  echo "$name: the krusty build failed (exit $krusty_build); see $name.krusty.log" >&2
+  exit 1
+fi

@@ -360,7 +360,7 @@ fn stable_bits(ir: &mut IrFile, bits: i32) -> ExprId {
 }
 
 /// Read `class`'s `$stable`.
-fn read_stable(ir: &mut IrFile, class: TypeName) -> ExprId {
+pub(super) fn read_stable(ir: &mut IrFile, class: TypeName) -> ExprId {
     let value = ir.external_static_field_name(class, "$stable", "I");
     ir.mark_positionless(value);
     value
@@ -391,6 +391,58 @@ struct Inference<'a> {
     substitutions: Vec<(TyParamName, Ty)>,
     /// The type parameters whose argument is being inferred.
     resolving: Vec<TyParamName>,
+}
+
+/// How a composable function compares a parameter of a type: by value when kotlinc infers the type
+/// stable, by identity when it infers it unstable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ParameterStability {
+    Stable,
+    Unstable,
+    /// Known only when the function runs, or not known at all: compared like a stable one.
+    Undecided,
+}
+
+/// kotlinc's `stabilityOf` for the type of a composable function's parameter, or why it is not
+/// decided before the function runs.
+pub(super) fn parameter_stability(
+    ir: &IrFile,
+    runtime: &dyn PluginRuntime,
+    ty: Ty,
+) -> Result<ParameterStability, &'static str> {
+    let mut inference = Inference {
+        ir,
+        runtime,
+        analyzed: Default::default(),
+        substitutions: Vec::new(),
+        resolving: Vec::new(),
+    };
+    let stability = inference.of_type(ty, &mut Vec::new())?.normalize();
+    if stability.known_stable() {
+        Ok(ParameterStability::Stable)
+    } else if stability == Stability::UNSTABLE {
+        Ok(ParameterStability::Unstable)
+    } else {
+        Ok(ParameterStability::Undecided)
+    }
+}
+
+/// The classes whose `$stable` a call reads to tell its callee how stable an argument of type `ty`
+/// is: none when kotlinc decides the stability when it compiles the call.
+pub(super) fn parameter_stability_reads(
+    ir: &IrFile,
+    runtime: &dyn PluginRuntime,
+    ty: Ty,
+) -> Result<Vec<TypeName>, &'static str> {
+    let mut inference = Inference {
+        ir,
+        runtime,
+        analyzed: Default::default(),
+        substitutions: Vec::new(),
+        resolving: Vec::new(),
+    };
+    let stability = inference.of_type(ty, &mut Vec::new())?.normalize();
+    Ok(stability.runtime_reads(&[]).unwrap_or_default())
 }
 
 /// The type parameters `class` declares, as its declaration names them.
@@ -468,9 +520,14 @@ impl Inference<'_> {
         {
             return Ok(true);
         }
-        Ok(self
-            .annotations(annotation)?
-            .contains(&type_name(STABLE_MARKER)))
+        // An annotation class the compiling module cannot see is no marker, as in kotlinc, which
+        // reads its annotations from a stub.
+        Ok(self.runtime.classifier(annotation).is_some_and(|declared| {
+            declared
+                .annotations
+                .iter()
+                .any(|applied| applied.annotation == type_name(STABLE_MARKER))
+        }))
     }
 
     /// Whether `name` or one of its supertypes other than `Any` applies a stable marker (kotlinc's
@@ -837,9 +894,10 @@ impl Inference<'_> {
 fn mentions_type_parameter(ty: Ty) -> bool {
     match ty.kind() {
         TyKind::TyParam(..) => true,
-        TyKind::Obj(_, arguments) | TyKind::Intersection(arguments) => arguments
+        TyKind::Obj(_, arguments) => arguments
             .iter()
             .any(|&argument| mentions_type_parameter(argument)),
+        TyKind::Intersection(parts) => parts.iter().any(|&part| mentions_type_parameter(part)),
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
         | TyKind::MutabilityFlexible(inner)

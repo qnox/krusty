@@ -79,7 +79,9 @@ use krusty::ir::{
 use krusty::types::{Ty, TypeName};
 
 use super::super::classes::{self as model, AnyMember, ClassModel, Slot};
-use super::super::laid_out_classes::{LaidOutClass, LaidOutClasses, ObjectFunction};
+use super::super::laid_out_classes::{
+    LaidOutClass, LaidOutClasses, ObjectFunction, ValueBoxEntries,
+};
 use super::super::symbols::Symbols;
 use super::{Entry, BOX_RESULT_FRAME, PROGRAM_ENTRY};
 use crate::NativeTarget;
@@ -156,6 +158,9 @@ pub struct Lowered {
     pub laid_out: Vec<(TypeName, LaidOutClass)>,
     /// Actual externally linkable descriptor definitions, signed by their producer class records.
     pub class_descriptors: Vec<(krusty::backend::KlibClassIdentity, String)>,
+    /// The box and unbox entry points this object defines for its exported value classes, by
+    /// the class's exact KLIB identity: how another source module boxes one.
+    pub value_boxes: Vec<(krusty::backend::KlibClassIdentity, ValueBoxEntries)>,
 }
 
 /// Build the ISA for `target`. Non-PIC, because the output is a static executable at a fixed
@@ -196,6 +201,8 @@ fn isa_for(
 /// One struct rather than a growing parameter list, and BORROWED rather than owned, because the
 /// pass that made them owns them for the whole lowering.
 pub struct FileInput<'a> {
+    #[cfg(feature = "test-support")]
+    pub driver_entries: &'a [super::DriverEntry],
     pub ir: &'a IrFile,
     /// Provider-normalized facts for classifiers whose representation this file needs.
     pub classifiers: &'a dyn krusty::backend::BackendClassifierSource,
@@ -228,8 +235,12 @@ pub struct FileInput<'a> {
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     pub dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
-    /// Stable dependency-member numbers shared by every file in the source module.
-    pub dependency_interface_numbers: &'a mut HashMap<Vec<u8>, u32>,
+    /// The interface member numbers beyond the module's own, shared by every file in the source
+    /// module: installed interfaces' members and the dependency members its files call.
+    pub dependency_interface_numbers: &'a mut ModuleInterfaceNumbers,
+    /// Dependency interface members a library default implements without a lowered body, with
+    /// the reason; shared by the whole emission session.
+    pub unimplementable_interface_members: &'a mut HashMap<Vec<u8>, String>,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::dependency_references`].
     pub dependency_properties:
@@ -254,6 +265,8 @@ pub fn lower_file(
     verify: bool,
 ) -> Result<Lowered, Unsupported> {
     let FileInput {
+        #[cfg(feature = "test-support")]
+        driver_entries,
         ir,
         classifiers,
         callables,
@@ -269,12 +282,19 @@ pub fn lower_file(
         dependency_symbols,
         dependency_instances,
         dependency_interface_numbers,
+        unimplementable_interface_members,
         value_classes,
         slot_plan,
         module_facts,
         laid_out,
     } = input;
-    let class_model = model::build(ir, value_classes, slot_plan, laid_out)?;
+    let class_model = model::build(
+        ir,
+        value_classes,
+        slot_plan,
+        &mut dependency_interface_numbers.extended,
+        laid_out,
+    )?;
     let extended = extended_elsewhere(
         ir,
         unit_kind,
@@ -338,6 +358,7 @@ pub fn lower_file(
         extended,
         exported,
         class_descriptors: Vec::new(),
+        value_boxes: Vec::new(),
         extension_entries: HashMap::default(),
         extension_tables: HashMap::default(),
         published_dependency_bridges: HashMap::default(),
@@ -370,13 +391,16 @@ pub fn lower_file(
         unwalkable_collections: krusty::fx_hash::HashSet::default(),
         walkable_classes: krusty::fx_hash::HashMap::default(),
         declares_its_own_comparable: declares_its_own_comparable(ir),
-        implemented_dependencies: implemented_dependencies(ir),
+        implemented_dependencies: implemented_dependencies(ir, |owner| {
+            laid_out.get(owner).is_some()
+        }),
         module_name,
         unit_kind,
         dependency_signatures,
         dependency_symbols,
         dependency_interface_calls: Vec::new(),
         dependency_interface_numbers,
+        unimplementable_interface_members,
         dependency_instances,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
@@ -429,12 +453,21 @@ pub fn lower_file(
         }
         krusty::backend::CheckedIrUnitKind::DependencySupport => Vec::new(),
     };
+    #[cfg(feature = "test-support")]
+    let abi = if unit_kind == krusty::backend::CheckedIrUnitKind::Source {
+        let mut abi = abi;
+        abi.extend(lowering.driver_records(driver_entries, abi_symbols)?);
+        abi
+    } else {
+        abi
+    };
     lowering.define_c_exports(file_init, &abi)?;
     lowering.define_dependency_exports(file_init, dependency_exports)?;
     lowering.define_interface_identities()?;
 
     let records = lowering.laid_out_records()?;
     let class_descriptors = std::mem::take(&mut lowering.class_descriptors);
+    let value_boxes = std::mem::take(&mut lowering.value_boxes);
     let comdat_objects = std::mem::take(&mut lowering.comdat_objects);
     let mut product = module.finish();
     for data in comdat_objects {
@@ -458,6 +491,7 @@ pub fn lower_file(
         abi,
         laid_out: records,
         class_descriptors,
+        value_boxes,
     })
 }
 
@@ -479,6 +513,14 @@ fn extended_elsewhere(
     for (id, class) in ir.classes.iter().enumerate() {
         if class.is_interface || ir.local_class_name_provenance.contains_key(&(id as u32)) {
             continue;
+        }
+        // A local class of a later file, which no header names, may extend any class open to
+        // extension, so every such class is laid out for one.
+        if (class.is_open || class.is_abstract)
+            && !class.is_local_class
+            && !class.is_anonymous_object
+        {
+            extended.insert(id as krusty::ir::ClassId);
         }
         if support && !classes.is_dependency_class(class.fq_name) {
             continue;
@@ -529,6 +571,7 @@ struct FileLowering<'a> {
     /// The classes earlier files of the source module laid out.
     laid_out: &'a LaidOutClasses,
     class_descriptors: Vec<(krusty::backend::KlibClassIdentity, String)>,
+    value_boxes: Vec<(krusty::backend::KlibClassIdentity, ValueBoxEntries)>,
     /// The classes of this file another file of the module extends.
     extended: krusty::fx_hash::HashSet<krusty::ir::ClassId>,
     /// The classes of `extended` and their superclasses here, whose table entries another file
@@ -633,10 +676,12 @@ struct FileLowering<'a> {
     /// Dependency interface members this file calls, numbered after the module's own interfaces.
     /// The identity bytes are what a dependent implementation records itself under.
     dependency_interface_calls: Vec<(u32, Vec<u8>)>,
-    /// Module-wide numbers for imported interface identities. The local vector above is only
-    /// this file's emitted identity records; the shared map prevents a second file from reusing
-    /// one stub number for another dependency member.
-    dependency_interface_numbers: &'a mut krusty::fx_hash::HashMap<Vec<u8>, u32>,
+    /// Module-wide numbers for imported interface identities and installed interfaces' members.
+    /// The local vector above is only this file's emitted identity records; the shared numbering
+    /// prevents a second file from reusing one stub number for another member.
+    dependency_interface_numbers: &'a mut ModuleInterfaceNumbers,
+    /// See [`FileInput::unimplementable_interface_members`].
+    unimplementable_interface_members: &'a mut krusty::fx_hash::HashMap<Vec<u8>, String>,
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
@@ -646,7 +691,7 @@ impl<'a> FileLowering<'a> {
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
         let mut signature = Signature::new(CallConv::SystemV);
         for param in params {
-            match self.carrier(*param).abi_param() {
+            match self.carrier(parameter_slot(*param)).abi_param() {
                 Some(abi) => signature.params.push(abi),
                 None => return Err("a `Unit` parameter".into()),
             }
@@ -664,16 +709,10 @@ impl<'a> FileLowering<'a> {
         if let Some(owner) = function.dispatch_receiver {
             // A value class's member takes the VALUE as `this`; its box reaches it through a
             // bridge. Every other member takes the object, as a reference.
-            params.push(match self.value_receiver(owner) {
-                Some(value) => value,
-                None if self.ir.class_id_by_name(owner).is_some() => any(),
-                None => {
-                    return Err(declined!(
-                        "a method of `{}`, which is not declared in this file",
-                        owner.render()
-                    ))
-                }
-            });
+            // An owner this file does not declare is a library classifier whose members the
+            // dependency unit lowers as functions of the instance (an interface's default body),
+            // so its receiver is the instance reference too.
+            params.push(self.value_receiver(owner).unwrap_or_else(any));
         }
         params.extend(super::super::captures::carried_parameters(self.ir, id));
         self.signature_of(&params, function.ret)
@@ -993,8 +1032,7 @@ impl<'a> FileLowering<'a> {
                 lowering.scope = krusty::ir::IrEnclosure::Function(index as krusty::ir::FunId);
                 lowering.record_semantic_slots(&semantic_slots);
                 for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
-                    let variable = lowering.declare_value(slot as u32, *ty)?;
-                    lowering.builder.def_var(variable, *value);
+                    lowering.bind_parameter(slot as u32, *value, *ty)?;
                 }
                 lowering.frame_objects = lowering.frame_constructions(body);
                 lowering.statement(body)
@@ -1134,6 +1172,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 "common-IR value slot {slot} has two semantic declaration types"
             );
         }
+    }
+
+    /// Bind an entry parameter to its slot. A `Unit` parameter arrives as the `Unit` instance;
+    /// reading it answers `Unit` exactly as a `Unit`-typed local does, so nothing is stored.
+    pub(super) fn bind_parameter(
+        &mut self,
+        slot: u32,
+        value: Value,
+        ty: Ty,
+    ) -> Result<(), Unsupported> {
+        if ty == Ty::Unit {
+            self.unit_values.insert(slot);
+            return Ok(());
+        }
+        let variable = self.declare_value(slot, ty)?;
+        self.builder.def_var(variable, value);
+        Ok(())
     }
 
     fn declare_value(&mut self, slot: u32, ty: Ty) -> Result<Variable, Unsupported> {
@@ -1553,11 +1608,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(());
                 }
                 // A property declared in another file of the module has no layout here; its
-                // declaring file exports the entry points of one shared plan.
-                if self.file.is_imported_property(target) {
+                // declaring file exports the entry points of one shared plan. A copy of its
+                // class this file realizes keeps the property's layout, and its own storage.
+                if self.file.is_imported_property(target)
+                    && !self.has_property_layout_at(id, target)
+                {
                     return self.module_property_write(target, *dispatch_receiver, *value);
                 }
-                match self.checked_property(target) {
+                match self.checked_property_at(id, target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
                         self.property_write(class, index, *dispatch_receiver, *value)?
                     }
@@ -2124,6 +2182,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
                 self.throwable_field_read(symbol, *receiver)
             }
+            // A getter the provider realizes as an exact operation reads as its call does.
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    result,
+                    ..
+                } = &**checked_op
+                    && let Some(getter) = self.operation_getter(*target) =>
+            {
+                self.realized_operation_call(id, getter, Some(*receiver), &[], None, *result)
+                    .expect("the guard selected a getter with an exact operation")
+            }
             // `array.size` read through its getter, as an expanded library body reads it.
             IrExpr::Checked(ref checked_op)
                 if let IrCheckedOperation::ExternalPropertyRead {
@@ -2180,8 +2251,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let (owner, name) = self
                     .range_getter(*target, *receiver)
                     .expect("checked by the guard");
-                self.range_property_member(owner, &name, *receiver, *result)
-                    .expect("a range member, by the guard")
+                self.range_property_through_implementors(*target, owner, &name, *receiver, *result)
             }
             IrExpr::Checked(ref checked_op)
                 if let IrCheckedOperation::ExternalPropertyRead {
@@ -2273,10 +2343,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         None,
                     );
                 }
-                if self.file.is_imported_property(target) {
+                if self.file.is_imported_property(target)
+                    && !self.has_property_layout_at(id, target)
+                {
                     return self.module_property_read(target, *dispatch_receiver);
                 }
-                match self.checked_property(target) {
+                match self.checked_property_at(id, target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
                         self.property_read(class, index, *dispatch_receiver)
                     }
@@ -2357,6 +2429,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             {
                 self.statement(id)?;
                 Ok(None)
+            }
+            IrExpr::Checked(ref checked_op)
+                if let Some(read) = self.dependency_interface_getter(checked_op) =>
+            {
+                read
             }
             other => Err(self.describe_declined(&other).into()),
         }
@@ -2756,7 +2833,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let mut values = Vec::with_capacity(args.len());
         for (index, argument) in args.iter().enumerate() {
             let value = match parameters.get(index) {
-                Some(ty) => self.coerce(*argument, *ty)?,
+                Some(ty) => self.coerce(*argument, parameter_slot(*ty))?,
                 None => self.expression(*argument)?,
             };
             if self.terminated {
@@ -2776,6 +2853,17 @@ fn any() -> Ty {
     Ty::nullable(Ty::obj("kotlin/Any"))
 }
 
+/// The type a parameter declared `ty` is passed as. A `Unit` parameter is passed the `Unit`
+/// instance in a reference slot, as kotlinc passes it: the argument is evaluated, and the callee
+/// receives the singleton.
+fn parameter_slot(ty: Ty) -> Ty {
+    if ty == Ty::Unit {
+        any()
+    } else {
+        ty
+    }
+}
+
 fn callee_kind(callee: &Callee) -> &'static str {
     match callee {
         Callee::Local(_) => "local",
@@ -2793,6 +2881,7 @@ fn callee_kind(callee: &Callee) -> &'static str {
         Callee::Static { .. } => "static",
         Callee::Virtual { .. } => "virtual",
         Callee::Super { .. } => "super",
+        Callee::ValueClassAdapter { .. } => "value-class adapter",
         Callee::Special { .. } => "special",
     }
 }
@@ -2876,4 +2965,14 @@ mod tests {
         assert!(!isa_for(target, false).unwrap().flags().enable_verifier());
         assert!(isa_for(target, true).unwrap().flags().enable_verifier());
     }
+}
+
+/// The interface member numbers one source module's files take beyond the module's own, shared
+/// by every file of it: what keeps one stub number naming one member module-wide.
+#[derive(Debug, Default)]
+pub(crate) struct ModuleInterfaceNumbers {
+    /// The numbers installed interfaces' members and dependency members draw from.
+    pub(crate) extended: krusty::backend::class_tables::module_interfaces::ExtendedNumbers,
+    /// The number of each dependency interface member a file calls, by its interface identity.
+    pub(crate) dependency: HashMap<Vec<u8>, u32>,
 }

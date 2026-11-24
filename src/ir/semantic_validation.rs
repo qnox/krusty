@@ -72,6 +72,7 @@ fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType>
         IrIntrinsic::UnsignedToString { source } => reject("intrinsic source", *source),
         IrIntrinsic::PrimitiveArrayNew { element } => reject("intrinsic array element", *element),
         IrIntrinsic::EnumValueOf { classifier } => reject("enum valueOf classifier", *classifier),
+        IrIntrinsic::EnumValues { classifier } => reject("enum values classifier", *classifier),
         IrIntrinsic::EnumEntries { classifier } => reject("enum entries classifier", *classifier),
         IrIntrinsic::TypeOf { ty } => reject("typeOf type argument", *ty),
         IrIntrinsic::GeneratedPropertyEquals { ty }
@@ -84,6 +85,7 @@ fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType>
         | IrIntrinsic::StringGet
         | IrIntrinsic::StringLength
         | IrIntrinsic::EnumOrdinal
+        | IrIntrinsic::EnumName
         | IrIntrinsic::NullableAnyToString
         | IrIntrinsic::CoroutineContext => Ok(()),
     }
@@ -157,6 +159,7 @@ fn validate_callee(callee: &Callee) -> Result<(), UndeterminedIrType> {
         | Callee::ClassStaticDefault { .. }
         | Callee::LocalDefault(_)
         | Callee::Static { .. }
+        | Callee::ValueClassAdapter { .. }
         | Callee::Special { .. } => Ok(()),
     }
 }
@@ -218,12 +221,14 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
         IrCheckedOperation::ExternalPropertyRead {
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         }
         | IrCheckedOperation::ExternalPropertyWrite {
             parameters,
             result,
+            substitutions,
             source_receiver,
             ..
         } => {
@@ -231,6 +236,9 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
             reject("external property result", *result)?;
             if let Some(receiver) = source_receiver {
                 reject("external property receiver", *receiver)?;
+            }
+            for substitution in substitutions {
+                validate_substitution(substitution)?;
             }
             Ok(())
         }
@@ -292,7 +300,12 @@ fn validate_sam(sam: &IrSamTarget) -> Result<(), UndeterminedIrType> {
         "SAM declared parameter",
         sam.declared_parameters.iter().copied(),
     )?;
-    reject("SAM declared result", sam.declared_result)
+    reject("SAM declared result", sam.declared_result)?;
+    for frame in sam.dispatch_methods.iter().chain(&sam.default_methods) {
+        reject_all("SAM slot parameter", frame.parameters.iter().copied())?;
+        reject("SAM slot result", frame.result)?;
+    }
+    Ok(())
 }
 
 fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
@@ -465,6 +478,10 @@ fn validate_prop_ref(reference: &PropRef) -> Result<(), UndeterminedIrType> {
 fn validate_member_extension(property: &MemberExtProp) -> Result<(), UndeterminedIrType> {
     reject("member-extension receiver", property.receiver)?;
     reject("member-extension property", property.ty)?;
+    reject_all(
+        "member-extension context parameter",
+        property.context_params.iter().map(|(_, _, ty)| *ty),
+    )?;
     for parameter in &property.type_params {
         validate_type_parameter(parameter)?;
     }
@@ -920,13 +937,17 @@ mod tests {
             has_receiver: false,
             suspend: false,
             source_suspend: false,
+            requires_object_dispatch: false,
             overridden_results: Vec::new(),
+            dispatch_methods: Vec::new(),
+            default_methods: Vec::new(),
             function_adapter: false,
             wraps_function_value: true,
             nullable: true,
             kotlin_interface: false,
             parameter_identities: Vec::new(),
             type_parameters: Vec::new(),
+            placement: crate::ir::IrSamPlacement::ThisFile,
         }
     }
 

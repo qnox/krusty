@@ -252,7 +252,9 @@ impl BodyLowering<'_> {
                     conversion,
                     ..
                 },
-                crate::ir::IrCheckedArgument::Expression { parameter, value },
+                crate::ir::IrCheckedArgument::Expression {
+                    parameter, value, ..
+                },
             ) = (argument, lowered)
             else {
                 continue;
@@ -683,6 +685,7 @@ impl BodyLowering<'_> {
                     crate::ir::IrCheckedArgument::Expression {
                         parameter,
                         value: self.coerce_to_declared(value, actual, declared),
+                        context: Default::default(),
                     }
                 }
                 crate::fir::FirAdaptedReferenceArgument::Context => return Ok(None),
@@ -764,7 +767,9 @@ impl BodyLowering<'_> {
             &arguments,
         )?;
         let selected_result = self.ir.functions[realization.function as usize].ret;
-        let body = self.callable_reference_adapter_body(call, selected_result, reference.ret);
+        let body = self
+            .ir
+            .callable_reference_adapter_body(call, selected_result, reference.ret);
         let mut parameters = realization.in_capture_order(
             realization
                 .captures

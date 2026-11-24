@@ -8,14 +8,14 @@
 //! classifiers and have no name of this shape; [`source_class_names`] gives every source classifier
 //! of a file the name Kotlin's IR gives it.
 
-use crate::ir::{ClassId, IrFile, IrLocalClassOwner};
+use crate::ir::{ClassId, IrFile, IrLocalClassOwner, IrSiteClassContainer, IrSiteClassName};
 use crate::libraries::ClassifierDeclarationKey;
 use crate::types::{ClassifierDeclarationName, TypeName};
 
 use super::BackendClassifierSource;
 
 /// The simple name Kotlin's IR gives an anonymous object (`SpecialNames.NO_NAME_PROVIDED`).
-pub const ANONYMOUS_OBJECT_NAME: &str = "<no name provided>";
+pub const ANONYMOUS_OBJECT_NAME: &str = crate::ir::IrSiteClassName::ANONYMOUS_OBJECT;
 
 /// The qualified and simple name of a classifier.
 pub struct ClassNames {
@@ -51,6 +51,22 @@ pub fn member_class_names(name: TypeName) -> ClassNames {
     ClassNames { qualified, simple }
 }
 
+/// The declaration a call-site copy of an anonymous object was regenerated from, following copies
+/// of copies; `class` itself when it is not a copy. Kotlin's IR names a regenerated class as it
+/// names its declaration. A cyclic or dangling source chain has no declaration, so the copy has no
+/// source names rather than the names of some class on the chain.
+fn copied_declaration(ir: &IrFile, class: ClassId) -> Option<ClassId> {
+    let mut current = class;
+    let mut seen = crate::fx_hash::HashSet::default();
+    while let Some(copy) = ir.specialized_anonymous_classes.get(&current) {
+        if !seen.insert(current) {
+            return None;
+        }
+        current = copy.source;
+    }
+    ir.classes.get(current as usize).map(|_| current)
+}
+
 /// The names Kotlin's IR gives the source classifier `class` of `ir`. Its qualified name
 /// (`kotlinFqName`) is the package, then each enclosing classifier, then the classifier itself,
 /// joined with `.`; its simple name is its own segment. An executable scope contributes no segment,
@@ -58,12 +74,27 @@ pub fn member_class_names(name: TypeName) -> ClassNames {
 /// object's own segment is [`ANONYMOUS_OBJECT_NAME`].
 ///
 /// The names are read from the declaration-owned naming provenance a local classifier records (its
-/// lexical owner and its source segment), never from its physical identity. `None` for a
-/// classifier the compiler generated, and for one nested in an enum entry body, whose segment
-/// Kotlin does not spell from source.
+/// lexical owner and its source segment), or from the declaration site recorded for one that a
+/// serialized body declares or an inline call regenerates; never from its physical identity. A
+/// call-site copy with no recorded site takes its declaration's names. `None` for a classifier the
+/// compiler generated, for a copy whose source chain does not end in a declaration, and for one
+/// nested in an enum entry body, whose segment Kotlin does not spell from source.
 pub fn source_class_names(ir: &IrFile, class: ClassId) -> Option<ClassNames> {
+    if let Some(site) = &ir.classes[class as usize].site_name {
+        if ir.classes[class as usize].is_enum_entry {
+            return None;
+        }
+        return site_class_names(ir, site);
+    }
+    let class = copied_declaration(ir, class)?;
     let declaration = &ir.classes[class as usize];
-    if !declaration.is_source_declared || declaration.is_enum_entry {
+    if declaration.is_enum_entry {
+        return None;
+    }
+    if let Some(site) = &declaration.site_name {
+        return site_class_names(ir, site);
+    }
+    if !declaration.is_source_declared {
         return None;
     }
     let Some(provenance) = ir.local_class_name_provenance.get(&class) else {
@@ -95,7 +126,7 @@ pub fn source_class_names(ir: &IrFile, class: ClassId) -> Option<ClassNames> {
         Some(IrLocalClassOwner::Class(owner)) => source_class_names(ir, owner)?.qualified,
         Some(IrLocalClassOwner::External(owner)) => member_class_names(owner).qualified,
         // Boundary conversion: the package path is spelled with `/` in the name tree.
-        None => provenance.source.package.render().replace('/', "."),
+        None => provenance.source.package().render().replace('/', "."),
     };
     if !qualified.is_empty() {
         qualified.push('.');
@@ -104,6 +135,32 @@ pub fn source_class_names(ir: &IrFile, class: ClassId) -> Option<ClassNames> {
     Some(ClassNames {
         qualified,
         simple: own.to_string(),
+    })
+}
+
+/// The names of a local classifier with no source provenance: its container's qualified name,
+/// then its own name.
+fn site_class_names(ir: &IrFile, site: &IrSiteClassName) -> Option<ClassNames> {
+    let mut qualified = site_container_name(ir, site.container)?;
+    if !qualified.is_empty() {
+        qualified.push('.');
+    }
+    qualified.push_str(&site.name);
+    Some(ClassNames {
+        qualified,
+        simple: site.name.to_string(),
+    })
+}
+
+/// The qualified name of the declaration container `container`, which prefixes the names of the
+/// classes Kotlin places in it; empty for the root package. `None` for a local container Kotlin
+/// does not name from source.
+pub fn site_container_name(ir: &IrFile, container: IrSiteClassContainer) -> Option<String> {
+    Some(match container {
+        // Boundary conversion: the package path is spelled with `/` in the name tree.
+        IrSiteClassContainer::Package(package) => package.render().replace('/', "."),
+        IrSiteClassContainer::Classifier(owner) => member_class_names(owner).qualified,
+        IrSiteClassContainer::Class(owner) => source_class_names(ir, owner)?.qualified,
     })
 }
 
@@ -167,6 +224,17 @@ pub fn declared_class(ir: &IrFile, class: ClassId) -> ReflectionNames {
             package,
             simple: Some(simple),
             qualified: None,
+        };
+    }
+    // A dependency's file-private classifier keeps its declared name, which its naming provenance
+    // records; its physical identity is a synthetic local one.
+    if let Some(provenance) = ir.local_class_name_provenance.get(&class) {
+        let names = source_class_names(ir, class);
+        return ReflectionNames {
+            // Boundary conversion: the package path is spelled with `/` in the name tree.
+            package: provenance.source.package().render().replace('/', "."),
+            simple: names.as_ref().map(|names| names.simple.clone()),
+            qualified: names.map(|names| names.qualified),
         };
     }
     let ClassNames { qualified, simple } = member_class_names(declaration.fq_name);

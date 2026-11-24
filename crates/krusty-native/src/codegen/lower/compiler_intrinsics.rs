@@ -7,7 +7,7 @@
 
 use super::*;
 
-impl BodyLowering<'_, '_, '_> {
+impl<'a> BodyLowering<'a, '_, '_> {
     /// The provider's bit reinterpretation of `operand`, a `from` scalar, as the equal-width `to`.
     fn reinterpret_bits(
         &mut self,
@@ -102,6 +102,60 @@ impl BodyLowering<'_, '_, '_> {
         self.value_hash(value, ty).map(Some)
     }
 
+    /// Realize the exact provider operation a dependency callable's realization carries: a
+    /// member's as its realization, a package function's as its intrinsic. A call of the
+    /// declaration and a read of the property it is the getter of reach the same operation.
+    pub(super) fn realized_operation_call(
+        &mut self,
+        site: u32,
+        realization: &krusty::backend::BackendCallableFact,
+        dispatch_receiver: Option<u32>,
+        args: &[u32],
+        extension_receiver_parameter: Option<u32>,
+        ret: Ty,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let intrinsic = realization
+            .compiler_intrinsic
+            .or(realization.member_realization.compiler_intrinsic())
+            .or_else(|| self.unsigned_array_carrier_access(realization));
+        self.compiler_intrinsic_call(
+            site,
+            intrinsic,
+            dispatch_receiver,
+            args,
+            DeclaredOperands {
+                operation: super::super::dependency_intrinsics::declaration_operation(
+                    intrinsic,
+                    realization.semantic_role,
+                ),
+                receiver: match realization.declaration_owner {
+                    Some(krusty::types::SemanticCallableOwner::Classifier(owner)) => {
+                        Some(Ty::obj_name(owner))
+                    }
+                    _ => None,
+                },
+                params: &realization.params,
+                extension_receiver_parameter,
+            },
+            ret,
+        )
+    }
+
+    /// The getter of a dependency property whose realization is an exact provider operation,
+    /// so its read lowers as the call of that getter does.
+    pub(super) fn operation_getter(
+        &self,
+        target: krusty::fir::ExternalPropertyId,
+    ) -> Option<&'a krusty::backend::BackendCallableFact> {
+        let callables = self.file.callables;
+        let getter = callables.callable(callables.property(target)?.getter)?;
+        let intrinsic = getter
+            .compiler_intrinsic
+            .or(getter.member_realization.compiler_intrinsic());
+        super::super::dependency_intrinsics::declaration_operation(intrinsic, getter.semantic_role)
+            .map(|_| getter)
+    }
+
     /// Realize an exact provider operation reached through an ordinary member call.
     ///
     /// Returns `None` only when the selected declaration has no operation handled here, allowing
@@ -165,6 +219,31 @@ impl BodyLowering<'_, '_, '_> {
                 // The iteration protocol's own member: the member path realizes it through the
                 // receiver's runtime descriptor, exactly as it realizes a source call of it.
                 DependencyOperation::PrimitiveIteratorNext => return None,
+                DependencyOperation::ResultFailureException => {
+                    let (Some(failure), [], None) = (receiver, args, extension_receiver_parameter)
+                    else {
+                        return Some(Err("a malformed `Result.Failure.exception` getter".into()));
+                    };
+                    if ret != Ty::obj("kotlin/Throwable") {
+                        return Some(Err(
+                            "a `Result.Failure.exception` getter with a non-Throwable result"
+                                .into(),
+                        ));
+                    }
+                    let value = match self.reference(failure) {
+                        Ok(value) if !self.terminated => value,
+                        Ok(_) => return Some(Ok(None)),
+                        Err(error) => return Some(Err(error)),
+                    };
+                    if let Err(error) = self.null_check(value) {
+                        return Some(Err(error));
+                    }
+                    self.runtime_call("kt_result_failure_exception", &[any()], any(), &[value])
+                        .and_then(|value| match value {
+                            Some(value) => self.convert(value, Some(any()), ret),
+                            None => Ok(None),
+                        })
+                }
             });
         }
         if intrinsic == Some(krusty::backend::BackendCompilerIntrinsic::ReinterpretBits) {
@@ -330,6 +409,34 @@ impl BodyLowering<'_, '_, '_> {
                         return Ok(None);
                     }
                     self.runtime_call("kt_string_range_equals", &params, ret, &arguments)
+                })());
+            }
+            Some(krusty::backend::BackendCompilerIntrinsic::StringIndexOf { sought, last }) => {
+                let operands = match (receiver, args, extension_receiver_parameter) {
+                    (Some(this), [value, from], None) => [this, *value, *from],
+                    (None, &[this, value, from], Some(0)) => [this, value, from],
+                    _ => {
+                        return Some(Err("a String search with malformed operands".into()));
+                    }
+                };
+                if ret != Ty::Int {
+                    return Some(Err("a String search with a non-Int result".into()));
+                }
+                let symbol = match (sought == Ty::Char, last) {
+                    (true, false) => "kt_string_index_of_char",
+                    (true, true) => "kt_string_last_index_of_char",
+                    (false, false) => "kt_string_index_of_string",
+                    (false, true) => {
+                        return Some(Err("a backward String search for a String".into()));
+                    }
+                };
+                let params = [Ty::obj("kotlin/String"), sought, Ty::Int];
+                return Some((|| {
+                    let arguments = self.arguments(&operands, &params)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call(symbol, &params, ret, &arguments)
                 })());
             }
             Some(krusty::backend::BackendCompilerIntrinsic::ArrayCopy { array }) => {

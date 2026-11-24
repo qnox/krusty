@@ -8,7 +8,8 @@
 
 use super::{mismatch, unsupported, BodyLowering, Lowered};
 use crate::ir::{ExprId, IrExpr, IrTypeOp};
-use crate::metadata::klib_ir::tree::{KlibIrExprId, KlibIrTypeId, KlibIrTypeOperator};
+use crate::metadata::klib_ir::tree::{KlibIrExprId, KlibIrType, KlibIrTypeId, KlibIrTypeOperator};
+use crate::metadata::klib_ir::KlibIrSymbolKind;
 use crate::types::{Ty, TyKind};
 
 use super::super::decline::KlibBodyDeclineReason;
@@ -24,8 +25,10 @@ impl BodyLowering<'_> {
         argument: KlibIrExprId,
         ty: Ty,
     ) -> Lowered<ExprId> {
+        self.install_operand_interface(operand)?;
         let target = self.semantic(operand)?;
         let op = match operator {
+            KlibIrTypeOperator::SamConversion => return self.sam_conversion(operand, argument, ty),
             KlibIrTypeOperator::ImplicitCast => return self.implicit_cast(target, argument, ty),
             KlibIrTypeOperator::SafeCast => return self.safe_cast(target, argument, ty),
             KlibIrTypeOperator::InstanceOf | KlibIrTypeOperator::NotInstanceOf => {
@@ -52,12 +55,7 @@ impl BodyLowering<'_> {
                 if ty != target {
                     return Err(mismatch("a cast is typed apart from its target"));
                 }
-                // A cast to a non-null type also rejects `null`.
-                if target.is_nullable() {
-                    IrTypeOp::Cast
-                } else {
-                    IrTypeOp::CastNonNull
-                }
+                IrTypeOp::cast_to(target)
             }
             other => return unsupported(type_operator_name(other)),
         };
@@ -75,6 +73,22 @@ impl BodyLowering<'_> {
             self.ir.written_casts.insert(lowered);
         }
         Ok(self.typed(lowered, ty))
+    }
+
+    /// Install the non-public interface `operand` names, if it names one, so the test or cast of
+    /// it has a class to name and its supertypes are known to the narrowing it permits.
+    fn install_operand_interface(&mut self, operand: KlibIrTypeId) -> Lowered<()> {
+        let KlibIrType::Simple { classifier, .. } = self.arena.ty(operand) else {
+            return Ok(());
+        };
+        if classifier.kind != KlibIrSymbolKind::Class
+            || self.linker.local_class(&classifier.signature)?.is_none()
+            || !self.linker.is_local_interface(&classifier.signature)
+        {
+            return Ok(());
+        }
+        self.linker
+            .link_local_interface(self.ir, &classifier.signature)
     }
 
     /// `argument is target` (or `!is`) for a nullable `target`, through the test checked FIR
@@ -137,6 +151,11 @@ impl BodyLowering<'_> {
             return Ok(proven);
         }
         let arg = self.expression(argument)?;
+        self.implicit_cast_of(arg, target, ty)
+    }
+
+    /// The lowered `arg` implicitly cast to `target`, typed `ty`; see [`Self::implicit_cast`].
+    pub(super) fn implicit_cast_of(&mut self, arg: ExprId, target: Ty, ty: Ty) -> Lowered<ExprId> {
         let actual = self.lowered_type(arg);
         if super::is_value_of(actual, target) {
             return Ok(arg);
@@ -179,7 +198,11 @@ impl BodyLowering<'_> {
     /// arguments. A value of a type parameter narrows to any type: its argument can be any
     /// subtype of its bounds. So does a value of a function type, an interface any class can
     /// implement besides its own supertypes (`this is BaseContinuationImpl` on a
-    /// `suspend () -> T`).
+    /// `suspend () -> T`). A value of an anonymous or local class this body lowered narrows as a
+    /// value of one of its supertypes does: a prepared copy types the object an inlined call
+    /// expanded with the erasure of the inline function's type parameters
+    /// (`Sequence<Any?>` for `Sequence { }`), which the call's result then casts back to its
+    /// declared type (`Sequence<T>`).
     fn narrows(&self, actual: Ty, target: Ty) -> bool {
         if matches!(
             actual.non_null().kind(),
@@ -198,6 +221,12 @@ impl BodyLowering<'_> {
                     || self
                         .linker
                         .is_subtype(parameters, target, Self::star_projected(actual))
+            })
+            || self.local_class(actual).is_some_and(|class| {
+                class
+                    .supertypes
+                    .iter()
+                    .any(|supertype| self.narrows(*supertype, target))
             })
     }
 

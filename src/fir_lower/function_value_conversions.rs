@@ -29,7 +29,26 @@ impl BodyLowering<'_> {
             return None;
         }
 
-        let callee = self.ir.add_expr(IrExpr::GetValue(0));
+        // A nullable value is invoked through a safe call on it, so a `null` value converts to an
+        // adapter that yields `null` (`Unit` for a `Unit` target) instead of invoking it.
+        let enclosing_temporary = self.next_temporary;
+        let guard = from.get().is_nullable().then(|| {
+            self.next_temporary = u32::try_from(target.params.len() + 1)
+                .expect("too many converted-function parameters");
+            let value = self.ir.add_expr(IrExpr::GetValue(0));
+            self.value_temporary(value, from.get())
+        });
+        let callee = match guard {
+            Some((_, temporary)) => {
+                let read = self.ir.add_expr(IrExpr::GetValue(temporary));
+                self.ir.add_expr(IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg: read,
+                    type_operand: from.get().non_null(),
+                })
+            }
+            None => self.ir.add_expr(IrExpr::GetValue(0)),
+        };
         let arguments = (1..=target.params.len())
             .map(|parameter| {
                 self.ir.add_expr(IrExpr::GetValue(
@@ -51,12 +70,34 @@ impl BodyLowering<'_> {
         if source.suspend {
             self.ir.suspend_calls.insert(invoke, source.ret);
         }
+        let invoke = match guard {
+            Some((variable, temporary)) => {
+                self.next_temporary = enclosing_temporary;
+                // The safe call yields the value's own result, or `null`. A `Unit` adapter
+                // discards it, so it reads no particular type.
+                let (invoke, result) = if target.ret == Ty::Unit {
+                    (invoke, erased_result)
+                } else {
+                    let result = Ty::nullable(source.ret);
+                    let read = self.ir.add_expr(IrExpr::TypeOp {
+                        op: crate::ir::IrTypeOp::ImplicitCoercion,
+                        arg: invoke,
+                        type_operand: result,
+                    });
+                    (read, result)
+                };
+                self.null_guarded_invoke(variable, temporary, invoke, result)
+            }
+            None => invoke,
+        };
         let adapter_result = if target.ret == Ty::Unit {
             Ty::Unit
         } else {
             erased_result
         };
-        let body = self.callable_reference_adapter_body(invoke, erased_result, adapter_result);
+        let body = self
+            .ir
+            .callable_reference_adapter_body(invoke, erased_result, adapter_result);
         let mut parameters = Vec::with_capacity(target.params.len() + 1);
         parameters.push(from.get());
         parameters.extend(target.params.iter().copied());
@@ -97,5 +138,33 @@ impl BodyLowering<'_> {
                     reflection_owner: None,
                 }))),
         )
+    }
+
+    /// `value?.invoke(...)` over the temporary `variable` declares, yielding `result`: `null` when
+    /// the value is `null`, else the invocation's result.
+    fn null_guarded_invoke(
+        &mut self,
+        variable: ExprId,
+        temporary: u32,
+        invoke: ExprId,
+        result: Ty,
+    ) -> ExprId {
+        let read = self.ir.add_expr(IrExpr::GetValue(temporary));
+        let null = self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
+        let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: crate::ir::IrBinOp::Eq,
+            lhs: read,
+            rhs: null,
+        });
+        let null_result = self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
+        let guarded = self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(condition), null_result), (None, invoke)],
+        });
+        self.ir.whens.exhaustive.insert(guarded, result);
+        self.ir.set_logical_type(guarded, result);
+        self.ir.add_expr(IrExpr::Block {
+            stmts: vec![variable],
+            value: Some(guarded),
+        })
     }
 }

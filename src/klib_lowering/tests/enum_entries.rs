@@ -141,7 +141,7 @@ fn an_enum_constant_resolves_in_the_reading_body_s_producer_graph() {
 }
 
 #[test]
-fn an_enum_with_members_beyond_its_generated_ones_declines() {
+fn an_enum_storing_member_properties_declines() {
     let Some(root) = distribution_root() else {
         return;
     };
@@ -162,7 +162,59 @@ fn an_enum_with_members_beyond_its_generated_ones_declines() {
     assert_eq!(
         super::super::enum_classes::authenticate_entry(bodies, module, &option).err(),
         Some(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "an enum class with member properties"
+            "an enum class with stored member properties"
         ))
     );
+}
+
+/// The exact serialized identity of `DeprecationLevel`'s implicit member `name`.
+fn deprecation_level_member(libraries: &KlibLibraries, name: &str) -> KlibDependencyCallable {
+    let symbols = libraries.symbols(
+        SymbolNamespace::Classifier(type_name("kotlin/DeprecationLevel")),
+        name,
+    );
+    let [member] = symbols.callables.functions() else {
+        panic!("one {name}");
+    };
+    libraries
+        .external_callable(
+            member
+                .callable
+                .external_identity
+                .expect("provider identity"),
+        )
+        .expect("exact declaration")
+        .dependency_callable
+        .expect("a serialized declaration")
+}
+
+#[test]
+fn an_enum_s_generated_values_and_value_of_are_its_common_operations() {
+    use super::super::enum_classes::{authenticate_static_member, EnumStaticMember};
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let bodies = libraries.declaration_bodies();
+    for (name, expected) in [
+        ("values", EnumStaticMember::Values),
+        ("valueOf", EnumStaticMember::ValueOf),
+    ] {
+        let identity = deprecation_level_member(&libraries, name);
+        let (class, member) = authenticate_static_member(bodies, &identity)
+            .unwrap_or_else(|decline| panic!("{name}: {decline:?}"))
+            .unwrap_or_else(|| panic!("{name} is a generated enum member"));
+        assert_eq!(member, expected);
+        assert_eq!(class.classifier, type_name("kotlin/DeprecationLevel"));
+        assert_eq!(class.entries, ["WARNING", "ERROR", "HIDDEN"]);
+    }
+    // Any other callable links as an ordinary call.
+    let getter = coroutine_suspended_getter(&libraries);
+    let identity = getter
+        .dependency_callable
+        .expect("a serialized declaration");
+    assert!(matches!(
+        authenticate_static_member(bodies, &identity),
+        Ok(None)
+    ));
 }

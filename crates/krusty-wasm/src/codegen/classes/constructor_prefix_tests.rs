@@ -890,7 +890,7 @@ fn non_enclosing_receiver_profiles_remain_unsupported() {
         IrCapturedReceiver::Lambda(None),
         IrCapturedReceiver::Callable {
             label: "callable".into(),
-            owner: krusty::fir::CapturedCallableOwner::Declaration,
+            owner: krusty::fir::CapturedCallableOwner::LocalFunction,
         },
         IrCapturedReceiver::Context {
             kind: krusty::types::CapturedContextKind::LegacyReceiver,
@@ -909,7 +909,7 @@ fn non_enclosing_receiver_profiles_remain_unsupported() {
 }
 
 #[test]
-fn proven_context_and_lambda_receivers_are_ordinary_references() {
+fn proven_context_lambda_and_callable_receivers_are_ordinary_references() {
     let (original, class, parameter) = stored_enclosing_receiver();
     let declared = original.classes[class as usize].ctor_args[parameter as usize].ty;
     let identity = ClassCaptureIdentity::Receiver(0);
@@ -978,6 +978,8 @@ fn proven_context_and_lambda_receivers_are_ordinary_references() {
     scalar.classes[class as usize].fields[field as usize].ty = Ty::Unit;
     assert_eq!(check_supported(&scalar, class), expected);
 
+    // The extension receiver of the capturing declaration itself is that declaration's own
+    // object parameter, with or without a receiver identity; a local function's is not.
     let mut callable = copy_transport(&original);
     install(
         &mut callable,
@@ -986,7 +988,40 @@ fn proven_context_and_lambda_receivers_are_ordinary_references() {
             owner: krusty::fir::CapturedCallableOwner::Declaration,
         },
     );
-    assert_eq!(check_supported(&callable, class), expected);
+    assert_eq!(check_supported(&callable, class), Ok(()));
+
+    // A support unit's class has no checked identity on the parameter or in the registry.
+    let mut unchecked = copy_transport(&callable);
+    unchecked.classes[class as usize].ctor_args[parameter as usize].capture_identity = None;
+    unchecked
+        .class_capture_identities
+        .remove(&(class, parameter));
+    assert_eq!(check_supported(&unchecked, class), Ok(()));
+
+    // A support unit's `suspend () -> T` extension receiver is a function value, an ordinary
+    // reference of the same kind as an object.
+    let mut function_value = copy_transport(&unchecked);
+    let function = Ty::fun(Vec::new(), Ty::String);
+    let field = function_value.classes[class as usize].ctor_args[parameter as usize]
+        .field_index
+        .unwrap();
+    function_value.classes[class as usize].ctor_args[parameter as usize].ty = function;
+    function_value.classes[class as usize].fields[field as usize].ty = function;
+    assert_eq!(check_supported(&function_value, class), Ok(()));
+
+    let mut unregistered = copy_transport(&callable);
+    unregistered
+        .class_capture_identities
+        .remove(&(class, parameter));
+    assert_eq!(check_supported(&unregistered, class), expected);
+
+    let mut scalar = copy_transport(&callable);
+    let field = scalar.classes[class as usize].ctor_args[parameter as usize]
+        .field_index
+        .unwrap();
+    scalar.classes[class as usize].ctor_args[parameter as usize].ty = Ty::Unit;
+    scalar.classes[class as usize].fields[field as usize].ty = Ty::Unit;
+    assert_eq!(check_supported(&scalar, class), expected);
 }
 
 #[test]
@@ -1281,4 +1316,181 @@ fn interface_delegate_prefix_requires_positive_role_and_unique_typed_storage() {
         assert_eq!(check_supported(&ir, class), expected, "{label}");
     }
     assert_eq!(check_supported(&original, class), Ok(()));
+}
+
+/// A state machine's frame is no closure: it has no constructor prefix. It may keep a shared
+/// holder in a field its own code fills, or one an ordinary constructor parameter stores. Any
+/// other transport of a holder into such a field still declines.
+#[test]
+fn a_frame_keeps_shared_holders_it_fills_or_its_parameters_store() {
+    let element = Ty::Int;
+    let frame = || {
+        let mut ir = IrFile::default();
+        let mut class = IrClass::synthetic(type_name("p/Frame"));
+        class.fields = vec![
+            krusty::ir::IrField::new("$frame$1".to_string(), element),
+            krusty::ir::IrField::new("$frame$0".to_string(), element),
+        ];
+        class.ctor_param_count = 1;
+        class.ctor_args = vec![krusty::ir::IrCtorArg {
+            name: None,
+            context_kind: krusty::types::ContextParameterKind::None,
+            ty: element,
+            declared_ty: Some(element),
+            is_field: true,
+            field_index: Some(1),
+            has_default: false,
+            is_vararg: false,
+            type_param: None,
+            check: None,
+            anonymous_super_forward: None,
+            capture: None,
+            provenance: IrCtorParameterProvenance::Value,
+            capture_identity: None,
+        }];
+        let class = ir.add_class(class);
+        ir.shared_class_capture_fields.insert((class, 0), element);
+        ir.shared_class_capture_fields.insert((class, 1), element);
+        (ir, class)
+    };
+    let (ir, class) = frame();
+    assert_eq!(check_supported(&ir, class), Ok(()));
+
+    type Mutation = fn(&mut IrFile, ClassId);
+    let mutations: &[(&str, Mutation)] = &[
+        ("parameter of another type", |ir, id| {
+            ir.classes[id as usize].ctor_args[0].ty = Ty::Long
+        }),
+        ("field of another type", |ir, id| {
+            ir.classes[id as usize].fields[0].ty = Ty::Long
+        }),
+        ("two parameters store the field", |ir, id| {
+            let duplicate = ir.classes[id as usize].ctor_args[0].clone();
+            ir.classes[id as usize].ctor_args.push(duplicate);
+        }),
+        ("capture outside a prefix", |ir, id| {
+            ir.classes[id as usize].ctor_args[0].provenance = IrCtorParameterProvenance::Capture
+        }),
+        ("pre-super store", |ir, id| {
+            ir.classes[id as usize].pre_super_param_fields.push((0, 1))
+        }),
+    ];
+    let expected = Err("a class capturing its surroundings (`p/Frame`)".to_string());
+    for (label, mutate) in mutations {
+        let (mut ir, class) = frame();
+        mutate(&mut ir, class);
+        assert_eq!(check_supported(&ir, class), expected, "{label}");
+    }
+}
+
+#[test]
+fn a_function_supertype_requires_its_exact_checked_invoke_edge() {
+    let mut ir = krusty::fir_lower::single_source_lowering::lower_single_source_with_jvm_stdlib(
+        "class Renderer : (Int) -> String { override fun invoke(value: Int): String = value.toString() }",
+        "FunctionClassLayout",
+    );
+    let class = ir
+        .classes
+        .iter()
+        .position(|class| class.fq_name == type_name("Renderer"))
+        .unwrap() as ClassId;
+    assert_eq!(check_supported(&ir, class), Ok(()));
+    let owner = ir.classes[class as usize].fq_name_id();
+    let invoke_owner = ir.function_overrides[&owner][0].overridden_owner;
+    let facts = FunctionOwnerRole {
+        owner: invoke_owner,
+        role: krusty::types::ClassifierRole::FunctionOfArity(1),
+    };
+    assert_eq!(
+        super::check_function_invocation_support(&ir, &facts, class),
+        Ok(())
+    );
+    for edge in ir.function_overrides.get_mut(&owner).into_iter().flatten() {
+        edge.overridden_semantic_role = None;
+    }
+    assert_eq!(
+        super::check_function_invocation_support(&ir, &facts, class),
+        Err(
+            "a class implementing a function type without its checked invocation (`Renderer`)"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn a_nominal_function_supertype_requires_its_provider_role_and_checked_invoke_edge() {
+    let mut ir = krusty::fir_lower::single_source_lowering::lower_single_source_with_jvm_stdlib(
+        "class Renderer : Function1<Int, String> { override fun invoke(value: Int): String = value.toString() }",
+        "FunctionClassLayout",
+    );
+    let class = ir
+        .classes
+        .iter()
+        .position(|class| class.fq_name == type_name("Renderer"))
+        .unwrap() as ClassId;
+    let owner = ir.classes[class as usize].fq_name_id();
+    let invoke_owner = ir.function_overrides[&owner][0].overridden_owner;
+    let facts = FunctionOwnerRole {
+        owner: invoke_owner,
+        role: krusty::types::ClassifierRole::FunctionOfArity(1),
+    };
+    assert_eq!(
+        super::check_function_invocation_support(&ir, &facts, class),
+        Ok(())
+    );
+    assert_eq!(
+        super::check_function_invocation_support(
+            &ir,
+            &FunctionOwnerRole {
+                owner: invoke_owner,
+                role: krusty::types::ClassifierRole::FunctionOfArity(2),
+            },
+            class,
+        ),
+        Err("a function classifier supertype without its checked invocation (`Renderer`)".into())
+    );
+    for edge in ir.function_overrides.get_mut(&owner).into_iter().flatten() {
+        edge.overridden_semantic_role = None;
+    }
+    assert_eq!(
+        super::check_function_invocation_support(&ir, &facts, class),
+        Err("a function classifier supertype without its checked invocation (`Renderer`)".into())
+    );
+}
+
+struct FunctionOwnerRole {
+    owner: krusty::types::TypeName,
+    role: krusty::types::ClassifierRole,
+}
+
+impl krusty::backend::BackendClassifierSource for FunctionOwnerRole {
+    fn classifier(
+        &self,
+        classifier: krusty::types::TypeName,
+    ) -> Option<std::sync::Arc<krusty::backend::BackendClassifierFact>> {
+        (classifier == self.owner).then(|| {
+            std::sync::Arc::new(krusty::backend::BackendClassifierFact {
+                runtime_exception: None,
+                declaration_name: None,
+                klib_identity: None,
+                access: krusty::libraries::ClassifierAccess::Public,
+                is_kotlin: true,
+                mapped_builtin: false,
+                source: false,
+                outer_instance: None,
+                kind: krusty::libraries::TypeKind::Interface,
+                is_abstract: true,
+                is_extensible: false,
+                supertypes: Box::new([]),
+                annotations: Box::new([]),
+                own_type_parameter_count: 0,
+                type_param_variances: Box::new([]),
+                value_underlying: None,
+                value_declaration: None,
+                role: Some(self.role),
+                companion: None,
+                enum_entries_accessor: None,
+            })
+        })
+    }
 }

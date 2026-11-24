@@ -144,11 +144,14 @@ where
                 })
                 .collect::<Vec<_>>(),
         ),
-        TyKind::Intersection(parts) => Ty::intersection(
+        TyKind::Intersection(parts) => Ty::intersection_approximated_to(
             &parts
                 .iter()
                 .map(|part| substitute_type_parameters(*part, lookup, preserve_unbound, narrowing))
                 .collect::<Vec<_>>(),
+            parts.approximation().map(|approximation| {
+                substitute_type_parameters(approximation, lookup, preserve_unbound, narrowing)
+            }),
         ),
         _ => ty,
     }
@@ -216,11 +219,12 @@ pub(crate) fn ty_subst_alias_expansion<K: TyParamKey>(ty: Ty, bindings: &HashMap
                     .map(|argument| normalize(*argument))
                     .collect::<Vec<_>>(),
             ),
-            TyKind::Intersection(parts) => Ty::intersection(
+            TyKind::Intersection(parts) => Ty::intersection_approximated_to(
                 &parts
                     .iter()
                     .map(|part| normalize(*part))
                     .collect::<Vec<_>>(),
+                parts.approximation().map(normalize),
             ),
             _ => ty,
         }
@@ -306,11 +310,14 @@ pub(crate) fn ty_with_param_bounds<K: TyParamKey>(ty: Ty, bounds: &HashMap<K, Ty
                 .map(|argument| ty_with_param_bounds(*argument, bounds))
                 .collect::<Vec<_>>(),
         ),
-        TyKind::Intersection(parts) => Ty::intersection(
+        TyKind::Intersection(parts) => Ty::intersection_approximated_to(
             &parts
                 .iter()
                 .map(|part| ty_with_param_bounds(*part, bounds))
                 .collect::<Vec<_>>(),
+            parts
+                .approximation()
+                .map(|approximation| ty_with_param_bounds(approximation, bounds)),
         ),
         _ => ty,
     }
@@ -372,11 +379,14 @@ pub(crate) fn ty_with_transitive_param_bounds<K: TyParamKey>(
                     .map(|argument| hydrate(*argument, bounds, visiting))
                     .collect::<Vec<_>>(),
             ),
-            TyKind::Intersection(parts) => Ty::intersection(
+            TyKind::Intersection(parts) => Ty::intersection_approximated_to(
                 &parts
                     .iter()
                     .map(|part| hydrate(*part, bounds, visiting))
                     .collect::<Vec<_>>(),
+                parts
+                    .approximation()
+                    .map(|approximation| hydrate(approximation, bounds, visiting)),
             ),
             _ => ty,
         }
@@ -436,10 +446,79 @@ pub(crate) fn ty_map_symbols(ty: Ty, rebuild: &dyn Fn(Ty, Ty) -> Ty) -> Ty {
                 .map(|argument| map(*argument))
                 .collect::<Vec<_>>(),
         ),
-        TyKind::Intersection(parts) => {
-            Ty::intersection(&parts.iter().map(|part| map(*part)).collect::<Vec<_>>())
-        }
+        TyKind::Intersection(parts) => Ty::intersection_approximated_to(
+            &parts.iter().map(|part| map(*part)).collect::<Vec<_>>(),
+            parts.approximation().map(map),
+        ),
         _ => ty,
+    }
+}
+
+/// `specialized` with each position where `declared` names a type parameter that `replacement`
+/// maps rebuilt as that replacement. `specialized` is `declared` after substitution, so the two
+/// share their shape down to those positions; wherever the shapes part, `specialized` is kept.
+/// Walking the declaration keeps two parameters that were given the same type apart.
+pub(crate) fn ty_replace_formals_along(
+    declared: Ty,
+    specialized: Ty,
+    replacement: &dyn Fn(&str) -> Option<Ty>,
+) -> Ty {
+    let along = |declared: Ty, specialized: Ty| {
+        ty_replace_formals_along(declared, specialized, replacement)
+    };
+    match (declared.kind(), specialized.kind()) {
+        (TyKind::TyParam(name, _) | TyKind::Var(name, _), _) => {
+            replacement(name.as_str()).unwrap_or(specialized)
+        }
+        (TyKind::Nullable(declared), TyKind::Nullable(specialized)) => {
+            Ty::nullable(along(declared, specialized))
+        }
+        (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(specialized)) => {
+            Ty::platform_nullable(along(declared, specialized))
+        }
+        (TyKind::MutabilityFlexible(declared), TyKind::MutabilityFlexible(specialized)) => {
+            Ty::mutability_flexible(along(declared, specialized))
+        }
+        (TyKind::DefinitelyNotNull(declared), TyKind::DefinitelyNotNull(specialized)) => {
+            Ty::from(TyKind::DefinitelyNotNull(along(declared, specialized)))
+        }
+        (TyKind::InProjection(declared), TyKind::InProjection(specialized)) => {
+            Ty::in_projection(along(declared, specialized))
+        }
+        (TyKind::OutProjection(declared), TyKind::OutProjection(specialized)) => {
+            Ty::out_projection(along(declared, specialized))
+        }
+        (TyKind::Obj(declared_name, declared_arguments), TyKind::Obj(name, arguments))
+            if declared_name == name
+                && !arguments.is_empty()
+                && declared_arguments.len() == arguments.len() =>
+        {
+            Ty::obj_args_name(
+                name,
+                &declared_arguments
+                    .iter()
+                    .zip(arguments.iter())
+                    .map(|(declared, specialized)| along(*declared, *specialized))
+                    .collect::<Vec<_>>(),
+            )
+        }
+        (TyKind::Fun(declared), TyKind::Fun(signature))
+            if declared.params.len() == signature.params.len() =>
+        {
+            Ty::fun_with_shape(
+                declared
+                    .params
+                    .iter()
+                    .zip(signature.params.iter())
+                    .map(|(declared, specialized)| along(*declared, *specialized))
+                    .collect(),
+                along(declared.ret, signature.ret),
+                signature.context_count,
+                signature.has_receiver,
+                signature.suspend,
+            )
+        }
+        _ => specialized,
     }
 }
 

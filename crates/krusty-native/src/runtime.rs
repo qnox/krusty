@@ -27,7 +27,8 @@
 //!   never sees: the layout of a built-in value and the helpers one file defines for another. It
 //!   is not exposed here, because nothing outside the runtime may include it.
 //! * `krusty_rt.c` is the object model, strings and string builders, boxing, class literals,
-//!   `lazy`, `Delegates.notNull`, pairs and ranges.
+//!   `lazy`, pairs and ranges.
+//! * `krusty_string_search.c` is the stdlib's native `String` searches, by UTF-16 unit.
 //! * `krusty_unsigned_arrays.c` is unsigned array value-class identity and its retained signed
 //!   storage, equality, content hashing and rendering.
 //! * `krusty_collections.c` is lists, and how any `Iterable` is walked; `krusty_maps.c` is maps

@@ -33,7 +33,9 @@ use super::boxes::Boxes;
 use super::builtin_instances::BuiltinInstances;
 use super::builtin_members::BuiltinMembers;
 use super::callable_references::CallableReferences;
+use super::char_sequence_appends::CharSequenceAppends;
 use super::class_tokens::{ClassTokens, TokenRuntime};
+use super::collection_arguments::CollectionArguments;
 use super::encode::{
     BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
 };
@@ -82,8 +84,12 @@ pub(super) struct Runtime {
     pub(super) identity: IdentityObjects,
     /// `kotlin.text.StringBuilder`, which the runtime lays out.
     pub(super) string_builders: StringBuilders,
+    /// `StringBuilder.append(CharSequence?)`, as the target declares it.
+    pub(super) char_sequence_appends: CharSequenceAppends,
     /// `kotlin.collections.ArrayList`, which the runtime lays out.
     pub(super) array_lists: ArrayLists,
+    /// The members the list reads a collection argument through.
+    pub(super) collection_arguments: CollectionArguments,
     /// Kotlin's `hashCode()` rules.
     pub(super) hashing: Hashing,
     pub(super) exceptions: ExceptionTransport,
@@ -164,7 +170,8 @@ impl Runtime {
             string,
             object_equals,
         );
-        let callable_references = CallableReferences::declare(module, &objects, object_equals);
+        let callable_references =
+            CallableReferences::declare(module, &objects, object_equals, references);
         let string_concat = module.declare();
         let hashing = Hashing::declare(module);
         let class_tokens = ClassTokens::declare(
@@ -199,7 +206,11 @@ impl Runtime {
             objects,
             identity,
             string_builders,
+            char_sequence_appends: CharSequenceAppends::new(
+                host.target() == crate::target::WasmTarget::Wasi,
+            ),
             array_lists,
+            collection_arguments: CollectionArguments::default(),
             hashing,
             class_tokens,
             exceptions,
@@ -269,7 +280,7 @@ impl Runtime {
             .struct_new(self.string);
     }
 
-    fn ascii_constant(&mut self, module: &mut Module, code: &mut Code, text: &str) {
+    pub(crate) fn ascii_constant(&mut self, module: &mut Module, code: &mut Code, text: &str) {
         let units = text.encode_utf16().collect::<Vec<_>>();
         self.string_constant(module, code, &units);
     }

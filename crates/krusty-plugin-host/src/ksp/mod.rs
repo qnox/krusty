@@ -12,7 +12,7 @@ mod protocol;
 use std::io::Write;
 use std::path::PathBuf;
 
-use krusty_plugin_ir::{KspClasspath, KspRound};
+use krusty_plugin_api::ksp::{KspClasspath, KspRound};
 
 use crate::host::HostError;
 use crate::process::{HostProcess, EXIT_GRACE};

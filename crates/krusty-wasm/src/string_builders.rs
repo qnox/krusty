@@ -11,9 +11,12 @@
 //! Kotlin's `StringBuilder` inherits both from `Any`. Its `toString` slot copies the units in use
 //! into a new string.
 
+use krusty::types::TypeName;
+
 use super::encode::{BlockType, Code, CompositeType, FieldType, Function, HeapType, Module};
 use super::encode::{StorageType, SubType, ValType};
 use super::identity::IdentityObjects;
+use super::interface_dispatch::ClassRef;
 use super::objects::{immutable, ObjectRoot, REFERENCE};
 use super::runtime::{ADD32, GE_S32, GT_S32, LT_S32, MUL32, OR32, SUB32};
 
@@ -24,16 +27,34 @@ const LENGTH_FIELD: u32 = CHARS_FIELD + 1;
 /// The capacity of a builder that asked for less, and the least a full one grows by.
 const MINIMUM_CAPACITY: i32 = 16;
 
+/// The class the runtime lays out.
+/// `kotlin.text.StringBuilder`.
+pub(super) fn class() -> TypeName {
+    krusty::types::wk::string_builder()
+}
+
+/// Whether `classifier` is `kotlin.text.StringBuilder`, which the runtime lays out.
+pub(super) fn lays_out(classifier: TypeName) -> bool {
+    classifier == class()
+}
+
 /// The runtime's `StringBuilder` type and the functions realizing its members.
 pub(super) struct StringBuilders {
     table: u32,
+    /// The builder's class, which implements the library members `StringBuilder` overrides
+    /// (`super::builtin_members`).
+    pub(super) class: ClassRef,
     /// `(capacity: Int) -> StringBuilder`.
     pub(super) new: u32,
     /// `(builder, value: String?) -> builder`: appends `value`, or `"null"`.
     pub(super) append_string: u32,
     /// `(builder, value: String?, start: Int, end: Int) -> builder`: appends that range of
     /// `value`, or of `"null"`, trapping on a range outside it.
-    append_range: u32,
+    pub(super) append_range: u32,
+    /// `(builder, value: String?, start: Int, end: Int) -> builder`: appends that range of
+    /// `value`, or of `"null"`, as JavaScript's `substring` does, which clamps both endpoints to
+    /// the string's length rather than trapping.
+    pub(super) append_clamped_range: u32,
     /// `(builder, value: Char) -> builder`.
     pub(super) append_char: u32,
     /// `(builder) -> String`: the units in use, copied.
@@ -42,6 +63,20 @@ pub(super) struct StringBuilders {
     pub(super) length: u32,
     /// `(builder, index: Int) -> Char`, trapping outside the units in use.
     pub(super) get: u32,
+    /// `(builder, count: Int) -> at: Int`: counts `count` more units in use, growing the storage
+    /// as needed, and answers the offset of the first. The units are unset until stored.
+    pub(super) reserve: u32,
+    /// `(builder, count: Int) -> length: Int`: grows the storage to hold `count` more units than
+    /// are in use, without counting them in use, and answers the count in use.
+    pub(super) ensure_capacity: u32,
+    /// `(builder) -> at: Int`: counts one more unit in use, whose storage `ensure_capacity` has
+    /// prepared, and answers its offset.
+    pub(super) claim_unit: u32,
+    /// `(builder) -> units`: the builder's current backing array, which a later growth replaces.
+    pub(super) units: u32,
+    /// `(units, at: Int, value: Char)`: stores one unit in a backing array `units` answered, at an
+    /// offset counted in use.
+    pub(super) set_unit: u32,
 }
 
 impl StringBuilders {
@@ -65,7 +100,7 @@ impl StringBuilders {
             open: false,
         });
         let to_string = module.declare();
-        let (_, itable) = objects
+        let (class, itable) = objects
             .interfaces
             .class(module, objects.itable, vec![object]);
         let mut init = Code::default();
@@ -81,13 +116,20 @@ impl StringBuilders {
         let table = module.constant_global(ValType::reference(objects.any_table), init);
         let builders = Self {
             table,
+            class,
             new: module.declare(),
             append_string: module.declare(),
             append_range: module.declare(),
+            append_clamped_range: module.declare(),
             append_char: module.declare(),
             to_string,
             length: module.declare(),
             get: module.declare(),
+            reserve: module.declare(),
+            ensure_capacity: module.declare(),
+            claim_unit: module.declare(),
+            units: module.declare(),
+            set_unit: module.declare(),
         };
         let layout = Layout {
             object,
@@ -95,8 +137,13 @@ impl StringBuilders {
             string,
         };
         builders.define_new(module, identity, layout);
-        let reserve = layout.define_reserve(module);
-        builders.define_append_range(module, layout, reserve);
+        let reserve = builders.reserve;
+        layout.define_reserve(module, reserve, true);
+        layout.define_reserve(module, builders.ensure_capacity, false);
+        builders.define_claim_unit(module, layout);
+        builders.define_set_unit(module, layout);
+        builders.define_append_range(module, layout, reserve, builders.append_range, false);
+        builders.define_append_range(module, layout, reserve, builders.append_clamped_range, true);
         builders.define_append_string(module, layout);
         builders.define_append_char(module, layout, reserve);
         builders.define_to_string(module, layout, objects);
@@ -131,7 +178,14 @@ impl StringBuilders {
         );
     }
 
-    fn define_append_range(&self, module: &mut Module, layout: Layout, reserve: u32) {
+    fn define_append_range(
+        &self,
+        module: &mut Module,
+        layout: Layout,
+        reserve: u32,
+        function: u32,
+        clamp: bool,
+    ) {
         let string = ValType::nullable(layout.string);
         let ty = module.func_type(
             vec![REFERENCE, string, ValType::I32, ValType::I32],
@@ -141,22 +195,37 @@ impl StringBuilders {
         let mut code = Code::default();
         layout.units_or_null(&mut code, value);
         code.local_set(source);
-        // `0 <= start <= end <= value.length`, as `append(CharSequence?, Int, Int)` requires.
-        code.local_get(start)
-            .i32_const(0)
-            .op(LT_S32)
-            .local_get(start)
-            .local_get(end)
-            .op(GT_S32)
-            .op(OR32)
-            .local_get(end)
-            .local_get(source)
-            .array_len()
-            .op(GT_S32)
-            .op(OR32)
-            .if_(BlockType::Empty)
-            .unreachable()
-            .end();
+        if clamp {
+            // `substring(start, end)` clamps both endpoints into `0..value.length`.
+            for endpoint in [end, start] {
+                code.local_get(source)
+                    .array_len()
+                    .local_get(endpoint)
+                    .local_get(endpoint)
+                    .local_get(source)
+                    .array_len()
+                    .op(GT_S32)
+                    .op(SELECT)
+                    .local_set(endpoint);
+            }
+        } else {
+            // `0 <= start <= end <= value.length`, as `append(CharSequence?, Int, Int)` requires.
+            code.local_get(start)
+                .i32_const(0)
+                .op(LT_S32)
+                .local_get(start)
+                .local_get(end)
+                .op(GT_S32)
+                .op(OR32)
+                .local_get(end)
+                .local_get(source)
+                .array_len()
+                .op(GT_S32)
+                .op(OR32)
+                .if_(BlockType::Empty)
+                .unreachable()
+                .end();
+        }
         code.local_get(builder)
             .local_get(end)
             .local_get(start)
@@ -174,7 +243,7 @@ impl StringBuilders {
             .array_copy(layout.chars, layout.chars);
         code.local_get(builder);
         let locals = vec![ValType::reference(layout.chars), ValType::I32];
-        module.define(self.append_range, Function { ty, locals, code });
+        module.define(function, Function { ty, locals, code });
     }
 
     fn define_append_string(&self, module: &mut Module, layout: Layout) {
@@ -213,6 +282,58 @@ impl StringBuilders {
             Function {
                 ty,
                 locals: vec![ValType::I32],
+                code,
+            },
+        );
+    }
+
+    fn define_claim_unit(&self, module: &mut Module, layout: Layout) {
+        let ty = module.func_type(vec![REFERENCE], vec![ValType::I32]);
+        let (builder, at) = (0, 1);
+        let mut code = Code::default();
+        layout.length(&mut code, builder);
+        code.local_set(at)
+            .local_get(builder)
+            .ref_cast(false, HeapType::Concrete(layout.object))
+            .local_get(at)
+            .i32_const(1)
+            .op(ADD32)
+            .struct_set(layout.object, LENGTH_FIELD)
+            .local_get(at);
+        module.define(
+            self.claim_unit,
+            Function {
+                ty,
+                locals: vec![ValType::I32],
+                code,
+            },
+        );
+    }
+
+    fn define_set_unit(&self, module: &mut Module, layout: Layout) {
+        let units = ValType::reference(layout.chars);
+        let ty = module.func_type(vec![REFERENCE], vec![units]);
+        let mut code = Code::default();
+        layout.storage(&mut code, 0);
+        module.define(
+            self.units,
+            Function {
+                ty,
+                locals: Vec::new(),
+                code,
+            },
+        );
+        let ty = module.func_type(vec![units, ValType::I32, ValType::I32], vec![]);
+        let mut code = Code::default();
+        code.local_get(0)
+            .local_get(1)
+            .local_get(2)
+            .array_set(layout.chars);
+        module.define(
+            self.set_unit,
+            Function {
+                ty,
+                locals: Vec::new(),
                 code,
             },
         );
@@ -325,7 +446,7 @@ impl Layout {
     /// `(builder, count: Int) -> Int`: make room for `count` more units, grow the count in use by
     /// it, and answer the index the first of them goes to. Full storage grows to twice its
     /// capacity plus the minimum, or to what is needed when that is more.
-    fn define_reserve(self, module: &mut Module) -> u32 {
+    fn define_reserve(self, module: &mut Module, function: u32, count_in_use: bool) {
         let ty = module.func_type(vec![REFERENCE, ValType::I32], vec![ValType::I32]);
         let (builder, count, at, needed, storage, grown, grown_storage) = (0, 1, 2, 3, 4, 5, 6);
         let mut code = Code::default();
@@ -365,16 +486,16 @@ impl Layout {
             .local_get(grown_storage)
             .struct_set(self.object, CHARS_FIELD);
         code.end();
-        code.local_get(builder)
-            .ref_cast(false, HeapType::Concrete(self.object))
-            .local_get(needed)
-            .struct_set(self.object, LENGTH_FIELD);
+        if count_in_use {
+            code.local_get(builder)
+                .ref_cast(false, HeapType::Concrete(self.object))
+                .local_get(needed)
+                .struct_set(self.object, LENGTH_FIELD);
+        }
         code.local_get(at);
         let units = ValType::reference(self.chars);
         let locals = vec![ValType::I32, ValType::I32, units, ValType::I32, units];
-        let function = module.declare();
         module.define(function, Function { ty, locals, code });
-        function
     }
 }
 

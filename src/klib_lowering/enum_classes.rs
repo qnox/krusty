@@ -6,8 +6,10 @@
 //! `kotlin.Enum`'s and run its instance initializer, and each entry must call that constructor
 //! with no arguments and declare no body. The compiler-generated members (`values`, `valueOf` and
 //! `entries`) are recognized by their synthetic bodies; the common realization provides them.
-//! Any other member, constructor parameter or entry body is a capability this does not model yet
-//! and declines the read.
+//! Members the class declares for itself, without overriding another declaration, are linked as
+//! members of the materialized class when a body calls them. A stored property, an override, a
+//! constructor parameter or an entry body is a capability this does not model yet and declines
+//! the read.
 
 use super::decline::KlibBodyDeclineReason;
 use super::klib_types::{classifier_declaration, classifier_name, semantic_type};
@@ -68,7 +70,56 @@ pub(super) fn authenticate_entry(
     Ok((class, name))
 }
 
-fn authenticate(
+/// Whether a support unit materializes the enum class `class` a member of it is called on: every
+/// instance is one of its constants, which the unit builds when the class's read authenticates.
+pub(crate) fn materializes(
+    bodies: &KlibDeclarationBodies,
+    class: &crate::libraries::KlibBodyClassContract,
+) -> bool {
+    let Ok(Some((arena, declared))) = bodies.class_header(&class.module, &class.signature) else {
+        return false;
+    };
+    authenticate(
+        bodies,
+        &KlibEnumEntryClass {
+            module: &class.module,
+            arena,
+            class: declared,
+        },
+    )
+    .is_ok()
+}
+
+/// One of the two operations an enum class declares on itself: `values()` and `valueOf(name)`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum EnumStaticMember {
+    Values,
+    ValueOf,
+}
+
+/// The enum class whose compiler-generated `values()` or `valueOf` is exactly `identity`, and which
+/// of the two it is. `None` for any other callable.
+pub(super) fn authenticate_static_member(
+    bodies: &KlibDeclarationBodies,
+    identity: &KlibDependencyCallable,
+) -> Result<Option<(EnumClass, EnumStaticMember)>, KlibBodyDeclineReason> {
+    let Some((declared, body)) = bodies.enum_static_member(identity) else {
+        return Ok(None);
+    };
+    let member = match body {
+        KlibIrSyntheticBody::EnumValues => EnumStaticMember::Values,
+        KlibIrSyntheticBody::EnumValueOf => EnumStaticMember::ValueOf,
+        KlibIrSyntheticBody::EnumEntries => {
+            return Err(mismatch(
+                "an enum's `entries` getter is called as a function",
+            ))
+        }
+    };
+    Ok(Some((authenticate(bodies, &declared)?, member)))
+}
+
+/// The enum class `declared`, which a body reads a constant, a generated operation or a member of.
+pub(super) fn authenticate(
     bodies: &KlibDeclarationBodies,
     declared: &KlibEnumEntryClass<'_>,
 ) -> Result<EnumClass, KlibBodyDeclineReason> {
@@ -121,23 +172,27 @@ fn authenticate(
                 if function.constructor {
                     constructors.push(function);
                 } else if !matches!(
-                    (function.name.as_str(), special_member_body(function)),
+                    (function.name.as_str(), function.enum_special_member()),
                     ("values", Some(KlibIrSyntheticBody::EnumValues))
                         | ("valueOf", Some(KlibIrSyntheticBody::EnumValueOf))
                 ) {
-                    return Err(unsupported("an enum class with member functions"));
+                    own_member(function)?;
                 }
             }
             KlibIrMember::Property(property) => {
                 let getter = property.getter.map(|getter| arena.function(getter));
-                if property.backing_field.is_some()
-                    || property.setter.is_some()
-                    || property.name != "entries"
-                    || !getter.is_some_and(|getter| {
-                        special_member_body(getter) == Some(KlibIrSyntheticBody::EnumEntries)
-                    })
-                {
-                    return Err(unsupported("an enum class with member properties"));
+                let generated_entries = property.name == "entries"
+                    && property.setter.is_none()
+                    && getter.is_some_and(|getter| {
+                        getter.enum_special_member() == Some(KlibIrSyntheticBody::EnumEntries)
+                    });
+                if !generated_entries {
+                    if property.backing_field.is_some() {
+                        return Err(unsupported("an enum class with stored member properties"));
+                    }
+                    for accessor in [property.getter, property.setter].into_iter().flatten() {
+                        own_member(arena.function(accessor))?;
+                    }
                 }
             }
             KlibIrMember::EnumEntry(entry) => entries.push(entry),
@@ -195,16 +250,18 @@ fn authenticate(
     })
 }
 
-/// The synthetic body of a compiler-generated enum member, which the common realization provides.
-fn special_member_body(function: &KlibIrFunction) -> Option<KlibIrSyntheticBody> {
-    match &function.body {
-        Some(KlibIrBody::Synthetic(body))
-            if function.base.origin == "ENUM_CLASS_SPECIAL_MEMBER" =>
-        {
-            Some(*body)
-        }
-        _ => None,
+/// A member the enum class declares for itself: a call of it links its body as a member of the
+/// materialized class, which every constant is an instance of. A member overriding another
+/// declaration is reached through dispatch, which the materialized class does not install, and
+/// an abstract one needs entry bodies, which the read already declines.
+fn own_member(function: &KlibIrFunction) -> Result<(), KlibBodyDeclineReason> {
+    if !function.overridden.is_empty() {
+        return Err(unsupported("an enum class overriding an inherited member"));
     }
+    if function.body.is_none() {
+        return Err(unsupported("an enum class with abstract members"));
+    }
+    Ok(())
 }
 
 /// The constructor only delegates to `kotlin.Enum`'s and then runs the instance initializer, so

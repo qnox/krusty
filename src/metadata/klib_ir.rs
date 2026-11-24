@@ -20,13 +20,14 @@ use super::id_signature::{
 
 #[cfg(test)]
 mod arena_fixtures;
+mod class_index;
 mod field_storage;
 mod symbols;
 pub mod tree;
 mod tree_decoding;
 mod wire;
 
-pub use symbols::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
+pub use symbols::{KlibFileLocalOrigin, KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 pub use tree_decoding::{
     read_declaration_trees, read_declaration_trees_where, read_inlinable_declaration_trees,
     read_inlinable_declaration_trees_where, KlibIrDeclarationTree, KlibIrModuleTrees,
@@ -1413,3 +1414,6 @@ mod tests {
         assert!(decoded.defaults().is_empty());
     }
 }
+
+/// Shared interpretation of serialized declaration types, before any body admission or emission.
+pub(crate) mod semantic_types;

@@ -56,9 +56,13 @@ mod kotlin_native_multimodule_support;
 mod kotlinc_argument_conformance;
 #[path = "krusty_case_workers.rs"]
 mod krusty_case_workers;
+#[path = "plugin_box_corpus.rs"]
+mod plugin_box_corpus;
 #[path = "common/reference_targets/invocation.rs"]
 mod reference_invocation_support;
 #[path = "common/reference_recording.rs"]
 mod reference_recording_support;
+#[path = "common/reference_targets/wasm_program.rs"]
+mod reference_wasm_program;
 #[path = "serialization_conformance.rs"]
 mod serialization_conformance;

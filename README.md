@@ -65,6 +65,11 @@ krusty -help                                 # all options
 The reference `kotlinc` version krusty targets defaults to the newest supported release; select
 another with `-Xkotlin-reference-version=<version>`.
 
+krusty reproduces that release's defects too, so its output is kotlinc's. With
+`-Xfix-kotlinc-defects` it fixes them instead: a program the release wrongly rejects or compiles
+to the wrong behavior compiles as the release that fixed the defect does, or as the language rules
+say when no release has, and the output then differs from kotlinc's wherever a defect applies.
+
 ### Gradle
 
 Download `krusty-gradle-plugin-<version>.zip` from the
@@ -115,7 +120,9 @@ signature, `krusty-<version>-SHA256SUMS.asc`, made by a subkey that the maintain
 signing, as published in `krusty-<version>-signing-key.asc`; a missing or invalid signature fails
 the build. Every release file also carries GitHub build provenance
 (`gh attestation verify <file> -R qnox/krusty`). `-Pkrusty.releases=<url>` reads releases from a
-mirror with the same layout instead. To run another compiler binary, use either form:
+mirror with the same layout instead. `-Pkrusty.fixKotlincDefects=true` (or `krusty.fixKotlincDefects=true` in
+`gradle.properties`) fixes kotlinc's defects in every compile krusty runs; a compile left to kotlinc
+keeps them, and the plugin says so. To run another compiler binary, use either form:
 
 ```sh
 ./gradlew -Pkrusty.binary=/absolute/path/to/krusty krustyCompile
@@ -185,7 +192,7 @@ changing its plugin configuration.
 | all-open (`plugin.allopen`, `plugin.spring`, `plugin.jpa`) | Supported, with the `spring` and `jpa` presets. |
 | no-arg (`plugin.noarg`, `plugin.jpa`) | Supported, with the `jpa` preset; `invokeInitializers=true` is not implemented. |
 | sam-with-receiver | Supported. |
-| KSP (KSP2) | Supported through a build system: under Gradle, KSP's own `kspKotlin` task runs the processors and krusty compiles what they generate (KSP's Gradle plugin needs Gradle 8 or newer); under the Kotlin Toolchain, processors from Maven artifacts run before the module compiles, but only their generated classes and resources are picked up; a processor that generates Kotlin or Java sources fails the module for now. The plain command line has no codegen host and rejects the KSP plugin. |
+| KSP (KSP2) | Supported through a build system: under Gradle, KSP's own `kspKotlin` task runs the processors and krusty compiles what they generate (KSP's Gradle plugin needs Gradle 8 or newer); under the Kotlin Toolchain, processors from Maven artifacts run before the module compiles, and krusty compiles the Kotlin sources they generate with the module's own and picks up their generated classes and resources; a processor that generates Java sources fails the module for now. The plain command line has no codegen host and rejects the KSP plugin. |
 | kapt | Supported under Gradle: kapt's own tasks generate stubs and run the annotation processors with kotlinc, and krusty compiles the module after them. kapt's jar alone, which the Kotlin Gradle plugin passes to every compile of a kapt project, changes nothing; kapt options on the command line fail with an error. |
 | Compose, Parcelize, assignment and every other FIR/IR plugin | Not supported. The command line fails with an error. The Gradle plugin reports the unsupported plugin and leaves that compile task to kotlinc, so the build still succeeds. |
 | Kotlin scripts (`.kts`) | Not supported. |

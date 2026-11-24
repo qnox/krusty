@@ -20,6 +20,7 @@ mod elvis_blocks;
 mod enum_entries;
 mod for_loop_bindings;
 mod generic_receiver_hierarchy;
+mod inline_calls;
 mod inline_templates;
 mod object_literal_overrides;
 mod object_literals;
@@ -28,6 +29,8 @@ mod primitive_calls;
 mod range_membership_producers;
 mod returnable_blocks;
 mod safe_calls;
+mod sam_conversions;
+mod sam_dispatch;
 mod same_library_class;
 mod support;
 mod target_calls;
@@ -62,7 +65,7 @@ use crate::metadata::semantic::{KotlinFunctionTypeShape, KotlinType};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{type_name, Ty, TyKind, TypeName, Visibility};
 
-use support::checked_template_hierarchy;
+use support::checked_template_facts;
 
 /// The fact the backend handoff freezes for the one function of `package` named `name` with this
 /// receiver and these value parameters.
@@ -605,6 +608,7 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
                 arguments,
                 parameters,
                 result,
+                substitutions: _,
                 source_receiver,
             } => format!(
                 "{}.read<{dispatch:?}>({}; {}): {} on {}",
@@ -2063,7 +2067,9 @@ fn wasm_numbers_bodies_link_their_internal_wasm_op_by_exact_intrinsic_identity()
             .filter(|symbol| {
                 let facts = libraries.intrinsic_facts();
                 match &symbol.signature {
-                    KlibIrSignature::FileLocal { .. } => false,
+                    KlibIrSignature::FileLocal { .. } | KlibIrSignature::TypeParameter { .. } => {
+                        false
+                    }
                     KlibIrSignature::Public(signature) => {
                         let intrinsic = facts.get(&KlibDependencyCallable {
                             module: callable.identity().module.clone(),
@@ -2395,7 +2401,7 @@ fn member_of(package: &[&str], class: &str, name: &str) -> KlibPublicIdSignature
 
 #[test]
 fn only_a_declared_function_invocation_has_invocation_semantics() {
-    use super::klib_types::function_invocation_arity;
+    use super::klib_types::{function_invocation_arity, suspend_function_invocation_arity};
     assert_eq!(
         function_invocation_arity(&member_of(&["kotlin"], "Function1", "invoke")),
         Some(1)
@@ -2418,6 +2424,14 @@ fn only_a_declared_function_invocation_has_invocation_semantics() {
             "invoke"
         )),
         None
+    );
+    assert_eq!(
+        suspend_function_invocation_arity(&member_of(
+            &["kotlin", "coroutines"],
+            "SuspendFunction1",
+            "invoke"
+        )),
+        Some(1)
     );
     assert_eq!(
         function_invocation_arity(&member_of(&["kotlin", "reflect"], "KFunction1", "invoke")),

@@ -838,6 +838,9 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     )
                 }
             }
+            Callee::ValueClassAdapter { .. } => {
+                unreachable!("a value-class adapter is built and realized by the JVM backend")
+            }
             Callee::Intrinsic { operation, .. } => match operation {
                 crate::ir::IrIntrinsic::Assert { mode } => {
                     if *mode == crate::types::AssertionMode::AlwaysDisabled {
@@ -861,6 +864,9 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                         "{}.ordinal",
                         emit_expr(ir, dispatch_receiver.unwrap(), inst)
                     )
+                }
+                crate::ir::IrIntrinsic::EnumName => {
+                    format!("{}.name", emit_expr(ir, dispatch_receiver.unwrap(), inst))
                 }
                 crate::ir::IrIntrinsic::StringGet | crate::ir::IrIntrinsic::ArrayGet => format!(
                     "{}[{}]",
@@ -891,6 +897,14 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     "String({})",
                     emit_expr(ir, dispatch_receiver.unwrap(), inst)
                 ),
+                crate::ir::IrIntrinsic::EnumValues { classifier } => {
+                    let classifier = classifier
+                        .non_null()
+                        .obj_internal()
+                        .map(|name| class_simple(&name.render()).to_string())
+                        .unwrap_or_else(|| "undefined".to_string());
+                    format!("{classifier}.values()")
+                }
                 crate::ir::IrIntrinsic::EnumEntries { classifier } => {
                     let classifier = classifier
                         .non_null()
@@ -1306,6 +1320,7 @@ mod tests {
             is_source_declared: true,
             is_compiler_generated: false,
             is_anonymous_object: false,
+            site_name: None,
             enclosure: None,
             is_inner_class: false,
             is_local_class: false,
@@ -1333,6 +1348,7 @@ mod tests {
             pre_super_param_fields: Vec::new(),
             explicit_param_stores: false,
             methods: Vec::new(),
+            installed_interface_overrides: Vec::new(),
             is_interface: false,
             is_fun_interface: false,
             is_annotation: false,

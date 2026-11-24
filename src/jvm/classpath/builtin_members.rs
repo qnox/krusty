@@ -136,7 +136,7 @@ impl Classpath {
                             annotations: &m.annotations,
                         },
                     );
-                    crate::libraries::LibraryMember {
+                    let mut member = crate::libraries::LibraryMember {
                         deprecation: None,
                         external_identity: None,
                         declaration_owner: None,
@@ -202,6 +202,7 @@ impl Classpath {
                         default_realization: None,
                         nonvirtual_realization: None,
                         declared_ret: builtin_declared_return(m.ret_nullable, m.generic_sig.ret),
+                        result_alias: None,
                         overridden_results: Box::new([]),
                         enhanced_result: crate::libraries::EnhancedResult::NONE,
                         implicit_classifier_callable: None,
@@ -210,7 +211,9 @@ impl Classpath {
                         plugin_expression: None,
                         stable_declaration: None,
                         source_member: None,
-                    }
+                    };
+                    super::atomic_exchange::realize(internal_id, m.is_property, &mut member);
+                    member
                 })
             })
             .into_iter()

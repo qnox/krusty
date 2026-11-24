@@ -672,6 +672,7 @@ interface View<T> {
 }
 private class Hidden(private val value: String) : View<CharSequence> {
     override fun get(): String = value
+    override fun toString(): String = \"value=$value\"
 }
 fun make(value: String): View<CharSequence> = Hidden(value)
 ";
@@ -956,6 +957,191 @@ fn applied_interface_signature_substitutes_the_supertype() {
     assert_ne!(edge.declared_result, edge.applied_result);
     assert!(edge.applied_parameters.is_empty());
     assert!(edge.declared_parameters.is_empty());
+    let any_to_string = unit
+        .ir()
+        .function_overrides
+        .values()
+        .flatten()
+        .find(|edge| edge.overridden_owner == crate::types::wk::any() && edge.name == "toString")
+        .expect("Hidden publishes its Any.toString override");
+    let any = libraries
+        .classifier(crate::types::wk::any())
+        .expect("kotlin.Any");
+    let any_members = any
+        .declared_callables
+        .get("toString")
+        .expect("kotlin.Any.toString");
+    let [any_declaration] = any_members.functions() else {
+        panic!("one kotlin.Any.toString declaration")
+    };
+    let any_to_string_id = any_declaration
+        .callable
+        .external_identity
+        .expect("kotlin.Any.toString has a provider identity");
+    assert_eq!(
+        any_to_string.overridden,
+        crate::fir::ResolvedFunctionOverrideTarget::External(any_to_string_id)
+    );
+    assert!(!any_to_string.overridden_is_interface);
+    assert!(any_to_string.implementation_function.is_some());
+    assert_eq!(
+        any_to_string.overridden_semantic_role,
+        Some(crate::types::SemanticCallRole::KotlinAnyToString)
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+const INHERITED_INTERFACE: &str = "\
+package fixture
+interface Root<T> {
+    fun get(): T
+}
+interface View<T> : Root<T> {
+    override fun get(): T
+}
+private class Hidden(private val value: String) : View<CharSequence> {
+    override fun get(): String = value
+}
+fun make(value: String): View<CharSequence> = Hidden(value)
+";
+
+#[test]
+fn a_file_private_class_is_named_and_overrides_the_interfaces_above_its_written_ones() {
+    let Some((directory, libraries)) = produce_library("inherited-interface", INHERITED_INTERFACE)
+    else {
+        return;
+    };
+    let view_get = declared_member(&libraries, "View", "get");
+    let root_get = declared_member(&libraries, "Root", "get");
+    let mut unit = DependencyBodyUnit::default();
+    lower_fixture(
+        &mut unit,
+        &libraries,
+        "make",
+        &Default::default(),
+        &libraries,
+    );
+    validated(unit.ir());
+    let ir = unit.ir();
+    for (owner, id) in [("fixture/View", view_get.id), ("fixture/Root", root_get.id)] {
+        let edge = override_edge(ir, id);
+        assert!(edge.overridden_is_interface, "{owner}");
+        assert_eq!(edge.overridden_owner.render(), owner);
+        assert_eq!(
+            type_name_of(edge.applied_result),
+            "kotlin/CharSequence",
+            "{owner}"
+        );
+        assert_eq!(
+            type_name_of(edge.implementation_result),
+            "kotlin/String",
+            "{owner}"
+        );
+    }
+    let [class] = ir
+        .classes
+        .iter()
+        .enumerate()
+        .filter(|(_, class)| class.fq_name.render().contains("klib-local"))
+        .map(|(id, _)| u32::try_from(id).unwrap())
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("one materialized private class")
+    };
+    assert!(ir.classes[class as usize].is_source_declared);
+    assert_eq!(
+        ir.local_class_name_provenance.get(&class),
+        Some(&crate::ir::IrLocalClassNameProvenance {
+            source: crate::ir::IrLocalClassNameRoot::Dependency {
+                package: crate::types::type_name("fixture"),
+            },
+            lexical_owner: None,
+            segments: Box::new(["Hidden".to_owned()]),
+            ordinal: None,
+            parents: Box::new([]),
+        })
+    );
+    let names = crate::backend::class_names::source_class_names(ir, class)
+        .expect("the private class is named");
+    assert_eq!(
+        (names.qualified.as_str(), names.simple.as_str()),
+        ("fixture.Hidden", "Hidden")
+    );
+    // Native's and Wasm's runtime reflection read the same declared name.
+    let reflection = crate::backend::class_names::declared_class(ir, class);
+    assert_eq!(
+        (
+            reflection.package.as_str(),
+            reflection.simple.as_deref(),
+            reflection.qualified.as_deref()
+        ),
+        ("fixture", Some("Hidden"), Some("fixture.Hidden"))
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+const ERASED_INHERITED_INTERFACE: &str = "\
+package fixture
+interface Root<T> { fun get(): T }
+interface Left<T> : Root<T>
+interface Right<T> : Root<T>
+interface Leaf<T> : Left<T>, Right<T>
+private class Hidden(private val value: String) : Leaf<CharSequence> {
+    override fun get(): String = value
+}
+interface Unused
+private class Dormant : Unused
+fun make(value: String): Any = Hidden(value)
+";
+
+#[test]
+fn an_erased_factory_freezes_only_the_private_classes_its_body_constructs() {
+    let Some((directory, libraries)) =
+        produce_library("erased-inherited-interface", ERASED_INHERITED_INTERFACE)
+    else {
+        return;
+    };
+    let symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
+        "make",
+    );
+    let [function] = symbols.callables.functions() else {
+        panic!("one erased-return factory")
+    };
+    let selected = libraries
+        .external_callable(function.callable.external_identity.unwrap())
+        .unwrap();
+    let callable = selected.klib_body_callable().unwrap();
+    assert_eq!(callable.ret(), Ty::obj("kotlin/Any"));
+    let roots =
+        crate::klib_lowering::emitted_body(libraries.declaration_bodies(), callable.identity())
+            .hierarchy_roots;
+    assert!(roots.contains(&crate::types::type_name("fixture/Leaf")));
+    assert!(!roots.contains(&crate::types::type_name("fixture/Unused")));
+    // The declaring header is a hierarchy root, not a new public callable or source candidate.
+    assert!(libraries
+        .classifier(crate::types::type_name("fixture/Hidden"))
+        .is_none());
+    let mut unit = DependencyBodyUnit::default();
+    lower_fixture(
+        &mut unit,
+        &libraries,
+        "make",
+        &Default::default(),
+        &libraries,
+    );
+    validated(unit.ir());
+    let root = declared_member(&libraries, "Root", "get");
+    let edge = override_edge(unit.ir(), root.id);
+    assert!(edge.overridden_is_interface);
+    assert_eq!(edge.overridden_owner.render(), "fixture/Root");
+    assert!(edge.declared_parameters.is_empty());
+    assert!(matches!(
+        edge.declared_result.kind(),
+        crate::types::TyKind::TyParam(..)
+    ));
+    assert_eq!(type_name_of(edge.applied_result), "kotlin/CharSequence");
+    assert_eq!(type_name_of(edge.implementation_result), "kotlin/String");
     let _ = std::fs::remove_dir_all(&directory);
 }
 
@@ -1103,7 +1289,17 @@ fn lower_fixture(
         .external_callable(function.callable.external_identity.unwrap())
         .unwrap();
     let callable = selected.klib_body_callable().unwrap();
-    let callees = super::super::KlibCalleeFacts::new([callable]);
+    // The checker freezes the selected body graph, the class hierarchy above each class included,
+    // before lowering reads it.
+    let checked = crate::resolve::for_checked_klib_bodies(
+        libraries,
+        libraries.declaration_bodies(),
+        [callable],
+        &[],
+    )
+    .unwrap_or_else(|identity| panic!("{name}: no checked facts for {identity:?}"));
+    let callees =
+        super::super::KlibCalleeFacts::new([callable]).with_checked_dependency_facts(&checked);
     unit.lower_function_with_declarations(
         callable,
         libraries.declaration_bodies(),
@@ -1175,8 +1371,7 @@ fn a_constructed_class_of_its_own_tree_contributes_its_member_callees() {
     let make = demo.callable("make").identity().clone();
     let helper = demo.callable("helper").identity().clone();
     assert_eq!(
-        demo.bodies
-            .emitted_body_callables(&make, crate::klib_lowering::EMITTED_CALL_FORMS),
+        crate::klib_lowering::emitted_body(&demo.bodies, &make).callables,
         vec![helper]
     );
 }
@@ -1208,9 +1403,7 @@ fn a_colliding_file_local_symbol_of_another_component_contributes_nothing() {
     let ordinary = demo_with(&shapes, vec![helper_calling_class(helper)], build);
     let make = ordinary.callable("make").identity().clone();
     assert_eq!(
-        ordinary
-            .bodies
-            .emitted_body_callables(&make, crate::klib_lowering::EMITTED_CALL_FORMS),
+        crate::klib_lowering::emitted_body(&ordinary.bodies, &make).callables,
         vec![ordinary.callable("helper").identity().clone()]
     );
     // The other component serializes the same constructing body but no class at those
@@ -1219,7 +1412,7 @@ fn a_colliding_file_local_symbol_of_another_component_contributes_nothing() {
     let prepared = KlibDeclarationBodies::from_libraries(vec![("demo".to_owned(), prepared)])
         .expect("one library");
     assert_eq!(
-        prepared.emitted_body_callables(&make, crate::klib_lowering::EMITTED_CALL_FORMS),
+        crate::klib_lowering::emitted_body(&prepared, &make).callables,
         Vec::new()
     );
 }
@@ -1421,9 +1614,7 @@ fn reached_constructor_class_facts_keep_field_and_init_edges_separate_from_body_
         module: "demo".into(),
         declaration: crate::libraries::KlibDeclarationSignature::Public(constructor_key),
     };
-    let before = demo
-        .bodies
-        .emitted_body_callables(&constructor, crate::klib_lowering::EMITTED_CALL_FORMS);
+    let before = crate::klib_lowering::emitted_body(&demo.bodies, &constructor).callables;
     let facts = demo
         .bodies
         .constructor_initializer_callables(&constructor, crate::klib_lowering::EMITTED_CALL_FORMS);
@@ -1432,8 +1623,7 @@ fn reached_constructor_class_facts_keep_field_and_init_edges_separate_from_body_
         [field_key.clone(), init_key].into_iter().collect()
     );
     assert_eq!(
-        demo.bodies
-            .emitted_body_callables(&constructor, crate::klib_lowering::EMITTED_CALL_FORMS),
+        crate::klib_lowering::emitted_body(&demo.bodies, &constructor).callables,
         before
     );
     assert!(demo
@@ -1567,5 +1757,242 @@ fn a_declined_secondary_constructor_leaves_its_materialized_class_as_it_was() {
         .unwrap_or_else(|decline| panic!("again: {decline}"));
     assert_eq!(again, primary);
     assert_eq!(unit_inventory(&unit), before);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+const PROCESS_OBJECT: &str = r#"package fixture
+
+private object Counter {
+    private val count: Int = 1
+    override fun toString(): String = "Counter $count"
+}
+
+fun counter(): Any = Counter
+"#;
+
+const PER_THREAD_OBJECT: &str = r#"package fixture
+
+@kotlin.native.concurrent.ThreadLocal
+private object Counter {
+    private val count: Int = 1
+    override fun toString(): String = "Counter $count"
+}
+
+fun counter(): Any = Counter
+"#;
+
+fn lower_counter(
+    name: &str,
+    source_text: &str,
+) -> Option<(
+    DependencyBodyUnit,
+    Result<(), super::super::KlibBodyDeclineReason>,
+)> {
+    let (directory, libraries) = produce_library(name, source_text)?;
+    let symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
+        "counter",
+    );
+    let [function] = symbols.callables.functions() else {
+        panic!("one producer declaration counter")
+    };
+    let selected = libraries
+        .external_callable(function.callable.external_identity.unwrap())
+        .unwrap();
+    let callable = selected.klib_body_callable().unwrap();
+    let callees = super::super::KlibCalleeFacts::new([callable]);
+    let mut unit = DependencyBodyUnit::default();
+    let lowered = unit
+        .lower_function_with_declarations(
+            callable,
+            libraries.declaration_bodies(),
+            &callees,
+            libraries.intrinsic_facts(),
+            &ProducedExternals::default(),
+            &libraries,
+        )
+        .map(|_| ())
+        .map_err(|decline| decline.reason().clone());
+    let _ = std::fs::remove_dir_all(directory);
+    Some((unit, lowered))
+}
+
+/// A private object is installed as the one process-wide instance only when its declaration
+/// proves that storage. The same object marked per-thread needs an instance and state on every
+/// thread, which the installed class does not carry, so the body stays refused.
+#[test]
+fn official_klib_private_object_storage_is_authenticated() {
+    let Some((unit, lowered)) = lower_counter("process-object", PROCESS_OBJECT) else {
+        return;
+    };
+    assert_eq!(lowered, Ok(()));
+    validated(unit.ir());
+    let objects = unit
+        .ir()
+        .classes
+        .iter()
+        .filter(|class| class.is_object)
+        .count();
+    assert_eq!(objects, 1);
+
+    let (unit, lowered) =
+        lower_counter("per-thread-object", PER_THREAD_OBJECT).expect("the producer ran above");
+    assert_eq!(
+        lowered,
+        Err(super::super::KlibBodyDeclineReason::UnsupportedOperation(
+            "a non-public per-thread object"
+        ))
+    );
+    assert!(unit.ir().classes.iter().all(|class| !class.is_object));
+}
+
+const PRIVATE_INTERFACE: &str = r#"package fixture
+
+private interface Sink {
+    val limit: Int
+    fun accept(value: String): String
+}
+
+private interface Labeled<out V> : Iterable<V>
+
+fun feed(target: Any?, value: String): String =
+    if (target is Sink) target.accept(value) else value
+
+fun <V> labeled(items: Iterable<V>): Boolean = items is Labeled<V>
+"#;
+
+fn lower_fixture_function(
+    name: &str,
+    source_text: &str,
+    function_name: &str,
+) -> Option<(
+    DependencyBodyUnit,
+    Result<(), super::super::KlibBodyDeclineReason>,
+)> {
+    let (directory, libraries) = produce_library(name, source_text)?;
+    let symbols = libraries.symbols(
+        crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("fixture")),
+        function_name,
+    );
+    let [function] = symbols.callables.functions() else {
+        panic!("one producer declaration {function_name}")
+    };
+    let selected = libraries
+        .external_callable(function.callable.external_identity.unwrap())
+        .unwrap();
+    let callable = selected.klib_body_callable().unwrap();
+    let callees = super::super::KlibCalleeFacts::new([callable]);
+    let mut unit = DependencyBodyUnit::default();
+    let lowered = unit
+        .lower_function_with_declarations(
+            callable,
+            libraries.declaration_bodies(),
+            &callees,
+            libraries.intrinsic_facts(),
+            &ProducedExternals::default(),
+            &libraries,
+        )
+        .map(|_| ())
+        .map_err(|decline| decline.reason().clone());
+    let _ = std::fs::remove_dir_all(directory);
+    Some((unit, lowered))
+}
+
+/// A body may test and call a non-public interface of its own library. The interface is
+/// installed in the unit with its abstract members and no constructor, and its generic form keeps
+/// the supertype a narrowing to it relies on.
+#[test]
+fn official_klib_private_interface_is_installed_for_a_type_test_and_a_member_call() {
+    let Some((unit, lowered)) =
+        lower_fixture_function("private-interface", PRIVATE_INTERFACE, "feed")
+    else {
+        return;
+    };
+    assert_eq!(lowered, Ok(()));
+    validated(unit.ir());
+    let ir = unit.ir();
+    let interfaces = ir
+        .classes
+        .iter()
+        .filter(|class| class.is_interface)
+        .collect::<Vec<_>>();
+    assert_eq!(interfaces.len(), 1);
+    let sink = interfaces[0];
+    assert!(!sink.has_primary_ctor && sink.secondary_ctors.is_empty());
+    let mut methods = sink
+        .methods
+        .iter()
+        .map(|method| {
+            let method = &ir.functions[*method as usize];
+            assert!(
+                method.body.is_none(),
+                "an installed interface member is abstract"
+            );
+            method.name.clone()
+        })
+        .collect::<Vec<_>>();
+    methods.sort();
+    assert_eq!(methods, ["<get-limit>", "accept"]);
+
+    let Some((unit, lowered)) =
+        lower_fixture_function("private-interface-generic", PRIVATE_INTERFACE, "labeled")
+    else {
+        return;
+    };
+    assert_eq!(lowered, Ok(()));
+    validated(unit.ir());
+    let labeled = unit
+        .ir()
+        .classes
+        .iter()
+        .find(|class| class.is_interface)
+        .expect("the generic interface is installed");
+    assert_eq!(labeled.type_params.len(), 1);
+    let supertypes = labeled
+        .supertypes
+        .iter()
+        .map(|supertype| supertype.kotlin_class_internal())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        supertypes,
+        [Some(crate::types::type_name("kotlin/collections/Iterable"))],
+        "the public interface it extends"
+    );
+}
+
+mod hierarchy_publication;
+
+const PRIVATE_COMPANION: &str = "\
+package fixture
+private class Box {
+    private companion object {
+        val Shared = Box()
+    }
+    fun shared(): Box = Shared
+}
+fun make(): Any = Box().shared()
+";
+
+/// An object private to its enclosing class is linked as a class private to its enclosing class
+/// is: installed in the unit that lowers the library's bodies, its value one shared instance.
+#[test]
+fn a_body_reads_the_value_of_an_object_private_to_its_enclosing_class() {
+    let Some((directory, libraries)) = produce_library("private-companion", PRIVATE_COMPANION)
+    else {
+        return;
+    };
+    let mut unit = DependencyBodyUnit::default();
+    let externals = ProducedExternals::default();
+    lower_fixture(&mut unit, &libraries, "make", &externals, &libraries);
+    validated(unit.ir());
+    let ir = unit.ir();
+    let objects = ir.classes.iter().filter(|class| class.is_object).count();
+    assert_eq!(objects, 1, "the companion is the one installed object");
+    let values = ir
+        .exprs
+        .iter()
+        .filter(|expression| matches!(expression, IrExpr::SingletonValue { .. }))
+        .count();
+    assert_eq!(values, 1, "one read of the companion's value");
     let _ = std::fs::remove_dir_all(&directory);
 }

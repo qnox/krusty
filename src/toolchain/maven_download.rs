@@ -37,35 +37,59 @@ pub(super) struct DownloadOutcome {
 }
 
 /// Download `url` into `dest`, retrying under `policy` until `deadline`. No attempt starts after the
-/// deadline, and a running attempt is cut off at it.
+/// deadline, and a running attempt is cut off at it. When no attempt completed, the second value is
+/// why the last one failed: curl's own message, the status, server address and final URL of the
+/// refusal, or the deadline that stopped the retries.
 pub(super) fn download(
     url: &str,
     dest: &Path,
     policy: RetryPolicy,
     deadline: Instant,
-) -> DownloadOutcome {
+) -> (DownloadOutcome, Option<String>) {
     let mut attempts = 0;
+    let mut failure = None;
     while attempts < policy.max_attempts {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
+            failure.get_or_insert_with(|| "the download deadline passed".to_string());
             break;
         }
         attempts += 1;
         let max_time = policy.attempt_timeout.min(remaining);
-        let status = std::process::Command::new("curl")
-            .args(["-sfL", "--connect-timeout"])
+        let output = std::process::Command::new("curl")
+            .args(["-sSfL", "--connect-timeout"])
             .arg(seconds(policy.connect_timeout.min(max_time)))
             .arg("--max-time")
             .arg(seconds(max_time))
+            .args(["-w", "%{http_code} %{remote_ip} %{url_effective}"])
             .arg("-o")
             .arg(dest)
             .arg(url)
-            .status();
-        if status.is_ok_and(|status| status.success()) && dest.is_file() {
-            return DownloadOutcome {
-                attempts,
-                completed: true,
-            };
+            .output();
+        match output {
+            Ok(output) if output.status.success() && dest.is_file() => {
+                return (
+                    DownloadOutcome {
+                        attempts,
+                        completed: true,
+                    },
+                    None,
+                );
+            }
+            Ok(output) => {
+                let message = String::from_utf8_lossy(&output.stderr);
+                let message = message.trim();
+                let message = if message.is_empty() {
+                    format!("curl exited with {}", output.status)
+                } else {
+                    message.to_string()
+                };
+                failure = Some(match answered_by(&output.stdout) {
+                    Some(answer) => format!("{message} ({answer})"),
+                    None => message,
+                });
+            }
+            Err(error) => failure = Some(format!("curl could not start: {error}")),
         }
         let _ = std::fs::remove_file(dest);
         if attempts == policy.max_attempts || Instant::now() + policy.retry_delay >= deadline {
@@ -73,10 +97,23 @@ pub(super) fn download(
         }
         std::thread::sleep(policy.retry_delay);
     }
-    DownloadOutcome {
-        attempts,
-        completed: false,
-    }
+    (
+        DownloadOutcome {
+            attempts,
+            completed: false,
+        },
+        failure,
+    )
+}
+
+/// Who refused: the status, server address and final URL curl reports through `-w` (the address
+/// and URL after redirects are what tell a mirror or proxy from Central itself). `None` when the
+/// request never reached a server, where curl prints a zero status.
+fn answered_by(stdout: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut fields = text.trim().splitn(3, ' ');
+    let (status, address, url) = (fields.next()?, fields.next()?, fields.next()?);
+    (status != "000").then(|| format!("HTTP {status} from {address} for {url}"))
 }
 
 fn seconds(duration: Duration) -> String {
@@ -134,6 +171,11 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+
+    /// The outcome of [`super::download`], without the failure reason.
+    fn download(url: &str, dest: &Path, policy: RetryPolicy, deadline: Instant) -> DownloadOutcome {
+        super::download(url, dest, policy, deadline).0
+    }
 
     /// A local HTTP endpoint that answers each request with the next of `responses` (the last one
     /// repeats), or holds the connection open without answering when that response is `None`.
@@ -202,6 +244,31 @@ mod tests {
         );
         assert_eq!(requests.load(Ordering::SeqCst), 5);
         assert!(!dest.exists());
+    }
+
+    #[test]
+    fn a_refusal_is_reported_with_the_status_the_server_gave() {
+        let (url, _requests) = endpoint(vec![Some(SERVER_ERROR)]);
+        let dest = destination("explained");
+        let deadline = Instant::now() + Duration::from_secs(30);
+
+        let (outcome, failure) =
+            super::download(&url, &dest, policy(Duration::from_secs(5)), deadline);
+
+        assert_eq!(
+            outcome,
+            DownloadOutcome {
+                attempts: 5,
+                completed: false
+            }
+        );
+        assert_eq!(
+            failure,
+            Some(format!(
+                "curl: (22) The requested URL returned error: 500 \
+                 (HTTP 500 from 127.0.0.1 for {url})"
+            ))
+        );
     }
 
     #[test]

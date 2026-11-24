@@ -97,8 +97,12 @@ pub struct FirSamConversion {
     /// is the selected interface method: a non-suspend value adapted to a suspend method keeps its
     /// own `FunctionN`.
     pub source_suspend: bool,
+    /// The selected declaration requires the object-method dispatch path, not an ordinary slot.
+    pub requires_object_dispatch: bool,
     /// The distinct own results of the declarations the selected method overrides, unspecialized.
     pub overridden_results: Box<[ResolvedTy]>,
+    pub dispatch_methods: Box<[FirSamMethodFrame]>,
+    pub default_methods: Box<[FirSamMethodFrame]>,
     /// A nullable function value converts conditionally: `null` remains `null`; only a non-null
     /// function object is wrapped as the selected SAM classifier.
     pub nullable: bool,
@@ -108,6 +112,15 @@ pub struct FirSamConversion {
     pub parameter_identities: Box<[super::ResolvedParameterIdentity]>,
     /// The interface's own type parameters in declaration order, which the declared shape names.
     pub type_parameters: Box<[FirSamTypeParameter]>,
+}
+
+/// A declaration implemented by the conversion, or a default it inherits. Unknown identities
+/// remain explicit; no lowering pass may reconstruct one from a method spelling.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirSamMethodFrame {
+    pub method: Option<FirSamMethod>,
+    pub parameters: Box<[ResolvedTy]>,
+    pub result: ResolvedTy,
 }
 
 /// One type parameter a functional interface declares, with every declared upper bound.
@@ -263,6 +276,11 @@ pub enum FirIntrinsic {
     PrimitiveArrayNew {
         element: ResolvedTy,
     },
+    /// `enumValues<T>()` of a reified type parameter, inside the inline function that declares it.
+    /// Inline specialization names the enum; until then `classifier` is that parameter.
+    EnumValues {
+        classifier: ResolvedTy,
+    },
 }
 
 /// Language-defined callable contributed by a classifier. Its identity is the classifier plus this
@@ -361,6 +379,10 @@ pub enum FirCallTarget {
         /// are parallel to the call's parameters for a source declaration, whose `descriptor` the
         /// target derives from them; a provider-described declaration keeps its own ABI shape.
         parameters: Box<[ResolvedTy]>,
+        /// The selected declaration's own semantic parameters, before the call site's
+        /// substitution, parallel to the call's arguments: the representation each argument is
+        /// passed in. Unset when the provider declares none.
+        declared_parameters: Option<Box<[ResolvedTy]>>,
         result: ResolvedTy,
         /// The selected owner is an interface, so the call reaches a default method.
         interface: bool,
@@ -1762,6 +1784,14 @@ pub struct FirBody {
     /// Local-storage blocks originating from postfix `++`/`--`, whose checked shape snapshots the
     /// old value.
     postfix_updates: HashSet<FirExprId>,
+    /// Context arguments checking selected from the scope rather than from the call's source
+    /// arguments: a read of a context parameter or an implicit receiver, passed where the callee
+    /// takes it. An explicit context argument is an ordinary source argument and is not listed.
+    implicit_context_arguments: HashSet<FirExprId>,
+    /// Explicit context arguments (`receiver().f(context = value())`) the call evaluates after its
+    /// extension receiver, as they are written, although they are passed before it. kotlinc does so
+    /// since 2.5; earlier releases evaluate a call's operands in the order they are passed.
+    receiver_ordered_context_arguments: HashSet<FirExprId>,
     /// Conversion origins that realize, in place, a call of an inline function kotlinc inlines
     /// (`Char.code`'s getter): the conversion is the end of an inlined call.
     inlined_call_conversions: HashSet<OriginId>,
@@ -1845,6 +1875,8 @@ impl FirBody {
             generated_class_provenance: HashMap::default(),
             source_forms: HashMap::default(),
             postfix_updates: HashSet::default(),
+            implicit_context_arguments: HashSet::default(),
+            receiver_ordered_context_arguments: HashSet::default(),
             inlined_call_conversions: HashSet::default(),
             lifting_site: None,
             declaration_span: None,
@@ -2550,6 +2582,22 @@ impl FirBody {
         self.postfix_updates.contains(&block)
     }
 
+    pub(crate) fn record_implicit_context_argument(&mut self, value: FirExprId) {
+        self.implicit_context_arguments.insert(value);
+    }
+
+    pub(crate) fn is_implicit_context_argument(&self, value: FirExprId) -> bool {
+        self.implicit_context_arguments.contains(&value)
+    }
+
+    pub(crate) fn record_receiver_ordered_context_argument(&mut self, value: FirExprId) {
+        self.receiver_ordered_context_arguments.insert(value);
+    }
+
+    pub(crate) fn is_receiver_ordered_context_argument(&self, value: FirExprId) -> bool {
+        self.receiver_ordered_context_arguments.contains(&value)
+    }
+
     pub(crate) fn record_inlined_call_conversion(&mut self, origin: OriginId) {
         self.inlined_call_conversions.insert(origin);
     }
@@ -2860,6 +2908,15 @@ impl FirBody {
                     conversion.method.len()
                         + conversion.parameters.len() * std::mem::size_of::<ResolvedTy>()
                         + conversion.declared_parameters.len() * std::mem::size_of::<ResolvedTy>()
+                        + conversion
+                            .dispatch_methods
+                            .iter()
+                            .chain(conversion.default_methods.iter())
+                            .map(|frame| {
+                                std::mem::size_of::<FirSamMethodFrame>()
+                                    + frame.parameters.len() * std::mem::size_of::<ResolvedTy>()
+                            })
+                            .sum::<usize>()
                 })
                 .sum::<usize>()
             + self.platform_narrowings.len() * std::mem::size_of::<FirPlatformNarrowing>()

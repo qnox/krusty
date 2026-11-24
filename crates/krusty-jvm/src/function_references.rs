@@ -501,6 +501,7 @@ fn realize_adapter_reference(
         unbox_param_nullable: vec![false; function_type.params.len()],
         box_ret: None,
         staticbound_recv_unbox: None,
+        bound_context_unbox: Vec::new(),
         invoke: None,
         function_type: reference.function_type.non_null(),
         reflection_signature,
@@ -785,16 +786,17 @@ fn realize_own_invoke(
         };
     }
     // kotlinc attributes the whole body to the reference's line, entered where the call's own
-    // operands begin: at each parameter or captured value read, or at a constructed object's
-    // `new`. Every other node enters it only at its dispatch, so a bound receiver's read stays
-    // ahead of the line.
+    // operands begin: at each parameter, temporary or captured value read, or at a constructed
+    // object's `new`. Every other node enters it only at its dispatch, so a bound receiver's read
+    // stays ahead of the line.
     if let Some(line) = ir.source_line(expression as u32) {
         // The bridge maps its whole body to the same line.
         ir.function_position_mut(adapter).decl_line = Some(line);
-        let parameter_count = function_type.params.len() as u32;
         for &current in &expressions {
             let marks = match &ir.exprs[current as usize] {
-                IrExpr::GetValue(value) => (1..=parameter_count).contains(value),
+                // A parameter read, or a read of a temporary the adapter declares past them (the
+                // safe call over a nullable converted value tests one).
+                IrExpr::GetValue(value) => *value >= 1,
                 IrExpr::GetField { .. } => captured_reads.contains(&current),
                 IrExpr::New { .. } => true,
                 _ => false,
@@ -1030,8 +1032,11 @@ pub(super) fn realize(
         // A property reference is the property reference value itself, which the
         // property-reference realization gives kotlinc's carrier.
         if let krusty::ir::IrCallableReferenceTarget::Property(property) = &reference.target {
-            let operation =
-                property.checked_operation(reference.bound_receiver, reference.adaptation.clone());
+            let operation = property.checked_operation(
+                reference.bound_receiver,
+                reference.adaptation.clone(),
+                reference.function_type,
+            );
             ir.exprs[raw] = IrExpr::Checked(Box::new(operation));
             // An inline getter has no accessor method the carrier could call: kotlinc splices it
             // into the carrier's own `get`, which takes the body of the adapter performing it.
