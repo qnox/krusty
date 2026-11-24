@@ -253,8 +253,6 @@ contextParameters/contextualCallableReference.kt
 contextParameters/explicitPassing.kt
 contextParameters/kt51863.kt
 contextParameters/kt65953.kt
-contextParameters/propertyCompoundAssignment.kt
-contextParameters/substitutedContextReceivers.kt
 contextParameters/suspendContextParemetersWithExtension.kt
 contracts/contractForCast.kt
 contracts/isNullString.kt
