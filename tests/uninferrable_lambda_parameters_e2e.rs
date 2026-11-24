@@ -47,11 +47,7 @@ fn assert_same(stem: &str, source: &str, expected_count: usize) {
 
 #[test]
 fn a_standalone_lambda_needs_an_explicit_parameter_type() {
-    assert_same(
-        "standalone",
-        "fun f() {\n    val a = { x -> }\n}\n",
-        1,
-    );
+    assert_same("standalone", "fun f() {\n    val a = { x -> }\n}\n", 1);
 }
 
 #[test]

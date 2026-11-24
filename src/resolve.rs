@@ -30026,7 +30026,10 @@ impl<'a> Checker<'a> {
             else {
                 continue;
             };
-            let Some(index) = signature.formals.iter().position(|candidate| candidate == formal)
+            let Some(index) = signature
+                .formals
+                .iter()
+                .position(|candidate| candidate == formal)
             else {
                 continue;
             };
