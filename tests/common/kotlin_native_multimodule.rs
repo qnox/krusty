@@ -8,7 +8,9 @@ use krusty::compilation_target::CompilationTarget;
 use krusty::fx_hash::{HashMap, HashSet};
 use krusty::kotlin_version::KotlinVersion;
 
-use super::reference_recording_support::{kotlin_native_root, recorded};
+use super::reference_recording_support::{
+    kotlin_native_program_arguments, kotlin_native_root, recorded,
+};
 
 /// What `box()` answers when kotlinc-native builds an exact `// MODULE:` graph as KLIB
 /// dependencies and a final native program. `None` when kotlin-native is not provisioned and no
@@ -198,6 +200,7 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
 
         let klib = unit_root.join(format!("{}.klib", unit.name));
         if final_unit {
+            command.args(kotlin_native_program_arguments(&native_root));
             command.args(["-produce", "program", "-output"]);
             command.arg(work.join("program"));
         } else {
