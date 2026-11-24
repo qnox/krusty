@@ -166,6 +166,9 @@ pub enum IrCheckedOperation {
         binding: crate::fir::FirCallableReferenceBinding,
         dispatch_receiver: Option<ExprId>,
         extension_receiver: Option<ExprId>,
+        /// Values the reference site bound for the declaration's leading context parameters, in
+        /// declaration order (`CallableReferencesToContextual`).
+        context_arguments: Vec<ExprId>,
         mutable: bool,
         substitutions: Vec<IrCheckedSubstitution>,
         adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
