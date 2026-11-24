@@ -388,7 +388,7 @@ fn run_kotlin_first(kotlin: &str, java: &[(&str, &str)]) -> String {
             krusty::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
                 .expect("JVM provider initialization"),
         )),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );

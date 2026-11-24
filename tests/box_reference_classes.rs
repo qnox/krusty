@@ -1655,8 +1655,10 @@ mod tests {
 
     #[test]
     fn reference_test_only_properties_cover_each_declared_feature_state() {
-        let table = krusty::features::FeatureTable::for_version(krusty::kotlin_version::target())
-            .expect("the configured release has a feature table");
+        let table = krusty::features::FeatureTable::for_version(
+            krusty::kotlin_version::environment_release(),
+        )
+        .expect("the configured release has a feature table");
         let features = table
             .features()
             .iter()
@@ -1682,8 +1684,10 @@ mod tests {
 
     #[test]
     fn reference_test_only_property_reaches_the_direct_acceptance_oracle() {
-        let table = krusty::features::FeatureTable::for_version(krusty::kotlin_version::target())
-            .expect("the configured release has a feature table");
+        let table = krusty::features::FeatureTable::for_version(
+            krusty::kotlin_version::environment_release(),
+        )
+        .expect("the configured release has a feature table");
         let feature = table
             .features()
             .iter()

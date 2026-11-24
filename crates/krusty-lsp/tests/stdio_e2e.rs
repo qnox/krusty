@@ -820,12 +820,13 @@ fn stdio_server_reports_mixed_and_missing_argument_diagnostics() {
         "source": "Kotlin",
         "message": "No value passed for parameter 'first'."
     });
-    let expected =
-        if krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_4_20) {
-            vec![missing, mixing]
-        } else {
-            vec![mixing, missing]
-        };
+    let expected = if krusty::kotlin_version::environment_release()
+        >= krusty::kotlin_version::KotlinVersion::V2_4_20
+    {
+        vec![missing, mixing]
+    } else {
+        vec![mixing, missing]
+    };
 
     assert_eq!(diagnostics, expected);
 }

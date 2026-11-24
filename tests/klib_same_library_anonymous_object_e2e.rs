@@ -68,7 +68,7 @@ fn an_anonymous_object_captures_the_values_its_members_read() {
             krusty::compilation_target::CompilationTarget::Native,
             Box::new(libraries.for_compilation()),
         ),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
     let target = krusty_native::NativeTarget::host().expect("host Native target");

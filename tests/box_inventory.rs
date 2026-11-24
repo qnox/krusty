@@ -179,7 +179,7 @@ pub fn kotlin_checkout(required: &str) -> PathBuf {
 
 /// The owned regressions whose kotlinc release range admits the reference release.
 fn within_kotlinc_releases(owned: Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
-    let release = krusty::kotlin_version::target();
+    let release = krusty::kotlin_version::environment_release();
     let mut within = Vec::with_capacity(owned.len());
     for file in owned {
         let source = std::fs::read_to_string(&file)
@@ -317,7 +317,7 @@ fn owned_regressions_outside_their_kotlinc_releases_leave_the_inventory() {
     let dir = std::env::temp_dir().join(format!("krusty_kotlinc_releases_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("scratch directory");
     // Bounds name `major.minor.patch`, whatever pre-release the reference release carries.
-    let target = krusty::kotlin_version::target();
+    let target = krusty::kotlin_version::environment_release();
     let release = format!("{}.{}.{}", target.major, target.minor, target.patch);
     let next = format!("{}.{}.0", target.major, target.minor + 1);
     let write = |name: &str, header: String| {

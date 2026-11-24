@@ -26,8 +26,9 @@ pub enum ReferenceJvmAcceptance {
 /// Both enabling and disabling one passes through kotlinc's test-only argument check, even when
 /// another directive later overrides it. Feature ownership comes from the exact release table.
 pub fn reference_jvm_properties<'a>(arguments: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let table = crate::features::FeatureTable::for_version(crate::kotlin_version::target())
-        .expect("the configured reference release has a feature table");
+    let table =
+        crate::features::FeatureTable::for_version(crate::kotlin_version::environment_release())
+            .expect("the configured reference release has a feature table");
     let needs_test_features = arguments
         .into_iter()
         .filter_map(|argument| argument.strip_prefix("-XXLanguage:"))
@@ -63,8 +64,9 @@ fn scratch_dir() -> Result<ScratchDir, String> {
 }
 
 fn language_args(src: &str) -> Vec<String> {
-    let features = crate::features::FeatureTable::for_version(crate::kotlin_version::target())
-        .expect("the configured reference release has a feature table");
+    let features =
+        crate::features::FeatureTable::for_version(crate::kotlin_version::environment_release())
+            .expect("the configured reference release has a feature table");
     let mut arguments: Vec<String> = src
         .lines()
         .filter_map(|line| line.trim_start().strip_prefix("// LANGUAGE:"))

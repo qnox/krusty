@@ -1634,8 +1634,8 @@ fn stdlib_calls_reach_header_declared_callees() {
     // its exact accessor, so `toKString` reaches `toKStringFromUtf16` and declines at its type
     // parameters. A generic file-private function now links with the formals its identity
     // mints, so three more bodies reach past one and decline at a member call.
-    let expected = if crate::kotlin_version::target()
-        >= crate::kotlin_version::KotlinVersion::V2_4_20
+    let expected = if crate::kotlin_version::ReferenceProfile::default()
+        .at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
     {
         vec![
                 ("it calls `kotlin.ArithmeticException.<init>`)", 2),

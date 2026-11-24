@@ -67,7 +67,7 @@ fn interface_typed_receiver_dispatches_the_private_implementation() {
             krusty::compilation_target::CompilationTarget::Native,
             Box::new(libraries.for_compilation()),
         ),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
     let target = krusty_native::NativeTarget::host().expect("host Native target");

@@ -92,7 +92,7 @@ fn compile(runtime: &KspRuntime, source: &Path, out: &Path) {
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
         platform(runtime, &[]),
-        &krusty::features::LangFeatures::from_source(&text),
+        &krusty::features::LangFeatures::from_source_in_environment(&text),
         &mut diags,
     );
     let backend = krusty_jvm::JvmBackend::new(classpath(runtime, &[]));
@@ -183,7 +183,7 @@ fn run_in_module(
             0,
             inputs.len(),
             platform(runtime, dependencies),
-            &krusty::features::LangFeatures::new(),
+            &krusty::features::LangFeatures::from_environment(),
             &mut diags,
         );
         let paths: Vec<String> = sources

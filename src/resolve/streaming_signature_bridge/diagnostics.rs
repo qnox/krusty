@@ -323,7 +323,8 @@ impl ProductionSignatureSemantics<'_> {
         self.record_source_diagnostic(
             scope.owner,
             origin,
-            crate::resolve::unresolved_member_message(spelling, receiver, hidden_deprecated),
+            self.table
+                .unresolved_member_message(spelling, receiver, hidden_deprecated),
         )
     }
 }

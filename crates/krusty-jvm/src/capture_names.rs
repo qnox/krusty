@@ -109,7 +109,11 @@ fn class_capture(ir: &IrFile, class: &IrClass, capture: &IrConstructorCapture) -
 
 /// JVM spelling shared by a stored receiver capture and a lifted callable's capture parameter.
 /// Only nested dispatch captures need a caller-supplied occurrence ordinal.
-fn receiver_name(receiver: &IrCapturedReceiver, dispatch: usize) -> String {
+fn receiver_name(
+    quirks: krusty::kotlin_version::Quirks,
+    receiver: &IrCapturedReceiver,
+    dispatch: usize,
+) -> String {
     match receiver {
         IrCapturedReceiver::Enclosing { .. } => format!("this${dispatch}"),
         IrCapturedReceiver::Callable { label, .. } | IrCapturedReceiver::Lambda(Some(label)) => {
@@ -120,7 +124,7 @@ fn receiver_name(receiver: &IrCapturedReceiver, dispatch: usize) -> String {
             CapturedContextKind::Anonymous | CapturedContextKind::FunctionType => {
                 format!(
                     "${}",
-                    anonymous_context_labels::label_at(types, *index as usize)
+                    anonymous_context_labels::label_at(quirks, types, *index as usize)
                 )
             }
             CapturedContextKind::LegacyReceiver => format!("$$context_receiver_{index}"),
@@ -269,7 +273,7 @@ fn realized_receiver(
         .filter(|receiver| matches!(receiver, IrCapturedReceiver::Enclosing { .. }))
         .filter(|receiver| realized_instance(ir, receiver, container).is_none())
         .count();
-    let name = receiver_name(receiver, dispatch);
+    let name = receiver_name(ir.reference.quirks(), receiver, dispatch);
     match receiver {
         IrCapturedReceiver::Callable {
             owner: CapturedCallableOwner::Declaration,

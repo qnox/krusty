@@ -30,7 +30,7 @@ pub fn compile_in_process_files_target(
         jdk_modules,
         class_major,
         None,
-        &krusty::language_settings::LanguageSettings::default(),
+        &krusty::language_settings::LanguageSettings::from_environment(),
     )
 }
 
@@ -176,7 +176,7 @@ pub(crate) fn compile_inputs(
 /// are common sources, each line `file.kt:line:column: severity: message` in emission order, as
 /// kotlinc prints it under `-Xmulti-platform -Xcommon-sources=…`.
 pub fn source_set_diagnostics(sources: &[(&str, &str)], common: usize) -> Vec<String> {
-    let mut features = krusty::features::LangFeatures::new();
+    let mut features = krusty::features::LangFeatures::from_environment();
     features.enable("MultiPlatformProjects");
     let inputs = sources
         .iter()

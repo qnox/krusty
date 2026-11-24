@@ -177,22 +177,19 @@ impl std::fmt::Display for CompileError {
 
 /// Compile what the `kotlinc-native` arguments describe, or print the diagnostics and exit 1.
 fn run_kotlinc_native(arguments: &[String]) {
-    let (options, defects) = match krusty_cli::kotlinc_native::parse(arguments) {
+    let options = match krusty_cli::kotlinc_native::parse(arguments) {
         Ok(krusty_cli::kotlinc_native::Invocation::Help) => {
             println!("{}", krusty_cli::kotlinc_native::HELP);
             return;
         }
-        Ok(krusty_cli::kotlinc_native::Invocation::Compile(options, defects)) => (options, defects),
+        Ok(krusty_cli::kotlinc_native::Invocation::Compile(options)) => options,
         Err(error) => {
             eprintln!("error: {error}");
             eprintln!("info: use krusty kotlinc-native -help for more information");
             std::process::exit(1);
         }
     };
-    if let Err(error) = krusty::kotlin_version::configured_target()
-        .and_then(krusty::kotlin_version::set_target)
-        .and_then(|()| krusty::kotlin_version::set_kotlinc_defects(defects))
-    {
+    if let Err(error) = krusty::kotlin_version::validate_release(options.features.release()) {
         eprintln!("error: {error}");
         std::process::exit(1);
     }
@@ -666,8 +663,7 @@ pub fn compile(opts: &cli::Options) -> Result<usize, CompileError> {
         None => krusty::kotlin_version::configured_target()
             .map_err(|error| format!("krusty: {error}\n"))?,
     };
-    krusty::kotlin_version::set_target(version).map_err(|error| format!("krusty: {error}\n"))?;
-    krusty::kotlin_version::set_kotlinc_defects(opts.kotlinc_defects)
+    krusty::kotlin_version::validate_release(version)
         .map_err(|error| format!("krusty: {error}\n"))?;
     let mut diags = DiagSink::new();
     let mut sources = Vec::new();

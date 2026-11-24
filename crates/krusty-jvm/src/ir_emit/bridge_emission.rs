@@ -914,6 +914,7 @@ fn attach_bridge_debug_tables(
             .map(|parameter| (parameter.identity.clone(), parameter.semantic))
             .unzip();
         let parameter_names = crate::parameter_names::bridge_local_variables(
+            ir.reference.quirks(),
             &identities,
             &semantic_types,
             &bridge.name,

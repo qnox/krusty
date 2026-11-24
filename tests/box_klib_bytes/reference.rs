@@ -152,7 +152,7 @@ fn toolchain(target: TestTarget) -> Result<Toolchain, String> {
             .lines()
             .find_map(|line| line.strip_prefix("compilerVersion="))
             .ok_or("Native distribution has no compilerVersion")?;
-        let selected = krusty::kotlin_version::target().to_string();
+        let selected = krusty::kotlin_version::environment_release().to_string();
         if version != selected {
             return Err(format!(
                 "selected Native compiler {selected}, distribution reports {version}"
@@ -173,7 +173,7 @@ fn toolchain(target: TestTarget) -> Result<Toolchain, String> {
                 krusty::toolchain::ensure_maven_artifact(
                     "org.jetbrains.kotlin",
                     artifact,
-                    &krusty::kotlin_version::target().to_string(),
+                    &krusty::kotlin_version::environment_release().to_string(),
                     "klib",
                 )
                 .ok_or("no exact target kotlin-test KLIB")?,

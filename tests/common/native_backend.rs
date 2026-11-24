@@ -246,7 +246,7 @@ pub(crate) fn analyze_natively(
         .iter()
         .map(|(stem, _)| (*stem).to_string())
         .collect();
-    let mut features = krusty::features::LangFeatures::new();
+    let mut features = krusty::features::LangFeatures::from_environment();
     for (_, src) in sources {
         features.apply_source_directives(src);
     }

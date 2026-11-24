@@ -40,7 +40,7 @@ fn diverging_property_initializer_runs() {
             ))
             .expect("JVM provider initialization"),
         )),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut d,
     );
     assert!(

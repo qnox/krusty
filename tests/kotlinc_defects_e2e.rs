@@ -150,7 +150,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
 
 /// Every defect, with what the reference release gives for its program.
 fn defects() -> Vec<(Quirk, Defect, Outcome)> {
-    let release = Quirks::of_release(krusty::kotlin_version::target());
+    let release = Quirks::of_release(krusty::kotlin_version::environment_release());
     Quirk::ALL
         .iter()
         .filter_map(|&quirk| {
@@ -183,7 +183,7 @@ fn kotlinc_has_each_defect_in_the_releases_the_table_names() {
                     outcome,
                     reference,
                     "{quirk:?} on {platform:?} kotlinc {}",
-                    krusty::kotlin_version::target()
+                    krusty::kotlin_version::environment_release()
                 );
             }
         }

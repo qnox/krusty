@@ -83,7 +83,7 @@ fn assert_matches_kotlinc(
 
 #[test]
 fn import_classifier_chain_reports_complete_order_and_count() {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
         return;
     }
     let source = r#"import lib.A.B.X
@@ -118,7 +118,7 @@ fun use() = f()
 
 #[test]
 fn source_import_reports_published_outer_but_not_imported_classifier_deprecation() {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
         return;
     }
     assert_matches_kotlinc(
@@ -138,7 +138,7 @@ fn source_import_reports_published_outer_but_not_imported_classifier_deprecation
 
 #[test]
 fn file_suppression_uses_published_policy_but_does_not_hide_migration_warning() {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
         return;
     }
     assert_matches_kotlinc(
@@ -197,11 +197,12 @@ const ORDINARY_WARNINGS_IN_MIGRATING_POSITIONS: &[&str] = &[
 
 #[test]
 fn migrating_positions_follow_the_selected_releases_exact_diagnostics() {
-    let warnings: &[&str] = if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
-        &[]
-    } else {
-        MIGRATION_WARNINGS
-    };
+    let warnings: &[&str] =
+        if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
+            &[]
+        } else {
+            MIGRATION_WARNINGS
+        };
     assert_matches_kotlinc(
         &[("Use.kt", MIGRATING_USES)],
         &[common::stdlib_jar(), dependency()],
@@ -213,11 +214,12 @@ fn migrating_positions_follow_the_selected_releases_exact_diagnostics() {
 
 #[test]
 fn warning_deprecations_follow_the_selected_releases_migration_checker() {
-    let warnings: &[&str] = if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
-        &[]
-    } else {
-        ORDINARY_WARNINGS_IN_MIGRATING_POSITIONS
-    };
+    let warnings: &[&str] =
+        if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
+            &[]
+        } else {
+            ORDINARY_WARNINGS_IN_MIGRATING_POSITIONS
+        };
     assert_matches_kotlinc(
         &[("Use.kt", WARNING_MIGRATING_USES)],
         &[common::stdlib_jar(), dependency()],
@@ -231,7 +233,7 @@ fn warning_deprecations_follow_the_selected_releases_migration_checker() {
 /// override global warning policy without changing the source-level suppression contract.
 #[test]
 fn named_warning_policy_controls_deprecation_error_migration_period() {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
         return;
     }
     struct Case {
@@ -288,7 +290,9 @@ interface Factory {
 
 fun use() = Factory()
 "#;
-    let warnings: &[&str] = if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+    let warnings: &[&str] = if krusty::kotlin_version::environment_release()
+        < KotlinVersion::V2_4_20
+    {
         &[]
     } else {
         &["Use.kt:6:13: 'interface Factory : Any' is deprecated. deprecated owner. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-82456."]
@@ -300,7 +304,7 @@ fun use() = Factory()
         &[],
         warnings,
     );
-    if krusty::kotlin_version::target() >= KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release() >= KotlinVersion::V2_4_20 {
         assert_matches_kotlinc(
             &[("Use.kt", source)],
             &[common::stdlib_jar()],
@@ -340,7 +344,9 @@ fun use() {
     P += 1
 }
 "#;
-    let warnings: &[&str] = if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+    let warnings: &[&str] = if krusty::kotlin_version::environment_release()
+        < KotlinVersion::V2_4_20
+    {
         &[]
     } else {
         &[
@@ -356,7 +362,7 @@ fun use() {
         &[],
         warnings,
     );
-    if krusty::kotlin_version::target() >= KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release() >= KotlinVersion::V2_4_20 {
         assert_matches_kotlinc(
             &[("Use.kt", source)],
             &[common::stdlib_jar(), dependency()],
@@ -390,7 +396,7 @@ fun use() {
 
 #[test]
 fn completed_migrations_restore_declared_error_levels() {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
         return;
     }
     assert_matches_kotlinc(
@@ -408,7 +414,7 @@ fn completed_migrations_restore_declared_error_levels() {
 
 #[test]
 fn qualified_companion_assignment_keeps_the_written_target_span() {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
         return;
     }
     assert_matches_kotlinc(

@@ -75,6 +75,7 @@ impl<'a> CheckedEmitFacts<'a> {
             inline_string_concat: opts.inline_string_concat,
             inline_scopes_numbers: opts.inline_scopes_numbers,
             metadata_stamp: opts.metadata_stamp(),
+            quirks: ir.reference.quirks(),
             property_realizations: self.property_realizations,
             property_reference_realizations: self.property_reference_realizations,
             sam_wrapper_realizations: self.sam_wrapper_realizations,

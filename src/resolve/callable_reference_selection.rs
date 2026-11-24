@@ -307,6 +307,8 @@ pub(super) struct ReferenceExpectation<'a> {
     pub(super) bound_contexts: usize,
     /// Which of `params` the enclosing call declares as one of its own type variables.
     pub(super) type_variable_inputs: TypeVariableInputs,
+    /// The reproduced kotlinc profile of the compilation the reference is checked in.
+    pub(super) quirks: crate::kotlin_version::Quirks,
 }
 
 /// The inputs of an expected function type that the call passing the reference declares as one of
@@ -403,6 +405,7 @@ pub(super) fn specialize_generic_signature(
         ret: expected_ret,
         bound_contexts,
         type_variable_inputs,
+        quirks,
     } = expectation;
     let mut bindings = crate::symbol_resolver::GSigBinds::default();
     if let (Some(declared), Some(actual)) = (generic.receiver, extension_receiver) {
@@ -424,7 +427,7 @@ pub(super) fn specialize_generic_signature(
                             .zip(generic.params.get(index))
                             .is_some_and(|(&actual, &declared)| {
                                 input_supplies_whole_vararg(
-                                    crate::kotlin_version::Quirks::target(),
+                                    quirks,
                                     type_variable_inputs,
                                     expected_index,
                                     actual,
@@ -562,6 +565,7 @@ pub(super) fn specialize_candidate_with_type_arguments(
 
 pub(super) fn specialize_candidate(
     source: &dyn SymbolSource,
+    quirks: crate::kotlin_version::Quirks,
     function: &mut FunctionInfo,
     bound_contexts: usize,
     extension_receiver: Option<Ty>,
@@ -578,6 +582,7 @@ pub(super) fn specialize_candidate(
             ret: expected_ret,
             bound_contexts,
             type_variable_inputs: TypeVariableInputs::NONE,
+            quirks,
         },
         is_assignable,
     )
@@ -939,6 +944,7 @@ pub(super) fn parameter_plan(
 /// candidate whose own inferred signature may currently be under computation.
 fn select_adapted_bound_instance_candidate(
     source: &dyn SymbolSource,
+    quirks: crate::kotlin_version::Quirks,
     overloads: &[FunctionInfo],
     bind_contexts: bool,
     expected: InstanceReferenceExpectation,
@@ -972,6 +978,7 @@ fn select_adapted_bound_instance_candidate(
                     ret: Some(expected.ret),
                     bound_contexts,
                     type_variable_inputs,
+                    quirks,
                 },
                 &mut is_assignable,
             )
@@ -1048,6 +1055,7 @@ fn select_adapted_bound_instance_candidate(
 /// this entry point so they cannot drift into different specialization or overload-selection rules.
 pub(super) fn select_adapted_instance_candidate(
     source: &dyn SymbolSource,
+    quirks: crate::kotlin_version::Quirks,
     overloads: &[FunctionInfo],
     bind_contexts: bool,
     unbound_receiver: Option<Ty>,
@@ -1085,6 +1093,7 @@ pub(super) fn select_adapted_instance_candidate(
     };
     let (selected, mut plan, type_arguments) = select_adapted_bound_instance_candidate(
         source,
+        quirks,
         overloads,
         bind_contexts,
         InstanceReferenceExpectation {

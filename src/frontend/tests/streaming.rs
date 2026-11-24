@@ -210,7 +210,11 @@ fn inferred_signature_reports_a_missing_member_during_pass_one() {
     );
     assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
     assert_eq!(diagnostics.diags[0].file, 0);
-    let expected = crate::diagnostic_wording::unresolved_reference_on("missing", Some("String"));
+    let expected = crate::diagnostic_wording::unresolved_reference_on(
+        crate::features::ReferenceProfile::default(),
+        "missing",
+        Some("String"),
+    );
     assert_eq!(diagnostics.diags[0].msg, expected);
 }
 

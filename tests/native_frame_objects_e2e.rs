@@ -29,7 +29,7 @@ fn native_object(source: &str, stem: &str) -> Option<Vec<u8>> {
             .expect("JVM provider initialization"),
     );
     let inputs = [SourceInput::kotlin(source).with_file_stem(stem)];
-    let features = krusty::features::LangFeatures::new();
+    let features = krusty::features::LangFeatures::from_environment();
     let mut diags = DiagSink::new();
     let backend = CraneliftBackend::new(target).with_entry(Entry::Box);
     let platform = krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform);

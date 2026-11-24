@@ -52,11 +52,11 @@ pub(super) fn lambda_class_xi(
     let in_inline_function = super::enclosure::enclosing_functions(ir, enclosure)
         .any(|(function, _)| ir.inline_fns.contains(&function));
     if !in_inline_function {
-        synthetic_class_xi(SYNTHETIC_LOCAL)
+        synthetic_class_xi(ir.reference.quirks(), SYNTHETIC_LOCAL)
     } else if in_public_inline_scope(ir, enclosure) {
-        synthetic_class_xi(SYNTHETIC_PUBLIC) | METADATA_PUBLIC_ABI_FLAG
+        synthetic_class_xi(ir.reference.quirks(), SYNTHETIC_PUBLIC) | METADATA_PUBLIC_ABI_FLAG
     } else {
-        synthetic_class_xi(SYNTHETIC_PUBLIC)
+        synthetic_class_xi(ir.reference.quirks(), SYNTHETIC_PUBLIC)
     }
 }
 
@@ -75,9 +75,9 @@ pub(super) fn continuation_class_xi(ir: &krusty::ir::IrFile, class: &krusty::ir:
     let function = ir.jvm_continuation_functions.get(&class).copied();
     let enclosure = function.map(krusty::ir::IrEnclosure::Function);
     if enclosure.is_some() && in_public_inline_scope(ir, enclosure) {
-        synthetic_class_xi(visibility) | METADATA_PUBLIC_ABI_FLAG
+        synthetic_class_xi(ir.reference.quirks(), visibility) | METADATA_PUBLIC_ABI_FLAG
     } else {
-        synthetic_class_xi(visibility)
+        synthetic_class_xi(ir.reference.quirks(), visibility)
     }
 }
 
@@ -102,11 +102,9 @@ pub(super) fn in_public_inline_scope(
 /// `@Metadata.xi` of a `k=3` synthetic class: the IR flags with the class's normalized visibility
 /// in bits 8–10, unless the release writes the flags alone
 /// ([`krusty::kotlin_version::Quirk::SyntheticClassXiOmitsVisibility`]).
-pub(super) fn synthetic_class_xi(visibility: i32) -> i32 {
+pub(super) fn synthetic_class_xi(quirks: krusty::kotlin_version::Quirks, visibility: i32) -> i32 {
     const JVM_IR_AND_STABLE_ABI: i32 = 48;
-    if krusty::kotlin_version::Quirks::target()
-        .has(krusty::kotlin_version::Quirk::SyntheticClassXiOmitsVisibility)
-    {
+    if quirks.has(krusty::kotlin_version::Quirk::SyntheticClassXiOmitsVisibility) {
         JVM_IR_AND_STABLE_ABI
     } else {
         JVM_IR_AND_STABLE_ABI | (visibility << 8)
@@ -133,7 +131,7 @@ pub(super) fn finish_local_synthetic_class_in_abi(
     env: &super::EmitEnv,
     public_abi: bool,
 ) -> Vec<u8> {
-    let xi = synthetic_class_xi(SYNTHETIC_LOCAL);
+    let xi = synthetic_class_xi(env.quirks, SYNTHETIC_LOCAL);
     let xi = if public_abi {
         xi | METADATA_PUBLIC_ABI_FLAG
     } else {
@@ -171,7 +169,7 @@ pub(super) fn finish_public_synthetic_class(
     cw.set_kotlin_metadata(
         3,
         env.metadata_stamp,
-        synthetic_class_xi(SYNTHETIC_PUBLIC),
+        synthetic_class_xi(env.quirks, SYNTHETIC_PUBLIC),
         &[],
         &[],
     );
@@ -180,7 +178,6 @@ pub(super) fn finish_public_synthetic_class(
 
 /// Whether a synthetic annotation implementation stamps nullability on its constructor, `equals`
 /// and `toString` ([`krusty::kotlin_version::Quirk::AnnotationImplCarriesNullability`]).
-pub(super) fn annotation_impl_carries_nullability() -> bool {
-    krusty::kotlin_version::Quirks::target()
-        .has(krusty::kotlin_version::Quirk::AnnotationImplCarriesNullability)
+pub(super) fn annotation_impl_carries_nullability(quirks: krusty::kotlin_version::Quirks) -> bool {
+    quirks.has(krusty::kotlin_version::Quirk::AnnotationImplCarriesNullability)
 }

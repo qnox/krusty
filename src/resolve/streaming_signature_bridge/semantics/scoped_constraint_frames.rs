@@ -340,10 +340,7 @@ impl ProductionSignatureSemantics<'_> {
             constraint_owner,
         );
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         for (&parameter, &argument) in parameters.iter().zip(arguments) {
             let constraints =
                 crate::symbol_resolver::collect_assignability_constraints_from_symbols(

@@ -65,7 +65,10 @@ impl Checker<'_> {
     /// ([`crate::kotlin_version::Quirk::UnitConversionRejectsNonUnitResult`]).
     pub(super) fn unit_conversion_admits_result(&self, expected: Ty) -> bool {
         self.file.unit_conversions_on_arbitrary_expressions
-            && !crate::kotlin_version::Quirks::target()
+            && !self
+                .file
+                .reference
+                .quirks()
                 .has(crate::kotlin_version::Quirk::UnitConversionRejectsNonUnitResult)
             && expected == Ty::Unit
     }

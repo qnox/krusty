@@ -54,7 +54,7 @@ fn assert_identical(src: &str, stem: &str, class: &str) {
 
 #[test]
 fn current_language_keeps_the_null_returning_lambda_on_indy() {
-    let settings = krusty::language_settings::LanguageSettings::default();
+    let settings = krusty::language_settings::LanguageSettings::from_environment();
     let built = common::compare_with_kotlinc_plugin_language_settings(
         "NothingLambdaCurrent",
         NOTHING_RESULT_SRC,
@@ -92,7 +92,7 @@ fn current_language_keeps_the_null_returning_lambda_on_indy() {
 /// implement raw `Function1`, without a generic `Signature`, just like kotlinc.
 #[test]
 fn current_language_class_fallback_keeps_a_declared_nothing_result_raw() {
-    let settings = krusty::language_settings::LanguageSettings::default();
+    let settings = krusty::language_settings::LanguageSettings::from_environment();
     let built = common::compare_with_kotlinc_plugin_language_settings(
         "DeclaredNothingResult",
         DECLARED_NOTHING_RESULT_SRC,
@@ -218,7 +218,7 @@ const CURRENT_NOTHING_SLOTS_SRC: &str = "fun keep(f: () -> Nothing) = f\n\
 
 #[test]
 fn current_language_nothing_slots_of_the_function_type_are_classes() {
-    let settings = krusty::language_settings::LanguageSettings::default();
+    let settings = krusty::language_settings::LanguageSettings::from_environment();
     for class in [
         "CurrentNothingSlotsKt$box$1",
         "CurrentNothingSlotsKt$box$2",

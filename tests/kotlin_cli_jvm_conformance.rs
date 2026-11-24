@@ -111,7 +111,7 @@ impl Toolchain {
         Toolchain {
             compiler,
             root,
-            reference: krusty::kotlin_version::target(),
+            reference: krusty::kotlin_version::environment_release(),
             jdks: available_jdks(),
             dist_jars,
             home,

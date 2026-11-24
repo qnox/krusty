@@ -2,7 +2,7 @@
 //!
 //! These settings are deliberately values, not process globals: a Bazel worker or language-server
 //! process may analyze modules at different reference releases and language/API levels in sequence.
-//! The process target in [`crate::kotlin_version`] supplies a default, while an explicitly selected
+//! The newest supported release is the default, while an explicitly selected
 //! release stays attached to [`LangFeatures`] for all per-compilation semantic policy.
 
 use crate::features::{FeatureSetting, LangFeatures};
@@ -29,15 +29,14 @@ impl LanguageSettings {
         feature_settings: &[FeatureSetting],
     ) -> Result<Self, String> {
         Self::for_release(
-            crate::kotlin_version::target(),
+            KotlinVersion::newest(),
             language_version,
             api_version,
             feature_settings,
         )
     }
 
-    /// [`Self::new`] under an explicitly chosen reference release, for a driver that configures a
-    /// compilation before fixing the process-wide reference version.
+    /// [`Self::new`] under an explicitly chosen reference release.
     pub fn for_release(
         release: KotlinVersion,
         language_version: LanguageVersion,
@@ -101,6 +100,21 @@ impl LanguageSettings {
         differences.sort_by(|left, right| left.feature.cmp(&right.feature));
         settings.extend(differences);
         settings
+    }
+}
+
+impl LanguageSettings {
+    /// The default settings of the environment-selected reference release
+    /// ([`crate::kotlin_version::environment_release`]), for a test harness or tool that mirrors a
+    /// provisioned kotlinc. A compilation never calls this: it carries its own settings.
+    pub fn from_environment() -> Self {
+        Self::for_release(
+            crate::kotlin_version::environment_release(),
+            LanguageVersion::default(),
+            None,
+            &[],
+        )
+        .expect("the default language/API versions are compatible")
     }
 }
 

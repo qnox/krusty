@@ -830,7 +830,7 @@ impl Checker<'_> {
         args: &[ExprId],
         candidates: &[crate::libraries::FunctionInfo],
     ) -> RejectedCallOwner {
-        let contested = crate::diagnostic_wording::inapplicable_member_joins_extensions()
+        let contested = self.file.reference.inapplicable_member_joins_extensions()
             && candidates.iter().any(|candidate| !candidate.is_extension())
             && candidates.iter().any(|candidate| candidate.is_extension());
         if !contested {

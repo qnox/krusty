@@ -69,7 +69,7 @@ fn an_inlined_object_extends_a_class_laid_out_from_the_library() {
             krusty::compilation_target::CompilationTarget::Native,
             Box::new(libraries.for_compilation()),
         ),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
     let target = krusty_native::NativeTarget::host().expect("host Native target");

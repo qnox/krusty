@@ -59,7 +59,7 @@ fn unit_codegen_modes<'a>(case: &str, unit: impl IntoIterator<Item = &'a str>) -
 }
 
 fn case_compiler_configuration(src: &str) -> Result<UnitCompilerConfiguration, String> {
-    case_compiler_configuration_for_release(src, crate::kotlin_version::target())
+    case_compiler_configuration_for_release(src, crate::kotlin_version::environment_release())
 }
 
 fn case_compiler_configuration_for_release(
@@ -74,7 +74,11 @@ pub fn platform_compiler_configuration(
     src: &str,
     target: super::TestTarget,
 ) -> Result<UnitCompilerConfiguration, String> {
-    platform_compiler_configuration_for_release(src, target, crate::kotlin_version::target())
+    platform_compiler_configuration_for_release(
+        src,
+        target,
+        crate::kotlin_version::environment_release(),
+    )
 }
 
 fn platform_compiler_configuration_for_release(

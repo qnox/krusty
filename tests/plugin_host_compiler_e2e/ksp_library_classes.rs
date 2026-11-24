@@ -38,7 +38,7 @@ fn dependency(paths: &[PathBuf]) -> PathBuf {
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
         platform(paths.to_vec()),
-        &LangFeatures::from_source(&text),
+        &LangFeatures::from_source_in_environment(&text),
         &mut diagnostics,
     );
     let backend = krusty_jvm::JvmBackend::new(Rc::new(Classpath::new(paths.to_vec())));
@@ -77,7 +77,7 @@ fn analysis_with_dependency(paths: &[PathBuf], dependency: PathBuf) -> SourceSet
         0,
         inputs.len(),
         platform(classpath),
-        &LangFeatures::new(),
+        &LangFeatures::from_environment(),
         &mut diagnostics,
     )
 }

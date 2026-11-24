@@ -25,7 +25,7 @@ fn editor_diagnostics(source: &str) -> Vec<String> {
         1,
         1,
         krusty::frontend::PlatformProvider::jvm(platform),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
     diags.diags.iter().map(|d| d.msg.clone()).collect()

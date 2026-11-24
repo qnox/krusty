@@ -76,6 +76,7 @@ pub fn collect_signatures_with_cp(
         files,
         libraries,
         NativePlugins::none(),
+        crate::kotlin_version::ReferenceProfile::default(),
         CompilationTarget::Jvm,
         diags,
     )
@@ -83,8 +84,11 @@ pub fn collect_signatures_with_cp(
 
 /// The plugins as the reference compiler bundles them: one activated without a jar naming its own
 /// release follows the release this compilation is checked against.
-fn with_reference_release(native_plugins: NativePlugins) -> NativePlugins {
-    native_plugins.with_reference_release(crate::kotlin_version::target().to_string())
+fn with_reference_release(
+    native_plugins: NativePlugins,
+    reference: crate::kotlin_version::ReferenceProfile,
+) -> NativePlugins {
+    native_plugins.with_reference_release(reference.release().to_string())
 }
 
 /// [`collect_signatures_with_cp`] with the native compiler plugins the compilation runs: they add
@@ -94,6 +98,7 @@ pub(crate) fn collect_signatures_with_cp_and_plugins(
     files: &[File],
     libraries: Box<dyn SemanticPlatform>,
     native_plugins: NativePlugins,
+    reference: crate::kotlin_version::ReferenceProfile,
     target: CompilationTarget,
     diags: &mut DiagSink,
 ) -> SymbolTable {
@@ -101,11 +106,12 @@ pub(crate) fn collect_signatures_with_cp_and_plugins(
     // per-operand recursion over the body), so a deep expression recurses here BEFORE any wrapped
     // check runs — it needs the same grown stack segment (see [`crate::wide_stack`]).
     crate::wide_stack::on_wide_stack(move || {
-        let native_plugins = with_reference_release(native_plugins);
+        let native_plugins = with_reference_release(native_plugins, reference);
         let host = native_plugins.host("main");
         let mut table =
             collect_signatures_with_cp_impl(files, libraries, &host, diags, None, None, target);
         table.native_plugins = native_plugins;
+        table.reference = reference;
         table
     })
 }
@@ -182,11 +188,12 @@ pub(crate) fn collect_signatures_with_cp_headers_and_local_contexts(
     local_contexts: &[PassOneLocalClassContext],
     libraries: Box<dyn SemanticPlatform>,
     native_plugins: NativePlugins,
+    reference: crate::kotlin_version::ReferenceProfile,
     target: CompilationTarget,
     diags: &mut DiagSink,
 ) -> SymbolTable {
     crate::wide_stack::on_wide_stack(move || {
-        let native_plugins = with_reference_release(native_plugins);
+        let native_plugins = with_reference_release(native_plugins, reference);
         let host = native_plugins.host("main");
         let mut table = collect_signatures_with_cp_impl(
             files,
@@ -198,6 +205,7 @@ pub(crate) fn collect_signatures_with_cp_headers_and_local_contexts(
             target,
         );
         table.native_plugins = native_plugins;
+        table.reference = reference;
         table
     })
 }

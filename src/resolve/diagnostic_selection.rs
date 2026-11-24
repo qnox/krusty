@@ -9,22 +9,39 @@ use crate::types::TyKind;
 /// `UNRESOLVED_REFERENCE` for a member looked up on an explicit receiver. A smart cast names the
 /// narrowed type, a safe call the non-null one, a platform type its Kotlin spelling, and the null
 /// literal `Nothing?`. Type parameters and failed types have no reportable receiver type.
-pub(crate) fn unresolved_member_message(
-    name: &str,
-    receiver: Ty,
-    hidden_deprecated: bool,
-) -> String {
-    if hidden_deprecated {
-        return crate::diagnostic_wording::unresolved_reference_on(name, None);
+impl crate::kotlin_version::ReferenceProfile {
+    pub(crate) fn unresolved_member_message(
+        self,
+        name: &str,
+        receiver: Ty,
+        hidden_deprecated: bool,
+    ) -> String {
+        if hidden_deprecated {
+            return crate::diagnostic_wording::unresolved_reference_on(self, name, None);
+        }
+        let rendered = match receiver.kind() {
+            TyKind::Error | TyKind::Pending | TyKind::TyParam(..) | TyKind::Var(..) => None,
+            TyKind::Nullable(inner) if inner.is_ty_param() => None,
+            TyKind::Null => Some("Nothing?".to_string()),
+            TyKind::PlatformNullable(inner) => Some(inner.source_name()),
+            _ => Some(receiver.source_name()),
+        };
+        crate::diagnostic_wording::unresolved_reference_on(self, name, rendered.as_deref())
     }
-    let rendered = match receiver.kind() {
-        TyKind::Error | TyKind::Pending | TyKind::TyParam(..) | TyKind::Var(..) => None,
-        TyKind::Nullable(inner) if inner.is_ty_param() => None,
-        TyKind::Null => Some("Nothing?".to_string()),
-        TyKind::PlatformNullable(inner) => Some(inner.source_name()),
-        _ => Some(receiver.source_name()),
-    };
-    crate::diagnostic_wording::unresolved_reference_on(name, rendered.as_deref())
+}
+
+impl SymbolTable {
+    /// [`crate::kotlin_version::ReferenceProfile::unresolved_member_message`] under this
+    /// compilation's profile.
+    pub(crate) fn unresolved_member_message(
+        &self,
+        name: &str,
+        receiver: Ty,
+        hidden_deprecated: bool,
+    ) -> String {
+        self.reference
+            .unresolved_member_message(name, receiver, hidden_deprecated)
+    }
 }
 
 impl Checker<'_> {
@@ -120,9 +137,11 @@ impl Checker<'_> {
         if qualifier
             || (self.omit_unshaped_any_receiver_type > 0 && receiver_ty == Ty::obj("kotlin/Any"))
         {
-            crate::diagnostic_wording::unresolved_reference_on(name, None)
+            crate::diagnostic_wording::unresolved_reference_on(self.file.reference, name, None)
         } else {
-            unresolved_member_message(name, receiver_ty, hidden_deprecated)
+            self.file
+                .reference
+                .unresolved_member_message(name, receiver_ty, hidden_deprecated)
         }
     }
 }

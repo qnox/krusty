@@ -67,7 +67,9 @@ fn lifted_callables_name_captured_receivers_like_kotlinc() {
 /// pin its distinct `$context_receiver_N` provenance as an exact facade-byte comparison.
 #[test]
 fn a_lifted_legacy_context_receiver_keeps_its_own_role() {
-    if krusty::kotlin_version::target() >= krusty::kotlin_version::KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release()
+        >= krusty::kotlin_version::KotlinVersion::V2_4_20
+    {
         return;
     }
     let source = "// LANGUAGE: +ContextReceivers\n\

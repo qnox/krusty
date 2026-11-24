@@ -95,6 +95,9 @@ fn friend_access_does_not_stabilize_mutable_custom_delegated_or_open_reads() {
                 line: 2,
                 column: 66,
                 message: krusty::diagnostic_wording::unresolved_reference_on(
+                    krusty::kotlin_version::ReferenceProfile::of_release(
+                        krusty::kotlin_version::environment_release()
+                    ),
                     "radius",
                     Some("Shape")
                 ),
@@ -104,6 +107,9 @@ fn friend_access_does_not_stabilize_mutable_custom_delegated_or_open_reads() {
                 line: 3,
                 column: 63,
                 message: krusty::diagnostic_wording::unresolved_reference_on(
+                    krusty::kotlin_version::ReferenceProfile::of_release(
+                        krusty::kotlin_version::environment_release()
+                    ),
                     "radius",
                     Some("Shape")
                 ),
@@ -113,6 +119,9 @@ fn friend_access_does_not_stabilize_mutable_custom_delegated_or_open_reads() {
                 line: 4,
                 column: 72,
                 message: krusty::diagnostic_wording::unresolved_reference_on(
+                    krusty::kotlin_version::ReferenceProfile::of_release(
+                        krusty::kotlin_version::environment_release()
+                    ),
                     "radius",
                     Some("Shape")
                 ),
@@ -122,6 +131,9 @@ fn friend_access_does_not_stabilize_mutable_custom_delegated_or_open_reads() {
                 line: 5,
                 column: 71,
                 message: krusty::diagnostic_wording::unresolved_reference_on(
+                    krusty::kotlin_version::ReferenceProfile::of_release(
+                        krusty::kotlin_version::environment_release()
+                    ),
                     "radius",
                     Some("Shape")
                 ),
@@ -174,7 +186,13 @@ fn the_same_final_property_is_unstable_without_friend_access() {
             file: "Main.kt".to_string(),
             line: 2,
             column: 63,
-            message: krusty::diagnostic_wording::unresolved_reference_on("radius", Some("Shape")),
+            message: krusty::diagnostic_wording::unresolved_reference_on(
+                krusty::kotlin_version::ReferenceProfile::of_release(
+                    krusty::kotlin_version::environment_release()
+                ),
+                "radius",
+                Some("Shape")
+            ),
         }]
     );
     assert_eq!(

@@ -110,7 +110,7 @@ fn compile_java_parameters(
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         common::with_native_plugins(krusty::compilation_target::CompilationTarget::Jvm, platform),
-        &krusty::features::LangFeatures::default(),
+        &krusty::features::LangFeatures::from_environment(),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );

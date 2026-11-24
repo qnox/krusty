@@ -470,10 +470,7 @@ impl ProductionSignatureSemantics<'_> {
         let (mut functions, properties) = callables.into_parts();
         let mut recorded = Vec::new();
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         for (index, candidate) in functions.overloads.iter_mut().enumerate() {
             let arguments = calls.map_or(source_arguments, |calls| calls[index].args.as_slice());
             let Some(mut signature) = candidate.generic_sig.clone() else {
@@ -696,10 +693,7 @@ impl ProductionSignatureSemantics<'_> {
         }
         let active = variables.iter().map(|variable| variable.as_str()).collect();
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let constraints = crate::symbol_resolver::collect_assignability_constraints_from_symbols(
             &source, declared, receiver,
         );
@@ -756,10 +750,7 @@ impl ProductionSignatureSemantics<'_> {
             return;
         };
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         ProductionSignatureSemantics::merge_scoped_constraints_from_symbols(
             &source, active, bindings,
         );

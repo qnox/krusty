@@ -15,7 +15,7 @@ pub(super) fn compile(
     source: &str,
     units: &[ModuleUnit],
 ) -> Result<QualifiedArtifacts, String> {
-    let features = krusty::features::LangFeatures::from_source(source);
+    let features = krusty::features::LangFeatures::from_source_in_environment(source);
     let backend = backend(target, source)?;
     let scratch = Scratch::new()?;
     let mut built = BTreeMap::new();
@@ -151,7 +151,7 @@ fn open_libraries(
 }
 
 pub(crate) fn backend(target: TestTarget, source: &str) -> Result<KlibBackend, String> {
-    let features = krusty::features::LangFeatures::from_source(source);
+    let features = krusty::features::LangFeatures::from_source_in_environment(source);
     let platform = match target {
         TestTarget::Native => KlibPlatform::Native,
         TestTarget::WasmJs => KlibPlatform::WasmJs,
@@ -161,7 +161,7 @@ pub(crate) fn backend(target: TestTarget, source: &str) -> Result<KlibBackend, S
     let mut backend = KlibBackend::new(
         platform,
         KlibStamp::new(
-            krusty::kotlin_version::target(),
+            krusty::kotlin_version::environment_release(),
             features.language_version(),
         ),
     )

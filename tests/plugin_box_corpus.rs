@@ -192,7 +192,7 @@ fn render(
 }
 
 fn run_corpus(corpus: &PluginCorpus) {
-    let version = krusty::kotlin_version::target();
+    let version = krusty::kotlin_version::environment_release();
     if !corpus.kotlin.contains(version) {
         eprintln!(
             "{} corpus: skipped, it covers Kotlin {} and this run is {version}",

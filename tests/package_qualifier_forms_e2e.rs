@@ -31,7 +31,7 @@ fn unresolved(location: &str, name: &str) -> String {
 /// Whether the reference release has the feature. Earlier releases have neither its deprecation
 /// warnings nor the language feature itself.
 fn release_has_feature() -> bool {
-    krusty::kotlin_version::target() >= KotlinVersion::V2_4_20
+    krusty::kotlin_version::environment_release() >= KotlinVersion::V2_4_20
 }
 
 /// Compile `sources` with both compilers, passing `args` to each, and require the same complete
@@ -939,9 +939,10 @@ const KLIB_TARGETS: [CompilationTarget; 3] = [
 /// kotlinc's `-progressive`: the reference release's language defaults with every progressive
 /// feature of its table on.
 fn progressive_features() -> krusty::features::LangFeatures {
-    let table = krusty::features::FeatureTable::for_version(krusty::kotlin_version::target())
-        .expect("the reference release has a feature table");
-    let mut features = krusty::features::LangFeatures::new();
+    let table =
+        krusty::features::FeatureTable::for_version(krusty::kotlin_version::environment_release())
+            .expect("the reference release has a feature table");
+    let mut features = krusty::features::LangFeatures::from_environment();
     for feature in table.progressive() {
         features.set(&feature.name, true);
     }
@@ -1006,7 +1007,11 @@ fn progressive_package_qualifiers_match_every_klib_reference_compiler() {
                 progressive_features(),
                 &rejected,
             ),
-            (Vec::new(), krusty::features::LangFeatures::new(), &accepted),
+            (
+                Vec::new(),
+                krusty::features::LangFeatures::from_environment(),
+                &accepted,
+            ),
         ] {
             assert_eq!(
                 &klib_outcome(target, &features),

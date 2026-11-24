@@ -332,8 +332,10 @@ pub(super) fn emit_lambda_class(
         cw.seed_inner_class_names();
     }
     if lambda.public_inline {
-        let mut xi =
-            super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_PUBLIC);
+        let mut xi = super::metadata_policy::synthetic_class_xi(
+            env.quirks,
+            super::metadata_policy::SYNTHETIC_PUBLIC,
+        );
         // A private `inline` function's default lambda is public on the JVM but not part of the
         // public ABI. Public and internal owners set the flag.
         if lambda.public_inline_abi {
@@ -348,8 +350,10 @@ pub(super) fn emit_lambda_class(
         cw.set_kotlin_metadata(3, env.metadata_stamp, xi, d1, d2);
         env.run.finish_class(cw)
     } else if let Some(reflection) = &reflection {
-        let xi =
-            super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_LOCAL);
+        let xi = super::metadata_policy::synthetic_class_xi(
+            env.quirks,
+            super::metadata_policy::SYNTHETIC_LOCAL,
+        );
         cw.set_kotlin_metadata(3, env.metadata_stamp, xi, &reflection.d1, &reflection.d2);
         env.run.finish_class(cw)
     } else {
@@ -612,6 +616,7 @@ fn emit_sam_bridge(
     emit_return(erased_result, &mut code);
     // The bridge's table names the interface method's declared parameters.
     let identities = crate::parameter_names::resolved_local_variables(
+        ir.reference.quirks(),
         &target.parameter_identities,
         &target.declared_parameters,
         &target.method,

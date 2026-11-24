@@ -49,8 +49,8 @@ kotlinc reads them.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Invocation {
     Help,
-    /// A program to compile, and whether to reproduce kotlinc's defects in it.
-    Compile(Box<NativeCompileOptions>, KotlincDefects),
+    /// A program to compile; its features say whether it reproduces kotlinc's defects.
+    Compile(Box<NativeCompileOptions>),
 }
 
 /// Read the arguments that follow `krusty kotlinc-native`.
@@ -170,11 +170,11 @@ pub fn parse(arguments: &[String]) -> Result<Invocation, String> {
         })
         .collect();
     let mut options = NativeCompileOptions::new(sources, target);
-    options.features = read.language_settings.features;
+    options.features = read.language_settings.features.with_defects(defects);
     options.libraries = libraries;
     options.output = output;
     options.module_name = module_name;
-    Ok(Invocation::Compile(Box::new(options), defects))
+    Ok(Invocation::Compile(Box::new(options)))
 }
 
 #[cfg(test)]
@@ -187,14 +187,17 @@ mod tests {
 
     #[test]
     fn kotlin_native_spellings_build_the_options() {
-        let Invocation::Compile(options, defects) = parse(&arguments(
+        let Invocation::Compile(options) = parse(&arguments(
             "-p program -o out/app -target linux_arm64 -l a.klib -library=b -module-name app \
              -no-default-libs a.kt b.kt",
         ))
         .expect("parses") else {
             panic!("not a compilation");
         };
-        assert_eq!(defects, KotlincDefects::Reproduce);
+        assert_eq!(
+            options.features.reference().defects(),
+            KotlincDefects::Reproduce
+        );
         let mut expected = NativeCompileOptions::new(
             vec![
                 NativeSource::plain(PathBuf::from("a.kt")),
@@ -213,7 +216,7 @@ mod tests {
 
     #[test]
     fn a_shared_flag_stands_alone_and_a_shared_value_follows_its_option() {
-        let Invocation::Compile(options, _) = parse(&arguments(
+        let Invocation::Compile(options) = parse(&arguments(
             "-Xexpect-actual-classes a.kt -opt-in kotlin.ExperimentalStdlibApi b.kt",
         ))
         .expect("parses") else {
@@ -226,7 +229,7 @@ mod tests {
                 NativeSource::plain(PathBuf::from("b.kt")),
             ]
         );
-        let Invocation::Compile(options, _) = parse(&arguments(
+        let Invocation::Compile(options) = parse(&arguments(
             "a.kt -Xexpect-actual-classes -o app -Xexpect-actual-classes",
         ))
         .expect("parses") else {
@@ -241,12 +244,12 @@ mod tests {
 
     #[test]
     fn fixing_kotlinc_defects_is_asked_by_name() {
-        let Invocation::Compile(_, defects) =
+        let Invocation::Compile(options) =
             parse(&arguments("-Xfix-kotlinc-defects -target linux_x64 a.kt")).expect("parses")
         else {
             panic!("not a compilation");
         };
-        assert_eq!(defects, KotlincDefects::Fix);
+        assert_eq!(options.features.reference().defects(), KotlincDefects::Fix);
         assert_eq!(
             parse(&arguments(
                 "-Xfix-kotlinc-defects=true -target linux_x64 a.kt"

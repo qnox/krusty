@@ -93,10 +93,7 @@ impl ProductionSignatureSemantics<'_> {
             .map(|anchor| anchor.source.raw())
             .unwrap_or(0);
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, source_file);
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         let context = crate::assignable::TyCtx::new();
         crate::assignable::is_subtype(&context, &oracle, actual.get(), expected.get())
@@ -1110,10 +1107,7 @@ impl ProductionSignatureSemantics<'_> {
         ) -> R,
     ) -> R {
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         let receivers = [super::super::ImplicitReceiver::signature_receiver(
             dispatch_receiver,
@@ -1761,10 +1755,7 @@ impl ProductionSignatureSemantics<'_> {
         }
         let owner = self.classifier_types.get(&header_owner).copied()?;
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let inheriting_supertypes = |owner: crate::types::TypeName| {
             crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(owner))
                 .into_iter()
@@ -1799,10 +1790,7 @@ impl ProductionSignatureSemantics<'_> {
         name: &str,
     ) -> Result<Option<(Ty, Option<crate::fir::DeclarationId>)>, ()> {
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         let receivers = [super::super::ImplicitReceiver::signature_receiver(
             dispatch_receiver,

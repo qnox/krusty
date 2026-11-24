@@ -33,7 +33,7 @@ fn native_full_value_mutable_parameter_is_rejected_without_a_jvm_annotation() {
 }
 
 fn assert_native_parameter_errors(source: &str, errors: &[&str]) {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
         return;
     }
     let expected = CompilerOutcome {
@@ -68,7 +68,7 @@ fn assert_native_parameter_errors(source: &str, errors: &[&str]) {
             CompilationTarget::Native,
             Box::new(libraries.for_compilation()),
         ),
-        &krusty::features::LangFeatures::from_source(source),
+        &krusty::features::LangFeatures::from_source_in_environment(source),
     );
     let actual = common::diagnostic_locations(source, &diagnostics)
         .into_iter()

@@ -31,10 +31,7 @@ impl ProductionSignatureSemantics<'_> {
         demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let implicit_receivers = self.implicit_receivers(scope);
         let inputs = SelectionInputs::new(Some(receiver), &[]);
         let selected = self.with_resolver(scope, |resolver| {

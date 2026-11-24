@@ -7,7 +7,7 @@
 //!
 //! The releases a quirk spans are recorded once, in the `quirks!` table below, and nowhere else. A
 //! release's whole profile is resolved once into a [`Quirks`] bit set ([`Quirks::of_release`]);
-//! the process reproduces [`Quirks::target`], and consumers test one bit and never compare
+//! a compilation reproduces its [`super::ReferenceProfile::quirks`], and consumers test one bit and never compare
 //! versions themselves.
 //!
 //! - **A new quirk** is one entry in that table and one `has` test at the place that implements
@@ -205,15 +205,6 @@ impl Quirks {
             index += 1;
         }
         Self(bits)
-    }
-
-    /// The profile this process reproduces: the reference release's ([`super::target`]), without
-    /// its defects when the process fixes them ([`super::kotlinc_defects`]). Resolved on first use.
-    /// Both settings are process-wide, so this is the profile every phase reproduces; a hot path
-    /// may hoist the copy, but reading it is one load and a bit test.
-    pub fn target() -> Self {
-        static TARGET: std::sync::OnceLock<Quirks> = std::sync::OnceLock::new();
-        *TARGET.get_or_init(|| Self::of_release(super::target()).under(super::kotlinc_defects()))
     }
 
     /// This profile as a compilation under `defects` reproduces it: unchanged, or without its

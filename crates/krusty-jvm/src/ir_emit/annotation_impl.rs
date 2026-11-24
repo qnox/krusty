@@ -145,7 +145,7 @@ pub(super) fn emit_annotation_impl_class(
                 .map(|(_, jt)| type_descriptor(*jt))
                 .collect::<String>()
         );
-        let carries_nullability = annotation_impl_carries_nullability();
+        let carries_nullability = annotation_impl_carries_nullability(env.quirks);
         let param_nullability = members
             .iter()
             .map(|(_, jt)| {
@@ -288,7 +288,7 @@ pub(super) fn emit_annotation_impl_class(
 
     emit_annotation_equals(env, &mut cw, &fq, iface, &members, &stored);
     emit_annotation_hashcode(ir, env, &mut cw, &fq, &stored, &members);
-    emit_annotation_tostring(&mut cw, &fq, iface, &stored, &members);
+    emit_annotation_tostring(env, &mut cw, &fq, iface, &stored, &members);
     // annotationType(): return <iface>.class. LAST, after the `Object` overrides — kotlinc's member
     // order, and the method table is part of the class file, so emitting it beside the member
     // accessors diverged from the reference on every annotation that is instantiated.
@@ -322,8 +322,10 @@ pub(super) fn emit_annotation_impl_class(
         cw.set_kotlin_metadata(
             3,
             env.metadata_stamp,
-            super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_LOCAL)
-                | super::metadata_policy::METADATA_PUBLIC_ABI_FLAG,
+            super::metadata_policy::synthetic_class_xi(
+                env.quirks,
+                super::metadata_policy::SYNTHETIC_LOCAL,
+            ) | super::metadata_policy::METADATA_PUBLIC_ABI_FLAG,
             &[],
             &[],
         );
@@ -354,8 +356,8 @@ fn emit_annotation_equals(
     // - The comparison is per type: `if_icmpeq` for the int-likes, `lcmp`, `Float`/`Double.compare`
     //   (not the wrapper's `equals`), `if_acmpeq` for an ENUM member, `Arrays.equals` for an array,
     //   and `Intrinsics.areEqual` for every other reference.
-    let parameter_annotation =
-        annotation_impl_carries_nullability().then_some("Lorg/jetbrains/annotations/Nullable;");
+    let parameter_annotation = annotation_impl_carries_nullability(env.quirks)
+        .then_some("Lorg/jetbrains/annotations/Nullable;");
     cw.reserve_method_pool(
         "equals",
         "(Ljava/lang/Object;)Z",
@@ -562,14 +564,15 @@ fn emit_annotation_hashcode(
 /// `toString()` for an annotation impl: `@<fqName>(m1=v1, m2=v2, …)` built with a `StringBuilder` (arrays
 /// rendered via `Arrays.toString`). Straight-line (no frames).
 fn emit_annotation_tostring(
+    env: &EmitEnv,
     cw: &mut ClassWriter,
     fq: &str,
     iface: &str,
     stored: &[Ty],
     members: &[(String, Ty)],
 ) {
-    let return_annotation =
-        annotation_impl_carries_nullability().then_some("Lorg/jetbrains/annotations/NotNull;");
+    let return_annotation = annotation_impl_carries_nullability(env.quirks)
+        .then_some("Lorg/jetbrains/annotations/NotNull;");
     cw.reserve_method_pool(
         "toString",
         "()Ljava/lang/String;",

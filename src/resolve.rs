@@ -458,7 +458,6 @@ use delegated_properties::{
 };
 pub(crate) use dependency_body_call_edges::for_checked_klib_bodies;
 pub(crate) use dependency_platform::DependencyPlatform;
-pub(crate) use diagnostic_selection::unresolved_member_message;
 use extension_reference_selection::ExtensionReferenceChoice;
 pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_declared_spellings, publish_stable_declaration_metadata,
@@ -1415,6 +1414,8 @@ pub struct SymbolTable {
     pub libraries: Box<dyn SemanticPlatform>,
     /// The native compiler plugins this compilation runs (none unless the driver selects them).
     native_plugins: crate::plugins::registry::NativePlugins,
+    /// What this compilation reproduces of kotlinc, for the phases that have no file in hand.
+    pub(crate) reference: crate::kotlin_version::ReferenceProfile,
     /// The annotation-configured conventions of the native plugins this compilation runs
     /// ([`crate::symbol_source::SymbolSource::annotation_conventions`]).
     pub(crate) annotation_conventions: crate::symbol_source::AnnotationConventions,
@@ -1567,6 +1568,7 @@ impl Default for SymbolTable {
             toplevel_jvm_names: HashMap::default(),
             libraries: Box::new(EmptySymbolSource),
             native_plugins: Default::default(),
+            reference: Default::default(),
             annotation_conventions: Default::default(),
             ext_funs: HashMap::default(),
             source_ext_funs: HashMap::default(),
@@ -19729,7 +19731,9 @@ mod tests {
     /// name where the reference version reports it there. That table row is checked against kotlinc
     /// by `tests/diagnostic_wording_versions_e2e.rs`; these tests check the resolver follows it.
     fn missing_argument_anchor<'a>(argument: &'a str, callee: &'a str) -> &'a str {
-        match crate::diagnostic_wording::no_value_for_parameter_anchor() {
+        match crate::diagnostic_wording::no_value_for_parameter_anchor(
+            crate::kotlin_version::ReferenceProfile::default(),
+        ) {
             crate::diagnostic_wording::Anchor::ValueArguments => argument,
             crate::diagnostic_wording::Anchor::ReferencedNameByQualified => callee,
         }
@@ -20621,6 +20625,7 @@ fun rejected(owner: Owner) { owner.hidden() }
         assert_eq!(
             errors,
             [crate::diagnostic_wording::unresolved_reference_on(
+                crate::kotlin_version::ReferenceProfile::default(),
                 "component2",
                 Some("Box")
             )]
@@ -23805,7 +23810,9 @@ fun box(): String {
             .flat_map(|callee| {
                 let missing = (missing, missing_argument_anchor("1)", callee), Some(callee));
                 let mixing = (mixing, "1", None);
-                match crate::diagnostic_wording::no_value_for_parameter_anchor() {
+                match crate::diagnostic_wording::no_value_for_parameter_anchor(
+                    crate::kotlin_version::ReferenceProfile::default(),
+                ) {
                     crate::diagnostic_wording::Anchor::ValueArguments => [mixing, missing],
                     crate::diagnostic_wording::Anchor::ReferencedNameByQualified => {
                         [missing, mixing]
@@ -26648,6 +26655,7 @@ fun use() {
         assert_eq!(
             errors,
             [crate::diagnostic_wording::unresolved_reference_on(
+                crate::kotlin_version::ReferenceProfile::default(),
                 "substring",
                 Some("Int")
             )]
@@ -26858,6 +26866,7 @@ fun use() {
         assert_eq!(
             errors,
             [crate::diagnostic_wording::unresolved_reference_on(
+                crate::kotlin_version::ReferenceProfile::default(),
                 "z",
                 Some("Point")
             )]
@@ -32179,7 +32188,13 @@ impl<'a> Checker<'a> {
         let unbound = matches!(binding, CallableReferenceBinding::Unbound);
         let source = self.fed_source();
         match extension_reference_selection::select_extension_reference(
-            &source, overloads, receiver, unbound, expected, self,
+            &source,
+            overloads,
+            receiver,
+            unbound,
+            expected,
+            self.file.reference.quirks(),
+            self,
         ) {
             ExtensionReferenceChoice::Selected(selected) => {
                 ExtensionRefSelection::Selected(selected)
@@ -32894,6 +32909,7 @@ impl<'a> Checker<'a> {
             let source = self.fed_source();
             if callable_reference_selection::select_adapted_instance_candidate(
                 &source,
+                self.file.reference.quirks(),
                 &candidates,
                 self.file.language.callable_references_to_contextual,
                 None,
@@ -33616,6 +33632,7 @@ impl<'a> Checker<'a> {
         let (selected, plan, type_arguments) =
             callable_reference_selection::select_adapted_instance_candidate(
                 &source,
+                self.file.reference.quirks(),
                 overloads,
                 self.file.language.callable_references_to_contextual,
                 None,
@@ -34522,7 +34539,9 @@ impl<'a> Checker<'a> {
                     .map(|argument| self.span(*argument))
                     .unwrap_or_else(|| self.call_argument_list_span(call, args)),
                 CallArgMappingError::MissingRequired { .. } => self.anchored_span(
-                    crate::diagnostic_wording::no_value_for_parameter_anchor(),
+                    crate::diagnostic_wording::no_value_for_parameter_anchor(
+                        crate::kotlin_version::ReferenceProfile::default(),
+                    ),
                     call,
                     || recovery_span.unwrap_or_else(|| self.call_argument_list_span(call, args)),
                 ),
@@ -42491,7 +42510,9 @@ impl<'a> Checker<'a> {
             {
                 let editor_span = self.call_callee_name_span(call);
                 let span = self.anchored_span(
-                    crate::diagnostic_wording::no_value_for_parameter_anchor(),
+                    crate::diagnostic_wording::no_value_for_parameter_anchor(
+                        crate::kotlin_version::ReferenceProfile::default(),
+                    ),
                     call,
                     || span,
                 );
@@ -47166,6 +47187,7 @@ impl<'a> Checker<'a> {
                 self.diags.error(
                     operator_span,
                     crate::diagnostic_wording::unresolved_operator_reference_on(
+                        crate::kotlin_version::ReferenceProfile::default(),
                         operator_name,
                         if decrement { "--" } else { "++" },
                         Some(read_ty.source_name().as_ref()),
@@ -49351,7 +49373,11 @@ impl<'a> Checker<'a> {
                     let ty = self.package_used_as_expression(span);
                     return self.set(e, ty);
                 }
-                let message = crate::diagnostic_wording::unresolved_reference_on(&name, None);
+                let message = crate::diagnostic_wording::unresolved_reference_on(
+                    crate::kotlin_version::ReferenceProfile::default(),
+                    &name,
+                    None,
+                );
                 self.diags.error(span, message);
                 return self.set(e, Ty::Error);
             }
@@ -50396,6 +50422,7 @@ impl<'a> Checker<'a> {
                     .and_then(|(classifier_receiver, candidates)| {
                         callable_reference_selection::select_adapted_instance_candidate(
                             &source,
+                            self.file.reference.quirks(),
                             &candidates,
                             self.file.language.callable_references_to_contextual,
                             None,
@@ -50695,6 +50722,7 @@ impl<'a> Checker<'a> {
                 if let Some((selected, argument_mapping, type_arguments)) =
                     callable_reference_selection::select_adapted_instance_candidate(
                         &source,
+                        self.file.reference.quirks(),
                         &receiver_candidates.overloads,
                         self.file.language.callable_references_to_contextual,
                         Some(receiver_ty),

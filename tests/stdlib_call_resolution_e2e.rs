@@ -35,7 +35,7 @@ fn resolve_errors(src: &str) -> Option<Vec<String>> {
     let _ = analyze_source_set_with_features(
         &inputs,
         krusty::frontend::PlatformProvider::jvm(platform),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
     Some(
