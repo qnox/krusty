@@ -186,8 +186,8 @@ impl Walk<'_, '_> {
     fn expression(&mut self, expression: ExprId, position: Position) {
         let file = self.checker.file;
         match file.expr(expression) {
-            Expr::Return { value, label } => {
-                let leaves = self.leaves_function(label.as_deref(), position);
+            Expr::Return { value, .. } => {
+                let leaves = self.expression_leaves_function(expression, position);
                 if let Some(value) = *value {
                     self.expression(
                         value,
@@ -277,7 +277,10 @@ impl Walk<'_, '_> {
                 }
                 return;
             }
-            Expr::Call { .. } | Expr::SafeCall { .. } | Expr::Binary { .. } => {
+            Expr::Call { .. }
+            | Expr::SafeCall { .. }
+            | Expr::Binary { .. }
+            | Expr::Unary { .. } => {
                 self.record_if_recursive(expression, position);
                 if let Some(&object) = file.anonymous_object_classes.get(&expression) {
                     self.declaration(object, position);
@@ -356,8 +359,8 @@ impl Walk<'_, '_> {
         let file = self.checker.file;
         match file.stmt(statement) {
             Stmt::Expr(expression) => self.expression(*expression, position),
-            Stmt::Return(value, label) => {
-                let leaves = self.leaves_function(label.as_deref(), position);
+            Stmt::Return(value, _) => {
+                let leaves = self.statement_leaves_function(statement, position);
                 if let Some(value) = *value {
                     self.expression(
                         value,
@@ -395,21 +398,25 @@ impl Walk<'_, '_> {
         }
     }
 
-    /// Whether a `return` written with `label` leaves the function being checked.
-    fn leaves_function(&self, label: Option<&str>, position: Position) -> bool {
+    /// Whether the `return` expression leaves the function being checked: the checker's own
+    /// resolution of its label says so, not the label's spelling.
+    fn expression_leaves_function(&self, expression: ExprId, position: Position) -> bool {
         position.returns_from_function
-            && match label {
-                None => true,
-                Some(label) => label == self.function.name,
-            }
+            && self.checker.expr_return_targets.get(&expression) == Some(&ReturnTarget::Function)
+    }
+
+    /// Whether the `return` statement leaves the function being checked.
+    fn statement_leaves_function(&self, statement: StmtId, position: Position) -> bool {
+        position.returns_from_function
+            && self.checker.stmt_return_targets.get(&statement) == Some(&ReturnTarget::Function)
     }
 
     /// A statement that leaves the function with no value, or with `Unit`, which kotlinc reads
     /// without an instruction of its own.
     fn statement_is_bare_return(&self, statement: StmtId, position: Position) -> bool {
         match self.checker.file.stmt(statement) {
-            Stmt::Return(value, label) => {
-                self.leaves_function(label.as_deref(), position)
+            Stmt::Return(value, _) => {
+                self.statement_leaves_function(statement, position)
                     && value.is_none_or(|value| self.is_bare_unit(value))
             }
             Stmt::Expr(expression) => self.expression_is_bare_return(*expression, position),
@@ -419,8 +426,8 @@ impl Walk<'_, '_> {
 
     fn expression_is_bare_return(&self, expression: ExprId, position: Position) -> bool {
         match self.checker.file.expr(expression) {
-            Expr::Return { value, label } => {
-                self.leaves_function(label.as_deref(), position)
+            Expr::Return { value, .. } => {
+                self.expression_leaves_function(expression, position)
                     && value.is_none_or(|value| self.is_bare_unit(value))
             }
             _ => false,
@@ -480,6 +487,14 @@ impl Walk<'_, '_> {
     /// the operator denotes.
     fn selected_call(&self, call: ExprId) -> Option<&ResolvedCall> {
         let checker = self.checker;
+        if let Expr::Unary { op, .. } = checker.file.expr(call) {
+            let key = match op {
+                UnOp::Neg => SyntheticOperatorCall::UnaryMinus,
+                UnOp::Plus => SyntheticOperatorCall::UnaryPlus,
+                UnOp::Not => SyntheticOperatorCall::Not,
+            };
+            return checker.resolved_operator_calls.get(&(call, key));
+        }
         let Expr::Binary { op, .. } = checker.file.expr(call) else {
             return checker.resolved_calls.get(&call);
         };
@@ -497,7 +512,8 @@ impl Walk<'_, '_> {
     fn reported_span(&self, call: ExprId) -> Span {
         let file = self.checker.file;
         let dotless =
-            matches!(file.expr(call), Expr::Binary { .. }) || file.infix_calls.contains(&call.0);
+            matches!(file.expr(call), Expr::Binary { .. } | Expr::Unary { .. })
+                || file.infix_calls.contains(&call.0);
         if !dotless || self.quirks.has(Quirk::TailrecDotlessCallReportedAtOperator) {
             return self.checker.call_callee_name_span(call);
         }

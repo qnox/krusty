@@ -35,3 +35,7 @@ tailrec fun inNestedFunction(n: Int): Int {
     return inner()
 }
 tailrec fun noRecursion(n: Int): Int = n
+tailrec fun shadowedLabel(n: Int): Int {
+    run shadowedLabel@{ return@shadowedLabel shadowedLabel(n - 1) }
+    return 0
+}
