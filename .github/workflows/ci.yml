@@ -577,7 +577,7 @@ jobs:
           cp "$(just tool-test-bin e2e)" e2e-bin
           cp target/gate/krusty krusty
           phase_begin krusty-build-tests
-          bin=$(just krusty-build-tests)
+          bin=$(CARGO_TEST_BINARY_REUSE="krusty krusty_jvm krusty_native krusty_wasm" just krusty-build-tests)
           phase_end krusty-build-tests
           cp "$bin" krusty-build-tests
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
