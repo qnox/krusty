@@ -511,9 +511,8 @@ impl Walk<'_, '_> {
     /// as wide as the name.
     fn reported_span(&self, call: ExprId) -> Span {
         let file = self.checker.file;
-        let dotless =
-            matches!(file.expr(call), Expr::Binary { .. } | Expr::Unary { .. })
-                || file.infix_calls.contains(&call.0);
+        let dotless = matches!(file.expr(call), Expr::Binary { .. } | Expr::Unary { .. })
+            || file.infix_calls.contains(&call.0);
         if !dotless || self.quirks.has(Quirk::TailrecDotlessCallReportedAtOperator) {
             return self.checker.call_callee_name_span(call);
         }
