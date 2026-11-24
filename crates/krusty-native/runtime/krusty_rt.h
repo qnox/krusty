@@ -523,6 +523,7 @@ KRef kt_mutable_list_with_capacity(kt_int capacity);
 KRef kt_mutable_list_of(KRef elements);
 /* `ArrayList(elements)`: a growable list holding a copy of any collection's elements. */
 KRef kt_mutable_list_copy_of(KRef elements);
+KRef kt_hash_map_copy_of(KRef original);
 kt_boolean kt_mutable_list_add(KRef self, KRef value);
 void kt_mutable_list_add_at(KRef self, kt_int index, KRef value);
 /* Answers the element that was there, as Kotlin's `set` does. */

@@ -47,10 +47,19 @@ impl BodyLowering<'_, '_, '_> {
         lhs: u32,
         rhs: u32,
     ) -> Result<Option<Value>, Unsupported> {
+        if let Some(equal) = self.unboxed_value_equality(op, lhs, rhs)? {
+            return Ok(equal);
+        }
         let against_null = matches!(self.file.ir.expr(lhs), IrExpr::Const(IrConst::Null))
             || matches!(self.file.ir.expr(rhs), IrExpr::Const(IrConst::Null));
-        let left = self.reference(lhs)?;
-        let right = self.reference(rhs)?;
+        let (left, right) = if against_null {
+            (
+                self.null_tested_operand(lhs, self.checked_type(lhs))?,
+                self.null_tested_operand(rhs, self.checked_type(rhs))?,
+            )
+        } else {
+            (self.reference(lhs)?, self.reference(rhs)?)
+        };
         if self.terminated {
             return Ok(None);
         }
@@ -67,6 +76,60 @@ impl BodyLowering<'_, '_, '_> {
         } else {
             equal
         }))
+    }
+
+    /// `==` of two unboxed operands of one value class that declares no `equals` of its own and
+    /// wraps an integral scalar: the classes' default equality is that of their values, so it is
+    /// the comparison of the values, and neither side is boxed to ask it. `Ok(None)` leaves the
+    /// comparison to the general path; `Ok(Some(None))` is a terminated body.
+    fn unboxed_value_equality(
+        &mut self,
+        op: IrBinOp,
+        lhs: u32,
+        rhs: u32,
+    ) -> Result<Option<Option<Value>>, Unsupported> {
+        let (Some(left), Some(right)) = (self.checked_type(lhs), self.checked_type(rhs)) else {
+            return Ok(None);
+        };
+        let Some(class) = self.file.values.unboxed(left) else {
+            return Ok(None);
+        };
+        if left.is_nullable()
+            || right.is_nullable()
+            || self.file.values.unboxed(right) != Some(class)
+            || !matches!(
+                self.file.values.underlying(class),
+                Some(Ty::Int | Ty::Long | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean)
+            )
+        {
+            return Ok(None);
+        }
+        let generated = self
+            .file
+            .ir
+            .data_class_member(class, krusty::ir::IrDataClassMemberRole::Equals);
+        let declares_equals = self.file.ir.class_id_by_name(class).is_none_or(|id| {
+            self.file.ir.classes[id as usize]
+                .methods
+                .iter()
+                .any(|&method| {
+                    let function = &self.file.ir.functions[method as usize];
+                    &*function.name == "equals"
+                        && function.params.len() == 1
+                        && Some(method) != generated
+                })
+        });
+        if declares_equals {
+            return Ok(None);
+        }
+        let (Some(left), Some(right)) = (self.expression(lhs)?, self.expression(rhs)?) else {
+            return Ok(Some(None));
+        };
+        if self.terminated {
+            return Ok(Some(None));
+        }
+        let condition = comparison(op, false).expect("equality");
+        Ok(Some(Some(self.builder.ins().icmp(condition, left, right))))
     }
 
     fn primitive_equality(
@@ -330,6 +393,28 @@ impl BodyLowering<'_, '_, '_> {
         }))
     }
 
+    /// An operand of `x == null`, as the reference the identity test reads: a nullable value class
+    /// carried as its (reference) value is that value, whose `null` is the class's own; any other
+    /// operand is the reference it is.
+    fn null_tested_operand(
+        &mut self,
+        operand: u32,
+        checked: Option<Ty>,
+    ) -> Result<Value, Unsupported> {
+        let carried_as_its_value = checked.is_some_and(|ty| {
+            ty.is_nullable()
+                && self.file.values.unboxed(ty).is_some()
+                && self.carrier(self.file.values.project(ty)) == Carrier::Ref
+        });
+        if !carried_as_its_value {
+            return self.reference(operand);
+        }
+        Ok(match self.expression(operand)? {
+            Some(value) => value,
+            None => self.builder.ins().iconst(types::I64, 0),
+        })
+    }
+
     /// Whether an operand is `null`, as a `Boolean`. A scalar one never is, and says so with a
     /// constant rather than a comparison against a pointer it is not.
     fn is_null_operand(&mut self, value: Value, ty: Option<Ty>) -> Value {
@@ -405,9 +490,12 @@ impl BodyLowering<'_, '_, '_> {
             let on_references =
                 reference_operand(lhs_physical) || reference_operand(rhs_physical) || own_equals;
             if against_null {
-                // `x == null` is `x === null` in Kotlin: no `equals` is ever called.
-                let left = self.reference(lhs)?;
-                let right = self.reference(rhs)?;
+                // `x == null` is `x === null` in Kotlin: no `equals` is ever called. A `V?` that
+                // is carried as its value has the value's own `null` for the absent one, so the
+                // test reads that value as it is: boxing it first would need a layout of `V` that
+                // a class carried as an address, such as `CPointer`, does not have.
+                let left = self.null_tested_operand(lhs, lhs_checked)?;
+                let right = self.null_tested_operand(rhs, rhs_checked)?;
                 let condition = comparison(op, true).expect("equality");
                 return Ok(Some(self.builder.ins().icmp(condition, left, right)));
             }

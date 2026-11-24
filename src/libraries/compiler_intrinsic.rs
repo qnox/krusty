@@ -97,6 +97,22 @@ impl AtomicOperation {
     }
 }
 
+/// One operation on Kotlin/Native's raw pointer values (`NativePtr`, `CPointer`), as the platform
+/// stdlib's `@TypedIntrinsic` declarations name it. A pointer is an address; the target realizes
+/// each operation on that address and never calls the declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativePointerOperation {
+    /// `IDENTITY`: the one operand reinterpreted as the declared result, bit for bit. A `null`
+    /// result is the zero address, as the stdlib's `interpretCPointer(nativeNullPtr)` states.
+    Reinterpret,
+    /// `INTEROP_NATIVE_PTR_PLUS_LONG`: the address advanced by a byte offset.
+    PlusLong,
+    /// `INTEROP_NATIVE_PTR_TO_LONG`: the address as a `Long`.
+    ToLong,
+    /// `INTEROP_GET_NATIVE_NULL_PTR`: the zero address.
+    Null,
+}
+
 /// A source-declared callable whose implementation is supplied by the compiler after ordinary symbol
 /// and overload selection. Providers attach this to the exact declaration identity; lowering never
 /// grants intrinsic behavior from a coincidental source name.
@@ -146,6 +162,9 @@ pub enum CompilerIntrinsic {
     /// Native's exact `GCUnsafeCall` `Char` surrogate predicate declaration. A target answers it
     /// with a range test of the receiver's code unit.
     CharIsSurrogate(SurrogateHalf),
+    /// One of Native's raw pointer operations, authenticated by its exact `@TypedIntrinsic` kind
+    /// and complete declared shape in the platform stdlib.
+    NativePointer(NativePointerOperation),
     /// Exact Kotlin array-factory declaration whose implementation is supplied by the compiler.
     /// The kind distinguishes reference/primitive varargs and the other language array creators;
     /// selected call-site types remain ordinary semantic types and are recorded in checked FIR.

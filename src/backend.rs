@@ -2,6 +2,7 @@
 //!
 //! A backend consumes checked frontend output and emits target artifacts.
 
+pub mod address_carriers;
 pub mod class_names;
 pub mod class_tables;
 pub use class_tables::is_declared_in_executable_code;

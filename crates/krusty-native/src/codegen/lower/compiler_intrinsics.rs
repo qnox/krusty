@@ -333,6 +333,10 @@ impl<'a> BodyLowering<'a, '_, '_> {
             };
             return Some(self.reinterpret_bits(operand, from, ret));
         }
+        if let Some(krusty::backend::BackendCompilerIntrinsic::NativePointer(operation)) = intrinsic
+        {
+            return Some(self.native_pointer(operation, receiver, args, ret));
+        }
         // A primitive operator member — `a.and(b)` in an expanded library body — is the binary
         // operation its source operator form lowers to.
         if let Some(op) = intrinsic.and_then(IrBinOp::of_primitive_operator) {

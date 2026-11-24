@@ -59,7 +59,11 @@ impl BodyLowering<'_, '_, '_> {
         internal: TypeName,
         args: &[u32],
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        if !super::super::super::intrinsics::constructs_as_its_value(internal) {
+        // The pointer classes hold only the address they wrap
+        // ([`krusty::backend::address_carriers`]).
+        let address = krusty::backend::address_carriers::is_address_class(internal)
+            && !internal.matches("kotlin/native/internal/NonNullNativePtr");
+        if !address && !super::super::super::intrinsics::constructs_as_its_value(internal) {
             return None;
         }
         let [argument] = args else {

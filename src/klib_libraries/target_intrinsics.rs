@@ -797,7 +797,9 @@ pub(super) fn authenticate(
         (TargetIntrinsicPlatform::Wasm, true) => wasm(placement, declaration),
         (TargetIntrinsicPlatform::Wasm, false) => wasm_array_copy(placement, declaration)
             .or_else(|| wasm_intercepted_continuation(placement, declaration)),
-        (TargetIntrinsicPlatform::Native, false) => None,
+        (TargetIntrinsicPlatform::Native, false) => {
+            native_pointer_reinterpret(placement, declaration)
+        }
     }
 }
 
@@ -1418,6 +1420,9 @@ fn native(
         type_name("kotlin/native/internal/TypedIntrinsic"),
         "kind",
     )?;
+    if let Some(shape) = native_pointer(entry, placement, declaration) {
+        return Some(shape);
+    }
     let shape = match (entry, placement) {
         ("REINTERPRET", crate::libraries::CallablePlacement::Member { owner, .. })
             if owner == type_name("kotlin/Float")
@@ -1561,6 +1566,115 @@ fn integral_scalar_pair(declaration: &KotlinFunction) -> Option<Ty> {
     .into_iter()
     .find_map(|(classifier, scalar)| {
         (exact_type(first, classifier) && exact_type(second, classifier)).then_some(scalar)
+    })
+}
+
+const NATIVE_PTR: &str = "kotlin/native/internal/NativePtr";
+
+fn native_ptr() -> Ty {
+    Ty::obj_name(type_name(NATIVE_PTR))
+}
+
+/// Native's raw pointer operations whose declaration has no type parameter: `NativePtr.plus(Long)`,
+/// `NativePtr.toLong()` and `getNativeNullPtr()`. The kind alone never authenticates one; the
+/// declaring class or package and the complete signature must be the stdlib's.
+fn native_pointer(
+    entry: &str,
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    use crate::libraries::{CallablePlacement, NativePointerOperation};
+    let (operation, kind, receiver, params, ret) = match (entry, placement) {
+        ("INTEROP_NATIVE_PTR_PLUS_LONG", CallablePlacement::Member { owner, .. })
+            if owner == type_name(NATIVE_PTR)
+                && exact_signature(declaration, "kotlin/Long", NATIVE_PTR) =>
+        {
+            (
+                NativePointerOperation::PlusLong,
+                ExternalCallableKind::Member,
+                Some(native_ptr()),
+                vec![Ty::Long],
+                native_ptr(),
+            )
+        }
+        ("INTEROP_NATIVE_PTR_TO_LONG", CallablePlacement::Member { owner, .. })
+            if owner == type_name(NATIVE_PTR)
+                && declaration.params.is_empty()
+                && exact_type(&declaration.ret, "kotlin/Long") =>
+        {
+            (
+                NativePointerOperation::ToLong,
+                ExternalCallableKind::Member,
+                Some(native_ptr()),
+                vec![],
+                Ty::Long,
+            )
+        }
+        ("INTEROP_GET_NATIVE_NULL_PTR", CallablePlacement::Package(package))
+            if package == type_name("kotlin/native/internal")
+                && declaration.params.is_empty()
+                && exact_type(&declaration.ret, NATIVE_PTR) =>
+        {
+            (
+                NativePointerOperation::Null,
+                ExternalCallableKind::TopLevel,
+                None,
+                vec![],
+                native_ptr(),
+            )
+        }
+        _ => return None,
+    };
+    Some(KlibIntrinsicShape {
+        operation: CompilerIntrinsic::NativePointer(operation),
+        kind,
+        receiver,
+        params,
+        ret,
+    })
+}
+
+/// `kotlinx.cinterop.interpretCPointer<T>(rawValue: NativePtr): CPointer<T>?`, the `IDENTITY`
+/// typed intrinsic that gives an address its pointer type. Its one type parameter only names the
+/// pointee, so the declared result is the nullable `CPointer` of exactly that parameter.
+fn native_pointer_reinterpret(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    if placement != crate::libraries::CallablePlacement::Package(type_name("kotlinx/cinterop"))
+        || !declaration.is_external
+        || declaration.receiver.is_some()
+        || declaration.formals.len() != 1
+        || string_annotation(
+            &declaration.annotation_applications,
+            type_name("kotlin/native/internal/TypedIntrinsic"),
+            "kind",
+        ) != Some("IDENTITY")
+        || declaration.params.len() != 1
+        || !exact_type(&declaration.params[0], NATIVE_PTR)
+    {
+        return None;
+    }
+    let KotlinType::Class {
+        internal,
+        args,
+        nullable: true,
+        ..
+    } = &declaration.ret
+    else {
+        return None;
+    };
+    if internal != "kotlinx/cinterop/CPointer" || args.len() != 1 {
+        return None;
+    }
+    Some(KlibIntrinsicShape {
+        operation: CompilerIntrinsic::NativePointer(
+            crate::libraries::NativePointerOperation::Reinterpret,
+        ),
+        kind: ExternalCallableKind::TopLevel,
+        receiver: None,
+        params: vec![native_ptr()],
+        ret: Ty::nullable(Ty::obj_name(type_name("kotlinx/cinterop/CPointer"))),
     })
 }
 

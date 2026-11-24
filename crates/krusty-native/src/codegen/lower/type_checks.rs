@@ -945,8 +945,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // `HashMap()` / `HashSet()` and their linked spellings, the runtime's growable tables.
         // Declared in no file either, for the reason the list above is not. The empty form and the
         // initial-capacity one are realized: the capacity is a hint, but a negative one throws as
-        // Kotlin's does. The load-factor overload and a copy constructor, which takes a collection
-        // whose walk would have to be the map's own, decline with what they were passed in sight.
+        // Kotlin's does. The map copy constructor reads the entries of a map this runtime made. The
+        // load-factor overload and a set's copy constructor, which takes a collection whose walk
+        // would have to be the set's own, decline with what they were passed in sight.
         if let Some(kind) = self
             .file
             .standard_collection_implementation(internal)
@@ -971,6 +972,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         any(),
                         &[capacity],
                     )
+                }
+                ([argument], Some([only]))
+                    if kind == "map"
+                        && only.non_null().obj_internal()
+                            == Some(krusty::types::type_name("kotlin/collections/Map")) =>
+                {
+                    let original = self.reference(*argument)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call("kt_hash_map_copy_of", &[any()], any(), &[original])
                 }
                 _ => Err(declined!("this constructor of `{name}`")),
             };

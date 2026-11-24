@@ -332,13 +332,17 @@ impl Backend for CraneliftBackend {
             &file.ir,
             &file.classifiers,
         ) {
-            Ok(inventory) => inventory.declared_in_module(
-                file.classifiers
-                    .module()
-                    .source_value_classes()
-                    .keys()
-                    .copied(),
-            ),
+            Ok(inventory) => inventory
+                .carrying(krusty::backend::address_carriers::declarations(
+                    &file.classifiers,
+                ))
+                .declared_in_module(
+                    file.classifiers
+                        .module()
+                        .source_value_classes()
+                        .keys()
+                        .copied(),
+                ),
             Err(unsupported) => {
                 diags.error(
                     krusty::diag::Span::new(0, 0),
@@ -360,7 +364,9 @@ impl Backend for CraneliftBackend {
             ) {
                 Ok(values) => super::classes::module_plan(
                     classes,
-                    &values,
+                    &values.carrying(krusty::backend::address_carriers::declarations(
+                        &file.classifiers,
+                    )),
                     &file.callables,
                     &file.classifiers,
                     &state.laid_out,

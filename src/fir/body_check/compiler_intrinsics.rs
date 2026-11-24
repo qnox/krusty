@@ -32,6 +32,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::FloatingAdjacent { .. }
         | CompilerIntrinsic::CountLeadingZeroBits { .. }
         | CompilerIntrinsic::CharIsSurrogate(_)
+        | CompilerIntrinsic::NativePointer(_)
         | CompilerIntrinsic::RadixToString { .. }
         | CompilerIntrinsic::StringRangeEquals
         | CompilerIntrinsic::StringIndexOf { .. }

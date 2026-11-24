@@ -817,6 +817,32 @@ KRef kt_hash_set_with_capacity(kt_int capacity) {
     return kt_map_with_capacity(&kt_type_hash_set, capacity);
 }
 
+/* `HashMap(original)` and `LinkedHashMap(original)`: a new map holding the entries of `original`
+   in its iteration order, read once now. The copy owns its storage, so a later write to either map
+   is not seen by the other. A map of the program's publishes only the members `KMapMembers` lists,
+   which cannot hand the entries over, so it fails loudly as every other runtime read of one does. */
+KRef kt_hash_map_copy_of(KRef original) {
+    if (kt_is_empty_one(original)) {
+        return kt_map_new();
+    }
+    if (original->header.type != &kt_type_hash_map) {
+        KT_FAIL_FOREIGN("Map", original);
+    }
+    const KMap *source = (const KMap *)original;
+    KRef map = kt_map_shaped(&kt_type_hash_map,
+                             source->size < KT_INITIAL_CAPACITY ? KT_INITIAL_CAPACITY : source->size);
+    for (kt_int index = 0; index < source->length; index++) {
+        if (kt_ints(source->presence)[index] < 0) {
+            continue;
+        }
+        (void)kt_map_put(map, kt_refs(source->keys)[index], kt_refs(source->values)[index]);
+        if (kt_map_raised()) {
+            return map;
+        }
+    }
+    return map;
+}
+
 /* ---- iteration ------------------------------------------------------------------------------
 
    `HashMap.Itr`: `hasNext` is whether the index is below the map's length; `next` first checks

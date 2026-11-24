@@ -503,6 +503,75 @@ fn native_a_collection_keeps_every_reachable_object() {
     assert_eq!(outcome, Outcome::Pass, "nativeGcCollect");
 }
 
+/// A Native-only program, which has no JVM oracle: its `box` states the language-defined answer.
+fn expect_native_only_box(source: &str, stem: &str) {
+    let target = host().expect("Native KLIB/runtime is required for this test");
+    let lane = NativeLane {
+        target: Some(target),
+    };
+    let outcome = lane.compile_and_run(
+        &std::env::temp_dir(),
+        stem,
+        &[(format!("{stem}.kt"), source.to_string())],
+        source,
+    );
+    assert_eq!(outcome, Outcome::Pass, "{stem}");
+}
+
+/// PLATFORM-SPECIFIC: `CPointer` exists only on Native. A pointer is an address: `Long.toCPointer`
+/// builds one from the address, `toLong` reads it back, and the null address is the `null`
+/// pointer.
+#[test]
+fn native_a_pointer_is_an_address_and_the_null_address_is_null() {
+    let source = "import kotlinx.cinterop.*\n\
+         @OptIn(ExperimentalForeignApi::class)\n\
+         fun box(): String {\n\
+         \x20   val none = 0L.toCPointer<ByteVar>()\n\
+         \x20   if (none != null) return \"fail 1\"\n\
+         \x20   val some = 4096L.toCPointer<ByteVar>()\n\
+         \x20   if (some == null) return \"fail 2\"\n\
+         \x20   if (some.toLong() != 4096L) return \"fail 3: ${some.toLong()}\"\n\
+         \x20   if (some.rawValue.toLong() != 4096L) return \"fail 4: ${some.rawValue.toLong()}\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_native_only_box(source, "nativePointerFromAddress");
+}
+
+/// PLATFORM-SPECIFIC: pointer arithmetic advances the address by whole elements of the pointee.
+#[test]
+fn native_pointer_arithmetic_advances_the_address() {
+    let source = "import kotlinx.cinterop.*\n\
+         @OptIn(ExperimentalForeignApi::class)\n\
+         fun box(): String {\n\
+         \x20   val base = 1000L.toCPointer<ByteVar>()!!\n\
+         \x20   val bytes = (base + 24L)!!\n\
+         \x20   if (bytes.toLong() != 1024L) return \"fail 1: ${bytes.toLong()}\"\n\
+         \x20   val ints = 1000L.toCPointer<IntVar>()!!\n\
+         \x20   val moved = (ints + 3)!!\n\
+         \x20   if (moved.toLong() != 1012L) return \"fail 2: ${moved.toLong()}\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_native_only_box(source, "nativePointerArithmetic");
+}
+
+/// PLATFORM-SPECIFIC: `GC.lastGCInfo` reads pool names the runtime hands the library as C strings
+/// (`NativePtr`), which the library turns into `String`s through `CPointer<ByteVar>.toKString()`.
+#[test]
+fn native_the_last_collection_reports_its_pools_by_name() {
+    let source = "@file:OptIn(kotlin.native.runtime.NativeRuntimeApi::class, kotlin.ExperimentalStdlibApi::class)\n\
+         import kotlin.native.runtime.GC\n\
+         fun box(): String {\n\
+         \x20   GC.collect()\n\
+         \x20   val info = GC.lastGCInfo ?: return \"fail 1\"\n\
+         \x20   if (info.memoryUsageBefore.isEmpty()) return \"fail 2\"\n\
+         \x20   if (info.memoryUsageAfter.keys != info.memoryUsageBefore.keys) return \"fail 3\"\n\
+         \x20   if (info.sweepStatistics.keys.any { it.isEmpty() }) return \"fail 4\"\n\
+         \x20   if (info.memoryUsageAfter.values.any { it.totalObjectsSizeBytes < 0 }) return \"fail 5\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_native_only_box(source, "nativeGcInfoPoolNames");
+}
+
 /// The receiver-reuse program starts its suspend lambda through the stdlib KLIB's `startCoroutine`.
 #[test]
 fn native_apply_receiver_single_store_runs() {
@@ -1145,4 +1214,16 @@ fn native_links_a_library_s_top_level_function_bodies_from_its_klib() {
         lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
         Outcome::Pass
     );
+}
+
+#[test]
+fn native_value_class_equality_compares_the_values() {
+    // PLATFORM-SPECIFIC: the expected values are the language's own.
+    let source = "value class Plain(val v: Int)\n\
+         fun box(): String {\n\
+         \x20   if (Plain(1) != Plain(1)) return \"fail 1\"\n\
+         \x20   if (Plain(1) == Plain(2)) return \"fail 2\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_native_only_box(source, "valueClassEquality");
 }
