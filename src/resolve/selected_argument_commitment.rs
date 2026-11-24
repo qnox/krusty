@@ -371,6 +371,26 @@ impl Checker<'_> {
                 ));
                 continue;
             }
+            let declared_parameter = declared_params[parameter];
+            let declared = if call_sig.vararg_index == Some(parameter) && !whole_array {
+                declared_parameter
+                    .array_read_elem()
+                    .unwrap_or(declared_parameter)
+            } else {
+                declared_parameter
+            };
+            // A lambda whose written parameter names no type, bound to a bare type variable that
+            // only its own arity-probe gave a shape, is still unshaped: the selection took the
+            // probe's function type for the variable, which would hide the missing inference.
+            let expected = self
+                .lambda_bound_only_the_callee_variable(
+                    call,
+                    argument,
+                    probed_actual,
+                    declared,
+                    expected,
+                )
+                .unwrap_or(expected);
             let actual = self.selected_argument_type(
                 scope,
                 argument,
@@ -424,14 +444,6 @@ impl Checker<'_> {
                 ));
                 continue;
             }
-            let declared_parameter = declared_params[parameter];
-            let declared = if call_sig.vararg_index == Some(parameter) && !whole_array {
-                declared_parameter
-                    .array_read_elem()
-                    .unwrap_or(declared_parameter)
-            } else {
-                declared_parameter
-            };
             self.expect_call_arg_labeled(
                 scope,
                 ParameterTypeExpectation { expected, declared },

@@ -63,3 +63,39 @@ fn a_bare_type_variable_parameter_gives_the_lambda_no_shape() {
         4,
     );
 }
+
+#[test]
+fn a_library_callee_with_a_bare_type_variable_parameter_gives_the_lambda_no_shape() {
+    assert_same(
+        "library_callee",
+        "fun f() {\n\
+         \x20   val a = listOf({ x -> })\n\
+         }\n",
+        2,
+    );
+}
+
+#[test]
+fn a_library_callee_with_no_argument_cannot_infer_its_type_variable() {
+    assert_same(
+        "library_no_argument",
+        "fun f() {\n\
+         \x20   val a = mutableSetOf()\n\
+         }\n",
+        1,
+    );
+}
+
+#[test]
+fn a_variable_bound_by_an_explicit_type_argument_or_receiver_needs_no_lambda_inference() {
+    assert_same(
+        "bound_elsewhere",
+        "class MyList<T>\n\
+         operator fun <T> MyList<T>.plusAssign(element: T) {}\n\
+         fun f(functions: MyList<(Int) -> Int>) {\n\
+         \x20   functions.plusAssign({ it -> it })\n\
+         \x20   val a = listOf<(Any) -> Unit>({ x -> })\n\
+         }\n",
+        0,
+    );
+}
