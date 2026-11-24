@@ -393,6 +393,11 @@ impl AnonymousObjects for CallObjects<'_> {
         let type_arguments = self
             .type_arguments(site)
             .ok_or(unsupported("a type argument without a generic signature"))?;
+        let enum_entries = super::super::entries_mappings::CallEnumEntries {
+            classifiers: site.symbols,
+            run: self.run,
+            owner: &self.owner,
+        };
         let bytes = self.bodies.class_file(class).ok_or(unsupported(
             "an object whose class file is not on the classpath",
         ))?;
@@ -451,6 +456,7 @@ impl AnonymousObjects for CallObjects<'_> {
                 classes: &self.bodies,
                 value_classes: &self.value_classes,
                 reified: &self.reified,
+                enum_entries: &enum_entries,
                 continuation: None,
                 same_module: self.same_module,
             },

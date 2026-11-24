@@ -62,8 +62,42 @@ pub trait EnumEntriesReads {
     ) -> Option<EnumEntriesRead>;
 }
 
+/// [`EnumEntriesReads`] where answering a read needs no exclusive access: an anonymous object copied
+/// into the call site's class reads enum entries the way the call's own body does, through the
+/// mapping class that class owns.
+pub trait EnumEntriesSource {
+    fn entries_read(
+        &self,
+        classifier: crate::types::TypeName,
+        internal: &str,
+    ) -> Option<EnumEntriesRead>;
+}
+
+/// An [`EnumEntriesSource`] as the [`EnumEntriesReads`] the inliner asks.
+pub(in crate::jvm) struct SharedEnumEntriesReads<'a>(pub(in crate::jvm) &'a dyn EnumEntriesSource);
+
+impl EnumEntriesReads for SharedEnumEntriesReads<'_> {
+    fn entries(
+        &mut self,
+        classifier: crate::types::TypeName,
+        internal: &str,
+    ) -> Option<EnumEntriesRead> {
+        self.0.entries_read(classifier, internal)
+    }
+}
+
 /// No declaration is readable: every entries read is refused.
 pub(in crate::jvm) struct NoEnumEntriesReads;
+
+impl EnumEntriesSource for NoEnumEntriesReads {
+    fn entries_read(
+        &self,
+        _classifier: crate::types::TypeName,
+        _internal: &str,
+    ) -> Option<EnumEntriesRead> {
+        None
+    }
+}
 
 impl EnumEntriesReads for NoEnumEntriesReads {
     fn entries(
