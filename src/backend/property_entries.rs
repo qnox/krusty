@@ -44,15 +44,20 @@ pub fn realize(
                 setter: declared_setter,
                 qualifier: None,
             } => {
-                let Some(storage) = ir.statics.get(storage as usize) else {
+                let Some(declaration) = ir.statics.get(storage as usize) else {
                     return Err("a default package property export without checked storage");
                 };
+                let storage_index = storage;
+                let storage = declaration;
                 let accessor = if setter {
                     storage.accessors.setter
                 } else {
                     storage.accessors.getter
                 };
-                if storage.owner.is_some()
+                // A block property's storage is owned by its class, but its entry is receiver-less
+                // like a package property's: reading or writing it initializes the class first.
+                let owned_by_block = ir.companion_blocks.is_storage(storage_index);
+                if (storage.owner.is_some() && !owned_by_block)
                     || storage.is_const
                     || storage.property_delegate
                     || accessor != crate::ir::IrStaticAccessor::Default
