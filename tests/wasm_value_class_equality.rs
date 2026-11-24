@@ -86,3 +86,63 @@ fn unsigned_storage_read_sign_extends() {
         "UnsignedToSignedNarrowing",
     );
 }
+
+/// PLATFORM-SPECIFIC: both Wasm hosts execute the ordinary three-file source module in both
+/// file orders. The complete program remains in the shared portable inventory.
+#[test]
+fn cross_file_nominal_box_tests_share_the_planned_class_identity_in_both_file_orders() {
+    let source = include_str!("box_regressions/crossFileNominalBoxTests.kt");
+    let stem = "CrossFileNominalBoxTests";
+    crate::box_reference_classes::checked_box(source, stem)
+        .expect("the complete nominal-box program passes the official JVM oracle");
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        let prepared = krusty::conformance::prepare_test_source(source, lane.test_target());
+        let (mut sources, java) =
+            krusty::conformance::split_files(&prepared).expect("the whole ordinary file set");
+        assert!(java.is_empty());
+        assert_eq!(sources.len(), 3);
+        for reverse in [false, true] {
+            if reverse {
+                sources.reverse();
+            }
+            assert_eq!(
+                lane.compile_and_run(&std::env::temp_dir(), stem, &sources, source),
+                Outcome::Pass,
+                "{stem} on {} with reverse={reverse}",
+                target.name(),
+            );
+        }
+    }
+}
+
+/// The complete dependency-interface program retains its genuine producer/consumer graph.
+#[test]
+fn dependency_interface_value_boxes_preserve_nominal_identity_in_both_consumer_file_orders() {
+    let source = include_str!("box_regressions/multimodule/dependencyInterfaceAppliedAbi.kt");
+    let stem = "DependencyInterfaceAppliedAbiNominalBoxes";
+    crate::box_reference_classes::checked_box(source, stem)
+        .expect("the complete dependency program passes the official JVM oracle");
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        let prepared = krusty::conformance::prepare_test_source(source, lane.test_target());
+        let modules =
+            krusty::conformance::split_modules(&prepared).expect("the whole dependency graph");
+        let mut units = krusty::conformance::module_units(&modules);
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[1].files.len(), 2);
+        for reverse in [false, true] {
+            if reverse {
+                units[1].files.reverse();
+            }
+            assert_eq!(
+                lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+                Outcome::Pass,
+                "{stem} on {} with reverse={reverse}",
+                target.name(),
+            );
+        }
+    }
+}

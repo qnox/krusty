@@ -288,3 +288,57 @@ fn capturing_default_lambdas_run_like_the_reference_compiler() {
     .expect("reference kotlinc is provisioned");
     assert_eq!(output, "OK");
 }
+
+const REFERENCE_LIB: &str = r#"
+package copies
+
+class Remapper(val source: String)
+
+inline fun <reified T : CharSequence> T.copyWith(
+    prefix: String = "",
+    create: (String) -> Remapper = ::Remapper,
+): String = create(prefix + this).source
+"#;
+
+const REFERENCE_MAIN: &str = r#"
+import copies.Remapper
+import copies.copyWith
+
+fun box(): String {
+    val text: CharSequence = "K"
+    val explicit = text.copyWith("O") { Remapper(it.lowercase()) }
+    if (explicit != "ok") return "fail: explicit " + explicit
+    return text.copyWith("O")
+}
+"#;
+
+/// An omitted parameter whose default is an unbound function reference (`::Remapper`) compiles to
+/// a `FunctionReferenceImpl` singleton whose typed `invoke` carries the call; the call site inlines
+/// it like any other default lambda. The class-file inliner is JVM-only, so the case is not a
+/// portable box regression.
+#[test]
+fn function_reference_defaults_are_inlined_where_kotlinc_inlines_them() {
+    let classes = common::classes_against_kotlinc_lib(
+        "ReferenceDefaults",
+        &[("Lib.kt", REFERENCE_LIB)],
+        REFERENCE_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        ["ReferenceDefaultsKt"]
+    );
+    let differences = classes.code_differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+#[test]
+fn function_reference_defaults_run_like_the_reference_compiler() {
+    let output = common::expect_box_run_against_ref(
+        "function_reference_defaults",
+        REFERENCE_LIB,
+        REFERENCE_MAIN,
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+}
