@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 
 use super::common;
 
+/// One compiler's classes: file name and bytes.
+type Classes = Vec<(String, Vec<u8>)>;
+
 const SOURCE: &str = "import java.util.AbstractMap\n\
     class A {\n\
     \x20 class B\n\
@@ -23,7 +26,7 @@ const SOURCE: &str = "import java.util.AbstractMap\n\
     \x20 fun mapped(e: E) = when (e) { E.X -> 1; E.Y -> 2 }\n\
     }\n";
 
-fn classes(dir: &Path) -> Vec<(String, Vec<u8>)> {
+fn classes(dir: &Path) -> Classes {
     let mut found: Vec<_> = std::fs::read_dir(dir)
         .expect("read compiler output")
         .map(|entry| entry.expect("compiler output entry").path())
@@ -56,7 +59,7 @@ fn announcement(arguments: &[&str]) -> String {
 }
 
 /// Compile `SOURCE` with both compilers under `arguments`; return each one's classes.
-fn compile_both(arguments: &[&str]) -> (Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>)>) {
+fn compile_both(arguments: &[&str]) -> (Classes, Classes) {
     let work = common::scratch_dir().expect("allocate a scratch directory");
     let path = |name: &str| -> PathBuf { work.join(name) };
     let text = |path: &Path| path.to_string_lossy().into_owned();
