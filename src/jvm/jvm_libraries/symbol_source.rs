@@ -63,19 +63,27 @@ impl SymbolSource for JvmLibraries {
     }
 
     /// Kotlin/JVM compiles a subclass's use of a protected companion member through the
-    /// superclass, so only a member that is also a static member of it (`@JvmStatic`,
-    /// `@JvmField`, `const`) is supported.
+    /// superclass, so only a member that is also a static member of it is supported: one
+    /// declared `@JvmStatic`, `@JvmField` or `const` in this compilation, or one the compiled
+    /// superclass carries as a static field or method.
     fn companion_protected_member_exposure(
         &self,
-        annotations: &[TypeName],
-        is_const: bool,
+        member: crate::symbol_source::CompanionMember<'_>,
     ) -> Option<bool> {
         Some(
-            is_const
-                || annotations.iter().any(|annotation| {
+            member.is_const
+                || member.annotations.iter().any(|annotation| {
                     annotation.matches("kotlin/jvm/JvmStatic")
                         || annotation.matches("kotlin/jvm/JvmField")
-                }),
+                })
+                || self.cp.has_static_member(
+                    member.outer,
+                    &[
+                        member.name.to_string(),
+                        crate::names::property_getter_name(member.name),
+                        crate::names::property_setter_name(member.name),
+                    ],
+                ),
         )
     }
 

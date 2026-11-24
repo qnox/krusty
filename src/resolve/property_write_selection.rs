@@ -280,6 +280,7 @@ impl Checker<'_> {
     pub(super) fn report_companion_protected_property_write(
         &mut self,
         resolution: &ImplicitPropertyWriteResolution,
+        name: &str,
         span: Span,
     ) {
         let Some(setter) = resolution.setter.as_ref() else {
@@ -288,6 +289,7 @@ impl Checker<'_> {
         self.report_companion_protected_subclass_use(
             setter.visibility,
             setter.callable.owner,
+            name,
             resolution.stable_declaration,
             false,
             span,

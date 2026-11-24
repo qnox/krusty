@@ -7443,6 +7443,7 @@ impl<'a> Checker<'a> {
                 self.report_companion_protected_subclass_use(
                     visibility,
                     owner,
+                    &member.name,
                     member.stable_declaration,
                     member.metadata_constant_read || member.compile_time_constant.is_some(),
                     span,
@@ -17143,6 +17144,7 @@ impl<'a> Checker<'a> {
                             self.mark_extension_receiver_stmt_used(s, resolution.receiver);
                             self.report_companion_protected_property_write(
                                 &resolution,
+                                &name,
                                 target_span,
                             );
                             if let Some(setter) = resolution.setter.as_ref() {
@@ -17510,6 +17512,15 @@ impl<'a> Checker<'a> {
                     property.ty,
                     owner,
                     property.getter.external_property_identity,
+                    target_span,
+                );
+            } else if !deferred_constructor_write {
+                self.report_companion_protected_subclass_use(
+                    property.setter_visibility,
+                    owner,
+                    &name,
+                    property.stable_declaration,
+                    property.is_const,
                     target_span,
                 );
             }
@@ -31977,8 +31988,9 @@ impl<'a> Checker<'a> {
         self.report_companion_protected_subclass_use(
             property.getter_visibility,
             property.getter.owner,
+            &property.name,
             property.stable_declaration,
-            false,
+            property.is_const,
             name_span,
         );
         if !self.property_reference_exposes_setter(&property, receiver) {

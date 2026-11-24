@@ -163,16 +163,11 @@ impl SymbolSource for ResolverSource<'_> {
 
     fn companion_protected_member_exposure(
         &self,
-        annotations: &[TypeName],
-        is_const: bool,
+        member: crate::symbol_source::CompanionMember<'_>,
     ) -> Option<bool> {
         match self {
-            Self::Direct(source) => {
-                source.companion_protected_member_exposure(annotations, is_const)
-            }
-            Self::Memoized(source) => {
-                source.companion_protected_member_exposure(annotations, is_const)
-            }
+            Self::Direct(source) => source.companion_protected_member_exposure(member),
+            Self::Memoized(source) => source.companion_protected_member_exposure(member),
         }
     }
 

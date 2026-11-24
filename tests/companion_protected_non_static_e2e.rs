@@ -56,11 +56,20 @@ class Outside {
 ";
 
 fn reports(source: &str, args: &[&str]) -> (Vec<String>, Vec<String>) {
+    reports_with(source, &[], args)
+}
+
+fn reports_with(
+    source: &str,
+    libraries: &[std::path::PathBuf],
+    args: &[&str],
+) -> (Vec<String>, Vec<String>) {
     let args = args
         .iter()
         .map(|arg| (*arg).to_string())
         .collect::<Vec<_>>();
-    let result = common::compiler_diagnostics_with_shared_args(&[("Use.kt", source)], &[], &args);
+    let result =
+        common::compiler_diagnostics_with_shared_args(&[("Use.kt", source)], libraries, &args);
     let krusty_output = format!("{}{}", result.krusty_stderr, result.krusty_stdout);
     let render = |diagnostics: Vec<common::CompilerError>| {
         diagnostics
@@ -130,5 +139,74 @@ fn a_generic_superclass_is_reported_only_under_its_feature() {
     assert_eq!(
         kotlinc,
         ["9:9: using protected members that are not '@JvmStatic' in the superclass companion is not yet supported."]
+    );
+}
+
+const QUALIFIED_AND_CONSTANT: &str = "open class Base {
+    companion object {
+        protected var plain = 0
+        protected const val konst = 1
+    }
+}
+
+class Sub : Base() {
+    fun test() {
+        Base.Companion.plain = 2
+        val reference = ::konst
+        val qualified = Base.Companion::konst
+    }
+}
+";
+
+/// A write through the companion is reported like the unqualified one, and a reference to a
+/// `const` is not, as a constant needs no annotation to be exposed.
+#[test]
+fn a_qualified_write_is_reported_and_a_constant_reference_is_not() {
+    let (krusty, kotlinc) = reports(QUALIFIED_AND_CONSTANT, &["-no-reflect"]);
+    assert_eq!(krusty, kotlinc);
+    assert_eq!(
+        kotlinc,
+        ["10:24: using protected members that are not '@JvmStatic' in the superclass companion is not yet supported."]
+    );
+}
+
+const DEPENDENCY: &str = "open class Base {
+    companion object {
+        protected fun bar() {}
+        protected val prop = 0
+        @JvmStatic protected fun gav() {}
+        @JvmStatic protected val jsv = 0
+        @JvmField protected val field = 0
+        protected const val konst = 1
+    }
+}
+";
+
+const DEPENDENCY_USE: &str = "class Sub : Base() {
+    fun test() {
+        bar()
+        prop
+        gav()
+        jsv
+        field
+        konst
+    }
+}
+";
+
+/// The superclass compiled into a dependency carries its static members as the platform
+/// compiled them, so exposure is read from them rather than from annotations in this compilation.
+/// kotlinc reports the two non-static uses and none of the exposed members.
+#[test]
+fn a_dependency_superclass_exposes_its_static_companion_members() {
+    let library = common::kotlinc_library(DEPENDENCY).expect("kotlinc builds the dependency");
+    let (krusty, kotlinc) = reports_with(DEPENDENCY_USE, &[library], &["-no-reflect"]);
+    assert_eq!(krusty, kotlinc);
+    assert_eq!(
+        kotlinc,
+        [
+            "3:9: using protected members that are not '@JvmStatic' in the superclass companion is not yet supported.",
+            "4:9: using protected members that are not '@JvmStatic' in the superclass companion is not yet supported.",
+        ]
     );
 }

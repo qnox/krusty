@@ -335,11 +335,9 @@ impl SymbolSource for DependencyPlatform {
 
     fn companion_protected_member_exposure(
         &self,
-        annotations: &[TypeName],
-        is_const: bool,
+        member: crate::symbol_source::CompanionMember<'_>,
     ) -> Option<bool> {
-        self.platform
-            .companion_protected_member_exposure(annotations, is_const)
+        self.platform.companion_protected_member_exposure(member)
     }
 
     /// The compiled platform assigns every dependency identity this federation hands out.

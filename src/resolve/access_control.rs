@@ -455,6 +455,7 @@ impl<'a> Checker<'a> {
         &mut self,
         visibility: Visibility,
         owner: TypeName,
+        name: &str,
         declaration: Option<crate::fir::DeclarationId>,
         is_const: bool,
         span: Span,
@@ -478,10 +479,14 @@ impl<'a> Checker<'a> {
             (Some(_), None) => return false,
             (None, _) => &[],
         };
-        if self
-            .libraries
-            .companion_protected_member_exposure(annotations, is_const)
-            != Some(false)
+        if self.libraries.companion_protected_member_exposure(
+            crate::symbol_source::CompanionMember {
+                outer,
+                name,
+                annotations,
+                is_const,
+            },
+        ) != Some(false)
         {
             return false;
         }
@@ -523,6 +528,7 @@ impl<'a> Checker<'a> {
         self.report_companion_protected_subclass_use(
             member.visibility,
             owner,
+            &member.name,
             member.stable_declaration,
             false,
             span,
@@ -593,6 +599,7 @@ impl<'a> Checker<'a> {
             return self.report_companion_protected_subclass_use(
                 selected.member.visibility,
                 owner,
+                &selected.member.name,
                 selected.member.stable_declaration,
                 false,
                 span,
@@ -632,6 +639,7 @@ impl<'a> Checker<'a> {
             return self.report_companion_protected_subclass_use(
                 function.visibility,
                 owner,
+                &function.callable.name,
                 function.stable_declaration,
                 false,
                 span,

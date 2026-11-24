@@ -2861,6 +2861,8 @@ pub struct ResolvedPropertyRef {
     /// `None` for an instance property; `Some(None)` for a same-file extension property;
     /// `Some(Some(owner))` for an extension property emitted on another facade.
     pub extension_facade: Option<Option<TypeName>>,
+    /// `const val`, whose constant a use site inlines.
+    pub is_const: bool,
 }
 
 fn select_extension_property_ref(property: PropertyInfo) -> Option<ResolvedPropertyRef> {
@@ -2899,6 +2901,7 @@ fn select_extension_property_ref(property: PropertyInfo) -> Option<ResolvedPrope
         prop_ty,
         source_key,
         stable_declaration: property.stable_declaration,
+        is_const: false,
     })
 }
 
@@ -2943,6 +2946,7 @@ fn build_property_reference_from_declaration(
         source_key: property.source_key,
         stable_declaration: property.stable_declaration,
         extension_facade: None,
+        is_const: property.is_const,
     })
 }
 
