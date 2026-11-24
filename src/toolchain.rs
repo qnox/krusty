@@ -655,8 +655,8 @@ pub fn compose_runtime_jars() -> Option<Vec<PathBuf>> {
     crate::conformance::plugin_corpus::named("compose").runtime_jars()
 }
 
-/// The atomicfu runtime version, for callers that name it as a constant (the conformance-deps
-/// fetch script). The atomicfu corpus descriptor is the producer;
+/// The atomicfu runtime version, for callers that name it as a constant. The atomicfu corpus
+/// descriptor is the producer;
 /// `plugin_runtime_version_constants_match_descriptors` pins this to it.
 pub const ATOMICFU_RUNTIME_VERSION: &str = "0.32.1";
 

@@ -612,7 +612,7 @@ jobs:
   # through the checkout path it was built in, which every runner of this pool shares, so it runs on
   # the pool that built it. Coverage runs it instrumented every night (.github/workflows/coverage.yml).
   e2e:
-    needs: [build-tool-bins, conformance-deps]
+    needs: [build-tool-bins]
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['e2e'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -697,14 +697,21 @@ jobs:
       - *restore-cross-packages
       - *install-cross-runners
       - *save-cross-packages
-      # The suite provisions the pinned serialization, Compose runtime and coroutines jars; the
-      # conformance-deps job downloaded them in this run, so a runner never asks Central for them.
-      - name: restore the pinned dependency jars
+      # The Maven artifacts the suite fetches on demand into KRUSTY_DEPS_CACHE (atomicfu plugins and
+      # runtimes, the pinned serialization, Compose runtime and coroutines jars). Nothing fills the
+      # cache in advance: a job restores the newest entry, downloads what it lacks, and a master job
+      # that downloaded something saves the grown cache for later runs.
+      - name: restore the Maven artifacts
+        id: maven-deps
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/krusty-deps
-          key: conformance-deps-v1-${{ hashFiles('scripts/fetch-conformance-deps.sh', 'kotlin-versions', 'src/toolchain.rs') }}
-          fail-on-cache-miss: true
+          key: krusty-deps-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}
+          restore-keys: |
+            krusty-deps-
+      - name: count the restored Maven artifacts
+        id: maven-deps-restored
+        run: echo "files=$(find target/cache/krusty-deps -type f 2> /dev/null | wc -l)" >> "$GITHUB_OUTPUT"
       - name: download e2e binary
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -754,6 +761,24 @@ jobs:
           grep -q ': test$' <<< "$ignored_tests"
           run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" ./e2e-bin plugin_host_compiler_e2e:: --include-ignored --test-threads=1
       - *save-plugin-host-runtime
+      - &save-maven-deps
+        name: check for new Maven artifacts
+        if: github.ref == 'refs/heads/master' && success()
+        env:
+          RESTORED: ${{ steps.maven-deps-restored.outputs.files }}
+        run: |
+          now=$(find target/cache/krusty-deps -type f 2> /dev/null | wc -l)
+          echo "Maven artifacts: $RESTORED restored, $now now"
+          [ "$now" -gt "$RESTORED" ] || exit 0
+          echo "grown=true" >> "$GITHUB_OUTPUT"
+        id: maven-deps-grown
+      - &save-maven-deps-entry
+        name: save the Maven artifacts entry
+        if: steps.maven-deps-grown.outputs.grown == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: ${{ steps.maven-deps.outputs.cache-primary-key }}
       - name: upload failed program evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -762,43 +787,9 @@ jobs:
           path: test-failures/
           if-no-files-found: ignore
 
-  # Downloads the extra libraries the conformance rows read (the atomicfu compiler plugin of each
-  # Kotlin release and the pinned atomicfu runtimes) once, serially and with retries, and saves them
-  # for the rows that follow. A row whose own cache entry was missing used to download them itself,
-  # and a refused or missing answer from Central failed that row (Native 2.4.20 on master). It saves
-  # on a queue branch too: the rows are in the same run, so they see an entry their own branch saved.
-  conformance-deps:
-    needs: [build-tool-bins]
-    runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['conformance-deps'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - *just-on-path
-      - *install-just
-      - name: restore the extra conformance libraries
-        id: deps
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/cache/krusty-deps
-          key: conformance-deps-v1-${{ hashFiles('scripts/fetch-conformance-deps.sh', 'kotlin-versions', 'src/toolchain.rs') }}
-      - name: download the libraries of every Kotlin release
-        if: steps.deps.outputs.cache-hit != 'true'
-        env:
-          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
-        run: |
-          set -euo pipefail
-          while read -r kotlin; do
-            scripts/fetch-conformance-deps.sh "$kotlin"
-          done < <(just kotlin-versions)
-      - name: save the extra conformance libraries
-        if: steps.deps.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/cache/krusty-deps
-          key: ${{ steps.deps.outputs.cache-primary-key }}
-
   conformance:
     name: conformance (${{ matrix.version }}, ${{ matrix.target }})
-    needs: [build-tool-bins, conformance-deps]
+    needs: [build-tool-bins]
     strategy:
       fail-fast: false
       matrix:
@@ -846,14 +837,21 @@ jobs:
         with:
           path: target/cache/kotlinc/${{ matrix.version }}
           key: kotlinc-${{ matrix.version }}
-      # The conformance-deps job downloaded the atomicfu plugin and runtimes of every release and
-      # saved them under this key in this run; a row never fetches them from Central itself.
-      - name: restore the extra conformance libraries
+      # The Maven artifacts the suite fetches on demand into KRUSTY_DEPS_CACHE (atomicfu plugins and
+      # runtimes, the pinned serialization, Compose runtime and coroutines jars). Nothing fills the
+      # cache in advance: a job restores the newest entry, downloads what it lacks, and a master job
+      # that downloaded something saves the grown cache for later runs.
+      - name: restore the Maven artifacts
+        id: maven-deps
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/krusty-deps
-          key: conformance-deps-v1-${{ hashFiles('scripts/fetch-conformance-deps.sh', 'kotlin-versions', 'src/toolchain.rs') }}
-          fail-on-cache-miss: true
+          key: krusty-deps-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}
+          restore-keys: |
+            krusty-deps-
+      - name: count the restored Maven artifacts
+        id: maven-deps-restored
+        run: echo "files=$(find target/cache/krusty-deps -type f 2> /dev/null | wc -l)" >> "$GITHUB_OUTPUT"
       # The Native lane's JVM oracle needs the same extra libraries (the atomicfu plugin), so it
       # restores the entry the JVM lane saves; only the JVM lane saves it.
       - name: restore serialization and KSP conformance inputs (${{ matrix.version }})
@@ -1249,6 +1247,8 @@ jobs:
         with:
           path: target/cache/kotlin-native/${{ matrix.version }}
           key: ${{ steps.kotlin-native.outputs.cache-primary-key }}
+      - *save-maven-deps
+      - *save-maven-deps-entry
       - name: save box corpus (${{ matrix.version }})
         if: github.ref == 'refs/heads/master' && steps.box-corpus.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
