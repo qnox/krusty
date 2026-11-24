@@ -31,8 +31,6 @@ on:
 
 permissions:
   contents: read
-  # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
-  id-token: write
 
 env:
   KRUSTY_TEST_FAILURE_DIR: ${{ github.workspace }}/test-failures
@@ -264,6 +262,10 @@ jobs:
 
   ci:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     env:
       # The build compiles krusty's library and its cfg(test) unit harness side by side, and every
       # extra job token also lets rustc run more LLVM threads. Four jobs fit in 16 GB, which is
@@ -1323,6 +1325,10 @@ jobs:
     # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
     needs: [route]
     runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['build-gradle-plugin'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1422,6 +1428,10 @@ jobs:
   build-tools-deps:
     needs: [build-tool-bins]
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['build-tools-deps'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     outputs:
       # The entry that holds every release's dependencies: the one this job saved, or the one it
       # restored when resolving added nothing.
@@ -1478,6 +1488,10 @@ jobs:
       matrix:
         kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['build-tools'][matrix.kotlin] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1527,6 +1541,10 @@ jobs:
   # KSP2 ships. It needs no krusty binary yet: the provider refuses every query.
   analysis-api:
     runs-on: ${{ fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1573,6 +1591,10 @@ jobs:
           - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true,  suite: boundary }
           - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false, suite: boundary }
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['gradle'][format('{0}|{1}|{2}|{3}', matrix.kotlin, matrix.gradle, matrix.ksp, matrix.suite)] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     # A lane takes under 10 minutes; one stuck on its runner (a download that never finished) ran for
     # hours, holding the batch that waits on it.
     timeout-minutes: 30
@@ -1724,6 +1746,10 @@ jobs:
     # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
     needs: [route]
     runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['build-maven-plugin'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1768,6 +1794,10 @@ jobs:
   maven:
     needs: [build-tool-bins, build-maven-plugin]
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['maven'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
