@@ -89,7 +89,6 @@ inlineClasses/resultApiDoesntCallSpecializedEquals.kt
 inlineClasses/toStringOfInlineClassValue.kt
 inlineClasses/toStringOfReferenceInlineClassValue.kt
 inlineClasses/unboxInlineClassFromParameterizedType.kt
-innerClasses/identityFlagWithJvmPreviewTarget28.kt
 innerClasses/kt27936.kt
 interfaces/addedInterfaceBridge.kt
 interfaces/noPrivateMemberInJavaInterface.kt

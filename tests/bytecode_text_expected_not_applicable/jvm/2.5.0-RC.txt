@@ -1,0 +1,34 @@
+# Kotlin 2.5.0-RC compiler/testData/codegen/bytecodeText cases the reference kotlinc does not reproduce
+# through this runner, relative to that directory. Each group says why. The conformance job runs
+# kotlin_bytecode_text_conformance::the_reference_compiler_reproduces_every_applicable_bytecode_text_case
+# for this release, which requires kotlinc to pass every other case and no listed one.
+
+# The reference compiler rejects the configuration the case requests: a feature whose first
+# release is no longer supported (`-EnumEntries`) cannot be disabled.
+enum/enumEntriesMapping.kt
+enum/enumEntriesMultiMapping.kt
+inline/entriesMappingOnCallSite.kt
+
+# The expectation counts label names. JetBrains' test prints each class as its code generator
+# visits it, before ClassWriter, so a label the code generator visits but nothing references keeps
+# a number; this runner reads the written class file, where such a label no longer exists.
+disabledOptimizations/noUnusedLabel.kt
+forLoop/loopVarInterval.kt
+
+# The case selects a compiler option through a directive the box harness does not translate yet:
+# INHERIT_MULTIFILE_PARTS, SANITIZE_PARENTHESES, DISABLE_PARAM_ASSERTIONS and
+# USE_OLD_INLINE_CLASSES_MANGLING_SCHEME.
+flagsInMultiFileInherit.kt
+inlineClasses/mangledSamWrappersOld.kt
+mangling/parentheses.kt
+multifileClasses/optimizedMultifileClassFacadeMethods.kt
+notNullAssertions/doNotGenerateParamAssertions.kt
+notNullAssertions/noAssertionForNullableCaptured.kt
+notNullAssertions/noAssertionForNullableGenericMethod.kt
+
+# The case declares `// ENABLE_JVM_PREVIEW`, which the harness does not yet pass to kotlinc as
+# `-Xjvm-enable-preview`. Without it kotlinc 2.5.0-RC emits no ACC_IDENTITY (synchronized) flag on
+# the nested classes (found 0 of the expected 2 for A$B and A$C); with it the class files carry
+# the flag (inner-class flags 0x39 and 0x29 for target 28), so the reference is right and this
+# is a harness gap. The sibling target-27 case expects no identity flag and passes.
+innerClasses/identityFlagWithJvmPreviewTarget28.kt
