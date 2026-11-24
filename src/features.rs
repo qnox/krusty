@@ -293,9 +293,14 @@ impl LangFeatures {
         Self::default()
     }
 
-    /// Whether `name` (a kotlinc `LanguageFeature` identifier) is enabled.
+    /// Whether `name` (a kotlinc `LanguageFeature` identifier) is enabled, written as the feature
+    /// itself or as the older feature this release names it by when a later release split or
+    /// renamed it ([`FeatureTable::spelling_in_release`]).
     pub fn has(&self, name: &str) -> bool {
         self.enabled.contains(name)
+            || self
+                .enabled
+                .contains(self.table().spelling_in_release(name))
     }
 
     pub fn enable(&mut self, name: &str) {
@@ -498,6 +503,22 @@ impl LangFeatures {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_feature_a_later_release_split_is_enabled_under_either_spelling() {
+        let enabled = |release, written: &str| {
+            let mut features =
+                LangFeatures::for_release(release, LanguageVersion::V2_4, LanguageVersion::V2_4);
+            features.apply_directive(&format!("+{written}"));
+            features
+        };
+        assert!(enabled(KotlinVersion::V2_4_20, "CompanionBlocks").has("CompanionBlocks"));
+        assert!(
+            enabled(KotlinVersion::V2_4_20, "CompanionBlocksAndExtensions").has("CompanionBlocks")
+        );
+        assert!(enabled(KotlinVersion::V2_5_0_RC, "CompanionBlocks").has("CompanionBlocks"));
+        assert!(!enabled(KotlinVersion::V2_4_20, "NameBasedDestructuring").has("CompanionBlocks"));
+    }
     use super::*;
 
     #[test]
