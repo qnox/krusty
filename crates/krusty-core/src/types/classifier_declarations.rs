@@ -148,6 +148,13 @@ pub struct ClassifierDeclarationFacts {
     pub source: bool,
 }
 
+/// One entry of an enum classifier, with the annotations its declaration states.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnumEntryFacts {
+    pub name: String,
+    pub annotations: Vec<crate::types::ResolvedAnnotation>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClassifierDeclarationKind {
     Class,
