@@ -1270,6 +1270,8 @@ fn splice_captured_lambda_invocation(
             .and_then(|origin| origin.lexical_owner);
         ir.record_inline_copy_owner(frame, impl_fn, owner, source);
     }
+    // The frame stands where the call stood, so it opens on the call's line as the call did.
+    ir.copy_position(invocation, frame);
     ir.copy_inline_copy_mark(invocation, frame);
     ir.exprs[invocation as usize] = IrExpr::Block {
         stmts: Vec::new(),

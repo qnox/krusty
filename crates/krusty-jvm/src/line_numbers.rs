@@ -158,7 +158,7 @@ pub(crate) fn is_copied_inline_line(ir: &IrFile, expression: ExprId) -> bool {
 /// starts. A block that stores operands first leaves the line to those operands and to the copied
 /// body: the frame marker carries the callee's line, and a positionless operand load must not
 /// take the caller's.
-fn inlined_call_marks_where_it_starts(ir: &IrFile, expression: ExprId) -> bool {
+pub(crate) fn inlined_call_marks_where_it_starts(ir: &IrFile, expression: ExprId) -> bool {
     match ir.expr(expression) {
         IrExpr::Block { stmts, value } => match stmts.first() {
             Some(&first) => matches!(ir.expr(first), IrExpr::InlineFrameMarker),

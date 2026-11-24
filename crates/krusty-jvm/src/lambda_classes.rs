@@ -965,6 +965,19 @@ fn implementation_result(ir: &IrFile, fid: FunId, signature: &krusty::types::FnS
         .unwrap_or(signature.ret)
 }
 
+/// The result an inline template's lambda declares in terms of the template's type parameter, for a
+/// call-site copy of that lambda. kotlinc regenerates the copy from the template class, so the
+/// method keeps the template's erased result while the generic `Signature` names the substituted
+/// one.
+fn template_result(ir: &IrFile, fid: FunId) -> Option<Ty> {
+    let source = specialization_source(ir, fid);
+    if source == fid {
+        return None;
+    }
+    let declared = ir.functions[source as usize].ret;
+    declared.mentions_ty_param().then_some(declared)
+}
+
 /// Whether the class's `FunctionN` supertype is written raw, without the generic `Signature`.
 /// kotlinc's `IrTypeMapper.writeGenericType` skips the generics when
 /// `hasNothingInNonContravariantPosition(supertype)` holds (`KotlinTypeMapper.kt`): an argument
@@ -1104,7 +1117,9 @@ fn realize_class(
     // method's). A value class stays its carrier, which the bridge boxes. kotlinc types it by the
     // body's INFERRED result, which a `Nothing`/`Nothing?` body pins to `Void` even when the
     // selected function type's return is wider.
+    let template_result = template_result(ir, fid);
     let result = match implementation_result(ir, fid, signature) {
+        _ if template_result.is_some() => template_result.expect("checked above"),
         inferred if matches!(inferred.non_null(), Ty::Nothing | Ty::Null) => {
             if inferred.admits_null() {
                 Ty::nullable(Ty::Nothing)
@@ -1162,6 +1177,7 @@ fn realize_class(
                 arg: value,
                 type_operand: result,
             });
+            ir.copy_position(expression, boxed);
             ir.exprs[expression as usize] = IrExpr::Return(Some(boxed));
         }
     }
@@ -1169,8 +1185,9 @@ fn realize_class(
         .as_deref()
         .map_or_else(|| "invoke".to_string(), |target| target.method.clone());
     become_invoke(ir, fid, class, captures.len(), result, method);
-    if (inline_default.is_some() || kotlin_lambda || sam.is_some())
-        && site.function_type.mentions_ty_param()
+    if ((inline_default.is_some() || kotlin_lambda || sam.is_some())
+        && site.function_type.mentions_ty_param())
+        || template_result.is_some()
     {
         // The class captures the enclosing declaration's type parameters; its specialized
         // `invoke` does not redeclare them, but its method Signature still names those exact

@@ -10,10 +10,15 @@ use krusty::types::Ty;
 /// A direct null literal has no runtime class to narrow: `aconst_null` satisfies every reference
 /// target, and kotlinc stores it without an otherwise-redundant `checkcast`. Non-null operands keep
 /// the narrowing required by their distinct physical descriptors.
+///
+/// `restored_line` is the call's line when the operand is an inlined call realized in place. The
+/// inliner ends such a body with an entry for the call's line, so a cast that follows it belongs to
+/// that line; the entry is written once the cast is certain to be emitted.
 pub(super) fn emit(
     operand: &IrExpr,
     source: Ty,
     target: Ty,
+    restored_line: Option<u32>,
     cw: &mut ClassWriter,
     code: &mut CodeBuilder,
 ) {
@@ -27,6 +32,9 @@ pub(super) fn emit(
 
     let internal = instanceof_internal_name(target);
     if internal != "java/lang/Object" {
+        if let Some(line) = restored_line {
+            code.mark_line(line);
+        }
         code.checkcast(cw.class_ref(&internal));
     }
 }
