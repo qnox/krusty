@@ -814,7 +814,7 @@ fn link_with(
     }
     write_headers(&mut image, target.arch, e_flags, entry, &program_headers);
     if symbol_table {
-        symbol_table::append(&mut image, &files, &layout)?;
+        symbol_table::append(&mut image, &files, &layout, &program_headers)?;
     }
     Ok(image)
 }
@@ -1010,7 +1010,7 @@ mod tests {
     /// and leaves the loaded image exactly as the one linked without it.
     #[test]
     fn a_requested_symbol_table_names_functions_without_moving_the_image() {
-        use object::read::{Object as _, ObjectSymbol as _};
+        use object::read::{Object as _, ObjectSection as _, ObjectSymbol as _};
         let (mut object, text) = x86_64_start(&[0x90, 0xc3]);
         object.define("helper", text, 1);
         object.local("private_helper", text, 1);
@@ -1034,6 +1034,16 @@ mod tests {
         let start = address_of("_start");
         assert_eq!(address_of("helper"), start + 1);
         assert_eq!(address_of("private_helper"), start + 1);
+        // A function belongs to the executable segment's section, which is what lets a debugger
+        // treat it as code rather than as an absolute address.
+        let helper = file
+            .symbols()
+            .find(|symbol| symbol.name() == Ok("helper"))
+            .unwrap();
+        let section = file
+            .section_by_index(helper.section_index().unwrap())
+            .unwrap();
+        assert_eq!(section.name(), Ok(".text"));
     }
 
     // ---- malformed input is an error, never a panic or a stray write -----------------------------
