@@ -23,7 +23,7 @@ fn an_unresolved_delegated_property_matches_kotlinc() {
         common::compiler_diagnostics(&[("Delegate.kt", SOURCE)], std::slice::from_ref(&stdlib));
     assert_ne!(result.reference_code, 0, "kotlinc accepted the delegate");
     assert_ne!(result.krusty_code, 0, "krusty accepted the delegate");
-    let observed = complete_errors(&result.krusty_stderr, false);
+    let observed = complete_errors(&result.krusty_stderr, true);
     let expected = complete_errors(&result.reference_stderr, true);
     assert!(
         !expected.is_empty(),
@@ -57,7 +57,7 @@ fn an_unresolved_generic_delegated_property_matches_kotlinc() {
     );
     assert_ne!(result.reference_code, 0, "kotlinc accepted the delegate");
     assert_ne!(result.krusty_code, 0, "krusty accepted the delegate");
-    let observed = complete_errors(&result.krusty_stderr, false);
+    let observed = complete_errors(&result.krusty_stderr, true);
     let expected = complete_errors(&result.reference_stderr, true);
     assert!(
         !expected.is_empty(),
@@ -103,7 +103,7 @@ fn an_unannotated_delegated_property_matches_kotlinc() {
     );
     assert_ne!(result.reference_code, 0, "kotlinc accepted the delegate");
     assert_ne!(result.krusty_code, 0, "krusty accepted the delegate");
-    let observed = complete_errors(&result.krusty_stderr, false);
+    let observed = complete_errors(&result.krusty_stderr, true);
     let expected = complete_errors(&result.reference_stderr, true);
     assert!(
         !expected.is_empty(),
@@ -159,7 +159,7 @@ fn a_resolved_generic_outer_type_keeps_its_unresolved_argument() {
     );
     assert_ne!(result.reference_code, 0, "kotlinc accepted the delegate");
     assert_ne!(result.krusty_code, 0, "krusty accepted the delegate");
-    let observed = complete_errors(&result.krusty_stderr, false);
+    let observed = complete_errors(&result.krusty_stderr, true);
     let expected = complete_errors(&result.reference_stderr, true);
     assert!(
         !expected.is_empty(),
