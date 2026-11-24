@@ -579,6 +579,16 @@ void *kt_gc_allocate(const KType *type, uint32_t size) {
     return kt_gc_allocate_slow(type, size);
 }
 
+/* ---- entries of the Kotlin/Native runtime ABI ------------------------------------------------- */
+
+/* `kotlin.native.runtime.GC.collect`, which the standard library declares `external` with
+   `@GCUnsafeCall("Kotlin_native_internal_GC_collect")`. The object `GC` is the first argument, as
+   every member's receiver is. */
+void Kotlin_native_internal_GC_collect(void *receiver) {
+    (void)receiver;
+    kt_gc_collect();
+}
+
 /* ---- introspection, for tests ---------------------------------------------------------------- */
 
 size_t kt_gc_global_roots(void) { return kt_global_count; }

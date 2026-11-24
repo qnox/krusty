@@ -601,6 +601,41 @@ fn wasm_scalar_instruction(operation: &str) -> Option<(ScalarInstruction, Scalar
     })
 }
 
+/// Whether the serialized function `function` is bound to a Kotlin/Native runtime entry by its
+/// `@GCUnsafeCall("callee")`. It fills the same [`super::direct_c_calls::RuntimeEntryShape`] the
+/// metadata view does, so both views share one definition of the binding.
+pub(crate) fn is_runtime_entry_ir(
+    arena: &KlibIrArena,
+    function: &crate::metadata::klib_ir::tree::KlibIrFunction,
+) -> bool {
+    use crate::metadata::function_flags::{IS_EXPECT, IS_EXTERNAL, IS_INLINE, IS_SUSPEND};
+    let flags = function.base.flags;
+    let parameters = &function.regular_parameters;
+    super::direct_c_calls::RuntimeEntryShape {
+        external: flags & IS_EXTERNAL != 0,
+        suspend: flags & IS_SUSPEND != 0,
+        inline: flags & IS_INLINE != 0,
+        expect: flags & IS_EXPECT != 0,
+        vararg: parameters
+            .iter()
+            .any(|parameter| parameter.vararg_element_type.is_some()),
+        context_parameters: !function.context_parameters.is_empty(),
+        type_parameters: !function.type_parameters.is_empty(),
+        defaulted_parameters: parameters
+            .iter()
+            .any(|parameter| parameter.default_value.is_some()),
+        callee: ir_string_annotation(
+            arena,
+            &function.base.annotations,
+            &["kotlin", "native", "internal"],
+            &["GCUnsafeCall", "<init>"],
+        ),
+    }
+    .callee()
+    .is_some()
+        && function.body.is_none()
+}
+
 fn ir_string_annotation<'a>(
     arena: &'a KlibIrArena,
     annotations: &'a [crate::metadata::klib_ir::tree::KlibIrAnnotation],

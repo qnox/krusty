@@ -537,9 +537,16 @@ impl BodyLowering<'_, '_, '_> {
                         args,
                     );
                 }
-                if let Some(function) = &realization.direct_c_function {
+                // A runtime entry the linked runtime defines is called as it is bound. One it does
+                // not define falls through to the realizations below that name the declaration by
+                // its owner. That second realization is transitional: it shrinks as the runtime
+                // defines more entries, and goes once it defines every one the library binds.
+                if let Some(function) = realization.direct_c_function.as_ref().filter(|function| {
+                    function.abi() == krusty::libraries::CFunctionAbi::Interop
+                        || self.file.runtime_symbols.contains(function.symbol())
+                }) {
                     return self.direct_c_call(
-                        function.symbol(),
+                        function,
                         params,
                         *ret,
                         defaults,
