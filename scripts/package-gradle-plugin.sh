@@ -89,7 +89,7 @@ The Kotlin/JVM plugin is an explicit consumer dependency and is not bundled here
 distribution does not claim availability from the Gradle Plugin Portal. A Build Tools API
 \`compilerVersion\` override, like any request krusty does not implement, leaves that compile task
 to kotlinc.
-Supported Gradle: 8.14 and newer. Validated Gradle boundaries: 8.14.3, 9.5.0, and 9.7.0.
+Supported Gradle: 8.14 and newer. Validated Gradle boundaries: 8.14.8 and 9.9.2.
 EOF
 
 cat > "$root/manifest.txt" <<EOF
@@ -98,7 +98,7 @@ plugin-version=$version
 implementation=dev.krustythecompiler:krusty-gradle-plugin:$version
 marker=dev.krustythecompiler:dev.krustythecompiler.gradle.plugin:$version
 kotlin-gradle-plugin=$(paste -sd, <<<"$kotlin_versions")
-gradle=8.14.3,9.5.0,9.7.0
+gradle=8.14.8,9.9.2
 EOF
 
 (
