@@ -89,3 +89,24 @@ fn plain_enum_elements_round_trip() {
     );
     assert_eq!(both_compilers_box(&src, "plain_enum_round_trip"), "OK");
 }
+
+/// An enum that states its own `@SerialName`, with no named entry, still gets the annotated
+/// factory: kotlinc selects it whenever the enum carries the serial name.
+#[test]
+fn a_plain_enum_with_a_class_serial_name_uses_the_annotated_factory() {
+    let src = "import kotlinx.serialization.SerialName\n\
+               import kotlinx.serialization.Serializable\n\
+               @SerialName(\"renamed.Level\") enum class Level { LOW, HIGH }\n\
+               @Serializable\n\
+               data class Holder(val level: Level)\n";
+    let (plugin, cp) = plugin_and_runtime()
+        .expect("the serialization plugin and runtime must be available to this regression");
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let built = compare_with_kotlinc_plugin("PlainEnumClassName", src, "Holder", &cp, "25", &extra)
+        .expect("the reference compiler and javap must be available to this regression");
+    for member in ["_childSerializers$_anonymous_()", "static {};"] {
+        let want = member_body(&built.reference, member);
+        assert!(want.len() > 1, "kotlinc must emit {member}");
+        assert_eq!(member_body(&built.krusty, member), want, "Holder.{member}");
+    }
+}

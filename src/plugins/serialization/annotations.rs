@@ -97,6 +97,11 @@ pub(super) fn class_serial_name(ir: &IrFile, class_id: ClassId) -> KtString {
     })
 }
 
+/// Whether the class states its own `@SerialName`.
+pub(super) fn class_declares_serial_name(ir: &IrFile, class_id: ClassId) -> bool {
+    class_serial_name_override(ir, class_id).is_some()
+}
+
 /// Whether this declaration carries an annotation whose resolved classifier is marked
 /// `@SerialInfo`. The provider performs the meta-annotation lookup; this query never infers the
 /// role from an annotation's spelling.

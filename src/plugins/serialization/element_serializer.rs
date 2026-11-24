@@ -122,6 +122,7 @@ pub(super) fn child_cache_element_plan(
                 ExternalSerializer::Object { .. }
                     | ExternalSerializer::Companion { .. }
                     | ExternalSerializer::Polymorphic
+                    | ExternalSerializer::PlainEnum { .. }
             )
         );
     if !cacheable {
@@ -738,6 +739,20 @@ fn serializer_plan(
         }
         Some(ExternalSerializer::Polymorphic) => {
             return Some(ElementSerializerPlan::Polymorphic(fq_name));
+        }
+        Some(ExternalSerializer::PlainEnum {
+            serial_name,
+            declares_serial_name,
+            entry_serial_names,
+        }) if type_args.is_empty() => {
+            return Some(ElementSerializerPlan::PlainEnum(
+                super::enum_serializer::PlainEnumSerializer::external(
+                    fq_name,
+                    serial_name.clone(),
+                    *declares_serial_name,
+                    entry_serial_names.clone(),
+                ),
+            ));
         }
         _ => {}
     }

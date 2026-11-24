@@ -1381,14 +1381,25 @@ fn external_serializers(
                         None => return None,
                     }
                 }
-                // An interface that names no serializer is serialized polymorphically, whoever
-                // declares it; any other classifier without one has no serializer to reach.
+                // An interface that names no serializer is serialized polymorphically and an enum is
+                // built at the use site, whoever declares them; any other classifier without one has
+                // no serializer to reach.
                 (None, None) => {
                     let declaration = classifiers.classifier_declaration(classifier)?;
-                    if declaration.kind != crate::types::ClassifierDeclarationKind::Interface {
-                        return None;
+                    match declaration.kind {
+                        crate::types::ClassifierDeclarationKind::Interface => {
+                            serialization::ExternalSerializer::Polymorphic
+                        }
+                        // An enum that names no serializer is built at the use site.
+                        crate::types::ClassifierDeclarationKind::Enum => {
+                            serialization::plain_enum_serializer(
+                                &declaration,
+                                &annotations,
+                                &classifiers.enum_entries(classifier)?,
+                            )?
+                        }
+                        _ => return None,
                     }
-                    serialization::ExternalSerializer::Polymorphic
                 }
             };
             if let serialization::ExternalSerializer::Object {
