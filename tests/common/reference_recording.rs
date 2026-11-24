@@ -26,7 +26,10 @@ pub(crate) fn recorded(
         // A live reference compile is a whole JVM or native toolchain run. Test threads outnumber
         // the cores they may use, so without a bound a cold cache starts one per thread and the
         // runner runs out of memory.
-        let _permit = LIVE_REFERENCES.acquire(super::common::server_pool::server_pool_cap());
+        let _permit = LIVE_REFERENCES.acquire(live_reference_cap(
+            super::common::server_pool::server_pool_cap(),
+            memory_total_kib(),
+        ));
         live(&work)
     };
     let _ = std::fs::remove_dir_all(&work);
@@ -98,6 +101,32 @@ impl Drop for Permit {
     }
 }
 
+/// Memory one live reference compile may take: kotlinc-native starts a JVM whose default heap
+/// reaches 3 GiB and then runs the native linker.
+const LIVE_REFERENCE_KIB: u64 = 4 * 1024 * 1024;
+
+/// Total memory of this host in KiB, where the platform reports it.
+fn memory_total_kib() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// How many live reference compiles may run at once: the compiler pool's width, or fewer where
+/// the host's memory cannot hold that many. A 7.6 GiB hosted runner killed the lane with exit 137
+/// when four of them started together.
+fn live_reference_cap(pool_cap: usize, memory_kib: Option<u64>) -> usize {
+    let by_memory = memory_kib.map_or(usize::MAX, |kib| {
+        usize::try_from(kib / LIVE_REFERENCE_KIB).unwrap_or(usize::MAX)
+    });
+    pool_cap.min(by_memory).max(1)
+}
+
 /// The Kotlin/Native distribution root, when provisioned.
 pub(crate) fn kotlin_native_root() -> Option<PathBuf> {
     let root = std::env::var_os("KRUSTY_KOTLIN_NATIVE")
@@ -115,6 +144,16 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn a_small_host_runs_one_live_reference_at_a_time() {
+        const GIB: u64 = 1024 * 1024;
+        assert_eq!(live_reference_cap(2, Some(7 * GIB + GIB * 6 / 10)), 1);
+        assert_eq!(live_reference_cap(2, Some(15 * GIB + GIB * 6 / 10)), 2);
+        assert_eq!(live_reference_cap(6, Some(15 * GIB + GIB * 6 / 10)), 3);
+        assert_eq!(live_reference_cap(2, Some(1)), 1);
+        assert_eq!(live_reference_cap(3, None), 3);
+    }
 
     #[test]
     fn live_references_never_exceed_the_cap() {
