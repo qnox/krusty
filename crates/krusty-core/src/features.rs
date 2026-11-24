@@ -199,6 +199,7 @@ const MODELED_FEATURES: &[&str] = &[
     "DataClassCopyRespectsConstructorVisibility",
     "EagerLambdaAnalysis",
     "EnableNameBasedDestructuringShortForm",
+    "EnforceMissingNamedArgumentsOnJavaAnnotation",
     "EnumEntries",
     "ErrorAboutDataClassCopyVisibilityChange",
     "ExplicitBackingFields",
