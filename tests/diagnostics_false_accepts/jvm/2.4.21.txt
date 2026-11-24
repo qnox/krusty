@@ -1125,7 +1125,6 @@ compiler/testData/diagnostics/tests/resolve/overloadConflicts/kt31670.kt
 compiler/testData/diagnostics/tests/resolve/overloadConflicts/kt31758.kt
 compiler/testData/diagnostics/tests/restrictsSuspensionDifference.kt
 compiler/testData/diagnostics/tests/returnFromDelegatedConstuctor.kt
-compiler/testData/diagnostics/tests/returnInExpressionBodies/returnInNestedCall.kt
 compiler/testData/diagnostics/tests/samConstructors/genericSam.kt
 compiler/testData/diagnostics/tests/samConversions/samConversionWithJavaFlexibleType.kt
 compiler/testData/diagnostics/tests/scopes/classHeader/companionObjectSuperConstructorArguments.kt
