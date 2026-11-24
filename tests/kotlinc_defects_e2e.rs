@@ -106,6 +106,11 @@ const LIST_ADD_ALL_OF_ITS_RANGE: &str = "fun box(): String {\n\
     \x20   return \"$answer $list\"\n\
     }\n";
 
+/// KT-89466: a platform module's class over the class of a library its common module depends on.
+/// kotlinc-native builds the library, then crashes actualizing the application's fragments.
+const PLATFORM_CLASS_OVER_LIBRARY_CLASS: &str =
+    include_str!("box_regressions/multimodule/platformRedeclaresCommonClass.kt");
+
 /// The program that shows `quirk`, for a defect. Every quirk is named, so a new one has to say
 /// here whether it is a defect and, if so, which program shows it.
 fn defect(quirk: Quirk) -> Option<Defect> {
@@ -353,5 +358,23 @@ fn collect_classes(root: &Path, dir: &Path, classes: &mut Vec<(String, Vec<u8>)>
                 .replace(std::path::MAIN_SEPARATOR, "/");
             classes.push((name, std::fs::read(&path).expect("read a class")));
         }
+    }
+}
+
+/// kotlinc-native's report for [`PLATFORM_CLASS_OVER_LIBRARY_CLASS`]: its HMPP actualizer looks up
+/// the platform fragment's module in a map that holds only the library's.
+#[test]
+fn kotlinc_native_cannot_actualize_a_platform_class_over_a_library_class() {
+    if let Some(outcome) =
+        common::kotlin_native_multimodule_outcome(PLATFORM_CLASS_OVER_LIBRARY_CLASS)
+    {
+        assert_eq!(
+            outcome,
+            common::NativeModulesOutcome::Rejected(
+                "exception: java.util.NoSuchElementException: Key Module <app-platform> is \
+                 missing in the map."
+                    .to_string()
+            )
+        );
     }
 }

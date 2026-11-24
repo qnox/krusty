@@ -10,15 +10,24 @@ use krusty::kotlin_version::KotlinVersion;
 
 use super::reference_recording_support::{kotlin_native_root, recorded};
 
-/// What `box()` answers when kotlinc-native builds an exact `// MODULE:` graph as KLIB
-/// dependencies and a final native program. `None` when kotlin-native is not provisioned and no
-/// recording exists.
+/// What kotlinc-native makes of an exact `// MODULE:` graph.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeModulesOutcome {
+    /// The final module's compilation fails; the compiler's own report.
+    Rejected(String),
+    /// `box()`'s answer.
+    Answer(String),
+}
+
+/// What kotlinc-native makes of an exact `// MODULE:` graph built as KLIB dependencies and a final
+/// native program. `None` when kotlin-native is not provisioned and no recording exists.
 ///
-/// Every non-final [`krusty::conformance::ModuleUnit`] is a real KLIB. The final unit sees only its
-/// declared dependency closure, with declared friends also passed through the Native compiler's
-/// friend-module channel. A folded `dependsOn` chain remains an HMPP compilation: its source files
-/// are assigned to their original fragments and its refinement edges are preserved.
-pub fn kotlin_native_multimodule_box(source: &str) -> Option<String> {
+/// Every non-final [`krusty::conformance::ModuleUnit`] is a real KLIB and must build. The final
+/// unit sees only its declared dependency closure, with declared friends also passed through the
+/// Native compiler's friend-module channel; if it fails, the failure is the outcome, recorded like
+/// an answer. A folded `dependsOn` chain remains an HMPP compilation: its source files are
+/// assigned to their original fragments and its refinement edges are preserved.
+pub fn kotlin_native_multimodule_outcome(source: &str) -> Option<NativeModulesOutcome> {
     let recorded_source = [("modules.kt", source)];
     let fingerprint_arguments = ["native-module-graph-v6-prepared-platform-settings".to_string()];
     let files = recorded(
@@ -28,18 +37,16 @@ pub fn kotlin_native_multimodule_box(source: &str) -> Option<String> {
         &fingerprint_arguments,
         |work| kotlin_native_multimodule_live(work, source),
     )?;
+    if let Some(reason) = files.get("rejected") {
+        return Some(NativeModulesOutcome::Rejected(
+            String::from_utf8(reason.clone()).expect("recorded text is UTF-8"),
+        ));
+    }
     let stdout = files
         .get("stdout")
         .expect("a multimodule box recording holds the program's stdout");
     let stdout = String::from_utf8(stdout.clone()).expect("recorded text is UTF-8");
-    let (_, answer) = stdout
-        .split_once(krusty::backend::BOX_RESULT_FRAME)
-        .expect("a multimodule box program prints its framed answer");
-    assert!(
-        !answer.contains(krusty::backend::BOX_RESULT_FRAME),
-        "a multimodule box program prints exactly one result frame"
-    );
-    Some(answer.to_string())
+    Some(NativeModulesOutcome::Answer(framed_answer(&stdout)))
 }
 
 #[derive(Clone)]
@@ -55,7 +62,7 @@ struct NativeFragmentGraph<'a> {
     module_blocks: &'a HashMap<&'a str, &'a krusty::conformance::ModuleBlock>,
     representatives: &'a HashMap<String, String>,
     built: &'a HashMap<String, BuiltNativeModule>,
-    stdlib: &'a Path,
+    stdlib: Option<&'a Path>,
 }
 
 /// Prepare the whole case before splitting so every module sees the Native placeholder
@@ -75,13 +82,60 @@ fn native_module_sources(source: &str) -> (Vec<krusty::conformance::ModuleBlock>
 
 fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<String, Vec<u8>>> {
     let native_root = kotlin_native_root()?;
-    let compiler = native_root.join("bin/kotlinc-native");
     let stdlib = native_root.join("klib/common/stdlib");
     assert!(
         stdlib.is_dir(),
         "the Kotlin/Native distribution has no stdlib KLIB at {}",
         stdlib.display()
     );
+    let compiler = ModuleCompiler {
+        program: native_root.join("bin/kotlinc-native"),
+        leading_arguments: Vec::new(),
+        stdlib: Some(stdlib),
+    };
+    let build = build_module_graph(work, source, &compiler);
+    Some(match build {
+        GraphBuild::Ran(stdout) => BTreeMap::from([("stdout".to_string(), stdout)]),
+        GraphBuild::Rejected(reason) => {
+            BTreeMap::from([("rejected".to_string(), reason.into_bytes())])
+        }
+    })
+}
+
+/// The compiler that builds each unit of a module graph: kotlinc-native, or krusty's
+/// `kotlinc-native` command, which takes the same options.
+pub struct ModuleCompiler {
+    pub program: PathBuf,
+    /// Arguments that precede a unit's own, such as `kotlinc-native` for the krusty binary or
+    /// `-Xfix-kotlinc-defects`.
+    pub leading_arguments: Vec<String>,
+    /// The stdlib KLIB to name explicitly, for a compiler that does not attach its own to common
+    /// fragments of a separate KMP compilation; `None` where the compiler resolves it itself.
+    pub stdlib: Option<PathBuf>,
+}
+
+/// How building a module graph ended.
+enum GraphBuild {
+    /// The final module's compilation failed, with the compiler's report.
+    Rejected(String),
+    /// The program ran and printed this.
+    Ran(Vec<u8>),
+}
+
+fn framed_answer(stdout: &str) -> String {
+    let (_, answer) = stdout
+        .split_once(krusty::backend::BOX_RESULT_FRAME)
+        .expect("a multimodule box program prints its framed answer");
+    assert!(
+        !answer.contains(krusty::backend::BOX_RESULT_FRAME),
+        "a multimodule box program prints exactly one result frame"
+    );
+    answer.to_string()
+}
+
+/// Build every unit of the `// MODULE:` graph in `source` with `compiler`, dependencies first, and
+/// run the final program. A failing final unit is an outcome; any other failure is a harness error.
+fn build_module_graph(work: &Path, source: &str, compiler: &ModuleCompiler) -> GraphBuild {
     let (modules, compiler_arguments) = native_module_sources(source);
     let units = krusty::conformance::module_units(&modules);
     assert!(
@@ -163,7 +217,8 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
             krusty::kotlin_version::target(),
         );
 
-        let mut command = Command::new(&compiler);
+        let mut command = Command::new(&compiler.program);
+        command.args(&compiler.leading_arguments);
         command.args(&compiler_arguments);
         command.args(&source_paths);
         if let Some(runner_path) = &runner_path {
@@ -172,7 +227,9 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         // Separate KMP compilation cannot attach kotlinc-native's implicit stdlib to common
         // fragments. Supply the same KLIB explicitly so the platform leaf receives it through
         // `-library` and each non-leaf can name it through `-Xfragment-dependency` below.
-        command.arg("-nostdlib").arg("-library").arg(&stdlib);
+        if let Some(stdlib) = &compiler.stdlib {
+            command.arg("-nostdlib").arg("-library").arg(stdlib);
+        }
         command.args(["-module-name", unit.name.as_str()]);
         for library in &libraries {
             command.arg("-library").arg(library);
@@ -192,7 +249,7 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
                 module_blocks: &module_blocks,
                 representatives: &representatives,
                 built: &built,
-                stdlib: &stdlib,
+                stdlib: compiler.stdlib.as_deref(),
             },
         );
 
@@ -206,6 +263,16 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         let output = command
             .output()
             .expect("run kotlinc-native module compiler");
+        if final_unit && !output.status.success() {
+            // The first line that names the failure; the rest is a stack trace or further reports.
+            let report = String::from_utf8_lossy(&output.stderr);
+            let reason = report
+                .lines()
+                .find(|line| line.starts_with("exception:") || line.starts_with("error:"))
+                .or_else(|| report.lines().find(|line| !line.trim().is_empty()))
+                .unwrap_or("the compiler failed without a report");
+            return GraphBuild::Rejected(reason.to_string());
+        }
         assert!(
             output.status.success(),
             "kotlinc-native rejected module {} (status {}):\n{}",
@@ -240,7 +307,7 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         run.status,
         String::from_utf8_lossy(&run.stderr)
     );
-    Some(BTreeMap::from([("stdout".to_string(), run.stdout)]))
+    GraphBuild::Ran(run.stdout)
 }
 
 fn order_libraries_for_native_linker(
@@ -381,11 +448,13 @@ fn native_fragment_arguments(
         if index + 1 == unit.fragments.len() {
             continue;
         }
-        command.arg(format!(
-            "-Xfragment-dependency={}:{}",
-            fragment.name,
-            graph.stdlib.to_string_lossy()
-        ));
+        if let Some(stdlib) = graph.stdlib {
+            command.arg(format!(
+                "-Xfragment-dependency={}:{}",
+                fragment.name,
+                stdlib.to_string_lossy()
+            ));
+        }
         let block = graph
             .module_blocks
             .get(fragment.name.as_str())
@@ -626,7 +695,7 @@ mod tests {
                 module_blocks: &module_blocks,
                 representatives: &representatives,
                 built: &built,
-                stdlib,
+                stdlib: Some(stdlib),
             },
         );
 
