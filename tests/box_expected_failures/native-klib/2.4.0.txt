@@ -774,7 +774,6 @@ typeErasure/twoFunWithTypeParametersWithUpperBoundsInlineFunWithReifiedTypeParam
 typealias/abbreviationWithCapturedType.kt
 unsignedTypes/forInUnsignedRangeWithCoercion.kt
 unsignedTypes/kt47716.kt
-unsignedTypes/varargsOfUnsignedTypes.kt
 volatile/atomicArrayIntrinsics.kt
 volatile/crossModuleIntrinsic.kt
 volatile/intrinsicWithInlineFunction.kt

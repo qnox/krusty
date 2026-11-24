@@ -2049,7 +2049,6 @@ unsignedTypes/unsignedIntCompare.kt
 unsignedTypes/unsignedLiteralsForMaxLongValue.kt
 unsignedTypes/unsignedLongCompare.kt
 unsignedTypes/unsignedRangeIterator.kt
-unsignedTypes/varargsOfUnsignedTypes.kt
 vararg/spreadCopiesArray.kt
 vararg/varargInTailrec.kt
 wasm-annotations/branchHint.kt
