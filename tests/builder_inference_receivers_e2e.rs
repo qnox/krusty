@@ -403,3 +403,45 @@ fn an_unconstrained_builder_variable_cannot_be_inferred() {
     assert_eq!(common::compiler_errors(&result.reference_stderr).len(), 2);
     common::expect_identical_rejection(&result, "unconstrained builder variable");
 }
+
+const BUILDEE_DECLARATIONS: &str = "open class Buildee<TV> {\n\
+    fun get(): TV = TODO()\n\
+}\n\
+class Derived<TA> : Buildee<TA>()\n\
+class Target\n\
+fun <PTV> build(instructions: Buildee<PTV>.() -> Unit): Buildee<PTV> =\n\
+    Buildee<PTV>().apply(instructions)\n";
+
+/// A builder lambda whose discarded tail is typed by the builder variable still constrains it, a
+/// cast of `this` keeps the declared receiver for a bare member call, and an anonymous function's
+/// declared return type constrains it through its expression body.
+#[test]
+fn a_builder_variable_used_by_the_tail_a_cast_or_an_anonymous_function_is_inferred() {
+    common::assert_accepted_like_kotlinc(&format!(
+        "{BUILDEE_DECLARATIONS}\
+         fun tail() = build {{ get() }}\n\
+         fun cast() = build {{ this as Derived<*>; get() }}\n\
+         fun anonymous() {{ build {{ fun(): Buildee<Target> = this }} }}\n\
+         fun <T> Buildee<T>.declared(): T {{ this as Derived<*>; return get() }}\n"
+    ));
+}
+
+/// A builder variable only a cast, a declaration or a discarded statement mentions stays open, and
+/// an anonymous function's expression body must conform to its declared return type.
+#[test]
+fn builder_variables_without_evidence_and_a_mismatched_anonymous_body_are_rejected() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "Use.kt",
+            &format!(
+                "{BUILDEE_DECLARATIONS}\
+                 fun cast() {{ build {{ this as Derived<*> }} }}\n\
+                 fun declaration() {{ build {{ val derived = this as Derived<*> }} }}\n\
+                 fun mismatch() {{ val f = fun(): Int = \"s\" }}\n"
+            ),
+        )],
+        &[common::stdlib_jar()],
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr).len(), 3);
+    common::expect_identical_rejection(&result, "builder variables without evidence");
+}

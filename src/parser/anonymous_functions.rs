@@ -73,6 +73,7 @@ impl Parser<'_> {
         } else {
             None
         };
+        let expression_body = self.at(TokenKind::Eq);
         let body = if self.eat(TokenKind::Eq) {
             let e = self.parse_expr();
             let sp = self.file.expr_spans[e.0 as usize];
@@ -101,6 +102,9 @@ impl Parser<'_> {
             self.file.lambda_parameter_roles.insert(lam.0, roles);
         }
         self.file.anon_fun_lambdas.insert(lam.0);
+        if expression_body {
+            self.file.anon_fun_expression_bodies.insert(lam.0);
+        }
         if context_count != 0 {
             self.file
                 .anon_fun_context_count

@@ -4,6 +4,26 @@ use super::*;
 use crate::types::TyKind;
 
 impl Checker<'_> {
+    /// Project the current implicit receiver's flow intersection onto the constituent that owns the
+    /// member a bare call names, as [`Self::flow_intersection_member_receiver`] does for `this.name`.
+    pub(super) fn project_implicit_receiver_for_member(
+        &self,
+        scope: &CheckerScope<'_>,
+        receivers: &mut [ImplicitReceiver],
+        name: &str,
+    ) {
+        let Some(path) = self.current_receiver_path(scope) else {
+            return;
+        };
+        let bounds = self.lookup_intersection_narrowing(scope, &path);
+        let Some(projected) = self.intersection_member_receiver(&bounds, name) else {
+            return;
+        };
+        if let Some(current) = receivers.iter_mut().find(|receiver| receiver.current) {
+            current.ty = projected;
+        }
+    }
+
     /// Project a flow intersection onto the constituent that owns the member being used. Candidate
     /// collection and overload selection remain the resolver's job; this operation only chooses the
     /// receiver view exposed by the proven intersection. When two bounds contribute the same

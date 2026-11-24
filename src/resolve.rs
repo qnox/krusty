@@ -9478,7 +9478,8 @@ impl<'a> Checker<'a> {
                 }
                 // A bare call's implicit receiver is the callee. Read it before any argument:
                 // `invoke(this as String)` must keep the receiver from before that cast.
-                let callee_receivers = self.implicit_receivers(scope);
+                let mut callee_receivers = self.implicit_receivers(scope);
+                self.project_implicit_receiver_for_member(scope, &mut callee_receivers, &fname);
                 let callee_this = self.effective_this_narrow(scope);
                 // Filled when a local receiver-function value matches this call's value-argument
                 // shape but its implicit receiver or context is absent. The failure waits until no
@@ -41034,6 +41035,7 @@ impl<'a> Checker<'a> {
                 )
             };
             let (bret, unit_from_exits) = bret;
+            self.expect_anonymous_expression_body(scope, e, body, bret);
             // Parameter types: an explicit annotation (`{ x: Int -> … }`) drives the function type so a
             // direct call (`f(3)`) type-checks; an unannotated parameter erases to `Object`. The return
             // type comes from the body.
