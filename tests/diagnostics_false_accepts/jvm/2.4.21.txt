@@ -326,7 +326,6 @@ compiler/testData/diagnostics/tests/coroutines/suspendFunctionAsSupertype/suspen
 compiler/testData/diagnostics/tests/coroutines/suspendFunctionAsSupertype/suspendFunctionN/mixingSuspendAndNonSuspendSupertypesThruSuperFunInterface.kt
 compiler/testData/diagnostics/tests/coroutines/suspendFunctionAsSupertype/suspendFunctionN/mixingSuspendAndNonSuspendSupertypesThruSuperinterface.kt
 compiler/testData/diagnostics/tests/crashOnPlusAssignInBuildList.kt
-compiler/testData/diagnostics/tests/crvDisabled/disabledChecker.kt
 compiler/testData/diagnostics/tests/crvDisabled/oldMustUse.kt
 compiler/testData/diagnostics/tests/cyclicHierarchy/classIndirectlyInheritsNested.kt
 compiler/testData/diagnostics/tests/cyclicHierarchy/classInheritsNested.kt
