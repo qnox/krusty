@@ -62,6 +62,14 @@ machine() {
     }'
 }
 
+# What the kernel killed for memory, newest last, so an exit-137 job names its culprit and the size
+# it had. RUNNER_PROFILE_DMESG replaces the `dmesg` command for the script's own tests.
+memory_kills() {
+    local dmesg=${RUNNER_PROFILE_DMESG:-dmesg}
+    { "$dmesg" 2>/dev/null || sudo -n "$dmesg" 2>/dev/null || true; } \
+        | grep -iE 'out of memory|oom-kill|killed process' | tail -n 10 || true
+}
+
 usage() {
     echo "usage: $0 start|report <state file>" >&2
     exit 2
@@ -76,6 +84,8 @@ case $1 in
     report)
         [[ -r $state ]] || { echo "no runner profile was started at $state" >&2; exit 1; }
         machine
+        kills=$(memory_kills)
+        [[ -z $kills ]] || printf 'memory kills recorded by the kernel:\n%s\n' "$kills"
         echo "$(cat "$state") $(counters)" | awk '
             function seconds(before, after) {
                 return (before == "-" || after == "-") ? "n/a" : sprintf("%.0fs", (after - before) / 1e6)

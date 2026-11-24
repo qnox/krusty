@@ -35,6 +35,9 @@ machine() {
     fi
 }
 
+# The cases below read no kernel log unless they stand one in.
+export RUNNER_PROFILE_DMESG=true
+
 failures=0
 expect() {
     local name=$1 expected=$2
@@ -76,6 +79,20 @@ RUNNER_PROFILE_ROOT=$fixture/root-end "$repo/scripts/runner-profile.sh" report "
 expect root "machine: 2 cpus (Stand-in CPU @ 2.00GHz), cpu quota max, memory 8.0 GiB, swap 1.0 of 2.0 GiB used
 over 10s: cpu user 50% system 0% iowait 0% steal 0% idle 50% | stalled on cpu 0s, io 0s, memory 0s | throttled n/a"
 
+# A kernel that killed a process for memory: the report names it, ahead of the counters.
+cat > "$fixture/dmesg" <<'STUB'
+#!/usr/bin/env bash
+echo '[ 10.1] audit: something unrelated'
+echo '[ 99.2] Out of memory: Killed process 4242 (java) total-vm:9000000kB, anon-rss:3100000kB'
+STUB
+chmod +x "$fixture/dmesg"
+RUNNER_PROFILE_DMESG=$fixture/dmesg RUNNER_PROFILE_ROOT=$fixture/root-end \
+    "$repo/scripts/runner-profile.sh" report "$fixture/root.state" > "$fixture/oom.out"
+expect oom "machine: 2 cpus (Stand-in CPU @ 2.00GHz), cpu quota max, memory 8.0 GiB, swap 1.0 of 2.0 GiB used
+memory kills recorded by the kernel:
+[ 99.2] Out of memory: Killed process 4242 (java) total-vm:9000000kB, anon-rss:3100000kB
+over 10s: cpu user 50% system 0% iowait 0% steal 0% idle 50% | stalled on cpu 0s, io 0s, memory 0s | throttled n/a"
+
 status=0
 "$repo/scripts/runner-profile.sh" report "$fixture/missing.state" > "$fixture/missing.out" 2>&1 || status=$?
 expect missing "no runner profile was started at $fixture/missing.state"
@@ -88,4 +105,4 @@ if [[ $failures -ne 0 ]]; then
     echo "$failures runner profile case(s) failed" >&2
     exit 1
 fi
-echo "runner profile: 4 cases passed"
+echo "runner profile: 5 cases passed"
