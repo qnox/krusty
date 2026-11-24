@@ -2137,10 +2137,7 @@ fn an_incompatible_actual_with_an_inferred_return_type_lists_that_type() {
 fn an_incompatible_member_inherited_from_a_source_class_is_listed() {
     let (reference, krusty) = both_split(
         "inherited_actual_candidate",
-        &[(
-            "Common.kt",
-            "expect class Holder {\n    fun f(x: Int)\n}\n",
-        )],
+        &[("Common.kt", "expect class Holder {\n    fun f(x: Int)\n}\n")],
         &[(
             "Platform.kt",
             "open class Base {\n    fun f(x: String) {}\n}\n\nactual class Holder : Base()\n",
