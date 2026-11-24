@@ -22,7 +22,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::server_pool::{self, server_pool_cap};
-use super::{die_with_parent, java_home, protocol_jvm_log_args, read_exact_deadline, spawn_owned};
+use super::{
+    die_with_parent, java_home, protocol_jvm_log_args, read_exact_deadline, spawn_owned,
+    timeout_ms_from,
+};
 
 const KOTLIN_NATIVE_SERVER_SRC: &str = r#"
 import java.io.*;
@@ -75,8 +78,23 @@ const KOTLIN_NATIVE_SERVER_JVM_OPTIONS: [&str; 5] = [
     "-Dfile.encoding=UTF-8",
 ];
 
-/// No compile in the oracle corpus takes a minute warm; a server past this is hung and replaced.
-const COMPILE_DEADLINE: Duration = Duration::from_secs(300);
+/// Milliseconds one compile may take before its server counts as hung and is replaced:
+/// `KRUSTY_NATIVE_COMPILE_TIMEOUT_MS`, five minutes by default. No compile in the oracle corpus
+/// takes a minute warm; slower or busier hosts raise it.
+fn compile_deadline() -> Duration {
+    static TIMEOUT: OnceLock<u64> = OnceLock::new();
+    Duration::from_millis(*TIMEOUT.get_or_init(|| {
+        compile_timeout_ms_from(
+            std::env::var("KRUSTY_NATIVE_COMPILE_TIMEOUT_MS")
+                .ok()
+                .as_deref(),
+        )
+    }))
+}
+
+fn compile_timeout_ms_from(raw: Option<&str>) -> u64 {
+    timeout_ms_from("KRUSTY_NATIVE_COMPILE_TIMEOUT_MS", raw, 300_000)
+}
 
 /// What one `kotlinc-native` invocation produced.
 pub(crate) struct NativeCompile {
@@ -182,7 +200,7 @@ impl KotlinNativeServer {
             self.stdin.write_all(bytes)?;
         }
         self.stdin.flush()?;
-        let deadline = Instant::now() + COMPILE_DEADLINE;
+        let deadline = Instant::now() + compile_deadline();
         let fd = self.stdout.as_raw_fd();
         let mut word = [0u8; 4];
         read_exact_deadline(fd, &mut word, deadline)?;
@@ -254,4 +272,12 @@ fn driver_classes(java_home: &str, jar: &Path) -> PathBuf {
         String::from_utf8_lossy(&output.stderr)
     );
     dir
+}
+
+#[test]
+fn the_compile_deadline_defaults_to_five_minutes_and_follows_its_variable() {
+    assert_eq!(compile_timeout_ms_from(None), 300_000);
+    assert_eq!(compile_timeout_ms_from(Some(" ")), 300_000);
+    assert_eq!(compile_timeout_ms_from(Some("900000")), 900_000);
+    assert!(std::panic::catch_unwind(|| compile_timeout_ms_from(Some("0"))).is_err());
 }
