@@ -106,22 +106,3 @@ tasks.withType<AbstractArchiveTask>().configureEach {
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
 }
-
-// Resolves every dependency of every resolvable configuration, plus the Kotlin Gradle plugin, so CI can fill the Gradle cache for a
-// Kotlin release once, serially, before the matrix jobs read it (see the build-tools-deps job).
-tasks.register("resolveDependencies") {
-    dependsOn("warmKotlinGradlePlugin")
-    notCompatibleWithConfigurationCache("resolves configurations at execution time")
-    doLast {
-        configurations.filter { it.isCanBeResolved }.forEach { it.resolve() }
-    }
-}
-
-// Builds a minimal `kotlin("jvm")` project in this Gradle user home. Resolving the plugin the way a
-// build applies it fills the cache with the variants a nested TestKit build needs, which a plain
-// configuration cannot select reliably.
-tasks.register<GradleBuild>("warmKotlinGradlePlugin") {
-    dir = layout.projectDirectory.dir("warm-kotlin-gradle-plugin").asFile
-    tasks = listOf("compileKotlin")
-    startParameter.projectProperties = mapOf("kotlinVersion" to kotlinVersion.get())
-}
