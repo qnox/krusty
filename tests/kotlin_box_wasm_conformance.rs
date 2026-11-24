@@ -1777,6 +1777,26 @@ fn wasm_callable_references_share_identity_across_independent_module_analyses() 
 }
 
 #[test]
+fn wasm_platform_module_class_replaces_the_common_module_class_it_redeclares() {
+    let source = include_str!("box_regressions/multimodule/platformRedeclaresCommonClass.kt");
+    let stem = "wasmPlatformRedeclaresCommonClass";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the whole classpath-substitution fixture");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name(),
+        );
+    }
+}
+
+#[test]
 fn wasm_data_class_signed_array_members_are_lowered_from_the_library_klib() {
     let source = include_str!("box_regressions/multimodule/dataClassSignedArrayMembers.kt");
     let stem = "wasmDataClassSignedArrayMembers";

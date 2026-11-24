@@ -12,6 +12,12 @@
 //!
 //! Identities are qualified, so one table serves every module of a program: a declaration
 //! another module published is defined by the time a later module reads it.
+//!
+//! A module may redeclare an identity an earlier module of its dependency chain declares: a
+//! platform module's class over a common module's, the way classpath substitution lets the later
+//! declaration replace the earlier one. The table remembers which module owns each link, so the
+//! later module's own declaration and its reads get a link of their own while every module after
+//! it reads the replacement; the earlier module's files, already lowered, keep their link.
 
 use crate::fx_hash::HashMap;
 use std::hash::Hash;
@@ -20,59 +26,83 @@ use std::hash::Hash;
 #[derive(Debug)]
 pub struct ModuleLinks<K, V> {
     links: HashMap<K, Link<V>>,
+    /// The source module whose files are being lowered.
+    module: Box<str>,
 }
 
 #[derive(Debug)]
 struct Link<V> {
     target: V,
     defined: bool,
+    /// The source module that reserved or defined the link.
+    module: Box<str>,
 }
 
 impl<K, V> Default for ModuleLinks<K, V> {
     fn default() -> Self {
         Self {
             links: HashMap::default(),
+            module: Box::default(),
         }
     }
 }
 
-/// A declaration defined twice: two files, or two units, realized one identity.
+/// A declaration defined twice: two files of one module realized one identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DefinedTwice;
 
 impl<K: Eq + Hash, V: Clone> ModuleLinks<K, V> {
+    /// Begin (or continue) the files of source module `module`.
+    pub fn enter_module(&mut self, module: &str) {
+        if &*self.module != module {
+            self.module = module.into();
+        }
+    }
+
+    fn fresh(&self, target: V, defined: bool) -> Link<V> {
+        Link {
+            target,
+            defined,
+            module: self.module.clone(),
+        }
+    }
+
     /// The link of `key` for a read: the defined or reserved one, or `None` when no file has
-    /// realized it and `declared` (the module fact certifying it exists) is false.
+    /// realized it and `declared` (the module fact certifying it exists) is false. A read of an
+    /// identity the current module declares never finds an earlier module's link: the module
+    /// redeclares it, so the read reserves a link for the module's own declaration.
     pub fn read(&mut self, key: K, declared: bool, allocate: impl FnOnce() -> V) -> Option<V> {
         if let Some(link) = self.links.get(&key) {
-            return Some(link.target.clone());
-        }
-        if !declared {
+            if !declared || link.module == self.module {
+                return Some(link.target.clone());
+            }
+        } else if !declared {
             return None;
         }
         let target = allocate();
-        self.links.insert(
-            key,
-            Link {
-                target: target.clone(),
-                defined: false,
-            },
-        );
+        let link = self.fresh(target.clone(), false);
+        self.links.insert(key, link);
         Some(target)
     }
 
-    /// The link the declaring file defines `key` under: the one an earlier read reserved, or a
-    /// fresh one.
+    /// The link the declaring file defines `key` under: the one an earlier read of the current
+    /// module reserved, or a fresh one. A link another module owns is replaced, so later modules
+    /// read the redeclaration.
     pub fn define(&mut self, key: K, allocate: impl FnOnce() -> V) -> Result<V, DefinedTwice> {
-        let link = self.links.entry(key).or_insert_with(|| Link {
-            target: allocate(),
-            defined: false,
-        });
-        if link.defined {
-            return Err(DefinedTwice);
+        match self.links.get_mut(&key) {
+            Some(link) if link.module == self.module => {
+                if link.defined {
+                    return Err(DefinedTwice);
+                }
+                link.defined = true;
+                return Ok(link.target.clone());
+            }
+            _ => {}
         }
-        link.defined = true;
-        Ok(link.target.clone())
+        let target = allocate();
+        let link = self.fresh(target.clone(), true);
+        self.links.insert(key, link);
+        Ok(target)
     }
 
     /// The defined link of `key`.
@@ -112,6 +142,35 @@ mod tests {
         assert_eq!(links.defined(&"A"), Some(1));
         assert_eq!(links.undefined().count(), 0);
         assert_eq!(links.define("A", &mut fresh), Err(DefinedTwice));
+    }
+
+    #[test]
+    fn a_later_module_redeclaring_an_identity_replaces_the_link_for_every_module_after_it() {
+        let mut links = ModuleLinks::<&str, u32>::default();
+        let mut next = 0;
+        let mut fresh = || {
+            next += 1;
+            next
+        };
+        links.enter_module("common");
+        assert_eq!(links.define("A", &mut fresh), Ok(1));
+        links.enter_module("platform");
+        // The platform module's own read, before its declaring file, reserves its own link.
+        assert_eq!(links.read("A", true, &mut fresh), Some(2));
+        assert_eq!(links.define("A", &mut fresh), Ok(2));
+        assert_eq!(links.defined(&"A"), Some(2));
+        links.enter_module("app");
+        assert_eq!(links.read("A", false, &mut fresh), Some(2));
+        assert_eq!(links.undefined().count(), 0);
+    }
+
+    #[test]
+    fn a_module_that_does_not_redeclare_an_identity_reads_the_earlier_modules_link() {
+        let mut links = ModuleLinks::<&str, u32>::default();
+        links.enter_module("common");
+        assert_eq!(links.define("A", || 1), Ok(1));
+        links.enter_module("app");
+        assert_eq!(links.read("A", false, || 2), Some(1));
     }
 
     #[test]

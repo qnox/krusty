@@ -82,6 +82,7 @@ impl CallableRegistry {
             self.module.clear();
             self.module_defaults.clear();
         }
+        self.instances.enter_module(module_name);
     }
 
     /// Link the entry answering each object instance and enum constant this file realizes,

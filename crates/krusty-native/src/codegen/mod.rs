@@ -483,6 +483,7 @@ impl Backend for CraneliftBackend {
                 },
             );
         }
+        state.instances.enter_module(file.module_name);
         let instances = match krusty::backend::instance_links::link_entries(
             &file.dependency_exports,
             &mut state.instances,

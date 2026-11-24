@@ -10,7 +10,9 @@
 //! (`super::BackendModuleFacts::declares_instance`) and one table of links
 //! ([`super::module_links::ModuleLinks`]): whichever of the reading and the declaring file is
 //! lowered first allocates the link, and the other finds it. The table serves every module of a
-//! program, so a library's instance links the same way.
+//! program, so a library's instance links the same way. A module that redeclares a classifier of
+//! an earlier module of its chain realizes entries of its own, which every later module reads
+//! (see [`super::module_links`]).
 
 use crate::fir::DeclarationId;
 use crate::fx_hash::HashMap;
