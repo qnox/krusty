@@ -233,8 +233,6 @@ constants/kt9532.kt
 contextParameters/contextPropertyInInterface.kt
 contextParameters/explicitPassing.kt
 contextParameters/kt51863.kt
-contextParameters/propertyCompoundAssignment.kt
-contextParameters/substitutedContextReceivers.kt
 contextParameters/suspendContextParemetersWithExtension.kt
 contracts/contractForCast.kt
 contracts/isNullString.kt
