@@ -6,6 +6,7 @@ pub use box_execution::run_box;
 pub(crate) mod byte_dump;
 pub(crate) mod conformance_report;
 pub(crate) mod kotlin_metadata;
+pub(crate) mod kotlin_native_server;
 pub(crate) mod kotlinc_lib;
 pub(crate) mod kotlinc_server;
 pub mod language_directives;
