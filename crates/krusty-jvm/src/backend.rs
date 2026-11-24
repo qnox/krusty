@@ -565,6 +565,8 @@ pub struct JvmBackend {
     cp: std::rc::Rc<krusty::jvm::classpath::Classpath>,
     /// Class-file major version to emit (`-jvm-target`), or `None` for krusty's default (v52).
     class_major: Option<u16>,
+    /// `-Xjvm-enable-preview`.
+    enable_preview: bool,
     jvm_default: crate::ir_emit::JvmDefaultMode,
     java_parameters: bool,
     lambda_modes: crate::ir_emit::LambdaModes,
@@ -598,6 +600,7 @@ impl JvmBackend {
         JvmBackend {
             cp,
             class_major: None,
+            enable_preview: false,
             jvm_default: crate::ir_emit::JvmDefaultMode::default(),
             java_parameters: false,
             lambda_modes: crate::ir_emit::LambdaModes::default(),
@@ -698,6 +701,12 @@ impl JvmBackend {
         self.class_major = major;
         self
     }
+
+    /// Mark every emitted class as compiled with preview features (`-Xjvm-enable-preview`).
+    pub fn with_enable_preview(mut self, enabled: bool) -> JvmBackend {
+        self.enable_preview = enabled;
+        self
+    }
 }
 
 /// The per-file emit configuration krusty SHIPS with — ONE definition, so an in-process caller (the
@@ -728,6 +737,7 @@ pub fn shipping_emit_options(
     let source_stem = stem.rsplit(['/', '\\']).next().unwrap_or(stem);
     crate::ir_emit::EmitOptions {
         class_major,
+        enable_preview: false,
         source_file: Some(format!(
             "{source_stem}.{}",
             match source_kind {
@@ -1168,6 +1178,7 @@ impl JvmBackend {
             self.class_major,
             self.cp.clone(),
         )
+        .with_enable_preview(self.enable_preview)
         .with_jvm_default(self.jvm_default)
         .with_lambda_modes(self.lambda_modes)
         .with_inline_string_concat(self.inline_string_concat)

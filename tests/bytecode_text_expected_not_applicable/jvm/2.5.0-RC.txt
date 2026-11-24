@@ -25,10 +25,3 @@ multifileClasses/optimizedMultifileClassFacadeMethods.kt
 notNullAssertions/doNotGenerateParamAssertions.kt
 notNullAssertions/noAssertionForNullableCaptured.kt
 notNullAssertions/noAssertionForNullableGenericMethod.kt
-
-# The case declares `// ENABLE_JVM_PREVIEW`, which the harness does not yet pass to kotlinc as
-# `-Xjvm-enable-preview`. Without it kotlinc 2.5.0-RC emits no ACC_IDENTITY (synchronized) flag on
-# the nested classes (found 0 of the expected 2 for A$B and A$C); with it the class files carry
-# the flag (inner-class flags 0x39 and 0x29 for target 28), so the reference is right and this
-# is a harness gap. The sibling target-27 case expects no identity flag and passes.
-innerClasses/identityFlagWithJvmPreviewTarget28.kt

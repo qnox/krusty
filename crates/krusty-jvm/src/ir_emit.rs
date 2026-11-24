@@ -1037,6 +1037,7 @@ fn new_writer_generic(
     if let Some(major) = opts.class_major {
         cw.set_major(major);
     }
+    cw.set_preview(opts.enable_preview);
     cw.set_source_file(opts.source_file.clone());
     cw.set_param_assertions(opts.param_assertions);
     cw.set_inner_class_resolver(opts.inner_class_resolver.clone());
@@ -4365,7 +4366,7 @@ fn emit_placed_method(
                     outer_method: &f.name,
                     outer_descriptor: &reserved_desc,
                     plan: &machine.plan,
-                    major: Some(e.cw.major()),
+                    version: Some(e.cw.version()),
                     source_file: source_file.as_deref(),
                     receiver: machine.receiver.as_deref(),
                     bridge: machine.bridge.as_deref(),
