@@ -274,10 +274,7 @@ impl ClassWriter {
             Some(source) if source.builder.kept_for_inlining => BodyStage::KeptForInlining,
             _ => BodyStage::Transformed,
         };
-        let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
-        let method = &self.methods[index];
-        let optimized = self.optimized(method, identity, node, None, stage, &mut pool);
-        if let Some(optimized) = optimized {
+        if let Some(optimized) = self.optimized_interning(index, identity, node, stage) {
             self.methods[index].take_rewritten(optimized);
         }
         let interned = interned_after + 1..self.cp.slot_count() + 1;
