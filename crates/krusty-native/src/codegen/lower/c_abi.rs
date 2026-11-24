@@ -220,4 +220,75 @@ impl<'a> FileLowering<'a> {
             Ok(())
         })
     }
+
+    pub(super) fn is_runtime_entry(&self, function: krusty::ir::FunId) -> bool {
+        matches!(
+            self.ir.runtime_bindings.get(&function),
+            Some(krusty::ir::RuntimeBinding::Entry(_))
+        )
+    }
+
+    /// A library function with no body that the runtime defines: its entry calls `symbol` with the
+    /// receiver first and the operands after it, as the runtime's C signature takes them.
+    pub(super) fn define_runtime_entry(
+        &mut self,
+        function: usize,
+        id: FuncId,
+        symbol: String,
+    ) -> Result<(), Unsupported> {
+        if !self.runtime_symbols.contains(symbol.as_str()) {
+            return Err(declined!(
+                "Kotlin/Native runtime entry `{symbol}` is not defined by this runtime"
+            ));
+        }
+        let declared = &self.ir.functions[function];
+        let ret = declared.ret;
+        let mut carried = Vec::with_capacity(declared.params.len() + 1);
+        if declared.dispatch_receiver.is_some() {
+            carried.push(any());
+        }
+        carried.extend_from_slice(&declared.params);
+        let signature = self.function_signature(function as krusty::ir::FunId)?;
+        let name = declared.name.clone();
+        self.emit_function(id, signature, ret, &name, &mut |body, arguments| {
+            let result = body.runtime_call(&symbol, &carried, ret, arguments)?;
+            if body.terminated || body.carrier(ret) == Carrier::Void {
+                return Ok(());
+            }
+            let Some(result) = result else {
+                return Err(declined!("runtime entry `{symbol}` returned no value"));
+            };
+            body.builder.ins().return_(&[result]);
+            body.terminate();
+            Ok(())
+        })
+    }
+
+    /// Export every library function the runtime calls back into, under the symbol its library
+    /// names. The receiver leads the operands, as it does for every member.
+    pub(super) fn define_runtime_exports(&mut self, file_init: FuncId) -> Result<(), Unsupported> {
+        let mut exports = self
+            .ir
+            .runtime_bindings
+            .iter()
+            .filter_map(|(function, binding)| match binding {
+                krusty::ir::RuntimeBinding::Export(symbol) => Some((*function, symbol.clone())),
+                krusty::ir::RuntimeBinding::Entry(_) => None,
+            })
+            .collect::<Vec<_>>();
+        exports.sort_unstable();
+        for (function, symbol) in exports {
+            let Some(target) = self.functions[function as usize] else {
+                return Err(declined!("`{symbol}` has no body"));
+            };
+            let declared = &self.ir.functions[function as usize];
+            let mut params = Vec::with_capacity(declared.params.len() + 1);
+            if declared.dispatch_receiver.is_some() {
+                params.push(any());
+            }
+            params.extend_from_slice(&declared.params);
+            self.define_trampoline(file_init, target, function, &symbol, params)?;
+        }
+        Ok(())
+    }
 }

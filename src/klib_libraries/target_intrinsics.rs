@@ -609,7 +609,20 @@ pub(crate) fn is_runtime_entry_ir(
     arena: &KlibIrArena,
     function: &crate::metadata::klib_ir::tree::KlibIrFunction,
 ) -> bool {
+    runtime_entry_symbol(arena, function).is_some()
+}
+
+/// The runtime symbol a bodyless serialized function is bound to by `@GCUnsafeCall("callee")`:
+/// the serialized-IR view of the declaration [`super::direct_c_calls::runtime_entry`]
+/// authenticates from metadata, through the same [`super::direct_c_calls::RuntimeEntryShape`].
+pub(crate) fn runtime_entry_symbol<'a>(
+    arena: &'a KlibIrArena,
+    function: &'a crate::metadata::klib_ir::tree::KlibIrFunction,
+) -> Option<&'a str> {
     use crate::metadata::function_flags::{IS_EXPECT, IS_EXTERNAL, IS_INLINE, IS_SUSPEND};
+    if function.body.is_some() {
+        return None;
+    }
     let flags = function.base.flags;
     let parameters = &function.regular_parameters;
     super::direct_c_calls::RuntimeEntryShape {
@@ -633,8 +646,21 @@ pub(crate) fn is_runtime_entry_ir(
         ),
     }
     .callee()
-    .is_some()
-        && function.body.is_none()
+}
+
+/// The symbol the runtime calls back through, named by `@ExportForCppRuntime("name")` on a
+/// serialized function that has a body.
+pub(crate) fn runtime_export_symbol<'a>(
+    arena: &'a KlibIrArena,
+    function: &'a crate::metadata::klib_ir::tree::KlibIrFunction,
+) -> Option<&'a str> {
+    function.body.as_ref()?;
+    ir_string_annotation(
+        arena,
+        &function.base.annotations,
+        &["kotlin", "native", "internal"],
+        &["ExportForCppRuntime", "<init>"],
+    )
 }
 
 fn ir_string_annotation<'a>(

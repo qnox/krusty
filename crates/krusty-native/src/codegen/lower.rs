@@ -464,6 +464,7 @@ pub fn lower_file(
     };
     lowering.define_c_exports(file_init, &abi)?;
     lowering.define_dependency_exports(file_init, dependency_exports)?;
+    lowering.define_runtime_exports(file_init)?;
     lowering.define_interface_identities()?;
 
     let records = lowering.laid_out_records()?;
@@ -760,7 +761,7 @@ impl<'a> FileLowering<'a> {
                 .ir
                 .inline_only_fns
                 .contains(&(index as krusty::ir::FunId))
-                || function.body.is_none()
+                || (function.body.is_none() && !self.is_runtime_entry(index as krusty::ir::FunId))
             {
                 // Nothing to emit, and therefore nothing to DECLARE: an exported symbol that is
                 // never defined fails the object's own consistency check, not the link. Two shapes
@@ -988,6 +989,11 @@ impl<'a> FileLowering<'a> {
             return Ok(());
         };
         let Some(body) = function.body else {
+            if let Some(krusty::ir::RuntimeBinding::Entry(symbol)) =
+                self.ir.runtime_bindings.get(&(index as krusty::ir::FunId))
+            {
+                return self.define_runtime_entry(index, id, symbol.clone());
+            }
             // Declared as nothing above, so there is nothing to define either.
             return Ok(());
         };
