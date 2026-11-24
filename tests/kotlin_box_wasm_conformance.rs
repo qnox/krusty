@@ -157,6 +157,9 @@ impl Lane for WasmLane {
         if krusty::conformance::directive(src, "FULL_JDK") {
             return Some("requires the JDK runtime");
         }
+        if krusty::conformance::wasm_ignored_for_multi_module(src) {
+            return Some("kotlinc mutes it in its multi-module wasm mode");
+        }
         None
     }
 
@@ -280,6 +283,30 @@ fn wasm_applicability_reads_both_the_family_and_the_exact_target() {
         None,
         "a JVM mute must not remove Wasm coverage"
     );
+    let two_modules = "// WASM_IGNORE_FOR: mode=multi-module\n// MODULE: a\n// FILE: a.kt\nfun a() = 1\n// MODULE: b(a)\n// FILE: b.kt\nfun box() = \"OK\"";
+    for lane in [&js, &wasi] {
+        assert_eq!(
+            lane.not_applicable(two_modules),
+            Some("kotlinc mutes it in its multi-module wasm mode")
+        );
+        assert_eq!(
+            lane.not_applicable(
+                &two_modules.replace("mode=multi-module", "mode=multi-module runner=x.Y")
+            ),
+            None,
+            "a runner-qualified mute names another test generator"
+        );
+        assert_eq!(
+            lane.not_applicable(&two_modules.replace("mode=multi-module", "vm=Wasmtime")),
+            None,
+            "a vm-qualified mute names another engine"
+        );
+        assert_eq!(
+            lane.not_applicable("// WASM_IGNORE_FOR: mode=multi-module\nfun box() = \"OK\""),
+            None,
+            "a one-module case is outside kotlinc's multi-module mode"
+        );
+    }
 }
 
 #[test]
