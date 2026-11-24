@@ -97,13 +97,17 @@ impl BodyLowering<'_, '_, '_> {
         if left.is_nullable()
             || right.is_nullable()
             || self.file.values.unboxed(right) != Some(class)
-            || !matches!(
-                self.file.values.underlying(class),
-                Some(Ty::Int | Ty::Long | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean)
-            )
         {
             return Ok(None);
         }
+        let Some(underlying) = self.file.values.underlying(class).filter(|ty| {
+            matches!(
+                *ty,
+                Ty::Int | Ty::Long | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean
+            )
+        }) else {
+            return Ok(None);
+        };
         let generated = self
             .file
             .ir
@@ -122,7 +126,9 @@ impl BodyLowering<'_, '_, '_> {
         if declares_equals {
             return Ok(None);
         }
-        let (Some(left), Some(right)) = (self.expression(lhs)?, self.expression(rhs)?) else {
+        let (Some(left), Some(right)) =
+            (self.coerce(lhs, underlying)?, self.coerce(rhs, underlying)?)
+        else {
             return Ok(Some(None));
         };
         if self.terminated {

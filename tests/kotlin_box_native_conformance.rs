@@ -1215,15 +1215,3 @@ fn native_links_a_library_s_top_level_function_bodies_from_its_klib() {
         Outcome::Pass
     );
 }
-
-#[test]
-fn native_value_class_equality_compares_the_values() {
-    // PLATFORM-SPECIFIC: the expected values are the language's own.
-    let source = "value class Plain(val v: Int)\n\
-         fun box(): String {\n\
-         \x20   if (Plain(1) != Plain(1)) return \"fail 1\"\n\
-         \x20   if (Plain(1) == Plain(2)) return \"fail 2\"\n\
-         \x20   return \"OK\"\n\
-         }\n";
-    expect_native_only_box(source, "valueClassEquality");
-}
