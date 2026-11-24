@@ -267,7 +267,7 @@ fn an_authenticated_direct_c_pointer_declines_its_nullable_boxed_carrier_exactly
     assert_eq!(diags.diags.len(), 1, "one selected call declines once");
     assert_eq!(
         diags.render_all(&[("directPointer.kt", POINTER_SOURCE)], krusty::diag::DiagnosticNames::Hidden),
-        "directPointer.kt:5:5: error: krusty: the native backend does not support a call of the C function `krusty_fixture_pointer` passing `kotlinx.cinterop.CValuesRef?`, which has no C representation here yet\n"
+        "directPointer.kt:5:5: error: krusty: the native backend does not support a call of the C function `krusty_fixture_pointer` passing `kotlinx.cinterop.CValuesRef?`, which has no C representation here yet\n    krusty_fixture_pointer(null)\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"
     );
 }
 
