@@ -15,6 +15,9 @@ use krusty::fir::ResolvedFunctionOverrideTarget;
 
 use super::super::super::laid_out_classes::DependencyImplementation;
 
+#[cfg(test)]
+mod property_identity_tests;
+
 impl FileLowering<'_> {
     /// Record, for the link, which function stands at each number of `itable`, the interface
     /// table of the type `descriptor` describes: see `native::interface_calls`. A number the type

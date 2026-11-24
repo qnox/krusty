@@ -140,6 +140,9 @@ pub(in crate::codegen) fn dispatches_through_library_member(
 /// Kotlin name of the declaration its overrides share.
 struct LibraryMember {
     identity: Vec<u8>,
+    /// The declaration the member's signature is read from: the called function, or for a setter
+    /// its property's getter.
+    declaration: BackendCallableFact,
     role: MemberRole,
     name: String,
     /// Whether the member is `KCallable.name`, which every callable-reference object answers.
@@ -292,19 +295,6 @@ impl Body<'_> {
                 }),
             );
         }
-        // A library member call reads a property only through its checked property read.
-        if role == MemberRole::Setter
-            || (property.is_some()
-                && !matches!(
-                    node,
-                    IrExpr::Checked(operation) if matches!(
-                        &**operation,
-                        krusty::ir::IrCheckedOperation::ExternalPropertyRead { .. }
-                    )
-                ))
-        {
-            return None;
-        }
         let published = self.calls.external(target).is_some();
         let dispatches =
             dispatches_through_library_member(self.ir, self.callables, id, fact, published);
@@ -317,11 +307,21 @@ impl Body<'_> {
             Some(property) => property.name.to_string(),
             None => fact.name.clone(),
         };
+        // A setter's member is named, and carried, as its property's getter declares it: the
+        // getter's declared parameters (its context and extension receivers) lead the value, the
+        // way an implementing class records it (`super::super::interface_members`).
+        let declaration = match (role, property) {
+            (MemberRole::Setter, Some(property)) => {
+                self.callables.callable(property.getter)?.clone()
+            }
+            _ => fact.clone(),
+        };
         Some(self.library_member_call(
             id,
             fact.clone(),
             LibraryMember {
                 identity,
+                declaration,
                 role,
                 name,
                 reference_name: property.is_some_and(is_reference_name),
@@ -373,8 +373,8 @@ impl Body<'_> {
         }
     }
 
-    /// A call through the library member `fact` declares, the getter of `property` when there is
-    /// one.
+    /// A call through the library member `fact` declares, in `member`'s role: the getter or setter
+    /// of its property when there is one.
     fn library_member_call(
         &mut self,
         id: u32,
@@ -385,6 +385,7 @@ impl Body<'_> {
     ) -> Result<(), Unsupported> {
         let LibraryMember {
             identity,
+            declaration,
             role,
             name,
             reference_name,
@@ -402,7 +403,7 @@ impl Body<'_> {
         }) {
             self.record_char_sequence_reads(false)?;
         }
-        let member = self.library_member_of(&fact, identity, role, &name)?;
+        let member = self.library_member_of(&declaration, identity, role, &name)?;
         if let Some(function) = interface_default {
             self.runtime
                 .objects
