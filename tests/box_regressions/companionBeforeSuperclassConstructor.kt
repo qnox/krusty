@@ -1,3 +1,5 @@
+// KOTLINC_VERSION: [2.5.0,)
+// LANGUAGE: +CompanionBlocks
 // Initializing a class initializes its superclass first. With both companions present the
 // superclass companion runs before the subclass companion.
 

@@ -114,7 +114,8 @@ impl ClassStaticPlan {
     }
 
     /// JLS 12.4.2's recursive enumeration: `interface`'s own superinterfaces first, then
-    /// `interface` itself when it has statics of its own and declares a non-abstract member.
+    /// `interface` itself when it has statics or a companion object of its own and declares a
+    /// non-abstract member.
     fn enumerate_superinterface(&self, ir: &IrFile, interface: ClassId, order: &mut Vec<ClassId>) {
         if order.contains(&interface) {
             return;
@@ -130,10 +131,9 @@ impl ClassStaticPlan {
                     let function = &ir.functions[method as usize];
                     function.body.is_some() && !function.is_static
                 });
-        if self.has_statics(interface)
-            && declares_non_abstract_member
-            && !order.contains(&interface)
-        {
+        let initializes_something =
+            self.has_statics(interface) || ir.classes[interface as usize].companion_class.is_some();
+        if initializes_something && declares_non_abstract_member && !order.contains(&interface) {
             order.push(interface);
         }
     }

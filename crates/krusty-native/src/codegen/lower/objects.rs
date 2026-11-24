@@ -1952,12 +1952,30 @@ impl<'a> FileLowering<'a> {
             .and_then(|outer| self.ir.enum_initializers().get(&outer))
             .and_then(|&initializer| self.functions[initializer as usize]);
 
+        // The class a companion belongs to is initialized with it, supertypes first. An enum's
+        // companion stays with the enum initializer.
+        let owner = self
+            .ir
+            .classes
+            .iter()
+            .position(|candidate| {
+                candidate.companion_class == Some(self.ir.classes[class as usize].fq_name_id())
+                    && !model::is_enum(candidate)
+            })
+            .map(|owner| owner as ClassId);
+
         let name = format!("{}.INSTANCE", self.ir.classes[class as usize].fq_name());
         let signature = self.signature_of(&[], any())?;
         self.emit_function(getter, signature, any(), &name, &mut |body, _| {
             if let Some(initializer) = enclosing_enum {
                 let func_ref = body.func_ref(initializer);
                 body.emit_call(func_ref, &[])?;
+            }
+            if let Some(owner) = owner {
+                body.activate_class_through(owner, ClassActivation::BeforeOwnCompanion)?;
+                if body.terminated {
+                    return Ok(());
+                }
             }
             let slot_address = body.data_address(slot);
             let current = body
@@ -1997,6 +2015,14 @@ impl<'a> FileLowering<'a> {
             Ok(())
         })
     }
+}
+
+/// How much of a class's initialization [`BodyLowering::activate_class_through`] runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClassActivation {
+    Whole,
+    /// Everything but the class's own companion object.
+    BeforeOwnCompanion,
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
@@ -2389,6 +2415,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// companion that constructs its holder does not re-enter. An enum's companion stays
     /// with the enum initializer.
     pub(super) fn activate_class(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        self.activate_class_through(class, ClassActivation::Whole)
+    }
+
+    /// [`Self::activate_class`], optionally stopping before `class`'s own companion: the
+    /// companion's own getter runs this much before it constructs the companion.
+    ///
+    /// Without `CompanionBlocks` a class does not initialize its supertypes: a construction asks
+    /// each constructor's own companion in turn, subclass first, and an access asks only the
+    /// companion it names.
+    fn activate_class_through(
+        &mut self,
+        class: ClassId,
+        extent: ClassActivation,
+    ) -> Result<(), Unsupported> {
+        if !self.file.ir.companion_blocks_enabled {
+            return Ok(());
+        }
         let mut chain = vec![class];
         loop {
             let parent = self
@@ -2409,6 +2452,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             for step in self.file.class_statics.activation_steps(owner) {
                 match step {
                     ClassActivationStep::OwnStatics(class) => self.initialize_own_statics(class)?,
+                    ClassActivationStep::Companion(companion_of)
+                        if extent == ClassActivation::BeforeOwnCompanion
+                            && companion_of == class =>
+                    {
+                        return Ok(());
+                    }
                     ClassActivationStep::Companion(class) => self.initialize_companion(class)?,
                 }
                 if self.terminated {
