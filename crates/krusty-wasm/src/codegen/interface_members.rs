@@ -69,11 +69,11 @@ pub(super) fn accessor_types(ty: Ty, setter: bool) -> (Vec<Ty>, Ty) {
     }
 }
 
-/// The parameters and result of a property accessor of a value of type `ty` on a member extension
-/// whose receiver is `receiver`: the receiver comes first, then (for a setter) the value.
-fn extension_accessor_types(receiver: Option<Ty>, ty: Ty, setter: bool) -> (Vec<Ty>, Ty) {
+/// The parameters and result of a property accessor of a value of type `ty` that takes the
+/// context parameters `context`: they lead its parameters, before (for a setter) the value.
+pub(super) fn contextual_accessor_types(context: &[Ty], ty: Ty, setter: bool) -> (Vec<Ty>, Ty) {
     let (value, result) = accessor_types(ty, setter);
-    (receiver.into_iter().chain(value).collect(), result)
+    (context.iter().copied().chain(value).collect(), result)
 }
 
 /// What every recording of one file reads.
@@ -283,8 +283,13 @@ fn publish_identities(
                 continue;
             };
             let signature = match layout {
-                IrLocalPropertyLayout::Member { ty, .. } => {
-                    let (params, result) = accessor_types(*ty, setter);
+                IrLocalPropertyLayout::Member {
+                    ty,
+                    context_parameters,
+                    ..
+                } => {
+                    let (params, result) =
+                        contextual_accessor_types(context_parameters, *ty, setter);
                     member_signature(&params, result)?
                 }
                 // A member extension's accessor takes its extension receiver as a parameter.
@@ -1141,6 +1146,53 @@ impl FileRecorder<'_, '_, '_> {
         Ok(())
     }
 
+    /// The parameters and result of the accessor of the property `target` names, of a value of
+    /// type `ty`: its context parameters, then its extension receiver, then (for a setter) the
+    /// value. A declaration of a dependency states its context parameters on its getter.
+    fn property_accessor_types(
+        &self,
+        target: &ResolvedPropertyOverrideTarget,
+        receiver: Option<Ty>,
+        ty: Ty,
+        setter: bool,
+    ) -> Result<(Vec<Ty>, Ty), Unsupported> {
+        let context: Vec<Ty> = match target {
+            ResolvedPropertyOverrideTarget::Module(property) => {
+                match self.recording.ir.local_property_layouts.get(property) {
+                    Some(
+                        IrLocalPropertyLayout::Member {
+                            context_parameters, ..
+                        }
+                        | IrLocalPropertyLayout::MemberExtension {
+                            context_parameters, ..
+                        },
+                    ) => context_parameters.clone(),
+                    _ => self
+                        .recording
+                        .ir
+                        .referenced_module_properties
+                        .get(property)
+                        .map(|reference| reference.context_parameters.to_vec())
+                        .ok_or_else(|| {
+                            self.declined("an interface property override with no recorded layout")
+                        })?,
+                }
+            }
+            ResolvedPropertyOverrideTarget::External(getter) => {
+                let fact = self.recording.callables.callable(*getter).ok_or_else(|| {
+                    self.declined("a dependency's interface property with no getter fact")
+                })?;
+                let params = fact.declared_params.as_deref().unwrap_or(&fact.params);
+                params[..fact.context_count.min(params.len())].to_vec()
+            }
+        };
+        let (value, result) = accessor_types(ty, setter);
+        Ok((
+            context.into_iter().chain(receiver).chain(value).collect(),
+            result,
+        ))
+    }
+
     /// The getter, or with `setter` the setter, `owner` implements the dependency property `edge`
     /// overrides with.
     fn property_edge_implementation(
@@ -1174,13 +1226,18 @@ impl FileRecorder<'_, '_, '_> {
                 }
             }
         };
-        let declared_types =
-            extension_accessor_types(edge.declared_receiver, edge.declared_type, setter);
-        let implemented_types = extension_accessor_types(
+        let declared_types = self.property_accessor_types(
+            &edge.overridden,
+            edge.declared_receiver,
+            edge.declared_type,
+            setter,
+        )?;
+        let implemented_types = self.property_accessor_types(
+            &edge.implementation,
             edge.implementation_receiver,
             edge.implementation_type,
             setter,
-        );
+        )?;
         let declared = member_signature(&declared_types.0, declared_types.1)?;
         let implemented = member_signature(&implemented_types.0, implemented_types.1)?;
         let placed = placed

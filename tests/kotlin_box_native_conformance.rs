@@ -412,6 +412,19 @@ fn native_library_suspend_coroutine_runs() {
     expect_native_klib_box(source, "nativeLibrarySuspendCoroutine");
 }
 
+#[test]
+fn native_dependency_interface_context_properties_pass_their_context_values() {
+    let source = include_str!("box_regressions/multimodule/dependencyInterfaceContextProperty.kt");
+    let stem = "dependencyInterfaceContextProperty";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole context property module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "interface accessors must receive their context values before the property value"
+    );
+}
+
 fn expect_native_klib_box(source: &str, stem: &str) {
     super::common::expect_box_ok_with_stdlib(source, &format!("{stem}Oracle"));
     let target = host().expect("Native KLIB/runtime is required for this test");
