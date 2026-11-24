@@ -17,11 +17,11 @@ pub(super) struct TargetConstraints {
     pub(super) lambdas: Vec<u32>,
     /// The lambda parameters the body calls.
     pub(super) invoked: Vec<u32>,
-    /// The composable calls the body passes lambda parameters to.
+    /// The calls of the file's functions the body passes lambda parameters to.
     pub(super) calls: Vec<LambdaCall>,
 }
 
-/// A composable call of a function of the same file that is passed lambda parameters.
+/// A call of a function of the same file that is passed lambda parameters.
 pub(super) struct LambdaCall {
     pub(super) callee: FunId,
     /// Each passed lambda: the callee's parameter it is passed to, and the caller's own parameter.

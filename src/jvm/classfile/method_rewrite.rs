@@ -330,6 +330,43 @@ impl ClassWriter {
         (outcome, !pool.missed())
     }
 
+    /// [`Self::optimized`] over the body the method at `index` now holds, with the constants the
+    /// optimized body names that the pool lacks interned first, as kotlinc's writer interns every
+    /// constant of the body it is handed. The passes run again over the grown pool.
+    pub(super) fn optimized_interning(
+        &mut self,
+        index: usize,
+        source: MethodIdentity<'_>,
+        node: MethodNode,
+        stage: BodyStage,
+    ) -> Option<Rewritten> {
+        let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
+        let optimized = self.optimized(
+            &self.methods[index],
+            source,
+            node.clone(),
+            None,
+            stage,
+            &mut pool,
+        );
+        match pool.into_wanted() {
+            Some(wanted) if !wanted.is_empty() => {
+                crate::trace_compiler!(
+                    "bytecode",
+                    "{}.{}{} interns {} constants its optimized body names",
+                    self.internal_name,
+                    source.name,
+                    source.desc,
+                    wanted.len()
+                );
+                self.intern_wanted(&wanted);
+                let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
+                self.optimized(&self.methods[index], source, node, None, stage, &mut pool)
+            }
+            _ => optimized,
+        }
+    }
+
     fn intern_wanted(&mut self, wanted: &[Wanted]) {
         for constant in wanted {
             match constant {
