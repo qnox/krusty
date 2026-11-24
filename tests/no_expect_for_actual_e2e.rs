@@ -120,9 +120,8 @@ fn complete(report: &str) -> Vec<Reported> {
         while block.last().is_some_and(|line| line.trim().is_empty()) {
             block.pop();
         }
-        let is_caret = |line: &str| {
-            !line.trim().is_empty() && line.chars().all(|c| c == '^' || c == ' ')
-        };
+        let is_caret =
+            |line: &str| !line.trim().is_empty() && line.chars().all(|c| c == '^' || c == ' ');
         if block.last().is_some_and(|line| is_caret(line)) {
             block.truncate(block.len().saturating_sub(2));
         }
@@ -2027,7 +2026,10 @@ public class Target {
 ";
     let (reference, krusty) = both_split_full(
         "alias_dependency_candidate_count",
-        &[("Common.kt", "expect class Counter {\n    fun count(a: Int): Int\n}\n")],
+        &[(
+            "Common.kt",
+            "expect class Counter {\n    fun count(a: Int): Int\n}\n",
+        )],
         &[
             ("Target.java", java),
             ("Platform.kt", "actual typealias Counter = Target\n"),
@@ -2042,7 +2044,10 @@ public class Target {
 fn an_actual_typealias_lists_a_property_that_answers_an_expect_function() {
     let (reference, krusty) = both_split_full(
         "alias_dependency_candidate_property",
-        &[("Common.kt", "expect class Pattern {\n    fun pattern(): String\n}\n")],
+        &[(
+            "Common.kt",
+            "expect class Pattern {\n    fun pattern(): String\n}\n",
+        )],
         &[("Platform.kt", "actual typealias Pattern = Regex\n")],
     );
     assert_eq!(reference.len(), 1, "{reference:#?}");
