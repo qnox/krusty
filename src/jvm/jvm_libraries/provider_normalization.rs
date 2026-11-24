@@ -50,6 +50,13 @@ pub(super) fn normalize_tail(
         candidate,
         array_list,
     );
+    // kotlinc's JVM compiler defaults `-Xassertions` to `legacy`: `assert` is the stdlib's inline
+    // function, not a compiler operation, unless a mode says otherwise.
+    if let Some(crate::libraries::CompilerIntrinsic::Assert { platform_default }) =
+        &mut candidate.callable.compiler_intrinsic
+    {
+        *platform_default = crate::types::AssertionCompilation::Legacy;
+    }
     if let Err(error) = common.attach(compiler_builtin_owner, namespace, name, candidate) {
         classpath.defer_common_expectation_error(error);
     }
