@@ -942,7 +942,7 @@ impl Body<'_> {
                                 class, *property, false, receiver, args,
                             ),
                         _ if args.is_empty() => self.property_read(None, *property, Some(receiver)),
-                        _ => Err("a property getter call with arguments".to_string()),
+                        _ => self.context_member_accessor(*property, false, receiver, args),
                     },
                     IrVirtualTarget::PropertySetter(ResolvedPropertyOverrideTarget::Module(
                         property,
@@ -954,7 +954,7 @@ impl Body<'_> {
                         _ if args.len() == 1 => {
                             self.property_write(None, *property, Some(receiver), args[0])
                         }
-                        _ => Err("a property setter call with the wrong arguments".to_string()),
+                        _ => self.context_member_accessor(*property, true, receiver, args),
                     },
                     _ => Err("a call to a library member".to_string()),
                 }
@@ -982,6 +982,61 @@ impl Body<'_> {
             },
             Callee::Super { .. } => Err("a `super` call to a library member".to_string()),
             _ => Err("a member call through this calling convention".to_string()),
+        }
+    }
+
+    /// A getter or setter of a class member property that declares context parameters: `args` are
+    /// its contexts, then, for the setter, the written value.
+    fn context_member_accessor(
+        &mut self,
+        property: PropertyId,
+        setter: bool,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let (class, index) = self.member_property(None, property)?;
+        let Some(IrLocalPropertyLayout::Member {
+            context_parameters,
+            ty,
+            ..
+        }) = self.ir.local_property_layouts.get(&property).cloned()
+        else {
+            return Err(
+                "an accessor call with arguments on a property that is not a class member"
+                    .to_string(),
+            );
+        };
+        let mut params = context_parameters;
+        if setter {
+            params.push(ty);
+        }
+        if params.len() != args.len() {
+            return Err("an accessor call whose arguments do not match its parameters".to_string());
+        }
+        let declared = self.ir.classes[class as usize].properties[index].clone();
+        let slot = local_property_target(self.ir, class, index)
+            .filter(|_| !self.ir.classes[class as usize].is_value)
+            .and_then(|target| {
+                let key = if setter {
+                    SlotKey::Setter(target)
+                } else {
+                    SlotKey::Getter(target)
+                };
+                self.file_classes().ok()?.tables.slot(class, &key)
+            });
+        if let Some(slot) = slot {
+            return self.dispatch(class, slot, receiver, args, &params, None);
+        }
+        match if setter {
+            declared.setter
+        } else {
+            declared.getter
+        } {
+            Some(accessor) => self.direct_member_call(accessor, receiver, args),
+            None => Err(format!(
+                "a property with context parameters and no accessor (`{}`)",
+                declared.name
+            )),
         }
     }
 

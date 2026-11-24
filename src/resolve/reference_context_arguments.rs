@@ -7,6 +7,15 @@
 
 use super::*;
 
+/// What a diagnostic about a reference to a property with context parameters shows of it.
+pub(super) struct ContextualPropertyDisplay<'a> {
+    pub(super) context_names: &'a [String],
+    pub(super) context_types: &'a [Ty],
+    pub(super) extension_receiver: Option<Ty>,
+    pub(super) property_type: Ty,
+    pub(super) mutable: bool,
+}
+
 impl Checker<'_> {
     /// Apply an expected callable shape to one generic declaration before reference adaptation.
     /// An extension contributes its already-selected receiver as inference evidence; references
@@ -178,6 +187,41 @@ impl Checker<'_> {
         Ty::Error
     }
 
+    /// Without `CallableReferencesToContextual` a property with context parameters cannot be
+    /// referenced either.
+    pub(super) fn report_context_property_reference(
+        &mut self,
+        expression: ExprId,
+        name: &str,
+        property: ContextualPropertyDisplay<'_>,
+    ) -> Ty {
+        let ContextualPropertyDisplay {
+            context_names,
+            context_types,
+            extension_receiver,
+            property_type,
+            mutable,
+        } = property;
+        let contexts = context_names
+            .iter()
+            .zip(context_types)
+            .map(|(name, ty)| format!("{name}: {}", ty.source_name()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let receiver = extension_receiver
+            .map(|receiver| format!("{}.", receiver.source_name()))
+            .unwrap_or_default();
+        self.diags.error(
+            self.member_name_span(expression, name),
+            format!(
+                "callable reference to 'context({contexts}) {} {receiver}{name}: {}' is unsupported because it has context parameters.",
+                if mutable { "var" } else { "val" },
+                property_type.source_name(),
+            ),
+        );
+        Ty::Error
+    }
+
     /// Select and record the reference-site context arguments of the declaration `e` now resolves
     /// to. A reference whose adaptation plan has no leading `Context` entry binds nothing.
     pub(super) fn bind_reference_context_arguments(
@@ -251,6 +295,19 @@ impl Checker<'_> {
                     | CallableReferenceTarget::TopLevelProperty(_) => return None,
                 };
                 (parameters, argument_mapping)
+            }
+            ExprLowering::CallableReference { target, .. } => {
+                let (property_parameters, count) = match target {
+                    CallableReferenceTarget::Property(property) => {
+                        (property.context_types(), property.context_count)
+                    }
+                    CallableReferenceTarget::TopLevelProperty(property) => (
+                        &property.getter.params[..property.context_count],
+                        property.context_count,
+                    ),
+                    _ => return None,
+                };
+                return (count > 0).then(|| property_parameters.to_vec());
             }
             _ => return None,
         };
