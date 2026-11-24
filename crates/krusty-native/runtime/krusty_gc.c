@@ -649,22 +649,31 @@ size_t kt_gc_live_bytes(void) {
 
 /* The standard library's `GCInfoBuilder` declares `fill` `external` with
    `@GCUnsafeCall("Kotlin_Internal_GC_GCInfoBuilder_Fill")`, and each setter below
-   `@ExportForCppRuntime` under the name used here. A setter is weak: a program that never builds a
-   `GCInfoBuilder` does not carry them, and then nothing calls `fill`. */
-#define KT_GC_INFO_SETTER(name, ...) __attribute__((weak)) void Kotlin_Internal_GC_GCInfoBuilder_##name(void *builder, __VA_ARGS__)
+   `@ExportForCppRuntime` under the name used here. The setters defined here are weak no-ops, which
+   the library's exports override; a program that never builds a `GCInfoBuilder` carries only these. */
+#define KT_GC_INFO_SETTER(name, ...) \
+    __attribute__((weak)) void Kotlin_Internal_GC_GCInfoBuilder_##name(void *builder, __VA_ARGS__)
 
-KT_GC_INFO_SETTER(setEpoch, int64_t value);
-KT_GC_INFO_SETTER(setStartTime, int64_t value);
-KT_GC_INFO_SETTER(setEndTime, int64_t value);
-KT_GC_INFO_SETTER(setFirstPauseRequestTime, int64_t value);
-KT_GC_INFO_SETTER(setFirstPauseStartTime, int64_t value);
-KT_GC_INFO_SETTER(setFirstPauseEndTime, int64_t value);
-KT_GC_INFO_SETTER(setPostGcCleanupTime, int64_t value);
-KT_GC_INFO_SETTER(setRootSet, int64_t thread_local, int64_t stack, int64_t global, int64_t stable);
-KT_GC_INFO_SETTER(setMarkStats, int64_t marked);
-KT_GC_INFO_SETTER(setSweepStats, const char *pool, int64_t kept, int64_t swept);
-KT_GC_INFO_SETTER(setMemoryUsageBefore, const char *pool, int64_t bytes);
-KT_GC_INFO_SETTER(setMemoryUsageAfter, const char *pool, int64_t bytes);
+KT_GC_INFO_SETTER(setEpoch, int64_t value) { (void)builder; (void)value; }
+KT_GC_INFO_SETTER(setStartTime, int64_t value) { (void)builder; (void)value; }
+KT_GC_INFO_SETTER(setEndTime, int64_t value) { (void)builder; (void)value; }
+KT_GC_INFO_SETTER(setFirstPauseRequestTime, int64_t value) { (void)builder; (void)value; }
+KT_GC_INFO_SETTER(setFirstPauseStartTime, int64_t value) { (void)builder; (void)value; }
+KT_GC_INFO_SETTER(setFirstPauseEndTime, int64_t value) { (void)builder; (void)value; }
+KT_GC_INFO_SETTER(setPostGcCleanupTime, int64_t value) { (void)builder; (void)value; }
+KT_GC_INFO_SETTER(setRootSet, int64_t thread_local, int64_t stack, int64_t global, int64_t stable) {
+    (void)builder; (void)thread_local; (void)stack; (void)global; (void)stable;
+}
+KT_GC_INFO_SETTER(setMarkStats, int64_t marked) { (void)builder; (void)marked; }
+KT_GC_INFO_SETTER(setSweepStats, const char *pool, int64_t kept, int64_t swept) {
+    (void)builder; (void)pool; (void)kept; (void)swept;
+}
+KT_GC_INFO_SETTER(setMemoryUsageBefore, const char *pool, int64_t bytes) {
+    (void)builder; (void)pool; (void)bytes;
+}
+KT_GC_INFO_SETTER(setMemoryUsageAfter, const char *pool, int64_t bytes) {
+    (void)builder; (void)pool; (void)bytes;
+}
 
 void Kotlin_Internal_GC_GCInfoBuilder_Fill(void *builder, int32_t id) {
     /* Only the last collection is kept, and until one has run there is none to report. */
