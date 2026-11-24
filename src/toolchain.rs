@@ -704,6 +704,15 @@ fn atomicfu_klib_unavailable(
     )
 }
 
+/// The prebuilt static caches a Kotlin/Native distribution rooted at `native_root` ships for debug
+/// binaries of this host (`klib/cache/linux_x64-gSTATIC-system`), the caches Gradle's debug
+/// binaries and Kotlin's own Native box tests link against. `None` on a host Kotlin/Native does
+/// not target.
+pub fn kotlin_native_debug_static_caches(native_root: &Path) -> Option<PathBuf> {
+    let konan = crate::native_target::NativeTarget::host()?.konan_name()?;
+    Some(native_root.join(format!("klib/cache/{konan}-gSTATIC-system")))
+}
+
 /// The atomicfu runtime KLIB for `target`, pinned to the version of the atomicfu corpus's runtime; `Ok(None)` for
 /// the targets without a KLIB form (the JVM lane uses [`atomicfu_runtime_jar`] and the compiler
 /// plugin instead). An `Err` says why the KLIB is unavailable: the URL and the status or deadline
@@ -822,6 +831,21 @@ fn find_exact_jar(dir: &std::path::Path, expected: &str, depth: usize) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_static_caches_are_the_host_targets_gstatic_system_directory() {
+        let konan = crate::native_target::NativeTarget::host().and_then(|host| host.konan_name());
+        assert_eq!(
+            kotlin_native_debug_static_caches(Path::new("/dist")),
+            konan.map(|konan| PathBuf::from(format!("/dist/klib/cache/{konan}-gSTATIC-system")))
+        );
+        if std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64" {
+            assert_eq!(
+                kotlin_native_debug_static_caches(Path::new("/dist")),
+                Some(PathBuf::from("/dist/klib/cache/linux_x64-gSTATIC-system"))
+            );
+        }
+    }
 
     #[test]
     fn plugin_runtime_version_constants_match_descriptors() {

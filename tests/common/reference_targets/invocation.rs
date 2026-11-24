@@ -22,12 +22,13 @@ pub fn run_reference(
             panic!("the JVM reference compiler runs through `reference_compiler_run`")
         }
         CompilationTarget::Native => {
-            let mut command = Command::new(
-                crate::reference_recording_support::kotlin_native_root()?
-                    .join("bin/kotlinc-native"),
-            );
+            let root = crate::reference_recording_support::kotlin_native_root()?;
+            let mut command = Command::new(root.join("bin/kotlinc-native"));
             if program {
                 command
+                    .args(
+                        crate::reference_recording_support::kotlin_native_program_arguments(&root),
+                    )
                     .args(["-p", "program", "-o"])
                     .arg(work.join("program"));
             } else {
