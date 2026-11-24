@@ -129,7 +129,7 @@ const INTERFACE_BLOCK_STORED_PROPERTY: &str = "// LANGUAGE: +CompanionBlocks\n\
     \x20   }\n\
     }\n\
     fun box(): String {\n\
-    \x20   Source.current = \"O\"\n\
+    \x20   Source.current += \"\"\n\
     \x20   return Source.current + Source.fixed\n\
     }\n";
 
@@ -268,6 +268,34 @@ fn fixing_kotlinc_defects_fixes_each_defect() {
             }
         }
     }
+}
+
+/// The initializer diagnostics a release with `InterfaceBlockPropertyInitializerProhibited` gives
+/// the stored property program: one per initializer, in source order, and none elsewhere. kotlinc
+/// and krusty agree on every file, line, column and message.
+#[test]
+fn the_prohibited_initializers_are_reported_as_kotlinc_reports_them() {
+    let source = INTERFACE_BLOCK_STORED_PROPERTY;
+    let diagnostic = |line, column| common::CompilerError {
+        file: "Main.kt".to_string(),
+        line,
+        column,
+        message: "property initializers in interfaces are prohibited.".to_string(),
+    };
+    let expected = if Quirks::of_release(krusty::kotlin_version::target())
+        .has(Quirk::InterfaceBlockPropertyInitializerProhibited)
+    {
+        vec![diagnostic(4, 31), diagnostic(5, 29)]
+    } else {
+        Vec::new()
+    };
+    let result = common::compiler_diagnostics_with_reference_args(
+        &[("Main.kt", source)],
+        &[common::stdlib_jar()],
+        &common::language_directives::kotlinc_args(source),
+    );
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), expected);
+    assert_eq!(common::compiler_errors(&result.reference_stderr), expected);
 }
 
 /// On a platform without a library defect, kotlinc and krusty already give the fixed outcome.
