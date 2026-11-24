@@ -302,12 +302,13 @@ impl ReparseSource {
             .has("JvmSupportRecursiveTypeOf")
     }
 
-    /// Whether the file compiles under `CompanionBlocks` (spelled as its release spells it), the
-    /// feature that gives a class the JVM's initialization order on a target with no class
-    /// initialization of its own.
+    /// Whether the file compiles under `CompanionBlocks`, written as the feature or as the older
+    /// release's combined spelling of it. The feature gives a class the JVM's initialization
+    /// order on a target with no class initialization of its own.
     pub(crate) fn companion_blocks(&self, module_features: &LangFeatures) -> bool {
         let features = module_features.for_source(&self.text);
-        features.has(features.table().spelling_in_release("CompanionBlocks"))
+        features.has("CompanionBlocks")
+            || features.has(features.table().spelling_in_release("CompanionBlocks"))
     }
 
     pub(crate) fn source_line_count(&self) -> u32 {
