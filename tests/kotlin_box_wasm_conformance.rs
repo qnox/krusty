@@ -91,6 +91,31 @@ impl WasmLane {
         let _ = std::fs::remove_dir_all(&directory);
         outcome
     }
+
+    /// Why `src` does not apply to this lane under `version`. kotlinc's multi-module mute is
+    /// honored from 2.5.0-RC on only: a released version's not-applicable inventory only shrinks,
+    /// so what that mute would newly exclude there stays a run case.
+    fn not_applicable_for(
+        &self,
+        version: krusty::kotlin_version::KotlinVersion,
+        src: &str,
+    ) -> Option<&'static str> {
+        if !krusty::conformance::backend_targeted(src, &self.tokens()) {
+            return Some(box_lane::TARGETED_AT_ANOTHER_BACKEND);
+        }
+        if krusty::conformance::backend_muted(src, &self.tokens()) {
+            return Some("muted on this wasm target");
+        }
+        if krusty::conformance::directive(src, "FULL_JDK") {
+            return Some("requires the JDK runtime");
+        }
+        if version >= krusty::kotlin_version::KotlinVersion::V2_5_0_RC
+            && krusty::conformance::wasm_ignored_for_multi_module(src)
+        {
+            return Some("kotlinc mutes it in its multi-module wasm mode");
+        }
+        None
+    }
 }
 
 /// Why this host has no Node.js able to run the modules, or `None` when it has one.
@@ -148,16 +173,7 @@ impl Lane for WasmLane {
     }
 
     fn not_applicable(&self, src: &str) -> Option<&'static str> {
-        if !krusty::conformance::backend_targeted(src, &self.tokens()) {
-            return Some(box_lane::TARGETED_AT_ANOTHER_BACKEND);
-        }
-        if krusty::conformance::backend_muted(src, &self.tokens()) {
-            return Some("muted on this wasm target");
-        }
-        if krusty::conformance::directive(src, "FULL_JDK") {
-            return Some("requires the JDK runtime");
-        }
-        None
+        self.not_applicable_for(krusty::kotlin_version::target(), src)
     }
 
     fn harness_limitation(&self, _src: &str) -> Option<&'static str> {
@@ -280,6 +296,40 @@ fn wasm_applicability_reads_both_the_family_and_the_exact_target() {
         None,
         "a JVM mute must not remove Wasm coverage"
     );
+    let two_modules = "// WASM_IGNORE_FOR: mode=multi-module\n// MODULE: a\n// FILE: a.kt\nfun a() = 1\n// MODULE: b(a)\n// FILE: b.kt\nfun box() = \"OK\"";
+    let rc = krusty::kotlin_version::KotlinVersion::V2_5_0_RC;
+    for lane in [&js, &wasi] {
+        assert_eq!(
+            lane.not_applicable_for(rc, two_modules),
+            Some("kotlinc mutes it in its multi-module wasm mode")
+        );
+        assert_eq!(
+            lane.not_applicable_for(
+                rc,
+                &two_modules.replace("mode=multi-module", "mode=multi-module runner=x.Y")
+            ),
+            None,
+            "a runner-qualified mute names another test generator"
+        );
+        assert_eq!(
+            lane.not_applicable_for(rc, &two_modules.replace("mode=multi-module", "vm=Wasmtime")),
+            None,
+            "a vm-qualified mute names another engine"
+        );
+        assert_eq!(
+            lane.not_applicable_for(
+                rc,
+                "// WASM_IGNORE_FOR: mode=multi-module\nfun box() = \"OK\""
+            ),
+            None,
+            "a one-module case is outside kotlinc's multi-module mode"
+        );
+        assert_eq!(
+            lane.not_applicable_for(krusty::kotlin_version::KotlinVersion::V2_4_21, two_modules),
+            None,
+            "a released version's not-applicable inventory does not grow"
+        );
+    }
 }
 
 #[test]

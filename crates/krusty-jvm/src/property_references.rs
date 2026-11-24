@@ -113,6 +113,7 @@ pub(super) fn realize(
 ) -> Result<PropertyReferenceRealizations, PropertyReferenceRealizationTarget> {
     let facades = &file_classes.containers[..];
     let mut realizations = PropertyReferenceRealizations::default();
+    let mut carriers = krusty::fx_hash::HashMap::<(TypeName, bool), krusty::ir::ClassId>::default();
     realizations.local_delegated =
         local_delegated_properties::LocalDelegatedProperties::collect(ir, facades)
             .ok_or(PropertyReferenceRealizationTarget::Invalid)?;
@@ -336,6 +337,31 @@ pub(super) fn realize(
             });
             continue;
         }
+        // Nodes carrying one source reference's name are copies of it (an inline splice copies the
+        // node, and a lambda keeps a template beside its implementation): one class, which each
+        // copy instantiates with its own receiver. A copy has no carrier of its own to take a
+        // spliced getter's body.
+        let named = u32::try_from(raw)
+            .ok()
+            .and_then(|raw| crate::local_class_names::callable_reference_name(ir, raw));
+        if let Some((name, class)) = named.and_then(|name| {
+            carriers
+                .get(&(name, receiver.is_some()))
+                .map(|&class| (name, class))
+        }) {
+            let _ = spliced_getters.take(raw as u32);
+            let carrier = carrier_expression(
+                ir,
+                name,
+                class,
+                BoundOperands {
+                    receiver,
+                    contexts: &context_arguments,
+                },
+            );
+            ir.exprs[raw] = carrier;
+            continue;
+        }
         let get_receiver = inline_getters::GetReceiver::of(receiver.is_some(), &property);
         let (class, carrier) = synthesize(
             ir,
@@ -351,6 +377,12 @@ pub(super) fn realize(
         );
         if let Some(adapter) = spliced_getters.take(raw as u32) {
             inline_getters::realize_own_get(ir, raw, class, adapter, get_receiver);
+        }
+        if named.is_some_and(|name| ir.classes[class as usize].fq_name == name) {
+            carriers.insert(
+                (named.expect("a named reference"), receiver.is_some()),
+                class,
+            );
         }
         ir.exprs[raw] = carrier;
     }
@@ -1172,12 +1204,35 @@ fn synthesize(
     class.prop_ref = Some(property);
     realizations.record(internal, realization);
     let class = ir.add_class(class);
+    (
+        class,
+        carrier_expression(
+            ir,
+            internal,
+            class,
+            BoundOperands {
+                receiver,
+                contexts: context_arguments,
+            },
+        ),
+    )
+}
+
+/// The value of a property reference: a new carrier bound to its context arguments and receiver,
+/// or the shared instance of one that binds nothing. A reference with bound contexts is
+/// constructed per use with them in `boundContextArguments` (an `Object[]` ahead of the
+/// receiver); it has no singleton.
+fn carrier_expression(
+    ir: &mut IrFile,
+    internal: TypeName,
+    class: krusty::ir::ClassId,
+    operands: BoundOperands<'_>,
+) -> IrExpr {
+    let BoundOperands { receiver, contexts } = operands;
     let any = Ty::obj("kotlin/Any");
-    // A reference with bound contexts is constructed per use with them in `boundContextArguments`
-    // (an `Object[]` ahead of the receiver); it has no singleton.
-    let contexts = (!context_arguments.is_empty()).then(|| {
+    let contexts = (!contexts.is_empty()).then(|| {
         // Each context is adapted to the `Any` slot it is stored in, as a call argument would be.
-        let elements = context_arguments
+        let elements = contexts
             .iter()
             .map(|&argument| {
                 ir.add_expr(IrExpr::TypeOp {
@@ -1193,7 +1248,7 @@ fn synthesize(
             elements,
         })
     });
-    let carrier = match (contexts, receiver) {
+    match (contexts, receiver) {
         (None, None) => IrExpr::StaticInstance {
             owner: class,
             ty: class,
@@ -1216,8 +1271,7 @@ fn synthesize(
                 default_prefix_count: 0,
             }
         }
-    };
-    (class, carrier)
+    }
 }
 
 /// A private companion property is realized before its field moves to the outer class. Once that

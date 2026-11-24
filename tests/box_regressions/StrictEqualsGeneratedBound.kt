@@ -4,7 +4,7 @@
 import kotlin.jvm.JvmInline
 
 data class Point(val x: Int)
-@JvmInline value class Meters(val amount: Int)
+OPTIONAL_JVM_INLINE_ANNOTATION value class Meters(val amount: Int)
 data object Obj { val tag = "t" }
 open class Base(val o: Int)
 data class Sub(val s: Int) : Base(s)
