@@ -36,6 +36,7 @@ pub struct KlibBackend {
     stamp: KlibStamp,
     native_target: Option<NativeKlibTarget>,
     annotations_in_metadata: bool,
+    function_bodies: bool,
 }
 
 /// One validated pairing of krusty's target model with Kotlin/Native's serialized identity.
@@ -83,6 +84,7 @@ impl KlibBackend {
             stamp,
             native_target: None,
             annotations_in_metadata: true,
+            function_bodies: false,
         }
     }
 
@@ -102,6 +104,15 @@ impl KlibBackend {
             .ok_or(KlibTargetBindingError::UnsupportedNativeTarget(target))?;
         self.native_target = Some(NativeKlibTarget { target, konan_name });
         Ok(self)
+    }
+
+    /// Also write the bodies of ordinary functions into the library's IR, as a library built to be
+    /// linked from a KLIB alone needs. A module compiled in the same process as its dependents
+    /// keeps its code beside the KLIB, so it leaves this off and the KLIB carries declarations and
+    /// inline templates only.
+    pub fn with_function_bodies(mut self, enabled: bool) -> Self {
+        self.function_bodies = enabled;
+        self
     }
 
     /// kotlinc's `AnnotationsInMetadata` language feature (on from Kotlin 2.4).
@@ -335,6 +346,7 @@ impl KlibBackend {
             ir,
             &format!("{simple_stem}.kt"),
             &package_exports.declarations,
+            self.function_bodies,
         );
         // Ordinary IR is an all-or-nothing module channel. The narrow writer currently owns one
         // exact file component, so publish it only for a single-source module whose every metadata

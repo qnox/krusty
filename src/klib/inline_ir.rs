@@ -107,11 +107,13 @@ struct ReifiedTypeTest {
 /// Serialize every exact supported inline template from one checked file.
 ///
 /// Unsupported inline bodies remain metadata-only. The returned functions are later combined into
-/// matching ordinary and prepared-inline components.
+/// matching ordinary and prepared-inline components. With `function_bodies`, ordinary functions
+/// whose body is a supported shape are serialized as well.
 pub(super) fn collect(
     ir: &IrFile,
     file_name: &str,
     declarations: &DeclarationSignatures,
+    function_bodies: bool,
 ) -> Vec<PreparedFunction> {
     let mut functions = Vec::new();
     let mut ids = ir
@@ -127,7 +129,7 @@ pub(super) fn collect(
         functions.push(prepared);
     }
     for package_function in &ir.package_functions {
-        if package_function.inline {
+        if !function_bodies || package_function.inline {
             continue;
         }
         if let Some(prepared) = prepared_function(
@@ -180,7 +182,21 @@ fn prepared_function(
         // The prepared wrapper's overridden-symbol list must be complete for virtual members.
         return None;
     }
-    let generic = ir.signatures.get(&function)?;
+    // Only a generic function records a generic signature; any other function's signature is
+    // exactly its declaration's physical parameters and result.
+    let own_signature;
+    let generic = match ir.signatures.get(&function) {
+        Some(generic) => generic,
+        None => {
+            own_signature = crate::ir::IrGenericSig {
+                type_params: Vec::new(),
+                params: declaration.params.clone(),
+                ret: Some(declaration.ret),
+                supers: Vec::new(),
+            };
+            &own_signature
+        }
+    };
     let physical_arity =
         generic.params.len() + usize::from(declaration.dispatch_receiver.is_some());
     let body = if inline {
@@ -357,15 +373,17 @@ fn reified_type_test(
     })
 }
 
-/// `{ return <constant or parameter> }`, the one body shape the ordinary writer serializes.
+/// `{ return <constant or parameter> }`, however many single-statement blocks wrap it: the one body shape the ordinary writer serializes.
 fn returned_value(ir: &IrFile, body: u32, physical_arity: usize) -> Option<PreparedValue> {
-    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
-        return None;
-    };
-    let [returned] = stmts.as_slice() else {
-        return None;
-    };
-    let IrExpr::Return(Some(value)) = ir.expr(*returned) else {
+    // A source body is a block holding the written block; both only group their one statement.
+    let mut statement = body;
+    while let IrExpr::Block { stmts, value: None } = ir.expr(statement) {
+        let [only] = stmts.as_slice() else {
+            return None;
+        };
+        statement = *only;
+    }
+    let IrExpr::Return(Some(value)) = ir.expr(statement) else {
         return None;
     };
     match ir.expr(*value) {
