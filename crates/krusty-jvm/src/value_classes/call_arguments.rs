@@ -1,15 +1,16 @@
 //! Value-class representation at checked call-argument boundaries.
 //!
-//! The selected declaration's semantic parameter vector is authoritative for every call shape. A
-//! call without one is a backend-built operation (a representation adapter such as `box-impl`)
-//! that takes its operands as they are; this pass never reads a representation back from a JVM
-//! descriptor.
+//! The selected declaration's semantic parameter vector is authoritative for every call shape. Only
+//! a backend-built operation (an intrinsic or a representation adapter such as `box-impl`) has no
+//! declaration and takes its operands as they are. Any other call that reaches this pass without a
+//! vector is a lowering defect, reported here rather than adapted from a JVM descriptor.
 
 use super::{record_value_boundary, BoxOp, ReprCtx, Under};
-use krusty::ir::{ExprId, FunId, IrExpr, IrFile};
+use krusty::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
 use krusty::types::Ty;
 
 pub(super) fn record_boundaries(
+    callee: &Callee,
     declared_parameters: Option<&[Ty]>,
     arguments: &[ExprId],
     under: &Under,
@@ -17,6 +18,14 @@ pub(super) fn record_boundaries(
     operations: &mut Vec<(ExprId, BoxOp)>,
 ) {
     let Some(parameters) = declared_parameters else {
+        assert!(
+            arguments.is_empty()
+                || matches!(
+                    callee,
+                    Callee::Intrinsic { .. } | Callee::ValueClassAdapter { .. }
+                ),
+            "a call reached value-class lowering without its declared parameters: {callee:?}"
+        );
         return;
     };
     for (&argument, &parameter) in arguments.iter().zip(parameters) {

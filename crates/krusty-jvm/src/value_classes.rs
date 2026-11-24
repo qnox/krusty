@@ -3021,8 +3021,9 @@ pub(crate) fn lower_value_classes(
                 }
                 _ => None,
             };
-            if let IrExpr::Call { args, .. } = &ir.exprs[id as usize] {
+            if let IrExpr::Call { args, callee, .. } = &ir.exprs[id as usize] {
                 call_arguments::record_boundaries(
+                    callee,
                     ir.call_declared_params
                         .get(&id)
                         .map(|parameters| parameters.as_ref())
