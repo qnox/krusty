@@ -196,4 +196,3 @@ mod tests {
         assert_eq!(*counted(&GATE.running), 0);
     }
 }
-}
