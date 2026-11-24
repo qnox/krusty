@@ -21,6 +21,40 @@ pub(in crate::resolve) struct SelectionInputs<'a> {
     pub(in crate::resolve) arguments: &'a [Ty],
 }
 
+/// The alias shape a constructor call inferred its abbreviation arguments through: the alias
+/// formals and its expansion. The published constructor type binds those formals again, so an
+/// inferred argument carries the same flexibility in the abbreviation as in the expanded type.
+#[derive(Clone)]
+pub(in crate::resolve) struct InferredAbbreviation {
+    pub(in crate::resolve) formals: Box<[String]>,
+    pub(in crate::resolve) expansion: Ty,
+}
+
+/// The abbreviation of a call's published result `published`: arguments ordinary selection
+/// inferred for the alias are those the published expansion binds, and a formal it leaves unbound
+/// keeps the argument ordinary selection inferred for it.
+pub(in crate::resolve) fn rebind_to_published(
+    abbreviation: ResolvedTypeAbbreviation,
+    inferred: Option<&InferredAbbreviation>,
+    published: Ty,
+) -> ResolvedTypeAbbreviation {
+    let Some(inferred) = inferred else {
+        return abbreviation;
+    };
+    let mut bindings = crate::symbol_resolver::GSigBinds::default();
+    crate::symbol_resolver::unify_ty(inferred.expansion, published, &mut bindings);
+    let arguments = inferred
+        .formals
+        .iter()
+        .zip(abbreviation.arguments.iter())
+        .map(|(formal, ordinary)| bindings.get(formal.as_str()).copied().unwrap_or(*ordinary))
+        .collect();
+    ResolvedTypeAbbreviation {
+        arguments,
+        ..abbreviation
+    }
+}
+
 impl<'a> SelectionInputs<'a> {
     pub(in crate::resolve) fn new(receiver: Option<Ty>, arguments: &'a [Ty]) -> Self {
         Self {

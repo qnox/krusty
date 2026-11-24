@@ -144,6 +144,29 @@ impl CompactSelectedResultPublication {
         })
     }
 
+    /// The expectation under which this call is checked again beside `sibling` when it left a
+    /// result-only formal open, read through the symbols of `scope`'s file.
+    pub(super) fn open_result_expectation(
+        &self,
+        table: &super::SymbolTable,
+        scope: crate::fir::SignatureScope,
+        sibling: crate::fir::ResolvedTy,
+    ) -> Option<crate::fir::ResolvedTy> {
+        let signature = self.open_result_signature()?;
+        let module = crate::module_symbols::ModuleSymbols::for_file(table, scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        let expectation = crate::symbol_resolver::generic_return_expectation_from_sibling(
+            &source,
+            signature,
+            sibling.get(),
+            |actual, bound| crate::symbol_resolver::resolution_subtype(&source, actual, bound),
+        )?;
+        crate::fir::ResolvedTy::new(expectation).ok()
+    }
+
     pub(super) fn with_selected(mut self, selected: Ty) -> Self {
         self.selected = selected;
         self

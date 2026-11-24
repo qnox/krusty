@@ -5,7 +5,7 @@
 //! projects the declaration interval without lookup or overload reselection.
 
 use super::ProductionSignatureSemantics;
-use crate::resolve::selected_result_aliases::SelectionInputs;
+use crate::resolve::selected_result_aliases::{rebind_to_published, SelectionInputs};
 use crate::resolve::selected_result_publication::{
     whole_array_arguments, CompactSelectedResultPublication,
 };
@@ -253,23 +253,12 @@ impl crate::fir::SelectedResultPublicationSemantics for ProductionSignatureSeman
         let Some(abbreviation) = self.selected_calls.abbreviation(origin) else {
             return self.selected_aliases.abbreviation(origin);
         };
-        let Some(inferred) = self.selected_calls.inferred_abbreviation(origin) else {
-            return Some(abbreviation);
-        };
-        let mut bindings = crate::symbol_resolver::GSigBinds::default();
-        crate::symbol_resolver::unify_ty(inferred.expansion, published.get(), &mut bindings);
-        // A formal the published expansion leaves unbound keeps the argument ordinary selection
-        // inferred for it.
-        let arguments = inferred
-            .formals
-            .iter()
-            .zip(abbreviation.arguments.iter())
-            .map(|(formal, ordinary)| bindings.get(formal.as_str()).copied().unwrap_or(*ordinary))
-            .collect();
-        Some(crate::fir::ResolvedTypeAbbreviation {
-            arguments,
-            ..abbreviation
-        })
+        let inferred = self.selected_calls.inferred_abbreviation(origin);
+        Some(rebind_to_published(
+            abbreviation,
+            inferred.as_ref(),
+            published.get(),
+        ))
     }
 
     fn open_result_expectation(
@@ -278,20 +267,9 @@ impl crate::fir::SelectedResultPublicationSemantics for ProductionSignatureSeman
         origin: crate::fir::OriginId,
         sibling: crate::fir::ResolvedTy,
     ) -> Option<crate::fir::ResolvedTy> {
-        let publication = self.selected_calls.publication(origin)?;
-        let signature = publication.open_result_signature()?;
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
-        let expectation = crate::symbol_resolver::generic_return_expectation_from_sibling(
-            &source,
-            signature,
-            sibling.get(),
-            |actual, bound| crate::symbol_resolver::resolution_subtype(&source, actual, bound),
-        )?;
-        crate::fir::ResolvedTy::new(expectation).ok()
+        self.selected_calls
+            .publication(origin)?
+            .open_result_expectation(self.table, scope, sibling)
     }
 
     fn call_result_publication(
