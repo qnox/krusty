@@ -756,8 +756,17 @@ impl<'a> JvmSignatureFormatter<'a> {
                 let mut signature = format!("L{jvm}");
                 for (segment_index, segment) in chain.iter().rev().enumerate() {
                     if segment_index != 0 {
-                        signature.push('.');
-                        signature.push_str(segment.classifier.nested_segment_ref());
+                        // `Outer<T>.Inner` spells the inner segment after the arguments of its
+                        // outer. Without any, the whole chain is one class's internal name.
+                        if signature.contains('<') {
+                            signature.push('.');
+                            signature.push_str(segment.classifier.nested_segment_ref());
+                        } else {
+                            signature = format!(
+                                "L{}",
+                                krusty::jvm::names::classfile_internal_name_of(segment.classifier)
+                            );
+                        }
                     }
                     if !segment.variances.is_empty() {
                         signature.push('<');
