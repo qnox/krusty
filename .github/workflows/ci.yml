@@ -262,6 +262,10 @@ jobs:
 
   ci:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     env:
       # The build compiles krusty's library and its cfg(test) unit harness side by side, and every
       # extra job token also lets rustc run more LLVM threads. Four jobs fit in 16 GB, which is
@@ -438,6 +442,15 @@ jobs:
       - &install-maven
         name: install Maven
         run: scripts/install-maven.sh 3.9.11
+      # Maven Central and the Gradle Plugin Portal through Infragnite's package cache
+      # (maven.infragnite.dev), for the tests' Gradle builds and the Maven embedder.
+      - name: send Gradle's and Maven's downloads through the package cache
+        uses: infragnite/package-cache-action@0390145ce4d6ed169d553bad09fa3921643a6f35 # main
+        env:
+          # The init script goes to the Gradle user home the tests' builds use.
+          GRADLE_USER_HOME: ${{ runner.temp }}/krusty-build-tools-gradle-user-home
+        with:
+          maven: 'true'
       # Coverage measures these same suites, instrumented, every night (.github/workflows/coverage.yml).
       - name: own test suites
         id: own-tests
@@ -1312,6 +1325,10 @@ jobs:
     # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
     needs: [route]
     runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['build-gradle-plugin'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1360,12 +1377,17 @@ jobs:
       - &count-gradle-home
         name: count the restored Gradle files
         id: gradle-restored
-        run: echo "files=$(find "$GRADLE_USER_HOME/caches/modules-2/files-2.1" "$GRADLE_USER_HOME/wrapper/dists" -type f 2> /dev/null | wc -l)" >> "$GITHUB_OUTPUT"
+        run: echo "files=$(find "$GRADLE_USER_HOME/caches/modules-2/files-2.1" "$GRADLE_USER_HOME"/caches/modules-2/metadata-*/descriptors "$GRADLE_USER_HOME/wrapper/dists" -type f 2> /dev/null | wc -l)" >> "$GITHUB_OUTPUT"
       - &setup-gradle
         uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
           # The steps around it cache the Gradle user home.
           cache-disabled: true
+      # Maven Central and the Gradle Plugin Portal through Infragnite's package cache
+      # (maven.infragnite.dev): an init script in GRADLE_USER_HOME, so set that first.
+      - &package-cache
+        name: send Gradle's downloads through the package cache
+        uses: infragnite/package-cache-action@0390145ce4d6ed169d553bad09fa3921643a6f35 # main
       - name: build portable local-Maven distribution
         run: |
           set -euo pipefail
@@ -1378,7 +1400,7 @@ jobs:
         env:
           RESTORED: ${{ steps.gradle-restored.outputs.files }}
         run: |
-          now=$(find "$GRADLE_USER_HOME/caches/modules-2/files-2.1" "$GRADLE_USER_HOME/wrapper/dists" -type f 2> /dev/null | wc -l)
+          now=$(find "$GRADLE_USER_HOME/caches/modules-2/files-2.1" "$GRADLE_USER_HOME"/caches/modules-2/metadata-*/descriptors "$GRADLE_USER_HOME/wrapper/dists" -type f 2> /dev/null | wc -l)
           echo "Gradle ${{ steps.gradle-home.outputs.version }}: $RESTORED restored files, $now now"
           if [ "$now" -gt "$RESTORED" ]; then echo "save=true" >> "$GITHUB_OUTPUT"; fi
       - &save-gradle-home
@@ -1406,6 +1428,10 @@ jobs:
   build-tools-deps:
     needs: [build-tool-bins]
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['build-tools-deps'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     outputs:
       # The entry that holds every release's dependencies: the one this job saved, or the one it
       # restored when resolving added nothing.
@@ -1426,6 +1452,7 @@ jobs:
       - *restore-gradle-home
       - *count-gradle-home
       - *setup-gradle
+      - *package-cache
       - name: resolve the dependencies of every Kotlin release
         run: |
           set -euo pipefail
@@ -1437,7 +1464,7 @@ jobs:
         env:
           RESTORED: ${{ steps.gradle-restored.outputs.files }}
         run: |
-          now=$(find "$GRADLE_USER_HOME/caches/modules-2/files-2.1" "$GRADLE_USER_HOME/wrapper/dists" -type f 2> /dev/null | wc -l)
+          now=$(find "$GRADLE_USER_HOME/caches/modules-2/files-2.1" "$GRADLE_USER_HOME"/caches/modules-2/metadata-*/descriptors "$GRADLE_USER_HOME/wrapper/dists" -type f 2> /dev/null | wc -l)
           echo "Gradle ${{ steps.gradle-home.outputs.version }}: $RESTORED restored files, $now now"
           if [ "$now" -gt "$RESTORED" ]; then echo "save=true" >> "$GITHUB_OUTPUT"; fi
       - *save-gradle-home
@@ -1488,6 +1515,8 @@ jobs:
           key: ${{ needs.build-tools-deps.outputs.gradle-key }}
           fail-on-cache-miss: true
       - *setup-gradle
+      # No package-cache step: this job runs offline, and its TestKit build gets a clean
+      # environment, where the cache's init script would find no token.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
@@ -1509,6 +1538,10 @@ jobs:
   # KSP2 ships. It needs no krusty binary yet: the provider refuses every query.
   analysis-api:
     runs-on: ${{ fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1526,6 +1559,7 @@ jobs:
       - *restore-gradle-home
       - *count-gradle-home
       - *setup-gradle
+      - *package-cache
       - name: test the session provider
         run: tools/krusty-analysis-api/gradlew --no-daemon -p tools/krusty-analysis-api test
       - *check-gradle-home
@@ -1554,6 +1588,10 @@ jobs:
           - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true,  suite: boundary }
           - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false, suite: boundary }
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['gradle'][format('{0}|{1}|{2}|{3}', matrix.kotlin, matrix.gradle, matrix.ksp, matrix.suite)] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     # A lane takes under 10 minutes; one stuck on its runner (a download that never finished) ran for
     # hours, holding the batch that waits on it.
     timeout-minutes: 30
@@ -1646,6 +1684,7 @@ jobs:
           gradle-version: ${{ steps.gradle-on-path.outputs.found != 'true' && matrix.gradle || '' }}
           # The steps around it cache the Gradle user home.
           cache-disabled: true
+      - *package-cache
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
@@ -1704,6 +1743,10 @@ jobs:
     # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
     needs: [route]
     runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['build-maven-plugin'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1721,6 +1764,14 @@ jobs:
           cache-dependency-path: tools/krusty-maven/pom.xml
       - *restore-maven
       - *install-maven
+      # Maven Central through the package cache: a mirror added to ~/.m2/settings.xml, so after
+      # setup-java, which rewrites that file.
+      - &package-cache-maven
+        name: send Maven's downloads through the package cache
+        uses: infragnite/package-cache-action@0390145ce4d6ed169d553bad09fa3921643a6f35 # main
+        with:
+          gradle: 'false'
+          maven: 'true'
       - name: build portable local-Maven distribution
         run: |
           set -euo pipefail
@@ -1740,6 +1791,10 @@ jobs:
   maven:
     needs: [build-tool-bins, build-maven-plugin]
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['maven'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1757,6 +1812,7 @@ jobs:
           cache-dependency-path: tools/krusty-maven/pom.xml
       - *restore-maven
       - *install-maven
+      - *package-cache-maven
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
