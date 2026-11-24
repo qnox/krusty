@@ -251,13 +251,15 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
     Some(BTreeMap::from([("stdout".to_string(), run.stdout)]))
 }
 
-/// Seconds one kotlinc-native invocation, or the program it links, may run:
-/// `KRUSTY_REFERENCE_SUBPROCESS_TIMEOUT_SECONDS`, five minutes by default.
+/// How long one kotlinc-native invocation, or the program it links, may run:
+/// `KRUSTY_REFERENCE_SUBPROCESS_TIMEOUT_SECONDS` seconds, five minutes by default.
 fn subprocess_deadline() -> Duration {
     let name = "KRUSTY_REFERENCE_SUBPROCESS_TIMEOUT_SECONDS";
-    let seconds =
-        crate::common::timeout_ms_from(name, std::env::var(name).ok().as_deref(), 300_000);
-    Duration::from_secs(seconds)
+    subprocess_deadline_from(name, std::env::var(name).ok().as_deref())
+}
+
+fn subprocess_deadline_from(name: &str, raw: Option<&str>) -> Duration {
+    Duration::from_secs(crate::common::timeout_ms_from(name, raw, 300))
 }
 
 /// Run `command` to completion inside its own process group and kill the whole group when the
@@ -277,6 +279,7 @@ fn output_within_deadline(
     let stderr_path = work.join(format!("capture-{id}.stderr"));
     let mut child = command
         .process_group(0)
+        .stdin(Stdio::null())
         .stdout(Stdio::from(
             std::fs::File::create(&stdout_path).expect("create the captured stdout"),
         ))
@@ -499,6 +502,23 @@ mod tests {
     use std::ffi::OsStr;
 
     use super::*;
+
+    #[test]
+    fn the_subprocess_deadline_defaults_to_five_minutes_and_reads_seconds() {
+        let name = "KRUSTY_REFERENCE_SUBPROCESS_TIMEOUT_SECONDS";
+        assert_eq!(
+            subprocess_deadline_from(name, None),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            subprocess_deadline_from(name, Some(" ")),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            subprocess_deadline_from(name, Some("45")),
+            Duration::from_secs(45)
+        );
+    }
 
     // PLATFORM-SPECIFIC: Native oracle configuration and prepared module inputs, not JVM ABI.
     #[test]
