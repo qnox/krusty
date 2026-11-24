@@ -142,7 +142,7 @@ JVM-owned pass, under its dedicated `KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS` 
 `scripts/target-conformance-regressions.sh <native|wasm>` owns the focused target pass and applies its
 `KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS` deadline; it requires the Native distribution or Wasm
 compiler distribution/dependency cache that owns the target KLIBs instead of silently accepting a
-skip. It does not run a JVM oracle or read a JVM stdlib. `scripts/box-lane-run.sh
+skip. The Wasm pass runs its independent tests on up to four threads (the CPU count, capped); the Native pass stays on one. It does not run a JVM oracle or read a JVM stdlib. `scripts/box-lane-run.sh
 <native|wasm-js|wasm-wasi>`
 owns each corpus invocation for the `just` recipes and CI (`scripts/native-conformance-run.sh` is
 its Native shorthand).
@@ -612,7 +612,9 @@ and Java drivers use persistent `BoxRunner` and `JavaRunner` JVMs; `javac` runs 
 source to compile that helper, then in-process. The conformance box runner is a separate persistent
 JVM per test thread, also compiled once. `BoxRunner` gives one `box()` call
 `KRUSTY_BOX_TIMEOUT_MS` (10s by default), and the conformance box runner gives one case
-`KRUSTY_BOX_CASE_TIMEOUT_MS` (2s by default).
+`KRUSTY_BOX_CASE_TIMEOUT_MS` (2s by default). A live kotlinc-native oracle compile also runs in a
+persistent compiler JVM per Native distribution, under the same pool cap; one compile gets
+`KRUSTY_NATIVE_COMPILE_TIMEOUT_MS` (five minutes by default) before its server is replaced.
 
 The `bytecode_parity_e2e` batch compares normalized disassembly for its named fixtures. Each
 fixture receives its own package on both compiler inputs, so independent declarations such as

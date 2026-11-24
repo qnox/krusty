@@ -487,6 +487,7 @@ impl JvmLibraries {
                 generic_sig: generic_sig_for_callable.clone().map(Box::new),
                 declared_params,
                 declared_ret,
+                result_alias: meta.ret_alias,
                 reified_type_parameter_ordinals: call_sig
                     .reified_type_parameter_ordinals
                     .clone()
@@ -833,10 +834,10 @@ impl JvmLibraries {
                 continue;
             };
             let getter_inline = property_getter_inline(property.getter_inline, getter_public);
-            let Some((getter_params, getter_ret)) = parse_method_desc(&getter_sig.desc) else {
+            let Some((mut getter_params, getter_ret)) = parse_method_desc(&getter_sig.desc) else {
                 continue;
             };
-            if getter_params.len() != 1 {
+            if !parameter_plans::declared_prefix(&mut getter_params, 1) {
                 continue; // exactly the extension receiver
             }
             let property_gsig = property.generic_sig.clone();
@@ -918,15 +919,18 @@ impl JvmLibraries {
                 context_count: 0,
                 context_param_names: Vec::new(),
                 context_parameter_identities: Vec::new(),
-                getter: accessor(
-                    crate::names::property_getter_name(&property.name),
-                    &getter_sig.name,
-                    &getter_sig.desc,
-                    getter_params,
-                    property_ty,
-                    getter_ret,
-                    getter_inline,
-                ),
+                getter: crate::libraries::LibraryCallable {
+                    result_alias: property.ret_alias,
+                    ..accessor(
+                        crate::names::property_getter_name(&property.name),
+                        &getter_sig.name,
+                        &getter_sig.desc,
+                        getter_params,
+                        property_ty,
+                        getter_ret,
+                        getter_inline,
+                    )
+                },
                 setter: setter.map(Box::new),
                 setter_visibility: property.visibility,
                 setter_parameter_name: None,
@@ -1433,6 +1437,7 @@ impl JvmLibraries {
                     member.set_deprecated_hidden(self.function_hidden_at_api(declaration));
                     member.call_sig = declaration.member_call_sig();
                     member.declared_ret = metadata_declared_nonnull_return(declaration);
+                    member.result_alias = declaration.ret_alias();
                 } else if let Some(declaration) = constructor_declaration {
                     if declaration.params.types.contains(&Ty::Error) {
                         crate::trace_compiler!(
@@ -2731,7 +2736,7 @@ impl JvmLibraries {
                     // frontend continues to see only the two semantic receiver roles.
                     let value_dispatch = metadata::class_inline(&ci).is_some();
                     let extension_index = context_count + usize::from(value_dispatch);
-                    if getter_params.len() != extension_index + 1 {
+                    if !parameter_plans::declared_prefix(&mut getter_params, extension_index + 1) {
                         continue;
                     }
                     let Some(physical_receiver) = getter_params.get(extension_index).copied()
@@ -2771,6 +2776,7 @@ impl JvmLibraries {
                     getter.is_abstract = mp.is_abstract;
                     getter.inline = property_getter_inline(mp.getter_inline, getter_public);
                     attach_interface_holder(&self.cp, cn, &mut getter);
+                    getter.result_alias = mp.ret_alias;
                     getter.semantic_role =
                         crate::libraries::builtin_declaration::semantic_call_role(
                             crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
@@ -2883,7 +2889,7 @@ impl JvmLibraries {
                 // NOT the value class's own sole property: that one IS the carrier (`Result.value`),
                 // reached as the underlying value itself rather than through a computed `-impl`
                 // accessor, and rerouting it breaks the box/unbox boundary.
-                let carrier_receiver = getter_params.len() == context_count + 1
+                let carrier_receiver = getter_params.len() > context_count
                     && metadata::class_inline(&ci).is_some_and(|inline| {
                         context_count != 0
                             || inline.property_name.as_deref() != Some(mp.name.as_str())
@@ -2891,7 +2897,7 @@ impl JvmLibraries {
                 if carrier_receiver {
                     getter_params.remove(0);
                 }
-                if getter_params.len() != context_count {
+                if !parameter_plans::declared_prefix(&mut getter_params, context_count) {
                     continue;
                 }
                 let semantic_context = property_signature
@@ -2921,6 +2927,7 @@ impl JvmLibraries {
                 getter.is_abstract = mp.is_abstract;
                 getter.inline = property_getter_inline(mp.getter_inline, getter_public);
                 attach_interface_holder(&self.cp, cn, &mut getter);
+                getter.result_alias = mp.ret_alias;
                 let getter_signature = self
                     .member_functions(recv, &getter.name)
                     .overloads

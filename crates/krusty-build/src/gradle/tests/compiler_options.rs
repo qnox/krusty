@@ -93,6 +93,62 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
         );
     }
 
+    // `-Pkrusty.fixKotlincDefects=true` asks krusty to fix kotlinc's defects: the compile stays
+    // krusty's and carries krusty's own switch once, right after the reference version.
+    {
+        let case = "fix-kotlinc-defects";
+        clear_invocation_log(log);
+        build()
+            .property("krusty.fixKotlincDefects", "true")
+            .tasks([":compiler:util:compileKotlin"])
+            .run()
+            .unwrap_or_else(|error| panic!("{case}: {error}"));
+        let invocation = single_module_invocation(log, "kotlin-compiler-util");
+        let reference = format!("-Xkotlin-reference-version={}", fixture.kgp);
+        assert_eq!(
+            invocation
+                .windows(2)
+                .filter(|pair| pair == &[reference.as_str(), "-Xfix-kotlinc-defects"])
+                .count(),
+            1,
+            "{case}: {invocation:?}"
+        );
+        assert_eq!(
+            invocation
+                .iter()
+                .filter(|argument| argument.as_str() == "-Xfix-kotlinc-defects")
+                .count(),
+            1,
+            "{case}: {invocation:?}"
+        );
+    }
+
+    // A compile left to kotlinc keeps kotlinc's defects, and the check says so.
+    {
+        let case = "jspecify-free-argument";
+        clear_invocation_log(log);
+        let output = build()
+            .property("krusty.negative", case)
+            .property("krusty.fixKotlincDefects", "true")
+            .tasks([":compiler:util:compileKotlin"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("{case} with defect fixes: {error}"));
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| *line
+                    == "krusty: task ':compiler:util:compileKotlin' keeps kotlinc's defects: \
+                        krusty.fixKotlincDefects applies only to compiles krusty runs")
+                .count(),
+            1,
+            "{case}: {output}"
+        );
+        assert!(
+            !log.exists(),
+            "kotlinc, not krusty, compiles a refused argument"
+        );
+    }
+
     // A Kotlin JVM target that differs from the Java one fails the build, as it does with
     // kotlinc under the default validation mode.
     clear_invocation_log(log);
@@ -111,6 +167,59 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
         "jvm-target: {rendered}",
     );
     assert!(!log.exists(), "jvm-target must fail before execing krusty");
+
+    // A Kotlin task with no Kotlin source compiles nothing, as KGP's: its Java sources and Java
+    // target are neither compiled nor checked.
+    clear_invocation_log(log);
+    clear_invocation_log(&fixture.probes);
+    build()
+        .property("krusty.negative", "java-only-source-set")
+        .tasks([":compiler:util:compileJavaOnlyKotlin"])
+        .run()
+        .unwrap_or_else(|error| panic!("java-only-source-set: {error}"));
+    assert!(
+        !log.exists(),
+        "java-only-source-set: krusty compiles no Java-only source set"
+    );
+
+    // KGP compiles against the Kotlin task's own Java toolchain, whose JDK home is no public
+    // KGP API: such a compile is kotlinc's, which compiles it against that JDK.
+    clear_invocation_log(log);
+    clear_invocation_log(&fixture.probes);
+    let _ = std::fs::remove_dir_all(kotlin_classes);
+    let output = build()
+        .property("krusty.negative", "kotlin-java-toolchain")
+        .tasks([":compiler:util:compileKotlin"])
+        .run_output()
+        .unwrap_or_else(|error| panic!("kotlin-java-toolchain: {error}"));
+    let gradle_java = output
+        .lines()
+        .find_map(|line| line.strip_prefix("fixture: Gradle Java "))
+        .and_then(|major| major.trim().parse::<u32>().ok())
+        .unwrap_or_else(|| panic!("kotlin-java-toolchain: no Gradle Java release\n{output}"));
+    assert_left_to_kotlinc(
+        &output,
+        ":compiler:util:compileKotlin",
+        &[format!(
+            "Kotlin task Java toolchain {} differs from Gradle Java toolchain {gradle_java}, \
+             whose JDK is the only one krusty receives",
+            gradle_java - 1,
+        )],
+    );
+    assert!(
+        !fixture.probes.exists(),
+        "kotlin-java-toolchain: the plugin refuses without asking krusty"
+    );
+    assert!(
+        !log.exists(),
+        "kotlin-java-toolchain: kotlinc, not krusty, compiles it"
+    );
+    assert!(
+        kotlin_classes
+            .join("org/jetbrains/kotlin/util/UtilKt.class")
+            .is_file(),
+        "kotlin-java-toolchain: kotlinc wrote the module's classes"
+    );
 
     // A compiler plugin krusty implements only partly no longer leaves the compile to kotlinc: krusty
     // compiles it, with the plugin.

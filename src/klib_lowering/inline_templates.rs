@@ -16,7 +16,7 @@
 //! template leaves the file as it was.
 
 use super::body_lowering::{
-    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessor, LinkedAccessorTarget,
+    publish_parameter_defaults, BodyLowering, CallLinker, LinkedAccessorCall,
     LinkedCallableReference, LinkedCallee, LinkedConstructor, LoweredFunction,
 };
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
@@ -732,7 +732,9 @@ impl CallLinker for TemplateCalls<'_> {
             KlibIrSignature::Accessor(accessor) => {
                 KlibDeclarationSignature::Accessor(accessor.clone())
             }
-            KlibIrSignature::FileLocal { .. } => return Ok(None),
+            KlibIrSignature::FileLocal { .. } | KlibIrSignature::TypeParameter { .. } => {
+                return Ok(None)
+            }
         };
         let binding = match self.callees.references.get(self.module, &signature) {
             KlibReferenceOrigin::Exact(binding) => binding,
@@ -801,7 +803,7 @@ impl CallLinker for TemplateCalls<'_> {
         &mut self,
         _: &mut IrFile,
         callee: &KlibAccessorIdSignature,
-    ) -> Result<LinkedAccessor, KlibBodyDeclineReason> {
+    ) -> Result<LinkedAccessorCall, KlibBodyDeclineReason> {
         let signature = KlibDeclarationSignature::Accessor(callee.clone());
         let identity = self.origin(&signature, callee.property())?;
         let declined = |reason| {
@@ -857,9 +859,8 @@ impl CallLinker for TemplateCalls<'_> {
                     "an inline-template property accessor without an exact selected contract",
                 ))
             })?;
-        linked.target = LinkedAccessorTarget::External(property);
         linked.callable = Some(target);
-        Ok(linked)
+        Ok(LinkedAccessorCall::Property(linked))
     }
 
     fn requires_declaration(

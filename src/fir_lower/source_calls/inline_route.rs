@@ -11,7 +11,7 @@ use crate::fir::{
 };
 use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, FunId, IrExpr, SameModuleInlining};
-use crate::types::{InlineParameterModifier, Ty, TyKind};
+use crate::types::InlineParameterModifier;
 
 #[cfg(test)]
 mod tests;
@@ -40,16 +40,11 @@ pub(in super::super) enum ExpansionReason {
     SuspendCallee,
     /// The call omits an argument that has a default.
     DefaultArguments,
-    /// A parameter (or the receiver) of the callee has a suspend function type, whose lambdas
-    /// suspend inside the caller's state machine.
-    SuspendFunctionParameter,
     /// A parameter of the callee is `crossinline`: its lambda is placed in an object or lambda the
     /// callee's body creates.
     CrossinlineParameter,
     /// The callee has no body of its own in this file's IR.
     NoTemplate,
-    /// The callee's body creates an object of a local or anonymous class.
-    LocalClassInBody,
     /// The callee is another file's and its body holds a subject `when` that switches on an enum's
     /// keys. The keys are read from a table of the callee's own class (the JVM's `$WhenMappings`),
     /// numbered by every `when` of that class in source order; this file's emission sees only the
@@ -121,22 +116,6 @@ impl BodyLowering<'_> {
         if header.flags.has(DeclarationFlags::SUSPEND) {
             return Some(ExpansionReason::SuspendCallee);
         }
-        let suspend_function =
-            |ty: Ty| matches!(ty.non_null().kind(), TyKind::Fun(signature) if signature.suspend);
-        let Some(signature) = self.index.signature(declaration) else {
-            return Some(ExpansionReason::NoTemplate);
-        };
-        if signature
-            .parameters
-            .iter()
-            .any(|parameter| suspend_function(parameter.get()))
-            || callable
-                .shape
-                .extension_receiver
-                .is_some_and(|receiver| suspend_function(receiver.get()))
-        {
-            return Some(ExpansionReason::SuspendFunctionParameter);
-        }
         let Some(function) = function else {
             return Some(ExpansionReason::NoTemplate);
         };
@@ -169,20 +148,6 @@ impl BodyLowering<'_> {
             }
             if foreign && self.ir.enum_switch_when(expression).is_some() {
                 return Some(ExpansionReason::EnumSwitchInBody);
-            }
-            match self.ir.expr(expression) {
-                IrExpr::New { internal, .. }
-                    if self
-                        .ir
-                        .class_id_by_name(*internal)
-                        .and_then(|class| self.ir.classes.get(class as usize))
-                        // An inner class of a local class needs an instance of one, which only
-                        // the body itself can create.
-                        .is_some_and(|class| class.is_local_class || class.is_anonymous_object) =>
-                {
-                    return Some(ExpansionReason::LocalClassInBody);
-                }
-                _ => {}
             }
             crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));
         }

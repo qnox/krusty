@@ -1692,18 +1692,24 @@ impl BodyFirChecker<'_> {
             selected.callable.compiler_intrinsic,
             selected.callable.ret,
         );
-        let assertion_mode = if self.file.assert_always_disabled {
-            crate::types::AssertionMode::AlwaysDisabled
-        } else if self.file.assert_always_enabled {
-            crate::types::AssertionMode::AlwaysEnabled
-        } else {
-            crate::types::AssertionMode::Runtime
-        };
+        let reified_enum_operation = super::enum_reflection::reified_parameter_operation(
+            selected.callable.compiler_intrinsic,
+            selected.callable.ret,
+            |classifier| {
+                ResolvedTy::new(classifier).map_err(|error| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnpublishableType(error),
+                    )
+                })
+            },
+        )?;
         let selected_intrinsic = super::compiler_intrinsics::selected_top_level(
             selected.callable.compiler_intrinsic,
-            assertion_mode,
+            self.file.assertions,
             selected.callable.name.as_str(),
-        );
+        )
+        .or(reified_enum_operation);
         let (target, substitutions) =
             if let Some((classifier, operation)) = selected_classifier_intrinsic {
                 if dispatch_receiver.is_some() {
@@ -1843,6 +1849,11 @@ impl BodyFirChecker<'_> {
         selected: &crate::symbol_resolver::ResolvedMember,
         receiver: FirReceiver,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        if let Some(invoke) =
+            self.function_classifier_invoke(expression, arguments, selected, receiver)?
+        {
+            return Ok(invoke);
+        }
         if let crate::libraries::MemberRealization::RangeConstruction { open_end } =
             selected.member.realization
         {

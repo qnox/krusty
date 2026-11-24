@@ -101,6 +101,17 @@ pub enum AssertionMode {
     AlwaysDisabled,
 }
 
+/// How `assert(...)` compiles: kotlinc's `-Xassertions` mode, or a platform's default.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssertionCompilation {
+    /// kotlinc's JVM default (`-Xassertions=legacy`): `assert` is no compiler operation. The call
+    /// stays an ordinary call of the library's inline function, whose body evaluates the condition
+    /// and then reads `kotlin._Assertions.ENABLED`.
+    Legacy,
+    /// The checked compiler operation, under this mode.
+    Checked(AssertionMode),
+}
+
 /// Semantic shape of one compiler-provided Kotlin array factory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArrayFactoryKind {
@@ -680,6 +691,19 @@ impl Ty {
         self.non_null()
             .kotlin_class_internal()
             .is_some_and(|n| same(n, wk::any()) || same(n, wk::java_object()))
+    }
+
+    /// Whether this is Kotlin's top type itself, `Any`/`Any?` or a physical JVM `Object` spelling.
+    /// Unlike [`Self::is_erased_top`], a type parameter whose bound is `Any?` is not the top type:
+    /// it erases to `Object`, but only values of that parameter are its subtypes.
+    pub fn is_semantic_top(self) -> bool {
+        match self.kind() {
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner) => inner.is_semantic_top(),
+            TyKind::Obj(n, _) => same(n, wk::any()) || same(n, wk::java_object()),
+            _ => false,
+        }
     }
 
     /// The canonical **extension-receiver key**: the `Ty` two receivers must share for an extension

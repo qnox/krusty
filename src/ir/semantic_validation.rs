@@ -72,6 +72,7 @@ fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType>
         IrIntrinsic::UnsignedToString { source } => reject("intrinsic source", *source),
         IrIntrinsic::PrimitiveArrayNew { element } => reject("intrinsic array element", *element),
         IrIntrinsic::EnumValueOf { classifier } => reject("enum valueOf classifier", *classifier),
+        IrIntrinsic::EnumValues { classifier } => reject("enum values classifier", *classifier),
         IrIntrinsic::EnumEntries { classifier } => reject("enum entries classifier", *classifier),
         IrIntrinsic::TypeOf { ty } => reject("typeOf type argument", *ty),
         IrIntrinsic::GeneratedPropertyEquals { ty }
@@ -84,6 +85,7 @@ fn validate_intrinsic(operation: &IrIntrinsic) -> Result<(), UndeterminedIrType>
         | IrIntrinsic::StringGet
         | IrIntrinsic::StringLength
         | IrIntrinsic::EnumOrdinal
+        | IrIntrinsic::EnumName
         | IrIntrinsic::NullableAnyToString
         | IrIntrinsic::CoroutineContext => Ok(()),
     }
@@ -476,6 +478,10 @@ fn validate_prop_ref(reference: &PropRef) -> Result<(), UndeterminedIrType> {
 fn validate_member_extension(property: &MemberExtProp) -> Result<(), UndeterminedIrType> {
     reject("member-extension receiver", property.receiver)?;
     reject("member-extension property", property.ty)?;
+    reject_all(
+        "member-extension context parameter",
+        property.context_params.iter().map(|(_, _, ty)| *ty),
+    )?;
     for parameter in &property.type_params {
         validate_type_parameter(parameter)?;
     }

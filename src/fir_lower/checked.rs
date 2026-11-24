@@ -539,7 +539,9 @@ impl BodyLowering<'_> {
         let Some(call) = call.transpose()? else {
             return Ok(None);
         };
-        let body = self.callable_reference_adapter_body(call, signature_result, reference.ret);
+        let body = self
+            .ir
+            .callable_reference_adapter_body(call, signature_result, reference.ret);
         let mut parameters = capture_types;
         parameters.extend(reference.params.iter().copied());
         let adapter_name = format!(
@@ -663,6 +665,7 @@ impl BodyLowering<'_> {
                 mutable: reference.mutable,
                 substitutions: lower_substitutions(reference.substitutions),
                 adaptation: reference.adaptation.cloned().map(Box::new),
+                function_type: Some(reference.reference_ty),
             },
         ))))
     }
@@ -1566,5 +1569,8 @@ pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate
                 element: element.get(),
             }
         }
+        crate::fir::FirIntrinsic::EnumValues { classifier } => crate::ir::IrIntrinsic::EnumValues {
+            classifier: classifier.get(),
+        },
     }
 }

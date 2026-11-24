@@ -513,6 +513,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             *ret = ty(*ret, names);
             match operation {
                 super::IrIntrinsic::EnumValueOf { classifier }
+                | super::IrIntrinsic::EnumValues { classifier }
                 | super::IrIntrinsic::EnumEntries { classifier }
                 | super::IrIntrinsic::PrimitiveCompare {
                     operand: classifier,
@@ -539,6 +540,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
                 | super::IrIntrinsic::StringGet
                 | super::IrIntrinsic::StringLength
                 | super::IrIntrinsic::EnumOrdinal
+                | super::IrIntrinsic::EnumName
                 | super::IrIntrinsic::NullableAnyToString
                 | super::IrIntrinsic::CoroutineContext => {}
             }
@@ -1496,6 +1498,9 @@ impl super::IrFile {
             for property in properties {
                 property.receiver = ty(property.receiver, names);
                 property.ty = ty(property.ty, names);
+                for (_, _, parameter) in &mut property.context_params {
+                    *parameter = ty(*parameter, names);
+                }
                 type_parameters(&mut property.type_params, names);
             }
         }

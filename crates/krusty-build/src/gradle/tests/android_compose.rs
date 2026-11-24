@@ -62,20 +62,20 @@ fn android_compose_app_is_compiled_by_krusty_with_a_handoff_for_what_it_refuses(
         "{}/app/src/main/kotlin/sample/app/MainActivity.kt",
         root.display()
     );
-    let outside_a_body = [
-        "22:22", "28:18", "29:5", "30:9", "31:9", "32:13", "32:45", "33:13", "33:47",
-    ];
-    let expected = std::iter::once(format!(
-        "{source}:27:1: error: krusty's Compose compiler plugin does not support a class \
-         annotation the compilation does not declare yet; compile this module with kotlinc"
-    ))
-    .chain(outside_a_body.map(|at| {
+    let expected = [
+        ("27:1", "a lambda in a composable lambda"),
+        (
+            "22:20",
+            "a composable lambda passed other than by a statement of a function body",
+        ),
+    ]
+    .map(|(at, what)| {
         format!(
-            "{source}:{at}: error: krusty's Compose compiler plugin does not support a composable \
-             call outside the statements of a composable body yet; compile this module with kotlinc"
+            "{source}:{at}: error: krusty's Compose compiler plugin does not support {what} yet; \
+             compile this module with kotlinc"
         )
-    }))
-    .collect::<Vec<_>>();
+    })
+    .to_vec();
     assert_eq!(reasons, expected, "{output}");
     let text = read_invocation_log(log).expect("invocation log");
     assert_eq!(invocations(&text).len(), 2, "{text}");

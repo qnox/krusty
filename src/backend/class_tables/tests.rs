@@ -1,4 +1,6 @@
-use super::fixtures::{add_method, class, field, function, record_override};
+use super::fixtures::{
+    add_method, class, field, function, record_external_interface_override, record_override,
+};
 use super::*;
 use crate::ir::IrFile;
 
@@ -25,6 +27,7 @@ fn tables(ir: &IrFile) -> Result<NumberedClassTables, Unsupported> {
         &IntsAndReferences,
         ir,
         &super::module_slots::ModuleSlotPlan::empty(),
+        &mut Default::default(),
         &|_| None,
     )
 }
@@ -134,8 +137,181 @@ fn a_superclass_no_file_declares_is_declined_unless_the_target_owns_it() {
         &OwnsEverything,
         &ir,
         &super::module_slots::ModuleSlotPlan::empty(),
+        &mut Default::default(),
         &|_| None,
     )
     .expect("tables");
     assert_eq!(owned.table(error).superclass, None);
+}
+
+/// An interface of `ir` with abstract members `names`, which no module numbering knows: what a
+/// KLIB lowering unit installs.
+fn installed_interface(ir: &mut IrFile, name: &str, names: &[&str]) -> (ClassId, Vec<FunId>) {
+    let id = class(ir, name, "kotlin/Any", 0);
+    ir.classes[id as usize].is_interface = true;
+    let members = names
+        .iter()
+        .map(|member| add_method(ir, id, function(member, name, vec![Ty::Int], Ty::Int, true)))
+        .collect();
+    (id, members)
+}
+
+#[test]
+fn an_installed_interface_numbers_its_members_in_declaration_order() {
+    let mut ir = IrFile::default();
+    let (first, first_members) = installed_interface(&mut ir, "Sink", &["put", "peek"]);
+    let (second, second_members) = installed_interface(&mut ir, "Source", &["take"]);
+    let numbered = tables(&ir).expect("an installed interface is numbered by the IR it lives in");
+    let numbers = &numbered.numbers;
+    let key = |function| super::module_slots::PlanKey::Installed(function);
+    assert_eq!(
+        [first_members[0], first_members[1], second_members[0]]
+            .map(|function| numbers.number(key(function))),
+        [Some(0), Some(1), Some(2)]
+    );
+    // The module's own count: installed numbers are the module's files' to share beyond it.
+    assert_eq!(numbers.count(), 0);
+    assert_eq!(
+        numbers.numbers_of(&[ir.classes[second as usize].fq_name].into_iter().collect()),
+        vec![2]
+    );
+    assert_eq!(
+        numbers
+            .function_carriers(key(first_members[0]))
+            .map(|(parameters, result)| (parameters.to_vec(), result)),
+        Some((vec![Ty::Int], Ty::Int))
+    );
+    let _ = first;
+}
+
+/// Two files of one module share the numbers beyond the module's own: an interface both install
+/// keeps its numbers in each, an interface only one installs takes numbers no other member has,
+/// and a number a target takes afterwards is fresh too.
+#[test]
+fn installed_interfaces_of_two_files_share_one_numbering() {
+    let mut extended = super::module_interfaces::ExtendedNumbers::default();
+    let mut numbered = |names: &[(&str, &[&str])]| {
+        let mut ir = IrFile::default();
+        let members = names
+            .iter()
+            .map(|(name, members)| installed_interface(&mut ir, name, members).1)
+            .collect::<Vec<_>>();
+        let tables = build_numbered(
+            &IntsAndReferences,
+            &ir,
+            &super::module_slots::ModuleSlotPlan::empty(),
+            &mut extended,
+            &|_| None,
+        )
+        .expect("installed interfaces are numbered");
+        members
+            .iter()
+            .map(|functions| {
+                functions
+                    .iter()
+                    .map(|&function| {
+                        tables
+                            .numbers
+                            .number(super::module_slots::PlanKey::Installed(function))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = numbered(&[("Sink", &["put", "peek"])]);
+    let second = numbered(&[("Source", &["take"]), ("Sink", &["put", "peek"])]);
+    assert_eq!(first, vec![vec![Some(0), Some(1)]]);
+    assert_eq!(second, vec![vec![Some(2)], vec![Some(0), Some(1)]]);
+    assert_eq!(extended.fresh(0), 3);
+}
+
+#[test]
+fn an_installed_interface_is_the_only_one_its_itable_implements() {
+    let mut ir = IrFile::default();
+    let (sink, _) = installed_interface(&mut ir, "Sink", &["put"]);
+    let numbered = tables(&ir).expect("tables");
+    assert_eq!(
+        numbered.interface_tables.implemented[sink as usize],
+        vec![ir.classes[sink as usize].fq_name]
+    );
+}
+
+#[test]
+fn an_installed_interface_declared_before_its_installed_base_is_refused() {
+    let mut ir = IrFile::default();
+    let (derived, _) = installed_interface(&mut ir, "Derived", &["take"]);
+    let (_, _) = installed_interface(&mut ir, "Base", &["put"]);
+    ir.classes[derived as usize]
+        .interfaces
+        .push_name(crate::types::type_name("Base"));
+    assert_eq!(
+        tables(&ir).map(|_| ()),
+        Err(
+            "an installed interface extending one with module-wide numbers (`Derived`)".to_string()
+        )
+    );
+}
+
+#[test]
+fn an_installed_interface_extending_another_installed_one_is_refused() {
+    let mut ir = IrFile::default();
+    let (_, _) = installed_interface(&mut ir, "Base", &["put"]);
+    let (derived, _) = installed_interface(&mut ir, "Derived", &["take"]);
+    ir.classes[derived as usize]
+        .interfaces
+        .push_name(crate::types::type_name("Base"));
+    assert_eq!(
+        tables(&ir).map(|_| ()),
+        Err(
+            "an installed interface extending one with module-wide numbers (`Derived`)".to_string()
+        )
+    );
+}
+
+#[test]
+fn a_value_classs_own_member_that_overrides_nothing_takes_no_table_slot() {
+    // Every support unit that emits some of a value class's members must lay its table out
+    // alike, so a member no one overrides is called directly and carries no slot.
+    let mut plain = IrFile::default();
+    let ordinary = class(&mut plain, "Box", "kotlin/Any", 0);
+    add_method(
+        &mut plain,
+        ordinary,
+        function("own", "Box", vec![], Ty::Int, false),
+    );
+    let mut value = IrFile::default();
+    let boxed = class(&mut value, "Box", "kotlin/Any", 0);
+    value.classes[boxed as usize].is_value = true;
+    add_method(
+        &mut value,
+        boxed,
+        function("own", "Box", vec![], Ty::Int, false),
+    );
+    let slots = |ir: &IrFile, class| tables(ir).expect("tables").table(class).vtable.len();
+    assert_eq!(slots(&plain, ordinary), slots(&value, boxed) + 1);
+}
+
+#[test]
+fn a_value_classs_member_implementing_a_dependency_interface_keeps_its_slot() {
+    // `UIntArray.iterator` implements `Collection.iterator`, which the program names only by
+    // an override edge: interface dispatch reaches the member through its slot.
+    let mut value = IrFile::default();
+    let boxed = class(&mut value, "Box", "kotlin/Any", 0);
+    value.classes[boxed as usize].is_value = true;
+    let own = add_method(
+        &mut value,
+        boxed,
+        function("own", "Box", vec![], Ty::Int, false),
+    );
+    let implemented = add_method(
+        &mut value,
+        boxed,
+        function("size", "Box", vec![], Ty::Int, false),
+    );
+    record_external_interface_override(&mut value, boxed, implemented);
+    let tables = tables(&value).expect("tables");
+    let vtable = &tables.table(boxed).vtable;
+    assert_eq!(vtable.len(), 5);
+    assert_eq!(vtable[4], Slot::Function(implemented));
+    assert!(!vtable.contains(&Slot::Function(own)));
 }

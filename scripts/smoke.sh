@@ -16,7 +16,8 @@
 #      baseline, then the clippy baseline when the change touches Rust;
 #   3. ONE cargo build of every test binary the later steps run, so the compiler is built once;
 #   4. the lib tests of krusty and of the backend crates;
-#   5. the e2e modules (`tests/*_e2e.rs`) this change touches;
+#   5. the e2e modules (`tests/*_e2e.rs`) this change touches, and those that name a plugin whose
+#      source (`src/plugins/<name>/`) it touches;
 #   6. the conformance entries CI runs for the lanes this change can affect (see select_lanes), in
 #      parallel jobs, on the newest Kotlin version, and on the others too if it fails: per lane
 #      (JVM, Native, wasm-js, wasm-wasi) an even sample of the box corpus and the owned regressions
@@ -89,6 +90,32 @@ select_lanes() {
   printf '%s\n' "${selected[*]}"
 }
 lanes="${KRUSTY_SMOKE_LANES-$(select_lanes)}"
+
+# The e2e modules a change can affect: the modules it changes, and the modules that name a plugin
+# whose source it changes. A plugin is the directory (or file stem) directly under src/plugins/ that
+# a changed path is in; a module covers it when its file, or any file of its directory, names the
+# plugin as a word. A source file directly under src/plugins/ belongs to no plugin.
+e2e_modules_for() {
+  {
+    changed 'tests/*_e2e.rs' 'tests/*_e2e/*.rs' | sed -E 's#^tests/([^/]+_e2e)(/.*)?\.rs$#\1#; s#^tests/([^/]+_e2e)/.*#\1#'
+    affected 'src/plugins/*/*' | sed -E 's#^src/plugins/([^/]+)/.*#\1#' | sort -u | while IFS= read -r plugin; do
+      grep -liw -- "$plugin" tests/*_e2e.rs || true
+      for dir in tests/*_e2e/; do
+        ! grep -rqiw -- "$plugin" "$dir" || printf '%s\n' "${dir%/}.rs"
+      done
+    done | sed -E 's#^tests/##; s#\.rs$##'
+  } | sort -u | sed 's#$#::#'
+}
+e2e_modules=()
+while IFS= read -r module; do
+  e2e_modules+=("$module")
+done < <(e2e_modules_for)
+# The selection alone, for the scenario test: no checks, no build.
+if [ "${KRUSTY_SMOKE_PRINT_E2E:-}" = 1 ]; then
+  printf '%s\n' "${e2e_modules[@]}"
+  exit 0
+fi
+
 # The selection alone, for the scenario test: no checks, no build.
 if [ "${KRUSTY_SMOKE_PRINT_LANES:-}" = 1 ]; then
   printf '%s\n' "$lanes"
@@ -119,11 +146,6 @@ export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}"
 # A local checkout has no published recorded-byte archive, so the reference compiler compiles a
 # missing class dump instead of refusing it, as the conformance-regressions run does.
 export KRUSTY_CLASS_DUMP_COMPILE_MISSING="${KRUSTY_CLASS_DUMP_COMPILE_MISSING:-1}"
-
-e2e_modules=()
-while IFS= read -r file; do
-  e2e_modules+=("$(basename "$file" .rs)::")
-done < <(changed 'tests/*_e2e.rs')
 
 # The owned regressions this change adds or modifies, by their path under the repository.
 regressions=()
@@ -157,6 +179,12 @@ done
 
 if [ "${#e2e_modules[@]}" -gt 0 ]; then
   step "changed e2e modules: ${e2e_modules[*]}"
+  # An e2e module that spawns the CLI runs the gate build of it, as run-tests.sh passes it.
+  if [ -z "${KRUSTY_BIN:-}" ]; then
+    cargo build --profile gate -p krusty-cli --bin krusty
+    target_root="${CARGO_TARGET_DIR:-$repo_root/target}"
+    export KRUSTY_BIN="$target_root/gate/krusty"
+  fi
   run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$(binary e2e test)" "${e2e_modules[@]}"
 fi
 
@@ -297,7 +325,10 @@ run_versions() {
     # Each step is checked on its own: an assignment's status is not reliably seen by `set -e`.
     kc="$(just kotlinc "$v")" || exit 1
     bc="$(just box-corpus "$v")" || exit 1
-    just plugin-corpus serialization "$v" >/dev/null || exit 1
+    # Every plugin that has a box corpus, as the conformance entries need all of them.
+    while read -r plugin; do
+      just plugin-corpus "$plugin" "$v" >/dev/null || exit 1
+    done < <(just plugin-corpora)
     kotlinc_of[$v]="$kc"
     box_of[$v]="$bc"
     case " $lanes " in

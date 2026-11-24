@@ -3,6 +3,7 @@
 //! captures after them, its `$i$a$` marker as its first local, and its body ending in a return of
 //! its own type. The inliner places that node at each `invoke` of the lambda.
 
+use super::super::inline_return_frames::LambdaBody;
 use super::super::unified_lambda_splice::placed_lambda_parameters;
 use super::lambda_route::SpliceReason;
 use super::*;
@@ -637,7 +638,9 @@ impl Emitter<'_> {
         let caller_export = self.export_private_calls;
         self.crossinline_lambda_body |= crossinline;
         self.export_private_calls |= crossinline;
-        let result = self.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch);
+        let result = self.in_lambda_body(LambdaBody::Method, |emitter| {
+            emitter.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch)
+        });
         self.crossinline_lambda_body = caller_crossinline;
         self.export_private_calls = caller_export;
         self.leave_placed_fake_continuations(&fake_continuations, caller_fakes);

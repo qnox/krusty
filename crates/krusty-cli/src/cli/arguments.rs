@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use krusty::kotlin_version::KotlinVersion;
+use krusty::kotlin_version::{KotlinVersion, KotlincDefects};
 use krusty::language_settings::LanguageSettings;
 use krusty::language_version::LanguageVersion;
 use krusty_jvm::ir_emit::{JvmDefaultMode, LambdaMode};
@@ -168,6 +168,25 @@ pub(super) fn take_reference_version(arguments: Vec<String>, opts: &mut Options)
     }
     rest
 }
+
+/// `-Xfix-kotlinc-defects` is krusty's own argument, which kotlinc does not have: the compilation
+/// fixes the reference release's defects ([`KotlincDefects::Fix`]) instead of reproducing them.
+pub(super) fn take_defect_fixes(arguments: Vec<String>, opts: &mut Options) -> Vec<String> {
+    let mut rest = Vec::with_capacity(arguments.len());
+    let mut sources_only = false;
+    for argument in arguments {
+        sources_only |= argument == "--";
+        if !sources_only && argument == FIX_KOTLINC_DEFECTS {
+            opts.kotlinc_defects = KotlincDefects::Fix;
+        } else {
+            rest.push(argument);
+        }
+    }
+    rest
+}
+
+/// The spelling of [`take_defect_fixes`]'s argument.
+pub const FIX_KOTLINC_DEFECTS: &str = "-Xfix-kotlinc-defects";
 
 /// The language and API settings read from the command line, applied once every argument is known
 /// so explicit `-XXLanguage` overrides stay ordered independently of where the versions appear.
@@ -334,10 +353,13 @@ pub(super) fn apply(
             }
         }
         // `-Xassertions` selects how `assert(...)` is compiled. krusty emits the two unconditional
-        // modes; `jvm` and `legacy` name runtime-checked shapes it does not reproduce yet.
+        // modes and `legacy`, kotlinc's default; `jvm` names a runtime-checked shape it does not
+        // reproduce yet.
         "-Xassertions" => match text {
-            "always-enable" | "always-disable" => opts.assertions = Some(text.to_string()),
-            "jvm" | "legacy" => opts.refuse(format!(
+            "always-enable" | "always-disable" | "legacy" => {
+                opts.assertions = Some(text.to_string())
+            }
+            "jvm" => opts.refuse(format!(
                 "{name}={text} selects an output shape krusty does not emit"
             )),
             _ => opts.errors.push(format!(

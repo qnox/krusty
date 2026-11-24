@@ -172,7 +172,7 @@ fn set_symbol(
             Ty::Boolean,
         ),
         ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
-            "kt_mutable_collection_add_all",
+            super::lists::collection_add_all_symbol(),
             vec![any(), any()],
             Ty::Boolean,
         ),
