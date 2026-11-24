@@ -1155,37 +1155,42 @@ impl FileRecorder<'_, '_, '_> {
         receiver: Option<Ty>,
         ty: Ty,
         setter: bool,
-    ) -> (Vec<Ty>, Ty) {
+    ) -> Result<(Vec<Ty>, Ty), Unsupported> {
         let context: Vec<Ty> = match target {
             ResolvedPropertyOverrideTarget::Module(property) => {
                 match self.recording.ir.local_property_layouts.get(property) {
-                    Some(IrLocalPropertyLayout::Member {
-                        context_parameters, ..
-                    }) => context_parameters.clone(),
+                    Some(
+                        IrLocalPropertyLayout::Member {
+                            context_parameters, ..
+                        }
+                        | IrLocalPropertyLayout::MemberExtension {
+                            context_parameters, ..
+                        },
+                    ) => context_parameters.clone(),
                     _ => self
                         .recording
                         .ir
                         .referenced_module_properties
                         .get(property)
                         .map(|reference| reference.context_parameters.to_vec())
-                        .unwrap_or_default(),
+                        .ok_or_else(|| {
+                            self.declined("an interface property override with no recorded layout")
+                        })?,
                 }
             }
-            ResolvedPropertyOverrideTarget::External(getter) => self
-                .recording
-                .callables
-                .callable(*getter)
-                .map(|fact| {
-                    let params = fact.declared_params.as_deref().unwrap_or(&fact.params);
-                    params[..fact.context_count.min(params.len())].to_vec()
-                })
-                .unwrap_or_default(),
+            ResolvedPropertyOverrideTarget::External(getter) => {
+                let fact = self.recording.callables.callable(*getter).ok_or_else(|| {
+                    self.declined("a dependency's interface property with no getter fact")
+                })?;
+                let params = fact.declared_params.as_deref().unwrap_or(&fact.params);
+                params[..fact.context_count.min(params.len())].to_vec()
+            }
         };
         let (value, result) = accessor_types(ty, setter);
-        (
+        Ok((
             context.into_iter().chain(receiver).chain(value).collect(),
             result,
-        )
+        ))
     }
 
     /// The getter, or with `setter` the setter, `owner` implements the dependency property `edge`
@@ -1226,13 +1231,13 @@ impl FileRecorder<'_, '_, '_> {
             edge.declared_receiver,
             edge.declared_type,
             setter,
-        );
+        )?;
         let implemented_types = self.property_accessor_types(
             &edge.implementation,
             edge.implementation_receiver,
             edge.implementation_type,
             setter,
-        );
+        )?;
         let declared = member_signature(&declared_types.0, declared_types.1)?;
         let implemented = member_signature(&implemented_types.0, implemented_types.1)?;
         let placed = placed
