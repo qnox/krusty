@@ -7,8 +7,7 @@ use crate::features::LangFeatures;
 /// declaration-unit reparsing must project the feature set through this one operation; otherwise a
 /// Pass-2 unit can resolve the same source under different language rules than Pass 1.
 pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
-    file.language.assert_always_enabled = features.has("AssertionsAlwaysEnable");
-    file.language.assert_always_disabled = features.has("AssertionsAlwaysDisable");
+    file.assertions = features.assertions();
     file.language.explicit_context_arguments = features.has("ExplicitContextArguments");
     file.language.callable_references_to_contextual =
         features.has("CallableReferencesToContextual");

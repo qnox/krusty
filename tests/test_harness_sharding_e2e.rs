@@ -586,11 +586,14 @@ fn target_regressions_run_only_their_focused_module_after_provisioning() {
     assert_eq!(wasm.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(wasm.stdout).expect("Wasm stdout is UTF-8"),
-        "language=2.4.10 native=0 js=1 wasi=1 runner=unset\n\
+        format!(
+            "language=2.4.10 native=0 js=1 wasi=1 runner=unset\n\
          kotlin_box_wasm_conformance::\n--skip\n\
          kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance\n--skip\n\
          kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance\n\
-         --test-threads\n1\n"
+         --test-threads\n{}\n",
+            regression_threads()
+        )
     );
     fs::remove_dir_all(temp).expect("remove target ownership fixture");
 }

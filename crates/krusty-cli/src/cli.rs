@@ -180,8 +180,8 @@ pub struct Options {
     /// `-Xexplicit-api=strict|warning|disable`: kotlinc's explicit API mode, applied to the
     /// language settings once they are built.
     pub explicit_api: Option<String>,
-    /// `-Xassertions=always-enable|always-disable`: an unconditional `assert(...)` mode, applied to
-    /// the language settings once they are built.
+    /// `-Xassertions=always-enable|always-disable|legacy`: the `assert(...)` mode, applied to the
+    /// language settings once they are built.
     pub assertions: Option<String>,
     /// `-Xstring-concat=inline`: build every string concatenation with `StringBuilder`, whatever
     /// the JVM target.
@@ -1215,13 +1215,14 @@ mod tests {
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
     }
 
-    /// The unconditional assertion modes reach the frontend; the runtime-checked ones and an
-    /// unknown mode are refused, the unknown one in kotlinc's words.
+    /// The unconditional assertion modes and kotlinc's default `legacy` reach the frontend; the
+    /// `jvm` shape and an unknown mode are refused, the unknown one in kotlinc's words.
     #[test]
-    fn assertions_select_the_unconditional_modes_only() {
+    fn assertions_select_the_modes_krusty_emits() {
         for (mode, feature) in [
             ("always-enable", "AssertionsAlwaysEnable"),
             ("always-disable", "AssertionsAlwaysDisable"),
+            ("legacy", "AssertionsLegacy"),
         ] {
             let parsed = parse_args(&[&format!("-Xassertions={mode}"), "x.kt"]);
             assert_eq!(parsed.errors, Vec::<String>::new(), "{mode}");
