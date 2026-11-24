@@ -64,7 +64,6 @@ apiVersion/apiVersionUnsupported.args
 argFileCommonChecks/argfileWithEmptyArgument.args
 argFileCommonChecks/argfileWithUnfinishedQuoteAndEscape.args
 argumentPassedMultipleTimes.args
-callableReferenceToContextual.args
 compatqualDefault.args
 compatqualDisable.args
 compatqualEnable.args

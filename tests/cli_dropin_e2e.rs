@@ -872,3 +872,103 @@ fn allow_no_source_files_writes_the_empty_module_like_kotlinc() {
         );
     }
 }
+
+/// `-Xcallable-references-to-contextual` enables the language feature of the same name from 2.5: a
+/// reference to a function with context parameters becomes a function value that binds them from
+/// the enclosing scope. Without it, and in releases that do not know the argument, kotlinc reports
+/// the reference as unsupported. For the release under test krusty's status, diagnostics and
+/// output files equal kotlinc's in both configurations.
+#[test]
+fn callable_references_to_contextual_argument_compiles_as_kotlinc_does() {
+    let dir = common::scratch_dir().expect("allocate a scratch directory");
+    let source = dir.join("C.kt");
+    fs::write(
+        &source,
+        "context(s: String) fun foo() {}\n\nfun String.test() {\n    val ref: () -> Unit = ::foo\n}\n",
+    )
+    .expect("write the source");
+    let compile = |output: &str, flag: bool| {
+        let mut arguments = vec![
+            source.to_string_lossy().into_owned(),
+            "-d".to_string(),
+            dir.join(output).to_string_lossy().into_owned(),
+        ];
+        if flag {
+            arguments.push("-Xcallable-references-to-contextual".to_string());
+        }
+        arguments
+    };
+    // kotlinc quotes the source line and a caret under each located diagnostic; krusty's plain
+    // renderer does not, and both lines are indented where the diagnostics are not. The two spell
+    // the source path absolutely or relative to the working directory, and krusty ends an
+    // unsuccessful compilation with a count of its errors.
+    let absolute = source.to_string_lossy().into_owned();
+    let relative = source
+        .strip_prefix(std::env::current_dir().expect("working directory"))
+        .unwrap_or(&source)
+        .to_string_lossy()
+        .into_owned();
+    let ledger = |stderr: &str| {
+        stderr
+            .lines()
+            .filter(|line| !line.starts_with("    "))
+            .map(|line| {
+                line.replace(&absolute, "<path>")
+                    .replace(&relative, "<path>")
+            })
+            .collect::<Vec<_>>()
+    };
+    let enabled =
+        krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_5_0_RC);
+    for flag in [false, true] {
+        let tag = if flag { "with" } else { "without" };
+        let (code, stderr) = common::kotlinc_server::kotlinc_compile_unrecorded(&compile(
+            &format!("kotlinc-{tag}"),
+            flag,
+        ))
+        .expect("the reference kotlinc is available");
+        assert_eq!(
+            code,
+            i32::from(!(flag && enabled)),
+            "kotlinc {tag} the argument: {stderr}"
+        );
+        let krusty = Command::new(common::krusty_binary())
+            .args(compile(&format!("krusty-{tag}"), flag))
+            .output()
+            .expect("run krusty");
+        assert_eq!(
+            krusty.status.code(),
+            Some(code),
+            "krusty {tag} the argument"
+        );
+        let mut diagnostics = ledger(&String::from_utf8_lossy(&krusty.stderr));
+        if code != 0 {
+            let summary = diagnostics.pop().expect("krusty summarizes its errors");
+            assert_eq!(
+                summary,
+                format!(
+                    "krusty: {} error(s)",
+                    diagnostics
+                        .iter()
+                        .filter(|line| line.contains(": error:"))
+                        .count()
+                ),
+                "error count {tag} the argument"
+            );
+        }
+        assert_eq!(
+            diagnostics,
+            ledger(&stderr),
+            "diagnostics {tag} the argument"
+        );
+        if code == 0 {
+            // The classes are compared by name: the reference class's bytes are the byte-identity
+            // conformance lanes' concern, not this argument's.
+            assert_eq!(
+                output_file_ledger(&dir.join(format!("krusty-{tag}"))),
+                output_file_ledger(&dir.join(format!("kotlinc-{tag}"))),
+                "output files {tag} the argument"
+            );
+        }
+    }
+}
