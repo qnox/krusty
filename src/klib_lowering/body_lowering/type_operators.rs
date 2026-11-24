@@ -244,7 +244,10 @@ impl BodyLowering<'_> {
         let TyKind::Obj(_, arguments) = ty.non_null().kind() else {
             return false;
         };
-        !arguments.is_empty() && arguments.iter().all(|argument| *argument == Ty::nullable(Ty::obj("kotlin/Any")))
+        !arguments.is_empty()
+            && arguments
+                .iter()
+                .all(|argument| *argument == Ty::nullable(Ty::obj("kotlin/Any")))
     }
 
     /// `ty`'s classifier with every type argument a star projection.
