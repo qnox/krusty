@@ -365,6 +365,7 @@ pub fn lower_file(
         extension_tables: HashMap::default(),
         published_dependency_bridges: HashMap::default(),
         module: &mut module,
+        runtime_symbols,
         symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
         model: class_model,
         functions: Vec::new(),
@@ -561,6 +562,8 @@ fn extended_elsewhere(
 
 struct FileLowering<'a> {
     ir: &'a IrFile,
+    /// The global symbols the linked runtime defines.
+    runtime_symbols: &'a krusty::fx_hash::HashSet<String>,
     /// This file's stable module identity, used to distinguish a declaration copied into the
     /// module-reference table from one that is genuinely owned by another file.
     source: krusty::fir::SourceFileId,

@@ -597,6 +597,24 @@ fn wasm_scalar_instruction(operation: &str) -> Option<(ScalarInstruction, Scalar
     })
 }
 
+/// Whether the serialized function `function` is bound to a Kotlin/Native runtime entry by its
+/// `@GCUnsafeCall("callee")`: it has no body, and the one annotation names its symbol. This is the
+/// serialized-IR view of the declaration [`super::direct_c_calls::runtime_entry`] authenticates
+/// from metadata.
+pub(crate) fn is_runtime_entry_ir(
+    arena: &KlibIrArena,
+    function: &crate::metadata::klib_ir::tree::KlibIrFunction,
+) -> bool {
+    function.body.is_none()
+        && ir_string_annotation(
+            arena,
+            &function.base.annotations,
+            &["kotlin", "native", "internal"],
+            &["GCUnsafeCall", "<init>"],
+        )
+        .is_some()
+}
+
 fn ir_string_annotation<'a>(
     arena: &'a KlibIrArena,
     annotations: &'a [crate::metadata::klib_ir::tree::KlibIrAnnotation],
