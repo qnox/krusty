@@ -2,7 +2,9 @@
 # the upstream corpus directory. Later releases with no file of their own read this one.
 # Regenerate with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local run.
 allUnsignedTypes.kt
+enums.kt
 kt19853.kt
+kt20021.kt
 kt20717.kt
 newArray.kt
 nullableTypesSimple.kt
