@@ -552,6 +552,12 @@ impl BodyLowering<'_, '_, '_> {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.
                     Some(receiver) => {
+                        if let Some(krusty::libraries::CompilerIntrinsic::AtomicFieldAccess(
+                            operation,
+                        )) = realization.compiler_intrinsic
+                        {
+                            return self.atomic_property_access(operation, receiver, args);
+                        }
                         if let Some(realized) = self.source_class_member(
                             *target,
                             signature,

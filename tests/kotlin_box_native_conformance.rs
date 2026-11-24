@@ -1043,3 +1043,57 @@ fn native_string_comparison_runs_the_whole_portable_program_through_klib() {
         "the Native KLIB driver must run every comparison control"
     );
 }
+
+// PLATFORM-SPECIFIC: `kotlin.concurrent` field atomics on a property reference are Native-only.
+#[test]
+fn native_atomic_field_intrinsics_reach_companion_block_and_extension_storage() {
+    // The JVM oracle cannot compile `kotlin.concurrent` field atomics; the pinned corpus cases
+    // `volatile/intrinsicsOnCompanion{Blocks,Extensions}` are the kotlinc record for this program.
+    let source = r#"// LANGUAGE: +CompanionExtensions +CompanionBlocks
+// TARGET_BACKEND: NATIVE
+// DISABLE_IR_VISIBILITY_CHECKS: ANY
+
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+
+import kotlin.concurrent.*
+
+class Block {
+    companion {
+        @Volatile var counter: Int = 1
+        @Volatile var small: Byte = 1
+        @Volatile var name: String = "a"
+    }
+}
+
+class Extended
+
+companion @Volatile var Extended.counter: Long = 1L
+
+fun box(): String {
+    if (Block::counter.compareAndSetField(1, 2) != true) return "FAIL block set"
+    if (Block::counter.compareAndSetField(1, 3) != false) return "FAIL block set again"
+    if (Block::counter.getAndAddField(5) != 2) return "FAIL block add"
+    if (Block.counter != 7) return "FAIL block value"
+    if (Block::small.getAndAddField(2.toByte()) != 1.toByte()) return "FAIL byte add"
+    if (Block.small != 3.toByte()) return "FAIL byte value"
+    if (Block::name.getAndSetField("b") != "a") return "FAIL string swap"
+    if (Block.name != "b") return "FAIL string value"
+    if (Extended::counter.getAndAddField(4L) != 1L) return "FAIL extension add"
+    if (Extended.counter != 5L) return "FAIL extension value"
+    return "OK"
+}
+"#;
+    let lane = NativeLane {
+        target: Some(host().expect("Native KLIB/runtime is required for this test")),
+    };
+    let outcome = lane.compile_and_run(
+        &std::env::temp_dir(),
+        "nativeAtomicCompanionProperties",
+        &[(
+            "nativeAtomicCompanionProperties.kt".to_string(),
+            source.to_string(),
+        )],
+        source,
+    );
+    assert_eq!(outcome, Outcome::Pass);
+}

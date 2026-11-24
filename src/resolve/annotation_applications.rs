@@ -255,10 +255,12 @@ impl Checker<'_> {
             },
         );
         // The parser hoists a `companion { ... }` property as a classifier-associated extension,
-        // but an initialized/lateinit/explicit-field declaration still owns static storage on the
+        // (as is a `companion var C.x` extension), but an initialized/lateinit/explicit-field
+        // declaration still owns static storage on the
         // declaring classifier. Validate its `@field:` site from that semantic storage shape, not
         // from the parser-only receiver used to retain the association.
-        let companion_block_storage = property.is_companion_block_member
+        let companion_block_storage = (property.is_companion_block_member
+            || property.is_companion_extension)
             && (property.init.is_some()
                 || property.is_lateinit
                 || property.explicit_backing_field.is_some());

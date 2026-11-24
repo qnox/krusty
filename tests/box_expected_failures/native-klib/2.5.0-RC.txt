@@ -1960,8 +1960,6 @@ versionOverloads/suspend.kt
 volatile/atomicArrayIntrinsics.kt
 volatile/intrinsicWithInlineFunction.kt
 volatile/intrinsics.kt
-volatile/intrinsicsOnCompanionBlocks.kt
-volatile/intrinsicsOnCompanionExtensions.kt
 volatile/intrinsicsOnGlobal.kt
 volatile/messagePassing.kt
 when/enumOptimization/bigEnum.kt
