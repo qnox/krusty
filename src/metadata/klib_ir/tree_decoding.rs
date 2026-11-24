@@ -226,6 +226,17 @@ impl KlibIrModuleTrees {
             .map(|at| self.class_at(*at))
     }
 
+    /// Every public class, outside enum entries, whose paths are `path`.
+    pub(crate) fn public_classes_at(
+        &self,
+        path: &crate::metadata::id_signature::KlibDeclarationPath,
+    ) -> impl Iterator<Item = (&KlibIrArena, &KlibIrClass)> {
+        self.classes
+            .public_at(path)
+            .iter()
+            .map(|at| self.class_at(*at))
+    }
+
     /// Every public class, outside enum entries, whose paths are `member`'s owner path
     /// ([`KlibPublicIdSignature::owner_path`]).
     pub(crate) fn classes_owning_member(

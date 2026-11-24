@@ -278,25 +278,20 @@ impl KlibDeclarationBodies {
         body_module: &str,
         signature: &KlibPublicIdSignature,
     ) -> Result<Option<(&KlibIrArena, &KlibIrClass)>, ()> {
-        let wanted = KlibIrSignature::Public(signature.clone());
+        let path = signature.declaration_path();
         let mut found = None;
         for module in self.body_provider_modules(body_module) {
             let Some(&library) = self.modules.get(&module) else {
                 continue;
             };
-            for tree in self.libraries[library].trees() {
-                let mut pending = vec![&tree.declaration];
-                while let Some(declaration) = pending.pop() {
-                    let KlibIrMember::Class(id) = declaration else {
-                        continue;
-                    };
-                    let class = tree.arena.class(*id);
-                    pending.extend(class.members.iter());
-                    if class.base.symbol.signature == wanted
-                        && found.replace((&tree.arena, class)).is_some()
-                    {
-                        return Err(());
-                    }
+            for class in self.libraries[library]
+                .public_classes_at(&path)
+                .filter(|(_, class)| {
+                    matches!(&class.base.symbol.signature, KlibIrSignature::Public(own) if own == signature)
+                })
+            {
+                if found.replace(class).is_some() {
+                    return Err(());
                 }
             }
         }

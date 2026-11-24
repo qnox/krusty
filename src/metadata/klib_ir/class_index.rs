@@ -119,6 +119,11 @@ impl KlibIrClassIndex {
         self.by_enum_entry.get(signature).map_or(&[], Vec::as_slice)
     }
 
+    /// Every public class outside an enum entry whose paths are `path`.
+    pub(super) fn public_at(&self, path: &KlibDeclarationPath) -> &[ClassAt] {
+        self.by_owner_path.get(path).map_or(&[], Vec::as_slice)
+    }
+
     pub(super) fn owning_member(&self, member: &KlibPublicIdSignature) -> &[ClassAt] {
         member
             .owner_path()
@@ -367,6 +372,30 @@ mod tests {
         assert_eq!(
             index.declaring_enum_entry(&KlibIrSignature::Public(class_path(&["Color", "RED"]))),
             [color]
+        );
+    }
+
+    #[test]
+    fn a_public_class_is_found_by_its_paths_outside_every_enum_entry() {
+        let (tree, _, _) = tree();
+        let index = KlibIrClassIndex::of(std::slice::from_ref(&tree));
+        let nested = at(class_id(&tree, class_path(&["Color", "Nested"])));
+        let color = at(class_id(&tree, class_path(&["Color"])));
+        assert_eq!(
+            index.public_at(&class_path(&["Color", "Nested"]).declaration_path()),
+            [nested]
+        );
+        assert_eq!(
+            index.public_at(&class_path(&["Color"]).declaration_path()),
+            [color]
+        );
+        assert_eq!(
+            index.public_at(&class_path(&["Color", "RED"]).declaration_path()),
+            []
+        );
+        assert_eq!(
+            index.public_at(&class_path(&["Color", "RED", "Inner"]).declaration_path()),
+            []
         );
     }
 
