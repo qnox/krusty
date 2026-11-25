@@ -917,7 +917,7 @@ fn superclass_chain(
             for &function_id in &source.methods {
                 let function = &ir.functions[function_id as usize];
                 if function.is_static
-                    || ir.suspend_funs.contains(&function_id)
+                    || !may_implement_collection_member(ir.suspend_funs.contains(&function_id))
                     || !inherited_along(ir.method_visibility(function_id), same_package_path)
                 {
                     continue;
@@ -1060,19 +1060,21 @@ fn superclass_chain(
                 // does not tell. A generated member has no declaration and only its descriptor.
                 // A suspend declaration's continuation is a real parameter its metadata signature
                 // omits, so it keeps its physical key and implements no non-suspend member.
-                let declaration =
-                    (is_kotlin && candidates.iter().any(|stub| stub.name == method.name))
-                        .then(|| {
-                            classpath.class_members(&info).class_functions.iter().find(
-                                |declaration| {
-                                    declaration.jvm_name == method.name
-                                        && declaration.jvm_desc == Some(method.descriptor.as_str())
-                                },
-                            )
+                let declaration = (is_kotlin
+                    && candidates.iter().any(|stub| stub.name == method.name))
+                .then(|| {
+                    classpath
+                        .class_members(&info)
+                        .class_functions
+                        .iter()
+                        .find(|declaration| {
+                            declaration.jvm_name == method.name
+                                && declaration.jvm_desc == Some(method.descriptor.as_str())
                         })
-                        .flatten()
-                        .filter(|declaration| !declaration.is_suspend())
-                        .and_then(|declaration| declaration.generic_sig.as_ref());
+                })
+                .flatten()
+                .filter(|declaration| may_implement_collection_member(declaration.is_suspend()))
+                .and_then(|declaration| declaration.generic_sig.as_ref());
                 let (key, result) = match declaration {
                     Some(signature) => {
                         let bindings = superclass_bindings(
@@ -1152,6 +1154,13 @@ pub(super) fn classifier_closure(
     closure
 }
 
+/// Whether a member can implement a collection declaration of the same name and parameters. A
+/// `suspend` member takes a continuation the declaration does not, so it never does: this one rule
+/// serves the class's own members, a source or dependency superclass's, and interface defaults.
+fn may_implement_collection_member(suspend: bool) -> bool {
+    !suspend
+}
+
 /// kotlinc's effective-override check: the class's own members, whatever their modality, and the
 /// non-abstract members it inherits from its superclasses and interface defaults. A `suspend`
 /// member never overrides a collection member: it takes a continuation the declaration does not.
@@ -1167,7 +1176,7 @@ fn implemented_members(
     for (function_id, function) in class
         .methods
         .iter()
-        .filter(|function| !ir.suspend_funs.contains(function))
+        .filter(|function| may_implement_collection_member(ir.suspend_funs.contains(function)))
         .map(|&function| (function, &ir.functions[function as usize]))
         .filter(|(_, function)| !function.is_static)
     {
@@ -1195,7 +1204,7 @@ fn implemented_members(
         .get(&class.fq_name_id())
         .into_iter()
         .flatten()
-        .filter(|default| !default.suspend)
+        .filter(|default| may_implement_collection_member(default.suspend))
     {
         if let krusty::fir::InheritedMemberName::Function(name) = &default.name {
             implemented
