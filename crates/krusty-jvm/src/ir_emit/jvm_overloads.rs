@@ -108,6 +108,24 @@ pub(super) fn kept_signature(
     Some(parts.render()).filter(|signature| signature != descriptor)
 }
 
+/// Emit the overloads of the facade functions `declared` collects, in declaration order, once every
+/// member the file declares is out. kotlinc generates them ahead of the launcher bridge.
+pub(super) fn emit_pending_facade_overloads(
+    ir: &IrFile,
+    declared: &mut Vec<u32>,
+    facade: &str,
+    cw: &mut ClassWriter,
+    env: &EmitEnv,
+) {
+    let slot = MethodSlot {
+        static_owner: StaticOwner::Facade,
+        instance: false,
+    };
+    for function in declared.drain(..) {
+        emit_function_overloads(ir, function, slot, facade, cw, env);
+    }
+}
+
 /// Emit the overloads of declared function `fid`, which is placed as `slot` says in `owner`.
 pub(super) fn emit_function_overloads(
     ir: &IrFile,

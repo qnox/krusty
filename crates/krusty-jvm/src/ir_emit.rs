@@ -1271,7 +1271,7 @@ fn emit_pass(
         emitted.then_some(i)
     });
     let facade_functions: Vec<u32> = facade_functions.collect();
-    let main_bridge = main_bridge::MainBridge::plan(ir, env, &facade_functions);
+    let mut main_bridge = main_bridge::PendingMainBridge::plan(ir, env, &facade_functions);
     let mut overloaded = Vec::new();
     for member in member_schedule::facade_source_ordered_members(ir, facade_functions.into_iter()) {
         let i = match member {
@@ -1289,6 +1289,9 @@ fn emit_pass(
                 continue;
             }
         };
+        main_bridge.before_function(ir, i as u32, facade, &mut cw, |cw| {
+            jvm_overloads::emit_pending_facade_overloads(ir, &mut overloaded, facade, cw, env)
+        });
         let f = &ir.functions[i];
         let rescued = lambdas.rescued.contains(&(i as u32));
         if rescued {
@@ -1330,12 +1333,6 @@ fn emit_pass(
         );
         facade_has_method = true;
         overloaded.push(i as u32);
-        if let Some(bridge) = main_bridge
-            .as_ref()
-            .filter(|bridge| bridge.follows(i as u32))
-        {
-            bridge.emit(ir, facade, &mut cw);
-        }
         // A top-level function (or extension) with parameter defaults gets kotlinc's
         // `foo$default(params…, int mask, Object marker)` synthetic (dispatches to the real method,
         // filling the masked slots from the defaults), so an omitted-argument caller — same-file or
@@ -1371,14 +1368,11 @@ fn emit_pass(
             );
         }
     }
+    main_bridge.finish(ir, facade, &mut cw, |cw| {
+        jvm_overloads::emit_pending_facade_overloads(ir, &mut overloaded, facade, cw, env)
+    });
     // `@JvmOverloads` overloads follow every member the file declares.
-    for function in overloaded {
-        let slot = MethodSlot {
-            static_owner: StaticOwner::Facade,
-            instance: false,
-        };
-        jvm_overloads::emit_function_overloads(ir, function, slot, facade, &mut cw, env);
-    }
+    jvm_overloads::emit_pending_facade_overloads(ir, &mut overloaded, facade, &mut cw, env);
     // A multifile facade forwards to the part's declared members and their `$default` stubs,
     // never to the synthetic accessors emitted below.
     if env.multifile_facade.is_some() {
