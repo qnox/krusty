@@ -75,6 +75,8 @@ pub struct JvmCompilationInputInventory {
     /// The release whose view of `jdk_modules` the compilation reads when that root is the JDK's
     /// `lib/ct.sym` (see [`JdkApi::for_release`]); `None` for the JDK's own API.
     ct_sym_release: Option<u8>,
+    /// The selected pre-jimage JDK's other runtime archives (see [`JdkApi`]).
+    jdk_companions: Vec<PathBuf>,
     common_expectation_klib: Option<PathBuf>,
 }
 
@@ -84,14 +86,21 @@ pub struct JvmCompilationInputInventory {
 pub struct JdkApi {
     root: PathBuf,
     ct_sym_release: Option<u8>,
+    /// The runtime archives a pre-jimage JDK keeps beside `rt.jar` (`jre/lib/*.jar` and
+    /// `jre/lib/ext/*.jar`), which kotlinc reads as part of the JDK's classes. Empty for a JDK
+    /// with a module image and for a `ct.sym` release view.
+    companions: Vec<PathBuf>,
 }
 
 impl JdkApi {
     /// The selected JDK's own API: its module image, or `rt.jar` before JDK 9.
     fn own(jdk_home: Option<&Path>) -> Option<Self> {
-        selected_jdk_modules(jdk_home).map(|root| JdkApi {
+        let root = selected_jdk_modules(jdk_home)?;
+        let companions = pre_jimage_companions(&root);
+        Some(JdkApi {
             root,
             ct_sym_release: None,
+            companions,
         })
     }
 
@@ -158,6 +167,7 @@ impl JdkApi {
             Some(release) => Ok(Some(JdkApi {
                 root: symbols,
                 ct_sym_release: Some(release),
+                companions: Vec::new(),
             })),
             None => Err(unavailable(format!(
                 "'-Xjdk-release={release}' option is not supported by used JDK: {}",
@@ -185,11 +195,19 @@ impl JvmCompilationInputInventory {
     /// [`JdkApi::for_release`] selected.
     pub fn from_explicit_classpath_and_jdk_api(classpath: &[PathBuf], api: Option<JdkApi>) -> Self {
         let mut effective_classpath = classpath.to_vec();
-        effective_classpath.extend(api.iter().map(|api| api.root.clone()));
+        if let Some(api) = &api {
+            effective_classpath.push(api.root.clone());
+            effective_classpath.extend(api.companions.iter().cloned());
+        }
         let ct_sym_release = api.as_ref().and_then(|api| api.ct_sym_release);
+        let companions = api
+            .as_ref()
+            .map(|api| api.companions.clone())
+            .unwrap_or_default();
         let mut inventory =
             Self::from_classpath_and_jdk(effective_classpath, api.map(|api| api.root));
         inventory.ct_sym_release = ct_sym_release;
+        inventory.jdk_companions = companions;
         inventory
     }
 
@@ -214,6 +232,7 @@ impl JvmCompilationInputInventory {
             effective_classpath,
             jdk_modules,
             ct_sym_release: None,
+            jdk_companions: Vec::new(),
             common_expectation_klib,
         }
     }
@@ -243,6 +262,7 @@ impl JvmCompilationInputInventory {
     pub fn implicit_files(&self) -> impl Iterator<Item = &Path> {
         self.jdk_modules()
             .into_iter()
+            .chain(self.jdk_companions.iter().map(PathBuf::as_path))
             .chain(self.common_expectation_klib())
     }
 }
@@ -284,6 +304,37 @@ pub(crate) fn selected_jdk_modules(jdk_home: Option<&Path>) -> Option<PathBuf> {
     }
     let rt_jar = base.join("jre").join("lib").join("rt.jar");
     rt_jar.is_file().then_some(rt_jar)
+}
+
+/// The runtime archives of a pre-jimage JDK besides `rt.jar`: the other jars of `jre/lib`, then
+/// those of `jre/lib/ext`, each directory in file-name order. Empty when `root` is not a
+/// `jre/lib/rt.jar`.
+fn pre_jimage_companions(root: &Path) -> Vec<PathBuf> {
+    if root.file_name().is_none_or(|name| name != "rt.jar") {
+        return Vec::new();
+    }
+    let Some(lib) = root.parent() else {
+        return Vec::new();
+    };
+    let jars_in = |directory: PathBuf| {
+        let mut jars: Vec<PathBuf> = std::fs::read_dir(directory)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("jar"))
+            })
+            .collect();
+        jars.sort();
+        jars
+    };
+    let mut companions = jars_in(lib.to_path_buf());
+    companions.retain(|path| path != root);
+    companions.extend(jars_in(lib.join("ext")));
+    companions
 }
 
 #[cfg(test)]
@@ -372,6 +423,50 @@ mod tests {
             .expect("start entry");
         std::io::Write::write_all(&mut archive, bytes).expect("write entry");
         archive.finish().expect("finish archive");
+    }
+
+    /// kotlinc reads the other runtime archives of a JDK 8 home (`charsets.jar`, `jce.jar`, the
+    /// `ext` jars) with `rt.jar`: `jre/lib` first, then `jre/lib/ext`, each in file-name order. A
+    /// JDK with a module image has none, and neither has a `ct.sym` release view.
+    #[test]
+    fn a_pre_jimage_jdk_home_reads_its_other_runtime_archives() {
+        let root = std::env::temp_dir().join(format!(
+            "krusty-jvm-jdk8-companions-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let lib = root.join("jre/lib");
+        std::fs::create_dir_all(lib.join("ext")).expect("mkdir");
+        for name in [
+            "rt.jar",
+            "jce.jar",
+            "charsets.jar",
+            "ext/sunjce_provider.jar",
+            "ext/dnsns.jar",
+            "ext/meta-index",
+            "classlist",
+        ] {
+            std::fs::write(lib.join(name), b"x").expect("write");
+        }
+        let inventory =
+            JvmCompilationInputInventory::from_explicit_classpath_and_jdk(&[], Some(&root));
+        let expected = [
+            "rt.jar",
+            "charsets.jar",
+            "jce.jar",
+            "ext/dnsns.jar",
+            "ext/sunjce_provider.jar",
+        ]
+        .map(|name| lib.join(name));
+        assert_eq!(inventory.effective_classpath(), expected);
+        assert_eq!(
+            inventory.implicit_files().collect::<Vec<_>>(),
+            expected.iter().map(PathBuf::as_path).collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A JDK 8 home has no `lib/modules` jimage; its bootclasspath is `jre/lib/rt.jar`. The
@@ -543,6 +638,7 @@ mod tests {
         let own = JdkApi {
             root: modules.clone(),
             ct_sym_release: None,
+            companions: Vec::new(),
         };
         assert_eq!(
             JdkApi::for_release(Some(&root), None),
@@ -555,6 +651,7 @@ mod tests {
                 Ok(Some(JdkApi {
                     root: symbols.clone(),
                     ct_sym_release: Some(release as u8),
+                    companions: Vec::new(),
                 })),
                 "release {release}"
             );

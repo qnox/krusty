@@ -683,11 +683,14 @@ jobs:
           toolchain: 1.100.0
       - *just-on-path
       - *install-just
-      # The last version listed stays JAVA_HOME, as in the ci job.
+      # The last version listed stays JAVA_HOME, as in the ci job. The JDK 8 home is the reference
+      # for the pre-module-image runtime archives, which tests/jdk8_runtime_archives_e2e.rs finds
+      # through JAVA_HOME_8_X64.
       - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           java-version: |
+            8.0.512+9
             21.0.13+0.3.1
             25.0.5+0.3.1
       # The Wasm e2e programs run under Node.js, which runs WasmGC without flags from version 22.

@@ -76,7 +76,6 @@ diagnosticTests/classAndFileClassClash.args
 diagnosticTests/classAndOtherFileClassClash.args
 diagnosticTests/classAndPartClash.args
 diagnosticTests/classAndTraitClash.args
-diagnosticTests/classpath.args
 diagnosticTests/conflictingJvmDeclarationsK2.args
 diagnosticTests/conflictingOverloads.args
 diagnosticTests/conflictingProjection.args
