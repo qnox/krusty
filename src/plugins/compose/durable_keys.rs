@@ -47,11 +47,17 @@ pub(super) struct KeyPath<'a> {
     pub package: &'a str,
     /// The file's simple name (`a.kt`).
     pub file_name: &'a str,
+    /// The path of the composable lambda this scope is the body of, which the declarations in the
+    /// body extend: a lambda nested in a lambda is keyed under the outer lambda's whole path.
+    pub within: Option<&'a str>,
 }
 
 impl KeyPath<'_> {
     /// The key string the transformer hashes.
     pub(super) fn path(&self) -> String {
+        if let Some(within) = self.within {
+            return within.to_string();
+        }
         format!(
             "fun-{}/pkg-{}/file-{}",
             self.signature, self.package, self.file_name
@@ -74,14 +80,22 @@ impl KeyPath<'_> {
         sibling: u32,
         argument: u32,
     ) -> i32 {
+        java_string_hash(&self.lambda_path(lambda, callee, sibling, argument))
+    }
+
+    /// The path `lambda_key` hashes, which the declarations in the lambda extend.
+    pub(super) fn lambda_path(
+        &self,
+        lambda: &str,
+        callee: &str,
+        sibling: u32,
+        argument: u32,
+    ) -> String {
         let call = match sibling {
             0 => format!("call-{callee}"),
             n => format!("call-{callee}:{n}"),
         };
-        java_string_hash(&format!(
-            "fun-{lambda}/arg-{argument}/{call}/{}",
-            self.path()
-        ))
+        format!("fun-{lambda}/arg-{argument}/{call}/{}", self.path())
     }
 }
 
@@ -97,6 +111,7 @@ mod tests {
                 signature,
                 package,
                 file_name,
+                within: None,
             }
             .key()
         };
@@ -113,6 +128,7 @@ mod tests {
             signature: "Card(String)Unit",
             package: "probe",
             file_name: "Probe.kt",
+            within: None,
         };
         assert_eq!(
             card.lambda_key("$anonymous$()Unit", "Box", 0, 0),
@@ -132,6 +148,7 @@ mod tests {
             signature: "Screen()Unit",
             package: "screens",
             file_name: "receiverLambdas.kt",
+            within: None,
         };
         assert_eq!(
             screen.lambda_key("String.$anonymous$()Unit", "Box", 0, 0),

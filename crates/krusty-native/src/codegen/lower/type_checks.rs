@@ -45,6 +45,7 @@ pub(super) fn is_runtime_constructed(file: &FileLowering<'_>, internal: TypeName
     super::super::super::intrinsics::throwable_descriptor(internal).is_some()
         || super::classifier_shapes::is_string_builder(internal)
         || super::classifier_shapes::is_pair(internal)
+        || super::classifier_shapes::is_indexed_value(internal)
         || file.standard_collection_implementation(internal).is_some()
 }
 
@@ -879,6 +880,31 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if super::classifier_shapes::is_pair(internal) {
             return match args {
                 [first, second] => self.pair_of(*first, *second),
+                _ => Err(declined!("this constructor of `{name}`")),
+            };
+        }
+        // `IndexedValue(index, value)`, the carrier the runtime builds for each step of a
+        // `withIndex` walk: a library body that constructs one reaches the same object.
+        if super::classifier_shapes::is_indexed_value(internal) {
+            return match args {
+                [index, value] => {
+                    let Some(index) = self.coerce(*index, Ty::Int)? else {
+                        return Ok(None);
+                    };
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    let value = self.reference(*value)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call(
+                        "kt_indexed_value",
+                        &[Ty::Int, any()],
+                        any(),
+                        &[index, value],
+                    )
+                }
                 _ => Err(declined!("this constructor of `{name}`")),
             };
         }
