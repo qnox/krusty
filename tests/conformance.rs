@@ -58,7 +58,7 @@ mod kotlinc_argument_conformance;
 mod krusty_case_workers;
 #[path = "plugin_box_corpus.rs"]
 mod plugin_box_corpus;
-#[path = "common/reference_targets/invocation.rs"]
+#[path = "common/reference_targets/recorded_library.rs"]
 mod reference_invocation_support;
 #[path = "common/reference_recording.rs"]
 mod reference_recording_support;

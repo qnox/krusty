@@ -907,7 +907,7 @@ impl<'u, 's> Linker<'u, 's> {
                             body,
                             Some(selected),
                             implemented,
-                        );
+                        )?;
                         continue;
                     }
                     let (arena, function) =
@@ -919,7 +919,7 @@ impl<'u, 's> Linker<'u, 's> {
                     self.declare(ir, body, Some(selected), arena, function)?;
                 }
             }
-            self.record_inherited_implementation(ir, owner, body, None, implemented);
+            self.record_inherited_implementation(ir, owner, body, None, implemented)?;
         }
         Ok(())
     }
@@ -937,7 +937,10 @@ impl<'u, 's> Linker<'u, 's> {
             KlibDeclarationSignature::Accessor(signature) => {
                 KlibIrSignature::Accessor(signature.clone())
             }
-            _ => return None,
+            KlibDeclarationSignature::FileLocal { file, slot } => KlibIrSignature::FileLocal {
+                file: *file,
+                slot: *slot,
+            },
         };
         self.local_functions
             .get(&super::super::same_library_class::LocalIdentity {
@@ -949,7 +952,7 @@ impl<'u, 's> Linker<'u, 's> {
 
     /// Record that `owner` implements each interface declaration of `implemented` with the
     /// inherited member `body`, unless an edge already names that declaration. A body this unit
-    /// did not declare, or a declaration outside the program's closure, records nothing.
+    /// did not declare, or a declaration with no registered provider handle, records nothing.
     pub(super) fn record_inherited_implementation(
         &self,
         ir: &mut IrFile,
@@ -957,13 +960,13 @@ impl<'u, 's> Linker<'u, 's> {
         body: &KlibDependencyCallable,
         realized: Option<KlibBodyCallable<'s>>,
         implemented: &[KlibDependencyCallable],
-    ) {
+    ) -> Result<(), KlibBodyDeclineReason> {
         // The implementation's own method when this unit declared it, and otherwise the
         // declaration the earlier unit exported (`realized`), which the edge names by callable.
         let (method, name, params, result) = match realized {
             None => {
                 let Some(method) = self.declared_member(body) else {
-                    return;
+                    return Ok(());
                 };
                 let function = &ir.functions[method as usize];
                 (
@@ -997,8 +1000,17 @@ impl<'u, 's> Linker<'u, 's> {
             else {
                 continue;
             };
-            let Some(target) = self.sources.callees.reference_target(declared) else {
-                continue;
+            // The declaration's provider handle, which a source call of it selects even when no
+            // body of the closure calls it (`ListIterator.next` on a list iterator inheriting
+            // `next` from its superclass), as an own override's edge names it.
+            let target = match super::local_class::registered_override_handle(
+                declared,
+                self.sources.externals,
+                self.sources.declarations,
+            ) {
+                Ok(handle) => handle.target(),
+                Err(KlibBodyDeclineReason::UnsupportedDeclaration(_)) => continue,
+                Err(reason) => return Err(reason),
             };
             // A member of a class private to its library has no provider handle of its own; the
             // edge then names the interface declaration it implements, as an installed class's
@@ -1040,6 +1052,7 @@ impl<'u, 's> Linker<'u, 's> {
                 depth: 0,
             });
         }
+        Ok(())
     }
 
     /// Declare `function`, a member dispatch on an instance of the materialized class `member`
