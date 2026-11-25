@@ -1,0 +1,125 @@
+//! PLATFORM-SPECIFIC: the KLIB form kotlinc-native serializes for an atomicfu library.
+//!
+//! The atomicfu compiler plugin rewrites an inline extension of an atomic into a helper that takes
+//! a lambda returning a reference to the atomic's field, and every operation on the atomic in its
+//! body into the Native field intrinsic on that lambda's result. A producer that inlines before it
+//! serializes leaves each caller holding the helper's inlined body, in which the lambda's
+//! invocation is a returnable block returning the property reference. The program itself is
+//! portable; the JVM oracle runs it against the atomicfu runtime before the Native consumer runs
+//! the dependency's serialized bodies.
+
+use crate::common;
+use krusty::diag::DiagSink;
+use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
+
+const LIBRARY: &str = include_str!("fixtures/klib_atomicfu/Library.kt");
+const CONSUMER: &str = include_str!("fixtures/klib_atomicfu/Consumer.kt");
+
+#[test]
+fn dependency_atomicfu_helpers_update_the_field_their_inlined_lambda_references() {
+    let Some(root) = std::env::var_os("KRUSTY_KOTLIN_NATIVE").map(std::path::PathBuf::from) else {
+        assert!(
+            std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
+            "Native distribution required"
+        );
+        return;
+    };
+    let runtime =
+        krusty::toolchain::atomicfu_runtime_jar().expect("the atomicfu runtime is provisioned");
+    assert_eq!(
+        common::kotlinc_box_files_result_with_classpath(
+            &[("Library.kt", LIBRARY), ("Consumer.kt", CONSUMER)],
+            "fixture.ConsumerKt",
+            &[runtime],
+        ),
+        "OK",
+        "unexpected kotlinc result"
+    );
+
+    let plugin = krusty::toolchain::atomicfu_compiler_plugin_jar()
+        .expect("the atomicfu compiler plugin is provisioned");
+    let atomicfu =
+        krusty::toolchain::atomicfu_klib(krusty::compilation_target::CompilationTarget::Native)
+            .unwrap_or_else(|reason| panic!("{reason}"))
+            .expect("Native has an atomicfu runtime KLIB");
+    let work = common::scratch_dir().expect("allocate atomicfu producer directory");
+    let source = work.join("Library.kt");
+    std::fs::write(&source, LIBRARY).unwrap();
+    let library = work.join("counter");
+    let output = std::process::Command::new(root.join("bin/kotlinc-native"))
+        .arg(format!("-Xplugin={}", plugin.display()))
+        .arg("-l")
+        .arg(&atomicfu)
+        .args(["-p", "library", "-nopack", "-o"])
+        .arg(&library)
+        .arg(&source)
+        .output()
+        .expect("run exact Native KLIB producer");
+    assert!(
+        output.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let libraries = KlibLibraries::open(&[
+        KlibLibraryInput::platform_stdlib(
+            root.join("klib/common/stdlib"),
+            KlibStdlibSemantics::Native,
+        ),
+        KlibLibraryInput::dependency(atomicfu),
+        KlibLibraryInput::dependency(library),
+    ])
+    .expect("read the atomicfu dependency declarations");
+    let mut diags = DiagSink::new();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &[krusty::source::SourceInput::kotlin(CONSUMER).with_file_stem("Consumer")],
+        krusty::frontend::PlatformProvider::new(
+            krusty::compilation_target::CompilationTarget::Native,
+            Box::new(libraries.for_compilation()),
+        ),
+        &krusty::features::LangFeatures::new(),
+        &mut diags,
+    );
+    let target = krusty_native::NativeTarget::host().expect("host Native target");
+    let backend = krusty_native::CraneliftBackend::new(target)
+        .with_entry(krusty_native::Entry::Box)
+        .verified();
+    let artifacts = krusty::compiler::emit_analyzed(
+        analysis,
+        &["Consumer".to_owned()],
+        &backend,
+        "consumer",
+        &mut diags,
+    );
+    assert_eq!(
+        diags
+            .diags
+            .iter()
+            .map(|diag| diag.msg.as_str())
+            .collect::<Vec<_>>(),
+        Vec::<&str>::new()
+    );
+    let objects = artifacts
+        .into_iter()
+        .filter_map(|(name, bytes)| name.ends_with(".o").then_some(bytes))
+        .collect::<Vec<_>>();
+    assert!(!objects.is_empty());
+    let image = krusty_native::link_program(
+        &objects.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        target,
+    )
+    .unwrap();
+    let output = common::native_backend::run_native_image(&image, "AtomicfuConsumer", &[], &[])
+        .unwrap_or_else(|failure| panic!("Native consumer: {}", failure.as_failure()));
+    assert!(
+        output.status.success(),
+        "Native consumer: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("{}OK", krusty::backend::BOX_RESULT_FRAME)
+    );
+    assert_eq!(output.stderr, Vec::<u8>::new());
+    std::fs::remove_dir_all(work).unwrap();
+}
