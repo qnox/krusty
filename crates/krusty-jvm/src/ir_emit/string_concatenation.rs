@@ -4,6 +4,7 @@
 //! semantic values to the physical reference slots those shapes consume.
 
 use super::*;
+use krusty::kt_string::KtString;
 use krusty::types::TyKind;
 
 impl Emitter<'_> {
@@ -199,19 +200,24 @@ impl Emitter<'_> {
         }
     }
 
-    /// kotlinc compiles a multi-part string template (and a synthesized `toString`) to a single
+    /// kotlinc compiles a multi-part string template (and a synthesized `toString`) to
     /// `invokedynamic makeConcatWithConstants` when targeting JVM 9+ — a `StringConcatFactory`
-    /// bootstrap with a recipe string, `` marking each dynamic argument and literal text inline.
-    /// Below JVM 9 (and for a part that spills the operand stack) returns `false` so the caller
-    /// keeps the `StringBuilder` form.
+    /// bootstrap with a recipe string, `\u{1}` marking each dynamic argument and literal text
+    /// inline — or, under `-Xstring-concat=indy`, to `makeConcat` with every part an argument.
+    /// Below JVM 9 (and for a part that spills the operand stack, or a recipe that would overflow a
+    /// constant) returns `false` so the caller keeps the `StringBuilder` form.
     fn try_emit_indy_concat(&mut self, parts: &[u32], code: &mut CodeBuilder) -> bool {
         const TAG_ARG: char = '\u{1}';
         const TAG_CONST: char = '\u{2}';
+        // The bootstrap takes at most 200 argument slots (`long` and `double` take two).
+        const MAX_ARGUMENT_SLOTS: i32 = 200;
         // JVM 9 = major 53; kotlinc's `-Xstring-concat` default flips to `indy-with-constants` there,
         // unless the invocation selects `inline`.
-        if self.cw.major() < 53 || self.inline_string_concat {
+        let mode = self.string_concat;
+        if self.cw.major() < 53 || mode == StringConcatMode::Inline {
             return false;
         }
+        let with_constants = mode == StringConcatMode::IndyWithConstants;
         // A branchy part (`v == null ? "null" : …`) merges with the earlier arguments on the
         // stack, as kotlinc's does. One that cannot carry the stack at all (a `try`, a branching
         // spliced inline) is spilled first, which only the `StringBuilder` form models.
@@ -231,51 +237,97 @@ impl Emitter<'_> {
             return false;
         }
         // The recipe is itself a string CONSTANT, so it carries whatever code units the literal
-        // parts hold — including an unpaired surrogate, which no Rust `String` can spell.
-        let mut recipe = KtStringBuf::new();
-        let mut arg_parts: Vec<u32> = Vec::new();
+        // parts hold — including an unpaired surrogate, which no Rust `String` can spell. A literal
+        // carrying a recipe tag would have to move to the constants array — rare; fall back rather
+        // than encode it wrong. Literal text too long for one constant keeps the `StringBuilder`
+        // form, whose operands are separate literals, as kotlinc's does (KT-47917).
+        let mut recipe_bytes = 0usize;
         for &part in parts {
             if let IrExpr::Const(IrConst::String(string)) = self.ir.expr(part) {
-                // A literal carrying a recipe tag would have to move to the constants array — rare;
-                // fall back rather than encode it wrong.
-                if string
-                    .units()
-                    .any(|unit| unit == TAG_ARG as u16 || unit == TAG_CONST as u16)
-                {
-                    return false;
+                if with_constants {
+                    if string
+                        .units()
+                        .any(|unit| unit == TAG_ARG as u16 || unit == TAG_CONST as u16)
+                    {
+                        return false;
+                    }
+                    recipe_bytes += string.units().map(modified_utf8_len).sum::<usize>();
                 }
-                recipe.push_kt(string);
             } else {
-                recipe.push(TAG_ARG);
-                arg_parts.push(part);
+                recipe_bytes += 1;
             }
         }
-        let recipe = recipe.finish();
+        if recipe_bytes > usize::from(u16::MAX) {
+            return false;
+        }
         // kotlinc interns constants in instruction order: the operands' entries first, then the
         // call site's, with the recipe (the bootstrap's static argument) before the bootstrap
-        // method handle.
+        // method handle. A template of more than 200 argument slots is built in chunks, each
+        // chunk's string leading the next.
+        let mut recipe = KtStringBuf::new();
         let mut arg_descs = String::new();
         let mut arg_words = 0i32;
-        for &part in &arg_parts {
+        for &part in parts {
+            if with_constants {
+                if let IrExpr::Const(IrConst::String(string)) = self.ir.expr(part) {
+                    recipe.push_kt(string);
+                    continue;
+                }
+            }
+            let words = slot_words(self.value_ty(part)) as i32;
+            if arg_words > 0 && arg_words + words > MAX_ARGUMENT_SLOTS {
+                self.emit_indy_concat_call(mode, &recipe.finish(), &arg_descs, arg_words, code);
+                recipe = KtStringBuf::new();
+                recipe.push(TAG_ARG);
+                arg_descs = "Ljava/lang/String;".to_string();
+                arg_words = 1;
+            }
             let ty = self.emit_indy_concat_operand(part, code);
+            recipe.push(TAG_ARG);
             arg_descs.push_str(&type_descriptor(ty));
             arg_words += slot_words(ty) as i32;
         }
-        let recipe_const = self.cw.const_string_kt(&recipe);
-        let method_handle = self.cw.method_handle_static(
-            "java/lang/invoke/StringConcatFactory",
-            "makeConcatWithConstants",
-            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;\
-             Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;",
-        );
-        let bootstrap = self.cw.add_bootstrap(method_handle, vec![recipe_const]);
-        let invocation = self.cw.invoke_dynamic(
-            bootstrap,
-            "makeConcatWithConstants",
-            &format!("({arg_descs})Ljava/lang/String;"),
-        );
-        code.invokedynamic(invocation, arg_words, 1);
+        self.emit_indy_concat_call(mode, &recipe.finish(), &arg_descs, arg_words, code);
         true
+    }
+
+    /// One `invokedynamic` string concatenation over the `arg_words` slots of arguments already on
+    /// the stack, typed `arg_descs`.
+    fn emit_indy_concat_call(
+        &mut self,
+        mode: StringConcatMode,
+        recipe: &KtString,
+        arg_descs: &str,
+        arg_words: i32,
+        code: &mut CodeBuilder,
+    ) {
+        let descriptor = format!("({arg_descs})Ljava/lang/String;");
+        let (name, bootstrap) = if mode == StringConcatMode::IndyWithConstants {
+            let recipe_const = self.cw.const_string_kt(recipe);
+            let method_handle = self.cw.method_handle_static(
+                "java/lang/invoke/StringConcatFactory",
+                "makeConcatWithConstants",
+                "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;\
+                 Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;",
+            );
+            (
+                "makeConcatWithConstants",
+                self.cw.add_bootstrap(method_handle, vec![recipe_const]),
+            )
+        } else {
+            let method_handle = self.cw.method_handle_static(
+                "java/lang/invoke/StringConcatFactory",
+                "makeConcat",
+                "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;)\
+                 Ljava/lang/invoke/CallSite;",
+            );
+            (
+                "makeConcat",
+                self.cw.add_bootstrap(method_handle, Vec::new()),
+            )
+        };
+        let invocation = self.cw.invoke_dynamic(bootstrap, name, &descriptor);
+        code.invokedynamic(invocation, arg_words, 1);
     }
 
     /// Append one string-template part to the `StringBuilder` beneath it. A single-character string
@@ -347,5 +399,14 @@ fn valueof_desc(ty: Ty) -> &'static str {
         Ty::Boolean => "(Z)Ljava/lang/String;",
         Ty::Char => "(C)Ljava/lang/String;",
         _ => "(Ljava/lang/Object;)Ljava/lang/String;",
+    }
+}
+
+/// The bytes one UTF-16 code unit takes in a class file's modified UTF-8.
+fn modified_utf8_len(unit: u16) -> usize {
+    match unit {
+        1..=0x7f => 1,
+        0 | 0x80..=0x7ff => 2,
+        _ => 3,
     }
 }

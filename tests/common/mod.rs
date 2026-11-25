@@ -2826,11 +2826,13 @@ pub fn javac_run_on(
         return None;
     }
     let runner_dir = setup_java_runner(&java_home)?;
-    let pool: &'static server_pool::Pool<JavaRunner> = *POOLS
-        .lock()
-        .unwrap()
-        .entry(java_home.clone())
-        .or_insert_with(|| Box::leak(Box::new(server_pool::Pool::new())));
+    let pool: &'static server_pool::Pool<JavaRunner> = {
+        let mut pools = POOLS.lock().unwrap();
+        let runners = pools
+            .entry(java_home.clone())
+            .or_insert_with(|| Box::leak(Box::new(server_pool::Pool::new())));
+        runners
+    };
     let options = target.javac_options();
     pool.with_server(
         server_pool::server_pool_cap(),

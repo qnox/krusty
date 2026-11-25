@@ -10,6 +10,8 @@ use krusty::jvm::names::type_descriptor;
 use krusty::metadata::local_properties::LocalPropertyMeta;
 use krusty::types::{type_name, Ty};
 
+use crate::ir_emit::StringConcatMode;
+
 /// Why [`run_backend_passes`] declined a file: the named pass met a shape it can't lower yet, so the
 /// caller must skip (or diagnose) the file rather than miscompile it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -571,7 +573,7 @@ pub struct JvmBackend {
     java_parameters: bool,
     lambda_modes: crate::ir_emit::LambdaModes,
     /// `-Xstring-concat=inline`: build string concatenations with `StringBuilder` at every target.
-    inline_string_concat: bool,
+    string_concat: StringConcatMode,
     /// `-Xuse-inline-scopes-numbers`: name inlined locals by their inline scope's number.
     inline_scopes_numbers: bool,
     /// Whether to emit the `Intrinsics.checkNotNullParameter` guards (`-Xno-param-assertions`
@@ -604,7 +606,7 @@ impl JvmBackend {
             jvm_default: crate::ir_emit::JvmDefaultMode::default(),
             java_parameters: false,
             lambda_modes: crate::ir_emit::LambdaModes::default(),
-            inline_string_concat: false,
+            string_concat: StringConcatMode::default(),
             inline_scopes_numbers: false,
             param_assertions: true,
             call_assertions: true,
@@ -685,8 +687,8 @@ impl JvmBackend {
     }
 
     /// `-Xstring-concat=inline`: never build a string concatenation with `invokedynamic`.
-    pub fn with_inline_string_concat(mut self, inline: bool) -> JvmBackend {
-        self.inline_string_concat = inline;
+    pub fn with_string_concat(mut self, mode: StringConcatMode) -> JvmBackend {
+        self.string_concat = mode;
         self
     }
 
@@ -750,7 +752,7 @@ pub fn shipping_emit_options(
         // Per-invocation strategies; the CLI overrides them on the backend.
         lambda_modes: crate::ir_emit::LambdaModes::default(),
         java_parameters: false,
-        inline_string_concat: false,
+        string_concat: StringConcatMode::default(),
         inline_scopes_numbers: false,
         // Compute + emit each class's own `@Metadata`. Without it a krusty-compiled CLASS is
         // unreadable BY KRUSTY: the facade metadata describes top-level declarations only, so a
@@ -1181,7 +1183,7 @@ impl JvmBackend {
         .with_enable_preview(self.enable_preview)
         .with_jvm_default(self.jvm_default)
         .with_lambda_modes(self.lambda_modes)
-        .with_inline_string_concat(self.inline_string_concat)
+        .with_string_concat(self.string_concat)
         .with_inline_scopes_numbers(self.inline_scopes_numbers)
         .with_param_assertions(self.param_assertions)
         .with_metadata_version(self.metadata_version)
