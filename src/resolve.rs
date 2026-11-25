@@ -29,8 +29,7 @@ use crate::types::{
     existing_type_name, semantic_value_parameter_ty, ty_mentions_param, type_name,
     type_name_nested_child, Ty, TypeName, Visibility,
 };
-use scope::ScopeKind;
-use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns};
+use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns, ScopeKind};
 
 mod callable_signature;
 mod class_names;
@@ -65,10 +64,10 @@ mod abstract_obligations;
 mod argument_parameter_mapping;
 mod builtin_implementation;
 mod char_sequence_protocol;
-pub(crate) mod collection_protocol;
 mod coroutine_runtime;
 mod plugin_runtime;
 pub(crate) use plugin_runtime::PluginRuntimeInventory;
+mod enum_entries_factory;
 mod selected_external_members;
 use argument_parameter_mapping::{
     call_argument_parameter_indices, call_argument_parameter_indices_result,

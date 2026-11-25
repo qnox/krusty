@@ -28,6 +28,8 @@
 //!   every constant of the body, not where its block closes.
 //! - An enum's declared functions intern before its synthesized `values`/`valueOf`/`getEntries`,
 //!   and its fields, entry constants included, intern where a body first references them.
+//! - A descriptor a removed unboxing interned in one method is placed where a later member's header
+//!   first names it, after what earlier code already interned.
 //! - A constant a removed null check interned in one method is placed where a later method
 //!   first names it, even when a later rewritten method names it too.
 //! - An enum's property accessors intern at their declarations: a getter's name does not precede
@@ -440,6 +442,24 @@ object Counter {
 }
 "#,
         &["Counter", "ElidedInstanceKt"],
+    );
+}
+
+/// `test`'s inlined `run` unboxes a value that kotlinc never writes, so the `()I` it interned moves
+/// to the first header that names it, `hashCode()`, which follows `hashCode-impl`'s body.
+#[test]
+fn a_removed_unboxing_s_descriptor_interns_at_the_next_header_that_names_it() {
+    assert_identical_with_stdlib(
+        "RemovedUnboxing",
+        "@JvmInline\n\
+         value class Slot(private val raw: Int) {\n\
+         \x20   fun test() = run { done() }\n\
+         \n\
+         \x20   private fun done() = \"OK\"\n\
+         }\n\
+         \n\
+         fun probe() = Slot(0).test()\n",
+        &["Slot"],
     );
 }
 

@@ -82,6 +82,43 @@ impl<'a> BodyLowering<'a> {
         Ok(body)
     }
 
+    /// The arguments of each constant of the materialized enum `class`, in declaration order,
+    /// lowered in this frame, the enum's static initialization. Each becomes its constant's own:
+    /// the shared enum realization evaluates a constant's arguments in its initializer right
+    /// before constructing the constant, so every constant's run in declaration order.
+    pub(in super::super) fn enum_entry_arguments(
+        mut self,
+        class: ClassId,
+        entries: &[Vec<crate::metadata::klib_ir::tree::KlibIrExprId>],
+    ) -> Lowered<()> {
+        let parameters = self.ir.classes[class as usize]
+            .ctor_args
+            .iter()
+            .map(|parameter| parameter.ty)
+            .collect::<Vec<_>>();
+        if entries.len() != self.ir.classes[class as usize].enum_entries.len() {
+            return Err(mismatch(
+                "an enum's entry frame disagrees with its materialized constants",
+            ));
+        }
+        for (ordinal, arguments) in entries.iter().enumerate() {
+            if arguments.len() != parameters.len() {
+                return Err(mismatch(
+                    "an enum constant passes another number of arguments than its constructor takes",
+                ));
+            }
+            let arguments = arguments
+                .iter()
+                .zip(&parameters)
+                .map(|(&argument, &ty)| self.operand(argument, ty))
+                .collect::<Lowered<Vec<_>>>()?;
+            let entry = &mut self.ir.classes[class as usize].enum_entries[ordinal];
+            entry.args = arguments;
+            entry.constructor_parameter_types.clone_from(&parameters);
+        }
+        Ok(())
+    }
+
     /// A secondary constructor of the materialized `class` delegating to another of its
     /// constructors: the delegation's arguments become the arguments of the class's secondary
     /// constructor `secondary`, then its own statements run as a member of the class does,
