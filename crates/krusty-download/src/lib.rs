@@ -73,7 +73,10 @@ pub fn download(
             .arg(seconds(policy.connect_timeout.min(max_time)))
             .arg("--max-time")
             .arg(seconds(max_time))
-            .args(["-w", "%{http_code} %{remote_ip} %header{retry-after} %{url_effective}"])
+            .args([
+                "-w",
+                "%{http_code} %{remote_ip} %header{retry-after} %{url_effective}",
+            ])
             .arg("-o")
             .arg(dest)
             .arg(url)
@@ -147,7 +150,9 @@ impl Pacer {
     /// Waits for the gap, but never past `deadline`.
     fn pace(&self, gap: Duration, deadline: Instant) {
         let now = Instant::now();
-        let wait = self.delay(now, gap).min(deadline.saturating_duration_since(now));
+        let wait = self
+            .delay(now, gap)
+            .min(deadline.saturating_duration_since(now));
         if !wait.is_zero() {
             std::thread::sleep(wait);
         }
@@ -163,8 +168,12 @@ static REQUESTS: Pacer = Pacer::new();
 fn answered_by(stdout: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stdout);
     let mut fields = text.trim().splitn(4, ' ');
-    let (status, address, _retry_after, url) =
-        (fields.next()?, fields.next()?, fields.next()?, fields.next()?);
+    let (status, address, _retry_after, url) = (
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+        fields.next()?,
+    );
     (status != "000").then(|| format!("HTTP {status} from {address} for {url}"))
 }
 
