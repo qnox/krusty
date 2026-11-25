@@ -131,3 +131,29 @@ class Holder {
         &["Holder$keep$1", "Holder$plain$1"],
     );
 }
+
+/// A member suspend function of a generic class declares only its own type parameters on the
+/// continuation class, as kotlinc's does, but its captured receiver, `this$0`, and the constructor
+/// take the receiver as the class applied to its own type parameters: `Holder<C>`.
+#[test]
+fn a_generic_class_member_continuation_signs_its_receiver_like_kotlinc() {
+    const SOURCE: &str = r#"suspend fun next(): Int = 2
+
+class Holder<C> {
+    suspend fun <T> keep(value: T, other: C): T {
+        next()
+        return value
+    }
+
+    suspend fun plain(other: C): C {
+        next()
+        return other
+    }
+}
+"#;
+    common::assert_classes_identical_to_kotlinc(
+        "SuspendGenericMemberContinuationSignature",
+        SOURCE,
+        &["Holder$keep$1", "Holder$plain$1"],
+    );
+}

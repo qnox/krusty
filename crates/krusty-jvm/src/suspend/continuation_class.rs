@@ -246,7 +246,19 @@ pub(super) fn build_continuation_class(
     let mut pre_super_param_fields = Vec::new();
     let mut arg_idx = 1u32; // value-index of the next ctor argument (`this` is 0)
     if let Some(owner) = receiver {
-        let recv_ty = Ty::obj_name(owner);
+        // The receiver is the member's class applied to its own type parameters (`Holder<C>`), which
+        // is what its `this$0` field and the constructor sign.
+        let owner_type_params = ir
+            .class_signature_name(owner)
+            .map(|signature| {
+                signature
+                    .type_params
+                    .iter()
+                    .map(krusty::ir::IrTypeParameter::ty)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let recv_ty = Ty::obj_args_name(owner, &owner_type_params);
         let receiver_field = fields.len() as u32;
         fields.push(
             krusty::ir::IrField::new("this$0".to_string(), recv_ty)
