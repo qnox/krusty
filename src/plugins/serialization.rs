@@ -43,6 +43,7 @@ mod synthesized_accessor;
 mod transient_initializer;
 mod type_argument_serializers;
 mod type_parameter_serializers;
+mod use_serializers;
 mod value_class_body;
 mod value_class_types;
 
