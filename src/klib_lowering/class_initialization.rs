@@ -922,6 +922,37 @@ pub(super) fn declared_instances_dispatched_members(
     }
 }
 
+/// The interface defaults the admitted object `class` inherits, each with the interface
+/// declarations it implements for the class. Dispatch reaches one only when a walked body calls
+/// one of those declarations, so a closure releases it then.
+pub(super) fn object_inherited_defaults(
+    class: &crate::libraries::KlibBodyClassContract,
+    bodies: &KlibDeclarationBodies,
+    callees: &super::KlibCalleeFacts<'_>,
+) -> Result<Vec<InheritedDefault>, KlibBodyDeclineReason> {
+    let Some(plan) = object_plan(class, bodies, callees)? else {
+        return Ok(Vec::new());
+    };
+    Ok(inherited_implementations(&plan, bodies)?
+        .into_iter()
+        .filter(|(body, _)| {
+            matches!(
+                bodies.member_owner(body),
+                crate::klib_libraries::LocatedMember::One { class, .. }
+                    if class_kind(class.base.flags) == TypeKind::Interface
+            )
+        })
+        .map(|(body, implemented)| InheritedDefault { body, implemented })
+        .collect())
+}
+
+/// An interface default a class inherits, with the interface declarations it implements.
+#[derive(Clone, Debug)]
+pub(crate) struct InheritedDefault {
+    pub(crate) body: KlibDependencyCallable,
+    pub(crate) implemented: Vec<KlibDependencyCallable>,
+}
+
 /// An override of a value class, with the declarations it overrides.
 pub(crate) struct ValueClassOverride {
     pub(crate) identity: KlibDependencyCallable,
