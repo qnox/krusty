@@ -256,14 +256,6 @@ pub trait Backend {
         false
     }
 
-    /// Whether this target's own `ArrayList` reads another collection through its interface
-    /// members: walks it with `Iterable.iterator()` and asks it `Collection.contains`, as the
-    /// stdlib's `addAll`, `containsAll`, `removeAll` and `retainAll` do. The handoff then freezes
-    /// those members for the target to call ([`CheckedBackendCallables::collection_protocol`]).
-    fn reads_collections_through_interfaces(&self) -> bool {
-        false
-    }
-
     /// How common lowering realizes calls to same-module inline functions for this backend. A
     /// backend that compiles each inline function's body and inlines it at the call keeps the calls
     /// it can inline that way; every other backend has them expanded in IR.

@@ -71,9 +71,10 @@ the log names, and the default ones, are probed: `<name>.warmup.http.tsv` and st
 status (`000` for a host that does not answer), because Gradle reports any refused download as "not
 found".
 
-A project's job fails when the reference kotlinc build or the krusty build fails, after the
-comparison has recorded how far each got, so the project still appears in the report; the `summary`
-job runs either way.
+A project's job fails only when its reference kotlinc build fails, after the comparison has
+recorded how far it got, so the project still appears in the report; the `summary` job runs either
+way. A compilation krusty fails, and so a failed krusty build, is a result the report carries, not a
+job failure.
 
 The krusty build is also sampled: `perf` records every process at 99 Hz while it runs (the corpus
 binary keeps frame pointers), `hotspots.py` folds the krusty processes' call stacks, and
@@ -140,11 +141,8 @@ These projects carry a patch for that bump:
 - `kotlin`: the build compiles itself with a bootstrap compiler, by default a development build
   from JetBrains' bootstrap repository. The patch takes the bootstrap from Maven Central instead, at
   the version the pin (`bootstrap.kotlin.version` in `gradle.properties`) names, and turns Gradle's
-  dependency verification off, since its metadata lists only the default bootstrap's artifacts. A
-  second pin, `kotlin-for-gradle-plugins-compilation` in `gradle/libs.versions.toml`, moves the
-  compiler that builds the modules its Gradle plugins load (2.2.21 at the tag) to the same release,
-  so both builds compile them with a release krusty supports. The pinned commit is the v2.4.21 tag,
-  whose sources are Kotlin 2.4.
+  dependency verification off, since its metadata lists only the default bootstrap's artifacts. The
+  pinned commit is the v2.4.21 tag, whose sources are Kotlin 2.4.
 
 A project too large to build whole on one runner names a target set in `gradle/<name>.targets`: Gradle
 task paths, one per line. `corpusCompile` then builds only the listed tasks that are not tests, the

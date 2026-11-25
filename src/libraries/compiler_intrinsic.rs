@@ -19,6 +19,25 @@ pub enum ClassNameKind {
     Qualified,
 }
 
+/// Which half of a UTF-16 surrogate pair an authenticated `Char` predicate recognizes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurrogateHalf {
+    /// `Char.isHighSurrogate()`, the leading half `\uD800..=\uDBFF`.
+    High,
+    /// `Char.isLowSurrogate()`, the trailing half `\uDC00..=\uDFFF`.
+    Low,
+}
+
+impl SurrogateHalf {
+    /// The inclusive UTF-16 code-unit range of this half.
+    pub fn code_units(self) -> std::ops::RangeInclusive<u16> {
+        match self {
+            Self::High => 0xD800..=0xDBFF,
+            Self::Low => 0xDC00..=0xDFFF,
+        }
+    }
+}
+
 /// Storage supplied by a target for an authenticated stdlib collection factory. The selected
 /// declaration distinguishes one array element from a packed array of elements before substitution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +114,9 @@ pub enum CompilerIntrinsic {
     FloatingIsInfinite {
         operand: crate::types::Ty,
     },
+    /// Native's exact `GCUnsafeCall` `Char` surrogate predicate declaration. A target answers it
+    /// with a range test of the receiver's code unit.
+    CharIsSurrogate(SurrogateHalf),
     /// Exact Kotlin array-factory declaration whose implementation is supplied by the compiler.
     /// The kind distinguishes reference/primitive varargs and the other language array creators;
     /// selected call-site types remain ordinary semantic types and are recorded in checked FIR.

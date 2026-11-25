@@ -11,8 +11,10 @@ fn lowered(source: &str) -> IrFile {
     crate::backend::enums::realize(
         &mut ir,
         crate::backend::enums::Contract::KotlinNative,
+        None,
         &mut crate::backend::DependencyExportSignatures::default(),
-    );
+    )
+    .expect("the Native contract builds its own list");
     ir
 }
 
@@ -464,15 +466,17 @@ fn an_enum_another_file_declares_keeps_its_use_nodes() {
     crate::backend::enums::realize(
         &mut ir,
         crate::backend::enums::Contract::KotlinNative,
+        None,
         &mut crate::backend::DependencyExportSignatures::default(),
-    );
+    )
+    .expect("the Native contract builds its own list");
     assert!(matches!(ir.expr(elsewhere), IrExpr::EnumEntry { .. }));
 }
 
-/// `enumEntries<E>()`, once inline specialization has named the enum, reads the same slot as
-/// `E.entries`.
+/// `enumEntries<E>()`, once inline specialization has named the enum, calls the same `entries`
+/// getter as `E.entries`, which runs the initializer and answers the list it stored.
 #[test]
-fn the_enum_entries_intrinsic_reads_the_entries_slot() {
+fn the_enum_entries_intrinsic_calls_the_entries_getter() {
     let mut ir = crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(
         "enum class Shade { LIGHT, DARK }\nfun box(): String = \"OK\"\n",
         "Enums",
@@ -496,8 +500,10 @@ fn the_enum_entries_intrinsic_reads_the_entries_slot() {
     crate::backend::enums::realize(
         &mut ir,
         crate::backend::enums::Contract::KotlinNative,
+        None,
         &mut crate::backend::DependencyExportSignatures::default(),
-    );
+    )
+    .expect("the Native contract builds its own list");
 
     let initializer = function(&ir, "Shade$initEntries");
     let (build, ..) = initializer_parts(&ir, initializer);
@@ -512,17 +518,18 @@ fn the_enum_entries_intrinsic_reads_the_entries_slot() {
             _ => None,
         })
         .expect("the entries are stored");
-    let IrExpr::Block {
-        stmts,
-        value: Some(value),
-    } = ir.expr(intrinsic)
-    else {
-        panic!(
-            "the intrinsic is realized in place: {:?}",
-            ir.expr(intrinsic)
-        );
+    let getter = function(&ir, "Shade$entries");
+    assert!(matches!(
+        ir.expr(intrinsic),
+        IrExpr::Call { callee, .. } if **callee == Callee::Local(getter)
+    ));
+    let [build, answer] = statements(&ir, body(&ir, getter))[..] else {
+        panic!("the getter builds the enum, then answers the list");
     };
-    assert!(calls_initializer(&ir, stmts[0], initializer));
+    assert!(calls_initializer(&ir, build, initializer));
+    let IrExpr::Return(Some(value)) = ir.expr(answer) else {
+        panic!("the getter answers the list");
+    };
     assert!(matches!(ir.expr(*value), IrExpr::GetStatic(slot) if *slot == entries));
 }
 

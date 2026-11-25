@@ -925,20 +925,18 @@ pub(crate) fn lower_value_classes(
         }
         if !f.param_checks.is_empty() {
             for (k, chk) in f.param_checks.iter_mut().enumerate() {
-                // Drop the null-check when the param erased to a non-reference, OR when it was a
-                // value class whose unboxed underlying is itself null-capable (e.g. `X(val v: Int?)`
-                // erases to `Integer`, which the value `X(null)` leaves null) — kotlinc emits no
-                // `checkNotNullParameter` there. Ask the declaration-descriptor realization rather
-                // than [`is_ref`]: an ordinary type parameter is a generic reference boundary, but
-                // a value-class carrier can temporarily retain `TyParam<T : Int>` here and is emitted
-                // as the primitive bound (`I`). The guard must agree with that final physical slot.
-                // A lowered member's checks start after its carrier; `orig_params` has none. A
-                // parameter holding its box (a generic override's) is marked nullable there.
+                // Drop the null-check when the param erased to a non-reference, or when its declared
+                // value class unwraps to a carrier kotlinc leaves unguarded (`X(val v: Int?)`, a primitive
+                // carrier, `TyParam<T : Int>` emitted as `I`). A parameter holding its box (a
+                // generic override's, a lifted lambda's own) is physically a reference, so the
+                // declared type decides. A lowered member's checks start after its carrier.
                 let source_index =
                     k.checked_sub(usize::from(lowered_value_members.contains(&(fid as u32))));
-                let under_nullable = source_index
+                let declared_drops_guard = source_index
                     .and_then(|index| orig_params[fid].get(index))
-                    .is_some_and(|t| vc_underlying_nullable(&t.non_null(), &under));
+                    .is_some_and(|t| {
+                        is_vc_ty(t) && !parameter_guards::carrier_keeps_guard(&t.non_null(), &under)
+                    });
                 let physical_is_ref = f
                     .params
                     .get(k)
@@ -946,7 +944,7 @@ pub(crate) fn lower_value_classes(
                         jvm_tys(std::slice::from_ref(parameter)).into_iter().next()
                     })
                     .is_some_and(|parameter| is_ref(&parameter));
-                if chk.is_some() && (!physical_is_ref || under_nullable) {
+                if chk.is_some() && (!physical_is_ref || declared_drops_guard) {
                     *chk = None;
                 }
             }
@@ -3374,7 +3372,7 @@ pub(crate) fn lower_value_classes(
         }
         _ => true,
     });
-    substitution_coercions::drop_rebox_round_trips(&mut ops, ir);
+    substitution_coercions::drop_unmaterialized(&mut ops, ir);
     // Each `unbox-impl` realized over a suspend call whose CPS result is the value class's box, as
     // recorded for that exact call. A suspend function returning the same box hands that value
     // back as it is (see `restore_boxed_suspension_tails`).
