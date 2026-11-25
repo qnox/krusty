@@ -1839,6 +1839,10 @@ pub fn class_companion_name(ci: &ClassInfo) -> Option<String> {
 pub fn class_sealed_subclasses(ci: &ClassInfo) -> crate::types::TypeNameList {
     if ci.meta.is_present() {
         ci.meta.sealed_subclasses.clone().into()
+    } else if ci.access & crate::jvm::classreader::ACC_ENUM != 0 {
+        // javac lists an enum's constant-body classes (`E$1`) in `PermittedSubclasses`, but an enum
+        // is covered by its entries, never by those classes.
+        crate::types::TypeNameList::new()
     } else {
         ci.permitted_subclasses.clone()
     }

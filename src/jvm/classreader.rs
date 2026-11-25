@@ -2221,6 +2221,16 @@ mod tests {
     }
 
     #[test]
+    fn a_java_enum_with_constant_bodies_publishes_no_sealed_subclasses() {
+        let mut cw = ClassWriter::new("demo/E", "java/lang/Enum");
+        cw.set_access(super::ACC_ENUM | 0x0001 | 0x0020);
+        cw.set_permitted_subclasses(vec!["demo/E$1".to_string(), "demo/E$2".to_string()]);
+        let ci = parse_class(&cw.finish()).unwrap();
+        assert_eq!(ci.permitted_subclasses.len(), 2);
+        assert!(crate::jvm::metadata::class_sealed_subclasses(&ci).is_empty());
+    }
+
+    #[test]
     fn class_bodies_share_one_parsed_pool_across_every_body_of_the_class() {
         let mut cw = ClassWriter::new("demo/Bodies", "java/lang/Object");
         let mut add = CodeBuilder::new(2);
