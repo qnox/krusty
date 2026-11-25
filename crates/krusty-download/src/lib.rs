@@ -81,6 +81,7 @@ pub fn download(
             .arg(dest)
             .arg(url)
             .output();
+        let mut refused_for_good = false;
         match output {
             Ok(output) if output.status.success() && dest.is_file() => {
                 return (
@@ -93,6 +94,7 @@ pub fn download(
             }
             Ok(output) => {
                 retry_after = retry_after_of(&output.stdout, SystemTime::now());
+                refused_for_good = is_final_refusal(&output.stdout);
                 let message = String::from_utf8_lossy(&output.stderr);
                 let message = message.trim();
                 let message = if message.is_empty() {
@@ -108,6 +110,9 @@ pub fn download(
             Err(error) => failure = Some(format!("curl could not start: {error}")),
         }
         let _ = std::fs::remove_file(dest);
+        if refused_for_good {
+            break;
+        }
         // A server that says how long to wait is obeyed, within the deadline: retrying sooner only
         // extends the block.
         let delay = policy.retry_delay.max(retry_after);
@@ -170,6 +175,19 @@ fn answered_by(stdout: &[u8]) -> Option<String> {
     let mut fields = text.lines().next()?.split(' ');
     let (status, address, url) = (fields.next()?, fields.next()?, fields.next()?);
     (status != "000").then(|| format!("HTTP {status} from {address} for {url}"))
+}
+
+/// Whether the server answered with a client error that asking again cannot change (a 404 or a 403
+/// names a file or a right the server will not give). Timeouts, 425, 429 and every 5xx are
+/// transient and stay retryable, as does a request that never reached a server.
+fn is_final_refusal(stdout: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stdout);
+    let status = text
+        .lines()
+        .next()
+        .and_then(|line| line.split(' ').next())
+        .and_then(|status| status.parse::<u16>().ok());
+    matches!(status, Some(400..=499) if !matches!(status, Some(408 | 425 | 429)))
 }
 
 /// How long the `Retry-After` header on curl's second `-w` line asks to wait: its whole seconds, or
@@ -310,6 +328,10 @@ mod tests {
         (url, requests)
     }
 
+    const NOT_FOUND: &str =
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const TOO_MANY: &str =
+        "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     const SERVER_ERROR: &str =
         "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     const JAR: &str = "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\njar";
@@ -425,6 +447,50 @@ mod tests {
                  (HTTP 500 from 127.0.0.1 for {url})"
             ))
         );
+    }
+
+    #[test]
+    fn a_missing_file_is_not_asked_for_again() {
+        let (url, requests) = endpoint(vec![Some(NOT_FOUND)]);
+        let dest = destination("missing");
+        let deadline = Instant::now() + Duration::from_secs(30);
+
+        let (outcome, failure) =
+            super::download(&url, &dest, policy(Duration::from_secs(5)), deadline);
+
+        assert_eq!(
+            outcome,
+            DownloadOutcome {
+                attempts: 1,
+                completed: false
+            }
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            failure,
+            Some(format!(
+                "curl: (22) The requested URL returned error: 404 \
+                 (HTTP 404 from 127.0.0.1 for {url})"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_throttled_request_is_asked_for_again() {
+        let (url, requests) = endpoint(vec![Some(TOO_MANY), Some(JAR)]);
+        let dest = destination("throttled");
+        let deadline = Instant::now() + Duration::from_secs(30);
+
+        let outcome = download(&url, &dest, policy(Duration::from_secs(5)), deadline);
+
+        assert_eq!(
+            outcome,
+            DownloadOutcome {
+                attempts: 2,
+                completed: true
+            }
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
     }
 
     #[test]
