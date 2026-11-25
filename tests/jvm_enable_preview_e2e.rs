@@ -96,6 +96,17 @@ fn preview_shape(bytes: &[u8]) -> (u16, Vec<krusty::jvm::classreader::InnerClass
     (minor_version(bytes), info.inner_classes)
 }
 
+/// The newest `-jvm-target` the reference kotlinc accepts, and the one before it. kotlinc 2.5.0-RC
+/// is the first to know target 28, where the identity flag begins; earlier ones stop at 26, so
+/// there the same comparison covers the newest target without it.
+fn newest_targets() -> (&'static str, &'static str) {
+    use krusty::kotlin_version::KotlinVersion;
+    common::for_reference(&[
+        (KotlinVersion::V2_4_0, ("26", "25")),
+        (KotlinVersion::V2_5_0_RC, ("28", "27")),
+    ])
+}
+
 fn assert_matches_kotlinc(arguments: &[&str], preview: bool) {
     let (expected, actual) = compile_both(arguments);
     assert!(!expected.is_empty(), "kotlinc emitted no classes");
@@ -116,14 +127,17 @@ fn assert_matches_kotlinc(arguments: &[&str], preview: bool) {
 
 #[test]
 fn preview_marks_every_class_with_the_preview_minor_version_below_target_28() {
-    for target in ["17", "27"] {
+    for target in ["17", newest_targets().1] {
         assert_matches_kotlinc(&["-jvm-target", target, "-Xjvm-enable-preview"], true);
     }
 }
 
 #[test]
 fn preview_from_target_28_gives_every_non_interface_inner_class_row_the_identity_flag() {
-    assert_matches_kotlinc(&["-jvm-target", "28", "-Xjvm-enable-preview"], true);
+    assert_matches_kotlinc(
+        &["-jvm-target", newest_targets().0, "-Xjvm-enable-preview"],
+        true,
+    );
 }
 
 #[test]
@@ -131,7 +145,7 @@ fn preview_marks_class_mode_lambda_classes_like_kotlinc() {
     assert_matches_kotlinc(
         &[
             "-jvm-target",
-            "28",
+            newest_targets().0,
             "-Xjvm-enable-preview",
             "-Xlambdas=class",
         ],
@@ -141,5 +155,5 @@ fn preview_marks_class_mode_lambda_classes_like_kotlinc() {
 
 #[test]
 fn without_preview_no_class_carries_the_minor_version_or_the_identity_flag() {
-    assert_matches_kotlinc(&["-jvm-target", "28"], false);
+    assert_matches_kotlinc(&["-jvm-target", newest_targets().0], false);
 }
