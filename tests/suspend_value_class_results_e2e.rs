@@ -113,9 +113,9 @@ fn an_override_of_a_dependency_type_parameter_result_returns_the_box() {
 #[test]
 fn a_dependency_override_hands_its_callers_the_box_on_either_path() {
     let main = format!(
-        "{DEPENDENCY_OVERRIDE}\
-         import kotlin.coroutines.*\n\
+        "import kotlin.coroutines.*\n\
          import kotlin.coroutines.intrinsics.*\n\
+         {DEPENDENCY_OVERRIDE}\
          var parked: Continuation<Int>? = null\n\
          class Immediate : Gate {{ override suspend fun open(): Int = 1 }}\n\
          class Parking : Gate {{\n\
