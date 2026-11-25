@@ -13,11 +13,13 @@ pub(super) enum GeneratedStaticInitialization {
 }
 
 /// Independent facts about storage generated without a source declaration. Compiler-generated
-/// provenance controls field metadata; initialization placement controls only `<clinit>` order.
+/// provenance controls field metadata; initialization placement controls only `<clinit>` order;
+/// leading the owner places both the field and its initializer before every other declaration.
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct GeneratedStaticFacts {
     compiler_generated: bool,
     initialization: GeneratedStaticInitialization,
+    leads_owner: bool,
 }
 
 /// Source/debug representation explicitly owned by a generated declaration's producer.
@@ -376,6 +378,22 @@ impl IrFile {
             .get(&index)
             .is_some_and(|facts| facts.initialization == GeneratedStaticInitialization::AfterSource)
     }
+
+    /// Make this static the first declaration of its owner, as a generator that inserts it at the
+    /// head of the class's declarations does: its field leads the field table, ahead of the
+    /// companion's, and its initializer runs before the companion is constructed.
+    pub fn place_static_before_owner_declarations(&mut self, index: u32) {
+        self.generated_static_facts
+            .entry(index)
+            .or_default()
+            .leads_owner = true;
+    }
+
+    pub fn static_leads_owner_declarations(&self, index: u32) -> bool {
+        self.generated_static_facts
+            .get(&index)
+            .is_some_and(|facts| facts.leads_owner)
+    }
 }
 
 #[cfg(test)]
@@ -392,6 +410,17 @@ mod tests {
         assert!(!ir.static_initializer_is_after_source(2));
         assert!(!ir.is_compiler_generated_static(7));
         assert!(ir.static_initializer_is_after_source(7));
+    }
+
+    #[test]
+    fn leading_its_owner_is_a_placement_of_its_own() {
+        let mut ir = IrFile::default();
+        ir.place_static_before_owner_declarations(3);
+
+        assert!(ir.static_leads_owner_declarations(3));
+        assert!(!ir.is_compiler_generated_static(3));
+        assert!(!ir.static_initializer_is_after_source(3));
+        assert!(!ir.static_leads_owner_declarations(2));
     }
 
     #[test]

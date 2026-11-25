@@ -459,11 +459,14 @@ fn build_atomicfu(
 /// Build the native Parcelize plugin from the compilation's options for it.
 fn build_parcelize(
     _act: &Activation,
-    _release: Option<&str>,
+    release: Option<&str>,
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
-    Box::new(ParcelizePlugin::from_options(options))
+    Box::new(
+        ParcelizePlugin::from_options(options)
+            .with_compiler_plugin_release(release.and_then(PluginRelease::parse)),
+    )
 }
 
 /// Build the native assignment plugin from the compilation's options for it.

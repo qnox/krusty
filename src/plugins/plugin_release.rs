@@ -15,6 +15,9 @@ impl PluginRelease {
     /// kotlinc 2.4.21's plugin copies the serialized class's type-parameter bounds onto its
     /// generated `$serializer` in IR (KT-89275).
     pub const V2_4_21: PluginRelease = PluginRelease::new(2, 4, 21);
+    /// kotlinc 2.5.0's Parcelize plugin makes `CREATOR` the parcelized class's first declaration,
+    /// not its last.
+    pub const V2_5_0: PluginRelease = PluginRelease::new(2, 5, 0);
 
     pub const fn new(major: u32, minor: u32, patch: u32) -> PluginRelease {
         PluginRelease {

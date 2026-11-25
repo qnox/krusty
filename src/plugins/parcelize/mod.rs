@@ -50,6 +50,8 @@ fn creator_interface() -> crate::types::TypeName {
 pub struct ParcelizePlugin {
     /// Every annotation that triggers the plugin: the built-in ones, then `additionalAnnotation`s.
     annotations: Vec<crate::types::TypeName>,
+    /// Where the generated `CREATOR` goes among the class's declarations.
+    creator_placement: generate::CreatorPlacement,
 }
 
 impl ParcelizePlugin {
@@ -66,7 +68,19 @@ impl ParcelizePlugin {
                     .flat_map(|option| krusty_plugin_api::classifier_identities(&option.value)),
             )
             .collect();
-        Self { annotations }
+        Self {
+            annotations,
+            creator_placement: generate::CreatorPlacement::of_release(None),
+        }
+    }
+
+    /// The plugin as the `-Xplugin` jar of `release` generates it; `None` is the newest release.
+    pub fn with_compiler_plugin_release(
+        mut self,
+        release: Option<crate::plugins::PluginRelease>,
+    ) -> Self {
+        self.creator_placement = generate::CreatorPlacement::of_release(release);
+        self
     }
 }
 
@@ -103,7 +117,7 @@ impl IrPlugin for ParcelizePlugin {
 
     fn complete_declarations(&self, ir: &mut IrFile, _ctx: &PluginContext) {
         if let Some(facts) = ir.parcelize.take() {
-            generate::complete(ir, &facts);
+            generate::complete(ir, &facts, self.creator_placement);
         }
     }
 }
