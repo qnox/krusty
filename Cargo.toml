@@ -22,7 +22,7 @@ krusty-names = { path = "crates/krusty-names" }
 # The contract compiler plugins are written against (conventions, the module IR, KSP rounds),
 # and the plugins already extracted.
 krusty-plugin-api = { path = "crates/krusty-plugin-api" }
-# One paced, bounded curl download shared by test-time Maven fetches.
+# One paced, bounded curl download shared by the test support and the plugin host.
 krusty-download = { path = "crates/krusty-download" }
 krusty-plugin-allopen = { path = "crates/krusty-plugin-allopen" }
 krusty-plugin-assignment = { path = "crates/krusty-plugin-assignment" }

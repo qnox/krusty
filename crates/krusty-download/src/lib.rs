@@ -5,7 +5,7 @@
 
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How long one download may take, and how often it is retried.
 #[derive(Clone, Copy, Debug)]
@@ -75,7 +75,7 @@ pub fn download(
             .arg(seconds(max_time))
             .args([
                 "-w",
-                "%{http_code} %{remote_ip} %header{retry-after} %{url_effective}",
+                "%{http_code} %{remote_ip} %{url_effective}\n%header{retry-after}",
             ])
             .arg("-o")
             .arg(dest)
@@ -92,7 +92,7 @@ pub fn download(
                 );
             }
             Ok(output) => {
-                retry_after = retry_after_of(&output.stdout);
+                retry_after = retry_after_of(&output.stdout, SystemTime::now());
                 let message = String::from_utf8_lossy(&output.stderr);
                 let message = message.trim();
                 let message = if message.is_empty() {
@@ -162,30 +162,63 @@ impl Pacer {
 /// Every download in the process shares one pacer.
 static REQUESTS: Pacer = Pacer::new();
 
-/// Who refused: the status, server address and final URL curl reports through `-w` (the address
-/// and URL after redirects are what tell a mirror or proxy from Central itself). `None` when the
-/// request never reached a server, where curl prints a zero status.
+/// Who refused: the status, server address and final URL curl reports through `-w` on its first
+/// line (the address and URL after redirects are what tell a mirror or proxy from Central itself).
+/// `None` when the request never reached a server, where curl prints a zero status.
 fn answered_by(stdout: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stdout);
-    let mut fields = text.trim().splitn(4, ' ');
-    let (status, address, _retry_after, url) = (
-        fields.next()?,
-        fields.next()?,
-        fields.next()?,
-        fields.next()?,
-    );
+    let mut fields = text.lines().next()?.split(' ');
+    let (status, address, url) = (fields.next()?, fields.next()?, fields.next()?);
     (status != "000").then(|| format!("HTTP {status} from {address} for {url}"))
 }
 
-/// The whole seconds of the `Retry-After` header curl reports through `-w`, zero when the server
-/// sent none or sent a date.
-fn retry_after_of(stdout: &[u8]) -> Duration {
+/// How long the `Retry-After` header on curl's second `-w` line asks to wait: its whole seconds, or
+/// the time until its HTTP-date. Zero when the server sent none or something unreadable. The value
+/// comes last because an HTTP-date holds spaces.
+fn retry_after_of(stdout: &[u8], now: SystemTime) -> Duration {
     let text = String::from_utf8_lossy(stdout);
-    text.trim()
-        .split(' ')
-        .nth(2)
-        .and_then(|seconds| seconds.parse::<u64>().ok())
-        .map_or(Duration::ZERO, Duration::from_secs)
+    let value = text.lines().nth(1).unwrap_or("").trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Duration::from_secs(seconds);
+    }
+    http_date(value).map_or(Duration::ZERO, |at| {
+        at.duration_since(now).unwrap_or(Duration::ZERO)
+    })
+}
+
+/// The instant of an IMF-fixdate (`Wed, 21 Oct 2015 07:28:00 GMT`), the form HTTP servers send.
+fn http_date(value: &str) -> Option<SystemTime> {
+    let mut parts = value.split_whitespace();
+    let (_weekday, day, month, year, time, zone) = (
+        parts.next()?,
+        parts.next()?.parse::<i64>().ok()?,
+        parts.next()?,
+        parts.next()?.parse::<i64>().ok()?,
+        parts.next()?,
+        parts.next()?,
+    );
+    if zone != "GMT" || parts.next().is_some() {
+        return None;
+    }
+    let month = 1 + [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .iter()
+    .position(|name| *name == month)? as i64;
+    let mut clock = time.split(':').map(|field| field.parse::<i64>().ok());
+    let (hour, minute, second) = (clock.next()??, clock.next()??, clock.next()??);
+    if clock.next().is_some() || !(1..=31).contains(&day) {
+        return None;
+    }
+    // Days since the epoch of a proleptic Gregorian date (Howard Hinnant's civil-days algorithm).
+    let shifted_year = year - i64::from(month <= 2);
+    let era = shifted_year.div_euclid(400);
+    let year_of_era = shifted_year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    let seconds = u64::try_from(days * 86_400 + hour * 3_600 + minute * 60 + second).ok()?;
+    Some(UNIX_EPOCH + Duration::from_secs(seconds))
 }
 
 fn seconds(duration: Duration) -> String {
@@ -291,20 +324,43 @@ mod tests {
         }
     }
 
+    /// curl prints `<status> <address> <url>`, a newline, then the `Retry-After` value, which may
+    /// hold spaces (an HTTP-date) and so comes last.
     #[test]
     fn a_retry_after_header_is_read_as_seconds() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
         assert_eq!(
-            retry_after_of(b"429 1.2.3.4 45 https://repo/a.jar"),
+            retry_after_of(b"429 1.2.3.4 https://repo/a.jar\n45", now),
             Duration::from_secs(45)
         );
         assert_eq!(
-            retry_after_of(b"429 1.2.3.4  https://repo/a.jar"),
+            retry_after_of(b"429 1.2.3.4 https://repo/a.jar\n", now),
             Duration::ZERO
         );
         assert_eq!(
-            retry_after_of(b"503 1.2.3.4 Wed,-21-Oct https://repo/a.jar"),
+            retry_after_of(b"429 1.2.3.4 https://repo/a.jar\nsoon", now),
             Duration::ZERO
         );
+    }
+
+    #[test]
+    fn a_retry_after_date_is_the_wait_until_that_instant() {
+        // 2015-10-21T07:28:00Z is 1445412480 seconds after the epoch.
+        let before = UNIX_EPOCH + Duration::from_secs(1_445_412_480 - 90);
+        let after = UNIX_EPOCH + Duration::from_secs(1_445_412_480 + 5);
+        let stdout = b"503 1.2.3.4 https://repo/a.jar\nWed, 21 Oct 2015 07:28:00 GMT";
+        assert_eq!(retry_after_of(stdout, before), Duration::from_secs(90));
+        assert_eq!(retry_after_of(stdout, after), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_refusal_names_the_url_whatever_the_retry_after_looks_like() {
+        let stdout = b"503 1.2.3.4 https://repo/a.jar\nWed, 21 Oct 2015 07:28:00 GMT";
+        assert_eq!(
+            answered_by(stdout).as_deref(),
+            Some("HTTP 503 from 1.2.3.4 for https://repo/a.jar")
+        );
+        assert_eq!(answered_by(b"000 0.0.0.0 https://repo/a.jar\n"), None);
     }
 
     #[test]
