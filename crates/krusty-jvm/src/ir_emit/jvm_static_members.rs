@@ -301,19 +301,17 @@ pub(super) fn emit_companion_bridges(
     };
     let formatter = &JvmSignatureFormatter::new(ir, env);
     let interface = is_jvm_interface(outer);
-    for bridge in bridges {
+    for &bridge in &bridges {
         let shape = match bridge {
             CompanionBridgeTarget::Function(function) => {
-                function_bridge_shape(ir, companion, function, formatter, env)
+                function_bridge_shape(ir, companion, function, None, formatter, env)
             }
             CompanionBridgeTarget::DefaultAccessor { property, side } => {
-                let Some(shape) =
-                    default_accessor_bridge_shape(ir, outer, property, side, formatter, env)
-                else {
-                    continue;
-                };
-                shape
+                default_accessor_bridge_shape(ir, outer, property, side, formatter, env)
             }
+        };
+        let Some(shape) = shape else {
+            continue;
         };
         emit_companion_bridge(
             CompanionBridge {
@@ -324,6 +322,29 @@ pub(super) fn emit_companion_bridges(
             shape,
             cw,
         );
+    }
+    // A member's `@JvmOverloads` overloads are companion members too, added after the declared
+    // ones, and each gets its static bridge in that order.
+    for &bridge in &bridges {
+        let CompanionBridgeTarget::Function(function) = bridge else {
+            continue;
+        };
+        for kept in super::jvm_overloads::member_overloads(ir, function) {
+            let Some(shape) =
+                function_bridge_shape(ir, companion, function, Some(&kept), formatter, env)
+            else {
+                continue;
+            };
+            emit_companion_bridge(
+                CompanionBridge {
+                    outer: outer.fq_name,
+                    companion,
+                    interface,
+                },
+                shape,
+                cw,
+            );
+        }
     }
 }
 
@@ -407,15 +428,56 @@ struct BridgeShape {
     deprecated: bool,
 }
 
+/// The shape of the bridge of companion member `function`: the member itself when `kept` is `None`,
+/// otherwise the `@JvmOverloads` overload that keeps those parameters. `None` when the member
+/// cannot be bridged.
 fn function_bridge_shape(
     ir: &IrFile,
     companion: TypeName,
     function: u32,
+    kept: Option<&[usize]>,
     formatter: &JvmSignatureFormatter<'_>,
     env: &EmitEnv,
-) -> BridgeShape {
+) -> Option<BridgeShape> {
     let declaration = &ir.functions[function as usize];
-    let parameters = jvm_function_params(ir, function);
+    let name = match kept {
+        None => declaration.name.clone(),
+        Some(kept) => crate::value_classes::member_names::overload_name(ir, function, kept, false),
+    };
+    let private = ir.method_visibility(function).is_private();
+    if private && kept.is_some() {
+        env.run.set_emit_error(format!(
+            "a private @JvmStatic member {name} has @JvmOverloads, whose bridges need accessors"
+        ));
+        return None;
+    }
+    let all_parameters = jvm_function_params(ir, function);
+    let all = (0..all_parameters.len()).collect::<Vec<_>>();
+    let kept_indices = kept.unwrap_or(&all);
+    let project = |index: usize| kept_indices.contains(&index);
+    let parameters = kept_indices
+        .iter()
+        .map(|&index| all_parameters[index])
+        .collect::<Vec<_>>();
+    let result = jvm_declared_ty(&env.override_results.physical_result(ir, function));
+    let (descriptor, signature) = match kept {
+        None => (
+            declared_method_desc(ir, env.override_results, function),
+            declared_method_signature(formatter, ir, env.override_results, function),
+        ),
+        Some(kept) => {
+            let descriptor = method_descriptor(&parameters, result);
+            let signature = super::jvm_overloads::kept_signature(
+                formatter,
+                ir,
+                env.override_results,
+                function,
+                kept,
+                &descriptor,
+            );
+            (descriptor, signature)
+        }
+    };
     let annotations = ir
         .function_annotations
         .get(&function)
@@ -425,27 +487,39 @@ fn function_bridge_shape(
         result: result_nullability,
         parameters: parameter_nullability,
     } = override_result_emission::declared_nullability(ir, env, function);
+    let parameter_nullability = kept_entries(parameter_nullability, project);
     let nullability_annotated =
         function_annotations::nullability_annotated(ir, function, &annotations);
+    let parameter_annotations = kept_entries(
+        ir.declared_parameters(function).annotations.clone(),
+        project,
+    );
     let method_parameters = if env.java_parameters {
-        crate::method_parameters::function(ir, function, &parameters, None)
+        kept_entries(
+            crate::method_parameters::function(ir, function, &all_parameters, None),
+            project,
+        )
     } else {
         Vec::new()
     };
-    let local_names = crate::parameter_names::placed(
-        ir,
-        function,
-        None,
-        crate::parameter_names::function_locals(ir, function, &parameters),
-    )
-    .unwrap_or_default();
-    BridgeShape {
-        name: declaration.name.clone(),
-        descriptor: declared_method_desc(ir, env.override_results, function),
-        signature: declared_method_signature(formatter, ir, env.override_results, function),
-        result: jvm_declared_ty(&env.override_results.physical_result(ir, function)),
+    let local_names = kept_entries(
+        crate::parameter_names::placed(
+            ir,
+            function,
+            None,
+            crate::parameter_names::function_locals(ir, function, &all_parameters),
+        )
+        .unwrap_or_default(),
+        project,
+    );
+    let keeps_varargs = kept_indices.last() == all_parameters.len().checked_sub(1).as_ref();
+    Some(BridgeShape {
+        name,
+        descriptor,
+        signature,
+        result,
         parameters,
-        parameter_annotations: ir.declared_parameters(function).annotations.to_vec(),
+        parameter_annotations,
         result_nullability,
         parameter_nullability,
         nullability_annotated,
@@ -453,12 +527,20 @@ fn function_bridge_shape(
         local_names,
         line: bridge_line(ir, companion, function),
         access: method_access::jvm_visibility(ir.method_visibility(function))
-            | method_access::varargs_access(ir, function)
-            | method_access::annotated_method_modifiers(Some(&annotations)),
-        private: ir.method_visibility(function).is_private(),
+            | if keeps_varargs {
+                method_access::varargs_access(ir, function)
+            } else {
+                0
+            }
+            | if kept.is_none() {
+                method_access::annotated_method_modifiers(Some(&annotations))
+            } else {
+                0
+            },
+        private,
         deprecated: ir.deprecated_methods.contains(&function),
         annotations,
-    }
+    })
 }
 
 /// The bridge of a companion property's compiler-default accessor, shaped as that accessor is:
@@ -680,6 +762,16 @@ fn emit_companion_bridge(bridge: CompanionBridge, shape: BridgeShape, cw: &mut C
         cw.mark_method_deprecated(name, &descriptor);
     }
     function_annotations::emit_declared(cw, &annotations, name, &descriptor);
+}
+
+/// The entries of a per-parameter list whose index `kept` selects.
+fn kept_entries<T>(entries: Vec<T>, kept: impl Fn(usize) -> bool) -> Vec<T> {
+    entries
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| kept(*index))
+        .map(|(_, entry)| entry)
+        .collect()
 }
 
 impl Emitter<'_> {

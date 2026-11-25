@@ -44,6 +44,9 @@ pub(super) fn emit(
     writer: &mut ClassWriter,
 ) {
     constructor_accessors::emit_sealed_accessors(ir, class, fq_name, writer);
+    if class.is_sealed {
+        super::jvm_overloads::emit_marker_accessors(ir, class, fq_name, writer, env);
+    }
     let marker_accessor = hidden_primary_marker(ir, class);
     let companion_marker = class.is_companion && marker_accessor;
     if companion_marker {
@@ -111,6 +114,7 @@ pub(super) fn emit(
                 );
             }
         }
+        super::jvm_overloads::emit_marker_accessors(ir, class, fq_name, writer, env);
     }
     if companion_marker {
         static_accessors::emit_after_companion_marker(
