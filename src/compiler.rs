@@ -507,6 +507,7 @@ fn emit_analyzed_into<B: Backend>(
                 symbols.semantic_platform(),
                 preparation,
                 symbols.coroutine_runtime(),
+                symbols.enum_entries_factory(),
                 &dispatched_classes,
             ) {
                 backend.report_common_ir_preparation_error(&error, diags);

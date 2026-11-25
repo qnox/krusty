@@ -679,8 +679,6 @@ enum/defaultCtor/constructorWithVararg.kt
 enum/defaultCtor/entryClassConstructorWithVarargs.kt
 enum/defaultCtor/noPrimaryConstructor.kt
 enum/enumCompanionInit.kt
-enum/enumEntriesInCompanion.kt
-enum/enumEntriesMultimoduleNoMappings.kt
 enum/enumEntriesNameClashes.kt
 enum/enumEntryMembers.kt
 enum/enumNestedObjectInit.kt
@@ -712,7 +710,6 @@ escapeAnalysis/test13.kt
 escapeAnalysis/zeroOutObjectOnAlloc.kt
 evaluate/intrinsicConst/charConstructor.kt
 evaluate/intrinsicConst/constTrim.kt
-evaluate/intrinsicConst/lowerAndUpperCase.kt
 evaluate/serialization/typeAnnotation.kt
 evaluate/ubyteOperations.kt
 evaluate/uintOperations.kt
@@ -1248,7 +1245,6 @@ objects/useAnonymousObjectFunction.kt
 operatorConventions/BoundedGenericValueInRangeCheck.kt
 operatorConventions/kt20387.kt
 operatorConventions/kt44647.kt
-optimizations/kt20844.kt
 package/packageLocalClassNotImportedWithDefaultImport.kt
 platformTypes/primitives/rangeTo.kt
 primitiveTypes/booleanHashCode.kt
@@ -1276,7 +1272,6 @@ properties/complexPropertyInitializer.kt
 properties/eagerInitializationGlobal2.kt
 properties/generalAccess.kt
 properties/genericPropertyMultiModule.kt
-properties/kt1398.kt
 properties/kt4383.kt
 properties/kt78962.kt
 properties/lateinit/accessorException.kt
@@ -1388,7 +1383,6 @@ ranges/forInDownTo/forIntInDownToWithNonConstBounds.kt
 ranges/forInDownTo/forIntInNonOptimizedDownTo.kt
 ranges/forInDownTo/forLongInDownTo.kt
 ranges/forInDownTo/forNullableIntInDownTo.kt
-ranges/forInIndices/forInArrayListIndices.kt
 ranges/forInIndices/forInCollectionImplicitReceiverIndices.kt
 ranges/forInIndices/forInCollectionIndices.kt
 ranges/forInIndices/forInCollectionTypeParameterIndices.kt

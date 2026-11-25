@@ -33,8 +33,9 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// `values()` or `valueOf` of an enum another file declares, called through the entry that
-    /// file exports: they read the constants its storage holds. `name` is `valueOf`'s argument.
+    /// `values()`, `valueOf` or `entries` of an enum another file declares, called through the
+    /// entry that file exports: they read the constants its storage holds. `name` is `valueOf`'s
+    /// argument.
     pub(super) fn dependency_enum_member(
         &mut self,
         classifier: krusty::types::TypeName,

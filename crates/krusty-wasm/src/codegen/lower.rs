@@ -1828,6 +1828,11 @@ impl<'a> Body<'a> {
                 krusty::backend::enums::StaticMember::ValueOf,
                 Some(arg),
             )?,
+            IrExpr::EnumEntries { classifier } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::Entries,
+                None,
+            )?,
             IrExpr::PropertyRead {
                 receiver: Some(receiver),
                 ty,

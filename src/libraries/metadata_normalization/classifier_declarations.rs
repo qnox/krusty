@@ -402,6 +402,7 @@ pub(crate) fn enum_values(owner: TypeName) -> LibraryMember {
     );
     values.owner = Some(owner);
     values.implicit_classifier_callable = Some(ImplicitClassifierCallable::EnumValues);
+    values.semantic_role = Some(crate::types::SemanticCallRole::KotlinEnumValues);
     values
 }
 
@@ -415,6 +416,7 @@ pub(crate) fn enum_value_of(owner: TypeName) -> LibraryMember {
     );
     value_of.owner = Some(owner);
     value_of.implicit_classifier_callable = Some(ImplicitClassifierCallable::EnumValueOf);
+    value_of.semantic_role = Some(crate::types::SemanticCallRole::KotlinEnumValueOf);
     value_of.call_sig = CallSig::metadata_member(1, vec!["value".to_string()], Vec::new(), None);
     value_of
 }
@@ -430,6 +432,7 @@ pub(crate) fn enum_entries_getter(owner: TypeName, name: &str) -> LibraryMember 
         String::new(),
     );
     getter.owner = Some(owner);
+    getter.semantic_role = Some(crate::types::SemanticCallRole::KotlinEnumEntries);
     getter
 }
 
