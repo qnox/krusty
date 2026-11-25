@@ -114,11 +114,13 @@ pub struct ResolvedDelegatedFunctionDeclaration {
     pub applied_result: ResolvedTy,
     pub interface: bool,
     pub has_kotlin_superclass_override: bool,
-    /// Return-value status the overridden declaration has: its provider's record, or the status a
-    /// current-module declaration inherited. `None` for a Java declaration, which records none.
+    /// A provider's recorded return-value status of the overridden declaration; `None` for a Java
+    /// declaration, which records none, and for a module declaration, whose inherited status is
+    /// published after this plan. The forwarder's status comes from
+    /// `ResolvedModuleIndex::delegated_function_status`, never from selecting among these.
     pub return_value_status: Option<crate::types::ReturnValueStatus>,
-    /// Whether the overridden declaration is `operator` / `infix`; an override has either modifier
-    /// when any declaration it overrides does.
+    /// Whether a provider's overridden declaration is `operator` / `infix` (unset for a module
+    /// declaration, as above).
     pub operator: bool,
     pub infix: bool,
 }
@@ -158,13 +160,13 @@ pub struct ResolvedDelegatedPropertyDeclaration {
     pub setter_value: Option<crate::fir::ResolvedParameterIdentity>,
     pub interface: bool,
     pub depth: u32,
+    /// As on [`ResolvedDelegatedFunctionDeclaration::return_value_status`].
+    pub return_value_status: Option<crate::types::ReturnValueStatus>,
     /// The overridden getter has a body (an interface default accessor): kotlinc's forwarder then
     /// records its own getter as non-default. A provider-normalized declaration fact.
     pub getter_has_body: bool,
     /// As [`Self::getter_has_body`], for the overridden setter of a `var`.
     pub setter_has_body: bool,
-    /// As on [`ResolvedDelegatedFunctionDeclaration::return_value_status`].
-    pub return_value_status: Option<crate::types::ReturnValueStatus>,
 }
 
 /// The call one generated forwarder makes on the delegate value's own static type.

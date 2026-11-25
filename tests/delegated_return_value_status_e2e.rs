@@ -29,3 +29,31 @@ fn delegated_member_extension_property_records_its_forwarded_declaration_as_kotl
         "DelegatedMemberExtensionPropertyRun",
     );
 }
+
+const MODULE_OVERRIDE_SOURCE: &str =
+    include_str!("box_regressions/delegatedThroughModuleInterfaceOverride.kt");
+
+#[test]
+fn delegation_through_a_module_interface_that_overrides_a_stdlib_member_keeps_its_status() {
+    common::assert_class_matches_kotlinc(
+        "DelegatedThroughModuleInterfaceOverride",
+        MODULE_OVERRIDE_SOURCE,
+        "Delegating",
+    );
+    common::expect_box_same_as_kotlinc(
+        MODULE_OVERRIDE_SOURCE,
+        "DelegatedThroughModuleInterfaceOverrideRun",
+    );
+}
+
+const INFIX_SOURCE: &str = include_str!("box_regressions/delegatedInfixThroughOverride.kt");
+
+#[test]
+fn delegated_infix_forwarder_keeps_the_modifier_an_override_inherits() {
+    common::assert_class_matches_kotlinc(
+        "DelegatedInfixThroughOverride",
+        INFIX_SOURCE,
+        "Delegating",
+    );
+    common::expect_box_same_as_kotlinc(INFIX_SOURCE, "DelegatedInfixThroughOverrideRun");
+}

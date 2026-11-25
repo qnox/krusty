@@ -23,6 +23,7 @@ use std::hash::Hash;
 
 use crate::fir::{
     DeclarationFlags, DeclarationId, DeclarationKind, InheritedCallableStatus,
+    ResolvedDelegatedFunctionDeclaration, ResolvedDelegatedPropertyDeclaration,
     ResolvedFunctionOverride, ResolvedFunctionOverrideTarget, ResolvedModuleIndex,
     ResolvedPropertyOverride, ResolvedPropertyOverrideTarget,
 };
@@ -235,6 +236,50 @@ pub(super) fn publish_inherited_statuses(
         index.publish_property_return_value_status(property, status);
     }
     publish_inherited_visibilities(index, classifiers)
+}
+
+impl ResolvedModuleIndex {
+    /// The status an `interface by` forwarder has: the override rule above applied to the
+    /// declarations it overrides, nearest first. Call it once their statuses are published; a
+    /// module declaration contributes its published status and a provider declaration its record.
+    pub(crate) fn delegated_function_status(
+        &self,
+        overridden: &[ResolvedDelegatedFunctionDeclaration],
+    ) -> InheritedCallableStatus {
+        let edges = overridden
+            .iter()
+            .map(|declaration| match declaration.target {
+                ResolvedFunctionOverrideTarget::Module(callable) => {
+                    self.callable_inherited_status(callable).as_edge()
+                }
+                ResolvedFunctionOverrideTarget::External(_) => OverriddenFunction {
+                    return_value: declaration.return_value_status,
+                    operator: declaration.operator,
+                    infix: declaration.infix,
+                    semantic_role: declaration.semantic_role,
+                },
+            })
+            .collect::<Vec<_>>();
+        InheritedCallableStatus::inherit(InheritedCallableStatus::default(), &edges)
+    }
+
+    /// The return-value status an `interface by` property forwarder has, as for
+    /// [`Self::delegated_function_status`].
+    pub(crate) fn delegated_property_return_value_status(
+        &self,
+        overridden: &[ResolvedDelegatedPropertyDeclaration],
+    ) -> ReturnValueStatus {
+        let edges = overridden
+            .iter()
+            .map(|declaration| match declaration.target {
+                ResolvedPropertyOverrideTarget::Module(property) => {
+                    self.property_return_value_status(property).as_edge()
+                }
+                ResolvedPropertyOverrideTarget::External(_) => declaration.return_value_status,
+            })
+            .collect::<Vec<_>>();
+        ReturnValueStatus::inherit(ReturnValueStatus::default(), &edges)
+    }
 }
 
 /// Resolve every override's effective visibility and restrict the headers of modifier-less

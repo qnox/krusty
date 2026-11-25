@@ -147,7 +147,7 @@ pub(super) fn finalize_interface_delegations(
                 class,
                 ordinal,
             };
-            materialize_delegation(delegate, delegation, &mut parameter_stores, ir)?;
+            materialize_delegation(index, delegate, delegation, &mut parameter_stores, ir)?;
         }
         prepend_initializers(ir, class, parameter_stores);
     }
@@ -163,6 +163,7 @@ struct DelegationSite {
 }
 
 fn materialize_delegation(
+    index: &ResolvedModuleIndex,
     site: DelegationSite,
     delegation: &ResolvedInterfaceDelegation,
     parameter_stores: &mut Vec<u32>,
@@ -272,28 +273,17 @@ fn materialize_delegation(
                     result,
                 );
                 ir.fn_source_names.insert(function, member.name.to_string());
-                // The forwarder takes the status of the first overridden declaration that
-                // records one, as any override does.
-                if let Some(status) = member
-                    .overridden
-                    .iter()
-                    .find_map(|declaration| declaration.return_value_status)
-                    .filter(|status| *status != crate::types::ReturnValueStatus::Unspecified)
-                {
-                    ir.fn_return_value_statuses.insert(function, status);
+                // The forwarder's status is the shared override rule over the declarations it
+                // overrides, read from the published index.
+                let status = index.delegated_function_status(&member.overridden);
+                if status.return_value != crate::types::ReturnValueStatus::Unspecified {
+                    ir.fn_return_value_statuses
+                        .insert(function, status.return_value);
                 }
-                if member
-                    .overridden
-                    .iter()
-                    .any(|declaration| declaration.operator)
-                {
+                if status.operator {
                     ir.operator_fns.insert(function);
                 }
-                if member
-                    .overridden
-                    .iter()
-                    .any(|declaration| declaration.infix)
-                {
+                if status.infix {
                     ir.infix_fns.insert(function);
                 }
                 let parameter_identities = member
@@ -388,6 +378,8 @@ fn materialize_delegation(
                     return Err(FirFileLoweringFailure::MissingClassifier(declaration));
                 };
                 let name = property.name.to_string();
+                let return_value_status =
+                    index.delegated_property_return_value_status(&property.overridden);
                 let ty = property.ty.get();
                 let context_params = property
                     .context_parameters
@@ -549,11 +541,7 @@ fn materialize_delegation(
                             setter,
                             visibility: crate::types::Visibility::Public,
                             type_params,
-                            return_value_status: property
-                                .overridden
-                                .iter()
-                                .find_map(|declaration| declaration.return_value_status)
-                                .unwrap_or_default(),
+                            return_value_status,
                             accessor_annotations: Default::default(),
                         });
                     continue;
@@ -571,11 +559,7 @@ fn materialize_delegation(
                     ty,
                     type_params,
                     visibility: crate::types::Visibility::Public,
-                    return_value_status: property
-                        .overridden
-                        .iter()
-                        .find_map(|declaration| declaration.return_value_status)
-                        .unwrap_or_default(),
+                    return_value_status,
                     annotations: Box::new([]),
                     initializer: None,
                     storage_ty: None,
