@@ -175,10 +175,11 @@ pub(crate) fn direct_supertypes(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
 /// The direct supertypes of `ty` as an extension receiver binds its formals from them. A Java
 /// class writes its own type variables as flexible supertype arguments (`class Sub<T> extends
 /// J<T>` is `J<T!>`), so binding `T` to a not-null type keeps the interval `String!` instead of
-/// fixing the argument to `String`. Only this consumer reads that interval: the shared hierarchy
-/// keeps the fixed binding, so the platform wrapper does not spread through supertypes and
-/// source-declared generic operations. A Kotlin declaration, a mapped builtin included, states its
-/// own nullability and keeps it.
+/// fixing the argument to `String`. The provider records the occurrence as the template variable's
+/// platform bound, and only a Java declaration's template carries it: a Kotlin declaration, a mapped
+/// builtin included, states its own nullability. Only this consumer reads the interval: the shared
+/// hierarchy keeps the fixed binding, so the platform wrapper does not spread through supertypes and
+/// source-declared generic operations.
 pub(crate) fn direct_supertypes_with_flexible_arguments(
     source: &dyn SymbolSource,
     ty: Ty,
@@ -190,10 +191,7 @@ pub(crate) fn direct_supertypes_with_flexible_arguments(
     else {
         return applied;
     };
-    if classifier.is_kotlin
-        || classifier.mapped_builtin
-        || classifier.supertype_templates.len() != applied.len()
-    {
+    if classifier.supertype_templates.len() != applied.len() {
         return applied;
     }
     classifier

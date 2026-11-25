@@ -2204,7 +2204,35 @@ impl JvmLibraries {
             // to non-null, and every member reached THROUGH the supertype then rejected a nullable
             // argument — `set(String, Any)` refused `Long?` while the class's own `put` accepted it.
             // A Kotlin class states its own nullability in `@Metadata` and must keep it.
-            let declared_supertype_templates: Vec<Ty> = if has_kotlin_metadata {
+            // A mapped Kotlin builtin (`MutableList` over `java.util.List`) is a Kotlin declaration in
+            // Kotlin's scope: its supertype arguments are its own type variables, not flexible
+            // Java occurrences, so the platform bound the class-file signature gives them does
+            // not reach the template.
+            let declared_supertype_templates: Vec<Ty> = if is_mapped_builtin {
+                declared_supertype_templates
+                    .into_iter()
+                    .map(|template| match template.kind() {
+                        TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+                            name,
+                            &arguments
+                                .iter()
+                                .map(|argument| match argument.kind() {
+                                    TyKind::TyParam(variable, bound)
+                                        if bound.is_platform_nullable() =>
+                                    {
+                                        Ty::ty_param(
+                                            variable.as_str(),
+                                            Ty::nullable(Ty::obj("kotlin/Any")),
+                                        )
+                                    }
+                                    _ => *argument,
+                                })
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => template,
+                    })
+                    .collect()
+            } else if has_kotlin_metadata {
                 declared_supertype_templates
             } else {
                 declared_supertype_templates
