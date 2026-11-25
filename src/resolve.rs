@@ -31918,7 +31918,7 @@ impl<'a> Checker<'a> {
                 .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             {
                 Some(Symbol::Member(facets)) => CallableRefCandidates {
-                    property: facets.property_ref.clone(),
+                    property: self.typed_body_local_property_ref(recv, facets.property_ref.clone()),
                     method: facets.method_ref.clone(),
                     overloads: facets.overloads.clone(),
                     inaccessible_extensions: facets.inaccessible_extensions.clone(),
