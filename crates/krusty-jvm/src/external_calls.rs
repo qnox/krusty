@@ -1111,7 +1111,6 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::FloatingIsNaN { .. }
                 | krusty::libraries::CompilerIntrinsic::FloatingIsInfinite { .. }
                 | krusty::libraries::CompilerIntrinsic::FloatingAdjacent { .. }
-                | krusty::libraries::CompilerIntrinsic::CountLeadingZeroBits { .. }
                 | krusty::libraries::CompilerIntrinsic::CharIsSurrogate(_)
                 | krusty::libraries::CompilerIntrinsic::RadixToString { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayStorageCopy

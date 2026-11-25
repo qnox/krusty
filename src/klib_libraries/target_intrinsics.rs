@@ -1119,34 +1119,6 @@ fn adjacent_floating(
     })
 }
 
-/// `Int.countLeadingZeroBits()` / `Long.countLeadingZeroBits()`: an extension in `kotlin` with no
-/// parameters whose result is `Int`.
-fn count_leading_zero_bits(
-    placement: crate::libraries::CallablePlacement,
-    declaration: &KotlinFunction,
-    operand: Ty,
-) -> Option<KlibIntrinsicShape> {
-    let classifier = match operand {
-        Ty::Int => "kotlin/Int",
-        Ty::Long => "kotlin/Long",
-        _ => return None,
-    };
-    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin"))
-        && declaration.params.is_empty()
-        && declaration
-            .receiver
-            .as_ref()
-            .is_some_and(|receiver| exact_type(receiver, classifier))
-        && exact_type(&declaration.ret, "kotlin/Int"))
-    .then(|| KlibIntrinsicShape {
-        operation: CompilerIntrinsic::CountLeadingZeroBits { operand },
-        kind: ExternalCallableKind::Extension,
-        receiver: Some(operand),
-        params: vec![operand],
-        ret: Ty::Int,
-    })
-}
-
 fn native(
     placement: crate::libraries::CallablePlacement,
     declaration: &KotlinFunction,
@@ -1204,12 +1176,6 @@ fn native(
                     Ty::Double,
                     AdjacentDirection::Down,
                 )
-            }
-            "Kotlin_Int_countLeadingZeroBits" => {
-                return count_leading_zero_bits(placement, declaration, Ty::Int)
-            }
-            "Kotlin_Long_countLeadingZeroBits" => {
-                return count_leading_zero_bits(placement, declaration, Ty::Long)
             }
             "Kotlin_Char_isHighSurrogate" => {
                 return char_is_surrogate(placement, declaration, SurrogateHalf::High)
@@ -2135,44 +2101,6 @@ mod tests {
                 )
                 .is_none(),
                 "the result must be the receiver's own type"
-            );
-        }
-        for (entry, receiver, operand) in [
-            ("Kotlin_Int_countLeadingZeroBits", "kotlin/Int", Ty::Int),
-            ("Kotlin_Long_countLeadingZeroBits", "kotlin/Long", Ty::Long),
-        ] {
-            let exact = extension("countLeadingZeroBits", entry, receiver, "kotlin/Int");
-            assert_eq!(
-                authenticate(native, package("kotlin"), &exact),
-                Some(KlibIntrinsicShape {
-                    operation: CompilerIntrinsic::CountLeadingZeroBits { operand },
-                    kind: ExternalCallableKind::Extension,
-                    receiver: Some(operand),
-                    params: vec![operand],
-                    ret: Ty::Int,
-                })
-            );
-            assert!(
-                authenticate(native, package("spoof"), &exact).is_none(),
-                "another package's declaration is not the stdlib's"
-            );
-            assert!(
-                authenticate(
-                    native,
-                    package("kotlin"),
-                    &extension("countLeadingZeroBits", entry, "kotlin/Short", "kotlin/Int")
-                )
-                .is_none(),
-                "the receiver must be the entry's own width"
-            );
-            assert!(
-                authenticate(
-                    native,
-                    package("kotlin"),
-                    &extension("countLeadingZeroBits", entry, receiver, "kotlin/Long")
-                )
-                .is_none(),
-                "the count is an `Int`"
             );
         }
     }
