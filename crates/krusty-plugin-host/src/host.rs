@@ -7,6 +7,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use krusty_plugin_api::ir::{CallableIdentity, ModuleIr};
+use krusty_plugin_api::{ModuleIrPlugin, ModuleIrRefusal};
 
 use crate::adapter;
 use crate::environment::Environment;
@@ -106,6 +107,16 @@ impl std::fmt::Display for HostError {
 }
 
 impl std::error::Error for HostError {}
+
+/// The host answers for the plugins it loaded: the compiler hands it a module through the plugin
+/// API and gets back the module they leave, or the reason the host could not return one.
+impl ModuleIrPlugin for Host {
+    fn transform(&mut self, module: &ModuleIr) -> Result<ModuleIr, ModuleIrRefusal> {
+        self.generate(module).map_err(|error| ModuleIrRefusal {
+            message: error.to_string(),
+        })
+    }
+}
 
 /// A running host. Dropping it stops the process: it is asked to exit, and killed when it has not
 /// within a grace interval.
