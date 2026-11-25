@@ -250,13 +250,10 @@ impl Checker<'_> {
         // The level that owns the name is probed alone. This pre-selection is not the call's
         // applicability check, so a level it cannot pre-select is left to ordinary selection rather
         // than handed to a farther level.
-        let top_level = self.resolver().top_level_candidates(name);
-        let owner = top_level.first().map(crate::symbol_resolver::scope_level);
         select_level(
-            top_level
-                .into_iter()
-                .filter(|function| Some(crate::symbol_resolver::scope_level(function)) == owner)
-                .collect(),
+            self.resolver()
+                .owning_level_top_level_functions(name)
+                .overloads,
             None,
         )
     }
