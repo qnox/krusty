@@ -79,10 +79,16 @@ RUNNER_PROFILE_ROOT=$fixture/root-end "$repo/scripts/runner-profile.sh" report "
 expect root "machine: 2 cpus (Stand-in CPU @ 2.00GHz), cpu quota max, memory 8.0 GiB, swap 1.0 of 2.0 GiB used
 over 10s: cpu user 50% system 0% iowait 0% steal 0% idle 50% | stalled on cpu 0s, io 0s, memory 0s | throttled n/a"
 
-# A kernel that killed a process for memory: the report names it, ahead of the counters.
+# A kernel that killed a process for memory: the report names it, ahead of the counters. The job
+# started at uptime 10, so the kills at 3.4 and 9.9 belong to earlier jobs and are dropped; a kill
+# at the start second is kept, and a line without an uptime timestamp is kept and marked undated.
 cat > "$fixture/dmesg" <<'STUB'
 #!/usr/bin/env bash
 echo '[ 10.1] audit: something unrelated'
+echo '[ 3.4] Out of memory: Killed process 7 (java) total-vm:1kB, anon-rss:1kB'
+echo '[ 9.9] Out of memory: Killed process 8 (java) total-vm:1kB, anon-rss:1kB'
+echo '[ 10.0] Out of memory: Killed process 9 (java) total-vm:2kB, anon-rss:2kB'
+echo 'Mon Nov 25 07:00:00 2026 Out of memory: Killed process 10 (java) total-vm:3kB, anon-rss:3kB'
 echo '[ 99.2] Out of memory: Killed process 4242 (java) total-vm:9000000kB, anon-rss:3100000kB'
 STUB
 chmod +x "$fixture/dmesg"
@@ -90,6 +96,8 @@ RUNNER_PROFILE_DMESG=$fixture/dmesg RUNNER_PROFILE_ROOT=$fixture/root-end \
     "$repo/scripts/runner-profile.sh" report "$fixture/root.state" > "$fixture/oom.out"
 expect oom "machine: 2 cpus (Stand-in CPU @ 2.00GHz), cpu quota max, memory 8.0 GiB, swap 1.0 of 2.0 GiB used
 memory kills recorded by the kernel:
+[ 10.0] Out of memory: Killed process 9 (java) total-vm:2kB, anon-rss:2kB
+(undated) Mon Nov 25 07:00:00 2026 Out of memory: Killed process 10 (java) total-vm:3kB, anon-rss:3kB
 [ 99.2] Out of memory: Killed process 4242 (java) total-vm:9000000kB, anon-rss:3100000kB
 over 10s: cpu user 50% system 0% iowait 0% steal 0% idle 50% | stalled on cpu 0s, io 0s, memory 0s | throttled n/a"
 

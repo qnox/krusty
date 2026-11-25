@@ -62,12 +62,19 @@ machine() {
     }'
 }
 
-# What the kernel killed for memory, newest last, so an exit-137 job names its culprit and the size
-# it had. RUNNER_PROFILE_DMESG replaces the `dmesg` command for the script's own tests.
+# What the kernel killed for memory since `since` (seconds of uptime when this job started), newest
+# last, so an exit-137 job names its culprit and the size it had. A long-lived runner's kernel log
+# also holds the kills of earlier jobs, which the timestamp in front of each line drops. A line with
+# no uptime timestamp cannot be placed, so it is kept and marked undated.
+# RUNNER_PROFILE_DMESG replaces the `dmesg` command for the script's own tests.
 memory_kills() {
-    local dmesg=${RUNNER_PROFILE_DMESG:-dmesg}
+    local since=$1 dmesg=${RUNNER_PROFILE_DMESG:-dmesg}
     { "$dmesg" 2>/dev/null || sudo -n "$dmesg" 2>/dev/null || true; } \
-        | grep -iE 'out of memory|oom-kill|killed process' | tail -n 10 || true
+        | grep -iE 'out of memory|oom-kill|killed process' \
+        | awk -v since="$since" '
+            match($0, /^\[ *[0-9]+/) { if (substr($0, 2, RLENGTH - 1) + 0 >= since) print; next }
+            { print "(undated) " $0 }' \
+        | tail -n 10 || true
 }
 
 # One line of what memory looked like: the memory still available, what tmpfs holds, and the five
@@ -119,7 +126,7 @@ case $1 in
             printf 'lowest available memory: %s\nlast memory sample: %s\n' \
                 "$(sort -n "$state.memory" | head -n 1 | cut -f2-)" "$(tail -n 1 "$state.memory" | cut -f2-)"
         fi
-        kills=$(memory_kills)
+        kills=$(memory_kills "$(cut -d' ' -f1 "$state")")
         [[ -z $kills ]] || printf 'memory kills recorded by the kernel:\n%s\n' "$kills"
         echo "$(cat "$state") $(counters)" | awk '
             function seconds(before, after) {
