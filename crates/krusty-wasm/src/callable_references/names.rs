@@ -11,7 +11,7 @@
 
 use std::mem;
 
-use crate::encode::{Code, Function, Module};
+use crate::encode::{Code, Function, HeapType, Module};
 use crate::interface_dispatch::{ClassRef, MemberRef};
 use crate::runtime::Runtime;
 
@@ -20,7 +20,16 @@ use crate::runtime::Runtime;
 #[derive(Default)]
 pub(crate) struct ReferenceNames {
     member: Option<MemberRef>,
-    pending: Vec<(ClassRef, Vec<u16>)>,
+    pending: Vec<(ClassRef, Name)>,
+}
+
+/// Where a reference class's answer to `KCallable.name` comes from.
+enum Name {
+    /// One declaration's name, the same for every object of the class.
+    Constant(Vec<u16>),
+    /// The `String` field of the object's own struct, for a class whose objects are properties
+    /// of different declarations.
+    Field { structure: u32, field: u32 },
 }
 
 impl Runtime {
@@ -31,11 +40,35 @@ impl Runtime {
         class: ClassRef,
         name: &str,
     ) -> Result<(), String> {
-        let units = name.encode_utf16().collect::<Vec<_>>();
+        self.record_reference_name(
+            module,
+            class,
+            Name::Constant(name.encode_utf16().collect::<Vec<_>>()),
+        )
+    }
+
+    /// Record that the objects of `class`, whose struct is `structure`, answer `KCallable.name`
+    /// with their own `String` field `field`.
+    pub(crate) fn reference_name_field(
+        &mut self,
+        module: &mut Module,
+        class: ClassRef,
+        structure: u32,
+        field: u32,
+    ) -> Result<(), String> {
+        self.record_reference_name(module, class, Name::Field { structure, field })
+    }
+
+    fn record_reference_name(
+        &mut self,
+        module: &mut Module,
+        class: ClassRef,
+        name: Name,
+    ) -> Result<(), String> {
         match self.callable_references.names.member {
-            Some(member) => self.implement_reference_name(module, member, class, &units),
+            Some(member) => self.implement_reference_name(module, member, class, &name),
             None => {
-                self.callable_references.names.pending.push((class, units));
+                self.callable_references.names.pending.push((class, name));
                 Ok(())
             }
         }
@@ -53,8 +86,8 @@ impl Runtime {
             Some(_) => return Err("`KCallable.name` named by two members".to_string()),
             None => self.callable_references.names.member = Some(member),
         }
-        for (class, units) in mem::take(&mut self.callable_references.names.pending) {
-            self.implement_reference_name(module, member, class, &units)?;
+        for (class, name) in mem::take(&mut self.callable_references.names.pending) {
+            self.implement_reference_name(module, member, class, &name)?;
         }
         Ok(())
     }
@@ -64,10 +97,17 @@ impl Runtime {
         module: &mut Module,
         member: MemberRef,
         class: ClassRef,
-        units: &[u16],
+        name: &Name,
     ) -> Result<(), String> {
         let mut code = Code::default();
-        self.string_constant(module, &mut code, units);
+        match name {
+            Name::Constant(units) => self.string_constant(module, &mut code, units),
+            Name::Field { structure, field } => {
+                code.local_get(0)
+                    .ref_cast(false, HeapType::Concrete(*structure))
+                    .struct_get(*structure, *field);
+            }
+        }
         let function = module.declare();
         let ty = self.objects.interfaces.ty(member);
         module.define(

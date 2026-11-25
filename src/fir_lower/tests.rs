@@ -28,6 +28,7 @@ mod lambda_return_flow;
 mod local_call_parameters;
 mod local_classifier_provenance;
 mod lowering_temporaries;
+mod property_reference_realization;
 mod ranges;
 
 pub(crate) use super::single_source_lowering::{
