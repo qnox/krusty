@@ -114,16 +114,11 @@ class Projects(unittest.TestCase):
                 self.assertEqual(set(recorded), {"demoDebug"}, result.stderr)
 
     def test_kotlin_builds_a_listed_target_set_with_a_released_bootstrap_compiler(self):
-        # kotlin compiles itself with its bootstrap compiler, and the modules its Gradle plugins
-        # load with a second compiler; both pins move to the newest release in kotlin-versions.
-        # The target set keeps the build within a runner's budget.
+        # kotlin compiles itself with its bootstrap compiler, which the pin moves to the newest
+        # release in kotlin-versions; the target set keeps the build within a runner's budget.
         rows = {line.split("\t")[0]: line.split("\t") for line in (HERE / "projects.tsv").read_text().splitlines()
                 if line and not line.startswith("#")}
-        self.assertEqual(
-            rows["kotlin"][5],
-            "gradle.properties:bootstrap.kotlin.version,"
-            "gradle/libs.versions.toml:kotlin-for-gradle-plugins-compilation",
-        )
+        self.assertEqual(rows["kotlin"][5], "gradle.properties:bootstrap.kotlin.version")
         targets = [line.split("#")[0].strip() for line in (HERE / "gradle/kotlin.targets").read_text().splitlines()]
         targets = [target for target in targets if target]
         self.assertTrue(targets)

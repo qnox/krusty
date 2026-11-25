@@ -78,6 +78,10 @@ const KOTLIN_NATIVE_SERVER_JVM_OPTIONS: [&str; 5] = [
     "-Dfile.encoding=UTF-8",
 ];
 
+/// What one server holds once warm, for [`server_pool::Budget`]: it measured 0.7 to 0.9 GiB after
+/// hundreds of compiles, and its 3 GiB heap may grow toward that, so the weight is two thirds of it.
+const KOTLIN_NATIVE_SERVER_RESIDENT_MIB: u64 = 2048;
+
 /// Milliseconds one compile may take before its server counts as hung and is replaced:
 /// `KRUSTY_NATIVE_COMPILE_TIMEOUT_MS`, five minutes by default. No compile in the oracle corpus
 /// takes a minute warm; slower or busier hosts raise it.
@@ -112,7 +116,12 @@ pub(crate) fn kotlinc_native(root: &Path, args: &[OsString]) -> NativeCompile {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .entry(root.to_path_buf())
-            .or_insert_with(|| Arc::new(server_pool::Pool::new())),
+            .or_insert_with(|| {
+                Arc::new(server_pool::Pool::resident(
+                    server_pool::Budget::process(),
+                    KOTLIN_NATIVE_SERVER_RESIDENT_MIB,
+                ))
+            }),
     );
     let start = || KotlinNativeServer::start(root);
     pool.with_server(

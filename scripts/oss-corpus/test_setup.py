@@ -147,35 +147,6 @@ class Setup(unittest.TestCase):
                              'kotlin.code.style=official\n')
 
 
-    def test_every_comma_separated_pin_is_rewritten(self):
-        with tempfile.TemporaryDirectory() as work:
-            repo = f'{work}/upstream'
-            write(f'{repo}/gradle.properties', 'kotlin_version=2.1.0\n')
-            write(f'{repo}/gradle/libs.versions.toml', '[versions]\nplugins-kotlin = "2.2.21"\n')
-            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
-            subprocess.run(['git', 'init', '-q', repo], check=True)
-            subprocess.run(git + ['add', '.'], check=True)
-            subprocess.run(git + ['commit', '-qm', 'init'], check=True)
-            commit = subprocess.run(git + ['rev-parse', 'HEAD'], check=True, capture_output=True,
-                                    text=True).stdout.strip()
-            projects = f'{work}/projects.tsv'
-            write(projects, f'p\tfile://{repo}\t{commit}\t.\t21\t'
-                            'gradle.properties:kotlin_version,'
-                            'gradle/libs.versions.toml:plugins-kotlin\n')
-            env = dict(os.environ, CORPUS_PROJECTS=projects)
-            result = subprocess.run(['bash', os.path.join(HERE, 'checkout.sh'), 'p', f'{work}/p'],
-                                    env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            kotlin = subprocess.run(
-                ['bash', '-c', "sed 's/#.*//' kotlin-versions | awk 'NF { print $1 }' | "
-                               "scripts/sort-kotlin-versions.sh | tail -n 1"],
-                cwd=os.path.join(HERE, '..', '..'), check=True, capture_output=True,
-                text=True).stdout.strip()
-            self.assertEqual(read(f'{work}/p/gradle.properties'), f'kotlin_version={kotlin}\n')
-            self.assertEqual(read(f'{work}/p/gradle/libs.versions.toml'),
-                             f'[versions]\nplugins-kotlin = "{kotlin}"\n')
-
-
 class Sampling(unittest.TestCase):
     """`run.sh` run again in the same work directory leaves only that run's samples and graph."""
 

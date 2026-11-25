@@ -18,16 +18,44 @@ pub(super) struct SelectedSamConstructor {
     pub signature: SamSignature,
 }
 
+/// Select a SAM construction: validate the operand against `fixed`, the application written type
+/// arguments or an enclosing expected type already determine, or infer the application from it.
+pub(super) fn select_sam_constructor(
+    source: &dyn SymbolSource,
+    signature: SamSignature,
+    fixed: Option<Ty>,
+    actual: Ty,
+) -> Option<SelectedSamConstructor> {
+    match fixed {
+        Some(result) => validate_fixed_application(source, signature, result, actual),
+        None => infer_application(source, signature, actual),
+    }
+}
+
 /// Validate a SAM operand against an application already fixed by explicit type arguments or an
 /// enclosing expected type. The caller-owned arguments are not inference variables of the SAM
 /// constructor: reopening the classifier formals here would replace dependent lexical parameters
 /// with unrelated top completions before bounds are checked.
-pub(super) fn select_fixed_sam_constructor(
+///
+/// An operand whose type is still stated over the interface's own formals (a lambda typed before
+/// its call is checked) reads those formals as the fixed application's arguments.
+fn validate_fixed_application(
     source: &dyn SymbolSource,
     signature: SamSignature,
     result: Ty,
     actual: Ty,
 ) -> Option<SelectedSamConstructor> {
+    let formals = signature
+        .type_parameters
+        .iter()
+        .map(|parameter| crate::types::TyParamName::new(&parameter.name))
+        .collect::<Vec<_>>();
+    let applied = formals
+        .iter()
+        .copied()
+        .zip(result.type_args().iter().copied())
+        .collect::<GSigBinds>();
+    let actual = crate::types::ty_subst_formals(actual, &formals, &applied);
     // A function type is its own callable signature.
     let callable =
         crate::symbol_resolver::classifier_callable_signature(source, actual.non_null())?;
@@ -75,7 +103,7 @@ fn unconstrained_argument(variance: TypeVariance, bounds: &[Ty]) -> Ty {
     }
 }
 
-pub(super) fn select_sam_constructor(
+fn infer_application(
     source: &dyn SymbolSource,
     mut signature: SamSignature,
     actual: Ty,
