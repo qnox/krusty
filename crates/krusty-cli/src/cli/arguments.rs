@@ -196,6 +196,9 @@ pub(super) struct ParsedSettings {
     /// The last `-jvm-target` and `-Xjdk-release` values, settled together by [`finish_jvm_target`].
     jvm_target: Option<String>,
     jdk_release: Option<String>,
+    /// `-Xvalhalla-value-classes`, checked against the target and `-Xjvm-enable-preview` by
+    /// [`finish_jvm_target`].
+    valhalla_value_classes: bool,
     api_version: Option<String>,
     /// The `-XXLanguage` values (`+Feature`, `-Feature`) in command-line order, which kotlinc
     /// applies last so they override everything else.
@@ -301,6 +304,7 @@ pub(super) fn apply(
         }
         "-jdk-home" => opts.jdk_home = Some(PathBuf::from(text)),
         "-Xjvm-enable-preview" => opts.jvm_enable_preview = flag,
+        "-Xvalhalla-value-classes" => parsed.valhalla_value_classes = flag,
         "-Xno-param-assertions" => opts.no_param_assertions = flag,
         "-Xno-call-assertions" => opts.no_call_assertions = flag,
         "-Xno-receiver-assertions" => opts.no_receiver_assertions = flag,
@@ -470,7 +474,30 @@ pub(super) fn finish_jvm_target(opts: &mut Options, parsed: &ParsedSettings) {
             None => opts.ignored.push(format!("-jvm-target {target}")),
         }
     }
+    if parsed.valhalla_value_classes {
+        // kotlinc requires the first JVM release with Valhalla's value classes and the preview
+        // opt-in before it reads any source.
+        let major = opts.jvm_target_major.unwrap_or(MAJOR_JAVA8);
+        if major < MAJOR_JAVA28 || !opts.jvm_enable_preview {
+            opts.configuration_errors.push(
+                krusty::diag::render_message(
+                    Some(krusty::diag::names::COMPILER_ARGUMENTS_ERROR),
+                    "Valhalla value classes ('-Xvalhalla-value-classes') require JVM target 28 or later and the '-Xjvm-enable-preview' flag.",
+                    opts.diagnostic_names,
+                )
+                .into_owned(),
+            );
+        } else {
+            opts.refuse(
+                "-Xvalhalla-value-classes selects an output shape krusty does not emit".to_string(),
+            );
+        }
+    }
 }
+
+const MAJOR_JAVA8: u16 = 52;
+/// The class-file major version of JVM target 28, the first with Valhalla's value classes.
+const MAJOR_JAVA28: u16 = 72;
 
 /// kotlinc's `isCompatibleJvmTargetAndRelease`: target 1.8 also serves releases 6 and 7, so the
 /// standard library can compile against them.
