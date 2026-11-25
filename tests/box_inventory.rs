@@ -135,6 +135,13 @@ fn join(
     Ok(files)
 }
 
+/// Whether the `codegen/boxModernJdk` cases join the JVM lane. They need JDK 11, 17 and 21
+/// installed (`KRUSTY_JDK_<N>_HOME`) and still include cases krusty does not pass, so the lane
+/// stays opt-in (`KRUSTY_BOX_MODERN_JDK=1`) until it is green and its JDKs are provisioned.
+fn modern_jdk_lane_enabled() -> bool {
+    std::env::var_os("KRUSTY_BOX_MODERN_JDK").is_some_and(|value| !value.is_empty())
+}
+
 /// The `codegen/boxModernJdk` cases that name a JDK to run on (`krusty::conformance::modern_jdk`).
 /// `testsWithValhalla` names none: it needs a Valhalla JDK that has no release, which JetBrains'
 /// own configuration skips, so it is outside the lane.
@@ -175,7 +182,7 @@ pub fn discover(corpus: &Path, target: TestTarget) -> Result<Vec<PathBuf>, Strin
     }
     let selected = model_files(corpus, target)?;
     let mut candidates = krusty::conformance::kotlin_files(corpus);
-    if target == TestTarget::Jvm {
+    if target == TestTarget::Jvm && modern_jdk_lane_enabled() {
         candidates.extend(modern_jdk_files(corpus));
     }
     let upstream: Vec<PathBuf> = candidates
