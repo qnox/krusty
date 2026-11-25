@@ -4,64 +4,144 @@
 //! override, as it does its result (see [`super::result_enhancement`]): a Java parameter with no
 //! nullability qualifier of its own (`String!`) that overrides a parameter fixed not-null is that
 //! not-null type, so a Java class implementing `interface I { fun f(x: String) }` rejects `null`
-//! for `f`.
+//! for `f`. The qualifier is the head nullability of the overridden parameter as the receiver sees
+//! it, and the overridden declarations must agree: parameters are contravariant, so one nullable
+//! declaration keeps the Java parameter flexible.
 //!
-//! An overridden parameter that is a type variable of its owner reads through the overriding
-//! class's supertype argument, which a Java supertype writes as a flexible `T!`. That occurrence is
-//! not rigid, so a parameter declared over a type variable contributes no qualifier here.
+//! A parameter whose declared head is a type variable of the overridden owner reads that variable
+//! through the supertype edges between the overriding class and the owner. An edge a Java class
+//! declares writes its arguments flexibly (`KG<String!>`), so the occurrence is not rigid and
+//! contributes no qualifier; a Kotlin class's edge states its arguments, and keeps the argument
+//! rigid.
 
 use super::result_enhancement::overrides;
+use crate::fx_hash::HashSet;
 use crate::libraries::{FunctionInfo, FunctionSet};
 use crate::symbol_source::SymbolSource;
-use crate::types::TyKind;
+use crate::types::{Ty, TyKind, TypeName};
 
-/// Whether `inherited` fixes its parameter `index` not-null: the declaration states the type
-/// itself, it is neither nullable nor flexible, and the declaration does not accept a platform
-/// `null` there.
-fn fixes_parameter_not_null(
+/// The head nullability qualifier one overridden declaration contributes to a parameter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParameterQualifier {
+    NotNull,
+    Nullable,
+}
+
+/// Whether a supertype argument is Java's flexible occurrence: written flexibly, or a variable
+/// whose bound is the platform one.
+fn argument_is_flexible(argument: Ty) -> bool {
+    let argument = argument.projection_inner().unwrap_or(argument);
+    argument.is_platform_nullable()
+        || matches!(argument.kind(), TyKind::TyParam(_, bound) if bound.is_platform_nullable())
+}
+
+/// Whether `to` is reached from `from` through supertype edges that all state their arguments
+/// rigidly.
+fn reaches_through_rigid_edges(source: &dyn SymbolSource, from: TypeName, to: TypeName) -> bool {
+    let mut pending = vec![from];
+    let mut seen = HashSet::default();
+    while let Some(current) = pending.pop() {
+        if current == to {
+            return true;
+        }
+        if !seen.insert(current) {
+            continue;
+        }
+        let Some(classifier) = source.classifier(current) else {
+            continue;
+        };
+        for template in &classifier.supertype_templates {
+            if let TyKind::Obj(supertype, arguments) = template.kind() {
+                if !arguments.iter().copied().any(argument_is_flexible) {
+                    pending.push(supertype);
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Whether `to` is reached from `from` with its type variables stated rigidly: through edges that
+/// all state their arguments rigidly, or, for a pure implementation, through its pure supertype,
+/// which reaches every mapped builtin collection declaration.
+fn reaches_rigidly(source: &dyn SymbolSource, from: TypeName, to: TypeName) -> bool {
+    reaches_through_rigid_edges(source, from, to)
+        || source
+            .classifier(from)
+            .is_some_and(|classifier| classifier.purely_implemented.is_some())
+            && source
+                .classifier(to)
+                .is_some_and(|classifier| classifier.mapped_builtin)
+}
+
+/// The head qualifier `inherited` contributes to its parameter `index`, as the overriding
+/// `implementation` sees it; `None` when the occurrence carries none.
+fn parameter_qualifier(
     source: &dyn SymbolSource,
+    implementation: &FunctionInfo,
     inherited: &FunctionInfo,
     index: usize,
-) -> bool {
-    // A generic owner's declaration reads its parameter through the overriding class's supertype
-    // argument, whose flexibility is that occurrence's own; only a declaration whose owner has no
-    // type variable states its parameter itself.
-    let owner_is_generic = source
-        .classifier(inherited.callable.owner)
-        .is_none_or(|owner| !owner.type_params().is_empty());
-    if owner_is_generic {
-        return false;
+) -> Option<ParameterQualifier> {
+    let parameter = inherited.semantic_params().get(index).copied()?;
+    if parameter.is_nullable() {
+        return Some(ParameterQualifier::Nullable);
     }
-    let Some(parameter) = inherited.semantic_params().get(index).copied() else {
-        return false;
-    };
+    if inherited
+        .call_sig
+        .platform_nullable_params
+        .get(index)
+        .copied()
+        .unwrap_or(false)
+        || matches!(
+            parameter.kind(),
+            TyKind::PlatformNullable(_) | TyKind::Error | TyKind::Pending
+        )
+        || !parameter.is_reference()
+    {
+        return None;
+    }
     let declared = inherited
         .generic_sig
         .as_ref()
         .and_then(|signature| signature.params.get(index).copied())
         .unwrap_or(parameter);
-    !declared.mentions_ty_param()
-        && !inherited
-            .call_sig
-            .platform_nullable_params
-            .get(index)
-            .copied()
-            .unwrap_or(false)
-        && !parameter.is_nullable()
-        && !matches!(
-            parameter.kind(),
-            TyKind::PlatformNullable(_) | TyKind::Error | TyKind::Pending
+    if matches!(declared.kind(), TyKind::TyParam(..))
+        && !reaches_rigidly(
+            source,
+            implementation.callable.owner,
+            inherited.callable.owner,
         )
-        && parameter.is_reference()
+    {
+        return None;
+    }
+    Some(ParameterQualifier::NotNull)
 }
 
-/// Whether `inherited` declares its parameter `index` nullable (`String?`), a qualifier that
-/// conflicts with a not-null one.
-fn accepts_null_parameter(inherited: &FunctionInfo, index: usize) -> bool {
-    inherited
-        .semantic_params()
-        .get(index)
-        .is_some_and(|parameter| parameter.is_nullable())
+/// A type argument without its platform nullability, through a projection.
+fn rigid_argument(argument: Ty) -> Ty {
+    match argument.kind() {
+        TyKind::InProjection(bound) => Ty::in_projection(bound.platform_lower_bound()),
+        TyKind::OutProjection(bound) => Ty::out_projection(bound.platform_lower_bound()),
+        _ => argument.platform_lower_bound(),
+    }
+}
+
+/// The enhanced form of the flexible Java `parameter` that the not-null `inherited` parameter
+/// fixes. The overridden head replaces the Java one, so a flexible collection takes the overridden
+/// mutability; the Java arguments stay flexible unless the overridden occurrence is rigid.
+fn enhanced_parameter(parameter: Ty, inherited: Ty, rigid: bool) -> Ty {
+    let lower = parameter.platform_lower_bound();
+    match (lower.kind(), inherited.non_null().kind()) {
+        (TyKind::Obj(_, arguments), TyKind::Obj(head, _)) => {
+            let arguments = if rigid {
+                arguments.iter().copied().map(rigid_argument).collect()
+            } else {
+                arguments.to_vec()
+            };
+            Ty::obj_args_name(head, &arguments)
+        }
+        _ => lower,
+    }
 }
 
 /// Make each flexible Java parameter (`String!`) that an overridden declaration fixes not-null
@@ -95,15 +175,31 @@ pub(super) fn enhance_overriding_flexible_parameters(
             .filter(|inherited| overrides(source, implementation, inherited))
             .collect::<Vec<_>>();
         for index in flexible {
-            // Parameters are contravariant: kotlinc leaves the Java parameter flexible when the
-            // overridden declarations disagree, so one nullable declaration cancels a not-null one.
-            if overridden
+            let qualifiers = overridden
                 .iter()
-                .any(|inherited| fixes_parameter_not_null(source, inherited, index))
-                && !overridden
-                    .iter()
-                    .any(|inherited| accepts_null_parameter(inherited, index))
+                .filter_map(|inherited| {
+                    parameter_qualifier(source, implementation, inherited, index)
+                })
+                .collect::<Vec<_>>();
+            if qualifiers.contains(&ParameterQualifier::NotNull)
+                && !qualifiers.contains(&ParameterQualifier::Nullable)
             {
+                let Some((fixed, rigid)) = overridden.iter().find_map(|inherited| {
+                    (parameter_qualifier(source, implementation, inherited, index)
+                        == Some(ParameterQualifier::NotNull))
+                    .then(|| {
+                        (
+                            inherited.semantic_params()[index],
+                            reaches_rigidly(
+                                source,
+                                implementation.callable.owner,
+                                inherited.callable.owner,
+                            ),
+                        )
+                    })
+                }) else {
+                    continue;
+                };
                 crate::trace_compiler!(
                     "resolve",
                     "enhanced overriding parameter owner={:?} name={} index={index}",
@@ -118,7 +214,7 @@ pub(super) fn enhance_overriding_flexible_parameters(
                 // extension receiver and context parameters precede on the callable.
                 if let Some(signature) = &mut implementation.generic_sig {
                     if let Some(parameter) = signature.params.get_mut(index) {
-                        *parameter = parameter.platform_lower_bound();
+                        *parameter = enhanced_parameter(*parameter, fixed, rigid);
                     }
                 }
                 let leading = implementation
@@ -127,7 +223,7 @@ pub(super) fn enhance_overriding_flexible_parameters(
                     .len()
                     .saturating_sub(implementation.semantic_params().len());
                 if let Some(parameter) = implementation.callable.params.get_mut(leading + index) {
-                    *parameter = parameter.platform_lower_bound();
+                    *parameter = enhanced_parameter(*parameter, fixed, rigid);
                 }
             }
         }
