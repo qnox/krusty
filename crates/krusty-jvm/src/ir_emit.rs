@@ -91,7 +91,7 @@ mod enum_entry_construction;
 mod enum_entry_subclass;
 mod enum_reflection_call;
 mod enum_synthetic_fields;
-pub use emit_options::{EmitOptions, DEFAULT_METADATA_VERSION};
+pub use emit_options::{EmitOptions, StringConcatMode, DEFAULT_METADATA_VERSION};
 mod explicit_backing_fields;
 mod field_read;
 mod field_visibility;
@@ -519,7 +519,7 @@ pub(super) struct EmitEnv<'a> {
     /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
     java_parameters: bool,
     /// `-Xstring-concat=inline`: build string concatenations with `StringBuilder` at every target.
-    inline_string_concat: bool,
+    string_concat: StringConcatMode,
     /// `-Xuse-inline-scopes-numbers`: name inlined locals by their inline scope's number.
     inline_scopes_numbers: bool,
     /// The `@kotlin.Metadata` `mv` (`-language-version`, or [`DEFAULT_METADATA_VERSION`]) and
@@ -4458,7 +4458,7 @@ struct Emitter<'a> {
     /// Independent realization strategies for plain lambdas and SAM conversions.
     lambda_modes: LambdaModes,
     /// `-Xstring-concat=inline`: never build a concatenation with `invokedynamic`.
-    inline_string_concat: bool,
+    string_concat: StringConcatMode,
     /// The scope numbering of the method being emitted, under `-Xuse-inline-scopes-numbers`.
     inline_scopes: Option<krusty::jvm::inliner::InlineScopes>,
     /// Placed lambdas whose bodies are being emitted, innermost last, with their callers' numbering.
@@ -4584,7 +4584,7 @@ impl<'a> Emitter<'a> {
             suppress_unsigned_local_line: false,
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
-            inline_string_concat: env.inline_string_concat,
+            string_concat: env.string_concat,
             inline_scopes: env
                 .inline_scopes_numbers
                 .then(krusty::jvm::inliner::InlineScopes::default),

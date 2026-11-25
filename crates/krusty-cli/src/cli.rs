@@ -14,7 +14,7 @@ use krusty::language_settings::LanguageSettings;
 use krusty::language_version::LanguageVersion;
 use krusty::plugins::cli::PluginConfig;
 use krusty::plugins::registry::{Activation, NativePlugins, PluginRegistry};
-use krusty_jvm::ir_emit::{JvmDefaultMode, LambdaModes};
+use krusty_jvm::ir_emit::{JvmDefaultMode, LambdaModes, StringConcatMode};
 use krusty_jvm::JvmBackend;
 
 use crate::kotlinc_arguments::{self, Catalog, Disposition, Lifecycle, Origin, ValueKind};
@@ -191,9 +191,8 @@ pub struct Options {
     /// `-Xassertions=always-enable|always-disable|legacy`: the `assert(...)` mode, applied to the
     /// language settings once they are built.
     pub assertions: Option<String>,
-    /// `-Xstring-concat=inline`: build every string concatenation with `StringBuilder`, whatever
-    /// the JVM target.
-    pub inline_string_concat: bool,
+    /// `-Xstring-concat`: how a string concatenation is built.
+    pub string_concat: StringConcatMode,
     /// `-Xuse-inline-scopes-numbers` (kotlinc's `USE_INLINE_SCOPES_NUMBERS` configuration): name
     /// inlined locals by their inline scope's number instead of `$iv` suffixes.
     pub inline_scopes_numbers: bool,
@@ -262,7 +261,7 @@ impl Default for Options {
             explicit_api: None,
             explicit_return_types: None,
             assertions: None,
-            inline_string_concat: false,
+            string_concat: StringConcatMode::default(),
             inline_scopes_numbers: false,
             opt_in: Vec::new(),
             suppress_version_warnings: false,
@@ -647,7 +646,7 @@ impl Options {
             .with_jvm_default(self.jvm_default)
             .with_java_parameters(self.java_parameters)
             .with_lambda_modes(self.lambda_modes)
-            .with_inline_string_concat(self.inline_string_concat)
+            .with_string_concat(self.string_concat)
             .with_inline_scopes_numbers(self.inline_scopes_numbers)
             .with_param_assertions(!self.no_param_assertions)
             .with_call_assertions(!self.no_call_assertions)
@@ -1222,14 +1221,22 @@ mod tests {
     }
 
     #[test]
-    fn string_concat_selects_inline_only() {
-        let parsed = parse_args(&["-Xstring-concat=inline", "x.kt"]);
-        assert_eq!(parsed.errors, Vec::<String>::new());
-        assert!(parsed.inline_string_concat);
-        assert!(!parse_args(&["x.kt"]).inline_string_concat);
+    fn string_concat_selects_the_build_shape() {
+        for (argument, mode) in [
+            ("-Xstring-concat=inline", StringConcatMode::Inline),
+            (
+                "-Xstring-concat=indy-with-constants",
+                StringConcatMode::IndyWithConstants,
+            ),
+            ("-Xstring-concat=indy", StringConcatMode::Indy),
+        ] {
+            let parsed = parse_args(&[argument, "x.kt"]);
+            assert_eq!(parsed.errors, Vec::<String>::new());
+            assert_eq!(parsed.string_concat, mode);
+        }
         assert_eq!(
-            parse_args(&["-Xstring-concat=indy", "x.kt"]).errors,
-            vec!["-Xstring-concat=indy selects an output shape krusty does not emit"]
+            parse_args(&["x.kt"]).string_concat,
+            StringConcatMode::IndyWithConstants
         );
         assert_eq!(
             parse_args(&["-Xstring-concat=sideways", "x.kt"]).errors,
