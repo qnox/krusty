@@ -975,6 +975,31 @@ fn a_pool_holds_one_server_per_cpu_between_one_and_six() {
 }
 
 #[test]
+fn a_container_limit_below_the_host_memory_is_the_budgeted_memory() {
+    use crate::common_core::server_pool::{cgroup_limit_bytes, effective_memory_mib};
+
+    assert_eq!(effective_memory_mib(64_000, Some(4096 * 1024 * 1024)), 4096);
+    assert_eq!(effective_memory_mib(7782, None), 7782, "no container limit");
+    assert_eq!(
+        effective_memory_mib(7782, Some(u64::MAX - 4095)),
+        7782,
+        "cgroup v1 reports no limit as a value near u64::MAX"
+    );
+    assert_eq!(cgroup_limit_bytes("max\n"), None);
+    assert_eq!(cgroup_limit_bytes("4294967296\n"), Some(4_294_967_296));
+}
+
+#[test]
+fn the_jvm_runner_and_asm_pools_keep_their_half_cpu_cap() {
+    use crate::common_core::server_pool::server_pool_cap;
+
+    if std::env::var_os("KRUSTY_SERVER_POOL").is_none() {
+        let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+        assert_eq!(server_pool_cap(), (cpus / 2).clamp(1, 6));
+    }
+}
+
+#[test]
 fn a_panicking_caller_releases_its_server_claim() {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::{AtomicUsize, Ordering};

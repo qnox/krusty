@@ -857,9 +857,11 @@ Performance-relevant harness state:
   (constant-pool ordering, `.kotlin_module` emission). `KRUSTY_LIB_BYTEDIFF_REPORT=1` (with
   `--nocapture`) prints a `LIBDIFF\t<identical|divergent|krusty-only|kotlinc-only>\t<entry>` line
   per lib entry — the convergence inventory for making byte equality the assertion.
-- Persistent JVM pools (kotlinc compiler servers, JavaRunner) scale with the host: one server per
-  CPU, clamped to `[1, 6]`. `KRUSTY_SERVER_POOL=<n>` overrides in either direction (e.g. `1` on a swapping host).
-  The kotlinc and kotlinc-native servers also share one memory budget, the host's memory less the
+- Persistent JVM pools scale with the host: a kotlinc compiler-server pool holds one server per
+  CPU and the JavaRunner and ASM pools half as many, each clamped to `[1, 6]`.
+  `KRUSTY_SERVER_POOL=<n>` overrides in either direction (e.g. `1` on a swapping host).
+  The kotlinc and kotlinc-native servers also share one memory budget, the host's memory (or its
+  container's limit, when lower) less the
   larger of 3.5 GiB and two fifths of it (about 4 GiB on a 7.6 GiB runner): a pool that would pass it
   stops another pool's server that has been idle for five seconds, or waits. A cold run that reaches
   every oracle at once otherwise holds six server JVMs beside the test process.

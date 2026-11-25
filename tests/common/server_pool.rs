@@ -323,6 +323,9 @@ pub(crate) fn default_limit_mib(total_mib: u64) -> u64 {
     total_mib.saturating_sub((total_mib * 2 / 5).max(3584))
 }
 
+/// The memory the test process may use: the host's `MemTotal`, or the container's limit when that
+/// is lower (cgroup v2 `memory.max`, cgroup v1 `memory.limit_in_bytes`), so a 4 GiB container on a
+/// larger host is budgeted as a 4 GiB machine.
 fn host_memory_mib() -> Option<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     let kib = meminfo
@@ -332,25 +335,55 @@ fn host_memory_mib() -> Option<u64> {
         .next()?
         .parse::<u64>()
         .ok()?;
-    Some(kib / 1024)
+    let limit = [
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ]
+    .iter()
+    .find_map(|path| cgroup_limit_bytes(&std::fs::read_to_string(path).ok()?));
+    Some(effective_memory_mib(kib / 1024, limit))
 }
 
-/// How many persistent compiler-server JVMs one pool may hold: one per CPU, clamped to [1, 6]. A
-/// single server serializes every kotlinc-dependency compile AND every java-driver test behind one
-/// mutex, and a cold corpus that waits for two servers on a 4-CPU host leaves half its CPUs idle.
-/// Memory is not decided here: the resident-server budget shared by every pool stops a server when
-/// another pool needs the room, so a pool that cannot grow waits for its own server instead.
+/// A cgroup limit file's value in bytes; `None` for `max` (no limit) or text that is not a number.
+pub(crate) fn cgroup_limit_bytes(text: &str) -> Option<u64> {
+    text.trim().parse().ok()
+}
+
+/// The lower of the host's memory and the container's limit. A cgroup v1 file that reports no limit
+/// holds a value near `u64::MAX`, which is never lower than the host's memory.
+pub(crate) fn effective_memory_mib(host_mib: u64, cgroup_limit_bytes: Option<u64>) -> u64 {
+    cgroup_limit_bytes.map_or(host_mib, |bytes| host_mib.min(bytes / (1024 * 1024)))
+}
+
+/// How many persistent JVMs a pool that is not counted against the resident-server budget may hold
+/// (the JavaRunner and ASM text pools, each at `-Xmx512m`): half the CPUs, clamped to [1, 6].
 /// `KRUSTY_SERVER_POOL` overrides in either direction (e.g. 1 on a swapping shared box).
 pub(crate) fn server_pool_cap() -> usize {
-    std::env::var("KRUSTY_SERVER_POOL")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or_else(|| pool_cap(std::thread::available_parallelism().map_or(1, |n| n.get())))
+    pool_cap_override().unwrap_or_else(|| (cpus() / 2).clamp(1, 6))
+}
+
+/// How many persistent kotlinc-server JVMs one pool may hold: one per CPU, clamped to [1, 6]. A
+/// single server serializes every kotlinc-dependency compile behind one mutex, and a cold corpus
+/// that waits for two servers on a 4-CPU host leaves half its CPUs idle. Memory is not decided
+/// here: the resident-server budget shared by the kotlinc and kotlinc-native pools stops a server
+/// when another of them needs the room, so a pool that cannot grow waits for its own server.
+pub(crate) fn kotlinc_pool_cap() -> usize {
+    pool_cap_override().unwrap_or_else(|| pool_cap(cpus()))
 }
 
 pub(crate) fn pool_cap(cpus: usize) -> usize {
     cpus.clamp(1, 6)
+}
+
+fn cpus() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+fn pool_cap_override() -> Option<usize> {
+    std::env::var("KRUSTY_SERVER_POOL")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
