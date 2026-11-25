@@ -79,6 +79,9 @@ pub const APPLIED: &[&str] = &[
 
 /// The arguments krusty accepts without acting on them, by canonical name.
 pub const INERT: &[&str] = &[
+    // This flag only lifts kotlinc's check that the JVM it runs on is at least 17. krusty does not
+    // run that check, so it already compiles as kotlinc does under the flag.
+    "-Xallow-pre-17-runtime-jdk",
     // krusty does not reserve the `kotlin` package, so it already compiles declarations there as
     // kotlinc does once this argument lifts the reservation.
     "-Xallow-kotlin-package",
@@ -110,11 +113,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "-Xallow-condition-implies-returns-contracts",
     "-Xallow-contracts-on-more-functions",
     "-Xallow-holdsin-contract",
-    // This flag only lifts kotlinc's check that its own JVM is at least 17. krusty does not
-    // run that check, so the flag is inert. It stays refused: the inert-argument harness needs
-    // kotlinc to reject a compilation that omits the flag, and a JDK that is already 17 or newer
-    // does not.
-    "-Xallow-pre-17-runtime-jdk",
     "-Xallow-reified-type-in-catch",
     "-Xallow-returns-result-of",
     "-Xannotation-default-target",
