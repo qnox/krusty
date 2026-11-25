@@ -1,14 +1,18 @@
 //! kotlinc enhances a Java parameter with the nullability of the declaration it overrides: a Java
 //! class implementing a Kotlin `fun f(x: String)` rejects `null` for `f`, because the override's
 //! `String!` becomes the overridden `String`. A parameter that overrides a type variable stays
-//! flexible, since a Java supertype names that argument flexibly (`KG<String!>`), and so does one whose
-//! overridden declarations disagree on nullability.
+//! flexible through a Java supertype, which names that argument flexibly (`KG<String!>`), and rigid
+//! through a Kotlin one (`KS : KG<String>`). A parameter that states its own head (`String`,
+//! `List<T>`) is enhanced wherever its owner is generic, one whose overridden declarations disagree
+//! on nullability stays flexible, and a flexible collection keeps its flexible mutability.
 
 use super::common;
 
 const KOTLIN_LIBRARY: &str = "interface KI { fun f(x: String): String }
-interface KG<T> { fun h(x: T) }
 interface KN { fun f(x: String?): String }
+interface KG<T> { fun g(x: String); fun h(x: T); fun l(x: List<T>) }
+abstract class KS : KG<String>
+interface KC { fun c(x: Collection<String>) }
 ";
 
 const SOURCE: &str = "fun strict(bar: Bar) {
@@ -17,7 +21,25 @@ const SOURCE: &str = "fun strict(bar: Bar) {
 }
 
 fun flexible(generic: JG) {
+    generic.g(null)
     generic.h(null)
+    generic.l(null)
+}
+
+fun rigid(intermediate: JS) {
+    intermediate.g(null)
+    intermediate.h(null)
+    intermediate.l(null)
+}
+
+fun conflicting(both: Both) {
+    both.f(null)
+}
+
+fun collection(jc: JC) {
+    jc.c(listOf(\"a\"))
+    jc.c(mutableListOf(\"a\"))
+    jc.c(null)
 }
 ";
 
@@ -35,12 +57,20 @@ fn libraries() -> Vec<std::path::PathBuf> {
                 .to_string(),
         ),
         (
+            "JS.java".to_string(),
+            "public abstract class JS extends KS { public void g(String x) {} public void h(String x) {} public void l(java.util.List<? extends String> x) {} }\n".to_string(),
+        ),
+        (
+            "JC.java".to_string(),
+            "public class JC implements KC { public void c(java.util.Collection<String> x) {} }\n".to_string(),
+        ),
+        (
             "JG.java".to_string(),
-            "public class JG implements KG<String> { public void h(String x) {} }\n".to_string(),
+            "public class JG implements KG<String> { public void g(String x) {} public void h(String x) {} public void l(java.util.List<? extends String> x) {} }\n".to_string(),
         ),
     ];
-    let (java_dir, _) = common::javac_compile(&java, std::slice::from_ref(&kotlin))
-        .map(|output| (output.0, ()))
+    let java_dir = common::javac_compile(&java, std::slice::from_ref(&kotlin))
+        .map(|output| output.0)
         .expect("javac must build the Java fixture");
     vec![kotlin, java_dir]
 }
@@ -70,6 +100,14 @@ fn a_java_override_of_a_kotlin_parameter_takes_its_nullability() {
     assert_eq!(krusty, kotlinc);
     assert_eq!(
         kotlinc,
-        ["Use.kt:2:11: null cannot be a value of a non-null type 'String'."]
+        [
+            "Use.kt:2:11: null cannot be a value of a non-null type 'String'.",
+            "Use.kt:7:15: null cannot be a value of a non-null type 'String'.",
+            "Use.kt:9:15: null cannot be a value of a non-null type 'List<out String!>'.",
+            "Use.kt:13:20: null cannot be a value of a non-null type 'String'.",
+            "Use.kt:14:20: null cannot be a value of a non-null type 'String'.",
+            "Use.kt:15:20: null cannot be a value of a non-null type 'List<out String>'.",
+            "Use.kt:25:10: null cannot be a value of a non-null type 'Collection<String>'.",
+        ]
     );
 }
