@@ -309,9 +309,16 @@ const KOTLINC_SERVER_RESIDENT_MIB: u64 = 1536;
 
 /// A persistent JVM running the in-process `KotlincServer` compiler, fed compiler arg-lists over a pipe.
 struct KotlincServer {
-    _child: Child,
+    child: Child,
     stdin: ChildStdin,
     stdout: ChildStdout,
+}
+
+impl Drop for KotlincServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl KotlincServer {
@@ -356,7 +363,7 @@ impl KotlincServer {
         let stdin = child.stdin.take()?;
         let stdout = child.stdout.take()?;
         Some(KotlincServer {
-            _child: child,
+            child,
             stdin,
             stdout,
         })
