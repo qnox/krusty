@@ -64,13 +64,18 @@ fn reaches_through_rigid_edges(source: &dyn SymbolSource, from: TypeName, to: Ty
 /// Whether `to` is reached from `from` with its type variables stated rigidly: through edges that
 /// all state their arguments rigidly, or, for a pure implementation, through its pure supertype,
 /// which reaches every mapped builtin collection declaration.
-fn reaches_rigidly(source: &dyn SymbolSource, from: TypeName, to: TypeName) -> bool {
+fn reaches_rigidly(
+    source: &dyn SymbolSource,
+    implementation: &FunctionInfo,
+    inherited: &FunctionInfo,
+) -> bool {
+    let (from, to) = (implementation.callable.owner, inherited.callable.owner);
     reaches_through_rigid_edges(source, from, to)
         || source
             .classifier(from)
             .is_some_and(|classifier| classifier.purely_implemented.is_some())
             && source
-                .classifier(to)
+                .classifier(super::function_declaration_identity(inherited).owner)
                 .is_some_and(|classifier| classifier.mapped_builtin)
 }
 
@@ -100,21 +105,22 @@ fn parameter_qualifier(
     {
         return None;
     }
-    let declared = inherited
-        .generic_sig
-        .as_ref()
-        .and_then(|signature| signature.params.get(index).copied())
-        .unwrap_or(parameter);
-    if matches!(declared.kind(), TyKind::TyParam(..))
-        && !reaches_rigidly(
-            source,
-            implementation.callable.owner,
-            inherited.callable.owner,
-        )
+    if head_is_owner_variable(inherited, index)
+        && !reaches_rigidly(source, implementation, inherited)
     {
         return None;
     }
     Some(ParameterQualifier::NotNull)
+}
+
+/// Whether the declared head of `inherited`'s parameter `index` is a type variable of its owner. The
+/// head is read from the declaration as its owner wrote it, not from the receiver's substitution of
+/// it: a variable of the owner stays one however the receiver binds it.
+fn head_is_owner_variable(inherited: &FunctionInfo, index: usize) -> bool {
+    super::function_declaration_identity(inherited)
+        .params
+        .get(index)
+        .is_none_or(|declared| matches!(declared.kind(), TyKind::TyParam(..)))
 }
 
 /// A type argument without its platform nullability, through a projection.
@@ -129,7 +135,18 @@ fn rigid_argument(argument: Ty) -> Ty {
 /// The enhanced form of the flexible Java `parameter` that the not-null `inherited` parameter
 /// fixes. The overridden head replaces the Java one, so a flexible collection takes the overridden
 /// mutability; the Java arguments stay flexible unless the overridden occurrence is rigid.
-fn enhanced_parameter(parameter: Ty, inherited: Ty, rigid: bool) -> Ty {
+fn enhanced_parameter(parameter: Ty, inherited: Ty, rigid: bool, variable_head: bool) -> Ty {
+    // A variable the receiver bound the overridden owner's own variable to is the parameter's type
+    // as it stands: it carries the variable's nullability, not a not-null one.
+    if inherited.is_ty_param() {
+        return inherited;
+    }
+    // A receiver whose arguments are not yet known reads the overridden owner's variable as its
+    // erasure, `Any`. That is the variable unbound, which the parameter keeps, not the not-null
+    // `Any` an argument would fix.
+    if variable_head && inherited == Ty::obj_name(crate::types::wk::any()) {
+        return parameter;
+    }
     let lower = parameter.platform_lower_bound();
     match (lower.kind(), inherited.non_null().kind()) {
         (TyKind::Obj(_, arguments), TyKind::Obj(head, _)) => {
@@ -184,17 +201,14 @@ pub(super) fn enhance_overriding_flexible_parameters(
             if qualifiers.contains(&ParameterQualifier::NotNull)
                 && !qualifiers.contains(&ParameterQualifier::Nullable)
             {
-                let Some((fixed, rigid)) = overridden.iter().find_map(|inherited| {
+                let Some((fixed, rigid, variable_head)) = overridden.iter().find_map(|inherited| {
                     (parameter_qualifier(source, implementation, inherited, index)
                         == Some(ParameterQualifier::NotNull))
                     .then(|| {
                         (
                             inherited.semantic_params()[index],
-                            reaches_rigidly(
-                                source,
-                                implementation.callable.owner,
-                                inherited.callable.owner,
-                            ),
+                            reaches_rigidly(source, implementation, inherited),
+                            head_is_owner_variable(inherited, index),
                         )
                     })
                 }) else {
@@ -214,7 +228,7 @@ pub(super) fn enhance_overriding_flexible_parameters(
                 // extension receiver and context parameters precede on the callable.
                 if let Some(signature) = &mut implementation.generic_sig {
                     if let Some(parameter) = signature.params.get_mut(index) {
-                        *parameter = enhanced_parameter(*parameter, fixed, rigid);
+                        *parameter = enhanced_parameter(*parameter, fixed, rigid, variable_head);
                     }
                 }
                 let leading = implementation
@@ -223,7 +237,7 @@ pub(super) fn enhance_overriding_flexible_parameters(
                     .len()
                     .saturating_sub(implementation.semantic_params().len());
                 if let Some(parameter) = implementation.callable.params.get_mut(leading + index) {
-                    *parameter = enhanced_parameter(*parameter, fixed, rigid);
+                    *parameter = enhanced_parameter(*parameter, fixed, rigid, variable_head);
                 }
             }
         }
