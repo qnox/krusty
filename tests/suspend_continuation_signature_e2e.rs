@@ -157,3 +157,25 @@ class Holder<C> {
         &["Holder$keep$1", "Holder$plain$1"],
     );
 }
+
+/// An inner class's receiver is applied to the enclosing class's type parameters as well as its
+/// own: `Outer<A>.Inner<B>` signs as `LOuter<TA;>.Inner<TB;>;`.
+#[test]
+fn an_inner_class_member_continuation_signs_its_receiver_like_kotlinc() {
+    const SOURCE: &str = r#"suspend fun next(): Int = 2
+
+class Outer<A> {
+    inner class Inner<B> {
+        suspend fun go(a: A, b: B): B {
+            next()
+            return b
+        }
+    }
+}
+"#;
+    common::assert_classes_identical_to_kotlinc(
+        "SuspendInnerMemberContinuationSignature",
+        SOURCE,
+        &["Outer$Inner$go$1"],
+    );
+}
