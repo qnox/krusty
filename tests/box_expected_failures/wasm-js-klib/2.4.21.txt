@@ -223,7 +223,6 @@ collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collections/addCollectionStubWithCovariantOverride.kt
 collections/clashWithInternalMapMethod.kt
-collections/inheritFromAbstractMutableListInt.kt
 collections/internalRemove.kt
 collections/removeClash.kt
 companionBlocksAndExtensions/callableReferences_block.kt
@@ -821,16 +820,12 @@ inference/integerLiteralTypeInLamdaReturnType.kt
 inference/kt35684.kt
 inference/kt39824.kt
 inference/overrideDefaultProperty.kt
-inference/pcla/builderCallAsReturnTypeInLocalClass.kt
-inference/pcla/callableReferenceAndCoercionToUnit.kt
 inference/pcla/callableReferencesProperCompletion.kt
 inference/pcla/issues/kt42139.kt
-inference/pcla/issues/kt49887.kt
 inference/pcla/issues/kt54400b.kt
 inference/pcla/issues/kt54767a.kt
 inference/pcla/issues/kt54767b.kt
 inference/pcla/issues/kt64069.kt
-inference/pcla/issues/kt74819e.kt
 inference/pcla/issues/kt76171.kt
 inference/pcla/memberScope.kt
 inference/pcla/nestedNonExhaustiveIf.kt
@@ -2268,7 +2263,6 @@ when/enumOptimization/manyWhensWithinClass.kt
 when/enumOptimization/nullability.kt
 when/enumOptimization/subjectAny.kt
 when/enumOptimization/withoutElse.kt
-when/is.kt
 when/kt45081.kt
 when/stringOptimization/duplicatingItems.kt
 when/stringOptimization/duplicatingItemsSameHashCode.kt

@@ -21,9 +21,7 @@ use crate::fx_hash::HashMap;
 use std::collections::hash_map::Entry;
 
 pub use crate::fir::BuiltinImplementation;
-use crate::fir::{
-    CharSequenceProtocol, CollectionProtocol, ExternalCallableId, ExternalPropertyId,
-};
+use crate::fir::{CharSequenceProtocol, ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 pub use crate::libraries::DependencyGetterSignature;
 /// A dependency classifier a target may represent itself
@@ -933,7 +931,6 @@ pub struct CheckedBackendCallables {
     /// with the parameters a plugin's transform appended to each.
     plugin_runtime: HashMap<ExternalCallableId, Box<[Ty]>>,
     char_sequence_protocol: Option<CharSequenceProtocol>,
-    collection_protocol: Option<CollectionProtocol>,
 }
 
 impl CheckedBackendCallables {
@@ -1303,33 +1300,6 @@ impl CheckedBackendCallables {
     /// them; `None` for every other target.
     pub fn char_sequence_protocol(&self) -> Option<CharSequenceProtocol> {
         self.char_sequence_protocol
-    }
-
-    /// Freeze the collection members a target's own list reads another collection through
-    /// ([`crate::backend::Backend::reads_collections_through_interfaces`]); no source call need
-    /// name them.
-    pub(crate) fn freeze_collection_protocol(
-        &mut self,
-        protocol: CollectionProtocol,
-        provider: &dyn SymbolSource,
-    ) -> Result<(), DependencyFactError> {
-        let mut callable = |identity| provider.external_callable(identity);
-        for member in [
-            protocol.iterator,
-            protocol.has_next,
-            protocol.next,
-            protocol.contains,
-        ] {
-            self.freeze_callable(member, &mut callable)?;
-        }
-        self.collection_protocol = Some(protocol);
-        Ok(())
-    }
-
-    /// The collection members the handoff froze for a target whose list reads another collection
-    /// through them; `None` for every other target.
-    pub fn collection_protocol(&self) -> Option<CollectionProtocol> {
-        self.collection_protocol
     }
 
     /// Copy checker-produced builtin implementation facts for every selected external member.

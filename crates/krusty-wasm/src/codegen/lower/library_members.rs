@@ -33,31 +33,7 @@ pub(in crate::codegen) fn target_owns_call(
     fact: &BackendCallableFact,
 ) -> bool {
     super::declared_by_string_builder(fact)
-        || super::declared_by_array_list(fact)
-        || array_list_realizes(ir, callables, expression, fact)
         || super::any_members::call_member(ir, callables, expression).is_some()
-}
-
-/// Whether the runtime realizes `fact` on the `ArrayList` receiver of `expression`, including
-/// members the list inherits from the abstract collection classes.
-fn array_list_realizes(
-    ir: &IrFile,
-    callables: &CheckedBackendCallables,
-    expression: u32,
-    fact: &BackendCallableFact,
-) -> bool {
-    let receiver = match ir.expr(expression) {
-        IrExpr::Call {
-            dispatch_receiver, ..
-        } => *dispatch_receiver,
-        IrExpr::Checked(operation) => callables
-            .dependency_accessor(operation)
-            .and_then(|access| access.receiver),
-        _ => None,
-    };
-    receiver.is_some_and(|receiver| {
-        super::array_list_receiver(ir, receiver) && super::realized_array_list_member(fact)
-    })
 }
 
 /// How a library member is reached.
@@ -464,16 +440,6 @@ impl Body<'_> {
         role: MemberRole,
         name: &str,
     ) -> Result<crate::interface_dispatch::MemberRef, Unsupported> {
-        // The runtime list's operations reading a collection argument exist once the members they
-        // read it through are recorded.
-        if fact.builtin_implementations.iter().any(|implementation| {
-            implementation
-                .receiver
-                .obj_internal()
-                .is_some_and(crate::array_lists::lays_out)
-        }) {
-            self.record_collection_arguments()?;
-        }
         let signature = library_member_signature(fact, role)?;
         let owner = library_member_owner(fact).ok_or("a library member without its classifier")?;
         let member = self.runtime.objects.interfaces.library(
@@ -488,36 +454,10 @@ impl Body<'_> {
             member,
             crate::builtin_members::LibraryMemberDeclaration {
                 name,
-                params: fact.declared_params.as_deref().unwrap_or(&fact.params),
                 implementations: &fact.builtin_implementations,
             },
             &signature,
         )?;
-        if let Some(step) = super::array_lists::iterator_step(fact) {
-            use super::array_lists::IteratorStep;
-            use crate::list_iterator_ends::EndedStep;
-            let lists = &self.runtime.array_lists;
-            let function = match step {
-                IteratorStep::HasNext => lists.has_next,
-                IteratorStep::HasPrevious => lists.has_previous,
-                IteratorStep::NextIndex => lists.next_index,
-                IteratorStep::PreviousIndex => lists.previous_index,
-                IteratorStep::Next | IteratorStep::Previous => {
-                    let ended = if matches!(step, IteratorStep::Next) {
-                        EndedStep::Next
-                    } else {
-                        EndedStep::Previous
-                    };
-                    self.runtime
-                        .checked_list_iterator_step(self.module, self.classifiers, ended)?
-                }
-            };
-            self.runtime.objects.interfaces.implement_representation(
-                member,
-                self.runtime.array_lists.iterator,
-                function,
-            )?;
-        }
         Ok(member)
     }
 }
