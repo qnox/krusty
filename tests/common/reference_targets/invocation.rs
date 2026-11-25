@@ -10,7 +10,8 @@ pub struct Reference {
     pub stderr: String,
 }
 
-pub fn run_reference(
+/// Run the reference compiler now, without consulting or writing a recording.
+pub fn run_live(
     target: CompilationTarget,
     work: &Path,
     paths: &[PathBuf],
