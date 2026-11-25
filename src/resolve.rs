@@ -65,7 +65,6 @@ mod abstract_obligations;
 mod argument_parameter_mapping;
 mod builtin_implementation;
 mod char_sequence_protocol;
-pub(crate) mod collection_protocol;
 mod coroutine_runtime;
 mod selected_external_members;
 use argument_parameter_mapping::{
