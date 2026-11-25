@@ -14,14 +14,55 @@ use krusty::ir::MainEntryParameters;
 const LAUNCHER_NAME: &str = "main";
 const LAUNCHER_DESCRIPTOR: &str = "([Ljava/lang/String;)V";
 
+/// The launcher bridge a facade still owes, or none when it needs none or has emitted it.
+///
+/// kotlinc appends the bridge to the file's declarations: it follows every declared function and
+/// precedes the lifted lambdas and local functions, which have no source order.
+pub(super) struct PendingMainBridge(Option<MainBridge>);
+
+impl PendingMainBridge {
+    pub(super) fn plan(ir: &IrFile, env: &EmitEnv, facade_functions: &[u32]) -> Self {
+        PendingMainBridge(MainBridge::plan(ir, env, facade_functions))
+    }
+
+    /// Emit the bridge ahead of `function` when it is the first one without a source position,
+    /// after `preceding` emits what kotlinc generates before it.
+    pub(super) fn before_function(
+        &mut self,
+        ir: &IrFile,
+        function: u32,
+        facade: &str,
+        cw: &mut ClassWriter,
+        preceding: impl FnOnce(&mut ClassWriter),
+    ) {
+        if !ir.fn_source_order.contains_key(&function) {
+            self.finish(ir, facade, cw, preceding);
+        }
+    }
+
+    /// Emit the bridge, after `preceding`, if it has not been emitted yet.
+    pub(super) fn finish(
+        &mut self,
+        ir: &IrFile,
+        facade: &str,
+        cw: &mut ClassWriter,
+        preceding: impl FnOnce(&mut ClassWriter),
+    ) {
+        if let Some(bridge) = self.0.take() {
+            preceding(cw);
+            bridge.emit(ir, facade, cw);
+        }
+    }
+}
+
 /// The parameterless entry point that gets a launcher bridge on this facade.
-pub(super) struct MainBridge {
+struct MainBridge {
     entry: u32,
 }
 
 impl MainBridge {
     /// The bridge the facade needs, given the functions it emits.
-    pub(super) fn plan(ir: &IrFile, env: &EmitEnv, facade_functions: &[u32]) -> Option<MainBridge> {
+    fn plan(ir: &IrFile, env: &EmitEnv, facade_functions: &[u32]) -> Option<MainBridge> {
         let entry = ir
             .entry_point
             .filter(|entry| entry.parameters == MainEntryParameters::None)?;
@@ -44,12 +85,7 @@ impl MainBridge {
         })
     }
 
-    /// Whether the bridge follows `function`, the entry point it calls.
-    pub(super) fn follows(&self, function: u32) -> bool {
-        self.entry == function
-    }
-
-    pub(super) fn emit(&self, ir: &IrFile, facade: &str, cw: &mut ClassWriter) {
+    fn emit(&self, ir: &IrFile, facade: &str, cw: &mut ClassWriter) {
         // kotlinc visits the bridge's header before its body's call to `main()`.
         cw.reserve_method_pool(LAUNCHER_NAME, LAUNCHER_DESCRIPTOR, None, &[]);
         let mut bridge = CodeBuilder::new(1);
