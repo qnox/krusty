@@ -428,8 +428,12 @@ fn a_call_of_a_suspend_inline_function_without_a_prepared_copy_declines() {
     let decline = demo
         .lower(&mut unit, "caller", &["caller", "suspends"])
         .expect_err("the unlowered suspension would be expanded");
+    let crate::klib_lowering::KlibBodyDeclineReason::CalleeDeclined(callee) = decline.reason()
+    else {
+        panic!("the callee declines: {decline:?}");
+    };
     assert_eq!(
-        decline.reason(),
+        callee.reason(),
         &crate::klib_lowering::KlibBodyDeclineReason::UnsupportedOperation(
             "a call of a suspend inline function without a prepared copy"
         )
