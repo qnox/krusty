@@ -210,7 +210,8 @@ fi
 # under tests/psi_ranges are shared with krusty's parser tests; CI runs it as its own job.
 if [ -n "$(changed 'tools/krusty-analysis-api/*' 'tests/psi_ranges/*')" ]; then
   step "analysis-api tests"
-  tools/krusty-analysis-api/gradlew --no-daemon -p tools/krusty-analysis-api test
+  run_with_deadline "${KRUSTY_ANALYSIS_API_TIMEOUT_SECONDS:-1800}" \
+    tools/krusty-analysis-api/gradlew --no-daemon -p tools/krusty-analysis-api test
 fi
 
 if [ -z "$lanes" ]; then
