@@ -2142,3 +2142,58 @@ fn preinferred_local_enum_keeps_its_semantic_owner() {
         assert!(*primary);
     }
 }
+
+/// An editor analysis of `source` as the one checked file: every diagnostic it reports.
+fn editor_diagnostics(source: &str) -> Vec<(u32, u32, String)> {
+    let mut diagnostics = DiagSink::new();
+    analyze_source_set_prefix_with_features(
+        &[SourceInput::kotlin(source)],
+        1,
+        1,
+        crate::frontend::PlatformProvider::jvm(Box::new(ExistingLibrary)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    emitted(&diagnostics)
+        .into_iter()
+        .map(|(file, offset, message)| (file, offset, message.to_string()))
+        .collect()
+}
+
+#[test]
+fn anonymous_object_captures_a_local_typed_by_an_inferred_return() {
+    // The local's type comes from `make()`, whose return type is inferred from its body. The
+    // editor discovers anonymous-object captures before signatures are finalized; that must not
+    // cost the file its declarations.
+    let source = "class Item\n\
+                  fun make() = Item()\n\
+                  fun use() {\n\
+                  \u{20}   val item = make()\n\
+                  \u{20}   object { fun get(): Item = item }\n\
+                  }";
+    assert_eq!(editor_diagnostics(source), Vec::new());
+}
+
+#[test]
+fn anonymous_object_in_a_lambda_captures_a_local_typed_by_an_inferred_return() {
+    let source = "class Item\n\
+                  private fun make(id: Int = 0) = Item()\n\
+                  interface Listener { fun on() }\n\
+                  fun <T> run2(block: () -> T): T = block()\n\
+                  fun use() = run2 {\n\
+                  \u{20}   val item = make()\n\
+                  \u{20}   object : Listener { override fun on() { item } }\n\
+                  }";
+    assert_eq!(editor_diagnostics(source), Vec::new());
+}
+
+#[test]
+fn anonymous_object_captures_a_local_typed_by_a_declared_return() {
+    let source = "class Item\n\
+                  fun make(): Item = Item()\n\
+                  fun use() {\n\
+                  \u{20}   val item = make()\n\
+                  \u{20}   object { fun get(): Item = item }\n\
+                  }";
+    assert_eq!(editor_diagnostics(source), Vec::new());
+}

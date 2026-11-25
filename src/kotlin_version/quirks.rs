@@ -170,6 +170,15 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: true,
     }
+    /// A class's static state initializes with its `companion object` first: the companion is
+    /// constructed, then every `companion { }` block property of the class is stored, then the
+    /// companion's initializer body runs. From 2.5 kotlinc initializes in program order: the block
+    /// properties written before the `companion object`, the companion, then the ones after it.
+    ClassStaticsInitializeBeforeCompanionBody {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
     /// The Kotlin/Native and Kotlin/Wasm standard library's `ArrayList.addAll` makes room for the
     /// new elements before it reads the argument, so a range of the list being appended to is
     /// invalidated first: `list.addAll(list.subList(0, 2))` raises
