@@ -383,8 +383,10 @@ pub(super) fn finalize_properties(
                     property,
                     context_parameters,
                 },
-                class,
-                extension_receiver.expect("guarded member extension receiver"),
+                super::delegated_properties::MemberExtensionOwner {
+                    class_id: class,
+                    receiver: extension_receiver.expect("guarded member extension receiver"),
+                },
                 ir,
                 templates,
                 &mut realizations,
@@ -529,13 +531,13 @@ struct PropertyMaterialization {
 fn materialize_member_extension_property(
     index: &ResolvedModuleIndex,
     materialization: PropertyMaterialization,
-    class_id: crate::ir::ClassId,
-    receiver: Ty,
+    owner: super::delegated_properties::MemberExtensionOwner,
     ir: &mut IrFile,
     templates: &mut DependencyTemplateCache,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
     initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
+    let super::delegated_properties::MemberExtensionOwner { class_id, receiver } = owner;
     let PropertyMaterialization {
         source_order,
         property_id,
@@ -551,8 +553,7 @@ fn materialize_member_extension_property(
                 property,
                 context_parameters,
             },
-            class_id,
-            receiver,
+            super::delegated_properties::MemberExtensionOwner { class_id, receiver },
             ir,
             templates,
             realizations,

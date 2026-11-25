@@ -493,16 +493,25 @@ pub(super) fn materialize_member_delegate(
     Ok(())
 }
 
+/// The class a member extension property belongs to and the receiver it extends.
+pub(super) struct MemberExtensionOwner {
+    pub(super) class_id: crate::ir::ClassId,
+    pub(super) receiver: Ty,
+}
+
 pub(super) fn materialize_member_extension_delegate(
     index: &ResolvedModuleIndex,
     declaration: DelegatedDeclaration,
-    class_id: crate::ir::ClassId,
-    extension_receiver: Ty,
+    owner: MemberExtensionOwner,
     ir: &mut IrFile,
     templates: &mut DependencyTemplateCache,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
     initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
+    let MemberExtensionOwner {
+        class_id,
+        receiver: extension_receiver,
+    } = owner;
     let DelegatedDeclaration {
         source_order,
         property_id,
