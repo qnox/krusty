@@ -1420,7 +1420,7 @@ pub fn run(lane: &dyn Lane) {
             unexpected_failure_keys.extend(mismatches.unexpected_failures.iter().cloned());
             if !mismatches.is_empty() {
                 failed.push((
-                    PathBuf::from(format!("<{} box expectations>", platform.name())),
+                    box_ratchet::expectations_subject(platform),
                     mismatches.report(platform, version),
                 ));
             }
@@ -1518,7 +1518,7 @@ pub fn run(lane: &dyn Lane) {
         eprintln!("  known failure {}: {reason}", file.display());
     }
     for (file, reason) in &failed {
-        eprintln!("FAILED {}: {reason}", file.display());
+        eprintln!("{}", box_ratchet::failed_line(file, reason));
     }
     let byte_reference_failures = bytes.finish();
     for failure in &byte_reference_failures {

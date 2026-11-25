@@ -2448,18 +2448,6 @@ pub(crate) fn signature_formals(sig: &str) -> Vec<String> {
     parse_formals(sig).0
 }
 
-fn has_free_ty_params(ty: Ty) -> bool {
-    match ty.kind() {
-        TyKind::TyParam(..) => true,
-        TyKind::Fun(sig) => {
-            sig.params.iter().any(|param| has_free_ty_params(*param)) || has_free_ty_params(sig.ret)
-        }
-        TyKind::Obj(_, args) => args.iter().any(|arg| has_free_ty_params(*arg)),
-        TyKind::Nullable(inner) => has_free_ty_params(inner),
-        _ => false,
-    }
-}
-
 fn parse_concrete_field_gsig(signature: &str, erased_descriptor: &str) -> Option<Ty> {
     let (ty, has_free) = parse_field_gsig(signature, erased_descriptor, &Default::default())?;
     (!has_free).then_some(ty)
@@ -3794,6 +3782,11 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     /// element class, and `Nothing?` has none.
     fn array_of_nullable_nothing_error(&self) -> Option<&'static str> {
         Some("'Array<Nothing?>' is not supported on the JVM.")
+    }
+
+    /// kotlinc's JVM `FirJvmSuspensionPointInsideMutexLockChecker`.
+    fn rejects_suspension_in_critical_sections(&self) -> bool {
+        true
     }
 
     fn install_source_module_headers(

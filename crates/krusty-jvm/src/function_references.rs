@@ -288,10 +288,10 @@ fn realize_adapter_reference(
     };
     let arity = u8::try_from(function_type.params.len())
         .map_err(|_| FunctionReferenceRealizationTarget::Invalid)?;
-    // Values bound for context parameters live in the runtime's `boundContextArguments`; a
-    // reference that also stores field captures has no carrier shape for the pair.
+    // Values bound for context parameters live in the runtime's `boundContextArguments`, ahead
+    // of the field captures.
     let bound_contexts = reference.bound_contexts as usize;
-    if bound_contexts > 0 && bound_contexts != reference.captures.len() {
+    if bound_contexts > reference.captures.len() {
         return Err(FunctionReferenceRealizationTarget::Invalid);
     }
     // A shared mutable capture travels as its JVM holder, as the adapter declares it.
@@ -658,9 +658,10 @@ fn carrier_expression(
             elements,
         });
         ir.set_logical_type(array, array_type);
-        constructor_arguments.insert(0, array);
+        // kotlinc's constructor takes the field captures first, then the context array.
+        constructor_arguments.push(array);
         capture_types.drain(..bound_contexts);
-        capture_types.insert(0, array_type);
+        capture_types.push(array_type);
     }
     constructor_arguments.extend(bound_receiver);
     // The constructor's declared parameters say that a value-class receiver is bound as its box.
@@ -738,7 +739,9 @@ fn local_capture_fields(
     let identities = ir.function_parameter_identities(function)?;
     (skip..reference.captures.len())
         .map(|capture| {
-            let identity = identities.get(capture)?;
+            // The lifted function declares its captured values first, and the reference's own
+            // vector puts the bound contexts ahead of them.
+            let identity = identities.get(capture - skip)?;
             matches!(
                 identity.role,
                 krusty::ir::IrParameterRole::CapturedValue { .. }
@@ -821,7 +824,9 @@ fn realize_own_invoke(
     let context_types = ir.functions[adapter as usize].params[..bound_contexts].to_vec();
     for (capture, name) in capture_fields.into_iter().enumerate() {
         // A shared mutable capture's field holds its cell, which the adapter no longer declares.
-        let ordinal = u32::try_from(capture).expect("a reference has few captures");
+        // The adapter's captures follow its bound contexts, which the recording producer counts.
+        let ordinal =
+            u32::try_from(bound_contexts + capture).expect("a reference has few captures");
         let ty = match ir.shared_capture_parameters.remove(&(adapter, ordinal)) {
             Some(element) => super::shared_captures::holder_ty(&element),
             None => ir.functions[adapter as usize].params[bound_contexts + capture],
@@ -911,6 +916,8 @@ fn realize_own_invoke(
                 IrExpr::GetValue(value) => *value >= 1,
                 IrExpr::GetField { .. } => captured_reads.contains(&current),
                 IrExpr::New { .. } => true,
+                // An array factory's adapter builds the array itself: its first instruction.
+                IrExpr::Vararg { .. } => true,
                 _ => false,
             };
             if marks {
@@ -976,6 +983,17 @@ fn realize_own_invoke(
         .collect();
     ir.fn_params
         .insert(adapter, krusty::ir::FnParamInfo::identities(identities));
+    // The reference's function type, not the erased target, is what the specialized `invoke` is
+    // generic over: kotlinc signs it with the type parameters those types name.
+    ir.signatures.insert(
+        adapter,
+        krusty::ir::IrGenericSig {
+            type_params: Vec::new(),
+            params: parameters.clone(),
+            ret: Some(result),
+            supers: Vec::new(),
+        },
+    );
     let function = &mut ir.functions[adapter as usize];
     function.name = "invoke".to_string();
     function.params = parameters;
