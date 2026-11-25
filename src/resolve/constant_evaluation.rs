@@ -170,11 +170,13 @@ impl<'a> Evaluator<'a> {
         depth: u32,
     ) -> Option<LibraryConst> {
         let constant = self.evaluate_node(expression, requested, depth)?;
-        Some(if self.context.file.normalize_nan_in_const_context {
-            canonical_nan(constant)
-        } else {
-            constant
-        })
+        Some(
+            if self.context.file.language.normalize_nan_in_const_context {
+                canonical_nan(constant)
+            } else {
+                constant
+            },
+        )
     }
 
     fn evaluate_node(
@@ -238,7 +240,7 @@ impl<'a> Evaluator<'a> {
                     })
                 }
                 SemanticCallRole::KotlinCallableReferenceName
-                    if self.context.file.intrinsic_const_evaluation =>
+                    if self.context.file.language.intrinsic_const_evaluation =>
                 {
                     let name = self.reference_name(*receiver, depth)?;
                     Some(LibraryConst {
@@ -408,6 +410,7 @@ pub(super) fn intrinsic_const_enum_entry<'a>(
 ) -> Option<&'a ResolvedEnumEntry> {
     context
         .file
+        .language
         .intrinsic_const_evaluation
         .then(|| context.resolved_enum_entries.get(&receiver))
         .flatten()

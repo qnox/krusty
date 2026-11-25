@@ -49,7 +49,9 @@ impl KlibStamp {
     ///
     /// Read off `kotlinc-native -p library -Xmetadata-klib -language-version <language>`: the
     /// language level itself, or `1.4.1` below language 2.3 on a release with
-    /// [`crate::kotlin_version::Quirk::KlibLegacyMetadataVersionBelowLanguage23`].
+    /// [`crate::kotlin_version::Quirk::KlibLegacyMetadataVersionBelowLanguage23`]. 2.5.0-RC writes
+    /// the language level, measured at 2.2 through 2.7, and rejects 2.0 and 2.1 before writing a
+    /// library.
     pub fn new(compiler: KotlinVersion, language: LanguageVersion) -> Self {
         let legacy_stamp = crate::kotlin_version::Quirks::of_release(compiler)
             .has(crate::kotlin_version::Quirk::KlibLegacyMetadataVersionBelowLanguage23)
@@ -411,73 +413,85 @@ mod tests {
     }
 
     /// The `abi_version` and `metadata_version` the reference compilers write with
-    /// `-language-version <level> -Xmetadata-klib`, for every supported release and language level.
+    /// `-language-version <level> -Xmetadata-klib`, at every language level that release supports.
     #[test]
     fn the_stamp_follows_the_language_level_as_each_release_does() {
         let releases = KotlinVersion::supported();
-        let languages = [
-            LanguageVersion::V2_0,
-            LanguageVersion::V2_1,
-            LanguageVersion::V2_2,
-            LanguageVersion::V2_3,
-            LanguageVersion::V2_4,
-        ];
-        let stamps = releases
-            .iter()
-            .flat_map(|&compiler| {
-                languages.iter().map(move |&language| {
-                    let writer = KlibWriter::new(
-                        "lib",
-                        KlibStamp::new(compiler, language),
-                        KlibPlatform::Native,
-                    );
-                    let versions = manifest(&writer)
-                        .lines()
-                        .filter(|line| {
-                            line.starts_with("abi_version=")
-                                || line.starts_with("metadata_version=")
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    format!("{compiler} {language}: {versions}")
-                })
-            })
-            .collect::<Vec<_>>();
         // Measured with kotlinc-native, recorded at the release where they change; a later release
-        // writes the stamps of the newest record at or below it.
-        let recorded: &[(KotlinVersion, [&str; 5])] = &[
+        // writes the stamps of the newest record at or below it. 2.4.0 was measured at 2.0 through
+        // 2.5, 2.4.20 at 2.0 through 2.6, and 2.5.0-RC at 2.2, 2.3, 2.4, 2.5, 2.6 and 2.7.
+        // RC rejects 2.0 and 2.1, so those levels are not rows.
+        let recorded: &[(KotlinVersion, &[(&str, &str)])] = &[
             (
                 KotlinVersion::V2_4_0,
-                [
-                    "2.0: abi_version=2.4.0 metadata_version=1.4.1",
-                    "2.1: abi_version=2.4.0 metadata_version=1.4.1",
-                    "2.2: abi_version=2.4.0 metadata_version=1.4.1",
-                    "2.3: abi_version=2.4.0 metadata_version=2.3.0",
-                    "2.4: abi_version=2.4.0 metadata_version=2.4.0",
+                &[
+                    ("2.0", "abi_version=2.4.0 metadata_version=1.4.1"),
+                    ("2.1", "abi_version=2.4.0 metadata_version=1.4.1"),
+                    ("2.2", "abi_version=2.4.0 metadata_version=1.4.1"),
+                    ("2.3", "abi_version=2.4.0 metadata_version=2.3.0"),
+                    ("2.4", "abi_version=2.4.0 metadata_version=2.4.0"),
+                    ("2.5", "abi_version=2.4.0 metadata_version=2.5.0"),
                 ],
             ),
             (
                 KotlinVersion::V2_4_20,
-                [
-                    "2.0: abi_version=2.4.0 metadata_version=2.0.0",
-                    "2.1: abi_version=2.4.0 metadata_version=2.1.0",
-                    "2.2: abi_version=2.4.0 metadata_version=2.2.0",
-                    "2.3: abi_version=2.4.0 metadata_version=2.3.0",
-                    "2.4: abi_version=2.4.0 metadata_version=2.4.0",
+                &[
+                    ("2.0", "abi_version=2.4.0 metadata_version=2.0.0"),
+                    ("2.1", "abi_version=2.4.0 metadata_version=2.1.0"),
+                    ("2.2", "abi_version=2.4.0 metadata_version=2.2.0"),
+                    ("2.3", "abi_version=2.4.0 metadata_version=2.3.0"),
+                    ("2.4", "abi_version=2.4.0 metadata_version=2.4.0"),
+                    ("2.5", "abi_version=2.4.0 metadata_version=2.5.0"),
+                    ("2.6", "abi_version=2.4.0 metadata_version=2.6.0"),
+                ],
+            ),
+            (
+                KotlinVersion::V2_5_0_RC,
+                &[
+                    ("2.2", "abi_version=2.5.0 metadata_version=2.2.0"),
+                    ("2.3", "abi_version=2.5.0 metadata_version=2.3.0"),
+                    ("2.4", "abi_version=2.5.0 metadata_version=2.4.0"),
+                    ("2.5", "abi_version=2.5.0 metadata_version=2.5.0"),
+                    ("2.6", "abi_version=2.5.0 metadata_version=2.6.0"),
+                    ("2.7", "abi_version=2.5.0 metadata_version=2.7.0"),
                 ],
             ),
         ];
-        let expected = releases
-            .iter()
-            .flat_map(|&compiler| {
-                let (_, rows) = recorded
+        let mut stamps = Vec::new();
+        let mut expected = Vec::new();
+        for &compiler in &releases {
+            let policy = crate::features::LanguageVersionPolicy::for_release(compiler)
+                .expect("every supported release has a language version policy");
+            let (_, rows) = recorded
+                .iter()
+                .rev()
+                .find(|(release, _)| *release <= compiler)
+                .expect("a stamp record at or below every supported release");
+            for &language in policy.supported() {
+                let writer = KlibWriter::new(
+                    "lib",
+                    KlibStamp::new(compiler, language),
+                    KlibPlatform::Native,
+                );
+                let versions = manifest(&writer)
+                    .lines()
+                    .filter(|line| {
+                        line.starts_with("abi_version=") || line.starts_with("metadata_version=")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let level = language.to_string();
+                let recorded_stamp = rows
                     .iter()
-                    .rev()
-                    .find(|(release, _)| *release <= compiler)
-                    .expect("a stamp record at or below every supported release");
-                rows.iter().map(move |row| format!("{compiler} {row}"))
-            })
-            .collect::<Vec<_>>();
+                    .find(|(recorded_level, _)| *recorded_level == level)
+                    .unwrap_or_else(|| {
+                        panic!("{compiler} supports language {level} with no measured stamp")
+                    })
+                    .1;
+                stamps.push(format!("{compiler} {level}: {versions}"));
+                expected.push(format!("{compiler} {level}: {recorded_stamp}"));
+            }
+        }
         assert_eq!(stamps, expected);
     }
 

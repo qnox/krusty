@@ -5,7 +5,7 @@ use crate::fir::{
 use crate::ir::{Callee, ExprId, IrBinOp, IrCatch, IrConst, IrExpr, IrIntrinsic, IrTypeOp};
 use crate::types::Ty;
 
-use super::{BodyLowering, FirLoweringFailure, LoweringState};
+use super::{BodyLowering, CheckedWhen, FirLoweringFailure, LoweringState};
 
 /// The unoptimized lowering dispatcher reserves frames of the same order as the checker's. Check
 /// before the first frame and then every 64 nested frames: that keeps the largest unchecked run
@@ -1234,14 +1234,17 @@ impl BodyLowering<'_> {
                 subject_variable,
                 branches,
                 deeply_exhaustive,
-            } => self.when_expression(
-                *subject,
-                *subject_variable,
+                subject_failure,
+            } => self.when_expression(CheckedWhen {
+                origin,
+                subject: *subject,
+                subject_variable: *subject_variable,
                 branches,
-                expression.ty.get(),
-                *deeply_exhaustive,
-                self.body.expression_debug_lines(expression_id),
-            )?,
+                result_ty: expression.ty.get(),
+                deeply_exhaustive: *deeply_exhaustive,
+                subject_failure: subject_failure.as_ref(),
+                lines: self.body.expression_debug_lines(expression_id),
+            })?,
             FirExprKind::Block { statements, result } => {
                 let mut lowered_statements = Vec::new();
                 for statement in statements.iter().copied() {

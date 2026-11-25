@@ -1650,7 +1650,7 @@ impl Checker<'_> {
                     self,
                     &receivers,
                     MemberExtensionProbes {
-                        explicit_context_arguments: self.file.explicit_context_arguments,
+                        explicit_context_arguments: self.file.language.explicit_context_arguments,
                         deferred_type_variables: &self.active_postponed_type_variables(),
                         select_context_arguments: &|parameters| {
                             self.select_context_arguments_with_types(scope, parameters)

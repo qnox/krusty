@@ -70,7 +70,7 @@ impl Checker<'_> {
         }
         let context_count = member.context_count.min(signature.params.len());
         let explicitly_named = |parameter: usize| {
-            self.file.explicit_context_arguments
+            self.file.language.explicit_context_arguments
                 && member
                     .call_sig
                     .param_names

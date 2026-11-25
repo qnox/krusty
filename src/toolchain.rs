@@ -175,15 +175,32 @@ fn toolchain_path(env: Option<OsString>, kind: &str, suffix: &str) -> Option<Pat
     })
 }
 
+/// The files of a kotlinc distribution (relative to its root) that count as the distribution being
+/// there: the all-in-one compiler jar, the standard library jar, and the build identity. A directory
+/// holding less, such as one an interrupted extraction left, is not a distribution.
+/// `scripts/provision-kotlinc.sh`, the only writer of the provisioned cache, publishes under the
+/// same rule.
+pub const KOTLINC_PAYLOAD: [&str; 3] = [
+    "lib/kotlin-compiler.jar",
+    "lib/kotlin-stdlib.jar",
+    "build.txt",
+];
+
+/// Whether `root` (the directory holding `bin/` and `lib/`) holds the whole [`KOTLINC_PAYLOAD`].
+pub fn kotlinc_distribution_complete(root: &Path) -> bool {
+    KOTLINC_PAYLOAD.iter().all(|file| root.join(file).is_file())
+}
+
 /// The reference Kotlin/JVM compiler used by differential and conformance-oracle runs.
-/// `KRUSTY_KOTLINC` overrides the provisioned distribution.
+/// `KRUSTY_KOTLINC` overrides the provisioned distribution. A launcher whose distribution is
+/// missing part of its payload is not available.
 pub fn kotlinc_path() -> Option<PathBuf> {
     let path = toolchain_path(
         std::env::var_os("KRUSTY_KOTLINC"),
         "kotlinc",
         "kotlinc/bin/kotlinc",
     )?;
-    path.is_file().then_some(path)
+    (path.is_file() && kotlinc_distribution_complete(path.parent()?.parent()?)).then_some(path)
 }
 
 /// The reference stdlib KLIB a compilation for `target` is analyzed against. JS and wasm-js ship
@@ -364,6 +381,70 @@ pub fn ensure_maven_artifact(
     ensure_repository_artifact(MAVEN_CENTRAL, group, artifact, version, extension)
 }
 
+/// The common (`commonMain` metadata) stdlib KLIB of the reference release, the library kotlinc's
+/// own tests name `kotlin.common.stdlib.path`. Kotlin publishes it inside the exact-version
+/// `kotlin-stdlib-<version>-all.jar`, the metadata variant of `kotlin-stdlib`, as the `commonMain/`
+/// directory of an unpacked KLIB. That directory is repacked once, with the `commonMain/` prefix
+/// dropped, as `kotlin-stdlib-<version>-common.klib` beside the downloaded jar, and published with
+/// one rename so a concurrent reader never sees a partial library.
+pub fn kotlin_stdlib_common_klib() -> Result<PathBuf, String> {
+    let version = reference_version();
+    let metadata = fetch_repository_file(
+        MAVEN_CENTRAL,
+        "org.jetbrains.kotlin",
+        &MavenFile {
+            artifact: "kotlin-stdlib",
+            version: &version,
+            classifier: Some("all"),
+            extension: "jar",
+        },
+    )?;
+    let klib = metadata.with_file_name(format!("kotlin-stdlib-{version}-common.klib"));
+    if klib.is_file() {
+        return Ok(klib);
+    }
+    let staging = maven_download_path(&klib);
+    let repacked = repack_metadata_source_set(&metadata, "commonMain/", &staging);
+    if let Err(error) = repacked {
+        let _ = std::fs::remove_file(&staging);
+        return Err(format!(
+            "repack the commonMain KLIB of {}: {error}",
+            metadata.display()
+        ));
+    }
+    publish_maven_download(&staging, &klib).ok_or_else(|| format!("publish {}", klib.display()))
+}
+
+/// Copy the entries of one source set's directory in a Kotlin metadata jar into a packed KLIB at
+/// `out`, without recompressing them.
+fn repack_metadata_source_set(
+    metadata: &Path,
+    source_set: &str,
+    out: &Path,
+) -> zip::result::ZipResult<()> {
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(metadata)?)?;
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(out)?);
+    let mut copied = 0usize;
+    for index in 0..archive.len() {
+        let entry = archive.by_index_raw(index)?;
+        let Some(name) = entry
+            .name()?
+            .strip_prefix(source_set)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        writer.raw_copy_file_rename(entry, name)?;
+        copied += 1;
+    }
+    if copied == 0 {
+        return Err(zip::result::ZipError::FileNotFound);
+    }
+    writer.finish()?;
+    Ok(())
+}
+
 const MAVEN_CENTRAL: &str = "https://repo1.maven.org/maven2";
 
 /// Google's Maven repository, the only one that publishes the AndroidX artifacts (the Compose
@@ -412,11 +493,61 @@ fn fetch_repository_artifact(
     version: &str,
     extension: &str,
 ) -> Result<PathBuf, String> {
-    if extension.is_empty()
-        || !extension
-            .bytes()
+    fetch_repository_file(
+        repository,
+        group,
+        &MavenFile {
+            artifact,
+            version,
+            classifier: None,
+            extension,
+        },
+    )
+}
+
+/// One file of a Maven publication: `<artifact>-<version>[-<classifier>].<extension>`.
+struct MavenFile<'a> {
+    artifact: &'a str,
+    version: &'a str,
+    classifier: Option<&'a str>,
+    extension: &'a str,
+}
+
+impl MavenFile<'_> {
+    fn file_name(&self) -> String {
+        let MavenFile {
+            artifact,
+            version,
+            classifier,
+            extension,
+        } = self;
+        match classifier {
+            Some(classifier) => format!("{artifact}-{version}-{classifier}.{extension}"),
+            None => format!("{artifact}-{version}.{extension}"),
+        }
+    }
+}
+
+fn fetch_repository_file(
+    repository: &str,
+    group: &str,
+    maven_file: &MavenFile<'_>,
+) -> Result<PathBuf, String> {
+    let MavenFile {
+        artifact,
+        version,
+        classifier,
+        extension,
+    } = *maven_file;
+    let file_part_is_valid = |part: &str| {
+        part.bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    };
+    if classifier.is_some_and(|classifier| classifier.is_empty() || !file_part_is_valid(classifier))
     {
+        return Err(format!("{classifier:?} is not a Maven classifier"));
+    }
+    if extension.is_empty() || !file_part_is_valid(extension) {
         return Err(format!("{extension:?} is not a file extension"));
     }
     let cache = std::env::var("KRUSTY_DEPS_CACHE")
@@ -430,12 +561,13 @@ fn fetch_repository_artifact(
         })
         .ok_or_else(|| "neither KRUSTY_DEPS_CACHE nor HOME is set".to_string())?;
     let _ = std::fs::create_dir_all(&cache);
-    let file = cache.join(format!("{artifact}-{version}.{extension}"));
+    let file_name = maven_file.file_name();
+    let file = cache.join(&file_name);
     if file.is_file() {
         return Ok(file);
     }
     let url = format!(
-        "{repository}/{}/{artifact}/{version}/{artifact}-{version}.{extension}",
+        "{repository}/{}/{artifact}/{version}/{file_name}",
         group.replace('.', "/"),
     );
     let download = maven_download_path(&file);
@@ -832,6 +964,39 @@ fn find_exact_jar(dir: &std::path::Path, expected: &str, depth: usize) -> Option
 mod tests {
     use super::*;
 
+    fn distribution_with(files: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "krusty-kotlinc-payload-{}-{}",
+            std::process::id(),
+            files.len()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        for file in files {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().expect("a payload file has a directory"))
+                .expect("create the directory");
+            std::fs::write(path, "").expect("write the file");
+        }
+        root
+    }
+
+    // The provisioned current release is read through the same readiness rule as any other: a
+    // launcher and compiler jar without the standard library are a half-written distribution.
+    #[test]
+    fn a_distribution_without_its_whole_payload_is_incomplete() {
+        let partial = distribution_with(&["bin/kotlinc", "lib/kotlin-compiler.jar"]);
+        assert!(!kotlinc_distribution_complete(&partial));
+        let whole = distribution_with(&[
+            "bin/kotlinc",
+            "lib/kotlin-compiler.jar",
+            "lib/kotlin-stdlib.jar",
+            "build.txt",
+        ]);
+        assert!(kotlinc_distribution_complete(&whole));
+        let _ = std::fs::remove_dir_all(partial);
+        let _ = std::fs::remove_dir_all(whole);
+    }
+
     #[test]
     fn debug_static_caches_are_the_host_targets_gstatic_system_directory() {
         let konan = crate::native_target::NativeTarget::host().and_then(|host| host.konan_name());
@@ -1072,5 +1237,69 @@ mod tests {
         use crate::compilation_target::CompilationTarget;
         assert_eq!(atomicfu_klib(CompilationTarget::Jvm), Ok(None));
         assert_eq!(atomicfu_klib(CompilationTarget::Js), Ok(None));
+    }
+
+    #[test]
+    fn a_classified_maven_file_names_its_classifier() {
+        let file = |classifier| MavenFile {
+            artifact: "kotlin-stdlib",
+            version: "2.5.0-RC",
+            classifier,
+            extension: "jar",
+        };
+        assert_eq!(file(None).file_name(), "kotlin-stdlib-2.5.0-RC.jar");
+        assert_eq!(
+            file(Some("all")).file_name(),
+            "kotlin-stdlib-2.5.0-RC-all.jar"
+        );
+    }
+
+    #[test]
+    fn a_metadata_source_set_repacks_as_a_klib_rooted_at_its_component() {
+        use std::io::{Read, Write};
+        let directory =
+            std::env::temp_dir().join(format!("krusty-metadata-repack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).expect("create scratch directory");
+        let metadata = directory.join("lib-all.jar");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&metadata).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, contents) in [
+            ("META-INF/kotlin-project-structure-metadata.json", "{}"),
+            ("commonMain/default/manifest", "unique_name=lib"),
+            ("commonMain/default/linkdata/module", "module"),
+            ("jvmAndNativeMain/default/manifest", "unique_name=other"),
+        ] {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(contents.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap();
+
+        let klib = directory.join("lib-common.klib");
+        repack_metadata_source_set(&metadata, "commonMain/", &klib).expect("repack commonMain");
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&klib).unwrap()).unwrap();
+        let mut entries = Vec::new();
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            let mut contents = String::new();
+            entry.read_to_string(&mut contents).unwrap();
+            entries.push((entry.name().unwrap().to_string(), contents));
+        }
+        assert_eq!(
+            entries,
+            [
+                (
+                    "default/manifest".to_string(),
+                    "unique_name=lib".to_string()
+                ),
+                ("default/linkdata/module".to_string(), "module".to_string()),
+            ]
+        );
+        assert!(
+            repack_metadata_source_set(&metadata, "absentMain/", &directory.join("absent.klib"))
+                .is_err(),
+            "a source set the jar lacks is not an empty library"
+        );
+        std::fs::remove_dir_all(directory).expect("remove scratch directory");
     }
 }

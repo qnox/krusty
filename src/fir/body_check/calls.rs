@@ -1649,7 +1649,7 @@ impl BodyFirChecker<'_> {
             return self.array_operation(expression, arguments, kind);
         }
         if selected.callable.compiler_intrinsic == Some(crate::libraries::CompilerIntrinsic::TypeOf)
-            && !self.file.recursive_type_of
+            && !self.file.language.recursive_type_of
         {
             let ty = self
                 .info

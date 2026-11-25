@@ -172,7 +172,6 @@ collectionLiterals/stdlibSequence.kt
 collections/clashWithInternalMapMethod.kt
 collections/inheritFromAbstractMutableListInt.kt
 companionBlocksAndExtensions/callableReferences.kt
-companionBlocksAndExtensions/companionBlock.kt
 companionBlocksAndExtensions/lateinit.kt
 compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt

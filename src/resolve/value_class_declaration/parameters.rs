@@ -77,7 +77,7 @@ impl Checker<'_> {
         let full = selected
             .as_ref()
             .is_some_and(|selected| selected.kind == SelectedValueClassKind::Full);
-        let value_prefix = if self.file.full_value_classes {
+        let value_prefix = if self.file.language.full_value_classes {
             "Final value"
         } else {
             "Value"
@@ -126,7 +126,7 @@ impl Checker<'_> {
                 if let Some(rendered) =
                     self.inapplicable_value_class_parameter(scope, parameter, underlying)
                 {
-                    let prefix = if self.file.full_value_classes {
+                    let prefix = if self.file.language.full_value_classes {
                         "@JvmInline value"
                     } else {
                         "Value"
@@ -157,9 +157,9 @@ impl Checker<'_> {
                     );
                     self.report_deprecation_error(
                         parameter.ty.span,
-                        self.file.forbid_value_class_recursion_via_type_parameters,
+                        self.file.language.forbid_value_class_recursion_via_type_parameters,
                         self.file
-                            .value_class_recursion_via_type_parameters_warning
+                            .language.value_class_recursion_via_type_parameters_warning
                             .as_deref(),
                         DeprecationNames {
                             error: crate::diag::names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_ERROR,

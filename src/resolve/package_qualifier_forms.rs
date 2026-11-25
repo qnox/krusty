@@ -24,7 +24,7 @@ use crate::features::deprecation_cycle_messages::PARENTHESIZED_PACKAGE_QUALIFIER
 /// Whether the written qualifier segment `expression` may not bind as a package under the current
 /// language settings.
 pub(super) fn segment_cannot_name_a_package(file: &File, expression: ExprId) -> bool {
-    file.forbid_package_qualifier_forms
+    file.language.forbid_package_qualifier_forms
         && (file.expression_annotations.contains_key(&expression)
             || file.call_type_args.contains_key(&expression.0))
 }
@@ -39,7 +39,7 @@ enum PackageForm {
 impl Checker<'_> {
     /// kotlinc's `FirParenthesizedPackageQualifierChecker` over the qualifiers of `tree`.
     pub(super) fn check_package_qualifier_forms(&mut self, tree: &QualifierTree) {
-        if self.file.forbid_package_qualifier_forms {
+        if self.file.language.forbid_package_qualifier_forms {
             self.report_parenthesized_package_qualifiers(tree);
         } else {
             self.report_deprecated_package_qualifier_forms(tree);
@@ -146,12 +146,18 @@ impl Checker<'_> {
             PackageForm::Parenthesized(span) => (
                 span,
                 crate::diag::names::PARENTHESIZED_PACKAGE_QUALIFIER_WARNING,
-                self.file.parenthesized_package_qualifier_warning.clone(),
+                self.file
+                    .language
+                    .parenthesized_package_qualifier_warning
+                    .clone(),
             ),
             PackageForm::TypeArguments(span) => (
                 span,
                 crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING,
-                self.file.package_qualifier_type_arguments_warning.clone(),
+                self.file
+                    .language
+                    .package_qualifier_type_arguments_warning
+                    .clone(),
             ),
         };
         // A release that predates the feature has neither deprecation.

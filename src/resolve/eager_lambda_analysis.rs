@@ -164,7 +164,7 @@ impl Checker<'_> {
         call: EagerLambdaCall<'_>,
         family: Vec<FunctionInfo>,
     ) -> Vec<FunctionInfo> {
-        if !self.file.eager_lambda_analysis {
+        if !self.file.language.eager_lambda_analysis {
             return family;
         }
         let candidates = family
@@ -184,7 +184,7 @@ impl Checker<'_> {
         call: EagerLambdaCall<'_>,
         constructors: Vec<LibraryMember>,
     ) -> Vec<LibraryMember> {
-        if !self.file.eager_lambda_analysis {
+        if !self.file.language.eager_lambda_analysis {
             return constructors;
         }
         let candidates = constructors
@@ -210,7 +210,7 @@ impl Checker<'_> {
         call: EagerLambdaCall<'_>,
         members: Vec<LibraryMember>,
     ) -> Vec<LibraryMember> {
-        if !self.file.eager_lambda_analysis {
+        if !self.file.language.eager_lambda_analysis {
             return members;
         }
         let candidates = members

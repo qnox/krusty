@@ -1,5 +1,5 @@
 // FILE: ValueClassBlock.kt
-// LANGUAGE: +CompanionBlocksAndExtensions
+// LANGUAGE: +CompanionBlocks
 OPTIONAL_JVM_INLINE_ANNOTATION
 value class W(val value: Int) {
     companion {

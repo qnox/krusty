@@ -580,7 +580,7 @@ pub(super) fn retain_eager_fits<T>(
     applicable: &mut Vec<T>,
     fits: impl Fn(&T) -> bool,
 ) {
-    if file.eager_lambda_analysis && applicable.iter().any(&fits) {
+    if file.language.eager_lambda_analysis && applicable.iter().any(&fits) {
         applicable.retain(fits);
     }
 }
