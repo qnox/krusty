@@ -100,6 +100,21 @@ fn deep_constant_arithmetic_chain_folds_on_two_mib_stack() {
 }
 
 #[test]
+fn deep_const_string_initializer_folds_on_two_mib_stack() {
+    // A `const val` initializer is evaluated by the resolver's constant evaluator, which recurses
+    // once per operand of a left-nested chain and has no depth cap of its own. At 480 operands,
+    // inside the 500-level semantic bound, it must fold on the explicit 2 MiB stack.
+    let chain = vec!["\"ab\""; 480].join(" + ");
+    let src = format!("object Tables {{\n    const val PACKED = {chain}\n}}\n");
+    let (es, emitted) = compile_on_regression_stack(src);
+    assert!(es.is_empty(), "expected no diagnostics, got: {es:?}");
+    assert!(
+        emitted,
+        "480-operand const string chain is inside the depth guard and must emit"
+    );
+}
+
+#[test]
 fn deep_string_concatenation_flattens_on_two_mib_stack() {
     // A left-nested `s + "a" + s + ...` chain is one concatenation as deep as it is long; its
     // parts are collected without recursing once per level.
