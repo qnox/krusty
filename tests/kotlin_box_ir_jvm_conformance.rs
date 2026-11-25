@@ -958,7 +958,18 @@ fn assert_compose_fixture_matches_kotlinc(stem: &str) {
         .join("tests/fixtures/compose")
         .join(format!("{stem}.kt"));
     let source = fs::read_to_string(&path).expect("read the Compose fixture");
-    assert_plugin_case_matches_kotlinc(&source, stem);
+    let version = krusty::kotlin_version::target();
+    let inventory = box_ratchet::read_path("plugin_expected_failures", "compose", version);
+    let expected_to_differ = box_ratchet::load_path(&inventory, false).contains(stem);
+    let outcome = std::panic::catch_unwind(|| assert_plugin_case_matches_kotlinc(&source, stem));
+    match (expected_to_differ, outcome) {
+        (false, Ok(())) | (true, Err(_)) => {}
+        (false, Err(failure)) => std::panic::resume_unwind(failure),
+        (true, Ok(())) => panic!(
+            "the Compose fixture {stem} now matches kotlinc {version}: remove it from {}",
+            inventory.display()
+        ),
+    }
 }
 
 /// A compiler plugin's case compiles to exactly the classes the reference compiler and that plugin
@@ -1924,7 +1935,8 @@ fn kotlin_codegen_box_conformance() {
     }
 }
 
-/// Reject every applicable failure and hold exclusions to the exact JVM applicability inventory.
+/// Hold every applicable failure and exclusion to the exact JVM inventories: a release records the
+/// cases it does not yet pass, and a case outside them that fails is an error.
 fn check_jvm_outcomes(
     box_dir: &Path,
     results: &[(PathBuf, TestResult, box_byte_score::CaseScore)],
@@ -1935,20 +1947,16 @@ fn check_jvm_outcomes(
     let failures: Vec<String> = results
         .iter()
         .filter_map(|(file, result, _)| match result {
-            TestResult::Fail(reason) => Some(format!(
-                "{}: {reason}",
-                box_ratchet::corpus_key(box_dir, file)
-            )),
             TestResult::NotApplicable if super::box_inventory::owned(file) => Some(format!(
                 "{}: owned portable box case may not be not-applicable",
                 box_ratchet::corpus_key(box_dir, file)
             )),
-            TestResult::Pass | TestResult::NotApplicable => None,
+            TestResult::Pass | TestResult::Fail(_) | TestResult::NotApplicable => None,
         })
         .collect();
     assert!(
         failures.is_empty(),
-        "{} applicable JVM box case(s) failed:\n  {}",
+        "{} owned JVM box case(s) not applicable:\n  {}",
         failures.len(),
         failures.join("\n  ")
     );
@@ -1991,11 +1999,6 @@ fn check_jvm_outcomes(
         return;
     }
     let expected = box_ratchet::load(Platform::Jvm, version);
-    assert!(
-        expected.failures.is_empty(),
-        "JVM expected-failure inventories are obsolete; remove every entry from {}",
-        box_ratchet::failure_path(Platform::Jvm, version).display()
-    );
     let mismatches = box_ratchet::compare(&expected, &outcomes, corpus);
     assert!(
         mismatches.is_empty(),

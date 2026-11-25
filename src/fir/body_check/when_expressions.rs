@@ -5,8 +5,8 @@
 
 use crate::ast::{ExprId, WhenArm};
 use crate::fir::{
-    FirExpr, FirExprId, FirWhenBranch, FirWhenCondition, FirWhenSubjectNumericEquality, ResolvedTy,
-    SyntheticOriginKind,
+    FirExpr, FirExprId, FirRuntimeFunction, FirWhenBranch, FirWhenCondition,
+    FirWhenSubjectNumericEquality, ResolvedTy, SyntheticOriginKind,
 };
 use crate::types::{EqualityMode, Ty};
 
@@ -226,11 +226,26 @@ impl BodyFirChecker<'_> {
                 Some(last) if last.conditions.is_empty() => self.else_is_exhaustive(last.result),
                 _ => true,
             };
+        let subject_failure = match self.info.when_subject_failure(expression) {
+            None => None,
+            Some(Some(function)) => Some(FirRuntimeFunction {
+                function: function.function,
+                parameters: function.parameters.clone(),
+                result: function.result,
+            }),
+            Some(None) => {
+                return Err(self.failure(
+                    self.file.expr_span(expression),
+                    super::BodyCheckFailureKind::MissingStableCallTarget,
+                ));
+            }
+        };
         Ok(FirExprKind::When {
             subject,
             subject_variable,
             branches: branches.into_boxed_slice(),
             deeply_exhaustive,
+            subject_failure,
         })
     }
 

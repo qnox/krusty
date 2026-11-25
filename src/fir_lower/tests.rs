@@ -28,6 +28,7 @@ mod lambda_return_flow;
 mod local_call_parameters;
 mod local_classifier_provenance;
 mod lowering_temporaries;
+mod property_reference_realization;
 mod ranges;
 
 pub(crate) use super::single_source_lowering::{
@@ -699,6 +700,7 @@ fn external_property_function_reference_is_materialized_without_lookup() {
                 conversion: None,
             }),
             extension_receiver: None,
+            context_arguments: Box::default(),
             mutable: false,
             substitutions: Box::new([]),
             adaptation: None,

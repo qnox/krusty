@@ -159,27 +159,45 @@ fn generated_method(
     name: &str,
     ir: &IrFile,
 ) -> Option<GeneratedMethod> {
+    let declaration = generated_declaration(index, owner, name)?;
+    if index.is_suppressed_generated_callable(declaration) {
+        return Some(GeneratedMethod::Suppressed);
+    }
+    index
+        .callable_for_declaration(declaration)
+        .and_then(|callable| ir.checked_callable_functions.get(&callable.id).copied())
+        .map(GeneratedMethod::Present)
+}
+
+/// The class's anchored compiler-generated function declaration of that name.
+fn generated_declaration(
+    index: &ResolvedModuleIndex,
+    owner: DeclarationId,
+    name: &str,
+) -> Option<DeclarationId> {
     index
         .owned_declarations(owner)
         .iter()
         .copied()
-        .find_map(|declaration| {
-            let header = index.declaration_header(declaration)?;
-            index.declaration_anchor(declaration)?;
-            (header.kind == DeclarationKind::Function
-                && header.flags.has(DeclarationFlags::COMPILER_GENERATED)
-                && index.declaration_name(declaration) == Some(name))
-            .then(|| {
-                if index.is_suppressed_generated_callable(declaration) {
-                    return Some(GeneratedMethod::Suppressed);
-                }
-                index
-                    .callable_for_declaration(declaration)
-                    .and_then(|callable| ir.checked_callable_functions.get(&callable.id).copied())
-                    .map(GeneratedMethod::Present)
-            })
-            .flatten()
+        .find(|&declaration| {
+            index.declaration_header(declaration).is_some_and(|header| {
+                header.kind == DeclarationKind::Function
+                    && header.flags.has(DeclarationFlags::COMPILER_GENERATED)
+            }) && index.declaration_anchor(declaration).is_some()
+                && index.declaration_name(declaration) == Some(name)
         })
+}
+
+/// The equality bound signature collection published on the class's generated `equals`.
+fn generated_equality_bound(
+    index: &ResolvedModuleIndex,
+    owner: DeclarationId,
+) -> Option<crate::types::Ty> {
+    let declaration = generated_declaration(index, owner, "equals")?;
+    let callable = index.callable_for_declaration(declaration)?;
+    index
+        .callable_equality_bound(callable.id)
+        .map(|bound| bound.get())
 }
 
 fn synthesize_components_and_copy(
@@ -505,6 +523,12 @@ fn synthesize_equals(
     };
     let owner = ir.classes[class as usize].fq_name_id();
     ir.record_data_class_member(owner, IrDataClassMemberRole::Equals, function);
+    // Under `StrictEquals` the generated `equals` carries its class as the equality bound, and
+    // `@Metadata` records it so a consuming module narrows by it too.
+    if let Some(bound) = generated_equality_bound(index, declaration) {
+        ir.declared_parameters_mut(function).equality_bound =
+            Some(crate::ir::IrEqualityBoundParameter { index: 0, bound });
+    }
     let classifier = ir.classes[class as usize].fq_name_id();
     let mut statements = Vec::new();
 

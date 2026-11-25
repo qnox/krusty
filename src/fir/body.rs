@@ -1222,6 +1222,9 @@ pub enum FirExprKind {
         binding: FirCallableReferenceBinding,
         dispatch_receiver: Option<FirReceiver>,
         extension_receiver: Option<FirReceiver>,
+        /// Values the reference site selected for the declaration's leading context parameters
+        /// (`CallableReferencesToContextual`); empty for any other reference.
+        context_arguments: Box<[FirReceiver]>,
         mutable: bool,
         substitutions: Box<[FirTypeSubstitution]>,
         adaptation: Option<Box<FirReferenceAdaptation>>,
@@ -1361,6 +1364,10 @@ pub enum FirExprKind {
         /// `else` result must be deeply exhaustive too; without one, the resolver typed it by its
         /// branches only when it proved it exhaustive.
         deeply_exhaustive: bool,
+        /// The function an exhaustive subject `when` without an `else` passes its subject to when no
+        /// branch matches (`+NoWhenBranchMatchedExceptionWithMessage`). `None` keeps the plain
+        /// `NoWhenBranchMatchedException()` failure, and a `when` that is not exhaustive has none.
+        subject_failure: Option<FirRuntimeFunction>,
     },
     Block {
         statements: Box<[FirStatementId]>,

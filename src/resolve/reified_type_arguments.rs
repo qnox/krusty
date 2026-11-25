@@ -278,7 +278,7 @@ impl Checker<'_> {
             }
             return;
         }
-        let features = &self.file.reified_type_arguments;
+        let features = &self.file.language.reified_type_arguments;
         match argument.kind() {
             TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
                 if !reified_type_parameter(scope, name.as_str()) {
@@ -341,7 +341,7 @@ impl Checker<'_> {
     }
 
     fn report_reified_problem(&mut self, span: Span, formal: &str, problem: ReifiedProblem) {
-        let features = self.file.reified_type_arguments.clone();
+        let features = self.file.language.reified_type_arguments.clone();
         match problem {
             ReifiedProblem::TypeParameter {
                 name,

@@ -41,42 +41,15 @@ impl<'a> FileLowering<'a> {
         }
     }
 
-    /// Can this property's initializer tell program start from the moment its owner is touched?
-    ///
-    /// Two cannot. A `const val`'s initializer is a compile-time constant. A delegated property's
-    /// `KProperty` metadata is a property REFERENCE, which is one emitted object per property with
-    /// no state of its own and nothing to allocate — the same value however early it is asked for.
-    /// Running either at program start is indistinguishable from running it with the owner, so the
-    /// placement fact the owner carries has nothing to say about them.
-    fn order_independent(&self, declaration: &IrStatic) -> bool {
-        declaration.is_const
-            || declaration.init.is_none_or(|init| {
-                matches!(
-                    self.ir.expr(init),
-                    IrExpr::Checked(checked_op) if matches!(&**checked_op, IrCheckedOperation::PropertyReference { .. })
-                )
-            })
-    }
-
     /// Declare a slot per top-level property. Declared before any body is compiled, because a
     /// function may read a property declared after it.
     pub(super) fn declare_statics(&mut self) -> Result<(), Unsupported> {
-        for (index, declaration) in self.ir.statics.iter().enumerate() {
+        let ir = self.ir;
+        for (index, declaration) in ir.statics.iter().enumerate() {
             // An owner is a PLACEMENT fact the JVM needs — a companion's `const val` becomes a
             // field of the OUTER class there. There is no facade here for a slot to be placed
-            // differently from, so the owner says nothing about the slot; what it could say
-            // something about is WHEN the initializer runs, since a companion's runs with the
-            // companion rather than at program start. An initializer that cannot OBSERVE the
-            // difference settles it; anything else owned by a class still declines rather than
-            // guess at the order.
-            if let Some(owner) = declaration.owner {
-                if !self.order_independent(declaration) {
-                    return Err(declined!(
-                        "a non-`const` property stored on `{}`",
-                        owner.render()
-                    ));
-                }
-            }
+            // differently from, so the owner says nothing about the slot; WHEN its initializer
+            // runs is the class static plan's (`class_statics`).
             if self.carrier(declaration.ty) == Carrier::Void {
                 return Err(declined!(
                     "a `Unit`-typed top-level property (`{}`)",
@@ -113,7 +86,14 @@ impl<'a> FileLowering<'a> {
             .statics
             .iter()
             .enumerate()
-            .map(|(index, declaration)| (self.statics[index], declaration.ty, declaration.init))
+            .map(|(index, declaration)| {
+                // A deferred static is still rooted here, at program start, but its class runs
+                // its initializer.
+                let init = declaration
+                    .init
+                    .filter(|_| !self.class_statics.is_deferred(index as u32));
+                (self.statics[index], declaration.ty, init)
+            })
             .collect();
 
         self.emit_function(id, signature, Ty::Unit, &symbol, &mut |body, _| {
@@ -354,6 +334,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     ) -> Result<(), Unsupported> {
         match self.top_level(target, true)? {
             TopLevel::Slot(index) => {
+                self.initialize_static_owner(index)?;
                 let slot = self.file.statics[index as usize];
                 let address = self.data_address(slot);
                 self.builder.ins().store(trusted(), value, address, 0);
@@ -367,6 +348,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     pub(super) fn static_read(&mut self, index: u32) -> Result<Option<Value>, Unsupported> {
+        self.initialize_static_owner(index)?;
         let ty = self.file.ir.statics[index as usize].ty;
         let slot = self.file.statics[index as usize];
         let clif = self.carrier(ty).clif().expect("declined at declaration");
@@ -384,6 +366,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let Some(value) = value else {
             return Err("a `Unit` value assigned to a top-level property".into());
         };
+        self.initialize_static_owner(index)?;
         let address = self.data_address(slot);
         self.builder.ins().store(trusted(), value, address, 0);
         Ok(())
@@ -457,7 +440,7 @@ impl BodyLowering<'_, '_, '_> {
                 supplied.len()
             ));
         }
-        let mut arguments = Vec::with_capacity(supplied.len() + 1);
+        let mut arguments = Vec::with_capacity(supplied.len());
         // The owner's instance is the accessor's first operand, exactly as it is for any other
         // instance method; the declared parameters follow in the order the layout recorded.
         let dispatch = match owner {
@@ -468,7 +451,6 @@ impl BodyLowering<'_, '_, '_> {
                 let Some(object) = self.receiver(receiver)? else {
                     return Ok(None);
                 };
-                arguments.push(object);
                 Some((owner, object))
             }
         };
@@ -481,11 +463,24 @@ impl BodyLowering<'_, '_, '_> {
             }
             arguments.push(argument);
         }
+        self.call_receiver_accessor(function, dispatch, &arguments)
+    }
+
+    /// Call `function`, the accessor of a property with a receiver or context parameters, with its
+    /// operands already converted to the types it declares: through its owner's dispatch slot when
+    /// it is a member's, directly when it is a top-level property's.
+    pub(super) fn call_receiver_accessor(
+        &mut self,
+        function: FunId,
+        dispatch: Option<(TypeName, Value)>,
+        arguments: &[Value],
+    ) -> Result<Option<Value>, Unsupported> {
+        let parameters = self.file.ir.functions[function as usize].params.clone();
         let Some((owner, object)) = dispatch else {
             let id = self.file.functions[function as usize]
                 .ok_or_else(|| "a property accessor with no body".to_string())?;
             let func_ref = self.func_ref(id);
-            let call = self.emit_call(func_ref, &arguments)?;
+            let call = self.emit_call(func_ref, arguments)?;
             return Ok(self.builder.inst_results(call).first().copied());
         };
         let class = self.file.class_of(owner, "a property accessor of")?;
@@ -494,7 +489,7 @@ impl BodyLowering<'_, '_, '_> {
             return Err("a member accessor with no dispatch slot".into());
         };
         let ret = self.file.ir.functions[function as usize].ret;
-        self.dispatch_through(object, slot, &parameters, ret, &arguments[1..])
+        self.dispatch_through(object, slot, &parameters, ret, arguments)
     }
 }
 

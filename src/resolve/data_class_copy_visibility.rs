@@ -23,7 +23,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         class: &ClassDecl,
     ) {
-        if self.file.data_copy_respects_ctor_visibility
+        if self.file.language.data_copy_respects_ctor_visibility
             || !class.is_data
             || class.singleton
             || class.primary_ctor_visibility == Visibility::Public
@@ -45,8 +45,11 @@ impl Checker<'_> {
         }
         self.report_deprecation_error(
             span,
-            self.file.error_about_data_class_copy_visibility_change,
             self.file
+                .language
+                .error_about_data_class_copy_visibility_change,
+            self.file
+                .language
                 .data_class_copy_visibility_change_warning
                 .as_deref(),
             DeprecationNames {
@@ -64,7 +67,7 @@ impl Checker<'_> {
         span: Span,
         member: &crate::libraries::LibraryMember,
     ) {
-        if self.file.data_copy_respects_ctor_visibility {
+        if self.file.language.data_copy_respects_ctor_visibility {
             return;
         }
         let source_copy = member
@@ -104,8 +107,13 @@ impl Checker<'_> {
         }
         self.report_deprecation_error(
             span,
-            self.file.error_about_data_class_copy_visibility_change,
-            self.file.data_class_invisible_copy_usage_warning.as_deref(),
+            self.file
+                .language
+                .error_about_data_class_copy_visibility_change,
+            self.file
+                .language
+                .data_class_invisible_copy_usage_warning
+                .as_deref(),
             DeprecationNames {
                 error: crate::diag::names::DATA_CLASS_INVISIBLE_COPY_USAGE_ERROR,
                 warning: crate::diag::names::DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING,

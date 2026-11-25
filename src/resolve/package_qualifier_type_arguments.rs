@@ -92,11 +92,12 @@ impl Checker<'_> {
         let argument_failed = self.diags.diags[diagnostics_start..]
             .iter()
             .any(|diagnostic| diagnostic.severity == crate::diag::Severity::Error);
-        let has_forbidden_list = lists
-            .iter()
-            .any(|list| self.file.forbid_useless_type_arguments || list.segment + 1 == packages);
+        let has_forbidden_list = lists.iter().any(|list| {
+            self.file.language.forbid_useless_type_arguments || list.segment + 1 == packages
+        });
         for list in lists {
-            let forbidden = self.file.forbid_useless_type_arguments || list.segment + 1 == packages;
+            let forbidden =
+                self.file.language.forbid_useless_type_arguments || list.segment + 1 == packages;
             // Like kotlinc's diagnostic collector, do not retain this deprecation warning beside
             // an error produced by the same qualified type application.
             if forbidden || (!argument_failed && !has_forbidden_list) {
@@ -108,9 +109,11 @@ impl Checker<'_> {
 
     fn report_package_type_arguments(&mut self, list: &QualifierSegmentArguments, packages: u32) {
         // The last package segment never accepted type arguments.
-        let forbidden = self.file.forbid_useless_type_arguments || list.segment + 1 == packages;
+        let forbidden =
+            self.file.language.forbid_useless_type_arguments || list.segment + 1 == packages;
         let warning = self
             .file
+            .language
             .useless_type_arguments_warning_format
             .as_ref()
             .map(|format| format.message(MESSAGE));

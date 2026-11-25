@@ -1,7 +1,7 @@
 //! Realization of stable same-file callable identities as ordinary common-IR calls.
 
 pub(super) mod argument_boundaries;
-mod dependency_inline;
+pub(super) mod dependency_inline;
 mod inline_route;
 mod reordered_operands;
 
@@ -156,6 +156,17 @@ pub(super) struct ExternalCallRequest<'a> {
     /// Source line of the call, when the lowering site carries one. An inline-body expansion
     /// attributes its frame to it; an ordinary dependency call does not consume it.
     pub(super) source_line: Option<u32>,
+}
+
+/// How a call of an inline dependency function is lowered on a target that expands inline bodies
+/// in common IR.
+pub(super) enum DependencyTemplateSelection {
+    /// Expanded from the function's serialized template.
+    Expand(super::DependencyInlineTemplate),
+    /// The function must be inlined and has no template: the call is unsupported.
+    Missing,
+    /// An ordinary call of the dependency function.
+    Ordinary,
 }
 
 /// A checked construction of a dependency constructor. `parameters` are the selected specialized
@@ -391,6 +402,34 @@ impl BodyLowering<'_> {
         Some(self.wrap_call_statements(statements, access))
     }
 
+    /// How a call of the dependency function `target` is lowered: expanded from its serialized
+    /// template, refused because it must inline and has none, or left an ordinary call.
+    pub(super) fn dependency_template_selection(
+        &mut self,
+        target: ExternalCallableId,
+        inline: crate::fir::InlineKind,
+    ) -> DependencyTemplateSelection {
+        if !inline.can_inline()
+            || self.ir.same_module_inlining() != crate::ir::SameModuleInlining::ExpandInIr
+            || self.dependency_templates.compiler_implemented(target)
+        {
+            return DependencyTemplateSelection::Ordinary;
+        }
+        match self.dependency_templates.template(self.ir, target).cloned() {
+            Some(template) => DependencyTemplateSelection::Expand(template),
+            // A declaration without a legal call has no fallback when its body cannot be
+            // expanded: the call is unsupported rather than an ordinary dependency call.
+            None if inline.must_inline() && self.dependency_templates.provides_templates() => {
+                crate::trace_compiler!(
+                    "lower",
+                    "the must-inline dependency function {target:?} has no template"
+                );
+                DependencyTemplateSelection::Missing
+            }
+            None => DependencyTemplateSelection::Ordinary,
+        }
+    }
+
     /// Materialize a checked dependency call without exposing its physical owner or descriptor.
     /// Argument ordinals were selected by the checker; this routine only preserves source
     /// evaluation order and lays the already-mapped values into semantic parameter order.
@@ -452,39 +491,26 @@ impl BodyLowering<'_> {
             self.ir.inline_regions.insert(expanded);
             return Some(expanded);
         }
-        if inline.can_inline()
-            && self.ir.same_module_inlining() == crate::ir::SameModuleInlining::ExpandInIr
-            && !self.dependency_templates.compiler_implemented(target)
-        {
-            match self.dependency_templates.template(self.ir, target).cloned() {
-                Some(template) => {
-                    // A selected template is an obligation: a call it cannot expand fails the
-                    // file, never retried as a call of the dependency function.
-                    return self.dependency_inline_call(dependency_inline::DependencyInlineCall {
-                        target,
-                        template,
-                        parameter_types: &parameter_types,
-                        dispatch_receiver,
-                        dispatch_type: declaring_receiver
-                            .or(receiver_ty)
-                            .map(|receiver| receiver.get()),
-                        extension_receiver,
-                        extension_receiver_parameter,
-                        arguments,
-                        substitutions,
-                    });
-                }
-                // A declaration without a legal call has no fallback when its body cannot be
-                // expanded: the call is unsupported rather than an ordinary dependency call.
-                None if inline.must_inline() && self.dependency_templates.provides_templates() => {
-                    crate::trace_compiler!(
-                        "lower",
-                        "the must-inline dependency function {target:?} has no template"
-                    );
-                    return None;
-                }
-                None => {}
+        match self.dependency_template_selection(target, inline) {
+            DependencyTemplateSelection::Expand(template) => {
+                // A selected template is an obligation: a call it cannot expand fails the file,
+                // never retried as a call of the dependency function.
+                return self.dependency_inline_call(dependency_inline::DependencyInlineCall {
+                    target,
+                    template,
+                    parameter_types: &parameter_types,
+                    dispatch_receiver,
+                    dispatch_type: declaring_receiver
+                        .or(receiver_ty)
+                        .map(|receiver| receiver.get()),
+                    extension_receiver,
+                    extension_receiver_parameter,
+                    arguments,
+                    substitutions,
+                });
             }
+            DependencyTemplateSelection::Missing => return None,
+            DependencyTemplateSelection::Ordinary => {}
         }
         let SelectedSemanticOperands {
             statements,

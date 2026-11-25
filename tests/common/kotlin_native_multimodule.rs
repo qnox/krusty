@@ -158,8 +158,9 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
             .collect::<Vec<_>>();
         // Kotlin/Native coalesces equal internal linker symbols from distinct KLIBs by library
         // order even though frontend selection correctly admits only the friend. Releases before
-        // 2.4.20 select the first definition while 2.4.20 selects the last, so put the friend at
-        // the precedence position used by the pinned compiler.
+        // 2.4.20 and from 2.5.0-RC on select the first definition while 2.4.20 and 2.4.21
+        // select the last, so put the friend at the precedence position used by the pinned
+        // compiler.
         order_libraries_for_native_linker(
             &mut libraries,
             &friend_paths,
@@ -252,7 +253,7 @@ fn order_libraries_for_native_linker(
     friends: &[PathBuf],
     version: KotlinVersion,
 ) {
-    if version >= KotlinVersion::V2_4_20 {
+    if (KotlinVersion::V2_4_20..KotlinVersion::V2_5_0_RC).contains(&version) {
         libraries.sort_by_key(|library| friends.contains(library));
     } else {
         libraries.sort_by_key(|library| !friends.contains(library));
@@ -441,7 +442,7 @@ mod tests {
     // PLATFORM-SPECIFIC: Native oracle configuration and prepared module inputs, not JVM ABI.
     #[test]
     fn every_native_module_receives_prepared_sources_and_case_language_settings() {
-        let source = "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+        let source = "// LANGUAGE: +CompanionBlocks\n\
                       // JVM_TARGET: 1.8\n\
                       // MODULE: lib\n// FILE: W.kt\n\
                       OPTIONAL_JVM_INLINE_ANNOTATION\n\
@@ -457,7 +458,7 @@ mod tests {
                 depends_on: Vec::new(),
                 files: vec![(
                     "W".to_owned(),
-                    "// LANGUAGE: +CompanionBlocksAndExtensions\n// JVM_TARGET: 1.8\n\n\
+                    "// LANGUAGE: +CompanionBlocks\n// JVM_TARGET: 1.8\n\n\
                      // FILE: W.kt\n\n\
                      value class W(val value: Int) { companion { fun answer() = 1 } }\n"
                         .to_owned(),
@@ -482,7 +483,7 @@ mod tests {
         assert_eq!(modules, expected);
         let flag = krusty::features::FeatureTable::for_version(krusty::kotlin_version::target())
             .expect("the pinned feature table")
-            .language_argument("+CompanionBlocksAndExtensions");
+            .language_argument("+CompanionBlocks");
         assert_eq!(arguments, vec![flag]);
     }
 
@@ -590,7 +591,24 @@ mod tests {
             std::slice::from_ref(&friend),
             KotlinVersion::V2_4_20,
         );
-        assert_eq!(since_2_4_20, [sibling, transitive, other, friend]);
+        assert_eq!(
+            since_2_4_20,
+            [
+                sibling.clone(),
+                transitive.clone(),
+                other.clone(),
+                friend.clone()
+            ]
+        );
+
+        let original = vec![friend.clone(), sibling, transitive, other];
+        let mut since_2_5 = original.clone();
+        order_libraries_for_native_linker(
+            &mut since_2_5,
+            std::slice::from_ref(&friend),
+            KotlinVersion::V2_5_0_RC,
+        );
+        assert_eq!(since_2_5, original);
     }
 
     #[test]

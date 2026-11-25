@@ -7,6 +7,7 @@
 //! `$Object` for its table. The frontend proved the value is of the class; the cast is what tells
 //! the validator.
 
+use krusty::backend::class_statics::ClassActivationStep;
 use krusty::backend::class_tables::module_slots::PlanKey;
 use krusty::backend::class_tables::{function_key, local_property_target, AnyMember, SlotKey};
 use krusty::backend::interface_identity::member_identity;
@@ -941,7 +942,7 @@ impl Body<'_> {
                                 class, *property, false, receiver, args,
                             ),
                         _ if args.is_empty() => self.property_read(None, *property, Some(receiver)),
-                        _ => Err("a property getter call with arguments".to_string()),
+                        _ => self.context_member_accessor(*property, false, receiver, args),
                     },
                     IrVirtualTarget::PropertySetter(ResolvedPropertyOverrideTarget::Module(
                         property,
@@ -953,7 +954,7 @@ impl Body<'_> {
                         _ if args.len() == 1 => {
                             self.property_write(None, *property, Some(receiver), args[0])
                         }
-                        _ => Err("a property setter call with the wrong arguments".to_string()),
+                        _ => self.context_member_accessor(*property, true, receiver, args),
                     },
                     _ => Err("a call to a library member".to_string()),
                 }
@@ -981,6 +982,61 @@ impl Body<'_> {
             },
             Callee::Super { .. } => Err("a `super` call to a library member".to_string()),
             _ => Err("a member call through this calling convention".to_string()),
+        }
+    }
+
+    /// A getter or setter of a class member property that declares context parameters: `args` are
+    /// its contexts, then, for the setter, the written value.
+    fn context_member_accessor(
+        &mut self,
+        property: PropertyId,
+        setter: bool,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let (class, index) = self.member_property(None, property)?;
+        let Some(IrLocalPropertyLayout::Member {
+            context_parameters,
+            ty,
+            ..
+        }) = self.ir.local_property_layouts.get(&property).cloned()
+        else {
+            return Err(
+                "an accessor call with arguments on a property that is not a class member"
+                    .to_string(),
+            );
+        };
+        let mut params = context_parameters;
+        if setter {
+            params.push(ty);
+        }
+        if params.len() != args.len() {
+            return Err("an accessor call whose arguments do not match its parameters".to_string());
+        }
+        let declared = self.ir.classes[class as usize].properties[index].clone();
+        let slot = local_property_target(self.ir, class, index)
+            .filter(|_| !self.ir.classes[class as usize].is_value)
+            .and_then(|target| {
+                let key = if setter {
+                    SlotKey::Setter(target)
+                } else {
+                    SlotKey::Getter(target)
+                };
+                self.file_classes().ok()?.tables.slot(class, &key)
+            });
+        if let Some(slot) = slot {
+            return self.dispatch(class, slot, receiver, args, &params, None);
+        }
+        match if setter {
+            declared.setter
+        } else {
+            declared.getter
+        } {
+            Some(accessor) => self.direct_member_call(accessor, receiver, args),
+            None => Err(format!(
+                "a property with context parameters and no accessor (`{}`)",
+                declared.name
+            )),
         }
     }
 
@@ -1052,6 +1108,7 @@ impl Body<'_> {
                 if !storage.direct_read {
                     return Err("a top-level property read that requires an accessor".to_string());
                 }
+                self.initialize_storage_owner(target)?;
                 self.code.global_get(storage.global);
                 return Ok(());
             }
@@ -1134,6 +1191,7 @@ impl Body<'_> {
                     return Err("a top-level property write that requires an accessor".to_string());
                 }
                 self.value(value, storage.ty)?;
+                self.initialize_storage_owner(target)?;
                 self.code.global_set(storage.global);
                 return Ok(());
             }
@@ -1264,8 +1322,13 @@ impl Body<'_> {
             .referenced_module_properties
             .get(&target)
             .ok_or_else(|| "a cross-file property with no module record".to_string())?;
-        if reference.owner.is_some()
-            || reference.extension_receiver.is_some()
+        // A `companion { }` block property is a static of its owner: its recorded owner and
+        // receiver coordinate name that class, which its storage takes no receiver for.
+        let block = matches!(
+            reference.placement,
+            krusty::ir::IrStaticPlacement::CompanionBlock { .. }
+        );
+        if (!block && (reference.owner.is_some() || reference.extension_receiver.is_some()))
             || !reference.context_parameters.is_empty()
         {
             return Err("a cross-file property storage with a receiver".to_string());
@@ -1643,6 +1706,7 @@ pub(super) fn define_class_functions(
                 class: id,
                 ordinal: 0,
             };
+            body.enter_constructor(id);
             body.primary_constructor(id)?;
             let lowered = body.finish();
             let carriers = constructor_carriers(module, ir, id, &parameters)?;
@@ -1667,6 +1731,7 @@ pub(super) fn define_class_functions(
                 class: id,
                 ordinal: ordinal as u32 + 1,
             };
+            body.enter_constructor(id);
             body.secondary_constructor(id, ordinal)?;
             let lowered = body.finish();
             let carriers = constructor_carriers(module, ir, id, &parameters)?;
@@ -2389,7 +2454,7 @@ impl Body<'_> {
     /// through the singleton getter, which publishes the instance before the companion
     /// constructor, so a companion that constructs its holder does not re-enter. `initializing`
     /// is a class whose initialization is already in progress, so activation skips it.
-    fn activate_class(
+    pub(super) fn activate_class(
         &mut self,
         class: ClassId,
         initializing: Option<ClassId>,
@@ -2408,8 +2473,14 @@ impl Body<'_> {
         }
         self.activate_laid_out(*chain.last().expect("non-empty"))?;
         for &owner in chain.iter().rev() {
-            if Some(owner) != initializing {
-                self.initialize_companion(owner)?;
+            for step in self.class_initializers.plan().activation_steps(owner) {
+                match step {
+                    ClassActivationStep::OwnStatics(class) => self.initialize_own_statics(class),
+                    ClassActivationStep::Companion(class) if Some(class) != initializing => {
+                        self.initialize_companion(class)?;
+                    }
+                    ClassActivationStep::Companion(_) => {}
+                }
             }
         }
         Ok(())

@@ -19,6 +19,17 @@ use super::{
 };
 
 impl super::Emitter<'_> {
+    /// Whether `class`, declared by another file of the module or by a dependency, is realized as a
+    /// JVM interface.
+    fn classifier_is_interface(&self, class: krusty::types::TypeName) -> bool {
+        self.classifiers.classifier(class).is_some_and(|fact| {
+            matches!(
+                fact.kind,
+                krusty::libraries::TypeKind::Interface | krusty::libraries::TypeKind::Annotation
+            )
+        })
+    }
+
     pub(super) fn emit_physical_value_node(
         &mut self,
         e: u32,
@@ -956,12 +967,14 @@ impl super::Emitter<'_> {
                     // A top-level function from another file → `invokestatic <facade>.<name>(desc)`.
                     let param_tys = jvm_tys(params);
                     let ret = jvm_declared_ty(ret);
+                    // A `companion { … }` block member of an interface another file declares is a
+                    // static of that interface.
                     let owner_is_interface =
                         super::super::module_calls::static_owner_is_jvm_interface(
                             self.ir,
                             *facade,
                             *module_target,
-                        );
+                        ) || self.classifier_is_interface(*facade);
                     let (facade, name) = (facade.render(), name.clone());
                     // A private function is reachable from this file only because a non-private
                     // inline function called it. The caller's class file uses the public accessor

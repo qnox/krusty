@@ -136,8 +136,11 @@ impl Checker<'_> {
         match access.kind {
             QualifierAccessKind::Static => self.report_deprecation_error(
                 arguments.span,
-                self.file.forbid_useless_type_arguments,
-                self.file.type_arguments_not_allowed_warning.as_deref(),
+                self.file.language.forbid_useless_type_arguments,
+                self.file
+                    .language
+                    .type_arguments_not_allowed_warning
+                    .as_deref(),
                 DeprecationNames {
                     error: crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED,
                     warning: crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED_WARNING,

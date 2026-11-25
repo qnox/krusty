@@ -18,6 +18,7 @@ mod boxed;
 mod c_abi;
 mod calls;
 mod carrier;
+mod class_statics;
 mod classes_literal;
 mod classifier_shapes;
 mod compiler_intrinsics;
@@ -74,7 +75,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use krusty::ir::{
     Callee, ClassId, FunId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
-    IrLocalPropertyLayout, IrStatic, IrTypeOp, MainEntryParameters,
+    IrLocalPropertyLayout, IrTypeOp, MainEntryParameters,
 };
 use krusty::types::{Ty, TypeName};
 
@@ -345,6 +346,13 @@ pub fn lower_file(
         },
     );
 
+    let class_statics =
+        krusty::backend::class_statics::ClassStaticPlan::new(ir).map_err(|unordered| {
+            declined!(
+                "a non-`const` property stored on `{}`",
+                unordered.owner.render()
+            )
+        })?;
     let mut lowering = FileLowering {
         ir,
         source,
@@ -377,6 +385,8 @@ pub fn lower_file(
         accessors: HashMap::default(),
         dependency_bridges: 0,
         statics: Vec::new(),
+        class_statics,
+        class_initializers: HashMap::default(),
         lambdas: HashMap::default(),
         local_delegate_helpers: HashMap::default(),
         reference_identities: HashMap::default(),
@@ -410,6 +420,7 @@ pub fn lower_file(
     lowering.declare_functions()?;
     lowering.declare_classes()?;
     lowering.declare_statics()?;
+    lowering.declare_class_initializers()?;
     lowering.declare_lambdas()?;
     lowering.declare_local_delegate_helpers()?;
     // Constructors are bodies too, so property-reference artifacts must exist before classes are
@@ -419,6 +430,7 @@ pub fn lower_file(
     lowering.define_local_delegate_helpers()?;
     lowering.define_classes()?;
     let statics_init = lowering.define_statics_init()?;
+    lowering.define_class_initializers()?;
     let file_init_linkage = match unit_kind {
         krusty::backend::CheckedIrUnitKind::Source => Linkage::Hidden,
         krusty::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
@@ -615,6 +627,10 @@ struct FileLowering<'a> {
     dependency_bridges: usize,
     /// The global slot of each top-level property, parallel to `ir.statics`.
     statics: Vec<DataId>,
+    /// Which statics wait for their class, and what each activation point initializes.
+    class_statics: krusty::backend::class_statics::ClassStaticPlan,
+    /// The emitted initializer of each class the plan gives statics.
+    class_initializers: HashMap<ClassId, class_statics::ClassInitializer>,
     /// The emitted pieces of each lambda, by the expression that creates it.
     lambdas: HashMap<u32, functions::LambdaItems>,
     /// Native-local accessor helper per checked local-delegate plan and accessor side.
@@ -1023,6 +1039,9 @@ impl<'a> FileLowering<'a> {
         semantic_slots.extend(function.params.iter().copied());
         let name = function.name.clone();
         let ret = function.ret;
+        let block_class = self
+            .class_statics
+            .function_activation(self.ir, index as krusty::ir::FunId);
         let attempt = self.emit_function(
             id,
             signature.clone(),
@@ -1033,6 +1052,9 @@ impl<'a> FileLowering<'a> {
                 lowering.record_semantic_slots(&semantic_slots);
                 for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                     lowering.bind_parameter(slot as u32, *value, *ty)?;
+                }
+                if let Some(class) = block_class {
+                    lowering.activate_class(class)?;
                 }
                 lowering.frame_objects = lowering.frame_constructions(body);
                 lowering.statement(body)

@@ -24,7 +24,12 @@ enum OrdinaryDelegateSelection {
     None(Vec<crate::libraries::FunctionInfo>),
     /// `FunctionInfo` alone is ~1.2 KiB and is what makes this variant large; the two `Ty`s are
     /// `Copy` and a couple of words each, so only the callable is boxed.
-    Selected(Box<crate::libraries::FunctionInfo>, Ty, Ty),
+    Selected(
+        Box<crate::libraries::FunctionInfo>,
+        Ty,
+        Ty,
+        Box<crate::symbol_resolver::GSigBinds>,
+    ),
     Ambiguous(Vec<crate::libraries::FunctionInfo>),
 }
 
@@ -481,6 +486,11 @@ pub enum DelegateGetValueTarget {
         /// Not the callable's `source_receiver`: that is the declaration's own receiver, whose
         /// formals say nothing about the delegate expression's type arguments.
         applied_receiver: Ty,
+        /// The bindings selection fixed for the declaration's own type parameters, by formal
+        /// identity. Not re-derived from the applied shapes: a delegate that is a subtype of the
+        /// declared receiver (`KMutableProperty1<A, B>` for `KProperty1<T, V>`) binds them
+        /// through its supertype, which structural unification of the two shapes cannot see.
+        bindings: crate::symbol_resolver::GSigBinds,
     },
     MemberExtension {
         stable_declaration: Option<crate::fir::DeclarationId>,
@@ -1702,6 +1712,7 @@ impl Checker<'_> {
                         selected.function,
                         selected.ret,
                         selected.applied_receiver,
+                        Box::new(selected.bindings),
                     )
                 }
                 crate::symbol_resolver::ReceiverFunctionSelection::None => {
@@ -1713,8 +1724,8 @@ impl Checker<'_> {
             }
         };
         let selected = match select_kind(crate::libraries::FnKind::Member) {
-            OrdinaryDelegateSelection::Selected(selected, ret, applied_receiver) => {
-                (selected, ret, applied_receiver)
+            OrdinaryDelegateSelection::Selected(selected, ret, applied_receiver, bindings) => {
+                (selected, ret, applied_receiver, bindings)
             }
             OrdinaryDelegateSelection::Ambiguous(candidates) => {
                 return if optional {
@@ -1736,7 +1747,7 @@ impl Checker<'_> {
                     self,
                     &receivers,
                     MemberExtensionProbes {
-                        explicit_context_arguments: self.file.explicit_context_arguments,
+                        explicit_context_arguments: self.file.language.explicit_context_arguments,
                         deferred_type_variables: &self.active_postponed_type_variables(),
                         select_context_arguments: &|parameters| {
                             self.select_context_arguments_with_types(scope, parameters)
@@ -1860,9 +1871,12 @@ impl Checker<'_> {
                     ));
                 }
                 match select_kind(crate::libraries::FnKind::Extension) {
-                    OrdinaryDelegateSelection::Selected(selected, ret, applied_receiver) => {
-                        (selected, ret, applied_receiver)
-                    }
+                    OrdinaryDelegateSelection::Selected(
+                        selected,
+                        ret,
+                        applied_receiver,
+                        bindings,
+                    ) => (selected, ret, applied_receiver, bindings),
                     OrdinaryDelegateSelection::None(extensions) => {
                         let families = DelegateConventionFamilies {
                             members,
@@ -1889,7 +1903,7 @@ impl Checker<'_> {
                 }
             }
         };
-        let (selected, ret, applied_receiver) = selected;
+        let (selected, ret, applied_receiver, bindings) = selected;
         // Same scratch-pass rule as the member-extension arm above: no resolved index means
         // the candidate's own signature, not a lookup that cannot succeed.
         let (declared_receiver, declared_params, declared_ret) = match selected.stable_declaration {
@@ -1917,6 +1931,7 @@ impl Checker<'_> {
                     callable,
                     stable_declaration,
                     applied_receiver,
+                    bindings: *bindings,
                 }) {
                 Some(target) => DelegateOperatorSelection::Selected(Box::new(target)),
                 None => DelegateOperatorSelection::None,

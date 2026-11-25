@@ -195,6 +195,11 @@ pub fn progression_builder(package: TypeName, name: &str) -> Option<ProgressionB
 /// come from the provider's declarations.
 pub const PROGRESSION_LAST_ELEMENT: &str = "getProgressionLastElement";
 
+/// `kotlin.internal.throwNoWhenBranchMatchedException`, the function an exhaustive subject `when`
+/// without an `else` fails through under `+NoWhenBranchMatchedExceptionWithMessage`. It takes the
+/// subject and returns `Nothing`.
+pub const THROW_NO_WHEN_BRANCH_MATCHED: &str = "throwNoWhenBranchMatchedException";
+
 /// The `withIndex()` extension of `kotlin.collections`, `kotlin.text` and `kotlin.sequences` that
 /// kotlinc's `ForLoopsLowering` (`WithIndexHandler`) iterates through instead of calling, when a
 /// `for` loop destructures the `IndexedValue` it yields.

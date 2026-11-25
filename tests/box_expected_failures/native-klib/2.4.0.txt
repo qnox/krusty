@@ -95,7 +95,6 @@ boxingOptimization/fold.kt
 boxingOptimization/foldRange.kt
 boxingOptimization/kt5844.kt
 boxingOptimization/kt6842.kt
-boxingOptimization/maxMinByOrNull.kt
 boxingOptimization/nullCheck.kt
 boxingOptimization/progressions.kt
 boxingOptimization/safeCallWithElvis.kt
@@ -172,7 +171,6 @@ collectionLiterals/stdlibSequence.kt
 collections/clashWithInternalMapMethod.kt
 collections/inheritFromAbstractMutableListInt.kt
 companionBlocksAndExtensions/callableReferences.kt
-companionBlocksAndExtensions/companionBlock.kt
 companionBlocksAndExtensions/lateinit.kt
 compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt
