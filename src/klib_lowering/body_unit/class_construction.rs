@@ -442,6 +442,10 @@ impl<'u, 's> Linker<'u, 's> {
             )?);
             class.enum_entries = super::enum_materialization::declared_entries(plan);
         }
+        if class.is_object {
+            class.applied_annotations =
+                super::super::object_instances::instance_annotations(plan.header.class);
+        }
         class.supertypes.clone_from(&plan.supertypes);
         set_materialized_modality(&mut class, plan.header.contract.modality);
         if let Some(call) = &plan.superclass {
