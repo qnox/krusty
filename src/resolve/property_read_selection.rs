@@ -163,7 +163,7 @@ impl Checker<'_> {
                         .ok()
                         .map(|_| {
                             (
-                                self.receiver_property_accessible(
+                                self.receiver_callable_accessible(
                                     property.visibility,
                                     property.owner,
                                     receiver,
@@ -388,7 +388,7 @@ impl Checker<'_> {
         let Some(member) = self.resolver().select_member_property(receiver, name) else {
             return false;
         };
-        let visible = self.receiver_property_accessible(
+        let visible = self.receiver_callable_accessible(
             member.visibility,
             member.owner,
             receiver,
@@ -413,7 +413,7 @@ impl Checker<'_> {
         receiver: Ty,
     ) -> Option<(Visibility, TypeName)> {
         selection.hidden_from(receiver, |visibility, owner, probed, callable| {
-            self.receiver_property_accessible(visibility, owner, probed, callable)
+            self.receiver_callable_accessible(visibility, owner, probed, callable)
         })
     }
 }

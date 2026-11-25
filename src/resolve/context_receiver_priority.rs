@@ -47,7 +47,7 @@ impl Checker<'_> {
                 match self.select_property_read(scope, receiver.ty, name) {
                     Ok(Some(selection)) => {
                         if selection.access().is_some_and(|(visibility, owner)| {
-                            !self.receiver_property_accessible(
+                            !self.receiver_callable_accessible(
                                 visibility,
                                 owner,
                                 receiver.ty,

@@ -83,6 +83,17 @@ impl SymbolNamespace {
     }
 }
 
+/// A protected member of a superclass's companion object, as a subclass uses it.
+#[derive(Clone, Copy)]
+pub struct CompanionMember<'a> {
+    /// The superclass whose companion declares the member.
+    pub outer: TypeName,
+    pub name: &'a str,
+    /// The resolved annotations of the member's source declaration, empty for a dependency's.
+    pub annotations: &'a [TypeName],
+    pub is_const: bool,
+}
+
 /// A provider of declarations — a module's AST or a compiled library. The arg-independent metadata
 /// surface that federates across sources; arg-dependent selection/binding lives above (the resolver).
 pub trait SymbolSource {
@@ -142,6 +153,14 @@ pub trait SymbolSource {
     /// applicable callable was removed before selection.
     fn api_withheld_callable(&self, _owner: TypeName, _name: &str) -> bool {
         false
+    }
+
+    /// How this platform treats a subclass's use of a protected member of its superclass's
+    /// companion object. `None` means the platform places no restriction on it; `Some(exposed)`
+    /// says whether the member is also a static member of the superclass, the only form the
+    /// platform supports.
+    fn companion_protected_member_exposure(&self, _member: CompanionMember<'_>) -> Option<bool> {
+        None
     }
 
     /// Whether the source this provider resolves for sees a callable it published. A refined
@@ -323,6 +342,12 @@ impl SymbolSource for CompositeSource<'_> {
         self.children
             .iter()
             .any(|child| child.api_withheld_callable(owner, name))
+    }
+
+    fn companion_protected_member_exposure(&self, member: CompanionMember<'_>) -> Option<bool> {
+        self.children
+            .iter()
+            .find_map(|child| child.companion_protected_member_exposure(member))
     }
 
     fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
@@ -564,6 +589,10 @@ impl SymbolSource for CachedCompositeSource<'_> {
 
     fn api_withheld_callable(&self, owner: TypeName, name: &str) -> bool {
         self.source.api_withheld_callable(owner, name)
+    }
+
+    fn companion_protected_member_exposure(&self, member: CompanionMember<'_>) -> Option<bool> {
+        self.source.companion_protected_member_exposure(member)
     }
 
     fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {

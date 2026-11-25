@@ -15,9 +15,6 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         .context_sensitive_resolution_using_expected_type =
         features.has("ContextSensitiveResolutionUsingExpectedType");
     file.language
-        .allow_protected_super_companion_property_access =
-        features.has("AllowAccessToProtectedFieldFromSuperCompanion");
-    file.language
         .enforce_missing_named_arguments_on_java_annotation =
         features.has("EnforceMissingNamedArgumentsOnJavaAnnotation");
     file.language
@@ -26,6 +23,9 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
             "EnforceMissingNamedArgumentsOnJavaAnnotation",
             "only named arguments are available for Java annotations.",
         );
+    file.language
+        .report_subclass_cant_call_companion_protected_with_generics =
+        features.has("ReportSubclassCantCallCompanionProtectedNonStaticWithGenerics");
     file.language.bare_array_class_literal = features.has("BareArrayClassLiteral");
     file.language
         .forbid_array_of_nothing_in_lhs_of_class_literal =

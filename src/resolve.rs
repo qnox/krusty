@@ -7437,6 +7437,19 @@ impl<'a> Checker<'a> {
         if inference_failed {
             self.silent_error_exprs.insert(expression);
         }
+        if let PropertyReadSelection::Member(member) = &selection {
+            if let Some((visibility, owner)) = member.access {
+                let span = self.member_name_span(expression, &member.name);
+                self.report_companion_protected_subclass_use(
+                    visibility,
+                    owner,
+                    &member.name,
+                    member.stable_declaration,
+                    member.metadata_constant_read || member.compile_time_constant.is_some(),
+                    span,
+                );
+            }
+        }
         match selection {
             PropertyReadSelection::Member(member) => {
                 let PropertyReadMemberSelection {
@@ -7960,11 +7973,9 @@ impl<'a> Checker<'a> {
         );
         if let Some(selected) = selection.and_then(CallableCandidateSelection::available) {
             let selected_owner = selected.callable.owner_type();
-            if self.reject_callable_if_inaccessible(
-                selected.visibility,
-                name,
+            if self.reject_function_if_inaccessible(
+                &selected.info,
                 selected_owner,
-                selected.callable.external_identity,
                 self.call_callee_name_span(call),
             ) {
                 return ClassifierValueCall::Checked(Ty::Error);
@@ -17131,6 +17142,11 @@ impl<'a> Checker<'a> {
                     match property {
                         PropertyWriteSelection::Implicit(resolution) => {
                             self.mark_extension_receiver_stmt_used(s, resolution.receiver);
+                            self.report_companion_protected_property_write(
+                                &resolution,
+                                &name,
+                                target_span,
+                            );
                             if let Some(setter) = resolution.setter.as_ref() {
                                 if setter.visibility != Visibility::Public {
                                     self.reject_callable_if_inaccessible(
@@ -17404,7 +17420,7 @@ impl<'a> Checker<'a> {
                             .ok()
                             .map(|_| {
                                 (
-                                    self.receiver_property_accessible(
+                                    self.receiver_callable_accessible(
                                         property.visibility,
                                         property.owner,
                                         rt,
@@ -17480,7 +17496,7 @@ impl<'a> Checker<'a> {
                 context_args
             };
             if property.setter_visibility != Visibility::Public
-                && !self.receiver_property_accessible(
+                && !self.receiver_callable_accessible(
                     property.setter_visibility,
                     owner,
                     rt,
@@ -17496,6 +17512,15 @@ impl<'a> Checker<'a> {
                     property.ty,
                     owner,
                     property.getter.external_property_identity,
+                    target_span,
+                );
+            } else if !deferred_constructor_write {
+                self.report_companion_protected_subclass_use(
+                    property.setter_visibility,
+                    owner,
+                    &name,
+                    property.stable_declaration,
+                    property.is_const,
                     target_span,
                 );
             }
@@ -24570,9 +24595,9 @@ fun use() {
             "cannot access 'fun m(): Int': it is private in 'C.Inner'.",
         );
         // …and an unrelated top-level class still cannot reach the companion's private member.
-        err_contains(
+        err_exact(
             "class C { companion object { private fun m(): Int = 1 } }\nclass D { fun f(): Int = C.m() }",
-            "it is private in 'C$Companion'",
+            "cannot access 'fun m(): Int': it is private in 'C.Companion'.",
         );
     }
 
@@ -24597,16 +24622,12 @@ fun use() {
     }
 
     #[test]
-    fn protected_super_companion_property_access_obeys_language_feature() {
-        let source =
+    fn a_subclass_reads_a_protected_const_of_its_superclass_companion() {
+        // A `const` is a static member of the superclass, the form the JVM supports.
+        ok(
             "open class Base { companion object { protected const val secret: Int = 1 } }\n\
-            class Derived : Base() { fun read(): Int = secret }";
-        ok(source);
-
-        let errors = check_with_detected_features(&format!(
-            "// LANGUAGE: -AllowAccessToProtectedFieldFromSuperCompanion\n{source}"
-        ));
-        assert_eq!(errors, ["unresolved reference 'secret'."]);
+            class Derived : Base() { fun read(): Int = secret }",
+        );
     }
 
     #[test]
@@ -31963,6 +31984,15 @@ impl<'a> Checker<'a> {
             property.setter_visibility,
         );
         self.report_java_class_property_reference(expression, &property);
+        let name_span = self.member_name_span(expression, &property.name);
+        self.report_companion_protected_subclass_use(
+            property.getter_visibility,
+            property.getter.owner,
+            &property.name,
+            property.stable_declaration,
+            property.is_const,
+            name_span,
+        );
         if !self.property_reference_exposes_setter(&property, receiver) {
             property.setter = None;
         }
@@ -32187,6 +32217,7 @@ impl<'a> Checker<'a> {
             return self.reject_member_extension_reference(expression, &member.name);
         }
         self.check_data_class_copy_usage(self.member_name_span(expression, &member.name), &member);
+        self.report_companion_protected_member_reference(expression, &member);
         self.replace_call_type_arguments(
             expression,
             type_arguments.into_iter().map(Some).collect(),
@@ -32264,6 +32295,7 @@ impl<'a> Checker<'a> {
             return Some(self.reject_member_extension_reference(expression, &member.name));
         }
         self.check_data_class_copy_usage(self.member_name_span(expression, &member.name), &member);
+        self.report_companion_protected_member_reference(expression, &member);
         self.apply_checked_source_callable_result(receiver, &mut member);
         if member.ret == Ty::Nothing {
             return None;

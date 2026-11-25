@@ -333,6 +333,13 @@ impl SymbolSource for DependencyPlatform {
         self.platform.api_withheld_callable(owner, name)
     }
 
+    fn companion_protected_member_exposure(
+        &self,
+        member: crate::symbol_source::CompanionMember<'_>,
+    ) -> Option<bool> {
+        self.platform.companion_protected_member_exposure(member)
+    }
+
     /// The compiled platform assigns every dependency identity this federation hands out.
     fn external_callable(
         &self,

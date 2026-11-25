@@ -2858,6 +2858,21 @@ impl Classpath {
         indices
     }
 
+    /// Whether the compiled class `owner` has a static field or method named one of `names` that
+    /// is not private. A companion property's backing field is a private static field of the
+    /// containing class, which exposes nothing.
+    pub(crate) fn has_static_member(&self, owner: TypeName, names: &[String]) -> bool {
+        self.find_name(owner).is_some_and(|class| {
+            class.fields.iter().any(|field| {
+                field.access & crate::jvm::classfile::ACC_STATIC != 0
+                    && !field.is_private()
+                    && names.contains(&field.name)
+            }) || class.methods.iter().any(|method| {
+                method.is_static() && !method.is_private() && names.contains(&method.name)
+            })
+        })
+    }
+
     pub fn find_name(&self, internal: TypeName) -> Option<std::sync::Arc<ClassInfo>> {
         // The front end names built-in types in Kotlin terms (`kotlin/Any`); a classpath artifact is
         // a real JVM class, so map to the JVM name (`java/lang/Object`) before looking it up. The parsed

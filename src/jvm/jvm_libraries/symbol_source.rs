@@ -62,6 +62,31 @@ impl SymbolSource for JvmLibraries {
             .is_some_and(|names| names.contains(name))
     }
 
+    /// Kotlin/JVM compiles a subclass's use of a protected companion member through the
+    /// superclass, so only a member that is also a static member of it is supported: one
+    /// declared `@JvmStatic`, `@JvmField` or `const` in this compilation, or one the compiled
+    /// superclass carries as a static field or method.
+    fn companion_protected_member_exposure(
+        &self,
+        member: crate::symbol_source::CompanionMember<'_>,
+    ) -> Option<bool> {
+        Some(
+            member.is_const
+                || member.annotations.iter().any(|annotation| {
+                    annotation.matches("kotlin/jvm/JvmStatic")
+                        || annotation.matches("kotlin/jvm/JvmField")
+                })
+                || self.cp.has_static_member(
+                    member.outer,
+                    &[
+                        member.name.to_string(),
+                        crate::names::property_getter_name(member.name),
+                        crate::names::property_setter_name(member.name),
+                    ],
+                ),
+        )
+    }
+
     fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
         crate::jvm::jvm_class_map::platform_flexible_upper_bound(lower)
     }

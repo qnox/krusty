@@ -161,6 +161,16 @@ impl SymbolSource for ResolverSource<'_> {
         }
     }
 
+    fn companion_protected_member_exposure(
+        &self,
+        member: crate::symbol_source::CompanionMember<'_>,
+    ) -> Option<bool> {
+        match self {
+            Self::Direct(source) => source.companion_protected_member_exposure(member),
+            Self::Memoized(source) => source.companion_protected_member_exposure(member),
+        }
+    }
+
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
         match self {
             Self::Direct(source) => source.symbols(namespace, name),

@@ -15,11 +15,6 @@ pub struct FileLanguagePolicy {
     /// `+ContextSensitiveResolutionUsingExpectedType`: an otherwise-unbound simple classifier or
     /// classifier value may be selected from the expected type's nested classifier hierarchy.
     pub context_sensitive_resolution_using_expected_type: bool,
-    /// `+AllowAccessToProtectedFieldFromSuperCompanion`: permit a subclass to read a protected
-    /// Kotlin property declared by a superclass companion. The upstream feature name describes
-    /// the JVM realization that motivated the rule; the frontend still resolves a property and
-    /// leaves its physical field/accessor realization to the backend.
-    pub allow_protected_super_companion_property_access: bool,
     /// `+EnforceMissingNamedArgumentsOnJavaAnnotation`: a positional argument of a Java annotation
     /// written as a constructor call (a nested annotation argument) is an error, as it already is
     /// on a top-level annotation use.
@@ -27,6 +22,10 @@ pub struct FileLanguagePolicy {
     /// The warning text kotlinc reports for that argument while the feature is off; `None` when the
     /// release predates it and accepts the argument silently.
     pub positional_java_annotation_call_argument_warning: Option<String>,
+    /// `+ReportSubclassCantCallCompanionProtectedNonStaticWithGenerics`: a subclass's use of a
+    /// protected, non-static companion member of a generic superclass is reported like the
+    /// non-generic case.
+    pub report_subclass_cant_call_companion_protected_with_generics: bool,
     /// `+BareArrayClassLiteral`: permit builtin `Array` without explicit type arguments on the
     /// left of `::class`; semantic resolution supplies its star projection.
     pub bare_array_class_literal: bool,

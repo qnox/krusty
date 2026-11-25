@@ -146,7 +146,7 @@ impl Checker<'_> {
                     .ok()
                     .map(|_| {
                         (
-                            self.receiver_property_accessible(
+                            self.receiver_callable_accessible(
                                 property.visibility,
                                 property.owner,
                                 receiver.ty,
@@ -274,6 +274,26 @@ impl Checker<'_> {
                 );
             }
         }
+    }
+
+    /// A write through an implicit receiver to a protected companion property of a superclass.
+    pub(super) fn report_companion_protected_property_write(
+        &mut self,
+        resolution: &ImplicitPropertyWriteResolution,
+        name: &str,
+        span: Span,
+    ) {
+        let Some(setter) = resolution.setter.as_ref() else {
+            return;
+        };
+        self.report_companion_protected_subclass_use(
+            setter.visibility,
+            setter.callable.owner,
+            name,
+            resolution.stable_declaration,
+            false,
+            span,
+        );
     }
 
     pub(super) fn record_implicit_property_write(
