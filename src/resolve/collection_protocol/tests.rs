@@ -8,8 +8,10 @@ use crate::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics
 #[test]
 fn each_wasm_stdlib_declares_the_collection_members_a_list_reads() {
     for target in [CompilationTarget::WasmJs, CompilationTarget::WasmWasi] {
-        let path = crate::toolchain::kotlin_stdlib_klib(target)
-            .expect("the exact target stdlib must be provisioned");
+        let path =
+            crate::toolchain::kotlin_stdlib_klib_or_reason(target).unwrap_or_else(|reason| {
+                panic!("the exact target stdlib must be provisioned: {reason}")
+            });
         let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
             path,
             KlibStdlibSemantics::Wasm,

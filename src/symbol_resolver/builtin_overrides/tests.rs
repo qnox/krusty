@@ -8,8 +8,10 @@ fn wasm_stdlibs() -> Vec<KlibLibraries> {
     [CompilationTarget::WasmJs, CompilationTarget::WasmWasi]
         .into_iter()
         .map(|target| {
-            let path = crate::toolchain::kotlin_stdlib_klib(target)
-                .expect("the exact target stdlib must be provisioned");
+            let path =
+                crate::toolchain::kotlin_stdlib_klib_or_reason(target).unwrap_or_else(|reason| {
+                    panic!("the exact target stdlib must be provisioned: {reason}")
+                });
             KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
                 path,
                 KlibStdlibSemantics::Wasm,

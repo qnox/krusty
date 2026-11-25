@@ -12,9 +12,9 @@ use crate::fx_hash::{HashMap, HashSet};
 use std::collections::VecDeque;
 
 use super::body_lowering::{
-    constant_value, publish_parameter_defaults, BodyLowering, CallLinker, ConstructorRole,
-    LinkedAccessorCall, LinkedCallableReference, LinkedCallee, LinkedConstructor, LoweredFunction,
-    StaticField,
+    constant_value, lower_parameter_defaults, publish_parameter_defaults, BodyLowering, CallLinker,
+    ConstructorRole, LinkedAccessorCall, LinkedCallableReference, LinkedCallee, LinkedConstructor,
+    LoweredFunction, StaticField,
 };
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
@@ -209,6 +209,9 @@ pub struct DependencyBodyUnit {
     /// Classes an earlier unit of the program materialized and exports the constants or the
     /// instance of: this unit reads them through those exports instead of holding a second copy.
     realized_classes: HashSet<TypeName>,
+    /// Whether the target lays out a class an earlier unit realized from that unit's record, so
+    /// this unit may add final members to it ([`crate::ir::ClassOwnership::EarlierUnit`]).
+    adds_members_to_realized_classes: bool,
     authenticated_singleton_dispatches: HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: HashMap<KlibDependencyCallable, TypeName>,
     /// Private members of value classes and file-private functions, which only this unit's bodies
@@ -268,6 +271,7 @@ impl Default for DependencyBodyUnit {
             classes: HashMap::default(),
             constructors: HashMap::default(),
             realized_classes: HashSet::default(),
+            adds_members_to_realized_classes: false,
             authenticated_singleton_dispatches: HashMap::default(),
             authenticated_singleton_classifiers: HashMap::default(),
             private_members: HashMap::default(),
@@ -328,7 +332,7 @@ enum PendingInitialization<'a> {
     /// class, whose arguments the class's secondary constructor `secondary` passes.
     OwnDelegation {
         secondary: usize,
-        arguments: Vec<crate::metadata::klib_ir::tree::KlibIrExprId>,
+        arguments: Vec<Option<crate::metadata::klib_ir::tree::KlibIrExprId>>,
     },
     /// The arguments of each constant of a materialized enum class, in declaration order, which
     /// lower to the constants' own rather than to the function's body.
@@ -766,6 +770,14 @@ impl DependencyBodyUnit {
         }
     }
 
+    /// This unit for a target that lays out a class an earlier unit realized from that unit's
+    /// record, so a member this unit needs of such a class is added to it here
+    /// ([`crate::backend::Backend::adds_members_to_realized_classes`]).
+    pub(crate) fn adding_members_to_realized_classes(mut self, adds: bool) -> Self {
+        self.adds_members_to_realized_classes = adds;
+        self
+    }
+
     /// Whether an earlier unit materialized `classifier`, which this unit reads through its
     /// exports.
     pub(crate) fn reads_realized(&self, classifier: TypeName) -> bool {
@@ -898,6 +910,7 @@ impl DependencyBodyUnit {
             classes: &mut self.classes,
             constructors: &mut self.constructors,
             realized_classes: &self.realized_classes,
+            adds_members_to_realized_classes: self.adds_members_to_realized_classes,
             authenticated_singleton_dispatches: &mut self.authenticated_singleton_dispatches,
             authenticated_singleton_classifiers: &mut self.authenticated_singleton_classifiers,
             private_members: &mut self.private_members,
@@ -959,6 +972,12 @@ impl DependencyBodyUnit {
                 .map_err(declined)?;
                 continue;
             }
+            // The secondary constructor a class initialization materialized, which carries its
+            // own defaults.
+            let initialized_secondary = linker
+                .constructors
+                .get(&body.identity)
+                .and_then(|constructor| constructor.secondary);
             let lowering = BodyLowering::new(
                 body.arena,
                 function,
@@ -992,7 +1011,18 @@ impl DependencyBodyUnit {
             } else {
                 match (&body.initialization, &body.value_member) {
                     (Some((class, PendingInitialization::Class(plan))), _) => {
-                        lowering.initialize_class(*class, plan)
+                        lowering.initialize_class(*class, plan).and_then(|lowered| {
+                            publish_constructor_defaults(
+                                body.arena,
+                                function,
+                                &body.header,
+                                &self.builtins,
+                                &mut self.ir,
+                                &mut linker,
+                                (*class, initialized_secondary),
+                            )
+                            .map(|()| lowered)
+                        })
                     }
                     (
                         Some((
@@ -1003,13 +1033,26 @@ impl DependencyBodyUnit {
                             },
                         )),
                         Some(member),
-                    ) => lowering.delegate_within_class(
-                        *class,
-                        *secondary,
-                        member,
-                        arguments,
-                        body.statements,
-                    ),
+                    ) => lowering
+                        .delegate_within_class(
+                            *class,
+                            *secondary,
+                            member,
+                            arguments,
+                            body.statements,
+                        )
+                        .and_then(|lowered| {
+                            publish_constructor_defaults(
+                                body.arena,
+                                function,
+                                &body.header,
+                                &self.builtins,
+                                &mut self.ir,
+                                &mut linker,
+                                (*class, Some(*secondary)),
+                            )
+                            .map(|()| lowered)
+                        }),
                     (Some((_, PendingInitialization::OwnDelegation { .. })), None) => {
                         Err(KlibBodyDeclineReason::SignatureMismatch(
                             "a delegation within the class has no materialized class".to_owned(),
@@ -1053,6 +1096,34 @@ impl DependencyBodyUnit {
     }
 }
 
+/// Publish a materialized constructor's parameter defaults, lowered in its initializer's frame,
+/// where the constructor's default-argument entry reads them: the instance is value 0 and the
+/// parameters follow it, as they do in the constructor's own frame. A primary constructor's
+/// defaults are recorded beside its class, a secondary constructor's on its declaration.
+fn publish_constructor_defaults(
+    arena: &KlibIrArena,
+    initializer: LoweredFunction<'_>,
+    header: &FunctionHeader,
+    builtins: &IrBuiltinOperators,
+    ir: &mut IrFile,
+    linker: &mut dyn CallLinker,
+    (class, secondary): (crate::ir::ClassId, Option<usize>),
+) -> Result<(), KlibBodyDeclineReason> {
+    let Some(defaults) =
+        lower_parameter_defaults(arena, initializer, header, builtins, ir, linker)?
+    else {
+        return Ok(());
+    };
+    match secondary {
+        Some(ordinal) => ir.classes[class as usize].secondary_ctors[ordinal].defaults = defaults,
+        None => {
+            let classifier = ir.classes[class as usize].fq_name_id();
+            ir.insert_class_ctor_defaults_name(classifier, defaults);
+        }
+    }
+    Ok(())
+}
+
 /// Joins the calls of the bodies being lowered to the unit's functions, declaring each callee
 /// reached for the first time and queueing its body.
 struct Linker<'u, 's> {
@@ -1060,6 +1131,7 @@ struct Linker<'u, 's> {
     classes: &'u mut HashMap<KlibDependencyCallable, crate::ir::ClassId>,
     constructors: &'u mut HashMap<KlibDependencyCallable, MaterializedConstructor>,
     realized_classes: &'u HashSet<TypeName>,
+    adds_members_to_realized_classes: bool,
     authenticated_singleton_dispatches: &'u mut HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: &'u mut HashMap<KlibDependencyCallable, TypeName>,
     private_members: &'u mut HashMap<KlibDependencyCallable, OwnFormals>,

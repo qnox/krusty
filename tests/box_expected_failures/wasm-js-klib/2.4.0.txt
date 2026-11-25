@@ -164,13 +164,10 @@ callableReference/adaptedReferences/extensionPropertyToFun.kt
 callableReference/adaptedReferences/inlineDefault.kt
 callableReference/adaptedReferences/inlineVararg.kt
 callableReference/adaptedReferences/innerConstructorWithVararg.kt
-callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
-callableReference/adaptedReferences/suspendConversion/extensionTypeProperty.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithContextParameterAsAPropertyType.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithExtensionProperty.kt
 callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction.kt
-callableReference/adaptedReferences/suspendConversion/withContextParameterAsAPropertyType.kt
 callableReference/adaptedReferences/unboundReferences.kt
 callableReference/adaptedReferences/unitCoercionOverloads.kt
 callableReference/arrayOfNulls.kt
@@ -180,7 +177,6 @@ callableReference/bound/genericValOnLHS.kt
 callableReference/bound/multiCase.kt
 callableReference/callableReferenceOfCompanionConst.kt
 callableReference/callableReferencetoInnerAndLocal.kt
-callableReference/equality/kpropertyWithCapturingInequality.kt
 callableReference/function/booleanNotIntrinsic.kt
 callableReference/function/enumValueOfMethod.kt
 callableReference/function/genericCallableReferenceArgumentsNonJVM.kt
@@ -195,9 +191,6 @@ callableReference/kt52270.kt
 callableReference/property/accessorForPropertyWithPrivateSetter.kt
 callableReference/property/delegated.kt
 callableReference/property/extensionPropertyWithExtensionReceiver.kt
-callableReference/property/kt12044.kt
-callableReference/property/kt14330_2.kt
-callableReference/property/kt15447.kt
 callableReference/property/nullableExtensionProperty.kt
 casts/asForConstants.kt
 casts/asToNothing.kt
@@ -812,7 +805,6 @@ inference/pcla/memberScope.kt
 inference/pcla/nestedNonExhaustiveIf.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/Int.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
-inference/pcla/specialCallsWithCallableReferencesDontRewriteAtSlice.kt
 inference/pcla/substituteStubTypeIntoCR.kt
 inference/pcla/substitutelambdaExtensionReceiverType.kt
 inference/pcla/topDownCompletionBreakedByNonBuilderInferenceSession.kt
