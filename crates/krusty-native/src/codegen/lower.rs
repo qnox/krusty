@@ -346,13 +346,7 @@ pub fn lower_file(
         },
     );
 
-    let class_statics =
-        krusty::backend::class_statics::ClassStaticPlan::new(ir).map_err(|unordered| {
-            declined!(
-                "a non-`const` property stored on `{}`",
-                unordered.owner.render()
-            )
-        })?;
+    let class_statics = class_statics::plan(ir)?;
     let mut lowering = FileLowering {
         ir,
         source,

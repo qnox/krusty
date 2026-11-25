@@ -309,6 +309,7 @@ fn annotation_implementation(
         fq_name,
         is_source_declared: false,
         is_compiler_generated: false,
+        ownership: krusty::ir::ClassOwnership::ThisUnit,
         is_anonymous_object: false,
         site_name: None,
         enclosure: Some(enclosure),

@@ -39,6 +39,7 @@ fn is_runtime_annotation(annotation: crate::types::TypeName) -> bool {
 
 /// `android.os.Parcel`, which the generated members write to and read from.
 const PARCEL: &str = "android/os/Parcel";
+const PARCELABLE: &str = "android/os/Parcelable";
 
 /// `android.os.Parcelable.Creator`, the interface of a parcelized class's `CREATOR`.
 fn creator_interface() -> crate::types::TypeName {

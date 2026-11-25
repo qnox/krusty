@@ -2459,7 +2459,7 @@ impl Body<'_> {
 
     /// Run the companion's typed initializer when this class has one. The getter's result is
     /// unused: construction needs the initialization, not the instance.
-    fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
+    pub(super) fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
         let declaration = &self.ir.classes[class as usize];
         if declaration.is_enum || declaration.is_enum_entry {
             return Ok(());
