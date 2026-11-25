@@ -549,7 +549,12 @@ fn default_accessor_bridge_shape(
         parameter_annotations,
         result_nullability,
         parameter_nullability,
-        method_parameters: Vec::new(),
+        method_parameters: match side {
+            PropertyAccessorSide::Setter if env.java_parameters => {
+                vec![(Some("<set-?>".to_string()), 0)]
+            }
+            _ => Vec::new(),
+        },
         local_names,
         line: Some(declared.decl_line).filter(|&line| line != 0),
         private: false,

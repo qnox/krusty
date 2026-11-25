@@ -28,14 +28,7 @@ fn companion_property_has_static_bridges() {
 
 const ACCESSOR_LEVEL: &str = include_str!("box_regressions/jvmStaticAccessorProperty.kt");
 
-const SIBLING_USE: &str = r#"fun box(): String {
-    Ide.V = 5
-    Ide.L = "l"
-    H.W = 6
-    H.L = "m"
-    return if (Ide.A + Ide.V + Ide.C + Ide.L + H.B + H.W + H.C + H.L == "O5clK6cm") "OK" else "fail"
-}
-"#;
+const ACROSS_FILES: &str = include_str!("box_regressions/jvmStaticPropertyAcrossFiles.kt");
 
 fn assert_files_identical(name: &str, sources: &[(&str, &str)]) {
     let classes = common::classes_against_kotlinc_module(sources);
@@ -54,15 +47,27 @@ fn accessor_level_annotations_select_their_accessor() {
 
 #[test]
 fn sibling_file_reads_and_writes_static_accessors() {
-    let declarations = format!(
-        "{}\n{}",
-        OBJECT.split("\nfun box").next().unwrap(),
-        COMPANION.split("\nfun box").next().unwrap()
-    );
-    assert_files_identical(
-        "jvm_static_property_sibling",
-        &[("Declarations.kt", &declarations), ("Main.kt", SIBLING_USE)],
-    );
+    let (files, java) = krusty::conformance::split_files(ACROSS_FILES).expect("a valid program");
+    assert!(java.is_empty(), "the program is Kotlin only");
+    let sources = files
+        .into_iter()
+        .map(|(name, source)| {
+            let body = source
+                .split_once(&format!("// FILE: {name}.kt\n"))
+                .expect("the named canonical file")
+                .1;
+            let body = krusty::conformance::prepare_test_source(
+                body,
+                krusty::conformance::TestTarget::Jvm,
+            );
+            (format!("{name}.kt"), body)
+        })
+        .collect::<Vec<_>>();
+    let sources = sources
+        .iter()
+        .map(|(name, source)| (name.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    assert_files_identical("jvm_static_property_sibling", &sources);
 }
 
 /// A companion property's static bridges occupy the outer class's method namespace like a
