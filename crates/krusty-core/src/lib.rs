@@ -1,9 +1,17 @@
 //! Interned classifier identities. `TypeName` is a handle into one process-wide name tree; every
 //! phase and every compiler plugin shares it, so it lives below both.
 
+pub mod assertions;
+pub mod context_parameters;
+pub mod features;
 pub mod fx_hash;
+pub mod inline_parameter_modifier;
+pub mod kotlin_version;
+pub mod kt_string;
+pub mod language_version;
 pub mod name_tree;
 mod qualified_name;
+pub mod span;
 mod spelling;
 mod type_name;
 

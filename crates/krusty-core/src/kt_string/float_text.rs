@@ -3,7 +3,7 @@
 
 use super::KtStringBuf;
 
-pub(crate) fn push_f32(value: f32, output: &mut KtStringBuf) -> Option<()> {
+pub fn push_f32(value: f32, output: &mut KtStringBuf) -> Option<()> {
     if value.is_nan() {
         output.push_str("NaN");
     } else if value == f32::INFINITY {
@@ -28,7 +28,7 @@ pub(crate) fn push_f32(value: f32, output: &mut KtStringBuf) -> Option<()> {
     Some(())
 }
 
-pub(crate) fn push_f64(value: f64, output: &mut KtStringBuf) -> Option<()> {
+pub fn push_f64(value: f64, output: &mut KtStringBuf) -> Option<()> {
     if value.is_nan() {
         output.push_str("NaN");
     } else if value == f64::INFINITY {
