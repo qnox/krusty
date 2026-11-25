@@ -488,17 +488,15 @@ impl BodyLowering<'_> {
             splice_lambda[index] = matches!(plan, InlineOperandPlan::Splice);
             plans.push(plan);
         }
-        // A call that omits an argument runs the callee's `$default` body, whose extension
-        // receiver parameter kotlinc names after that stub.
+        // A call that omits an argument runs the callee's default-argument body, whose extension
+        // receiver parameter the backend names after that body.
         if plans
             .iter()
             .any(|plan| matches!(plan, InlineOperandPlan::Default))
         {
             for operand in &mut parameter_names {
                 if operand.local_role == IrInlineLocalRole::ExtensionReceiver {
-                    if let Some(name) = operand.source_name.as_mut() {
-                        name.push_str("$default");
-                    }
+                    operand.local_role = IrInlineLocalRole::DefaultBodyExtensionReceiver;
                 }
             }
         }

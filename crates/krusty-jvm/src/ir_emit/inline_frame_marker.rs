@@ -13,9 +13,12 @@ impl Emitter<'_> {
         declaration: krusty::ir::ExprId,
         code: &mut CodeBuilder,
     ) {
-        let frame_start = self
-            .copied_frame_start
-            .take()
+        let pending = self
+            .pending_copied_frames
+            .pop_if(|frame| frame.block_depth == self.block_depth);
+        let defaulted = pending.as_ref().is_some_and(|frame| frame.defaulted);
+        let frame_start = pending
+            .and_then(|frame| frame.start)
             .or_else(|| u16::try_from(code.bytes.len()).ok())
             .unwrap_or(u16::MAX);
         let slot = self
@@ -23,7 +26,7 @@ impl Emitter<'_> {
             .enter(FrameKey::InlineFrameMarker(declaration), Ty::Int);
         code.push_int(0, self.cw);
         store(Ty::Int, slot, code);
-        if std::mem::take(&mut self.copied_frame_defaulted) {
+        if defaulted {
             code.forget_line();
         }
         if !self.record_locals {

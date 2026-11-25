@@ -205,6 +205,10 @@ pub(super) fn render(
                 // and unused in the first.
                 IrInlineLocalRole::DispatchReceiver => "this_".to_string(),
                 IrInlineLocalRole::ExtensionReceiver => format!("$this${}", escaped(source)),
+                // kotlinc inlines the callable's `$default` stub, which names the receiver after it.
+                IrInlineLocalRole::DefaultBodyExtensionReceiver => {
+                    format!("$this${}", escaped(&format!("{source}$default")))
+                }
             };
             for _ in 0..depth {
                 rendered.push_str("$iv");
@@ -292,6 +296,23 @@ mod tests {
             IrDebugLocalProvenance::inline_value(IrInlineLocalRole::ExtensionReceiver, 1),
         );
         assert_eq!(name(&ir, declaration).as_deref(), Some("$this$map$iv"));
+    }
+
+    #[test]
+    fn inline_default_body_extension_receiver_is_named_after_the_default_stub() {
+        let mut ir = IrFile::default();
+        let declaration = local(&mut ir, "inlineFoo2");
+        ir.set_debug_local_provenance(
+            declaration,
+            IrDebugLocalProvenance::inline_value(
+                IrInlineLocalRole::DefaultBodyExtensionReceiver,
+                1,
+            ),
+        );
+        assert_eq!(
+            name(&ir, declaration).as_deref(),
+            Some("$this$inlineFoo2_u24default$iv")
+        );
     }
 
     /// The callable's OWN `this` is a different value from the receiver it extends, and kotlinc

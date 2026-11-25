@@ -1054,14 +1054,17 @@ impl Emitter<'_> {
             self.mark_expression_line(block, line, code);
             code.nop();
         }
-        self.copied_frame_start = u16::try_from(code.bytes.len()).ok();
-        self.copied_frame_defaulted = matches!(
-            self.ir.debug_local_provenance(statement),
-            Some(IrDebugLocalProvenance::InlineValue {
-                role: IrInlineLocalRole::DefaultedValue,
-                ..
-            })
-        );
+        self.pending_copied_frames.push(PendingCopiedFrame {
+            block_depth: self.block_depth,
+            start: u16::try_from(code.bytes.len()).ok(),
+            defaulted: matches!(
+                self.ir.debug_local_provenance(statement),
+                Some(IrDebugLocalProvenance::InlineValue {
+                    role: IrInlineLocalRole::DefaultedValue,
+                    ..
+                })
+            ),
+        });
     }
 
     /// kotlinc's `markLineNumberAfterInlineIfNeeded` after a same-module inline expansion: inside a
@@ -2275,4 +2278,18 @@ struct CopiedFunctionCaller {
     line: Option<u16>,
     inside_condition: bool,
     operand_binding: Option<u32>,
+}
+
+/// A same-module callee's frame that has opened and awaits its frame marker.
+pub(super) struct PendingCopiedFrame {
+    /// The block holding the expansion's statements, and so its marker: a marker in a deeper
+    /// block belongs to an inline call evaluated inside it.
+    pub(super) block_depth: usize,
+    /// Where the frame opened, once an omitted parameter's default has begun it ahead of the
+    /// marker; the supplied operands' debug ranges start there.
+    pub(super) start: Option<u16>,
+    /// Whether the frame opened at an omitted parameter's default. kotlinc inlines the callee's
+    /// real body inside its `$default` stub, so the line mapper has forgotten the default's line
+    /// when the body begins and writes it again.
+    pub(super) defaulted: bool,
 }
