@@ -55,9 +55,11 @@ mod condition_emission;
 mod constant_emission;
 mod constructor_accessors;
 mod constructor_defaults;
+mod constructor_descriptors;
 mod constructor_initialization;
 mod constructor_signatures;
 use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
+use constructor_descriptors::{ctor_field_descs, primary_ctor_descriptor, primary_ctor_parameter_descs};
 mod companion_field;
 mod copied_code;
 mod coroutine_machine;
@@ -543,26 +545,6 @@ fn lambda_mode_for(
         None if is_high_arity_function(arity) => LambdaMode::Class,
         None => modes.lambdas,
     }
-}
-
-/// The primary constructor's JVM descriptor: every constructor argument, property-backed or plain.
-fn primary_ctor_descriptor(ir: &IrFile, c: &IrClass) -> String {
-    format!("({})V", primary_ctor_parameter_descs(ir, c))
-}
-
-fn primary_ctor_parameter_descs(ir: &IrFile, c: &IrClass) -> String {
-    class_ctor_jvm_tys(ir, c)
-        .into_iter()
-        .map(krusty::jvm::names::type_descriptor)
-        .collect()
-}
-
-fn ctor_field_descs(ir: &IrFile, c: &IrClass) -> String {
-    let fields = c.fields.iter().take(c.ctor_param_count as usize).collect();
-    capture_order::physical_fields(ir, c, fields)
-        .into_iter()
-        .map(|f| krusty::jvm::names::type_descriptor(f.ty))
-        .collect()
 }
 
 /// Physical JVM realization of one exact common data-class declaration. The role was bound to its
