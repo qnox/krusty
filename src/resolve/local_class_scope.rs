@@ -11,8 +11,6 @@ use crate::ast::{
 };
 use crate::types::{type_name, TypeName};
 
-use super::class_internal;
-
 /// Bounded body-containment facts retained after one Pass-1 parser arena is released.
 #[derive(Default, Clone)]
 pub(crate) struct PassOneLocalClassContext {
@@ -651,6 +649,13 @@ pub(super) fn local_class_sibling_declarations(
 }
 
 pub(super) fn local_class_sibling_names(file: &File) -> HashMap<DeclId, Vec<(String, TypeName)>> {
+    let package = type_name(
+        &file
+            .package
+            .as_deref()
+            .unwrap_or_default()
+            .replace('.', "/"),
+    );
     local_class_sibling_declarations(file)
         .into_iter()
         .map(|(owner, siblings)| {
@@ -660,12 +665,29 @@ pub(super) fn local_class_sibling_names(file: &File) -> HashMap<DeclId, Vec<(Str
                     let Decl::Class(class) = file.decl(declaration) else {
                         return None;
                     };
-                    Some((name, type_name(&class_internal(file, &class.name))))
+                    Some((
+                        name,
+                        classifier_identity_from_dotted_source_name(package, &class.name),
+                    ))
                 })
                 .collect();
             (owner, siblings)
         })
         .collect()
+}
+
+/// `Outer.Inner` is nesting. A `$` inside one segment is part of that segment (`Cash$Box`,
+/// `Leaf$Name`), so this does not go through [`type_name`], which splits on `$`.
+fn classifier_identity_from_dotted_source_name(package: TypeName, source_name: &str) -> TypeName {
+    let mut segments = source_name.split('.');
+    let Some(first) = segments.next() else {
+        return package;
+    };
+    let mut identity = crate::types::type_name_child(package, first);
+    for segment in segments {
+        identity = crate::types::type_name_nested_child(identity, segment);
+    }
+    identity
 }
 
 pub(super) fn stable_local_classifier_identities(
@@ -723,7 +745,10 @@ pub(super) fn stable_local_classifier_identities(
             let Decl::Class(class) = file.decl(*parser) else {
                 return None;
             };
-            Some((*parser, type_name(&class_internal(file, &class.name))))
+            Some((
+                *parser,
+                classifier_identity_from_dotted_source_name(package, &class.name),
+            ))
         })
         .collect::<HashMap<_, _>>();
     let mut pending = classifiers
