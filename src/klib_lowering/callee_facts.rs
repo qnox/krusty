@@ -35,8 +35,10 @@ pub struct KlibCalleeFacts<'a> {
     /// copies of the table with extra declarations, so the copies share them.
     member_edges: Rc<HashMap<KlibDependencyCallable, CallEdge>>,
     sam_declarations: Rc<HashMap<crate::ir::KlibSamKey, crate::ir::CheckedKlibSamDeclaration>>,
-    /// The library objects whose values the closed bodies read, by classifier.
-    read_objects: Rc<HashMap<crate::types::TypeName, crate::libraries::KlibBodyClassContract>>,
+    /// The library objects and enum classes whose instances the closed bodies read, by classifier.
+    read_classes: Rc<HashMap<crate::types::TypeName, crate::libraries::KlibBodyClassContract>>,
+    /// The checked edge of an enum's synthetic `entries` body: the selected `enumEntries`.
+    enum_entries_factory: Option<KlibDependencyCallable>,
     /// The prepared-inline copies of the loaded libraries' inline functions, which a call of a
     /// suspend inline function expands from.
     expansion_copies: Option<&'a crate::klib_libraries::KlibDeclarationBodies>,
@@ -104,6 +106,21 @@ impl<'a> KlibCalleeFacts<'a> {
         self
     }
 
+    /// These facts with `factory`, the selected `enumEntries`: the checker freezing its edge, or a
+    /// target that builds an enum's `entries` by calling it.
+    pub(crate) fn with_enum_entries_factory(
+        mut self,
+        factory: Option<KlibDependencyCallable>,
+    ) -> Self {
+        self.enum_entries_factory = factory;
+        self
+    }
+
+    /// The declaration an enum's synthetic `entries` body calls with the enum's `values()`.
+    pub(super) fn enum_entries_factory(&self) -> Option<&KlibDependencyCallable> {
+        self.enum_entries_factory.as_ref()
+    }
+
     pub(super) fn sam_declaration(
         &self,
         module: &str,
@@ -119,12 +136,12 @@ impl<'a> KlibCalleeFacts<'a> {
         &self.builtin_implementation_facts
     }
 
-    /// Record the library objects whose values the closed bodies read.
-    pub(crate) fn with_read_objects(
+    /// Record the library objects and enum classes whose instances the closed bodies read.
+    pub(crate) fn with_read_classes(
         mut self,
         objects: Vec<crate::libraries::KlibBodyClassContract>,
     ) -> Self {
-        self.read_objects = Rc::new(
+        self.read_classes = Rc::new(
             objects
                 .into_iter()
                 .map(|object| (object.classifier, object))
@@ -133,12 +150,19 @@ impl<'a> KlibCalleeFacts<'a> {
         self
     }
 
-    /// The object `classifier`, when the closed bodies read its value.
-    pub(crate) fn read_object(
+    /// The object or enum class `classifier`, when the closed bodies read an instance of it.
+    pub(crate) fn read_class(
         &self,
         classifier: crate::types::TypeName,
     ) -> Option<&crate::libraries::KlibBodyClassContract> {
-        self.read_objects.get(&classifier)
+        self.read_classes.get(&classifier)
+    }
+
+    /// The library objects and enum classes the closed bodies read, which the unit materializes.
+    pub(crate) fn read_classes(
+        &self,
+    ) -> impl Iterator<Item = &crate::libraries::KlibBodyClassContract> {
+        self.read_classes.values()
     }
 
     pub(crate) fn member_edge(&self, identity: &KlibDependencyCallable) -> Option<&CallEdge> {
@@ -430,17 +454,19 @@ impl<'a> KlibCalleeFacts<'a> {
         }
     }
 
-    /// The initializer graph of the object `class`, when its initialization is admitted.
-    pub(crate) fn object_initialization_callees(
+    /// The initializer graph of `class`, an object or an enum class, when its initialization is
+    /// admitted.
+    pub(crate) fn declared_instances_callees(
         &self,
         class: &crate::libraries::KlibBodyClassContract,
         bodies: &crate::klib_libraries::KlibDeclarationBodies,
     ) -> Result<Option<Vec<KlibDependencyCallable>>, super::decline::KlibBodyDeclineReason> {
-        super::class_initialization::object_initialization_callees(class, bodies, self)
+        super::class_initialization::declared_instances_callees(class, bodies, self)
     }
 
-    /// The library objects the initialization of the object `class` reads as values.
-    pub(crate) fn object_initialization_objects(
+    /// The library objects and enum classes the initialization of `class`, an object or an enum
+    /// class, reads as values.
+    pub(crate) fn declared_instances_objects(
         &self,
         class: &crate::libraries::KlibBodyClassContract,
         bodies: &crate::klib_libraries::KlibDeclarationBodies,
@@ -448,25 +474,25 @@ impl<'a> KlibCalleeFacts<'a> {
         Vec<crate::metadata::id_signature::KlibPublicIdSignature>,
         super::decline::KlibBodyDeclineReason,
     > {
-        super::class_initialization::object_initialization_objects(class, bodies, self)
+        super::class_initialization::declared_instances_objects(class, bodies, self)
     }
 
-    /// The members dispatch reaches of the object `class`.
-    pub(crate) fn object_dispatched_members(
+    /// The members dispatch reaches of the object or enum class `class`.
+    pub(crate) fn declared_instances_dispatched_members(
         &self,
         class: &crate::libraries::KlibBodyClassContract,
         bodies: &crate::klib_libraries::KlibDeclarationBodies,
     ) -> Result<Vec<KlibDependencyCallable>, super::decline::KlibBodyDeclineReason> {
-        super::class_initialization::object_dispatched_members(class, bodies, self)
+        super::class_initialization::declared_instances_dispatched_members(class, bodies, self)
     }
 
-    /// The declarations the overrides of the object `class` override.
-    pub(crate) fn object_overridden_declarations(
+    /// The declarations the overrides of the object or enum class `class` override.
+    pub(crate) fn declared_instances_overridden_declarations(
         &self,
         class: &crate::libraries::KlibBodyClassContract,
         bodies: &crate::klib_libraries::KlibDeclarationBodies,
     ) -> Result<Vec<KlibDependencyCallable>, super::decline::KlibBodyDeclineReason> {
-        super::class_initialization::object_overridden_declarations(class, bodies, self)
+        super::class_initialization::declared_instances_overridden_declarations(class, bodies, self)
     }
 
     /// Check graph-owned declarations even when the root operation emits no callee body/export.

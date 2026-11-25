@@ -7,6 +7,7 @@
 //! already settled.
 
 use crate::fx_hash::HashMap;
+use crate::libraries::KlibDeclarationSignature;
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::types::TypeName;
 
@@ -64,6 +65,10 @@ pub(super) struct DependencyIdentities {
     function_owners: ByIdentity<KlibPublicIdSignature, TypeName>,
     /// The classes that declare a member property accessor, by the class's module.
     accessor_owners: ByIdentity<KlibAccessorIdSignature, TypeName>,
+    /// The enum classes whose implicit `values`, `valueOf` or `entries` getter carries the
+    /// signature, by the class's module. Metadata leaves those members implicit; their signatures
+    /// are the ones the class publishes for them.
+    enum_members: ByIdentity<KlibDeclarationSignature, TypeName>,
 }
 
 impl DependencyIdentities {
@@ -196,6 +201,19 @@ impl DependencyIdentities {
                     owners.push(classifier);
                 }
             }
+            if let Some(members) = &class.enum_members {
+                let signatures = [
+                    Some(KlibDeclarationSignature::Public(members.values.clone())),
+                    Some(KlibDeclarationSignature::Public(members.value_of.clone())),
+                    members
+                        .entries_getter
+                        .clone()
+                        .map(KlibDeclarationSignature::Accessor),
+                ];
+                for signature in signatures.into_iter().flatten() {
+                    entries(&mut index.enum_members, module, &signature).push(classifier);
+                }
+            }
         }
         index
     }
@@ -244,6 +262,15 @@ impl DependencyIdentities {
         accessor: &KlibAccessorIdSignature,
     ) -> Option<TypeName> {
         first(&self.accessor_owners, module, accessor)
+    }
+
+    /// The enum class of `module` whose implicit member is serialized under `signature`.
+    pub(super) fn enum_member(
+        &self,
+        module: &str,
+        signature: &KlibDeclarationSignature,
+    ) -> Option<TypeName> {
+        first(&self.enum_members, module, signature)
     }
 }
 
