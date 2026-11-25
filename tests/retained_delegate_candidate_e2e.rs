@@ -136,7 +136,7 @@ fn a_missing_getvalue_on_an_unannotated_property_matches_kotlinc() {
     );
     assert_ne!(result.reference_code, 0, "kotlinc accepted the delegate");
     assert_ne!(result.krusty_code, 0, "krusty accepted the delegate");
-    let observed = complete_errors(&result.krusty_stderr, false);
+    let observed = complete_errors(&result.krusty_stderr, true);
     let expected = complete_errors(&result.reference_stderr, true);
     assert!(
         !expected.is_empty(),
