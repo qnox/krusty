@@ -5,7 +5,15 @@ impl Parser<'_> {
     pub(super) fn parse_enum_entries(&mut self, name: &str) -> Vec<AstEnumEntry> {
         let mut entries: Vec<AstEnumEntry> = Vec::new();
         loop {
-            let entry_start = self.syntactic_ident_span(self.tok()).lo;
+            let previous_end = self
+                .i
+                .checked_sub(1)
+                .map_or(0, |previous| self.t[previous].span.hi);
+            let entry_start = comment_binding::leading_start(
+                self.src,
+                previous_end,
+                self.syntactic_ident_span(self.tok()).lo,
+            );
             let (entry_ann_names, entry_ann_args) = self.parse_enum_entry_prefix();
             if !self.at(TokenKind::Ident) {
                 break;
@@ -109,9 +117,11 @@ impl Parser<'_> {
                     }
                 }
             }
-            let entry_end = self
-                .syntactic_ident_span(self.t[self.i.saturating_sub(1)])
-                .hi;
+            let entry_end = comment_binding::trailing_end(
+                self.src,
+                self.syntactic_ident_span(self.t[self.i.saturating_sub(1)])
+                    .hi,
+            );
             entries.push(AstEnumEntry {
                 name: entry_name,
                 span: entry_span,
@@ -167,42 +177,78 @@ mod tests {
             .collect()
     }
 
+    /// Every expectation below is the text of the entry's PSI element as kotlinc's parser builds it,
+    /// read through the Analysis API's standalone session.
+    fn assert_entries(source: &str, expected: &[(&str, &str)]) {
+        let expected = expected
+            .iter()
+            .map(|(name, text)| (name.to_string(), text.to_string()))
+            .collect::<Vec<_>>();
+        assert_eq!(entry_texts(source), expected);
+    }
+
     #[test]
-    fn enum_entry_range_covers_annotations_arguments_and_body() {
-        let source = "enum class E(val v: Int) {\n    A(1),\n    @Deprecated(\"x\") B(2) { override fun toString() = \"b\" },\n    C(3);\n}";
-        assert_eq!(
-            entry_texts(source),
-            [
-                ("A".to_string(), "A(1)".to_string()),
-                (
-                    "B".to_string(),
-                    "@Deprecated(\"x\") B(2) { override fun toString() = \"b\" }".to_string()
-                ),
-                ("C".to_string(), "C(3)".to_string()),
-            ]
+    fn range_covers_annotations_arguments_body_and_the_separator() {
+        assert_entries(
+            "enum class E(val v: Int) {\n    /** doc */\n    A(1),\n    @Deprecated(\"x\") B(2) { },\n    // c\n    C(3), `in`,\n    D;\n    fun f() = 1\n}\n",
+            &[
+                ("A", "/** doc */\n    A(1),"),
+                ("B", "@Deprecated(\"x\") B(2) { },"),
+                ("C", "// c\n    C(3),"),
+                ("in", "`in`,"),
+                ("D", "D;"),
+            ],
         );
     }
 
     #[test]
-    fn bare_enum_entry_range_is_its_name() {
-        assert_eq!(
-            entry_texts("enum class E { A, B }"),
-            [
-                ("A".to_string(), "A".to_string()),
-                ("B".to_string(), "B".to_string())
-            ]
+    fn comments_lead_the_next_entry_from_the_line_after_the_previous_token() {
+        assert_entries(
+            "enum class E {\n    A, // trailing a\n    // own line b\n    B,\n\n    // after blank\n    C,\n    /* block */ D,\n    /** kdoc */\n\n    E1, // t\n    F // t2\n    ;\n}\n",
+            &[
+                ("A", "A, // trailing a"),
+                ("B", "// own line b\n    B,"),
+                ("C", "// after blank\n    C,"),
+                ("D", "/* block */ D,"),
+                ("E1", "/** kdoc */\n\n    E1, // t"),
+                ("F", "F // t2\n    ;"),
+            ],
         );
     }
 
     #[test]
-    fn escaped_enum_entry_names_keep_their_backticks() {
-        assert_eq!(
-            entry_texts("enum class E { `in`, `is`(1), @Deprecated(\"x\") `fun` }"),
-            [
-                ("in".to_string(), "`in`".to_string()),
-                ("is".to_string(), "`is`(1)".to_string()),
-                ("fun".to_string(), "@Deprecated(\"x\") `fun`".to_string()),
-            ]
+    fn same_line_comments_stay_with_the_entry_before_them() {
+        assert_entries(
+            "enum class E { // c0\n    A /* x */, /* y */ B, // tb\n    /* z */ C /* w */ ; // after semi\n    fun f() = 1\n}\n",
+            &[
+                ("A", "A /* x */, /* y */"),
+                ("B", "B, // tb"),
+                ("C", "/* z */ C /* w */ ; // after semi"),
+            ],
+        );
+    }
+
+    #[test]
+    fn an_entry_without_a_separator_keeps_its_trailing_comment() {
+        assert_entries(
+            "enum class E {\n    A, B // t\n}\n",
+            &[("A", "A,"), ("B", "B // t")],
+        );
+        assert_entries(
+            "enum class F {\n    A, B /* u */ }\n",
+            &[("A", "A,"), ("B", "B /* u */")],
+        );
+    }
+
+    #[test]
+    fn escaped_entry_names_keep_their_backticks() {
+        assert_entries(
+            "enum class E { `in`, `is`(1), @Deprecated(\"x\") `fun` }",
+            &[
+                ("in", "`in`,"),
+                ("is", "`is`(1),"),
+                ("fun", "@Deprecated(\"x\") `fun`"),
+            ],
         );
     }
 }

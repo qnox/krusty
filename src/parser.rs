@@ -14,6 +14,7 @@ mod annotation_classes;
 mod annotation_values;
 mod anonymous_functions;
 mod class_recovery;
+mod comment_binding;
 mod companion_declarations;
 mod constructors;
 mod context_clause;
