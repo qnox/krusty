@@ -946,7 +946,16 @@ pub(crate) fn lower_value_classes(
                         jvm_tys(std::slice::from_ref(parameter)).into_iter().next()
                     })
                     .is_some_and(|parameter| is_ref(&parameter));
-                if chk.is_some() && (!physical_is_ref || under_nullable) {
+                // A lifted lambda's own value-class parameter holds the box, a reference, but
+                // kotlinc decides the guard from the declared type unwrapped to its carrier, and a
+                // primitive carrier is never guarded.
+                let primitive_carrier = source_index
+                    .and_then(|index| orig_params[fid].get(index))
+                    .is_some_and(|t| {
+                        let declared = t.non_null();
+                        is_vc_ty(&declared) && !is_ref(&erase(&declared, &under))
+                    });
+                if chk.is_some() && (!physical_is_ref || under_nullable || primitive_carrier) {
                     *chk = None;
                 }
             }
