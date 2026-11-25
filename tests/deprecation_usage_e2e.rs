@@ -9,10 +9,20 @@ use super::common;
 /// Compile `source` with both compilers and require the same complete errors and warnings, which
 /// must also be `errors` and `warnings` (`line:column: message`, in emission order).
 fn assert_matches_kotlinc(source: &str, errors: &[&str], warnings: &[&str]) {
+    assert_matches_kotlinc_with_args(source, &[], errors, warnings);
+}
+
+/// [`assert_matches_kotlinc`] with `arguments` passed to both compilers.
+fn assert_matches_kotlinc_with_args(
+    source: &str,
+    arguments: &[String],
+    errors: &[&str],
+    warnings: &[&str],
+) {
     let result = common::compiler_diagnostics_with_shared_args(
         &[("Deprecations.kt", source)],
         &[common::stdlib_jar()],
-        &[],
+        arguments,
     );
     let krusty_output = format!("{}{}", result.krusty_stderr, result.krusty_stdout);
     let render = |diagnostics: &[common::CompilerError]| {
@@ -390,8 +400,73 @@ fun use(): Hidden? {
     );
 }
 
-/// `HIDDEN` on a constructor removes that constructor from overload candidates; it is not a
-/// selected declaration that subsequently emits a deprecation diagnostic.
+/// A `@Suppress` on a parameter of any kind covers the whole parameter: its type reference and
+/// its default value. The unsuppressed parameters are the controls.
+#[test]
+fn parameter_suppression_covers_its_type_and_default() {
+    assert_matches_kotlinc(
+        r#"@Deprecated("old")
+class Old
+
+annotation class Ann(
+    @Suppress("DEPRECATION") val suppressed: kotlin.reflect.KClass<out Old> = Old::class,
+    val control: kotlin.reflect.KClass<out Old>,
+)
+
+class Ctor(
+    @Suppress("DEPRECATION") val suppressed: Old? = Old(),
+    val control: Old?,
+    @Suppress("DEPRECATION") plain: Old? = Old(),
+    plainControl: Old?,
+) {
+    constructor(@Suppress("DEPRECATION") secondary: Old? = Old()) : this(null, null, secondary, null)
+}
+
+fun function(
+    @Suppress("DEPRECATION") suppressed: Old? = Old(),
+    control: Old?,
+) {
+    fun local(@Suppress("DEPRECATION") suppressed: Old? = Old(), control: Old?) {}
+}
+
+interface Bodyless {
+    fun member(@Suppress("DEPRECATION") suppressed: Old?, control: Old?)
+}
+"#,
+        &[],
+        &[
+            "6:44: 'class Old : Any' is deprecated. old.",
+            "11:18: 'class Old : Any' is deprecated. old.",
+            "13:19: 'class Old : Any' is deprecated. old.",
+            "20:14: 'class Old : Any' is deprecated. old.",
+            "22:75: 'class Old : Any' is deprecated. old.",
+            "26:68: 'class Old : Any' is deprecated. old.",
+        ],
+    );
+}
+
+/// kotlin-script-runtime's `ScriptTemplateAdditionalCompilerArguments` shape: an annotation
+/// parameter whose `@Suppress` covers the deprecated class in its type and default compiles
+/// cleanly under `-Werror`.
+#[test]
+fn suppressed_annotation_parameter_compiles_under_werror() {
+    assert_matches_kotlinc_with_args(
+        r#"import kotlin.reflect.KClass
+
+@Deprecated("old")
+interface Provider
+
+annotation class Arguments(
+    val arguments: Array<String> = [],
+    @Suppress("DEPRECATION") val provider: KClass<out Provider> = Provider::class
+)
+"#,
+        &["-Werror".to_string()],
+        &[],
+        &[],
+    );
+}
+
 #[test]
 fn hidden_constructor_is_not_a_candidate() {
     assert_matches_kotlinc(

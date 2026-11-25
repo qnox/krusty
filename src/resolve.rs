@@ -318,7 +318,7 @@ mod overload_diagnostics;
 mod override_plans;
 mod override_results;
 mod parameter_defaults;
-use parameter_defaults::ParameterDefaultFlow;
+use parameter_defaults::{DeclaredParameter, ParameterDefaultFlow};
 mod platform_value_narrowing;
 mod value_classes;
 pub use platform_value_narrowing::PlatformNarrowing;
@@ -17741,14 +17741,8 @@ impl<'a> Checker<'a> {
         }
         // Resolve the lifted method's erased parameter types; `generic_sig` below retains the same
         // declaration with symbolic formals for call-site inference.
-        let params: Vec<Ty> = f
-            .params
-            .iter()
-            .map(|p| {
-                let t = self.type_ref_ty(&physical_signature_scope, &p.ty);
-                semantic_value_parameter_ty(t, p.is_vararg)
-            })
-            .collect();
+        let params =
+            self.local_parameter_types(&annotation_scope, &physical_signature_scope, &f.params);
         let receiver = f
             .receiver
             .as_ref()
@@ -17759,15 +17753,7 @@ impl<'a> Checker<'a> {
         let semantic_params = if f.type_params.is_empty() {
             params.clone()
         } else {
-            f.params
-                .iter()
-                .map(|parameter| {
-                    semantic_value_parameter_ty(
-                        self.type_ref_ty(&semantic_signature_scope, &parameter.ty),
-                        parameter.is_vararg,
-                    )
-                })
-                .collect::<Vec<_>>()
+            self.local_parameter_types(&annotation_scope, &semantic_signature_scope, &f.params)
         };
         let semantic_receiver = if f.type_params.is_empty() {
             receiver
@@ -17812,9 +17798,7 @@ impl<'a> Checker<'a> {
             });
             self.check_parameter_defaults(
                 defaults_scope,
-                f.params
-                    .iter()
-                    .map(|parameter| (parameter.name.as_str(), parameter.default, parameter.span)),
+                f.params.iter().map(DeclaredParameter::from),
                 &semantic_params,
                 ParameterDefaultFlow::Function,
             );
@@ -37826,11 +37810,15 @@ impl<'a> Checker<'a> {
                     lexical_context_receiver(self.file, parameter, checked)
                 })
                 .collect::<Vec<_>>();
+            let header_policy_depth = self.active_lexical_policies.len();
             let checked_constructor_parameter_types = cl
                 .props
                 .iter()
                 .enumerate()
                 .map(|(index, property)| {
+                    // Close the previous parameter's policies here: an early return skips a close.
+                    self.active_lexical_policies.truncate(header_policy_depth);
+                    self.push_parameter_policies(&classifier_header_scope, property.into());
                     let constructor_semantic = finalized_constructor_types
                         .as_ref()
                         .and_then(|types| types.get(index))
@@ -37908,6 +37896,7 @@ impl<'a> Checker<'a> {
                     )
                 })
                 .collect::<Vec<_>>();
+            self.active_lexical_policies.truncate(header_policy_depth);
             self.enter_classifier_type_parameter_bounds();
             if finalized_local_classifier_header {
                 if let Some(declaration) = stable_local_classifier {
@@ -39291,15 +39280,21 @@ impl<'a> Checker<'a> {
                                             .zip(parameters.iter().skip(context_parameters.len()))
                                             .enumerate()
                                         {
-                                            self.record_or_bind_deferred_parameter_type(
+                                            self.with_parameter_policies(
                                                 scope,
-                                                declaration,
-                                                &parameter.ty,
-                                                parameter.is_vararg,
-                                                semantic,
-                                                spellings
-                                                    .as_ref()
-                                                    .and_then(|spellings| spellings.param(index)),
+                                                parameter.into(),
+                                                |checker| {
+                                                    checker.record_or_bind_deferred_parameter_type(
+                                                        scope,
+                                                        declaration,
+                                                        &parameter.ty,
+                                                        parameter.is_vararg,
+                                                        semantic,
+                                                        spellings.as_ref().and_then(|spellings| {
+                                                            spellings.param(index)
+                                                        }),
+                                                    )
+                                                },
                                             );
                                         }
                                         return parameters;
@@ -39328,14 +39323,20 @@ impl<'a> Checker<'a> {
                                 let mut parameters = context_parameters.clone();
                                 parameters.extend(constructor.params.iter().enumerate().map(
                                     |(index, parameter)| {
-                                        self.bind_active_deferred_parameter_type(
+                                        self.with_parameter_policies(
                                             scope,
-                                            declaration,
-                                            &parameter.ty,
-                                            parameter.is_vararg,
-                                            spellings
-                                                .as_ref()
-                                                .and_then(|spellings| spellings.param(index)),
+                                            parameter.into(),
+                                            |checker| {
+                                                checker.bind_active_deferred_parameter_type(
+                                                    scope,
+                                                    declaration,
+                                                    &parameter.ty,
+                                                    parameter.is_vararg,
+                                                    spellings.as_ref().and_then(|spellings| {
+                                                        spellings.param(index)
+                                                    }),
+                                                )
+                                            },
                                         )
                                     },
                                 ));
@@ -39469,9 +39470,7 @@ impl<'a> Checker<'a> {
                     let context_count = semantic_params.len().saturating_sub(sc.params.len());
                     checker.check_parameter_defaults(
                         scope,
-                        sc.params.iter().map(|parameter| {
-                            (parameter.name.as_str(), parameter.default, parameter.span)
-                        }),
+                        sc.params.iter().map(DeclaredParameter::from),
                         &semantic_params[context_count..],
                         ParameterDefaultFlow::Constructor,
                     );
@@ -39624,13 +39623,7 @@ impl<'a> Checker<'a> {
                 self.with_this_unavailable(|checker| {
                     checker.check_parameter_defaults(
                         scope,
-                        cl.props.iter().map(|parameter| {
-                            (
-                                parameter.name.as_str(),
-                                parameter.default,
-                                parameter.declaration_span,
-                            )
-                        }),
+                        cl.props.iter().map(DeclaredParameter::from),
                         &source_primary_params,
                         ParameterDefaultFlow::Constructor,
                     );
