@@ -27,7 +27,7 @@ mod inner_class_rows_support;
 mod reference_box_support;
 #[path = "common/reference_compiler.rs"]
 mod reference_compiler_support;
-#[path = "common/reference_targets/invocation.rs"]
+#[path = "common/reference_targets/recorded_library.rs"]
 mod reference_invocation_support;
 #[path = "common/reference_recording.rs"]
 mod reference_recording_support;

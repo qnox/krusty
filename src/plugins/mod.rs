@@ -676,6 +676,16 @@ impl PluginContext {
             .map_or(crate::ir::Spelled::NONE, |spellings| &spellings.ret)
     }
 
+    /// The declared type of `class`'s ordinary property `property`.
+    pub fn property_type(&self, ir: &IrFile, class: ClassId, property: &str) -> Option<Ty> {
+        ir.classes
+            .get(class as usize)?
+            .properties
+            .iter()
+            .find(|candidate| candidate.name == property)
+            .map(|property| property.ty)
+    }
+
     pub fn property_canonical_type(
         &self,
         ir: &IrFile,
