@@ -1,9 +1,15 @@
-name: Kotlin RC reference evidence
+name: Kotlin reference evidence
 
 # Manual-only generation of release tables and exact compiler/KLIB provenance. This uses the
 # repository's self-hosted runner because the release downloads and Maven closure are large.
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Exact Kotlin release to capture, such as 2.5.0-RC
+        type: string
+        required: true
+        default: 2.5.0-RC
 
 permissions:
   contents: read
@@ -13,7 +19,7 @@ jobs:
     runs-on: [self-hosted, rust-4c-8gb]
     timeout-minutes: 120
     env:
-      KOTLIN_VERSION: 2.5.0-RC
+      KOTLIN_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -35,7 +41,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/kotlin-rc-evidence/klib"
           printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/kotlin-rc-evidence/source-commit.txt"
           printf '%s\n' "$KOTLIN_VERSION" > "$RUNNER_TEMP/kotlin-rc-evidence/requested-version.txt"
-      - name: Generate release tables from the exact RC distribution
+      - name: Generate release tables from the exact release distribution
         run: |
           set -euo pipefail
           dist="$(just kotlinc "$KOTLIN_VERSION")"
@@ -46,14 +52,15 @@ jobs:
           sha256sum "$zip" > "$RUNNER_TEMP/kotlin-rc-evidence/kotlinc-distribution.sha256"
           printf '%s\n' "$dist" > "$RUNNER_TEMP/kotlin-rc-evidence/kotlinc-bin.txt"
           just kotlinc-arguments "$KOTLIN_VERSION" 2>&1 | tee "$RUNNER_TEMP/kotlin-rc-evidence/release-tables/generator.log"
-          cp "crates/krusty-cli/src/kotlinc_arguments/releases/$KOTLIN_VERSION.tsv" \
-            "$RUNNER_TEMP/kotlin-rc-evidence/release-tables/" 2>/dev/null || true
-          cp "src/features/releases/$KOTLIN_VERSION.features.tsv" \
-            "$RUNNER_TEMP/kotlin-rc-evidence/release-tables/" 2>/dev/null || true
-          cp "src/features/releases/$KOTLIN_VERSION.language-versions.tsv" \
-            "$RUNNER_TEMP/kotlin-rc-evidence/release-tables/" 2>/dev/null || true
-          cp "src/diag/releases/$KOTLIN_VERSION.diagnostics.tsv" \
-            "$RUNNER_TEMP/kotlin-rc-evidence/release-tables/" 2>/dev/null || true
+          # The generator records a table only where it differs from the release it would inherit,
+          # so the tables to capture are the ones it wrote.
+          git ls-files --others --exclude-standard -- \
+            crates/krusty-cli/src/kotlinc_arguments/releases \
+            crates/krusty-core/src/features/releases \
+            src/diag/releases |
+            while IFS= read -r table; do
+              cp "$table" "$RUNNER_TEMP/kotlin-rc-evidence/release-tables/"
+            done
           find "$RUNNER_TEMP/kotlin-rc-evidence/release-tables" -type f -printf '%f\n' | sort \
             > "$RUNNER_TEMP/kotlin-rc-evidence/release-tables/files.txt"
       - name: Resolve and hash the exact Maven compiler classpath
@@ -74,11 +81,11 @@ jobs:
             xargs -0 sha256sum > "$RUNNER_TEMP/kotlin-rc-evidence/klib/stdlib-knm.sha256"
           printf '%s\n' "$root" > "$RUNNER_TEMP/kotlin-rc-evidence/klib/native-root.txt"
           grep -E '^(compiler_version|abi_version|metadata_version|unique_name)=' "$stdlib/manifest" \
-            > "$RUNNER_TEMP/kotlin-rc-evidence/klib/version-stamp.txt" || true
+            > "$RUNNER_TEMP/kotlin-rc-evidence/klib/version-stamp.txt"
       - name: Upload generated tables, pins, and provenance even on failure
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: kotlin-2.5.0-RC-reference-evidence
+          name: kotlin-${{ inputs.version }}-reference-evidence
           path: ${{ runner.temp }}/kotlin-rc-evidence
           if-no-files-found: warn

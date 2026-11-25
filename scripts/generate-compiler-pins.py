@@ -19,8 +19,6 @@ def main() -> None:
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
     version = args.version
-    if version != "2.5.0-RC":
-        raise SystemExit(f"this evidence run is pinned to exact 2.5.0-RC, got {version!r}")
 
     with tempfile.TemporaryDirectory(prefix="krusty-kotlin-pins-") as temp:
         root = Path(temp)
@@ -34,9 +32,6 @@ def main() -> None:
               <artifactId>kotlin-compiler-classpath</artifactId><version>1</version>
               <dependencies>
                 <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-compiler-embeddable</artifactId><version>{version}</version></dependency>
-                <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-reflect</artifactId><version>1.6.10</version></dependency>
-                <dependency><groupId>org.jetbrains.kotlinx</groupId><artifactId>kotlinx-coroutines-core-jvm</artifactId><version>1.8.0</version></dependency>
-                <dependency><groupId>org.jetbrains</groupId><artifactId>annotations</artifactId><version>13.0</version></dependency>
                 <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-scripting-common</artifactId><version>{version}</version></dependency>
                 <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-scripting-jvm</artifactId><version>{version}</version></dependency>
               </dependencies>
@@ -69,10 +64,11 @@ def main() -> None:
             if len(relative) < 4:
                 raise SystemExit(f"unexpected Maven repository path: {jar}")
             jars.append((jar, relative))
+        # The release's own artifacts must be in the closure; every other version is whatever the
+        # release's POMs declare, so the pins show its real closure.
         expected = {
             "kotlin-compiler-embeddable", "kotlin-build-tools-api", "kotlin-daemon-embeddable",
-            "kotlin-script-runtime", "kotlin-stdlib", "kotlin-reflect",
-            "kotlinx-coroutines-core-jvm", "annotations", "kotlin-scripting-common",
+            "kotlin-script-runtime", "kotlin-stdlib", "kotlin-scripting-common",
             "kotlin-scripting-jvm",
         }
         found = {relative[-3] for _, relative in jars}
