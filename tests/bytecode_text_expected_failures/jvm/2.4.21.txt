@@ -114,11 +114,8 @@ stringOperations/concatDynamicConstants.kt
 stringOperations/concatDynamicDataClass.kt
 stringOperations/concatDynamicIndy.kt
 stringOperations/concatDynamicIndy201.kt
-stringOperations/concatDynamicIndyDataClass.kt
 stringOperations/concatDynamicSpecialSymbols.kt
 stringOperations/concatDynamicUnit.kt
-stringOperations/concatNotDynamic.kt
-stringOperations/kt42457_old.kt
 suspendCoroutineUninterceptedOrReturn.kt
 temporaryVals/safeCallElvisSafeCallElvisSomething.kt
 toArray/noAccessorForToArray.kt
