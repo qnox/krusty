@@ -646,7 +646,6 @@ compiler/testData/diagnostics/tests/inline/exposingPackagePrivateTypeInInternal.
 compiler/testData/diagnostics/tests/inline/exposingPrivateCallableReferenceInInternal.kt
 compiler/testData/diagnostics/tests/inline/exposingPrivateCallableReferenceInPublic.kt
 compiler/testData/diagnostics/tests/inline/exposingPrivateTypeInInternal.kt
-compiler/testData/diagnostics/tests/inline/illegalUsageOfCrossInline.kt
 compiler/testData/diagnostics/tests/inline/inlineCallsStaticMethodFromOtherPackage.kt
 compiler/testData/diagnostics/tests/inline/inlineLambdaInDefaultInlineParameter.kt
 compiler/testData/diagnostics/tests/inline/invoke.kt
