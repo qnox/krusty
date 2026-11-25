@@ -7,13 +7,12 @@
 //! accessor's expansion binds them. A selected template is an obligation: a convention it cannot
 //! expand is a failure, never a call of the dependency function.
 
-use crate::fir::ExternalCallableId;
+use crate::fir::{ExternalCallableId, InlineKind};
 use crate::fx_hash::HashMap;
 use crate::inline_expansion::{
     fresh_value_base, splice_inline_body, InlineBodySplice, InlineOperand, SplicedResult,
 };
 use crate::ir::{ExprId, IrExpr, IrFile, SameModuleInlining};
-use crate::libraries::InlineKind;
 
 use super::dependency_templates::DependencyTemplateCache;
 
