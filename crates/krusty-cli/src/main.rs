@@ -736,7 +736,7 @@ pub fn compile(opts: &cli::Options) -> Result<usize, CompileError> {
     opts.check_jdk_release().map_err(|errors| {
         errors
             .iter()
-            .map(|error| format!("krusty: error: {error}\n"))
+            .map(krusty::jvm::compilation_inputs::JdkReleaseError::report_line)
             .collect::<String>()
     })?;
     let inputs = opts
