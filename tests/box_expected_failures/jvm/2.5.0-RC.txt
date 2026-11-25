@@ -20,7 +20,6 @@ contextParameters/callableReferences/contextual/delegation/varProperty.kt
 contextParameters/callableReferences/contextual/fakeOverride.kt
 contextParameters/callableReferences/contextual/generic.kt
 contextParameters/callableReferences/contextual/jvmStaticObjectProperty.kt
-contextParameters/callableReferences/contextual/localFunction.kt
 contextParameters/callableReferences/contextual/propertyEquality.kt
 contextParameters/callableReferences/contextual/shapes.kt
 contextParameters/callableReferences/contextual/simple.kt

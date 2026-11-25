@@ -36,6 +36,8 @@ impl Checker<'_> {
                     }) && !deferred_local_header
                 });
         let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
+        self.suspension_points
+            .enter_function(self.expectation_frames.len(), f);
         self.check_infix_declaration(f, true);
         self.reset_body_mutations(
             (!self.signature_defaults_only || default_owned_method)
@@ -556,6 +558,7 @@ impl Checker<'_> {
         self.this_extension_receiver = dispatch_extension_receiver;
         self.leave_public_api_inline(public_api_inline);
         self.lambda_returns.leave_function(enclosing_return_frame);
+        self.suspension_points.leave_function();
         self.restore_type_parameter_owners(owned_type_parameters);
         self.active_lexical_policies.truncate(suppression_depth);
     }
@@ -568,6 +571,8 @@ impl Checker<'_> {
     ) {
         let public_api_inline = self.enter_public_api_inline(scope, f);
         let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
+        self.suspension_points
+            .enter_function(self.expectation_frames.len(), f);
         let stable_declaration = source_decl.and_then(|source| {
             self.active_declarations
                 .and_then(|active| active.file_declaration(self.file, source))
@@ -1061,6 +1066,7 @@ impl Checker<'_> {
         self.leave_public_api_inline(public_api_inline);
         self.leave_block_body(block);
         self.lambda_returns.leave_function(enclosing_return_frame);
+        self.suspension_points.leave_function();
         self.restore_type_parameter_owners(owned_type_parameters);
         self.active_lexical_policies.truncate(suppression_depth);
     }
