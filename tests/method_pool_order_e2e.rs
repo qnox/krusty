@@ -46,6 +46,8 @@
 //!   read interns its name at `<clinit>`'s store, since fields are written after methods.
 //! - A data object's synthesized `equals` interns its `this` and `other` locals with its body,
 //!   before `<clinit>`.
+//! - A suspend local function's re-entry accessor follows the accessors the source's references
+//!   need: its continuation class carries no source position.
 //!
 //! Each case asserts that the named classes are byte-identical to kotlinc's. The fixtures use
 //! neutral names only.
@@ -463,6 +465,22 @@ fn an_enum_with_only_secondary_constructors_interns_them_at_their_declarations()
          \x20   constructor() : this(\"\")\n\
          }\n",
         &["Gate"],
+    );
+}
+
+#[test]
+fn a_suspend_local_function_s_reentry_accessor_follows_the_source_ordered_accessors() {
+    assert_identical_with_stdlib(
+        "SuspendReentry",
+        r#"fun box(): String {
+    fun plain(x: Any) {}
+    suspend fun suspending() {}
+
+    val reference = ::plain as Any
+    return "OK"
+}
+"#,
+        &["SuspendReentryKt"],
     );
 }
 
