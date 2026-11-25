@@ -1110,6 +1110,7 @@ fn realize_expressions(
                 krusty::libraries::CompilerIntrinsic::ArraySize
                 | krusty::libraries::CompilerIntrinsic::FloatingIsNaN { .. }
                 | krusty::libraries::CompilerIntrinsic::FloatingIsInfinite { .. }
+                | krusty::libraries::CompilerIntrinsic::CharIsSurrogate(_)
                 | krusty::libraries::CompilerIntrinsic::RadixToString { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayStorageCopy
                 | krusty::libraries::CompilerIntrinsic::StringRangeEquals
@@ -1121,7 +1122,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::ListStorageConstruction(_)
                 | krusty::libraries::CompilerIntrinsic::CharCode
                 | krusty::libraries::CompilerIntrinsic::StringLength
-                | krusty::libraries::CompilerIntrinsic::Assert
+                | krusty::libraries::CompilerIntrinsic::Assert { .. }
                 | krusty::libraries::CompilerIntrinsic::AssertFailsWith
                 | krusty::libraries::CompilerIntrinsic::Print
                 | krusty::libraries::CompilerIntrinsic::Println

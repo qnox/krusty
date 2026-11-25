@@ -329,7 +329,6 @@ fn emit_analyzed_into<B: Backend>(
         }
         let mut source_failed = false;
         let mut source_rejected = false;
-        let source_diagnostics = diags.diags.len();
         source.visit_declaration_units(reparse_sources.features(), diags, |active_file, diags| {
             if source_failed {
                 return;
@@ -447,8 +446,11 @@ fn emit_analyzed_into<B: Backend>(
             );
             source_failed = true;
         }
-        // kotlinc lists a file's diagnostics by position, whichever member its checker visited first.
-        diags.sort_source_order_from(source_diagnostics);
+        // Pass 1 checked every signature-owned default and reported its diagnostics; the
+        // authoritative body check sees the same expressions again. kotlinc reports each once and
+        // lists a file's diagnostics by position, whichever member its checker visited first.
+        diags.collapse_duplicates_from(0);
+        diags.sort_source_order();
         if !source_failed && !declaration_cursor.is_finished() {
             diags.error(
                 Span::new(0, 0),
@@ -490,7 +492,6 @@ fn emit_analyzed_into<B: Backend>(
                 common_ir_coroutines: common_ir_preparation.is_some(),
                 dispatched_classes: &dispatched_classes,
                 appends_char_sequences_by_index: backend.appends_char_sequences_by_index(),
-                collections_through_interfaces: backend.reads_collections_through_interfaces(),
             },
             diags,
         ) else {
@@ -500,26 +501,24 @@ fn emit_analyzed_into<B: Backend>(
         if diags.has_errors() {
             continue;
         }
+        if let Some(preparation) = common_ir_preparation {
+            if let Err(error) = backend_handoff::prepare_common_ir(
+                &mut file,
+                symbols.semantic_platform(),
+                preparation,
+                symbols.coroutine_runtime(),
+                symbols.enum_entries_factory(),
+                &dispatched_classes,
+            ) {
+                backend.report_common_ir_preparation_error(&error, diags);
+                continue;
+            }
+        }
         // A target emitting library bodies emits each file once the whole program is checked, so
-        // its dependency support closes over every file's uses, and common IR is prepared then,
-        // with every file of the program in hand (`target_emission::emit_program`).
+        // its dependency support closes over every file's uses.
         if backend.emits_dependency_support() {
             retained.retain(raw_source, file);
         } else {
-            if let Some(preparation) = common_ir_preparation {
-                let entries_read = crate::backend::enums::entries_read(&file.ir);
-                if let Err(error) = backend_handoff::prepare_common_ir(
-                    &mut file,
-                    symbols.semantic_platform(),
-                    preparation,
-                    symbols.coroutine_runtime(),
-                    &dispatched_classes,
-                    &entries_read,
-                ) {
-                    backend.report_common_ir_preparation_error(&error, diags);
-                    continue;
-                }
-            }
             target_emission::emit_file(raw_source, file, emission, diags, artifacts);
         }
     }
@@ -534,7 +533,6 @@ fn emit_analyzed_into<B: Backend>(
             symbols,
             backend_module_facts,
             source_map,
-            dispatched_classes,
         )
     })
 }

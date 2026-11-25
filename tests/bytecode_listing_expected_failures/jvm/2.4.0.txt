@@ -5,7 +5,6 @@ accessorsForProtectedStaticJavaFieldInOtherPackage.kt
 annotations/JvmSynthetic.kt
 annotations/annotationAllTarget.kt
 annotations/annotationsOnDelegatedMembers.kt
-annotations/deprecatedJvmOverloads.kt
 annotations/internalPropertyOrTypealias.kt
 annotations/kt62788.kt
 annotations/kt9320.kt
@@ -34,7 +33,6 @@ collectionStubs/abstractStubSignatures/stringGenericMutableMap.kt
 collectionStubs/collectionByDelegation.kt
 collectionStubs/collectionByDelegation2.kt
 collectionStubs/collectionByDelegation3.kt
-collectionStubs/collectionWithInternalRemove.kt
 collectionStubs/extendingAbstractCollection.kt
 collectionStubs/inheritingFromAbstractCollections.kt
 collectionStubs/inheritingFromAbstractMap.kt
@@ -90,7 +88,6 @@ inlineClasses/inlineCollectionOfInlineClass/mutableMapEntry.kt
 inlineClasses/inlineCollectionOfInlineClass/mutableSet.kt
 inlineClasses/inlineCollectionOfInlineClass/mutableSet2.kt
 inlineClasses/jvmName.kt
-inlineClasses/jvmOverloadsOnTopLevelFunctionReturningInlineClassValue.kt
 inlineClasses/noArgConstructorForInlineClassParameter.kt
 inlineClasses/nullabilityAnnotationsOnInlineClassMembers.kt
 inlineClasses/primaryValsWithDifferentVisibilities.kt
@@ -113,7 +110,6 @@ jvm8/defaults/enable/specialization/primitiveAndNullable.kt
 jvmOverloadsAndParametersAnnotations.kt
 jvmOverloadsExternal.kt
 jvmStatic/jvmStaticExternal.kt
-jvmStatic/jvmStaticPrivate.kt
 jvmStatic/kt31389.kt
 kt45853.kt
 localFunctions/inInitBlock.kt
@@ -155,7 +151,5 @@ specialBridges/signatures/withPlatformDependentDeclarations.kt
 specialBridges/signatures/withoutPlatformDependentDeclarations.kt
 specialBridges/specialBridgeForGet.kt
 specialBridges/unsignedArray.kt
-strictfpFlag.kt
-synchronizedFlag.kt
 valueClasses/annotations.kt
 valueClasses/nullabilityAnnotationsOnInlineClassMembers.kt

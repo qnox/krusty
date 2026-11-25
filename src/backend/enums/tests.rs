@@ -113,14 +113,48 @@ fn lowered(ir: IrFile) -> IrFile {
 }
 
 fn lowered_for(mut ir: IrFile, contract: super::Contract) -> IrFile {
-    let entries_read = super::entries_read(&ir);
     super::realize(
         &mut ir,
         contract,
-        &entries_read,
+        Some(super::EntriesFactory::Selected(factory())),
         &mut super::super::DependencyExportSignatures::default(),
-    );
+    )
+    .expect("the enums are realized");
     ir
+}
+
+/// The `enumEntries(Array)` resolution selected, as a provider identity.
+fn factory() -> crate::fir::EnumEntriesFactory {
+    crate::fir::EnumEntriesFactory {
+        function: crate::fir::ExternalCallableId::from_raw(41),
+    }
+}
+
+/// The function a call of this file's own function calls, if `expression` is one.
+fn local_callee(ir: &IrFile, expression: ExprId) -> Option<FunId> {
+    match ir.expr(expression) {
+        IrExpr::Call { callee, .. } => match **callee {
+            Callee::Local(function) => Some(function),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The slot the Native contract's initializer stores the `entries` list of `name` in.
+fn runtime_entries_slot(ir: &IrFile, name: &str) -> u32 {
+    let (build, ..) = initializer_parts(ir, function(ir, &format!("{name}$initEntries")));
+    build
+        .iter()
+        .find_map(|&statement| match ir.expr(statement) {
+            IrExpr::SetStatic { index, value }
+                if matches!(ir.expr(*value), IrExpr::EnumEntriesList { .. }) =>
+            {
+                Some(*index)
+            }
+            _ => None,
+        })
+        .expect("the initializer stores the entries")
 }
 
 fn class(ir: &IrFile, name: &str) -> ClassId {
@@ -565,10 +599,10 @@ fn an_enum_publishes_an_entry_answering_each_constant() {
     }
 }
 
-/// `enumEntries<E>()`, once inline specialization has named the enum, reads the same slot as
-/// `E.entries`.
+/// `enumEntries<E>()`, once inline specialization has named the enum, calls the same `entries`
+/// getter as `E.entries`, which runs the initializer and answers the list it stored.
 #[test]
-fn the_enum_entries_intrinsic_reads_the_entries_slot() {
+fn the_enum_entries_intrinsic_calls_the_entries_getter() {
     let mut ir = IrFile::default();
     shade(&mut ir);
     let shade = type_name("Shade");
@@ -585,47 +619,64 @@ fn the_enum_entries_intrinsic_reads_the_entries_slot() {
     declare(&mut ir, "box", Vec::new(), vec![intrinsic]);
     let ir = lowered(ir);
 
+    let getter = function(&ir, "Shade$entries");
+    assert_eq!(local_callee(&ir, intrinsic), Some(getter));
     let initializer = function(&ir, "Shade$initEntries");
-    let (build, ..) = initializer_parts(&ir, initializer);
-    let entries = build
-        .iter()
-        .find_map(|&statement| match ir.expr(statement) {
-            IrExpr::SetStatic { index, value }
-                if matches!(ir.expr(*value), IrExpr::EnumEntriesList { .. }) =>
-            {
-                Some(*index)
-            }
-            _ => None,
-        })
-        .expect("the entries are stored");
-    let IrExpr::Block {
-        stmts,
-        value: Some(value),
-    } = ir.expr(intrinsic)
-    else {
-        panic!(
-            "the intrinsic is realized in place: {:?}",
-            ir.expr(intrinsic)
-        );
+    let entries = runtime_entries_slot(&ir, "Shade");
+    let [build, answer] = statements(&ir, body(&ir, getter))[..] else {
+        panic!("the getter builds the enum, then answers the list");
     };
-    assert!(calls_initializer(&ir, stmts[0], initializer));
+    assert!(calls_initializer(&ir, build, initializer));
+    let IrExpr::Return(Some(value)) = ir.expr(answer) else {
+        panic!("the getter answers the list");
+    };
     assert!(matches!(ir.expr(*value), IrExpr::GetStatic(slot) if *slot == entries));
 }
 
-/// Another file calls an enum's `values()` and `valueOf` through entries of this file: the very
-/// functions this file's own calls are rewritten to, published by the enum and the member.
+/// An enum another file declares is not realized here: `enumEntries<E>()` of it becomes the same
+/// node as `E.entries`, which a target links to the declaring file's getter.
 #[test]
-fn an_enum_publishes_its_values_and_value_of() {
+fn another_files_enum_entries_keep_one_use_node() {
+    let mut ir = IrFile::default();
+    shade(&mut ir);
+    let elsewhere = type_name("other/Elsewhere");
+    let intrinsic = ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::Intrinsic {
+            operation: crate::ir::IrIntrinsic::EnumEntries {
+                classifier: Ty::obj_name(elsewhere),
+            },
+            ret: super::initializer::entries_type(elsewhere),
+        }),
+        dispatch_receiver: None,
+        args: Vec::new(),
+    });
+    let read = ir.add_expr(IrExpr::EnumEntries {
+        classifier: elsewhere,
+    });
+    declare(&mut ir, "box", Vec::new(), vec![intrinsic, read]);
+    let ir = lowered(ir);
+    for expression in [intrinsic, read] {
+        assert!(
+            matches!(ir.expr(expression), IrExpr::EnumEntries { classifier } if *classifier == elsewhere),
+            "{:?}",
+            ir.expr(expression)
+        );
+        assert_eq!(
+            super::StaticMember::of(ir.expr(expression)),
+            Some((elsewhere, super::StaticMember::Entries))
+        );
+    }
+}
+
+/// Another file calls an enum's `values()`, `valueOf` and `entries` through entries of this file:
+/// the very functions this file's own uses are rewritten to, published by the enum and the member.
+#[test]
+fn an_enum_publishes_its_values_value_of_and_entries() {
     let mut ir = IrFile::default();
     shade(&mut ir);
     let mut exports = super::super::DependencyExportSignatures::default();
-    let entries_read = super::entries_read(&ir);
-    super::realize(
-        &mut ir,
-        super::Contract::KotlinNative,
-        &entries_read,
-        &mut exports,
-    );
+    super::realize(&mut ir, super::Contract::KotlinNative, None, &mut exports)
+        .expect("the Native contract builds its own list");
 
     let shade = type_name("Shade");
     let published = exports
@@ -635,6 +686,7 @@ fn an_enum_publishes_its_values_and_value_of() {
         .collect::<Vec<_>>();
     let values = function(&ir, "Shade$values");
     let value_of = function(&ir, "Shade$valueOf");
+    let entries = function(&ir, "Shade$entries");
     assert_eq!(
         published,
         [
@@ -651,6 +703,13 @@ fn an_enum_publishes_its_values_and_value_of() {
                     member: super::StaticMember::ValueOf,
                 },
                 value_of,
+            ),
+            (
+                super::super::instance_links::InstanceEntry::EnumMember {
+                    classifier: shade,
+                    member: super::StaticMember::Entries,
+                },
+                entries,
             ),
         ]
     );
@@ -698,9 +757,11 @@ fn defaults_reading_a_constant_are_realized() {
     }
 }
 
-/// No use of the program reads `Shade.entries`, so the list is never built.
+/// Every enum builds its `entries` list, whether or not a use of this file reads it: another file
+/// may read it through the getter, and what a program observes must not depend on which file is
+/// lowered first. `Shade` has no use here, and its initializer still builds and clears the list.
 #[test]
-fn entries_no_use_reads_are_not_built() {
+fn every_enum_builds_its_entries() {
     let ir = lowered(colors());
     let lists = |initializer: &str| {
         let (build, reset, _) = initializer_parts(&ir, function(&ir, initializer));
@@ -718,42 +779,16 @@ fn entries_no_use_reads_are_not_built() {
     };
     // Color: flag, three constants and entries cleared, then the rethrow.
     assert_eq!(lists("Color$initEntries"), (1, 6));
-    // Shade: flag and two constants cleared, then the rethrow.
-    assert_eq!(lists("Shade$initEntries"), (0, 4));
-}
-
-/// Another file of the program reads `Shade.entries`: the file declaring `Shade` builds its list,
-/// though none of its own uses read it.
-#[test]
-fn entries_another_file_reads_are_built() {
-    let mut ir = colors();
-    let mut entries_read = super::entries_read(&ir);
-    entries_read.insert(type_name("Shade"));
-    super::realize(
-        &mut ir,
-        super::Contract::KotlinNative,
-        &entries_read,
-        &mut super::super::DependencyExportSignatures::default(),
-    );
-    let (build, reset, _) = initializer_parts(&ir, function(&ir, "Shade$initEntries"));
-    let built = build
-        .iter()
-        .filter(|&&statement| {
-            matches!(
-                ir.expr(statement),
-                IrExpr::SetStatic { value, .. }
-                    if matches!(ir.expr(*value), IrExpr::EnumEntriesList { .. })
-            )
-        })
-        .count();
-    assert_eq!((built, reset.len()), (1, 5));
+    // Shade: flag, two constants and entries cleared, then the rethrow.
+    assert_eq!(lists("Shade$initEntries"), (1, 5));
+    function(&ir, "Shade$entries");
 }
 
 /// A constant's argument is the only read of another enum's `entries`
-/// (`enum class Kind(val n: Int) { A(Shade.entries.size) }`): the list is still kept and built,
-/// under either contract.
+/// (`enum class Kind(val n: Int) { A(Shade.entries.size) }`): it calls that enum's getter, under
+/// either contract.
 #[test]
-fn entries_read_only_by_a_constant_argument_are_built() {
+fn entries_read_by_a_constant_argument_call_the_getter() {
     for contract in [super::Contract::KotlinNative, super::Contract::KotlinWasm] {
         let mut ir = IrFile::default();
         shade(&mut ir);
@@ -762,23 +797,39 @@ fn entries_read_only_by_a_constant_argument_are_built() {
         });
         enum_class(&mut ir, "Kind", vec![entry("A", vec![entries], Vec::new())]);
         let ir = lowered_for(ir, contract);
-
-        let IrExpr::Block {
-            value: Some(value), ..
-        } = ir.expr(entries)
-        else {
-            panic!("the argument is realized in place: {:?}", ir.expr(entries));
-        };
-        assert!(
-            matches!(ir.expr(*value), IrExpr::GetStatic(_)),
+        assert_eq!(
+            local_callee(&ir, entries),
+            Some(function(&ir, "Shade$entries")),
             "{contract:?}: {:?}",
-            ir.expr(*value)
+            ir.expr(entries)
         );
     }
 }
 
+/// The Wasm contract builds `entries` through the stdlib's `enumEntries(Array)`. A platform that
+/// declares none has nothing to build it by, which only an enum needs.
+#[test]
+fn the_wasm_contract_needs_the_selected_factory_for_an_enum() {
+    let mut exports = super::super::DependencyExportSignatures::default();
+    let mut ir = colors();
+    assert_eq!(
+        super::realize(&mut ir, super::Contract::KotlinWasm, None, &mut exports),
+        Err(
+            "the platform declares no `kotlin.enums.enumEntries(Array)` to build `entries` by"
+                .to_owned()
+        )
+    );
+    let mut ir = IrFile::default();
+    declare(&mut ir, "box", Vec::new(), Vec::new());
+    assert_eq!(
+        super::realize(&mut ir, super::Contract::KotlinWasm, None, &mut exports),
+        Ok(())
+    );
+}
+
 /// kotlinc-js/wasm publish each constant once it is constructed, a constant with a body from its
-/// subclass's constructor right after the super call, and build `entries` on its first read.
+/// subclass's constructor right after the super call, and build `entries` in its getter on its
+/// first read, by calling the stdlib's `enumEntries` with the constants.
 #[test]
 fn the_wasm_contract_publishes_each_constant_once_constructed() {
     let ir = lowered_for(colors(), super::Contract::KotlinWasm);
@@ -824,26 +875,87 @@ fn the_wasm_contract_publishes_each_constant_once_constructed() {
     let slots: Vec<u32> = published.iter().map(|(slot, _)| *slot).collect();
     assert_eq!(array_slots(&ir, *array), slots);
 
-    // `Color.entries` fills the list on its first read.
+    // `Color.entries` calls the getter, which fills the list on its first read.
+    let getter = function(&ir, "Color$entries");
     let read = crate::ir::emitted_body_roots(&ir)
         .into_iter()
         .flat_map(|root| crate::ir::value_namespace_expressions(&ir, root))
-        .find_map(|expression| match ir.expr(expression) {
-            IrExpr::Block {
-                stmts,
-                value: Some(_),
-            } if stmts.len() == 2 => Some(stmts[1]),
-            _ => None,
-        })
-        .expect("the entries read");
-    let IrExpr::When { branches } = ir.expr(read) else {
+        .find(|&expression| local_callee(&ir, expression) == Some(getter));
+    assert!(read.is_some(), "the entries read calls the getter");
+    let [build, fill, answer] = statements(&ir, body_of(&ir, "Color$entries"))[..] else {
+        panic!("the getter builds the enum, fills the list, then answers it");
+    };
+    assert!(calls_initializer(
+        &ir,
+        build,
+        function(&ir, "Color$initEntries")
+    ));
+    let IrExpr::When { branches } = ir.expr(fill) else {
         panic!("the list is built when missing");
     };
     let [(Some(_), store)] = branches[..] else {
         panic!("one branch");
     };
-    assert!(matches!(ir.expr(store), IrExpr::SetStatic { value, .. }
-        if matches!(ir.expr(*value), IrExpr::EnumEntriesList { values, .. } if array_slots(&ir, *values) == slots)));
+    let IrExpr::SetStatic { index: list, value } = ir.expr(store) else {
+        panic!("the list is stored");
+    };
+    let IrExpr::Call {
+        callee,
+        dispatch_receiver: None,
+        args,
+    } = ir.expr(*value)
+    else {
+        panic!("the list is a call");
+    };
+    let Callee::External {
+        target,
+        substitutions,
+        ..
+    } = &**callee
+    else {
+        panic!("of the selected factory: {callee:?}");
+    };
+    assert_eq!(*target, factory().function);
+    let [substitution] = &substitutions[..] else {
+        panic!("one type argument");
+    };
+    assert_eq!(substitution.value, Ty::obj_name(type_name("Color")));
+    let [array] = args[..] else {
+        panic!("one argument");
+    };
+    assert_eq!(array_slots(&ir, array), slots);
+    let IrExpr::Return(Some(value)) = ir.expr(answer) else {
+        panic!("the getter answers the list");
+    };
+    assert!(matches!(ir.expr(*value), IrExpr::GetStatic(slot) if slot == list));
+}
+
+/// A support unit that lowers `enumEntries` itself builds a library enum's list with its own
+/// function, which no earlier unit exports.
+#[test]
+fn a_unit_lowering_the_factory_calls_its_own_function() {
+    let mut ir = colors();
+    let own: FunId = 0;
+    super::realize(
+        &mut ir,
+        super::Contract::KotlinWasm,
+        Some(super::EntriesFactory::Own(own)),
+        &mut super::super::DependencyExportSignatures::default(),
+    )
+    .expect("the enums are realized");
+    let [_, fill, _] = statements(&ir, body_of(&ir, "Color$entries"))[..] else {
+        panic!("the getter builds the enum, fills the list, then answers it");
+    };
+    let IrExpr::When { branches } = ir.expr(fill) else {
+        panic!("the list is built when missing");
+    };
+    let [(Some(_), store)] = branches[..] else {
+        panic!("one branch");
+    };
+    let IrExpr::SetStatic { value, .. } = ir.expr(store) else {
+        panic!("the list is stored");
+    };
+    assert_eq!(local_callee(&ir, *value), Some(own));
 }
 
 fn body_of(ir: &IrFile, name: &str) -> ExprId {
@@ -876,4 +988,85 @@ fn base_members_are_recognized_by_their_semantic_owner() {
         super::declared_base_member(Some(Classifier(type_name("java/lang/Enum"))), "ordinal"),
         None
     );
+}
+
+/// Realize `ir` for Kotlin/Wasm and withdraw the entries getters nothing reads.
+fn withdrawn(mut ir: IrFile) -> (IrFile, super::super::DependencyExportSignatures) {
+    let mut exports = super::super::DependencyExportSignatures::default();
+    super::realize(
+        &mut ir,
+        super::Contract::KotlinWasm,
+        Some(super::EntriesFactory::Selected(factory())),
+        &mut exports,
+    )
+    .expect("the enums are realized");
+    super::withdraw_unread_entries(&mut [(&mut ir, &mut exports)]);
+    (ir, exports)
+}
+
+fn publishes_entries(exports: &super::super::DependencyExportSignatures) -> bool {
+    exports.instance_entries().iter().any(|(instance, _)| {
+        matches!(
+            instance,
+            super::super::instance_links::InstanceEntry::EnumMember {
+                member: super::StaticMember::Entries,
+                ..
+            }
+        )
+    })
+}
+
+#[test]
+fn an_entries_getter_nothing_reads_is_withdrawn_so_its_factory_call_is_no_emitted_use() {
+    let mut ir = IrFile::default();
+    shade(&mut ir);
+    declare(&mut ir, "box", Vec::new(), Vec::new());
+    let (ir, exports) = withdrawn(ir);
+
+    assert!(ir.inline_only_fns.contains(&function(&ir, "Shade$entries")));
+    assert!(!publishes_entries(&exports));
+}
+
+#[test]
+fn an_entries_getter_a_body_reads_is_kept_and_published() {
+    let mut ir = IrFile::default();
+    shade(&mut ir);
+    let shade = type_name("Shade");
+    let entries = ir.add_expr(IrExpr::EnumEntries { classifier: shade });
+    declare(&mut ir, "box", Vec::new(), vec![entries]);
+    let (ir, exports) = withdrawn(ir);
+
+    assert!(!ir.inline_only_fns.contains(&function(&ir, "Shade$entries")));
+    assert!(publishes_entries(&exports));
+}
+
+#[test]
+fn an_entries_read_in_another_file_of_the_program_keeps_the_getter() {
+    let mut declaring = IrFile::default();
+    shade(&mut declaring);
+    declare(&mut declaring, "box", Vec::new(), Vec::new());
+    let mut reading = IrFile::default();
+    let entries = reading.add_expr(IrExpr::EnumEntries {
+        classifier: type_name("Shade"),
+    });
+    declare(&mut reading, "read", Vec::new(), vec![entries]);
+
+    let mut declaring_exports = super::super::DependencyExportSignatures::default();
+    super::realize(
+        &mut declaring,
+        super::Contract::KotlinWasm,
+        Some(super::EntriesFactory::Selected(factory())),
+        &mut declaring_exports,
+    )
+    .expect("the enums are realized");
+    let mut reading_exports = super::super::DependencyExportSignatures::default();
+    super::withdraw_unread_entries(&mut [
+        (&mut declaring, &mut declaring_exports),
+        (&mut reading, &mut reading_exports),
+    ]);
+
+    assert!(!declaring
+        .inline_only_fns
+        .contains(&function(&declaring, "Shade$entries")));
+    assert!(publishes_entries(&declaring_exports));
 }

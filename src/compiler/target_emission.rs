@@ -30,8 +30,6 @@ struct ModuleState {
     symbols: PassTwoSymbols,
     facts: BackendModuleFacts,
     source_map: crate::fir::SourceMap,
-    /// The dependency classes the target dispatches through its own representation.
-    dispatched_classes: Vec<crate::backend::DependencyClassifier>,
 }
 
 /// A checked source module whose files wait for target emission, with the module state their
@@ -66,7 +64,6 @@ impl RetainedFiles {
         symbols: PassTwoSymbols,
         facts: BackendModuleFacts,
         source_map: crate::fir::SourceMap,
-        dispatched_classes: Vec<crate::backend::DependencyClassifier>,
     ) -> CheckedModule {
         CheckedModule {
             state: ModuleState {
@@ -75,7 +72,6 @@ impl RetainedFiles {
                 symbols,
                 facts,
                 source_map,
-                dispatched_classes,
             },
             files: self.0,
         }
@@ -98,13 +94,6 @@ pub(super) fn emit_program<B: Backend>(
     let Some(last) = states.last() else {
         return;
     };
-    // A file may read the `entries` of an enum another file declares, so the program's reads are
-    // known before any file is prepared.
-    let entries_read = files
-        .iter()
-        .flatten()
-        .flat_map(|retained| crate::backend::enums::entries_read(&retained.ir))
-        .collect::<crate::fx_hash::HashSet<_>>();
     let mut checked = Vec::new();
     for (state, files) in states.iter().zip(files) {
         for retained in files {
@@ -123,24 +112,9 @@ pub(super) fn emit_program<B: Backend>(
                 stems: &state.stems,
                 origins: state.source_map.origins(),
             };
-            diags.set_file(retained.raw_source as u32);
-            // Common IR is prepared once the whole program is checked, so a preparation may
-            // consult every file of it.
-            if let Some(preparation) = backend.common_ir_preparation() {
-                if let Err(error) = super::backend_handoff::prepare_common_ir(
-                    &mut file,
-                    state.symbols.semantic_platform(),
-                    preparation,
-                    state.symbols.coroutine_runtime(),
-                    &state.dispatched_classes,
-                    &entries_read,
-                ) {
-                    backend.report_common_ir_preparation_error(&error, diags);
-                    return;
-                }
-            }
             // A target emitting library bodies builds a range class it does not lay out through
             // the library's own declaration, which support emission below then selects.
+            diags.set_file(retained.raw_source as u32);
             if let Err(error) = crate::backend::range_constructions::realize(
                 &mut file.ir,
                 &file.callables,
@@ -151,6 +125,16 @@ pub(super) fn emit_program<B: Backend>(
             }
             checked.push((retained.raw_source, state, file));
         }
+    }
+    if backend
+        .common_ir_preparation()
+        .is_some_and(|preparation| preparation.enums.builds_entries_by_factory())
+    {
+        let mut programs = checked
+            .iter_mut()
+            .map(|(_, _, file)| (&mut file.ir, &mut file.dependency_exports))
+            .collect::<Vec<_>>();
+        crate::backend::enums::withdraw_unread_entries(&mut programs);
     }
     let uses = checked
         .iter()

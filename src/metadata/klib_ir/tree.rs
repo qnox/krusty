@@ -990,6 +990,22 @@ pub struct KlibIrClass {
     pub sealed_subclasses: Vec<KlibIrSymbol>,
 }
 
+impl KlibIrClass {
+    /// Whether the class declares a property whose getter is an enum's synthetic `entries` body
+    /// (`IrSyntheticBody(ENUM_ENTRIES)`), which Kotlin builds by passing the enum's `values()` to
+    /// `kotlin.enums.enumEntries`.
+    pub fn declares_synthetic_enum_entries(&self, arena: &KlibIrArena) -> bool {
+        self.members.iter().any(|member| {
+            matches!(member, KlibIrMember::Property(property) if property.getter.is_some_and(
+                |getter| matches!(
+                    arena.function(getter).body,
+                    Some(KlibIrBody::Synthetic(KlibIrSyntheticBody::EnumEntries))
+                )
+            ))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

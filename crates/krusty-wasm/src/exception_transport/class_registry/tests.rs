@@ -132,8 +132,10 @@ fn selected_wasm_stdlibs_publish_the_exception_chain_without_constructor_authori
     use krusty::compilation_target::CompilationTarget;
     use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
     for target in [CompilationTarget::WasmJs, CompilationTarget::WasmWasi] {
-        let path = krusty::toolchain::kotlin_stdlib_klib(target)
-            .expect("the exact target stdlib must be provisioned");
+        let path =
+            krusty::toolchain::kotlin_stdlib_klib_or_reason(target).unwrap_or_else(|reason| {
+                panic!("the exact target stdlib must be provisioned: {reason}")
+            });
         let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
             path,
             KlibStdlibSemantics::Wasm,
@@ -166,8 +168,9 @@ fn selected_illegal_state_storage_is_a_distinct_subtype_of_its_declared_parent()
     use krusty::symbol_source::SymbolSource;
     for target in [CompilationTarget::WasmJs, CompilationTarget::WasmWasi] {
         let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
-            krusty::toolchain::kotlin_stdlib_klib(target)
-                .expect("the exact target stdlib must be provisioned"),
+            krusty::toolchain::kotlin_stdlib_klib_or_reason(target).unwrap_or_else(|reason| {
+                panic!("the exact target stdlib must be provisioned: {reason}")
+            }),
             KlibStdlibSemantics::Wasm,
         )])
         .unwrap();

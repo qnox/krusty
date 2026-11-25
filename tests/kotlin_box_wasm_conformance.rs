@@ -857,6 +857,29 @@ fun box(): String = if (2.0.pow(3.0) == 8.0) "OK" else "pow"
     );
 }
 
+/// A discarded value-class result is popped as the generic slot holds it. The program builds
+/// that slot with `arrayListOf`, whose private collection overrides `Collection.size`.
+#[test]
+fn wasm_discarded_value_class_result_runs() {
+    let source = include_str!("box_regressions/valueClassDiscardedGenericResult.kt");
+    let stem = "valueClassDiscardedGenericResult";
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(
+            focused_wasm_lane_available(&lane, stem),
+            "{stem} requires its Wasm lane"
+        );
+        let sources = box_lane::prepare_sources(source, stem, lane.test_target())
+            .expect("the owned regression prepares");
+        assert_eq!(
+            lane.compile_and_run(&std::env::temp_dir(), stem, &sources, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name()
+        );
+    }
+}
+
 /// A discarded `if` over sealed value classes lowers `toString` of the underlying interface.
 /// The lambda in the same file stays a function value.
 #[test]
@@ -1250,6 +1273,61 @@ fn explicit_array_checks_share_metadata_with_the_reference_compiler() {
             "the product must execute the entire checked store-order program"
         );
         std::fs::remove_dir_all(work).expect("remove array check compilation directory");
+    }
+}
+
+/// A reference library recorded once is replayed with its status, diagnostics and complete entry
+/// layout into a different work directory: the recording's identity is the source name and text,
+/// never the scratch directory. The entry bytes are not compared: the compiler writes the source
+/// file's absolute path into the library, so two live runs in different directories differ there
+/// while a replay repeats the first run's bytes.
+#[test]
+fn a_recorded_reference_library_replays_into_another_work_directory() {
+    use krusty::backend::Backend;
+    fn files(dir: &std::path::Path, root: &std::path::Path, found: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("list a reference library") {
+            let path = entry.expect("read a reference library entry").path();
+            if path.is_dir() {
+                files(&path, root, found);
+            } else {
+                found.push(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+    }
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(
+            &lane,
+            "recordedReferenceLibrary"
+        ));
+        let compilation_target = WasmBackend::new(target).compilation_target();
+        let mut runs = Vec::new();
+        for _ in 0..2 {
+            let work = super::common::scratch_dir().expect("reference library directory");
+            let path = work.join("recordedReferenceLibrary.kt");
+            std::fs::write(&path, "fun answer(): Int = 42\n").expect("write the reference source");
+            let (reference, library) = crate::reference_invocation_support::run_reference(
+                compilation_target,
+                &work,
+                &[path],
+                &[],
+                false,
+            )
+            .expect("the exact Wasm reference compiler");
+            let mut found = Vec::new();
+            files(&library, &library, &mut found);
+            found.sort();
+            runs.push((reference.status, reference.stderr, found));
+            std::fs::remove_dir_all(work).expect("remove the reference library directory");
+        }
+        assert_eq!(runs[0].0, 0, "{}", runs[0].1);
+        assert!(!runs[0].2.is_empty(), "the reference library has entries");
+        assert_eq!(runs[0], runs[1], "{target:?}");
     }
 }
 
