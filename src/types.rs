@@ -510,6 +510,17 @@ impl Ty {
         }
     }
 
+    /// This intersection without the upper type it was fixed below, so it approximates by its own
+    /// components. Any other type is returned unchanged.
+    pub fn without_intersection_approximation(self) -> Ty {
+        match self.kind() {
+            TyKind::Intersection(parts) if parts.approximation().is_some() => Ty::from(
+                TyKind::Intersection(IntersectionParts::new(parts.parts(), None)),
+            ),
+            _ => self,
+        }
+    }
+
     pub fn projection_inner(self) -> Option<Ty> {
         match self.kind() {
             TyKind::InProjection(inner)
@@ -608,6 +619,11 @@ impl Ty {
             TyKind::DefinitelyNotNull(_) | TyKind::MutabilityFlexible(_) => self,
             TyKind::TyParam(..) | TyKind::Var(..) => {
                 self.with_symbol_bound(self.ty_param_bound().unwrap().definitely_non_null())
+            }
+            // Narrowing `(A & B)?` to non-null intersects it with `Any`, which builds a new
+            // intersection: the upper type the original was fixed below no longer applies.
+            TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Intersection(_)) => {
+                inner.without_intersection_approximation()
             }
             _ => self.non_null_keeping_mutability(),
         }
