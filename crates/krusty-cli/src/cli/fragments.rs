@@ -829,6 +829,13 @@ mod tests {
         }
     }
 
+    /// A library the sources of `hidden_from` cannot see, because their fragment does not refine
+    /// the library's.
+    fn hidden(mut library: FragmentLibrary, hidden_from: &[&str]) -> FragmentLibrary {
+        library.hidden_from = strings(hidden_from);
+        library
+    }
+
     fn libraries(arguments: &FragmentArguments) -> Vec<FragmentLibrary> {
         let check = check(arguments, &strings(&["C.kt", "M.kt", "P.kt"]));
         assert_eq!(check.configuration_errors, Vec::<String>::new());
@@ -848,8 +855,8 @@ mod tests {
             vec![
                 library("common", "c.klib", false),
                 library("common", "friend", true),
-                library("middle", "m.klib", false),
-                library("middle", "mf", true),
+                hidden(library("middle", "m.klib", false), &["common"]),
+                hidden(library("middle", "mf", true), &["common"]),
             ]
         );
     }
@@ -871,7 +878,7 @@ mod tests {
             )),
             vec![
                 library("common", "a.klib", false),
-                library("middle", "b.klib", false),
+                hidden(library("middle", "b.klib", false), &["common"]),
             ]
         );
     }
