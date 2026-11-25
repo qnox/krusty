@@ -246,6 +246,11 @@ pub(super) fn apply(
         parsed.manual_feature_values.extend(list.iter().cloned());
         return;
     }
+    // `-Xmulti-platform` enables a language feature, which is read with the others; separate
+    // compilation also needs to know it was written.
+    if name == "-Xmulti-platform" {
+        parsed.fragments.multi_platform = flag;
+    }
     if spec.changes_language_features() {
         return;
     }
@@ -268,6 +273,15 @@ pub(super) fn apply(
             .fragments
             .fragment_refines
             .extend(list.iter().cloned()),
+        "-Xfragment-dependency" => parsed
+            .fragments
+            .fragment_dependencies
+            .extend(list.iter().cloned()),
+        "-Xfragment-friend-dependency" => parsed
+            .fragments
+            .fragment_friend_dependencies
+            .extend(list.iter().cloned()),
+        "-Xseparate-kmp-compilation" => parsed.fragments.separate_compilation = flag,
         "-language-version" => parsed.language_version = Some(text.to_string()),
         "-api-version" => parsed.api_version = Some(text.to_string()),
         "-progressive" => parsed.progressive = flag,

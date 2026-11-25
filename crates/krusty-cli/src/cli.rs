@@ -20,6 +20,7 @@ use krusty_jvm::JvmBackend;
 use crate::kotlinc_arguments::{self, Catalog, Disposition, Lifecycle, Origin, ValueKind};
 
 mod arguments;
+mod fragment_libraries;
 mod fragments;
 mod language_features;
 mod source_roots;
@@ -113,6 +114,9 @@ pub struct Options {
     /// kotlinc's configuration errors (a feature that cannot be disabled), in its words. They are
     /// reported before the configuration warnings and fail the invocation.
     pub configuration_errors: Vec<String>,
+    /// kotlinc's `info:` lines about the libraries a common fragment is compiled against, in its
+    /// words.
+    pub fragment_library_notes: Vec<String>,
     /// Named CLI warnings and their configured severity. These are evaluated before compilation;
     /// an `error` level fails the invocation and `disabled` removes the diagnostic entirely.
     pub warning_policy: WarningPolicy,
@@ -231,6 +235,7 @@ impl Default for Options {
             unknown_extra_flags: Vec::new(),
             language_feature_problems: Vec::new(),
             configuration_errors: Vec::new(),
+            fragment_library_notes: Vec::new(),
             warning_policy: WarningPolicy::default(),
             diagnostic_names: krusty::diag::DiagnosticNames::Hidden,
             warnings: Vec::new(),
@@ -449,6 +454,19 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
     }
     opts.configuration_errors
         .extend(fragments.configuration_errors);
+    let libraries = fragment_libraries::load(&fragments.libraries, reference_version);
+    for library in libraries.classpath {
+        if !opts.classpath.contains(&library) {
+            opts.classpath.push(library.clone());
+        }
+        if libraries.friends.contains(&library) && !opts.friend_paths.contains(&library) {
+            opts.friend_paths.push(library);
+        }
+    }
+    opts.fragment_library_notes = libraries.notes;
+    for refusal in libraries.refusals {
+        opts.refuse(refusal);
+    }
     opts.plugins.finish();
     opts.errors.append(&mut opts.plugins.errors);
     let lifecycle = kotlinc_arguments::lifecycle_warnings(&tokenized, reference_version)

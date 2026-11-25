@@ -128,7 +128,6 @@ globalWarningSuppression_correct.args
 globalWarningSuppression_incorrect.args
 headerMode.args
 help.args
-hmpp/commaInFragmentDependency.args
 hmpp/scriptInCommonFragment.args
 hmpp/successfulCompilation.args
 hmpp/successfulCompilation2.args

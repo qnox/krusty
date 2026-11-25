@@ -4,6 +4,12 @@
 //! other fragment into the leaf's compilation as common sources, which is the leaf's own output.
 //! Each source keeps its fragment, so a common source still sees only the fragments it refines.
 //! kotlinc's checks of the structure are reproduced in its words.
+//!
+//! `-Xfragment-dependency` and `-Xfragment-friend-dependency` (with `-Xseparate-kmp-compilation`)
+//! name the libraries a fragment is compiled against. Only a common fragment's libraries are read:
+//! the leaf is compiled against the command line's classpath. A library that a fragment's session
+//! cannot load as a KLIB is kotlinc's JVM classpath for that fragment; krusty has one classpath for
+//! the folded compilation, so such a library joins it.
 
 use krusty::source::SourceFragment;
 
@@ -13,6 +19,14 @@ pub(super) struct FragmentArguments {
     pub(super) fragments: Vec<String>,
     pub(super) fragment_sources: Vec<String>,
     pub(super) fragment_refines: Vec<String>,
+    /// `-Xfragment-dependency=<fragment>:<path>` values.
+    pub(super) fragment_dependencies: Vec<String>,
+    /// `-Xfragment-friend-dependency=<fragment>:<path>` values.
+    pub(super) fragment_friend_dependencies: Vec<String>,
+    /// `-Xseparate-kmp-compilation`.
+    pub(super) separate_compilation: bool,
+    /// `-Xmulti-platform`, which with separate compilation selects one session per fragment.
+    pub(super) multi_platform: bool,
 }
 
 /// What the fragment arguments say about `free` (the free arguments as written).
@@ -27,6 +41,21 @@ pub(super) struct FragmentCheck {
     /// Each free argument a fragment lists, with that fragment. A fragment other than the leaf
     /// lists common sources.
     pub(super) sources: Vec<FragmentSource>,
+    /// The libraries kotlinc loads for the common fragments, in its loading order.
+    pub(super) libraries: Vec<FragmentLibrary>,
+}
+
+/// A library a common fragment is compiled against.
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct FragmentLibrary {
+    pub(super) fragment: String,
+    /// The path as written on the command line.
+    pub(super) path: String,
+    /// Named by `-Xfragment-friend-dependency`: its `internal` declarations are visible.
+    pub(super) friend: bool,
+    /// The fragments that list sources but do not refine `fragment`: kotlinc keeps the library
+    /// out of their sessions.
+    pub(super) hidden_from: Vec<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -106,6 +135,32 @@ pub(super) fn check(arguments: &FragmentArguments, free: &[String]) -> FragmentC
             ));
         }
     }
+    // kotlinc keeps checking after a cycle, so these follow it.
+    for (flag, values) in [
+        ("-Xfragment-dependency", &arguments.fragment_dependencies),
+        (
+            "-Xfragment-friend-dependency",
+            &arguments.fragment_friend_dependencies,
+        ),
+    ] {
+        if !values.is_empty() && !arguments.separate_compilation {
+            errors.push(format!(
+                "{flag} flag could be used only with -Xseparate-kmp-compilation"
+            ));
+        }
+    }
+    let dependencies = fragment_dependencies(
+        &fragments,
+        "-Xfragment-dependency",
+        &arguments.fragment_dependencies,
+        &mut errors,
+    );
+    let friend_dependencies = fragment_dependencies(
+        &fragments,
+        "-Xfragment-friend-dependency",
+        &arguments.fragment_friend_dependencies,
+        &mut errors,
+    );
     if !errors.0.is_empty() {
         return errors.into_check();
     }
@@ -162,10 +217,109 @@ pub(super) fn check(arguments: &FragmentArguments, free: &[String]) -> FragmentC
             })
         })
         .collect();
+    // One session per fragment, each loading its own libraries, needs both flags.
+    let libraries = if arguments.separate_compilation && arguments.multi_platform {
+        common
+            .iter()
+            .flat_map(|fragment| {
+                let hidden_from = order
+                    .iter()
+                    .filter(|other| {
+                        *other != fragment
+                            && !refined_closure(&refines, other).contains(fragment)
+                            && listed.iter().any(|(_, owner)| owner == *other)
+                    })
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                fragment_libraries(
+                    fragment,
+                    &dependencies,
+                    &friend_dependencies,
+                    &refined(&refines, fragment).collect::<Vec<_>>(),
+                )
+                .into_iter()
+                .map(move |library| FragmentLibrary {
+                    hidden_from: hidden_from.clone(),
+                    ..library
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     FragmentCheck {
         sources,
+        libraries,
         ..FragmentCheck::default()
     }
+}
+
+/// The `<fragment>:<path>` values of `flag`, in command-line order, between declared fragments.
+/// kotlinc reports a value that is not two parts and a fragment that is not declared, then drops
+/// that value.
+fn fragment_dependencies<'a>(
+    fragments: &[&str],
+    flag: &str,
+    values: &'a [String],
+    errors: &mut Errors,
+) -> Vec<(&'a str, &'a str)> {
+    let mut dependencies = Vec::new();
+    for value in values {
+        let Some((fragment, path)) = value.split_once(':') else {
+            errors.push(format!(
+                "incorrect syntax for {flag} argument. Expected <moduleName>:<path> but got \
+                 `{value}`"
+            ));
+            continue;
+        };
+        if !fragments.contains(&fragment) {
+            errors.push(format!(
+                "module `{fragment}` not found in -Xfragments arguments"
+            ));
+            continue;
+        }
+        dependencies.push((fragment, path));
+    }
+    dependencies
+}
+
+/// The libraries kotlinc loads for the common `fragment`: its own dependencies, except the ones a
+/// fragment it directly refines already lists, then its friend dependencies.
+fn fragment_libraries<'a>(
+    fragment: &str,
+    dependencies: &[(&'a str, &'a str)],
+    friend_dependencies: &[(&'a str, &'a str)],
+    parents: &[&str],
+) -> Vec<FragmentLibrary> {
+    let listed = |of: &str, list: &[(&'a str, &'a str)]| -> Vec<&'a str> {
+        let mut paths: Vec<&str> = Vec::new();
+        for (owner, path) in list {
+            if *owner == of && !paths.contains(path) {
+                paths.push(path);
+            }
+        }
+        paths
+    };
+    let inherited: Vec<&str> = parents
+        .iter()
+        .flat_map(|parent| listed(parent, dependencies))
+        .collect();
+    let library = |path: &str, friend: bool| FragmentLibrary {
+        fragment: fragment.to_string(),
+        path: path.to_string(),
+        friend,
+        hidden_from: Vec::new(),
+    };
+    listed(fragment, dependencies)
+        .into_iter()
+        .filter(|path| !inherited.contains(path))
+        .map(|path| library(path, false))
+        .chain(
+            listed(fragment, friend_dependencies)
+                .into_iter()
+                .map(|path| library(path, true)),
+        )
+        .collect()
 }
 
 /// kotlinc's configuration errors; its message collector reports a repeated message once.
@@ -315,6 +469,7 @@ mod tests {
             fragments: strings(fragments),
             fragment_sources: strings(fragment_sources),
             fragment_refines: strings(fragment_refines),
+            ..FragmentArguments::default()
         };
         check(&arguments, &strings(free))
     }
@@ -366,8 +521,7 @@ mod tests {
                     "source 'B.kt' does not belong to any module",
                     "source 'd' does not belong to any module",
                 ]),
-                unsupported: None,
-                sources: Vec::new(),
+                ..FragmentCheck::default()
             }
         );
     }
@@ -400,8 +554,7 @@ mod tests {
                      file>` expected but got ``",
                     "source 'A.kt' does not belong to any module",
                 ]),
-                unsupported: None,
-                sources: Vec::new(),
+                ..FragmentCheck::default()
             }
         );
     }
@@ -433,7 +586,7 @@ mod tests {
                      `jvm`"
                         .to_string()
                 ),
-                sources: Vec::new(),
+                ..FragmentCheck::default()
             }
         );
     }
@@ -628,8 +781,7 @@ mod tests {
                     "source 'a.kt' does not belong to any module",
                     "source 'b.kt' does not belong to any module",
                 ]),
-                unsupported: None,
-                sources: Vec::new(),
+                ..FragmentCheck::default()
             }
         );
         assert_eq!(
@@ -651,9 +803,128 @@ mod tests {
                     "file 'a.kt' can be a part of only one module, but is listed as a source for \
                      both `a` and `b`, please check you -Xfragment-sources options."
                 ]),
-                unsupported: None,
-                sources: Vec::new(),
+                ..FragmentCheck::default()
             }
+        );
+    }
+
+    fn separate(dependencies: &[&str], friends: &[&str], separate: bool) -> FragmentArguments {
+        FragmentArguments {
+            fragments: strings(&["common", "middle", "platform"]),
+            fragment_sources: strings(&["common:C.kt", "middle:M.kt", "platform:P.kt"]),
+            fragment_refines: strings(&["platform:middle", "middle:common"]),
+            fragment_dependencies: strings(dependencies),
+            fragment_friend_dependencies: strings(friends),
+            separate_compilation: separate,
+            multi_platform: true,
+        }
+    }
+
+    fn library(fragment: &str, path: &str, friend: bool) -> FragmentLibrary {
+        FragmentLibrary {
+            fragment: fragment.to_string(),
+            path: path.to_string(),
+            friend,
+            hidden_from: Vec::new(),
+        }
+    }
+
+    /// A library the sources of `hidden_from` cannot see, because their fragment does not refine
+    /// the library's.
+    fn hidden(mut library: FragmentLibrary, hidden_from: &[&str]) -> FragmentLibrary {
+        library.hidden_from = strings(hidden_from);
+        library
+    }
+
+    fn libraries(arguments: &FragmentArguments) -> Vec<FragmentLibrary> {
+        let check = check(arguments, &strings(&["C.kt", "M.kt", "P.kt"]));
+        assert_eq!(check.configuration_errors, Vec::<String>::new());
+        check.libraries
+    }
+
+    /// Each common fragment loads its dependencies, then its friend dependencies, in the
+    /// refinement order; the leaf's own are not loaded.
+    #[test]
+    fn a_common_fragment_loads_its_dependencies_then_its_friends() {
+        assert_eq!(
+            libraries(&separate(
+                &["platform:p.jar", "middle:m.klib", "common:c.klib"],
+                &["common:friend", "middle:mf"],
+                true
+            )),
+            vec![
+                library("common", "c.klib", false),
+                library("common", "friend", true),
+                hidden(library("middle", "m.klib", false), &["common"]),
+                hidden(library("middle", "mf", true), &["common"]),
+            ]
+        );
+    }
+
+    /// A dependency a directly refined fragment already lists is not loaded again, and a repeat
+    /// within one fragment is one library.
+    #[test]
+    fn a_dependency_a_refined_fragment_lists_loads_once() {
+        assert_eq!(
+            libraries(&separate(
+                &[
+                    "common:a.klib",
+                    "common:a.klib",
+                    "middle:a.klib",
+                    "middle:b.klib"
+                ],
+                &[],
+                true
+            )),
+            vec![
+                library("common", "a.klib", false),
+                hidden(library("middle", "b.klib", false), &["common"]),
+            ]
+        );
+    }
+
+    /// One session per fragment needs both `-Xseparate-kmp-compilation` and `-Xmulti-platform`.
+    #[test]
+    fn fragment_libraries_load_only_with_one_session_per_fragment() {
+        let mut arguments = separate(&["common:a.klib"], &[], true);
+        arguments.multi_platform = false;
+        assert_eq!(libraries(&arguments), Vec::new());
+    }
+
+    #[test]
+    fn dependency_flags_need_separate_compilation() {
+        assert_eq!(
+            check(
+                &separate(&["common:a.klib"], &["middle:b"], false),
+                &strings(&["C.kt", "M.kt", "P.kt"])
+            ),
+            errors(&[
+                "-Xfragment-dependency flag could be used only with -Xseparate-kmp-compilation",
+                "-Xfragment-friend-dependency flag could be used only with \
+                 -Xseparate-kmp-compilation",
+            ])
+        );
+    }
+
+    /// kotlinc's messages for a dependency that is not `<fragment>:<path>` or names no fragment;
+    /// only the first `:` splits, so a path may contain more.
+    #[test]
+    fn malformed_dependencies_are_kotlincs_configuration_errors() {
+        assert_eq!(
+            check(
+                &separate(
+                    &["no-colon", "missing:a.klib", "common:C\\:/a.klib"],
+                    &["other:b"],
+                    true
+                ),
+                &strings(&["C.kt", "M.kt", "P.kt"])
+            ),
+            errors(&[
+                "incorrect syntax for -Xfragment-dependency argument. Expected \
+                 <moduleName>:<path> but got `no-colon`",
+                "module `missing` not found in -Xfragments arguments",
+                "module `other` not found in -Xfragments arguments",
+            ])
         );
     }
 }
