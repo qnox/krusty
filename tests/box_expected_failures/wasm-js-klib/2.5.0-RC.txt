@@ -164,7 +164,6 @@ callableReference/adaptedReferences/extensionPropertyToFun.kt
 callableReference/adaptedReferences/inlineDefault.kt
 callableReference/adaptedReferences/inlineVararg.kt
 callableReference/adaptedReferences/innerConstructorWithVararg.kt
-callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
 callableReference/adaptedReferences/suspendConversion/extensionTypeProperty.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithContextParameterAsAPropertyType.kt
@@ -279,7 +278,6 @@ contextParameters/callableReferences/contextual/delegation/varProperty.kt
 contextParameters/callableReferences/contextual/fakeOverride.kt
 contextParameters/callableReferences/contextual/funInterfaceEquality.kt
 contextParameters/callableReferences/contextual/generic.kt
-contextParameters/callableReferences/contextual/localFunction.kt
 contextParameters/callableReferences/contextual/propertyEquality.kt
 contextParameters/callableReferences/contextual/shapes.kt
 contextParameters/callableReferences/contextual/simple.kt

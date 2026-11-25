@@ -62,6 +62,7 @@ mod constructors;
 mod default_arguments;
 mod enum_switch_whens;
 pub use enum_switch_whens::EnumSwitchWhen;
+mod declared_hierarchy;
 mod emitted_body_roots;
 mod plugin_file_facts;
 pub use plugin_file_facts::PluginFileFacts;
