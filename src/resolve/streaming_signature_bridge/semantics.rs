@@ -1,6 +1,7 @@
 //! Resolver-backed evaluation of compact signature expressions.
 
 use super::super::callable_reference_selection as reference_selection;
+use super::super::reference_context_arguments::bound_reference_contexts;
 use super::callable_references::AppliedSourceAlias;
 use super::classifier_associated::ClassifierCallee;
 use super::constructor_results::selected_sam_constructor_result;
@@ -2345,7 +2346,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         // property candidates as an ordinary value read. Its reflective result type depends on the
         // property's semantic type, so demand an inferred source property before constructing
         // `KProperty0<T>`/`KMutableProperty0<T>`.
-        if let Ok(property) = self.with_resolver(scope, |resolver| {
+        let facets = self.with_resolver(scope, |resolver| {
             let crate::symbol_resolver::Symbol::Member(facets) = resolver.resolve_symbol(
                 crate::symbol_resolver::SymRecv::TopLevel,
                 spelling,
@@ -2355,19 +2356,17 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             else {
                 return None;
             };
-            let properties = facets
-                .values
-                .into_iter()
-                .filter(|property| {
-                    property.kind == crate::libraries::PropKind::TopLevel
-                        && property.context_count == 0
-                })
-                .collect::<Vec<_>>();
-            match properties.as_slice() {
-                [property] => Some(property.clone()),
-                [] | [_, _, ..] => None,
-            }
-        }) {
+            Some(facets)
+        });
+        let binds_contexts = self.headers.scopes.binds_reference_contexts(scope.source);
+        let properties = facets
+            .iter()
+            .flat_map(|facets| &facets.values)
+            .filter(|property| {
+                property.kind == crate::libraries::PropKind::TopLevel
+                    && (property.context_count == 0 || binds_contexts)
+            });
+        if let [property] = properties.collect::<Vec<_>>().as_slice() {
             let result = match self.demanded_source_signature(
                 Some(scope),
                 property.stable_declaration,
@@ -2377,28 +2376,19 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 None => property.ty,
             };
             let ty = self
-                .top_level_property_reference_type(scope, &property, result)
+                .top_level_property_reference_type(scope, property, result)
                 .ok_or_else(Self::failure)?;
             return crate::fir::ResolvedTy::new(ty).map_err(|_| Self::failure());
         }
-        let selected = self.with_resolver(scope, |resolver| {
-            let crate::symbol_resolver::Symbol::Member(facets) = resolver.resolve_symbol(
-                crate::symbol_resolver::SymRecv::TopLevel,
-                spelling,
-                &[],
-                &[],
-            )?
-            else {
-                return None;
-            };
+        let selected = facets.and_then(|facets| {
             let candidates = facets
                 .overloads
                 .into_iter()
                 .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
                 .collect::<Vec<_>>();
             match candidates.as_slice() {
-                [selected] => Some(selected.clone()),
-                [] | [_, _, ..] => None,
+                [selected] => Ok(selected.clone()),
+                [] | [_, _, ..] => Err(Self::failure()),
             }
         });
         let selected = match selected {
@@ -2478,10 +2468,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     (parameters, selected.callable.ret)
                 }
             };
+        let contexts =
+            bound_reference_contexts(binds_contexts, selected.context_count).min(parameters.len());
         crate::fir::ResolvedTy::new(Ty::fun_with_shape(
-            parameters,
+            parameters[contexts..].to_vec(),
             result,
-            selected.context_count,
+            selected.context_count - contexts,
             selected.is_extension(),
             selected.callable.suspend,
         ))

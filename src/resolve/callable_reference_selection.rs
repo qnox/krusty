@@ -305,6 +305,10 @@ pub(super) struct ReferenceExpectation<'a> {
     pub(super) params: Option<&'a [Ty]>,
     pub(super) ret: Option<Ty>,
     pub(super) bound_contexts: usize,
+    /// The types of the values the reference site supplies for those `bound_contexts`, when it has
+    /// selected them. A type variable that only a context parameter mentions is inferred from them,
+    /// as it is for a call.
+    pub(super) context_arguments: Option<&'a [Ty]>,
     /// Which of `params` the enclosing call declares as one of its own type variables.
     pub(super) type_variable_inputs: TypeVariableInputs,
     /// The reproduced kotlinc profile of the compilation the reference is checked in.
@@ -423,13 +427,31 @@ pub(super) fn specialize_generic_signature(
         params: expected_params,
         ret: expected_ret,
         bound_contexts,
+        context_arguments,
         type_variable_inputs,
         quirks,
     } = expectation;
     let mut bindings = crate::symbol_resolver::GSigBinds::default();
-    if let (Some(declared), Some(actual)) = (generic.receiver, extension_receiver) {
+    // The extension receiver and the values selected for bound context parameters are inputs the
+    // reference site supplies itself; each pair is evidence for the type variables it mentions.
+    let receiver_input = generic.receiver.zip(extension_receiver);
+    let context_inputs = context_arguments.map(|actuals| {
+        generic
+            .params
+            .iter()
+            .take(bound_contexts)
+            .copied()
+            .zip(actuals.iter().copied())
+    });
+    let site_inputs: Vec<(Ty, Ty)> = receiver_input
+        .into_iter()
+        .chain(context_inputs.into_iter().flatten())
+        .collect();
+    if !site_inputs.is_empty() {
         let mut inferred = crate::symbol_resolver::GSigBinds::default();
-        crate::symbol_resolver::unify_ty_from_symbols(source, declared, actual, &mut inferred);
+        for (declared, actual) in site_inputs {
+            crate::symbol_resolver::unify_ty_from_symbols(source, declared, actual, &mut inferred);
+        }
         crate::symbol_resolver::merge_generic_bindings(generic, 0, &mut bindings, inferred);
     }
     if let Some(expected) = expected_params {
@@ -599,6 +621,7 @@ pub(super) fn specialize_candidate(
             params: expected_params,
             ret: expected_ret,
             bound_contexts,
+            context_arguments: None,
             type_variable_inputs: TypeVariableInputs::NONE,
             quirks: reference.quirks,
         },
@@ -995,6 +1018,7 @@ fn select_adapted_bound_instance_candidate(
                     params: Some(&expected.params),
                     ret: Some(expected.ret),
                     bound_contexts,
+                    context_arguments: None,
                     type_variable_inputs,
                     quirks,
                 },

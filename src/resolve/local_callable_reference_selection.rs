@@ -74,6 +74,7 @@ impl Checker<'_> {
                 params: Some(expected_params),
                 ret: Some(expected_ret),
                 bound_contexts,
+                context_arguments: None,
                 type_variable_inputs: self.active_reference_type_variable_inputs(),
                 quirks: self.file.reference.quirks(),
             },
