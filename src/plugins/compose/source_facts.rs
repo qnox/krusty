@@ -126,6 +126,9 @@ pub(super) enum Memoization {
     /// It captures values: `rememberComposableLambda` keeps it in the composition of `caller`,
     /// whose group creates it, and updates the block it calls.
     Remembered { caller: FunId },
+    /// It captures values in a function that is not composable, which has no composition to keep
+    /// it in: `composableLambdaInstance` wraps it where `caller` passes it.
+    Instance { caller: FunId },
 }
 
 /// One value parameter of a restartable function.
@@ -595,6 +598,7 @@ refusal: true,
             signature: &signature,
             package: &package,
             file_name: source.file_name,
+            within: None,
         };
         scope.register_lambdas(
             ir,
@@ -604,6 +608,7 @@ refusal: true,
                 caller: declaration.function,
                 direct: &passing,
                 arguments: &lambda_arguments,
+                composable: true,
             },
             &mut direct_calls,
             rejections,
@@ -759,24 +764,8 @@ refusal: true,
             signature: &signature,
             package: &package,
             file_name: source.file_name,
+            within: None,
         };
-        // Only a lambda that captures nothing needs no composition to remember it in.
-        let (captures, singletons): (Vec<_>, Vec<_>) = lambda_arguments
-            .into_iter()
-            .partition(|argument| argument.captures);
-        rejections.extend(captures.iter().map(|argument| {
-            PluginRejection {
-            refusal: true,
-            span: source
-                .expression_span(ir, argument.lambda)
-                .unwrap_or(crate::diag::Span::new(0, 0)),
-            message: unsupported(
-                "a composable lambda that captures a value, passed from a function that is not \
-                 composable",
-            ),
-        }
-        }));
-        include_lambda_calls(ir, &captures, &calls, &mut direct_calls);
         scope.register_lambdas(
             ir,
             LambdaOwner {
@@ -784,7 +773,8 @@ refusal: true,
                 qualified: &qualified,
                 caller: declaration.function,
                 direct: &direct,
-                arguments: &singletons,
+                arguments: &lambda_arguments,
+                composable: false,
             },
             &mut direct_calls,
             rejections,
@@ -931,7 +921,9 @@ refusal: true,
     }
     match ComposeRuntime::bind(runtime) {
         Ok(runtime) => {
-            composable_lambdas.sort_by_key(|lambda| lambda.offsets);
+            // kotlinc memoizes a lambda once its body is transformed, so one nested in another
+            // comes first: by where each ends.
+            composable_lambdas.sort_by_key(|lambda| (lambda.offsets.1, lambda.offsets.0));
             ir.compose = Some(Box::new(ComposeFileFacts {
                 functions,
                 lambda_takers,
@@ -1166,8 +1158,8 @@ fn unsupported_plain_body(
 
 /// An expression in a composable body the transform does not handle yet: an early `return`, which
 /// must end the group first, a lambda other than the composable `passed` to its calls, whose
-/// lifted name the group's own lambda would share, or one of those that holds another lambda or
-/// captures anything but a value parameter. `lambdas` says which of the body's parameters are
+/// lifted name the group's own lambda would share, or one of those that captures anything but a
+/// value parameter. `lambdas` says which of the body's parameters are
 /// composable `() -> Unit` values, which a lambda calling them would have to pass its composer.
 fn unsupported_body_expression(
     ir: &IrFile,
@@ -1179,9 +1171,9 @@ fn unsupported_body_expression(
     while let Some(expression) = pending.pop() {
         match &ir.exprs[expression as usize] {
             IrExpr::Return(_) => return Some("a `return` in a composable function"),
-            IrExpr::Lambda {
-                captures, impl_fn, ..
-            } if passed.iter().any(|argument| argument.lambda == expression) => {
+            IrExpr::Lambda { captures, .. }
+                if passed.iter().any(|argument| argument.lambda == expression) =>
+            {
                 for &capture in captures {
                     match ir.exprs[capture as usize] {
                         IrExpr::GetValue(index)
@@ -1194,9 +1186,6 @@ fn unsupported_body_expression(
                         IrExpr::GetValue(_) => {}
                         _ => return Some("a composable lambda that captures anything but a value"),
                     }
-                }
-                if holds_lambda(ir, *impl_fn) {
-                    return Some("a lambda in a composable lambda");
                 }
             }
             IrExpr::Lambda { .. } => return Some("a lambda in a composable function"),
@@ -1253,21 +1242,6 @@ fn unplaced_lambdas(
     }
     spans.sort_by_key(|(_, span)| (span.lo, span.hi));
     spans
-}
-
-/// Whether the body of `function` writes a lambda.
-fn holds_lambda(ir: &IrFile, function: FunId) -> bool {
-    let mut pending = ir.functions[function as usize]
-        .body
-        .into_iter()
-        .collect::<Vec<_>>();
-    while let Some(expression) = pending.pop() {
-        if matches!(ir.exprs[expression as usize], IrExpr::Lambda { .. }) {
-            return true;
-        }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-    }
-    false
 }
 
 /// Count the composable calls in the bodies of `arguments`' lambdas and the lambdas in them, both
@@ -1690,6 +1664,11 @@ struct LambdaIdentity<'a> {
     key: i32,
     memoization: Memoization,
     qualified_caller: &'a str,
+    /// The path of the scope that passes the lambda, its callee and the number of that callee's
+    /// calls before the lambda's, which key what the lambda's body passes in turn.
+    path: &'a KeyPath<'a>,
+    callee: Option<&'a str>,
+    sibling: u32,
 }
 
 /// How kotlinc's durable keys and traces name a package function: its source name, that name
@@ -1755,6 +1734,8 @@ struct LambdaOwner<'a> {
     direct: &'a [ExprId],
     /// The lambdas those calls pass to composable lambda parameters.
     arguments: &'a [LambdaArgument],
+    /// Whether the body is composable, which gives a capturing lambda a composition to be kept in.
+    composable: bool,
 }
 
 struct BodyScope<'a> {
@@ -1796,12 +1777,14 @@ impl BodyScope<'_> {
                 sibling,
                 argument.parameter,
             );
-            let memoization = if argument.captures {
-                Memoization::Remembered {
+            let memoization = match (argument.captures, owner.composable) {
+                (false, _) => Memoization::Singleton,
+                (true, true) => Memoization::Remembered {
                     caller: owner.caller,
-                }
-            } else {
-                Memoization::Singleton
+                },
+                (true, false) => Memoization::Instance {
+                    caller: owner.caller,
+                },
             };
             if let Some(lambda) = self.composable_lambda(
                 ir,
@@ -1810,9 +1793,13 @@ impl BodyScope<'_> {
                     key,
                     memoization,
                     qualified_caller: owner.qualified,
+                    path: owner.path,
+                    callee,
+                    sibling,
                 },
                 direct_calls,
                 rejections,
+                lambdas,
             ) {
                 lambdas.push(lambda);
             }
@@ -2015,11 +2002,13 @@ impl BodyScope<'_> {
         identity: LambdaIdentity<'_>,
         direct_calls: &mut crate::fx_hash::HashSet<ExprId>,
         rejections: &mut Vec<PluginRejection>,
+        lambdas: &mut Vec<ComposableLambda>,
     ) -> Option<ComposableLambda> {
         let LambdaIdentity {
             key,
             memoization,
             qualified_caller,
+            ..
         } = identity;
         let IrExpr::Lambda { captures, .. } = &ir.exprs[argument.lambda as usize] else {
             unreachable!("a lambda argument is a lambda");
@@ -2028,9 +2017,10 @@ impl BodyScope<'_> {
             .iter()
             .map(
                 |&capture| match (&ir.exprs[capture as usize], memoization) {
-                    (&IrExpr::GetValue(index), Memoization::Remembered { caller }) => {
-                        index as usize >= ir.functions[caller as usize].params.len()
-                    }
+                    (
+                        &IrExpr::GetValue(index),
+                        Memoization::Remembered { caller } | Memoization::Instance { caller },
+                    ) => index as usize >= ir.functions[caller as usize].params.len(),
                     _ => false,
                 },
             )
@@ -2040,7 +2030,7 @@ impl BodyScope<'_> {
             .source
             .expression_span(ir, argument.lambda)
             .unwrap_or(crate::diag::Span::new(0, 0));
-        let mut reject = |what: &str| {
+        let reject = |rejections: &mut Vec<PluginRejection>, what: &str| {
             rejections.push(PluginRejection {
                 refusal: true,
                 span,
@@ -2062,7 +2052,7 @@ impl BodyScope<'_> {
             }
         }
         let Some(body) = lambda_body(ir, argument.implementation) else {
-            reject("a composable lambda whose body is not a block");
+            reject(rejections, "a composable lambda whose body is not a block");
             return None;
         };
         let direct = body
@@ -2073,20 +2063,66 @@ impl BodyScope<'_> {
             .filter(|call| self.calls.contains_key(call))
             .collect::<Vec<_>>();
         direct_calls.extend(direct.iter().copied());
-        if let Some(what) = unsupported_body_expression(ir, body.block, &[], &[]) {
-            reject(what);
+        // Composable lambdas the body passes are keyed under this lambda's path, and a capturing
+        // one is remembered in the composition this lambda's group opens.
+        let nested = lambda_arguments(ir, self.source, &direct, self.composable);
+        if let Some(what) = unsupported_body_expression(ir, body.block, &nested, &[]) {
+            reject(rejections, what);
             return None;
         }
+        // A singleton is moved to the singletons class, while a lambda it remembers stays numbered
+        // in the function that writes both.
+        if memoization == Memoization::Singleton && nested.iter().any(|inner| inner.captures) {
+            reject(
+                rejections,
+                "a composable lambda that captures nothing passing a capturing composable lambda",
+            );
+            include_lambda_calls(ir, &nested, self.calls, direct_calls);
+            return None;
+        }
+        let path = identity.path.lambda_path(
+            &argument.signature,
+            identity.callee.unwrap_or_default(),
+            identity.sibling,
+            argument.parameter,
+        );
+        let inner_owner = match memoization {
+            Memoization::Singleton => format!("{}.lambda${key}", self.singletons),
+            Memoization::Remembered { .. } | Memoization::Instance { .. } => {
+                qualified_caller.to_string()
+            }
+        };
+        let qualified = format!("{inner_owner}.<anonymous>");
+        let within = KeyPath {
+            signature: "",
+            package: "",
+            file_name: "",
+            within: Some(&path),
+        };
+        self.register_lambdas(
+            ir,
+            LambdaOwner {
+                path: &within,
+                qualified: &qualified,
+                caller: argument.implementation,
+                direct: &direct,
+                arguments: &nested,
+                composable: true,
+            },
+            direct_calls,
+            rejections,
+            lambdas,
+        );
         let Some(first) = body
             .statements
             .first()
             .and_then(|&statement| self.source.expression_span(ir, statement))
         else {
-            reject("an empty composable lambda");
+            reject(rejections, "an empty composable lambda");
             return None;
         };
         if span.hi == 0 {
-            reject("a composable lambda without a source position");
+            reject(rejections, "a composable lambda without a source position");
             return None;
         }
         let mut calls = Vec::with_capacity(direct.len());
@@ -2102,6 +2138,14 @@ impl BodyScope<'_> {
                 span,
                 rejections,
             ) {
+                // A remembered lambda's group comes before the call it is passed to.
+                locations.extend(
+                    nested
+                        .iter()
+                        .filter(|inner| inner.call == call && inner.captures)
+                        .filter_map(|inner| self.source.expression_span(ir, inner.lambda))
+                        .map(|lambda| call_location(self.positions, lambda)),
+                );
                 calls.push(site);
                 locations.push(location);
             }
@@ -2142,7 +2186,9 @@ impl BodyScope<'_> {
         // kotlinc names a singleton after its property, and a remembered lambda after its caller.
         let owner = match memoization {
             Memoization::Singleton => format!("{}.lambda${key}", self.singletons),
-            Memoization::Remembered { .. } => qualified_caller.to_string(),
+            Memoization::Remembered { .. } | Memoization::Instance { .. } => {
+                qualified_caller.to_string()
+            }
         };
         Some(ComposableLambda {
             lambda: argument.lambda,

@@ -29,6 +29,8 @@
 //! - An enum's declared functions intern before its synthesized `values`/`valueOf`/`getEntries`,
 //!   and its fields, entry constants included, intern where a body first references them.
 //! - An enum's `$values` helper interns after its lifted local functions, which kotlinc visits first.
+//! - An enum's property accessors intern at their declarations: a getter's name does not precede
+//!   the setter of an earlier property.
 //! - A data class's declared functions intern before its synthesized `componentN`/`copy`/
 //!   `toString`/`hashCode`/`equals`, whose bodies and local-variable tables intern where they are
 //!   emitted.
@@ -459,5 +461,18 @@ fn an_enum_values_helper_interns_after_its_lifted_local_functions() {
          \x20   }\n\
          }\n",
         &["Phase"],
+    );
+}
+
+/// Each accessor of an enum's primary-constructor properties interns at its own declaration, so a
+/// getter follows the setter of the property before it.
+#[test]
+fn an_enum_s_property_accessors_intern_at_their_declarations() {
+    assert_identical(
+        "EnumAccessors",
+        "enum class Gear(var speed: Int, var torque: Int = 1, val ratio: Int = 1, var limit: Int = 2) {\n\
+         \x20   First(1)\n\
+         }\n",
+        &["Gear"],
     );
 }
