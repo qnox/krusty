@@ -61,7 +61,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -515,22 +515,46 @@ fn store_files(
         .or_default()
         .insert(key.to_string(), updated);
     slot.archive.insert_blob(blob, raw);
+    let now = Instant::now();
     let pending = PendingDump {
         module,
         key: key.to_string(),
         compiler,
         fingerprint,
         blob,
+        stored_at: now,
     };
     // Only the last publication of one exact version/fingerprint matters. Coalescing it keeps the
     // replay log bounded while retaining independent versions and fingerprints for the same key.
     slot.pending.retain(|record| !record.same_slot(&pending));
     slot.pending.push(pending);
+    let due = publication_due(&slot.pending, now);
+    drop(cache);
     ensure_flush_at_exit();
+    if due {
+        flush_archive(root);
+    }
+}
+
+/// How long a recording may stay unpublished. A deadline ends a corpus process with SIGTERM and
+/// then SIGKILL, so no exit hook runs: everything still in memory is lost, the CI cache saves the
+/// archive without it, and every later run pays the reference compiler again for the same cases.
+/// Publishing the backlog once it is this old bounds that loss without rewriting the archive on
+/// every store: a publication rereads and recompresses the whole archive, so a cold run that
+/// records continuously pays it at most once a minute, and a replaying run never does.
+const PUBLICATION_AGE: Duration = Duration::from_secs(60);
+
+fn publication_due(pending: &[PendingDump], now: Instant) -> bool {
+    pending
+        .iter()
+        .map(|record| record.stored_at)
+        .min()
+        .is_some_and(|oldest| now.saturating_duration_since(oldest) >= PUBLICATION_AGE)
 }
 
 /// One process-wide cache. The archive is decompressed once; later lookups copy one payload.
-/// Stores stay in memory until the process exits, which writes each pending archive once.
+/// Stores stay in memory until the process exits, which writes each pending archive once, or until
+/// the oldest of them is [`PUBLICATION_AGE`] old.
 fn dump_cache() -> &'static Mutex<HashMap<PathBuf, CacheSlot>> {
     static CACHE: std::sync::OnceLock<Mutex<HashMap<PathBuf, CacheSlot>>> =
         std::sync::OnceLock::new();
@@ -563,6 +587,8 @@ struct PendingDump {
     compiler: DumpVersion,
     fingerprint: u128,
     blob: u128,
+    /// When this process recorded it; the oldest unpublished record decides publication.
+    stored_at: Instant,
 }
 
 impl PendingDump {

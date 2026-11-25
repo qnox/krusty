@@ -25,4 +25,5 @@ contextParameters/callableReferences/contextual/shapes.kt
 contextParameters/callableReferences/contextual/simple.kt
 contextParameters/callableReferences/contextual/valueClassContextArg.kt
 contextParameters/contextualCallableReferenceReturnType.kt
+regressions/contextParameters/contextualReferenceNullableValueClassContext.kt
 suspendConversion/suspendConversionNullableNpe2.kt

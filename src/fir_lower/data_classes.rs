@@ -289,7 +289,7 @@ fn synthesize_components_and_copy(
         ir.functions[copy as usize].param_checks = fields
             .iter()
             .map(|field| {
-                (field.ty.is_reference() && !field.ty.is_nullable())
+                (field.ty.is_reference() && !field.ty.upper_bound_admits_null())
                     .then_some(crate::ir::IrParameterCheck::NonNull)
             })
             .collect();
