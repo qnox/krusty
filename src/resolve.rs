@@ -508,7 +508,7 @@ use postponed_diagnostics::PostponedDiagnostics;
 use property_read_selection::{PropertyReadAmbiguity, PropertyReadMemberSelection};
 use property_write_selection::PropertyWriteSelection;
 use qualifiers::*;
-use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
+use sam_constructors::select_sam_constructor;
 pub(crate) use serialization_generated_members::resolve as resolve_serialization_generated_member_statuses;
 use stable_path::StablePathRead;
 #[cfg(any(test, feature = "test-support"))]

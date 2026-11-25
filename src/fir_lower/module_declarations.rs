@@ -409,6 +409,19 @@ fn publish_property(
                 .declaration_annotations(property.declaration)
                 .to_vec()
                 .into_boxed_slice(),
+            property_annotations: index
+                .declaration_applied_annotations(property.declaration)
+                .iter()
+                .filter(|annotation| {
+                    annotation.written.as_ref().is_none_or(|written| {
+                        matches!(
+                            written.use_site,
+                            None | Some(crate::types::PropertyAnnotationSite::Property)
+                        )
+                    })
+                })
+                .map(|annotation| annotation.annotation)
+                .collect(),
             getter_annotations: accessor_annotations(
                 index,
                 property.declaration,
