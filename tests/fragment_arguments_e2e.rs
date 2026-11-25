@@ -798,3 +798,82 @@ fn an_ordinary_inherited_dependency_function_does_not_implement_a_suspend_expect
         true,
     );
 }
+
+const LIBRARY: &str = "package dep\nfun shared(): Int = 41\ninternal fun hidden(): Int = 1\n";
+
+fn dependency_library() -> PathBuf {
+    common::kotlinc_lib_out(&[("Dep.kt", LIBRARY)]).expect("the reference kotlinc is available")
+}
+
+fn text(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// A class directory a fragment names with `-Xfragment-dependency` is that fragment's JVM
+/// classpath from Kotlin 2.5 and ignored before it; krusty reproduces whichever the release does.
+#[test]
+fn a_fragment_dependency_on_the_common_fragment_compiles_as_kotlinc_does() {
+    // Before 2.5 kotlinc ignores the path, and its common session then has no standard library
+    // either; the corpus `hmpp` cases pin that behaviour.
+    if krusty::kotlin_version::target() < krusty::kotlin_version::KotlinVersion::V2_5_0_RC {
+        return;
+    }
+    let library = dependency_library();
+    let compiled = compile_sources(
+        "package p\nfun fromCommon(): Int = dep.shared()\n",
+        "package p\nfun fromJvm(): Int = dep.shared()\n",
+        |first, second| {
+            let mut arguments = common_and_jvm(first, second);
+            arguments.push(format!("-Xfragment-dependency=common:{}", text(&library)));
+            arguments.push("-Xseparate-kmp-compilation".to_string());
+            arguments
+        },
+    );
+    assert_eq!(compiled.krusty, compiled.kotlinc);
+}
+
+/// An `internal` declaration of the dependency is visible only when it is named as a friend.
+#[test]
+fn a_friend_dependency_shows_internal_declarations_as_kotlinc_does() {
+    let library = dependency_library();
+    for flag in ["-Xfragment-dependency", "-Xfragment-friend-dependency"] {
+        let compiled = compile_sources(
+            "package p\nfun fromCommon(): Int = dep.hidden()\n",
+            "package p\nfun fromJvm(): Int = 1\n",
+            |first, second| {
+                let mut arguments = common_and_jvm(first, second);
+                arguments.push(format!("{flag}=common:{}", text(&library)));
+                arguments.push("-Xseparate-kmp-compilation".to_string());
+                arguments
+            },
+        );
+        assert_eq!(compiled.krusty.0, compiled.kotlinc.0, "{flag}");
+        assert_eq!(compiled.krusty.2, compiled.kotlinc.2, "{flag}");
+    }
+}
+
+/// A dependency of the middle fragment is not visible to the common fragment it refines. krusty
+/// folds the fragments into one compilation, so it refuses rather than let `common` see it.
+#[test]
+fn a_dependency_hidden_from_a_source_fragment_is_rejected_by_both_compilers() {
+    let library = dependency_library();
+    let compiled = compile_sources(
+        "package p\nfun fromCommon(): Int = dep.shared()\n",
+        "package p\nfun fromJvm(): Int = dep.shared()\n",
+        |first, second| {
+            vec![
+                "-Xmulti-platform".to_string(),
+                "-Xseparate-kmp-compilation".to_string(),
+                "-Xfragments=common,middle,jvm".to_string(),
+                format!("-Xfragment-sources=common:{first}"),
+                format!("-Xfragment-sources=jvm:{second}"),
+                "-Xfragment-refines=middle:common".to_string(),
+                "-Xfragment-refines=jvm:middle".to_string(),
+                format!("-Xfragment-dependency=middle:{}", text(&library)),
+            ]
+        },
+    );
+    assert_eq!(compiled.kotlinc.0, 1, "kotlinc: {}", compiled.kotlinc.1);
+    assert_eq!(compiled.krusty.0, 1, "krusty: {}", compiled.krusty.1);
+    assert!(compiled.kotlinc.2.is_empty() && compiled.krusty.2.is_empty());
+}
