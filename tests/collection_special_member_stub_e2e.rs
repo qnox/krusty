@@ -609,3 +609,22 @@ fn an_ordinary_any_add_keeps_its_parameter_assertion() {
         "add does not return before the parameter assertion: {code:?}"
     );
 }
+
+#[test]
+fn internal_member_of_read_only_collection_keeps_its_special_bridge_byte_for_byte() {
+    // An `internal` member has the JVM name `remove$main`, so the mutable declaration's
+    // `remove(Object)` is not written as a throwing stub: kotlinc gives it the final special bridge
+    // to the mangled member.
+    assert_byte_equal(
+        "InternalRemoveBridgeBytes",
+        "class InternalRemoveBridgeBytes<T> : Collection<T> {\n\
+        \x20   override val size: Int get() = TODO()\n\
+        \x20   override fun contains(element: T): Boolean = TODO()\n\
+        \x20   override fun containsAll(elements: Collection<T>): Boolean = TODO()\n\
+        \x20   override fun isEmpty(): Boolean = TODO()\n\
+        \x20   override fun iterator(): Iterator<T> = TODO()\n\
+        \x20   internal fun remove(x: T): Boolean = false\n\
+        }\n",
+        "InternalRemoveBridgeBytes",
+    );
+}

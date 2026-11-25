@@ -45,6 +45,9 @@ struct DelegateGetValueSelection {
     this_ref: Ty,
     expected_property: Option<Ty>,
     site: DelegateConventionSite,
+    /// Shared with the caller's site. A missing `getValue` on an unannotated property records
+    /// the type kotlinc names in the following `setValue` demand.
+    missing_getvalue_display: std::rc::Rc<std::cell::RefCell<Option<String>>>,
 }
 
 /// What kotlinc's delegate-convention diagnostics name beyond the types already in hand: where the
@@ -1192,23 +1195,23 @@ impl Checker<'_> {
         provide_ref: Ty,
         this_ref: Ty,
         expected_property: Option<Ty>,
-        site: DelegateConventionSite,
+        site: &mut DelegateConventionSite,
     ) -> (Ty, Option<Ty>) {
         // Only the complete delegate expression is a migration position. Nested expressions keep
         // their ordinary declaration-use semantics, while a selected class companion is identified
         // later from the expression's retained singleton lowering.
         self.deprecation_use_sites.mark_companion_delegate(delegate);
-        let mut site = site;
         self.note_failed_property_syntax(
             scope,
-            &mut site,
+            site,
             expected_property.is_none_or(Ty::mentions_error),
         );
         let selection = DelegateGetValueSelection {
             provide_ref,
             this_ref,
             expected_property,
-            site,
+            site: site.clone(),
+            missing_getvalue_display: std::rc::Rc::new(std::cell::RefCell::new(None)),
         };
         let mut receiver_expectation = None;
         loop {
@@ -1229,6 +1232,10 @@ impl Checker<'_> {
                 selection.clone(),
             ) {
                 DelegateGetValueAttempt::Complete(result) => {
+                    if site.failed_property_display.is_none() {
+                        site.failed_property_display =
+                            selection.missing_getvalue_display.borrow().clone();
+                    }
                     return (delegate_ty, result);
                 }
                 DelegateGetValueAttempt::RetryWithReceiver(expected) => {
@@ -1251,6 +1258,7 @@ impl Checker<'_> {
             this_ref,
             expected_property,
             site,
+            missing_getvalue_display,
         } = selection;
         crate::trace_compiler!(
             "fir",
@@ -1311,6 +1319,9 @@ impl Checker<'_> {
         ) {
             DelegateOperatorSelection::Selected(target) => target,
             DelegateOperatorSelection::None => {
+                // No getValue candidate. An unannotated property's type is that missing name,
+                // which setValue then demands.
+                let unannotated = site.written_property_type.is_none();
                 self.report_delegate_convention_failure(
                     site,
                     stored_ty,
@@ -1319,6 +1330,10 @@ impl Checker<'_> {
                     expected_property,
                     None,
                 );
+                if unannotated {
+                    *missing_getvalue_display.borrow_mut() =
+                        Some("??? (Unresolved name: getValue)".to_string());
+                }
                 return DelegateGetValueAttempt::Complete(None);
             }
             DelegateOperatorSelection::Failure(failure) => {
