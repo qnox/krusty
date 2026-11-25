@@ -32,7 +32,7 @@ pub enum NativeModulesOutcome {
 /// assigned to their original fragments and its refinement edges are preserved.
 pub fn kotlin_native_multimodule_outcome(source: &str) -> Option<NativeModulesOutcome> {
     let recorded_source = [("modules.kt", source)];
-    let fingerprint_arguments = ["native-module-graph-v6-prepared-platform-settings".to_string()];
+    let fingerprint_arguments = ["native-module-graph-v7-prepared-platform-settings".to_string()];
     let files = recorded(
         CompilationTarget::Native,
         "multimodule-program",
@@ -225,17 +225,19 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         let arguments = command.get_args().map(OsString::from).collect::<Vec<_>>();
         let output = super::common::kotlin_native_server::kotlinc_native(&native_root, &arguments);
         if final_unit && output.status != 0 {
-            // The first line that names the failure; the rest is a stack trace or further reports.
-            let reason = output
+            // Only a failure the compiler itself reports is its rejection of the program. A crash
+            // or a refused launch without such a line is an environment failure, and recording it
+            // would cache it as the oracle's answer.
+            if let Some(reason) = output
                 .stderr
                 .lines()
                 .find(|line| line.starts_with("exception:") || line.starts_with("error:"))
-                .or_else(|| output.stderr.lines().find(|line| !line.trim().is_empty()))
-                .unwrap_or("the compiler failed without a report");
-            return Some(BTreeMap::from([(
-                "rejected".to_string(),
-                reason.as_bytes().to_vec(),
-            )]));
+            {
+                return Some(BTreeMap::from([(
+                    "rejected".to_string(),
+                    reason.as_bytes().to_vec(),
+                )]));
+            }
         }
         assert!(
             output.status == 0,
