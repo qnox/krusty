@@ -1,28 +1,33 @@
-//! Fetching one jar over HTTP within a bounded time. A test binary runs under the harness deadline
+//! Fetching one artifact over HTTP within a bounded time. A test binary runs under the harness deadline
 //! (120 seconds by default), so provisioning a missing jar must give up well before it: every attempt
 //! is capped, retries stop at an overall deadline, and the whole process shares one download budget,
 //! so several missing jars cannot add up to the suite timeout either.
 
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How long one download may take, and how often it is retried.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct RetryPolicy {
-    pub(super) connect_timeout: Duration,
-    pub(super) attempt_timeout: Duration,
-    pub(super) retry_delay: Duration,
-    pub(super) max_attempts: u32,
+pub struct RetryPolicy {
+    pub connect_timeout: Duration,
+    pub attempt_timeout: Duration,
+    pub retry_delay: Duration,
+    pub max_attempts: u32,
+    /// The least time between the starts of two requests from this process. Maven Central answers
+    /// back-to-back artifact requests with `429` and extends the block for every request made
+    /// during it, so a download never starts within this gap of another.
+    pub request_gap: Duration,
 }
 
 /// Maven Central refuses or drops a connection now and then; a missing jar silently leaves its
 /// library off every test's classpath, so a failed attempt is retried a few times.
-pub(super) const MAVEN_CENTRAL_RETRIES: RetryPolicy = RetryPolicy {
+pub const MAVEN_CENTRAL_RETRIES: RetryPolicy = RetryPolicy {
     connect_timeout: Duration::from_secs(5),
     attempt_timeout: Duration::from_secs(20),
     retry_delay: Duration::from_secs(2),
     max_attempts: 5,
+    request_gap: Duration::from_secs(3),
 };
 
 /// The default time one process may spend downloading, well below the harness's 120-second
@@ -31,16 +36,16 @@ const DEFAULT_BUDGET: Duration = Duration::from_secs(60);
 
 /// What a download did: how many transfers it started and whether one completed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct DownloadOutcome {
-    pub(super) attempts: u32,
-    pub(super) completed: bool,
+pub struct DownloadOutcome {
+    pub attempts: u32,
+    pub completed: bool,
 }
 
 /// Download `url` into `dest`, retrying under `policy` until `deadline`. No attempt starts after the
 /// deadline, and a running attempt is cut off at it. When no attempt completed, the second value is
 /// why the last one failed: curl's own message, the status, server address and final URL of the
 /// refusal, or the deadline that stopped the retries.
-pub(super) fn download(
+pub fn download(
     url: &str,
     dest: &Path,
     policy: RetryPolicy,
@@ -48,7 +53,14 @@ pub(super) fn download(
 ) -> (DownloadOutcome, Option<String>) {
     let mut attempts = 0;
     let mut failure = None;
+    let mut retry_after = Duration::ZERO;
     while attempts < policy.max_attempts {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            failure.get_or_insert_with(|| "the download deadline passed".to_string());
+            break;
+        }
+        REQUESTS.pace(policy.request_gap, deadline);
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             failure.get_or_insert_with(|| "the download deadline passed".to_string());
@@ -61,11 +73,15 @@ pub(super) fn download(
             .arg(seconds(policy.connect_timeout.min(max_time)))
             .arg("--max-time")
             .arg(seconds(max_time))
-            .args(["-w", "%{http_code} %{remote_ip} %{url_effective}"])
+            .args([
+                "-w",
+                "%{http_code} %{remote_ip} %{url_effective}\n%header{retry-after}",
+            ])
             .arg("-o")
             .arg(dest)
             .arg(url)
             .output();
+        let mut refused_for_good = false;
         match output {
             Ok(output) if output.status.success() && dest.is_file() => {
                 return (
@@ -77,6 +93,8 @@ pub(super) fn download(
                 );
             }
             Ok(output) => {
+                retry_after = retry_after_of(&output.stdout, SystemTime::now());
+                refused_for_good = is_final_refusal(&output.stdout);
                 let message = String::from_utf8_lossy(&output.stderr);
                 let message = message.trim();
                 let message = if message.is_empty() {
@@ -92,10 +110,16 @@ pub(super) fn download(
             Err(error) => failure = Some(format!("curl could not start: {error}")),
         }
         let _ = std::fs::remove_file(dest);
-        if attempts == policy.max_attempts || Instant::now() + policy.retry_delay >= deadline {
+        if refused_for_good {
             break;
         }
-        std::thread::sleep(policy.retry_delay);
+        // A server that says how long to wait is obeyed, within the deadline: retrying sooner only
+        // extends the block.
+        let delay = policy.retry_delay.max(retry_after);
+        if attempts == policy.max_attempts || Instant::now() + delay >= deadline {
+            break;
+        }
+        std::thread::sleep(delay);
     }
     (
         DownloadOutcome {
@@ -106,14 +130,113 @@ pub(super) fn download(
     )
 }
 
-/// Who refused: the status, server address and final URL curl reports through `-w` (the address
-/// and URL after redirects are what tell a mirror or proxy from Central itself). `None` when the
-/// request never reached a server, where curl prints a zero status.
+/// Spaces request starts at least a gap apart; callers take turns.
+struct Pacer {
+    last: Mutex<Option<Instant>>,
+}
+
+impl Pacer {
+    const fn new() -> Self {
+        Pacer {
+            last: Mutex::new(None),
+        }
+    }
+
+    /// How long a request starting at `now` must wait; it counts as started once it has waited.
+    fn delay(&self, now: Instant, gap: Duration) -> Duration {
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        let wait = last
+            .map(|last| (last + gap).saturating_duration_since(now))
+            .unwrap_or_default();
+        *last = Some(now + wait);
+        wait
+    }
+
+    /// Waits for the gap, but never past `deadline`.
+    fn pace(&self, gap: Duration, deadline: Instant) {
+        let now = Instant::now();
+        let wait = self
+            .delay(now, gap)
+            .min(deadline.saturating_duration_since(now));
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
+        }
+    }
+}
+
+/// Every download in the process shares one pacer.
+static REQUESTS: Pacer = Pacer::new();
+
+/// Who refused: the status, server address and final URL curl reports through `-w` on its first
+/// line (the address and URL after redirects are what tell a mirror or proxy from Central itself).
+/// `None` when the request never reached a server, where curl prints a zero status.
 fn answered_by(stdout: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stdout);
-    let mut fields = text.trim().splitn(3, ' ');
+    let mut fields = text.lines().next()?.split(' ');
     let (status, address, url) = (fields.next()?, fields.next()?, fields.next()?);
     (status != "000").then(|| format!("HTTP {status} from {address} for {url}"))
+}
+
+/// Whether the server answered with a client error that asking again cannot change (a 404 or a 403
+/// names a file or a right the server will not give). Timeouts, 425, 429 and every 5xx are
+/// transient and stay retryable, as does a request that never reached a server.
+fn is_final_refusal(stdout: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stdout);
+    let status = text
+        .lines()
+        .next()
+        .and_then(|line| line.split(' ').next())
+        .and_then(|status| status.parse::<u16>().ok());
+    matches!(status, Some(400..=499) if !matches!(status, Some(408 | 425 | 429)))
+}
+
+/// How long the `Retry-After` header on curl's second `-w` line asks to wait: its whole seconds, or
+/// the time until its HTTP-date. Zero when the server sent none or something unreadable. The value
+/// comes last because an HTTP-date holds spaces.
+fn retry_after_of(stdout: &[u8], now: SystemTime) -> Duration {
+    let text = String::from_utf8_lossy(stdout);
+    let value = text.lines().nth(1).unwrap_or("").trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Duration::from_secs(seconds);
+    }
+    http_date(value).map_or(Duration::ZERO, |at| {
+        at.duration_since(now).unwrap_or(Duration::ZERO)
+    })
+}
+
+/// The instant of an IMF-fixdate (`Wed, 21 Oct 2015 07:28:00 GMT`), the form HTTP servers send.
+fn http_date(value: &str) -> Option<SystemTime> {
+    let mut parts = value.split_whitespace();
+    let (_weekday, day, month, year, time, zone) = (
+        parts.next()?,
+        parts.next()?.parse::<i64>().ok()?,
+        parts.next()?,
+        parts.next()?.parse::<i64>().ok()?,
+        parts.next()?,
+        parts.next()?,
+    );
+    if zone != "GMT" || parts.next().is_some() {
+        return None;
+    }
+    let month = 1 + [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .iter()
+    .position(|name| *name == month)? as i64;
+    let mut clock = time.split(':').map(|field| field.parse::<i64>().ok());
+    let (hour, minute, second) = (clock.next()??, clock.next()??, clock.next()??);
+    if clock.next().is_some() || !(1..=31).contains(&day) {
+        return None;
+    }
+    // Days since the epoch of a proleptic Gregorian date (Howard Hinnant's civil-days algorithm).
+    let shifted_year = year - i64::from(month <= 2);
+    let era = shifted_year.div_euclid(400);
+    let year_of_era = shifted_year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    let seconds = u64::try_from(days * 86_400 + hour * 3_600 + minute * 60 + second).ok()?;
+    Some(UNIX_EPOCH + Duration::from_secs(seconds))
 }
 
 fn seconds(duration: Duration) -> String {
@@ -122,12 +245,12 @@ fn seconds(duration: Duration) -> String {
 
 /// The time a process may still spend downloading. Every download charges its wall time, including
 /// ones that succeed, so the total a process blocks on the network stays within the budget.
-pub(super) struct DownloadBudget {
+pub struct DownloadBudget {
     remaining: Mutex<Duration>,
 }
 
 impl DownloadBudget {
-    pub(super) const fn new(budget: Duration) -> Self {
+    pub const fn new(budget: Duration) -> Self {
         DownloadBudget {
             remaining: Mutex::new(budget),
         }
@@ -136,7 +259,7 @@ impl DownloadBudget {
     /// Run `fetch` with the deadline the remaining budget allows, then charge the time it took.
     /// Returns `None` without calling `fetch` once the budget is spent. The budget stays locked for
     /// the whole fetch, so concurrent callers take turns and each sees what the previous one left.
-    pub(super) fn spend<T>(&self, fetch: impl FnOnce(Instant) -> T) -> Option<T> {
+    pub fn spend<T>(&self, fetch: impl FnOnce(Instant) -> T) -> Option<T> {
         let mut remaining = self.remaining.lock().unwrap_or_else(|e| e.into_inner());
         if remaining.is_zero() {
             return None;
@@ -149,7 +272,7 @@ impl DownloadBudget {
 }
 
 /// The process-wide download budget, read once from `KRUSTY_DEPS_DEADLINE_SECONDS`.
-pub(super) fn process_budget() -> &'static DownloadBudget {
+pub fn process_budget() -> &'static DownloadBudget {
     static BUDGET: std::sync::OnceLock<DownloadBudget> = std::sync::OnceLock::new();
     BUDGET.get_or_init(|| {
         let budget = std::env::var("KRUSTY_DEPS_DEADLINE_SECONDS")
@@ -205,6 +328,10 @@ mod tests {
         (url, requests)
     }
 
+    const NOT_FOUND: &str =
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const TOO_MANY: &str =
+        "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     const SERVER_ERROR: &str =
         "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     const JAR: &str = "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\njar";
@@ -215,7 +342,58 @@ mod tests {
             attempt_timeout,
             retry_delay: Duration::from_millis(100),
             max_attempts: 5,
+            request_gap: Duration::ZERO,
         }
+    }
+
+    /// curl prints `<status> <address> <url>`, a newline, then the `Retry-After` value, which may
+    /// hold spaces (an HTTP-date) and so comes last.
+    #[test]
+    fn a_retry_after_header_is_read_as_seconds() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert_eq!(
+            retry_after_of(b"429 1.2.3.4 https://repo/a.jar\n45", now),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            retry_after_of(b"429 1.2.3.4 https://repo/a.jar\n", now),
+            Duration::ZERO
+        );
+        assert_eq!(
+            retry_after_of(b"429 1.2.3.4 https://repo/a.jar\nsoon", now),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn a_retry_after_date_is_the_wait_until_that_instant() {
+        // 2015-10-21T07:28:00Z is 1445412480 seconds after the epoch.
+        let before = UNIX_EPOCH + Duration::from_secs(1_445_412_480 - 90);
+        let after = UNIX_EPOCH + Duration::from_secs(1_445_412_480 + 5);
+        let stdout = b"503 1.2.3.4 https://repo/a.jar\nWed, 21 Oct 2015 07:28:00 GMT";
+        assert_eq!(retry_after_of(stdout, before), Duration::from_secs(90));
+        assert_eq!(retry_after_of(stdout, after), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_refusal_names_the_url_whatever_the_retry_after_looks_like() {
+        let stdout = b"503 1.2.3.4 https://repo/a.jar\nWed, 21 Oct 2015 07:28:00 GMT";
+        assert_eq!(
+            answered_by(stdout).as_deref(),
+            Some("HTTP 503 from 1.2.3.4 for https://repo/a.jar")
+        );
+        assert_eq!(answered_by(b"000 0.0.0.0 https://repo/a.jar\n"), None);
+    }
+
+    #[test]
+    fn requests_start_a_gap_apart() {
+        let pacer = Pacer::new();
+        let gap = Duration::from_secs(3);
+        let start = Instant::now();
+        assert_eq!(pacer.delay(start, gap), Duration::ZERO);
+        assert_eq!(pacer.delay(start, gap), gap);
+        assert_eq!(pacer.delay(start, gap), gap * 2);
+        assert_eq!(pacer.delay(start + gap * 10, gap), Duration::ZERO);
     }
 
     fn destination(name: &str) -> std::path::PathBuf {
@@ -272,6 +450,50 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_file_is_not_asked_for_again() {
+        let (url, requests) = endpoint(vec![Some(NOT_FOUND)]);
+        let dest = destination("missing");
+        let deadline = Instant::now() + Duration::from_secs(30);
+
+        let (outcome, failure) =
+            super::download(&url, &dest, policy(Duration::from_secs(5)), deadline);
+
+        assert_eq!(
+            outcome,
+            DownloadOutcome {
+                attempts: 1,
+                completed: false
+            }
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        // curl's own wording of the status differs between releases; the answer is ours.
+        assert_eq!(
+            failure.map(|reason| reason
+                .rsplit_once(" (")
+                .map(|(_, answer)| answer.to_string())),
+            Some(Some(format!("HTTP 404 from 127.0.0.1 for {url})")))
+        );
+    }
+
+    #[test]
+    fn a_throttled_request_is_asked_for_again() {
+        let (url, requests) = endpoint(vec![Some(TOO_MANY), Some(JAR)]);
+        let dest = destination("throttled");
+        let deadline = Instant::now() + Duration::from_secs(30);
+
+        let outcome = download(&url, &dest, policy(Duration::from_secs(5)), deadline);
+
+        assert_eq!(
+            outcome,
+            DownloadOutcome {
+                attempts: 2,
+                completed: true
+            }
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn a_retry_after_a_failure_completes_the_download() {
         let (url, requests) = endpoint(vec![Some(SERVER_ERROR), Some(JAR)]);
         let dest = destination("recovering");
@@ -288,6 +510,37 @@ mod tests {
         );
         assert_eq!(requests.load(Ordering::SeqCst), 2);
         assert_eq!(std::fs::read(&dest).expect("downloaded jar"), b"jar");
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[test]
+    fn a_server_that_asks_for_a_wait_is_waited_for() {
+        const THROTTLED: &str = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\n\
+                                 Content-Length: 0\r\nConnection: close\r\n\r\n";
+        let (url, requests) = endpoint(vec![Some(THROTTLED), Some(JAR)]);
+        let dest = destination("throttled");
+        let start = Instant::now();
+
+        let outcome = download(
+            &url,
+            &dest,
+            policy(Duration::from_secs(5)),
+            start + Duration::from_secs(30),
+        );
+
+        assert_eq!(
+            outcome,
+            DownloadOutcome {
+                attempts: 2,
+                completed: true
+            }
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert!(
+            start.elapsed() >= Duration::from_secs(1),
+            "the retry came after {:?}, before the 1s the server asked for",
+            start.elapsed()
+        );
         let _ = std::fs::remove_file(&dest);
     }
 
