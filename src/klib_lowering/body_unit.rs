@@ -212,6 +212,9 @@ pub struct DependencyBodyUnit {
     /// Classes an earlier unit of the program materialized and exports the constants or the
     /// instance of: this unit reads them through those exports instead of holding a second copy.
     realized_classes: HashSet<TypeName>,
+    /// Whether the target lays out a class an earlier unit realized from that unit's record, so
+    /// this unit may add final members to it ([`crate::ir::ClassOwnership::EarlierUnit`]).
+    adds_members_to_realized_classes: bool,
     authenticated_singleton_dispatches: HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: HashMap<KlibDependencyCallable, TypeName>,
     /// Private members of value classes and file-private functions, which only this unit's bodies
@@ -272,6 +275,7 @@ impl Default for DependencyBodyUnit {
             constructors: HashMap::default(),
             enum_classes: HashMap::default(),
             realized_classes: HashSet::default(),
+            adds_members_to_realized_classes: false,
             authenticated_singleton_dispatches: HashMap::default(),
             authenticated_singleton_classifiers: HashMap::default(),
             private_members: HashMap::default(),
@@ -767,6 +771,14 @@ impl DependencyBodyUnit {
         }
     }
 
+    /// This unit for a target that lays out a class an earlier unit realized from that unit's
+    /// record, so a member this unit needs of such a class is added to it here
+    /// ([`crate::backend::Backend::adds_members_to_realized_classes`]).
+    pub(crate) fn adding_members_to_realized_classes(mut self, adds: bool) -> Self {
+        self.adds_members_to_realized_classes = adds;
+        self
+    }
+
     /// Whether an earlier unit materialized `classifier`, which this unit reads through its
     /// exports.
     pub(crate) fn reads_realized(&self, classifier: TypeName) -> bool {
@@ -904,6 +916,7 @@ impl DependencyBodyUnit {
             constructors: &mut self.constructors,
             enum_classes: &mut self.enum_classes,
             realized_classes: &self.realized_classes,
+            adds_members_to_realized_classes: self.adds_members_to_realized_classes,
             authenticated_singleton_dispatches: &mut self.authenticated_singleton_dispatches,
             authenticated_singleton_classifiers: &mut self.authenticated_singleton_classifiers,
             private_members: &mut self.private_members,
@@ -1048,6 +1061,7 @@ struct Linker<'u, 's> {
     constructors: &'u mut HashMap<KlibDependencyCallable, MaterializedConstructor>,
     enum_classes: &'u mut HashMap<KlibDependencyCallable, crate::ir::ClassId>,
     realized_classes: &'u HashSet<TypeName>,
+    adds_members_to_realized_classes: bool,
     authenticated_singleton_dispatches: &'u mut HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: &'u mut HashMap<KlibDependencyCallable, TypeName>,
     private_members: &'u mut HashMap<KlibDependencyCallable, OwnFormals>,

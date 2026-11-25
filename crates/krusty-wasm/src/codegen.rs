@@ -135,6 +135,10 @@ impl Backend for WasmBackend {
         true
     }
 
+    fn adds_members_to_realized_classes(&self) -> bool {
+        true
+    }
+
     fn capability_decline(&self, construct: &str) -> String {
         format!("{DECLINE_PREFIX}{construct} yet")
     }
