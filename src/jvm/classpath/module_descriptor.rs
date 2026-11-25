@@ -30,6 +30,8 @@ struct Descriptor<'a> {
     bytes: &'a [u8],
     /// Offset just past each constant's tag, by pool index; `0` for an index no entry starts at.
     pool: Vec<usize>,
+    /// The capacity of ASM's string buffer: the largest `CONSTANT_Utf8` entry, tag and length included.
+    string_buffer: usize,
 }
 
 impl Descriptor<'_> {
@@ -60,9 +62,32 @@ impl Descriptor<'_> {
     fn utf8(&self, at: usize) -> Read<()> {
         let index = self.u2(at)?;
         if index != 0 {
-            let offset = self.entry(index)?;
-            // The string's own length field must be readable.
-            self.u2(offset)?;
+            self.read_utf(self.entry(index)?)?;
+        }
+        Ok(())
+    }
+
+    /// ASM's `readUtf`: decode the string at `offset` whatever tag the entry there has, so the
+    /// bytes it claims must lie inside the class file and its characters inside the string buffer.
+    fn read_utf(&self, offset: usize) -> Read<()> {
+        let end = offset + 2 + self.u2(offset)?;
+        let mut at = offset + 2;
+        let mut characters = 0;
+        while at < end {
+            let first = self.u1(at)?;
+            at += 1;
+            if first & 0x80 != 0 {
+                let continuation = if first & 0xE0 == 0xC0 { 1 } else { 2 };
+                self.u1(at + continuation - 1)?;
+                at += continuation;
+            }
+            if characters >= self.string_buffer {
+                return Err(ModuleDescriptorError::out_of_bounds(
+                    characters,
+                    self.string_buffer,
+                ));
+            }
+            characters += 1;
         }
         Ok(())
     }
@@ -80,6 +105,7 @@ pub(crate) fn validate(bytes: &[u8]) -> Result<(), ModuleDescriptorError> {
     let mut descriptor = Descriptor {
         bytes,
         pool: Vec::new(),
+        string_buffer: 0,
     };
     let count = descriptor.u2(8)?;
     descriptor.pool = vec![0; count];
@@ -93,7 +119,11 @@ pub(crate) fn validate(bytes: &[u8]) -> Result<(), ModuleDescriptorError> {
                 index += 1;
                 9
             }
-            1 => 3 + descriptor.u2(at + 1)?,
+            1 => {
+                let size = 3 + descriptor.u2(at + 1)?;
+                descriptor.string_buffer = descriptor.string_buffer.max(size);
+                size
+            }
             15 => 4,
             _ => 3,
         };
@@ -246,6 +276,21 @@ mod tests {
         assert_eq!(
             validate(&bytes).unwrap_err().cause(),
             "java.lang.ArrayIndexOutOfBoundsException: Index 6 out of bounds for length 5"
+        );
+    }
+
+    #[test]
+    fn a_main_class_naming_an_integer_decodes_the_string_it_would_claim() {
+        // pool: 4 = Integer 0xffff0000, 5 = Class 4. The class names a string of 65535 bytes, whose
+        // characters overflow ASM's string buffer, sized by the longest real string (18 with its
+        // tag and length: "ModuleMainClass").
+        let bytes = descriptor(
+            &[(3, &[0xff, 0xff, 0, 0]), (7, &[0, 4])],
+            ("ModuleMainClass", &[0, 5]),
+        );
+        assert_eq!(
+            validate(&bytes).unwrap_err().cause(),
+            "java.lang.ArrayIndexOutOfBoundsException: Index 18 out of bounds for length 18"
         );
     }
 }
