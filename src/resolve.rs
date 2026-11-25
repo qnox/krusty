@@ -446,6 +446,7 @@ mod uninferred_call_results;
 mod upper_bound_violations;
 mod value_class_declaration;
 mod variance_conflicts;
+mod when_comparison;
 mod when_exhaustiveness;
 mod when_flow;
 
@@ -40698,31 +40699,6 @@ impl<'a> Checker<'a> {
             Ty::obj_name(sub),
             Ty::obj_name(sup),
         )
-    }
-
-    /// Are two reference types comparable as `when`-subject value arms? A `when (s) { A -> … }` over a
-    /// sealed subject `s: S` matches the *object* `A` (a subtype of `S`) by `==` — valid in Kotlin
-    /// whenever one operand's type is a subtype of the other (the comparison can be non-trivially true).
-    /// A primitive or `String` operand takes part as its own Kotlin classifier (`kotlin/Int` declares
-    /// `Number` and `Comparable<Int>`): `when (x: Any) { 1 -> … }` compares an `Int` with the `Any`
-    /// subject, and the comparison can be non-trivially true for exactly the same subtype reason. How
-    /// a target boxes the value is its own representation, never a semantic supertype.
-    fn when_objs_comparable(&self, st: Ty, ct: Ty) -> bool {
-        match (st.kind(), ct.kind()) {
-            (TyKind::Obj(a, _), TyKind::Obj(b, _)) => {
-                self.obj_name_is_subtype(a, b) || self.obj_name_is_subtype(b, a)
-            }
-            _ => false,
-        }
-    }
-
-    /// Whether subject and condition values can be compared with Kotlin equality.
-    fn when_values_comparable(&self, subject: Ty, condition: Ty) -> bool {
-        let subject = subject.non_null();
-        let condition = condition.non_null();
-        subject == condition
-            || Ty::promote(subject, condition).is_some()
-            || self.when_objs_comparable(subject, condition)
     }
 
     fn lookup_prop_name(&self, receiver: Ty, name: &str) -> Option<(Ty, bool)> {

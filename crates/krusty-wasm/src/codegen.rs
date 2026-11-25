@@ -539,10 +539,10 @@ mod tests {
         sources: &[&str],
     ) -> (Vec<Artifact>, Vec<String>) {
         use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
-        let path = krusty::toolchain::kotlin_stdlib_klib(
+        let path = krusty::toolchain::kotlin_stdlib_klib_or_reason(
             krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
         )
-        .expect("the exact target stdlib must be provisioned");
+        .unwrap_or_else(|reason| panic!("the exact target stdlib must be provisioned: {reason}"));
         let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
             path,
             KlibStdlibSemantics::Wasm,
@@ -601,10 +601,12 @@ mod tests {
         use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
         let source = include_str!("../../../tests/box_regressions/delegateCaptureDiscovery.kt");
         for target in WasmTarget::ALL {
-            let path = krusty::toolchain::kotlin_stdlib_klib(
+            let path = krusty::toolchain::kotlin_stdlib_klib_or_reason(
                 krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
             )
-            .expect("the exact target stdlib must be provisioned");
+            .unwrap_or_else(|reason| {
+                panic!("the exact target stdlib must be provisioned: {reason}")
+            });
             let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
                 path,
                 KlibStdlibSemantics::Wasm,
@@ -1020,10 +1022,12 @@ mod tests {
         use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
 
         for target in WasmTarget::ALL {
-            let path = krusty::toolchain::kotlin_stdlib_klib(
+            let path = krusty::toolchain::kotlin_stdlib_klib_or_reason(
                 krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
             )
-            .expect("the exact target stdlib must be provisioned");
+            .unwrap_or_else(|reason| {
+                panic!("the exact target stdlib must be provisioned: {reason}")
+            });
             let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
                 path,
                 KlibStdlibSemantics::Wasm,
@@ -1092,10 +1096,12 @@ mod tests {
         use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
 
         for target in WasmTarget::ALL {
-            let path = krusty::toolchain::kotlin_stdlib_klib(
+            let path = krusty::toolchain::kotlin_stdlib_klib_or_reason(
                 krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
             )
-            .expect("the exact target stdlib must be provisioned");
+            .unwrap_or_else(|reason| {
+                panic!("the exact target stdlib must be provisioned: {reason}")
+            });
             let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
                 path,
                 KlibStdlibSemantics::Wasm,
