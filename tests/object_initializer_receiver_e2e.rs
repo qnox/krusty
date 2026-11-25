@@ -119,3 +119,33 @@ fun box(): String {
         "object_initializer_inlined_parameter",
     );
 }
+
+/// The shared program's object calls its own members through its name, which loads `INSTANCE`
+/// inside the object as kotlinc loads it for `this`.
+#[test]
+fn calls_of_the_objects_own_members_by_its_name_load_the_instance() {
+    let source = include_str!("box_regressions/objectOwnMemberReads.kt");
+    common::expect_box_same_as_kotlinc(source, "objectOwnMemberReads");
+    byte_identical("object_own_member_reads", source, "Counter");
+}
+
+/// PLATFORM-SPECIFIC: `@JvmField` and `@JvmStatic` exist only on the JVM. Reading the object's
+/// own fields through its name treats the name as a qualifier, inside the object and outside it.
+#[test]
+fn reads_of_the_objects_own_jvm_fields_by_its_name_are_qualified() {
+    let source = r#"
+object Limits {
+    @JvmField val max: Int = 3
+    @JvmField var used: Int = 0
+    @JvmStatic fun spare(): Int = Limits.max - Limits.used
+    fun left(): Int = Limits.max - Limits.used + Limits.spare()
+}
+fun outside(): Int = Limits.max + Limits.used + Limits.spare() + Limits.left()
+"#;
+    byte_identical("object_own_jvm_field_reads", source, "Limits");
+    byte_identical(
+        "object_own_jvm_field_reads",
+        source,
+        "Object_own_jvm_field_readsKt",
+    );
+}

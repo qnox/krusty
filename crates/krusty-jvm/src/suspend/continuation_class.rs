@@ -301,6 +301,7 @@ pub(super) fn build_continuation_class(
         fq_name: krusty::types::type_name(internal),
         is_source_declared: false,
         is_compiler_generated: false,
+        ownership: krusty::ir::ClassOwnership::ThisUnit,
         is_anonymous_object: false,
         site_name: None,
         enclosure: None,
@@ -328,6 +329,7 @@ pub(super) fn build_continuation_class(
         pre_super_param_fields,
         explicit_param_stores: false,
         methods: vec![inv_fid],
+        installed_interface_overrides: Vec::new(),
         is_interface: false,
         is_fun_interface: false,
         is_annotation: false,
@@ -367,5 +369,21 @@ pub(super) fn build_continuation_class(
     };
     let class = ir.add_class(class);
     ir.jvm_continuation_functions.insert(class, outer_fid);
+    // kotlinc copies the suspend function's own type parameters onto its continuation class, which
+    // therefore carries a generic `Signature` over the `ContinuationImpl` superclass.
+    if let Some(function) = ir.signatures.get(&outer_fid) {
+        let type_params = function.type_params.clone();
+        if !type_params.is_empty() {
+            ir.insert_lowered_class_signature(
+                krusty::types::type_name(internal),
+                krusty::ir::IrGenericSig {
+                    type_params,
+                    params: Vec::new(),
+                    ret: None,
+                    supers: vec![Ty::obj(CONTINUATION_IMPL)],
+                },
+            );
+        }
+    }
     class
 }

@@ -35,7 +35,7 @@ mod inline_body_slots;
 mod interface_entries;
 mod lambda_slots;
 mod mangled_calls;
-mod member_names;
+pub(crate) mod member_names;
 mod module_members;
 mod module_static_calls;
 mod operand_nullness;
@@ -49,6 +49,7 @@ mod representation;
 mod result_tail_boxing;
 mod return_unboxing;
 mod sam_names;
+mod source_call_parameters;
 mod substitution_coercions;
 mod suspend_results;
 mod synth_members;
@@ -3014,11 +3015,18 @@ pub(crate) fn lower_value_classes(
                 &under,
                 &mut ops,
             );
+            let source_parameters = match &ir.exprs[id as usize] {
+                IrExpr::Call { callee, .. } if !ir.call_declared_params.contains_key(&id) => {
+                    source_call_parameters::supplied(ir, callee, &orig_params)
+                }
+                _ => None,
+            };
             if let IrExpr::Call { args, .. } = &ir.exprs[id as usize] {
                 call_arguments::record_boundaries(
                     ir.call_declared_params
                         .get(&id)
-                        .map(|parameters| parameters.as_ref()),
+                        .map(|parameters| parameters.as_ref())
+                        .or(source_parameters.as_deref()),
                     args,
                     &under,
                     &repr_ctx,
@@ -3030,7 +3038,11 @@ pub(crate) fn lower_value_classes(
                 // Checked declaration parameters were already applied uniformly above. They are
                 // authoritative for every call shape, so no origin-specific fallback may reinterpret
                 // those arguments from a source function or realized descriptor.
-                IrExpr::Call { .. } if ir.call_declared_params.contains_key(&id) => Vec::new(),
+                IrExpr::Call { .. }
+                    if ir.call_declared_params.contains_key(&id) || source_parameters.is_some() =>
+                {
+                    Vec::new()
+                }
                 // The boundary target types are the constructor's parameter types, read from wherever they
                 // are known — the same for any owner: the named class's own field types when it has them
                 // (an in-IR primary ctor), otherwise the node's explicit `ctor_params` (a fieldless
@@ -3064,52 +3076,6 @@ pub(crate) fn lower_value_classes(
                             .map(|(a, p)| (*a, *p))
                             .collect()
                     }
-                }
-                IrExpr::Call { callee, args, .. } if callee.source_function().is_some() => {
-                    let function = callee
-                        .source_function()
-                        .expect("guarded same-file function call");
-                    let mut parameters = orig_params[function as usize].clone();
-                    if matches!(
-                        &**callee,
-                        Callee::LocalDefault(_)
-                            | Callee::ClassStaticDefault { .. }
-                            | Callee::LocalWithDefaults { .. }
-                            | Callee::ClassStaticWithDefaults { .. }
-                    ) {
-                        if let Some(boxed) = ir.default_stub_boxed_params.get(&function) {
-                            for &(index, ty) in boxed {
-                                if let Some(parameter) = parameters.get_mut(index) {
-                                    // `Target::Boxed` is the semantic representation boundary. The
-                                    // physical descriptor remains the non-null box type recorded in
-                                    // `default_stub_boxed_params`.
-                                    *parameter = Ty::nullable(ty);
-                                }
-                            }
-                        }
-                    }
-                    let omitted = match &**callee {
-                        Callee::LocalWithDefaults { defaults, .. }
-                        | Callee::ClassStaticWithDefaults { defaults, .. } => {
-                            Some(defaults.as_ref())
-                        }
-                        _ => None,
-                    };
-                    args.iter()
-                        .zip(
-                            parameters
-                                .into_iter()
-                                .enumerate()
-                                .filter_map(|(parameter, ty)| {
-                                    omitted
-                                        .is_none_or(|defaults| {
-                                            !defaults.contains(&(parameter as u32))
-                                        })
-                                        .then_some(ty)
-                                }),
-                        )
-                        .map(|(argument, parameter)| (*argument, parameter))
-                        .collect()
                 }
                 // A semantic sibling-source default call still carries only supplied arguments.
                 // Adapt each one against the provider declaration parameter that remains after

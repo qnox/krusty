@@ -38,6 +38,9 @@ pub(super) struct ModuleTables {
     tables: HashMap<TypeName, Result<ModuleTable, Unsupported>>,
     published: HashMap<TypeName, Result<ModuleTable, Unsupported>>,
     dependencies: HashMap<TypeName, ModuleTable>,
+    /// The interface member numbers the current module's files take beyond the plan's: the
+    /// members of interfaces KLIB units installed, numbered alike in every file.
+    pub(super) extended: krusty::backend::class_tables::module_interfaces::ExtendedNumbers,
     structures: HashMap<TypeName, (Vec<FieldType>, Option<u32>, u32)>,
 }
 
@@ -56,6 +59,7 @@ impl ModuleTables {
     ) {
         self.tables.clear();
         self.published.clear();
+        self.extended = Default::default();
         for (name, _) in classes.iter() {
             if !classes.is_dependency_class(name) {
                 continue;
@@ -100,9 +104,9 @@ impl ModuleTables {
         if let Some(known) = self.dependencies.get(&class) {
             if known.slot_types != slot_types {
                 return Err(format!(
-                    "a dependency class whose table two modules lay out differently (`{}`)",
+                    "a dependency class whose table two modules lay out differently (`{}`) {:?} vs {:?}",
                     // Boundary conversion for a diagnostic.
-                    class.render().replace('/', ".")
+                    class.render().replace('/', "."), known.slot_types, slot_types
                 ));
             }
             return Ok(known.table_type);

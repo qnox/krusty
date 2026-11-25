@@ -113,7 +113,7 @@ pub(super) fn emit_companion_bridges(
     };
     let formatter = &JvmSignatureFormatter::new(ir, env);
     let interface = is_jvm_interface(outer);
-    for function in functions {
+    for &function in &functions {
         emit_companion_bridge(
             ir,
             CompanionBridge {
@@ -121,11 +121,31 @@ pub(super) fn emit_companion_bridges(
                 companion,
                 interface,
                 function,
+                kept: None,
             },
             cw,
             formatter,
             env,
         );
+    }
+    // A member's `@JvmOverloads` overloads are companion members too, added after the declared
+    // ones, and each gets its static bridge in that order.
+    for function in functions {
+        for kept in super::jvm_overloads::member_overloads(ir, function) {
+            emit_companion_bridge(
+                ir,
+                CompanionBridge {
+                    outer: outer.fq_name,
+                    companion,
+                    interface,
+                    function,
+                    kept: Some(&kept),
+                },
+                cw,
+                formatter,
+                env,
+            );
+        }
     }
 }
 
@@ -164,16 +184,18 @@ pub(super) fn emit_private_bridge_accessors(
     }
 }
 
-struct CompanionBridge {
+struct CompanionBridge<'a> {
     outer: TypeName,
     companion: TypeName,
     interface: bool,
     function: u32,
+    /// The parameters a `@JvmOverloads` overload of `function` keeps; `None` bridges the member.
+    kept: Option<&'a [usize]>,
 }
 
 fn emit_companion_bridge(
     ir: &IrFile,
-    bridge: CompanionBridge,
+    bridge: CompanionBridge<'_>,
     cw: &mut ClassWriter,
     formatter: &JvmSignatureFormatter<'_>,
     env: &EmitEnv,
@@ -183,13 +205,40 @@ fn emit_companion_bridge(
         companion,
         interface,
         function,
+        kept,
     } = bridge;
     let declaration = &ir.functions[function as usize];
-    let name = declaration.name.as_str();
-    let parameters = jvm_function_params(ir, function);
+    let name = &match kept {
+        None => declaration.name.clone(),
+        Some(kept) => crate::value_classes::member_names::overload_name(ir, function, kept, false),
+    };
+    let all_parameters = jvm_function_params(ir, function);
+    let all = (0..all_parameters.len()).collect::<Vec<_>>();
+    let kept_indices = kept.unwrap_or(&all);
+    let project = |index: usize| kept_indices.contains(&index);
+    let parameters = kept_indices
+        .iter()
+        .map(|&index| all_parameters[index])
+        .collect::<Vec<_>>();
     let result = jvm_declared_ty(&env.override_results.physical_result(ir, function));
-    let descriptor = declared_method_desc(ir, env.override_results, function);
-    let signature = declared_method_signature(formatter, ir, env.override_results, function);
+    let (descriptor, signature) = match kept {
+        None => (
+            declared_method_desc(ir, env.override_results, function),
+            declared_method_signature(formatter, ir, env.override_results, function),
+        ),
+        Some(kept) => {
+            let descriptor = method_descriptor(&parameters, result);
+            let signature = super::jvm_overloads::kept_signature(
+                formatter,
+                ir,
+                env.override_results,
+                function,
+                kept,
+                &descriptor,
+            );
+            (descriptor, signature)
+        }
+    };
     let annotations = ir
         .function_annotations
         .get(&function)
@@ -199,12 +248,18 @@ fn emit_companion_bridge(
         result: result_nullability,
         parameters: parameter_nullability,
     } = override_result_emission::declared_nullability(ir, env, function);
+    let parameter_nullability = kept_entries(parameter_nullability, project);
     let nullability_annotated =
         function_annotations::nullability_annotated(ir, function, &annotations);
-    let parameter_annotations: &[krusty::ir::DeclarationAnnotations] =
-        &ir.declared_parameters(function).annotations;
+    let parameter_annotations = kept_entries(
+        ir.declared_parameters(function).annotations.clone(),
+        project,
+    );
     let method_parameters = if env.java_parameters {
-        crate::method_parameters::function(ir, function, &parameters, None)
+        kept_entries(
+            crate::method_parameters::function(ir, function, &all_parameters, None),
+            project,
+        )
     } else {
         Vec::new()
     };
@@ -219,7 +274,7 @@ fn emit_companion_bridge(
     );
     cw.reserve_method_parameter_annotation_pool(
         result_nullability,
-        parameter_annotations,
+        &parameter_annotations,
         &parameter_nullability,
         nullability_annotated,
     );
@@ -239,6 +294,12 @@ fn emit_companion_bridge(
         slot += slot_words(*ty);
     }
     if ir.method_visibility(function).is_private() {
+        if kept.is_some() {
+            env.run.set_emit_error(format!(
+                "a private @JvmStatic member {name} has @JvmOverloads, whose bridges need accessors"
+            ));
+            return;
+        }
         // The companion's private member is out of the outer class's reach: kotlinc calls the
         // companion's static `access$<name>` accessor, which `emit_private_bridge_accessors` adds.
         let accessor_descriptor = format!("(L{companion_internal};{}", &descriptor[1..]);
@@ -268,13 +329,16 @@ fn emit_companion_bridge(
         code.mark_line(line);
     }
     emit_return(result, &mut code);
-    let local_names = crate::parameter_names::placed(
-        ir,
-        function,
-        None,
-        crate::parameter_names::function_locals(ir, function, &parameters),
-    )
-    .unwrap_or_default();
+    let local_names = kept_entries(
+        crate::parameter_names::placed(
+            ir,
+            function,
+            None,
+            crate::parameter_names::function_locals(ir, function, &all_parameters),
+        )
+        .unwrap_or_default(),
+        project,
+    );
     let mut slot = 0u16;
     for (index, ty) in parameters.iter().enumerate() {
         if let Some(Some(local)) = local_names.get(index) {
@@ -291,8 +355,16 @@ fn emit_companion_bridge(
     let access = visibility
         | 0x0008
         | finality
-        | method_access::varargs_access(ir, function)
-        | method_access::annotated_method_modifiers(ir.function_annotations.get(&function));
+        | if kept_indices.last() == all_parameters.len().checked_sub(1).as_ref() {
+            method_access::varargs_access(ir, function)
+        } else {
+            0
+        }
+        | if kept.is_none() {
+            method_access::annotated_method_modifiers(ir.function_annotations.get(&function))
+        } else {
+            0
+        };
     cw.add_method_sig(access, name, &descriptor, &code, signature.as_deref());
     cw.set_method_parameters(name, &descriptor, &method_parameters);
     if nullability_annotated
@@ -306,12 +378,22 @@ fn emit_companion_bridge(
         );
     }
     if !parameter_annotations.is_empty() {
-        cw.set_method_param_annotations(name, &descriptor, parameter_annotations);
+        cw.set_method_param_annotations(name, &descriptor, &parameter_annotations);
     }
     if ir.deprecated_methods.contains(&function) {
         cw.mark_method_deprecated(name, &descriptor);
     }
     function_annotations::emit_declared(cw, &annotations, name, &descriptor);
+}
+
+/// The entries of a per-parameter list whose index `kept` selects.
+fn kept_entries<T>(entries: Vec<T>, kept: impl Fn(usize) -> bool) -> Vec<T> {
+    entries
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| kept(*index))
+        .map(|(_, entry)| entry)
+        .collect()
 }
 
 impl Emitter<'_> {
@@ -327,10 +409,12 @@ impl Emitter<'_> {
     /// Whether `expression` reads a static member's receiver value: the singleton's instance
     /// field, which a `getstatic` loads, as kotlinc loads `INSTANCE` for `this`.
     pub(super) fn reads_singleton_receiver(&self, expression: ExprId) -> bool {
-        matches!(
-            self.ir.expr(expression),
-            IrExpr::GetValue(value) if self.singleton_receiver_value(*value).is_some()
-        )
+        match self.ir.expr(expression) {
+            IrExpr::GetValue(value) => self.singleton_receiver_value(*value).is_some(),
+            // Naming the instance is loading it, as kotlinc does for the `this` it stands for.
+            IrExpr::SingletonValue { .. } => true,
+            _ => false,
+        }
     }
 
     /// Whether `expression` reads a local value or parameter: no code a discarded receiver must

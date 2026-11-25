@@ -54,6 +54,42 @@ pub(super) fn emitted_dependency_targets(
     Ok(targets)
 }
 
+/// The exact external callables `source` emits a use of, its property reads and writes through
+/// their selected accessors.
+fn emitted_file_targets(
+    source: &CheckedIrFile<'_>,
+) -> Result<Vec<(crate::ir::ExprId, crate::fir::ExternalCallableId, bool)>, String> {
+    emitted_dependency_targets(&source.ir, |property, setter| {
+        let property = source
+            .callables
+            .property(property)
+            .ok_or("an emitted dependency property has no frozen fact")?;
+        if setter {
+            property
+                .setter
+                .map(Some)
+                .ok_or("an emitted dependency property write has no selected setter".to_owned())
+        } else {
+            Ok(Some(property.getter))
+        }
+    })
+}
+
+/// The dependency declarations `source` emits a use of.
+pub(super) fn emitted_dependency_callables(
+    source: &CheckedIrFile<'_>,
+) -> Result<HashSet<KlibDependencyCallable>, String> {
+    Ok(emitted_file_targets(source)?
+        .into_iter()
+        .filter_map(|(_, target, _)| {
+            source
+                .callables
+                .callable(target)
+                .and_then(|callable| callable.dependency_callable.clone())
+        })
+        .collect())
+}
+
 /// The dependency interface members the classes of `ir` inherit with a body and do not override.
 /// A target that dispatches through interface records calls each of them from its class's record,
 /// so they are emitted uses even though no expression of the file calls them.
@@ -671,22 +707,7 @@ pub(super) fn ordinary_roots<'a>(
     let target_represents_classifier = capabilities.represents_classifier;
     let mut roots = Vec::new();
     let mut seen = HashSet::default();
-    for (expression, target, construction) in
-        emitted_dependency_targets(&source.ir, |property, setter| {
-            let property = source
-                .callables
-                .property(property)
-                .ok_or("an emitted dependency property has no frozen fact")?;
-            if setter {
-                property
-                    .setter
-                    .map(Some)
-                    .ok_or("an emitted dependency property write has no selected setter".to_owned())
-            } else {
-                Ok(Some(property.getter))
-            }
-        })?
-    {
+    for (expression, target, construction) in emitted_file_targets(source)? {
         let callable = source
             .callables
             .callable(target)

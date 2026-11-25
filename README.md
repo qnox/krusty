@@ -109,8 +109,8 @@ Parcelize, ...), or a kotlinc argument krusty does not implement yet, is reporte
 kotlinc, whatever the artifact filename; the rest of the build still compiles with krusty. KSP2
 (`com.google.devtools.ksp`) works: it runs processors in its own `kspKotlin` task and
 adds no compiler plugin to the compilation, and krusty compiles the Kotlin and Java sources the
-processors generate (KSP's Gradle plugin needs Gradle 8 or newer). The
-validated Gradle versions are 7.6.3, 8.14.3, 9.5.0, and 9.7.0. Projects applying Gradle's
+processors generate. The plugin supports the Gradle releases Gradle still maintains, 8.14 and
+newer; the validated versions are 8.14.8 and 9.9.2. Projects applying Gradle's
 `kotlin-dsl` (such as `buildSrc`) and Kotlin compile tasks outside any source set stay with kotlinc;
 the plugin logs each task it leaves. The plugin runs the compiler of its own release: on first use
 it downloads the archive for the host from that GitHub release into the Gradle user home and checks
@@ -174,7 +174,7 @@ shows the newest. On the command line, anything not listed here fails the build 
 | Build system | Support |
 | --- | --- |
 | Command line | kotlinc-compatible flags for the supported subset; output to a class directory or a jar. Compiler plugins come in through `-Xplugin`/`-P`/`-Xcompiler-plugin` as for kotlinc. |
-| Gradle | `id("dev.krustythecompiler")` plugin, shipped as `krusty-gradle-plugin-<version>.zip` in each release (see [Gradle](#gradle)). Replaces Kotlin/JVM compile tasks of source sets and of Android variants (AGP 9's built-in Kotlin or `kotlin("android")`, with android.jar, Java sources and generated `R`/`BuildConfig` taken from the variant); validated with Gradle 7.6.3, 8.14.3, 9.5.0 and 9.7.0. `kotlin-dsl` builds such as `buildSrc` and compile tasks outside a source set stay with kotlinc, logged per task. |
+| Gradle | `id("dev.krustythecompiler")` plugin, shipped as `krusty-gradle-plugin-<version>.zip` in each release (see [Gradle](#gradle)). Replaces Kotlin/JVM compile tasks of source sets and of Android variants (AGP 9's built-in Kotlin or `kotlin("android")`, with android.jar, Java sources and generated `R`/`BuildConfig` taken from the variant); supports Gradle 8.14 and newer, validated with 8.14.8 and 9.9.2. `kotlin-dsl` builds such as `buildSrc` and compile tasks outside a source set stay with kotlinc, logged per task. |
 | Kotlin Toolchain (`project.yaml`/`module.yaml`) | `krusty-toolchain`, built from source in `crates/krusty-toolchain`, as a drop-in for JetBrains' `kotlin` command: `show modules`, `show settings`, `show dependencies` and `task :<module>:compileJvm`. JVM modules only; a module with Java sources, a compiler setting it does not pass yet or an artifact to download is refused by name. See [docs/KOTLIN_TOOLCHAIN.md](docs/KOTLIN_TOOLCHAIN.md). |
 | Kotlin Build Tools API | `krusty-build-tools-<version>-kotlin-<kotlin>.jar` in each release, one per supported Kotlin version, stands in for `kotlin-build-tools-impl` in a build tool that loads the API from a classpath (JetBrains' Kotlin Toolchain among them). JVM toolchain and in-process execution only. See [tools/krusty-build-tools](tools/krusty-build-tools/README.md). |
 | Bazel | `krusty_jvm_library` rule from the `krusty` Bazel module each release publishes (`krusty-bazel-<version>.tar.gz`), which brings the release's compiler as a toolchain per host, and a `--persistent_worker` speaking intellij-community's `jvm-inc-builder` vocabulary. The worker accepts no compiler plugins. See [tools/krusty-bazel/README.md](tools/krusty-bazel/README.md) and [tools/krusty-bazel/intellij.md](tools/krusty-bazel/intellij.md). |
@@ -192,7 +192,7 @@ changing its plugin configuration.
 | all-open (`plugin.allopen`, `plugin.spring`, `plugin.jpa`) | Supported, with the `spring` and `jpa` presets. |
 | no-arg (`plugin.noarg`, `plugin.jpa`) | Supported, with the `jpa` preset; `invokeInitializers=true` is not implemented. |
 | sam-with-receiver | Supported. |
-| KSP (KSP2) | Supported through a build system: under Gradle, KSP's own `kspKotlin` task runs the processors and krusty compiles what they generate (KSP's Gradle plugin needs Gradle 8 or newer); under the Kotlin Toolchain, processors from Maven artifacts run before the module compiles, and krusty compiles the Kotlin sources they generate with the module's own and picks up their generated classes and resources; a processor that generates Java sources fails the module for now. The plain command line has no codegen host and rejects the KSP plugin. |
+| KSP (KSP2) | Supported through a build system: under Gradle, KSP's own `kspKotlin` task runs the processors and krusty compiles what they generate; under the Kotlin Toolchain, processors from Maven artifacts run before the module compiles, and krusty compiles the Kotlin sources they generate with the module's own and picks up their generated classes and resources; a processor that generates Java sources fails the module for now. The plain command line has no codegen host and rejects the KSP plugin. |
 | kapt | Supported under Gradle: kapt's own tasks generate stubs and run the annotation processors with kotlinc, and krusty compiles the module after them. kapt's jar alone, which the Kotlin Gradle plugin passes to every compile of a kapt project, changes nothing; kapt options on the command line fail with an error. |
 | Compose, Parcelize, assignment and every other FIR/IR plugin | Not supported. The command line fails with an error. The Gradle plugin reports the unsupported plugin and leaves that compile task to kotlinc, so the build still succeeds. |
 | Kotlin scripts (`.kts`) | Not supported. |
