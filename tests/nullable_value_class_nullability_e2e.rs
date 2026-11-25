@@ -189,7 +189,6 @@ fn member_annotations_and_guards(disassembly: &str) -> Vec<String> {
 fn an_explicit_backing_field_is_annotated_by_its_own_type() {
     let settings = krusty::language_settings::LanguageSettings::for_release(
         krusty::kotlin_version::environment_release(),
-        
         krusty::language_version::LanguageVersion::default(),
         None,
         &[krusty::features::FeatureSetting {

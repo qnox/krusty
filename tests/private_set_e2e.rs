@@ -156,7 +156,6 @@ fn companion_block_private_and_internal_setters_match_kotlinc() {
                }\n";
     let settings = krusty::language_settings::LanguageSettings::for_release(
         krusty::kotlin_version::environment_release(),
-        
         krusty::language_version::LanguageVersion::V2_4,
         None,
         &[krusty::features::FeatureSetting {

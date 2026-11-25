@@ -116,9 +116,12 @@ class Subject(
         krusty::language_version::LanguageVersion::V2_4,
     ] {
         let settings = krusty::language_settings::LanguageSettings::for_release(
-        krusty::kotlin_version::environment_release(),
-        language, None, &[])
-            .expect("valid language settings");
+            krusty::kotlin_version::environment_release(),
+            language,
+            None,
+            &[],
+        )
+        .expect("valid language settings");
         let classes = common::classes_against_kotlinc_lib_language_settings(
             "ConfiguredDefaultTargets",
             &[("Policies.kt", policies)],
