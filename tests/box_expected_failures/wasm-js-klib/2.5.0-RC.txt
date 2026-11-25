@@ -632,7 +632,6 @@ defaultArguments/useThisInLambda.kt
 delegatedProperty/callableReferenceAsSecondArgumentOfDelegate.kt
 delegatedProperty/correctFieldsOrder.kt
 delegatedProperty/delegateToConstVal.kt
-delegatedProperty/delegateToSmartCastReceiver.kt
 delegatedProperty/delegatedByExtensionProperty.kt
 delegatedProperty/delegatedOverride.kt
 delegatedProperty/genericDelegateUncheckedCast1.kt
