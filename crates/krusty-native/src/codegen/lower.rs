@@ -511,7 +511,7 @@ fn extended_elsewhere(
     let classes = module_facts.classes();
     let support = unit_kind != krusty::backend::CheckedIrUnitKind::Source;
     for (id, class) in ir.classes.iter().enumerate() {
-        if class.is_interface || ir.local_class_name_provenance.contains_key(&(id as u32)) {
+        if class.is_interface || super::super::symbols::is_local_class(ir, id as u32) {
             continue;
         }
         // A local class of a later file, which no header names, may extend any class open to
@@ -801,7 +801,7 @@ impl<'a> FileLowering<'a> {
                             .dispatch_receiver
                             .and_then(|owner| self.ir.class_id_by_name(owner))
                             .is_some_and(|class| {
-                                self.ir.local_class_name_provenance.contains_key(&class)
+                                super::super::symbols::is_local_class(self.ir, class)
                             }) =>
                     {
                         Linkage::Local
