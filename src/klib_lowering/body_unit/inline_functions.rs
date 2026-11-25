@@ -26,6 +26,24 @@ fn declares_inline(function: &KlibIrFunction) -> bool {
     function.base.flags & crate::metadata::function_flags::IS_INLINE != 0
 }
 
+/// Decline a call of a suspend inline `function` that has no prepared copy to expand from.
+///
+/// Its serialized body still holds the unlowered suspension intrinsics, which only the library's
+/// prepared copy replaces with the continuation operations, so expanding it would emit a
+/// suspension the unit cannot lower.
+pub(super) fn require_prepared_copy(
+    function: &KlibIrFunction,
+) -> Result<(), KlibBodyDeclineReason> {
+    if declares_inline(function)
+        && function.base.flags & crate::metadata::function_flags::IS_SUSPEND != 0
+    {
+        return Err(KlibBodyDeclineReason::UnsupportedOperation(
+            "a call of a suspend inline function without a prepared copy",
+        ));
+    }
+    Ok(())
+}
+
 /// A function the unit lowered from its serialized body, with the selected declaration it was
 /// lowered for, that is declared as an inline callee when it is inline.
 pub(super) struct Candidate<'a, 's> {

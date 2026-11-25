@@ -1,7 +1,7 @@
 //! A call of an inline function in a dependency body is expanded from the function's lowered
 //! body, as kotlinc expands it when it links a library compiled before Kotlin 2.4.20.
 
-use super::demo_package::{demo_inlining, operator, Body, T};
+use super::demo_package::{demo_inlining, demo_suspend_inlining, operator, Body, T};
 use super::{base, local_symbol, validated, DependencyBodyUnit};
 use crate::ir::{Callee, FunId, IrConst, IrExpr, IrFile};
 use crate::metadata::klib_ir::tree::{
@@ -405,6 +405,37 @@ fn a_lambda_parameter_the_inline_body_keeps_as_a_value_declines() {
             "an inline function's lambda parameter used other than by invoking it"
         )
     );
+}
+
+#[test]
+fn a_call_of_a_suspend_inline_function_without_a_prepared_copy_declines() {
+    let demo = demo_suspend_inlining(
+        &[
+            ("suspends", &[T::Int], T::Int),
+            ("caller", &[T::Int], T::Int),
+        ],
+        &["suspends"],
+        |name, body| match name {
+            "suspends" => sole_return(body),
+            _ => {
+                let argument = body.param(0);
+                let call = body.call("suspends", vec![argument], T::Int);
+                Some(vec![body.ret(call)])
+            }
+        },
+    );
+    let mut unit = DependencyBodyUnit::default();
+    let decline = demo
+        .lower(&mut unit, "caller", &["caller", "suspends"])
+        .expect_err("the unlowered suspension would be expanded");
+    assert_eq!(
+        decline.reason(),
+        &crate::klib_lowering::KlibBodyDeclineReason::UnsupportedOperation(
+            "a call of a suspend inline function without a prepared copy"
+        )
+    );
+    assert!(unit.ir().inline_fns.is_empty());
+    assert!(unit.ir().suspend_funs.is_empty());
 }
 
 #[test]

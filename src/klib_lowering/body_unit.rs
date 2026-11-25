@@ -2103,7 +2103,10 @@ impl<'s> Linker<'_, 's> {
                     prepared_inline_header(selected, selected.type_parameters(), arena, copy)?;
                 self.declare_with_header(ir, identity, Some(selected), arena, copy, header)?
             }
-            (None, None) => self.declare(ir, identity, selected, arena, declaration)?,
+            (None, None) => {
+                inline_functions::require_prepared_copy(declaration)?;
+                self.declare(ir, identity, selected, arena, declaration)?
+            }
         };
         let parameter_defaults = parameter_defaults(declaration);
         let declaration = &ir.functions[function as usize];
@@ -2395,7 +2398,10 @@ impl<'s> Linker<'_, 's> {
                 body_header(Some(selected), arena, declaration, self.sources.bodies)?;
                 function
             }
-            None => self.declare(ir, identity, Some(selected), arena, declaration)?,
+            None => {
+                inline_functions::require_prepared_copy(declaration)?;
+                self.declare(ir, identity, Some(selected), arena, declaration)?
+            }
         };
         let declared = &ir.functions[function as usize];
         let (Some(receiver), params) = (
