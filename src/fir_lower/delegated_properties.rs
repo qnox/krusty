@@ -25,6 +25,7 @@ use crate::ir::{
 };
 use crate::types::{Ty, TypeName};
 
+use super::dependency_templates::DependencyTemplateCache;
 use super::generics::{attach_accessor_type_parameters, declaration_type_parameters};
 use super::properties::{
     add_accessor_function, record_accessor_visibilities, set_accessor_parameter_identities,
@@ -46,6 +47,7 @@ pub(super) fn materialize_top_level_delegate(
     extension_receiver: Option<Ty>,
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
+    templates: &mut DependencyTemplateCache,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
 ) -> Result<(), FirFileLoweringFailure> {
     let DelegatedDeclaration {
@@ -94,6 +96,7 @@ pub(super) fn materialize_top_level_delegate(
         delegated_call(
             index,
             ir,
+            templates,
             property.declaration,
             provide,
             initializer,
@@ -129,6 +132,7 @@ pub(super) fn materialize_top_level_delegate(
     let read = delegated_call(
         index,
         ir,
+        templates,
         property.declaration,
         &plan.get_value,
         receiver,
@@ -167,6 +171,7 @@ pub(super) fn materialize_top_level_delegate(
             let write = delegated_call(
                 index,
                 ir,
+                templates,
                 property.declaration,
                 set_value,
                 receiver,
@@ -228,6 +233,7 @@ pub(super) fn materialize_member_delegate(
     declaration: DelegatedDeclaration,
     class_id: crate::ir::ClassId,
     ir: &mut IrFile,
+    templates: &mut DependencyTemplateCache,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
     initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
@@ -299,6 +305,7 @@ pub(super) fn materialize_member_delegate(
         delegated_call(
             index,
             ir,
+            templates,
             property.declaration,
             provide,
             initializer,
@@ -340,6 +347,7 @@ pub(super) fn materialize_member_delegate(
     let read = delegated_call(
         index,
         ir,
+        templates,
         property.declaration,
         &plan.get_value,
         receiver,
@@ -377,6 +385,7 @@ pub(super) fn materialize_member_delegate(
             let write = delegated_call(
                 index,
                 ir,
+                templates,
                 property.declaration,
                 set_value,
                 receiver,
@@ -490,6 +499,7 @@ pub(super) fn materialize_member_extension_delegate(
     class_id: crate::ir::ClassId,
     extension_receiver: Ty,
     ir: &mut IrFile,
+    templates: &mut DependencyTemplateCache,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
     initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
@@ -552,6 +562,7 @@ pub(super) fn materialize_member_extension_delegate(
         delegated_call(
             index,
             ir,
+            templates,
             property.declaration,
             provide,
             initializer,
@@ -596,6 +607,7 @@ pub(super) fn materialize_member_extension_delegate(
     let read = delegated_call(
         index,
         ir,
+        templates,
         property.declaration,
         &plan.get_value,
         delegate,
@@ -636,6 +648,7 @@ pub(super) fn materialize_member_extension_delegate(
             let write = delegated_call(
                 index,
                 ir,
+                templates,
                 property.declaration,
                 set_value,
                 delegate,
@@ -843,23 +856,48 @@ fn delegate_storage_read(ir: &mut IrFile, read: IrExpr, storage: Ty) -> ExprId {
 fn delegated_call(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
+    templates: &mut DependencyTemplateCache,
     property: DeclarationId,
     call: &FirDelegateCall,
     receiver: ExprId,
     arguments: Vec<(ExprId, Ty)>,
 ) -> Result<ExprId, FirFileLoweringFailure> {
-    delegated_call_with_dispatch(index, ir, property, call, receiver, None, arguments)
+    delegated_call_with_dispatch(
+        index,
+        ir,
+        templates,
+        DelegatedUse {
+            property,
+            call,
+            receiver,
+            selected_dispatch: None,
+            arguments,
+        },
+    )
+}
+
+/// One delegate convention call at a delegated property's use.
+pub(super) struct DelegatedUse<'a> {
+    pub(super) property: DeclarationId,
+    pub(super) call: &'a FirDelegateCall,
+    pub(super) receiver: ExprId,
+    pub(super) selected_dispatch: Option<ExprId>,
+    pub(super) arguments: Vec<(ExprId, Ty)>,
 }
 
 pub(super) fn delegated_call_with_dispatch(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
-    property: DeclarationId,
-    call: &FirDelegateCall,
-    receiver: ExprId,
-    selected_dispatch: Option<ExprId>,
-    arguments: Vec<(ExprId, Ty)>,
+    templates: &mut DependencyTemplateCache,
+    delegated: DelegatedUse<'_>,
 ) -> Result<ExprId, FirFileLoweringFailure> {
+    let DelegatedUse {
+        property,
+        call,
+        receiver,
+        selected_dispatch,
+        arguments,
+    } = delegated;
     match &call.target {
         FirCallTarget::Module(target) => {
             let target = &super::expect_realization::realized_callable(index, *target);
@@ -1091,12 +1129,45 @@ pub(super) fn delegated_call_with_dispatch(
             declared_result,
             semantic_role,
             suspend,
+            inline,
             inline_plan: _,
             extension_receiver_parameter,
             ..
         } => {
             let mut arguments =
                 materialize_delegated_arguments(ir, arguments, &call.declared_parameters)?;
+            if call.dispatch_receiver.is_none() {
+                let mut operands = Vec::with_capacity(arguments.len() + 1);
+                operands.push(match declared_receiver {
+                    Some(declared) => materialize_delegated_receiver(
+                        ir,
+                        receiver,
+                        call.receiver.get(),
+                        declared.get(),
+                    ),
+                    None => receiver,
+                });
+                operands.extend(arguments.iter().copied());
+                let expanded = super::delegate_inline::expand_dependency_convention(
+                    ir,
+                    templates,
+                    super::delegate_inline::DelegateConventionCall {
+                        target: *declaration,
+                        inline: *inline,
+                        extension: call.extension,
+                        operands,
+                    },
+                )
+                .map_err(|_| FirFileLoweringFailure::UnsupportedPropertyShape(property))?;
+                if let Some(expanded) = expanded {
+                    return Ok(materialize_delegated_result(
+                        ir,
+                        expanded,
+                        declared_result.map_or_else(|| result.get(), |declared| declared.get()),
+                        call.result.get(),
+                    ));
+                }
+            }
             let dispatch_receiver = if let Some(dispatch) = &call.dispatch_receiver {
                 let dispatch = match selected_dispatch {
                     Some(dispatch) => dispatch,
