@@ -668,7 +668,6 @@ delegatedProperty/lazyDelegateInObject.kt
 delegatedProperty/local.kt
 delegatedProperty/local/inlineGetValue.kt
 delegatedProperty/local/kt12891.kt
-delegatedProperty/local/kt78073.kt
 delegatedProperty/local/localDelegatedPropertyCall.kt
 delegatedProperty/localDelegatedBoundValueWithSideEffect.kt
 delegatedProperty/map.kt
