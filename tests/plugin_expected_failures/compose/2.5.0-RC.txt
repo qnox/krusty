@@ -1,13 +1,3 @@
 # Compose fixtures (tests/fixtures/compose) whose classes differ from kotlinc 2.5.0-RC's, by stem.
 # kotlinc 2.5 changed the Compose compiler plugin's output; each pull request that matches it
 # removes the stems it fixes. A listed stem that starts matching is an error until it is removed.
-callInitializers
-lambdasInPlainFunctions
-layoutCalls
-libraryCalls
-libraryLambdaParameters
-libraryReceiverLambdas
-receiverInvokeTrivia
-receiverLambdas
-rememberedLambdas
-singletonLambdas

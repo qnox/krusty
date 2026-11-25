@@ -34,7 +34,7 @@ pub use source_facts::ComposeFileFacts;
 use crate::ir::IrFile;
 use crate::plugins::runtime_declarations::PluginRuntime;
 use crate::plugins::{
-    IrPlugin, PluginContext, PluginRejection, PluginSourceView, TransformedEntry,
+    IrPlugin, PluginContext, PluginRejection, PluginRelease, PluginSourceView, TransformedEntry,
 };
 
 /// The runtime's `@Composable` annotation.
@@ -43,11 +43,23 @@ const COMPOSABLE: &str = "androidx/compose/runtime/Composable";
 /// The Compose plugin, configured for one compilation.
 pub struct ComposePlugin {
     options: ComposeOptions,
+    /// Where the file's composable singletons are created, which the plugin release decides.
+    singleton_creation: singleton_lambdas::SingletonCreation,
 }
 
 impl ComposePlugin {
     pub fn new(options: ComposeOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            singleton_creation: singleton_lambdas::SingletonCreation::of_release(None),
+        }
+    }
+
+    /// Reproduce the compiler plugin of `release`, or the newest one when no jar named a release
+    /// (see [`PluginRelease`]).
+    pub fn with_compiler_plugin_release(mut self, release: Option<PluginRelease>) -> Self {
+        self.singleton_creation = singleton_lambdas::SingletonCreation::of_release(release);
+        self
     }
 }
 
@@ -63,7 +75,11 @@ impl IrPlugin for ComposePlugin {
         runtime: &mut dyn PluginRuntime,
         rejections: &mut Vec<PluginRejection>,
     ) {
-        source_facts::record(ir, source, runtime, &self.options, rejections);
+        let settings = source_facts::Settings {
+            options: &self.options,
+            singleton_creation: self.singleton_creation,
+        };
+        source_facts::record(ir, source, runtime, settings, rejections);
     }
 
     fn transform_bodies(&self, ir: &mut IrFile, _ctx: &PluginContext) {
