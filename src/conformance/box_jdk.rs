@@ -51,6 +51,8 @@ pub enum BoxJdk<'a> {
     /// Compile against one installed JDK and name it to the reference compiler (`-jdk-home`): a
     /// `boxModernJdk` case, which runs on that JDK (`FULL_JDK_<N>`).
     Home {
+        /// The JDK's feature release.
+        release: u16,
         home: &'a Path,
         /// Its bootclasspath root (`lib/modules`).
         modules: &'a Path,
@@ -89,7 +91,11 @@ impl BoxJdkRoots {
                 jdk.release
             )
         })?;
-        Ok(BoxJdk::Home { home, modules })
+        Ok(BoxJdk::Home {
+            release: jdk.release,
+            home,
+            modules,
+        })
     }
 
     pub fn select(&self, src: &str) -> BoxJdk<'_> {
@@ -114,10 +120,10 @@ impl<'a> BoxJdk<'a> {
         }
     }
 
-    /// The JDK installation a case runs on, when the case names one.
-    pub fn home(self) -> Option<&'a Path> {
+    /// The JDK installation and feature release a case runs on, when the case names one.
+    pub fn home(self) -> Option<(&'a Path, u16)> {
         match self {
-            BoxJdk::Home { home, .. } => Some(home),
+            BoxJdk::Home { home, release, .. } => Some((home, release)),
             BoxJdk::Mock { .. } | BoxJdk::Full { .. } => None,
         }
     }
