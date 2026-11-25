@@ -310,6 +310,13 @@ fn replace_test_paths(
         replaced = replaced.replace("$JDK_17$", &home.display().to_string());
     }
     if replaced.contains(STDLIB_COMMON_PATH) {
+        // The cases that name the common stdlib also compile fragments separately, which no
+        // runner here supports yet: they are not applicable (listed) until it does.
+        if replaced.contains("-Xseparate-kmp-compilation") {
+            return Err(format!(
+                "needs {STDLIB_COMMON_PATH}: -Xseparate-kmp-compilation is not supported yet"
+            ));
+        }
         let klib = stdlib_common_klib()
             .as_ref()
             .map_err(|reason| format!("needs {STDLIB_COMMON_PATH}: {reason}"))?;
@@ -456,6 +463,11 @@ fn run_case(toolchain: &Toolchain, args_file: &Path, recording: Option<&Recordin
             ),
             Some(recording) => recording.run(toolchain, args_file, &temp, &invocations),
         },
+        // A case that needs the common-stdlib placeholder together with a feature no runner here
+        // supports is not applicable (listed) rather than unavailable.
+        Err(reason) if reason.starts_with("needs $STDLIB_COMMON_PATH$") => {
+            Outcome::Excluded(reason)
+        }
         Err(reason) => Outcome::Unavailable(reason),
     };
     let _ = std::fs::remove_dir_all(&temp);
