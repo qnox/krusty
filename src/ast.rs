@@ -936,6 +936,9 @@ pub struct AstEnumEntry {
     pub name: String,
     /// Source span of the entry name.
     pub span: Span,
+    /// Whole entry as PSI ranges it: from the first annotation or modifier through the last token
+    /// of its arguments or class body.
+    pub declaration_span: Span,
     /// 1-based source line of the entry, filled by the parser post-pass (0 = unknown). kotlinc gives
     /// each entry's construction in `<clinit>` its own `LineNumberTable` entry.
     pub decl_line: u32,

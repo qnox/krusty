@@ -2040,6 +2040,7 @@ impl<'a> Parser<'a> {
             self.skip_semicolons();
             if !members_only {
                 loop {
+                    let entry_start = self.tok().span.lo;
                     let (entry_ann_names, entry_ann_args) = self.parse_enum_entry_prefix();
                     if !self.at(TokenKind::Ident) {
                         break;
@@ -2149,9 +2150,11 @@ impl<'a> Parser<'a> {
                             }
                         }
                     }
+                    let entry_end = self.t[self.i.saturating_sub(1)].span.hi;
                     entries.push(AstEnumEntry {
                         name: entry_name,
                         span: entry_span,
+                        declaration_span: Span::new(entry_start, entry_end),
                         decl_line: 0,
                         annotations: entry_ann_names,
                         annotation_args: entry_ann_args,
@@ -6519,6 +6522,60 @@ typealias Box<@Marker T> = List<T>
         assert_eq!(
             &source[diagnostics.diags[0].span.lo as usize..diagnostics.diags[0].span.hi as usize],
             "List"
+        );
+    }
+}
+
+#[cfg(test)]
+mod enum_entry_declaration_span_tests {
+    use super::*;
+
+    fn entry_texts(source: &str) -> Vec<(String, String)> {
+        let mut diagnostics = DiagSink::new();
+        let tokens = crate::lexer::lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+        file.decls
+            .iter()
+            .filter_map(|&id| match file.decl(id) {
+                Decl::Class(class) => Some(class),
+                _ => None,
+            })
+            .flat_map(|class| class.enum_entries.iter())
+            .map(|entry| {
+                let range = entry.declaration_span;
+                (
+                    entry.name.clone(),
+                    source[range.lo as usize..range.hi as usize].to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn enum_entry_range_covers_annotations_arguments_and_body() {
+        let source = "enum class E(val v: Int) {\n    A(1),\n    @Deprecated(\"x\") B(2) { override fun toString() = \"b\" },\n    C(3);\n}";
+        assert_eq!(
+            entry_texts(source),
+            [
+                ("A".to_string(), "A(1)".to_string()),
+                (
+                    "B".to_string(),
+                    "@Deprecated(\"x\") B(2) { override fun toString() = \"b\" }".to_string()
+                ),
+                ("C".to_string(), "C(3)".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn bare_enum_entry_range_is_its_name() {
+        assert_eq!(
+            entry_texts("enum class E { A, B }"),
+            [
+                ("A".to_string(), "A".to_string()),
+                ("B".to_string(), "B".to_string())
+            ]
         );
     }
 }
