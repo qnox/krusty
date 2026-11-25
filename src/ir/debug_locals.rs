@@ -113,6 +113,9 @@ impl IrDebugLocalProvenance {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrInlineLocalRole {
     Value,
+    /// A parameter the call omitted, initialized by a copy of its declared default. kotlinc
+    /// evaluates it inside the expansion's frame, unlike a supplied operand.
+    DefaultedValue,
     /// The containing class's `this`, bound because the inline callable is a member.
     DispatchReceiver,
     /// The receiver the inline callable extends.

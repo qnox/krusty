@@ -13,12 +13,19 @@ impl Emitter<'_> {
         declaration: krusty::ir::ExprId,
         code: &mut CodeBuilder,
     ) {
-        let frame_start = u16::try_from(code.bytes.len()).unwrap_or(u16::MAX);
+        let frame_start = self
+            .copied_frame_start
+            .take()
+            .or_else(|| u16::try_from(code.bytes.len()).ok())
+            .unwrap_or(u16::MAX);
         let slot = self
             .frame
             .enter(FrameKey::InlineFrameMarker(declaration), Ty::Int);
         code.push_int(0, self.cw);
         store(Ty::Int, slot, code);
+        if std::mem::take(&mut self.copied_frame_defaulted) {
+            code.forget_line();
+        }
         if !self.record_locals {
             return;
         }
@@ -40,7 +47,10 @@ impl Emitter<'_> {
         let depth = self.block_depth;
         for local in &mut self.open_locals {
             if local.inline_operand && local.inline_frame.is_none() && local.depth == depth {
-                local.start = frame_start;
+                // A default evaluated inside the frame starts its range after its own store.
+                if local.start <= frame_start {
+                    local.start = frame_start;
+                }
                 local.inline_frame = Some(frame);
             }
         }

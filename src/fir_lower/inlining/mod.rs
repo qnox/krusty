@@ -191,6 +191,11 @@ impl BodyLowering<'_> {
             named: true,
         });
         self.ir.call_operand_bindings.insert(declaration);
+        // The declaration stands on the default's own line, as kotlinc's `$default` body does.
+        if let Some(line) = self.ir.source_line(copy).filter(|line| *line != 0) {
+            self.ir.set_source_line(declaration, line);
+            self.ir.set_statement_line(declaration, line);
+        }
         Some((declaration, cloned))
     }
 
@@ -483,6 +488,20 @@ impl BodyLowering<'_> {
             splice_lambda[index] = matches!(plan, InlineOperandPlan::Splice);
             plans.push(plan);
         }
+        // A call that omits an argument runs the callee's `$default` body, whose extension
+        // receiver parameter kotlinc names after that stub.
+        if plans
+            .iter()
+            .any(|plan| matches!(plan, InlineOperandPlan::Default))
+        {
+            for operand in &mut parameter_names {
+                if operand.local_role == IrInlineLocalRole::ExtensionReceiver {
+                    if let Some(name) = operand.source_name.as_mut() {
+                        name.push_str("$default");
+                    }
+                }
+            }
+        }
         let mut operand_declarations = Vec::new();
         let mut defaulted = Vec::new();
         let mut staging_failed = false;
@@ -583,16 +602,25 @@ impl BodyLowering<'_> {
                 operand_types[index],
                 (&bindings, &reified_bindings),
             )?;
-            default_copies.extend(cloned);
-            if let Some(parameter) = parameter_names.get(index) {
-                if let Some(source_name) = parameter.source_name.clone() {
-                    self.ir.value_names.insert(declaration, source_name);
-                }
-                self.ir.set_debug_local_provenance(
-                    declaration,
-                    IrDebugLocalProvenance::inline_value(parameter.local_role, 1),
-                );
+            // The default is the callee's own code: its lines map through the callee's source
+            // like the body's.
+            let mut copied = cloned.values().copied().collect::<Vec<_>>();
+            copied.sort_unstable();
+            for copy in copied {
+                frame.record_copy(self.ir, copy, function);
             }
+            frame.record_copy(self.ir, declaration, function);
+            default_copies.extend(cloned);
+            if let Some(source_name) = parameter_names
+                .get(index)
+                .and_then(|parameter| parameter.source_name.clone())
+            {
+                self.ir.value_names.insert(declaration, source_name);
+            }
+            self.ir.set_debug_local_provenance(
+                declaration,
+                IrDebugLocalProvenance::inline_value(IrInlineLocalRole::DefaultedValue, 1),
+            );
             operand_declarations.push(declaration);
         }
         crate::trace_compiler!(

@@ -199,7 +199,7 @@ pub(super) fn render(
         Some(IrDebugLocalProvenance::InlineValue { role, depth }) => {
             let source = source?;
             let mut rendered = match role {
-                IrInlineLocalRole::Value => source.to_owned(),
+                IrInlineLocalRole::Value | IrInlineLocalRole::DefaultedValue => source.to_owned(),
                 // kotlinc spells the expanded callable's own `this` `this_`, and the receiver it
                 // extends `$this$<callable>` — the source name is the callable's in the second case
                 // and unused in the first.
