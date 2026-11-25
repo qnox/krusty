@@ -6,12 +6,12 @@
 use crate::fx_hash::HashSet;
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::assertions::{AssertionCompilation, AssertionMode};
 pub use crate::kotlin_version::ReferenceProfile;
 use crate::kotlin_version::{KotlinVersion, KotlincDefects};
 use crate::language_version::LanguageVersion;
-use crate::types::{AssertionCompilation, AssertionMode};
 
-pub(crate) mod deprecation_cycle_messages;
+pub mod deprecation_cycle_messages;
 
 const LANGUAGE_DIRECTIVE: &str = "// LANGUAGE:";
 const ASSERTIONS_MODE_DIRECTIVE: &str = "// ASSERTIONS_MODE:";
@@ -28,7 +28,7 @@ mod deprecation_migrations;
 mod language_versions;
 mod table;
 
-pub(crate) use deprecation_migrations::DeprecationMigration;
+pub use deprecation_migrations::DeprecationMigration;
 pub use deprecation_migrations::DeprecationMigrations;
 pub use language_versions::{vendored_language_versions, LanguageVersionPolicy, VersionStatus};
 pub use table::{vendored_table, BehaviorAfterSinceVersion, FeatureTable, LanguageFeature};
@@ -72,7 +72,7 @@ pub struct ReifiedTypeArgumentFeatures {
 
 impl DeprecationWarningFormat {
     /// Format kotlinc's complete deprecation warning around the occurrence-specific `message`.
-    pub(crate) fn message(&self, message: &str) -> String {
+    pub fn message(&self, message: &str) -> String {
         let mut warning = message.to_string();
         if warning.ends_with('.') {
             warning.push(' ');
@@ -346,21 +346,14 @@ impl LangFeatures {
     /// kotlinc's `toDeprecationWarningMessage` for a diagnostic this compilation's selected
     /// release turns into an error. `None` means that release predates the split deprecation
     /// diagnostic and reports the construct as an ordinary error.
-    pub(crate) fn deprecation_warning_message(
-        &self,
-        feature: &str,
-        message: &str,
-    ) -> Option<String> {
+    pub fn deprecation_warning_message(&self, feature: &str, message: &str) -> Option<String> {
         self.deprecation_warning_format(feature)
             .map(|format| format.message(message))
     }
 
     /// The release-owned formatting policy for a deprecation diagnostic whose leading message is
     /// only known when the checker has selected the declaration involved.
-    pub(crate) fn deprecation_warning_format(
-        &self,
-        feature: &str,
-    ) -> Option<DeprecationWarningFormat> {
+    pub fn deprecation_warning_format(&self, feature: &str) -> Option<DeprecationWarningFormat> {
         self.table()
             .get(feature)
             .map(LanguageFeature::deprecation_warning_format)

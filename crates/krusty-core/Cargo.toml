@@ -1,8 +1,8 @@
 [package]
-name = "krusty-names"
+name = "krusty-core"
 version = "0.0.1"
 edition = "2021"
-description = "Interned classifier identities: the name tree and the TypeName handle shared by the compiler and its plugins"
+description = "Shared foundations of the compiler and its plugins: interned classifier identities (the name tree and the TypeName handle), growing to the type model and checked facts"
 license = "Apache-2.0"
 repository = "https://github.com/qnox/krusty"
 

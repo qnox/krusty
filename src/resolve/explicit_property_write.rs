@@ -254,9 +254,12 @@ impl Checker<'_> {
                         );
                     self.diags.error(
                         self.assignment_member_name_span(s, name),
-                        self.file
-                            .reference
-                            .unresolved_member_message(name, rt, hidden_deprecated),
+                        super::diagnostic_selection::unresolved_member_message(
+                            self.file.reference,
+                            name,
+                            rt,
+                            hidden_deprecated,
+                        ),
                     )
                 }
                 _ => self.diags.error(

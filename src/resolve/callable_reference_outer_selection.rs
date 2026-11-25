@@ -247,6 +247,14 @@ impl Checker<'_> {
                 }
             }
         }
-        select_level(self.resolver().top_level_candidates(name), None)
+        // The level that owns the name is probed alone. This pre-selection is not the call's
+        // applicability check, so a level it cannot pre-select is left to ordinary selection rather
+        // than handed to a farther level.
+        select_level(
+            self.resolver()
+                .owning_level_top_level_functions(name)
+                .overloads,
+            None,
+        )
     }
 }

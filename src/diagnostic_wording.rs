@@ -147,8 +147,6 @@ pub fn no_value_for_parameter_anchor(reference: ReferenceProfile) -> Anchor {
 /// climbing the tower past the member, so when the extensions are inapplicable too it reports
 /// NONE_APPLICABLE for the member and the extensions together, at the callee's name. Earlier
 /// releases stop at the member and report its own error.
-impl ReferenceProfile {
-    pub fn inapplicable_member_joins_extensions(self) -> bool {
-        self.at_least(KotlinVersion::V2_4_20)
-    }
+pub fn inapplicable_member_joins_extensions(reference: ReferenceProfile) -> bool {
+    reference.at_least(KotlinVersion::V2_4_20)
 }

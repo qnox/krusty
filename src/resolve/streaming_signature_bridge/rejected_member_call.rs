@@ -90,7 +90,9 @@ impl ProductionSignatureSemantics<'_> {
         // rejected member; all versions fall through to member extensions when no direct shape
         // maps. Signature recovery follows the same policy as body diagnostics.
         let direct_maps = direct_rank.is_some();
-        if self.table.reference.inapplicable_member_joins_extensions() || !direct_maps {
+        if crate::diagnostic_wording::inapplicable_member_joins_extensions(self.table.reference)
+            || !direct_maps
+        {
             let member_extensions =
                 self.implicit_member_extension_candidate_sources(scope, receiver, spelling);
             let unprojected = member_extensions
