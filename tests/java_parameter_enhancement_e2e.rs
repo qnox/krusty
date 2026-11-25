@@ -1,12 +1,14 @@
 //! kotlinc enhances a Java parameter with the nullability of the declaration it overrides: a Java
 //! class implementing a Kotlin `fun f(x: String)` rejects `null` for `f`, because the override's
 //! `String!` becomes the overridden `String`. A parameter that overrides a type variable stays
-//! flexible, since a Java supertype names that argument flexibly (`KG<String!>`).
+//! flexible, since a Java supertype names that argument flexibly (`KG<String!>`), and so does one whose
+//! overridden declarations disagree on nullability.
 
 use super::common;
 
 const KOTLIN_LIBRARY: &str = "interface KI { fun f(x: String): String }
 interface KG<T> { fun h(x: T) }
+interface KN { fun f(x: String?): String }
 ";
 
 const SOURCE: &str = "fun strict(bar: Bar) {
@@ -25,6 +27,11 @@ fn libraries() -> Vec<std::path::PathBuf> {
         (
             "Bar.java".to_string(),
             "public class Bar implements KI { public String f(String x) { return x; } }\n"
+                .to_string(),
+        ),
+        (
+            "Both.java".to_string(),
+            "public class Both implements KI, KN { public String f(String x) { return \"\"; } }\n"
                 .to_string(),
         ),
         (
