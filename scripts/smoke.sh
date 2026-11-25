@@ -206,6 +206,13 @@ if [ -n "$(changed 'tools/krusty-build-tools/*' 'scripts/package-build-tools.sh'
   rm -rf "$packaged"
 fi
 
+# The Analysis API adapter is a Gradle build whose tests drive real KSP2 sessions, and the fixtures
+# under tests/psi_ranges are shared with krusty's parser tests; CI runs it as its own job.
+if [ -n "$(changed 'tools/krusty-analysis-api/*' 'tests/psi_ranges/*')" ]; then
+  step "analysis-api tests"
+  tools/krusty-analysis-api/gradlew --no-daemon -p tools/krusty-analysis-api test
+fi
+
 if [ -z "$lanes" ]; then
   step "no conformance lane is affected by this change"
   step "passed"
