@@ -3150,8 +3150,6 @@ fn emit_enum_class(
 
     let field_tys = field_jvm_tys(&c.fields);
     // (bridges emitted after the methods below — `emit_bridges` references emitted method refs)
-    let n_params = c.ctor_param_count as usize;
-    let user_tys: Vec<Ty> = field_tys[..n_params].to_vec();
     let all_param_tys = class_ctor_jvm_tys(ir, c);
     let ctor_params: Vec<Ty> = [Ty::String, Ty::Int]
         .into_iter()
@@ -3208,8 +3206,8 @@ fn emit_enum_class(
             &krusty::ir::DeclarationAnnotations::default(),
             &ctor_parameters,
         );
-        // The source parameters' annotations follow the constructor header, before its body. A
-        // private enum constructor carries no nullability annotations.
+        // The source parameters' annotations follow the constructor header, before its body. A private
+        // enum constructor carries no nullability annotations.
         cw.reserve_method_parameter_annotation_pool(None, &c.ctor_param_annotations, &[], false);
         // The ctor BODY's `super(name, ordinal)` call resolves before its LocalVariableTable strings.
         cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
@@ -3274,7 +3272,7 @@ fn emit_enum_class(
     // Private constructor `(Ljava/lang/String;I<user params>)V` → `super(name, ordinal)` then store the
     // property params / run the body-property initializers. The user params are ALL primary-ctor params
     // (from `ctor_args`) — a `val`/`var` param backs a field, a plain param is an argument only (in scope
-    // for a body-property initializer), so `all_param_tys` can be wider than the `n_params` fields.
+    // for a body-property initializer), so `all_param_tys` can be wider than the property fields.
     // An enum declaring ONLY secondary constructors has no primary to emit: every entry names one
     // of the secondaries, and each secondary interns its own header and locals where the declared
     // members schedule emits it. Building the synthesized primary anyway would intern its header and
@@ -3359,8 +3357,14 @@ fn emit_enum_class(
         let base_ctor_acc = 0x0002;
         // kotlinc's `Signature` on the enum ctor lists only the USER params, without the synthetic
         // leading `(String, int)`: `()V` for a plain enum, `(I)V` for `E(val n: Int)`.
+        // An enum declaring ONLY secondary constructors has no primary to emit: every entry names one
+        // of the secondaries. Registering the synthesized primary anyway collided with a no-argument
+        // secondary — both are `(String, int)V` — and the class failed to load with a
+        // `ClassFormatError: Duplicate method name "<init>"`. Its bytes are still built above so the
+        // constant pool interns in kotlinc's order.
         seed_enum_constructor_locals(ir, c, &self_desc, &mut cw);
-        {
+        let emits_primary_ctor = c.has_primary_ctor || c.secondary_ctors.is_empty();
+        if emits_primary_ctor {
             cw.add_method_sig(
                 base_ctor_acc | method_access::primary_constructor_varargs(c),
                 "<init>",
@@ -3377,7 +3381,7 @@ fn emit_enum_class(
                 &c.ctor_param_annotations,
             );
         }
-        {
+        if emits_primary_ctor {
             let header = c.decl_line;
             let start = if c.decl_start_line == 0 {
                 header
@@ -3414,26 +3418,6 @@ fn emit_enum_class(
             &mut cw,
             env,
         );
-    }
-
-    // The constructors' LocalVariableTable strings follow their bodies, and the property accessors
-    // (`getTag`, its descriptor, its `@NotNull`) come next, each at its method visit.
-    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
-        cw.reserve_method_name(&property_getter_name(&f.name));
-        cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
-        // A parameterized getter's generic `Signature` interns at its method visit, before the
-        // nullability annotation.
-        if let Some(getter) =
-            property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref()).getter
-        {
-            cw.reserve_descriptor(&getter);
-        }
-        // The nullability comes from the declared type; `t` is its erased JVM form.
-        match field_nullability_kind(f.ty) {
-            1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
-            2 => cw.reserve_descriptor("Lorg/jetbrains/annotations/Nullable;"),
-            _ => {}
-        }
     }
 
     let markers = member_schedule::property_annotation_marker_fids(ir, c);
