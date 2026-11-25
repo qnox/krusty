@@ -408,7 +408,12 @@ pub(super) fn compile_multifile(
     // real javac.
     let mut java_classes: Vec<(String, Vec<u8>)> = Vec::new();
     if !java_blocks.is_empty() {
-        match common::javac_compile(&java_blocks, cp_jars) {
+        match common::javac_compile_on(
+            &javac_target(jdk_modules, krusty::conformance::needs_preview(src)),
+            &java_blocks,
+            cp_jars,
+            &[],
+        ) {
             Some((javadir, classes)) => {
                 // The classes were read into memory (BoxRunner loads from bytes, and krusty sees
                 // them as an overlay on the shared jar classpath), so the scratch tree can go now.
@@ -472,8 +477,13 @@ fn compile_kotlin_first(
         write_classes_to_dir(&kotlin_classes, &kotlindir)?;
         let mut javac_cp = cp_jars.to_vec();
         javac_cp.push(kotlindir);
-        let (javadir, java_classes) = common::javac_compile(java_blocks, &javac_cp)
-            .ok_or_else(|| harness("javac rejected the Java sources against krusty's classes"))?;
+        let (javadir, java_classes) = common::javac_compile_on(
+            &javac_target(jdk_modules, krusty::conformance::needs_preview(src)),
+            java_blocks,
+            &javac_cp,
+            &[],
+        )
+        .ok_or_else(|| harness("javac rejected the Java sources against krusty's classes"))?;
         if let Some(jroot) = javadir.parent() {
             let _ = fs::remove_dir_all(jroot);
         }
@@ -779,7 +789,12 @@ fn compile_module_units(
                 &[],
             )?
         } else {
-            match common::javac_compile(java_files, &cp) {
+            match common::javac_compile_on(
+                &javac_target(jdk_modules, krusty::conformance::needs_preview(src)),
+                java_files,
+                &cp,
+                &[],
+            ) {
                 Some((javadir, java_classes)) => {
                     if let Some(root) = javadir.parent() {
                         let _ = fs::remove_dir_all(root);
@@ -833,6 +848,37 @@ fn compile_module_units(
         flat: all,
         module_ranges,
     })
+}
+
+/// The JDK a case's Java sources compile on. A case that runs on an installed JDK names it through
+/// that JDK's `lib/modules`; its `release` file gives the feature release javac is told next to
+/// `--enable-preview`. Every other case compiles on the harness JDK.
+pub(super) fn javac_target(jdk_modules: Option<&Path>, preview: bool) -> common::JavacTarget {
+    let home = jdk_modules
+        .filter(|modules| modules.file_name().is_some_and(|name| name == "modules"))
+        .and_then(Path::parent)
+        .filter(|lib| lib.file_name().is_some_and(|name| name == "lib"))
+        .and_then(Path::parent)
+        .filter(|home| home.join("release").is_file());
+    let Some(home) = home else {
+        return common::JavacTarget {
+            preview,
+            ..common::JavacTarget::default()
+        };
+    };
+    let release = fs::read_to_string(home.join("release"))
+        .ok()
+        .and_then(|text| {
+            let version = text
+                .lines()
+                .find_map(|line| line.strip_prefix("JAVA_VERSION=\""))?;
+            version.split(['.', '"', '-']).next()?.parse::<u32>().ok()
+        });
+    common::JavacTarget {
+        home: Some(home.to_path_buf()),
+        release,
+        preview,
+    }
 }
 
 /// Compile one box case with krusty through the topology its markers select: `// MODULE:` builds,

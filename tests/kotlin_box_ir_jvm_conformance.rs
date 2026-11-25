@@ -1488,7 +1488,8 @@ fn kotlin_codegen_box_conformance() {
                             .unwrap_or_else(|error| panic!("{}: {error}", file.display())),
                         (None, None) => jdk_roots.select(&src),
                     };
-                    let modern_jdk_home = modern.and_then(|_| jdk.home().map(|(home, _)| home.to_path_buf()));
+                    let modern_jdk_home =
+                        modern.and_then(|_| jdk.home().map(|(home, _)| home.to_path_buf()));
                     let jdk_modules = jdk.classpath_root();
 
                     // Box outcome and krusty's module-qualified classes (`None` when krusty emitted
@@ -1504,8 +1505,14 @@ fn kotlin_codegen_box_conformance() {
                         let compiled = match compiled {
                             Ok(c) if !c.flat.is_empty() => c,
                             rejected => {
-                                if let Err(CompileFailure::Rejected { report, .. }) = rejected {
-                                    eprintln!("{report}");
+                                match &rejected {
+                                    Err(CompileFailure::Rejected { report, .. }) => {
+                                        eprintln!("{report}")
+                                    }
+                                    Err(CompileFailure::Harness(reason)) => {
+                                        eprintln!("{}: {reason}", file.display())
+                                    }
+                                    Ok(_) => {}
                                 }
                                 return (
                                     TestResult::Fail(

@@ -2563,10 +2563,11 @@ public class JavaRunner {
         DataOutputStream dout = new DataOutputStream(new BufferedOutputStream(System.out, 4096));
         PrintStream realOut = System.out;
         while (true) {
-            String driver, cp, outdir, mainClass, procPath;
+            String driver, cp, outdir, mainClass, procPath, extraArgs;
             try { driver = readStr(din); } catch (EOFException e) { break; }
             cp = readStr(din); outdir = readStr(din); mainClass = readStr(din);
             procPath = readStr(din);
+            extraArgs = readStr(din);
             String result;
             try {
                 if (mainClass.equals("\u0000javap")) {
@@ -2596,6 +2597,8 @@ public class JavaRunner {
                 ArrayList<String> jargs = new ArrayList<>();
                 jargs.add("-cp"); jargs.add(cp);
                 jargs.add("-d"); jargs.add(outdir);
+                // Extra javac options, one per line (`--enable-preview`, `--release N`).
+                if (!extraArgs.isEmpty()) for (String o : extraArgs.split("\n")) jargs.add(o);
                 if (!procPath.isEmpty()) {
                     // Annotation processing: javac discovers processors via ServiceLoader on the
                     // processor path and runs its own multi-round loop. JDK >= 23 disables
@@ -2674,7 +2677,8 @@ fn setup_java_runner(java_home: &str) -> Option<PathBuf> {
         return None;
     }
     let out = Command::new(&javac)
-        .args(["-d", &dir.to_string_lossy()])
+        // UTF-8 explicitly: before JDK 18 the default charset follows the locale.
+        .args(["-encoding", "UTF-8", "-d", &dir.to_string_lossy()])
         .arg(&src_path)
         .output()
         .ok()?;
@@ -2695,6 +2699,7 @@ impl JavaRunner {
         // the reference javac output on a thread pool, so serial GC / C1-only throttles it (see BoxRunner).
         cmd.args([
             "-Xverify:all",
+            "-Dfile.encoding=UTF-8",
             "-Xmx512m",
             "-cp",
             &runner_dir.to_string_lossy(),
@@ -2726,12 +2731,14 @@ impl JavaRunner {
         outdir: &str,
         main_class: &str,
         proc_path: &str,
+        extra_args: &str,
     ) -> std::io::Result<String> {
         self.write_str(driver)?;
         self.write_str(cp)?;
         self.write_str(outdir)?;
         self.write_str(main_class)?;
         self.write_str(proc_path)?;
+        self.write_str(extra_args)?;
         self.stdin.flush()?;
         let deadline = Instant::now() + Duration::from_secs(60);
         let fd = self.stdout.as_raw_fd();
@@ -2764,25 +2771,76 @@ pub fn javac_run_proc(
     main_class: &str,
     proc_path: &str,
 ) -> Option<String> {
-    // A pool of runner JVMs. The claim is held across the run, so overlapping javac/javap calls use
-    // distinct JVMs instead of queueing on the first one.
-    static POOL: OnceLock<server_pool::Pool<JavaRunner>> = OnceLock::new();
-    let java_home = java_home();
+    javac_run_on(
+        &JavacTarget::default(),
+        driver_path,
+        cp,
+        outdir,
+        main_class,
+        proc_path,
+    )
+}
+
+/// The JDK a Java compilation runs on. A `boxModernJdk` case's Java sources compile on the JDK the
+/// case runs on: javac's default class-file version is that JDK's, and only that javac reads the
+/// case's preview-marked Kotlin classes.
+#[derive(Clone, Debug, Default)]
+pub struct JavacTarget {
+    /// The JDK installation (`None` = the harness JDK).
+    pub home: Option<PathBuf>,
+    /// The feature release, named to javac next to `--enable-preview`.
+    pub release: Option<u32>,
+    pub preview: bool,
+}
+
+impl JavacTarget {
+    fn javac_options(&self) -> String {
+        match (self.preview, self.release) {
+            (true, Some(release)) => format!("--enable-preview\n--release\n{release}"),
+            (true, None) => "--enable-preview".to_string(),
+            (false, _) => String::new(),
+        }
+    }
+}
+
+/// [`javac_run_proc`] on the JDK `target` names.
+pub fn javac_run_on(
+    target: &JavacTarget,
+    driver_path: &str,
+    cp: &str,
+    outdir: &str,
+    main_class: &str,
+    proc_path: &str,
+) -> Option<String> {
+    // A pool of runner JVMs per JDK. The claim is held across the run, so overlapping javac/javap
+    // calls use distinct JVMs instead of queueing on the first one.
+    static POOLS: Mutex<
+        std::collections::BTreeMap<String, &'static server_pool::Pool<JavaRunner>>,
+    > = Mutex::new(std::collections::BTreeMap::new());
+    let java_home = match &target.home {
+        Some(home) => home.to_string_lossy().into_owned(),
+        None => java_home(),
+    };
     let java = format!("{java_home}/bin/java");
     if !Path::new(&java).exists() {
         return None;
     }
     let runner_dir = setup_java_runner(&java_home)?;
-    let pool = POOL.get_or_init(server_pool::Pool::new);
+    let pool: &'static server_pool::Pool<JavaRunner> = *POOLS
+        .lock()
+        .unwrap()
+        .entry(java_home.clone())
+        .or_insert_with(|| Box::leak(Box::new(server_pool::Pool::new())));
+    let options = target.javac_options();
     pool.with_server(
         server_pool::server_pool_cap(),
         || JavaRunner::new(&java, &runner_dir),
-        |runner| match runner.try_run(driver_path, cp, outdir, main_class, proc_path) {
+        |runner| match runner.try_run(driver_path, cp, outdir, main_class, proc_path, &options) {
             Ok(output) => Some(output),
             Err(_) => {
                 *runner = JavaRunner::new(&java, &runner_dir)?;
                 runner
-                    .try_run(driver_path, cp, outdir, main_class, proc_path)
+                    .try_run(driver_path, cp, outdir, main_class, proc_path, &options)
                     .ok()
             }
         },
@@ -2885,6 +2943,16 @@ pub fn javac_compile_proc(
     cp_jars: &[PathBuf],
     proc_path: &[PathBuf],
 ) -> Option<JavacOutput> {
+    javac_compile_on(&JavacTarget::default(), sources, cp_jars, proc_path)
+}
+
+/// [`javac_compile_proc`] on the JDK `target` names.
+pub fn javac_compile_on(
+    target: &JavacTarget,
+    sources: &[(String, String)],
+    cp_jars: &[PathBuf],
+    proc_path: &[PathBuf],
+) -> Option<JavacOutput> {
     if sources.is_empty() {
         return None;
     }
@@ -2919,7 +2987,7 @@ pub fn javac_compile_proc(
         .collect::<Vec<_>>()
         .join(":");
     // Empty main class = compile-only (no run) in the JavaRunner protocol.
-    let res = javac_run_proc(&joined, &cp, &outdir.to_string_lossy(), "", &proc)?;
+    let res = javac_run_on(target, &joined, &cp, &outdir.to_string_lossy(), "", &proc)?;
     if res != "OK" {
         // Failure is a legitimate SKIP for the harness; surface the javac error only on demand.
         if std::env::var("KRUSTY_JAVAC_DEBUG").is_ok() {
