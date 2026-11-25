@@ -5,6 +5,7 @@
 use super::common;
 
 const NOT_NULL: &str = include_str!("box_regressions/suspendResultNotNullAssertion.kt");
+const MAP_BACKED: &str = include_str!("box_regressions/suspendResultMapBackedRepository.kt");
 const CONSUMERS: &str = include_str!("box_regressions/suspendResultErasedConsumers.kt");
 
 fn assert_complete_module(file: &str, source: &str) {
@@ -33,4 +34,9 @@ fn the_complete_not_null_suspension_result_program_matches_kotlin() {
 #[test]
 fn the_complete_erased_suspension_result_consumers_program_matches_kotlin() {
     assert_complete_module("suspendResultErasedConsumers.kt", CONSUMERS);
+}
+
+#[test]
+fn the_complete_map_backed_repository_suspension_result_program_matches_kotlin() {
+    assert_complete_module("suspendResultMapBackedRepository.kt", MAP_BACKED);
 }

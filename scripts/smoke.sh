@@ -325,7 +325,10 @@ run_versions() {
     # Each step is checked on its own: an assignment's status is not reliably seen by `set -e`.
     kc="$(just kotlinc "$v")" || exit 1
     bc="$(just box-corpus "$v")" || exit 1
-    just plugin-corpus serialization "$v" >/dev/null || exit 1
+    # Every plugin that has a box corpus, as the conformance entries need all of them.
+    while read -r plugin; do
+      just plugin-corpus "$plugin" "$v" >/dev/null || exit 1
+    done < <(just plugin-corpora)
     kotlinc_of[$v]="$kc"
     box_of[$v]="$bc"
     case " $lanes " in

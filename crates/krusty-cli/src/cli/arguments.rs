@@ -353,10 +353,13 @@ pub(super) fn apply(
             }
         }
         // `-Xassertions` selects how `assert(...)` is compiled. krusty emits the two unconditional
-        // modes; `jvm` and `legacy` name runtime-checked shapes it does not reproduce yet.
+        // modes and `legacy`, kotlinc's default; `jvm` names a runtime-checked shape it does not
+        // reproduce yet.
         "-Xassertions" => match text {
-            "always-enable" | "always-disable" => opts.assertions = Some(text.to_string()),
-            "jvm" | "legacy" => opts.refuse(format!(
+            "always-enable" | "always-disable" | "legacy" => {
+                opts.assertions = Some(text.to_string())
+            }
+            "jvm" => opts.refuse(format!(
                 "{name}={text} selects an output shape krusty does not emit"
             )),
             _ => opts.errors.push(format!(
