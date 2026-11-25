@@ -915,9 +915,83 @@ impl<'u, 's> Linker<'u, 's> {
                     self.declare(ir, body, Some(selected), arena, function)?;
                 }
             }
+            if self.publish_inherited_default(ir, owner, body, implemented)? {
+                continue;
+            }
             self.record_inherited_implementation(ir, owner, body, None, implemented);
         }
         Ok(())
+    }
+
+    /// Publish, as the checker does for a source class, the interface default `body` the
+    /// materialized class `owner` inherits without overriding it, when no unit declared the
+    /// default as a method: the backend implements the class's interface slot with the
+    /// default's emitted body. Returns whether the default was published.
+    fn publish_inherited_default(
+        &self,
+        ir: &mut IrFile,
+        owner: crate::types::TypeName,
+        body: &KlibDependencyCallable,
+        implemented: &[KlibDependencyCallable],
+    ) -> Result<bool, KlibBodyDeclineReason> {
+        if implemented != std::slice::from_ref(body) || self.declared_member(body).is_some() {
+            return Ok(false);
+        }
+        let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) else {
+            return Ok(false);
+        };
+        let selected = callables[0];
+        let Some(target) = self.sources.callees.reference_target(body) else {
+            return Ok(false);
+        };
+        let Some(crate::types::SemanticCallableOwner::Classifier(interface)) =
+            selected.declaration_owner()
+        else {
+            return Ok(false);
+        };
+        if !selected
+            .class_contract()
+            .is_some_and(|class| class.kind == crate::libraries::TypeKind::Interface)
+        {
+            return Ok(false);
+        }
+        let (_, function) = self.sources.bodies.function(body).ok_or_else(|| {
+            KlibBodyDeclineReason::SignatureMismatch(
+                "an inherited default has no serialized declaration".to_owned(),
+            )
+        })?;
+        if !function.type_parameters.is_empty()
+            || function.base.flags & crate::metadata::function_flags::IS_SUSPEND != 0
+        {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a generic or suspend interface default inherited by a materialized class"
+                    .to_owned(),
+            ));
+        }
+        let records = ir.inherited_defaults.entry(owner).or_default();
+        if records.iter().any(|known| {
+            known.body == crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(target)
+        }) {
+            return Ok(true);
+        }
+        records.push(crate::fir::ResolvedInheritedDefault {
+            name: crate::fir::InheritedMemberName::Function(selected.name().into()),
+            function: Some(crate::fir::ResolvedFunctionOverrideTarget::External(target)),
+            accessor: None,
+            annotation_origin: None,
+            declaring_interface: interface,
+            dispatch_interface: interface,
+            parameters: selected.params().into(),
+            parameter_identities: selected.parameter_identities().into(),
+            result: selected.ret(),
+            applied_parameters: selected.params().into(),
+            applied_result: selected.ret(),
+            type_parameters: Box::default(),
+            suspend: false,
+            vararg: selected.vararg_index().is_some(),
+            body: crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(target),
+        });
+        Ok(true)
     }
 
     /// The method this unit declared for the member `body`: a member of a class it materialized,
