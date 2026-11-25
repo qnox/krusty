@@ -60,10 +60,6 @@ pub(super) fn standard_collection_implementation(
     )
 }
 
-pub(super) fn is_lazy(internal: TypeName) -> bool {
-    is_identity(internal, &["kotlin/Lazy"])
-}
-
 pub(super) fn is_read_only_property(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/properties/ReadOnlyProperty"])
 }
@@ -222,8 +218,6 @@ pub(super) fn runtime_interface_descriptor(internal: TypeName) -> Option<&'stati
         "kt_type_closed_range"
     } else if is_closed_floating_range(internal) {
         "kt_type_closed_floating_point_range"
-    } else if is_lazy(internal) {
-        "kt_type_lazy"
     } else if is_kclass(internal) {
         "kt_type_kclass"
     } else if is_enum_entries(internal) {

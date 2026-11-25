@@ -783,12 +783,6 @@ pub(super) fn float_predicate(owner: DeclarationOwner, name: &str) -> Option<Flo
     }
 }
 
-/// Whether a declaration's owner is the file facade `lazy` and `Lazy.getValue` live in. Both are
-/// top-level declarations of `kotlin`, so they reach a backend as members of `kotlin/LazyKt`.
-pub(super) fn is_lazy_facade(owner: DeclarationOwner) -> bool {
-    owner.package_is(krusty::types::wk::kotlin_package())
-}
-
 /// Whether a declaration's owner is the file facade `to` lives in. `kotlin.to` is a top-level
 /// extension, so it reaches a backend as a member of `kotlin/TuplesKt` — the `kotlin/io/ConsoleKt`
 /// situation again, normalized in the same place.

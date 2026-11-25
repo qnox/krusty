@@ -665,21 +665,6 @@ kt_double kt_iterable_sum_of_double(KRef iterable, KRef selector);
 KRef kt_iterable_plus_element(KRef iterable, KRef element);
 KRef kt_iterable_plus_all(KRef iterable, KRef tail);
 
-/* ---- lazy ---------------------------------------------------------------------------------- */
-
-/* `by lazy { … }`: the initializer until it has run, the value afterwards, and the one bit that
-   says which. The initializer is dropped once it has run, as Kotlin's own `SynchronizedLazyImpl`
-   does — it is no longer reachable from the program, so keeping it would keep its captures alive
-   for nothing.
-
-   Single-threaded for now: this target has no threads, and Kotlin's default mode synchronizes. When
-   threads arrive, this is where that lock goes. */
-extern const KType kt_type_lazy;
-
-KRef kt_lazy_of(KRef initializer);
-KRef kt_lazy_value(KRef lazy);
-kt_boolean kt_lazy_is_initialized(KRef lazy);
-
 /* ---- pairs --------------------------------------------------------------------------------- */
 
 /* `a to b`: two references, with the three `kotlin.Any` members answering componentwise the way

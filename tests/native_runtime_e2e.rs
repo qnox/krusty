@@ -1108,11 +1108,6 @@ fn a_builder_joins_a_surrogate_pair_appended_unit_by_unit() {
 }
 
 #[test]
-fn a_lazy_whose_initializer_throws_stays_uninitialized() {
-    run_driver("lazy_initializer_throws");
-}
-
-#[test]
 fn an_append_whose_to_string_throws_leaves_the_builder_alone() {
     run_driver("builder_append_throwing_to_string");
 }
@@ -1192,11 +1187,6 @@ fn a_number_converts_saturating_and_truncating_as_kotlin_does() {
 #[test]
 fn a_pairs_members_answer_componentwise() {
     run_driver("pair_members");
-}
-
-#[test]
-fn a_lazy_runs_its_initializer_once_on_the_first_read() {
-    run_driver("delegates");
 }
 
 #[test]

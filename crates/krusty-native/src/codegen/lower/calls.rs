@@ -975,9 +975,6 @@ impl BodyLowering<'_, '_, '_> {
                         {
                             return realized;
                         }
-                        if let Some(realized) = self.lazy_construction(signature, args) {
-                            return realized;
-                        }
                         if let Some(operation) =
                             compiler_intrinsics::console_intrinsic(realization.compiler_intrinsic)
                         {
