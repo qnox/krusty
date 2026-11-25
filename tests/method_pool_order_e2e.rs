@@ -28,6 +28,7 @@
 //!   every constant of the body, not where its block closes.
 //! - An enum's declared functions intern before its synthesized `values`/`valueOf`/`getEntries`,
 //!   and its fields, entry constants included, intern where a body first references them.
+//! - An enum's `$values` helper interns after its lifted local functions, which kotlinc visits first.
 //! - A descriptor a removed unboxing interned in one method is placed where a later member's header
 //!   first names it, after what earlier code already interned.
 //! - A constant a removed null check interned in one method is placed where a later method
@@ -442,6 +443,28 @@ object Counter {
 }
 "#,
         &["Counter", "ElidedInstanceKt"],
+    );
+}
+
+/// A function-local lambda inside an enum member is lifted to a method that kotlinc visits before
+/// the private `$values` helper.
+#[test]
+fn an_enum_values_helper_interns_after_its_lifted_local_functions() {
+    assert_identical(
+        "EnumLifted",
+        "class Sink<T> { fun put(value: T) {} }\n\
+         fun <R> build(init: Sink<R>.() -> Unit): Sink<R> = Sink<R>().apply(init)\n\
+         enum class Phase {\n\
+         \x20   Start;\n\
+         \x20   fun run() {\n\
+         \x20       fun inner() {\n\
+         \x20           val phase: Phase = Start\n\
+         \x20           build { put(phase) }\n\
+         \x20       }\n\
+         \x20       inner()\n\
+         \x20   }\n\
+         }\n",
+        &["Phase"],
     );
 }
 
