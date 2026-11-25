@@ -155,6 +155,11 @@ pub fn case_kotlinc_arguments(src: &str) -> Result<Vec<String>, String> {
     Ok(configuration.arguments)
 }
 
+/// Whether kotlinc's `-Xjdk-release=<release>` is only valid with `-jvm-target 1.8`.
+fn release_requires_jvm_target_1_8(release: &str) -> bool {
+    matches!(release, "6" | "1.6" | "7" | "1.7")
+}
+
 fn case_cli_arguments(
     src: &str,
     target: super::TestTarget,
@@ -199,10 +204,19 @@ fn case_cli_arguments(
         );
     }
     if target == super::TestTarget::Jvm {
-        if let Some(target) = last_value(src, "JVM_TARGET") {
+        let release = last_value(src, "JDK_RELEASE");
+        // kotlinc refuses a release below 8 unless the target is named, and names only 1.8 valid:
+        // JetBrains' test infrastructure sets the two settings directly, so the command line
+        // spells the one target those releases accept.
+        let target = last_value(src, "JVM_TARGET").or_else(|| {
+            release
+                .filter(|release| release_requires_jvm_target_1_8(release))
+                .map(|_| "1.8")
+        });
+        if let Some(target) = target {
             arguments.extend(["-jvm-target".to_string(), target.to_string()]);
         }
-        if let Some(release) = last_value(src, "JDK_RELEASE") {
+        if let Some(release) = release {
             arguments.push(format!("-Xjdk-release={release}"));
         }
         if directive(src, "ENABLE_JVM_PREVIEW") {
@@ -454,6 +468,22 @@ mod tests {
                 "-Xassertions=always-enable",
                 "-Xwhen-expressions=indy",
             ]
+        );
+    }
+
+    #[test]
+    fn a_release_below_8_names_the_only_target_kotlinc_accepts_with_it() {
+        for (release, own_target) in [("6", None), ("7", None), ("6", Some("1.8"))] {
+            let target = own_target.map_or(String::new(), |t| format!("// JVM_TARGET: {t}\n"));
+            let src = format!("// JDK_RELEASE: {release}\n{target}fun box() = \"OK\"\n");
+            assert_eq!(
+                arguments(&src),
+                ["-jvm-target", "1.8", &format!("-Xjdk-release={release}")]
+            );
+        }
+        assert_eq!(
+            arguments("// JDK_RELEASE: 8\nfun box() = \"OK\"\n"),
+            ["-Xjdk-release=8"]
         );
     }
 
