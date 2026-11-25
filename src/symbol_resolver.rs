@@ -1625,9 +1625,16 @@ impl<'a> SymbolResolver<'a> {
                 let referenced_property = member_dispatch
                     .then(|| self.declared_member_property_for_reference(ty, name, &callables))
                     .flatten();
+                // A member function of the name outranks a Java bean property derived from a getter:
+                // `Thread::isDaemon` and `List<String>::isEmpty` name the function, as kotlinc binds them.
+                let declares_member_function = callables
+                    .functions()
+                    .iter()
+                    .any(|function| function.kind == FnKind::Member);
                 let property_ref = referenced_property
                     .as_ref()
                     .filter(|_| ty.kotlin_class_internal() != Some(crate::types::wk::any()))
+                    .filter(|property| !(property.accessor_derived() && declares_member_function))
                     .and_then(|property| {
                         build_property_reference_from_declaration(ty, name, property)
                     });
