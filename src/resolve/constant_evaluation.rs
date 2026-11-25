@@ -5,6 +5,8 @@
 //! `const val` publication from growing a second syntax-only resolver and prevents an overloaded
 //! `plus`/`compareTo` from being mistaken for a builtin constant operation.
 
+use std::cell::Cell;
+
 use crate::fx_hash::HashMap;
 
 use crate::ast::{BinOp, Expr, ExprId, File, TemplatePart, UnOp};
@@ -132,11 +134,23 @@ pub(crate) fn checked_constant_expression(
     expression: ExprId,
     declared_ty: Ty,
 ) -> Option<LibraryConst> {
-    Evaluator { context }.evaluate(expression, Some(declared_ty))
+    Evaluator {
+        context,
+        depth: Cell::new(0),
+    }
+    .evaluate(expression, Some(declared_ty))
 }
+
+/// How many evaluation levels run between stack-headroom checks, on the schedule the checked-FIR
+/// constant evaluator uses (`src/fir_lower/constant_evaluation.rs`).
+const STACK_CHECK_INTERVAL: u32 = 64;
 
 struct Evaluator<'a> {
     context: CheckedConstantExpression<'a>,
+    /// Current recursion depth. Evaluation has no depth cap of its own: the checker already bounds
+    /// source nesting at `MAX_SEMANTIC_EXPR_DEPTH`, and the recursion grows the stack as it
+    /// descends so that bound is survivable on any thread.
+    depth: Cell<u32>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -164,7 +178,15 @@ impl<'a> Evaluator<'a> {
     /// literal (`toConstExpression`): under `NormalizeNaNValuesInConstContext` a NaN is the
     /// canonical NaN of its type.
     fn evaluate(&self, expression: ExprId, requested: Option<Ty>) -> Option<LibraryConst> {
-        let constant = self.evaluate_node(expression, requested)?;
+        let depth = self.depth.get() + 1;
+        self.depth.set(depth);
+        let constant = if depth == 1 || depth.is_multiple_of(STACK_CHECK_INTERVAL) {
+            crate::wide_stack::on_wide_stack(|| self.evaluate_node(expression, requested))
+        } else {
+            self.evaluate_node(expression, requested)
+        };
+        self.depth.set(depth - 1);
+        let constant = constant?;
         Some(if self.context.file.normalize_nan_in_const_context {
             canonical_nan(constant)
         } else {
