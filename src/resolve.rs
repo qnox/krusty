@@ -8770,20 +8770,19 @@ impl<'a> Checker<'a> {
             let ret = crate::symbol_resolver::ty_subst_keep_unbound(signature.ret, &bindings);
             fitted.push((score, overload_index, params, ret, bindings));
         }
+        crate::symbol_resolver::retain_nearest_scope_level(&mut fitted, |(_, i, ..)| {
+            crate::symbol_resolver::scope_level(&overloads[*i])
+        });
         let low_priority_annotation =
             crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
-        if fitted.iter().any(|(_, index, ..)| {
-            !overloads[*index]
+        let ordinary = |index: usize| {
+            !overloads[index]
                 .callable
                 .annotations
                 .contains(&low_priority_annotation)
-        }) {
-            fitted.retain(|(_, index, ..)| {
-                !overloads[*index]
-                    .callable
-                    .annotations
-                    .contains(&low_priority_annotation)
-            });
+        };
+        if fitted.iter().any(|(_, index, ..)| ordinary(*index)) {
+            fitted.retain(|(_, index, ..)| ordinary(*index));
         }
         let best_rank = fitted.iter().map(|(score, ..)| score.rank).max()?;
         let maximal = fitted
@@ -13539,9 +13538,7 @@ impl<'a> Checker<'a> {
                 // A top-level NON-public (`@InlineOnly`) inline fn (`require`/`check`) inlines its lambda
                 // argument (or the file is skipped), so a mutable capture is an inline capture — type the
                 // lambda body with mutation allowed (don't `Ref`-box the captured var).
-                let top_level_functions = crate::libraries::FunctionSet {
-                    overloads: self.resolver().top_level_candidates(&fname),
-                };
+                let top_level_functions = self.resolver().owning_level_top_level_functions(&fname);
                 let toplevel_inline = toplevel_lambda_shape
                     .as_ref()
                     .is_some_and(|shape| shape.param_types.is_some())
@@ -31478,7 +31475,7 @@ impl<'a> Checker<'a> {
         let mut unavailable_default = None;
         let mut unresolved_type_arguments = false;
         let mut context_parameter_candidate = None;
-        let candidates = candidates
+        let mut candidates = candidates
             .into_iter()
             .filter_map(|mut function| {
                 if function.kind != crate::libraries::FnKind::TopLevel {
@@ -31652,6 +31649,9 @@ impl<'a> Checker<'a> {
                 ))
             })
             .collect::<Vec<_>>();
+        crate::symbol_resolver::retain_nearest_scope_level(&mut candidates, |c| {
+            crate::symbol_resolver::scope_level(&c.0)
+        });
         if candidates.is_empty() {
             if let Some(function) = context_parameter_candidate {
                 return Some(self.report_context_parameter_reference(expression, name, &function));

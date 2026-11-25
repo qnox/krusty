@@ -84,7 +84,73 @@ impl SymbolResolver<'_> {
         }
     }
 
+    /// Select from a family one scope-tower level at a time, nearest first: the first level whose
+    /// selection is not empty owns the call, so a farther declaration never competes with a nearer
+    /// applicable one on specificity, and a nearer level whose declarations do not apply leaves the
+    /// call to the next.
     pub(super) fn pick_top_level_with_visibility(
+        &self,
+        name: &str,
+        fs: &FunctionSet,
+        arguments: FamilyArguments<'_>,
+        type_args: &[Ty],
+        expected: Option<Ty>,
+        include_invisible: bool,
+    ) -> TopLevelSelection<(Option<FunctionInfo>, LibraryCallable)> {
+        let level = super::scope_level_callables::scope_level;
+        let mut levels = fs.overloads.iter().map(level).collect::<Vec<_>>();
+        levels.sort_unstable();
+        levels.dedup();
+        if levels.len() <= 1 {
+            return self.pick_top_level_at_level(
+                name,
+                fs,
+                arguments,
+                type_args,
+                expected,
+                include_invisible,
+            );
+        }
+        for nearest in levels {
+            let members = (0..fs.overloads.len())
+                .filter(|&index| level(&fs.overloads[index]) == nearest)
+                .collect::<Vec<_>>();
+            let functions = FunctionSet {
+                overloads: members
+                    .iter()
+                    .map(|&index| fs.overloads[index].clone())
+                    .collect(),
+            };
+            let calls;
+            let arguments = match arguments {
+                FamilyArguments::Shared(args) => FamilyArguments::Shared(args),
+                FamilyArguments::PerCandidate { calls: all, source } => {
+                    calls = members
+                        .iter()
+                        .map(|&index| all[index].clone())
+                        .collect::<Vec<_>>();
+                    FamilyArguments::PerCandidate {
+                        calls: &calls,
+                        source,
+                    }
+                }
+            };
+            match self.pick_top_level_at_level(
+                name,
+                &functions,
+                arguments,
+                type_args,
+                expected,
+                include_invisible,
+            ) {
+                TopLevelSelection::None => {}
+                selection => return selection,
+            }
+        }
+        TopLevelSelection::None
+    }
+
+    fn pick_top_level_at_level(
         &self,
         name: &str,
         fs: &FunctionSet,
