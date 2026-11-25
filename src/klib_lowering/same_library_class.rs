@@ -444,6 +444,8 @@ pub(super) struct PreparedLocalClass<'a> {
     pub(super) naming: Option<crate::ir::IrLocalClassNameProvenance>,
     /// Whether the class is an object, whose one instance its singleton value reads.
     pub(super) object: bool,
+    /// The annotations that decide where an object keeps its instance.
+    pub(super) instance_annotations: crate::ir::DeclarationAnnotations,
 }
 
 /// A same-library superclass constructor a class's constructor delegates to, and the serialized
@@ -1017,24 +1019,19 @@ fn prepare<'a>(
     )
 }
 
-/// Authenticates that `object` keeps the one process-wide instance its installed class is
-/// realized as. Each annotation is joined to its declared classifier; one of unknown identity
-/// cannot prove the storage role. A per-thread object needs its own identity and state on every
-/// thread, which installed objects do not carry, so it stays refused.
+/// Authenticates the storage role of `object`'s instance from its annotations, each joined to its
+/// declared classifier; one of unknown identity cannot prove it. A per-thread object keeps one
+/// instance on every thread, which its installed class records as its annotation does.
 fn object_storage(object: &KlibIrClass) -> Result<(), KlibBodyDeclineReason> {
-    let per_thread = crate::types::type_name("kotlin/native/concurrent/ThreadLocal");
-    for annotation in &object.base.annotations {
-        match super::klib_types::annotation_classifier(annotation) {
-            None => {
-                return Err(unsupported(
-                    "a non-public object annotation of unknown identity",
-                ))
-            }
-            Some(classifier) if classifier == per_thread => {
-                return Err(unsupported("a non-public per-thread object"))
-            }
-            Some(_) => {}
-        }
+    if object
+        .base
+        .annotations
+        .iter()
+        .any(|annotation| super::klib_types::annotation_classifier(annotation).is_none())
+    {
+        return Err(unsupported(
+            "a non-public object annotation of unknown identity",
+        ));
     }
     Ok(())
 }
@@ -1108,6 +1105,7 @@ fn prepare_class<'a>(
     if object {
         object_storage(class)?;
     }
+    let instance_annotations = super::object_instances::instance_annotations(class);
     let resolve = |signature: &KlibIrSignature| classifier(source.bodies, source.module, signature);
     let ClassFormals {
         types,
@@ -1281,6 +1279,7 @@ fn prepare_class<'a>(
         open: declaration_modality(class.base.flags) != KotlinModality::Final,
         naming,
         object,
+        instance_annotations,
     })
 }
 
@@ -2095,6 +2094,7 @@ pub(super) fn installed_class(prepared: &PreparedLocalClass<'_>) -> IrClass {
         class.pre_super_param_fields.push((0, outer.field));
     }
     class.is_object = prepared.object;
+    class.applied_annotations = prepared.instance_annotations.clone();
     class
 }
 

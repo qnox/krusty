@@ -412,6 +412,63 @@ impl BodyLowering<'_, '_, '_> {
                 {
                     return result;
                 }
+                let owner = super::super::super::intrinsics::DeclarationOwner::callable(
+                    realization.physical_owner,
+                    realization.declaration_owner,
+                );
+                // The Kotlin name the declaration PUBLISHES, not the spelling it is realized under.
+                // A physical name is an emit handle: a JVM realization may RENAME a member, and
+                // where the signature mentions a value class kotlinc appends a hash of the erasure
+                // (`UInt.compareTo` is realized as `compareTo-WZ4Q5Ns`). Neither is recoverable
+                // from the spelling, and neither has to be: the contract carries the Kotlin name
+                // beside it. Where it does not, the member declines rather than being guessed at.
+                let name = realization
+                    .reflection_name
+                    .clone()
+                    .unwrap_or_else(|| realization.name.clone());
+                // Intrinsic identity is the declaration's signature, not the types produced by
+                // call-site substitution. `compareTo<String>(...)`, for example, still names the
+                // declaration whose parameter is `T`; using the specialized `params`/`ret` here
+                // would make one declaration acquire a different intrinsic key at every call.
+                let generic_signature = realization.generic_sig.as_deref();
+                let declared_receiver = generic_signature
+                    .and_then(|signature| signature.receiver)
+                    .or(realization.source_receiver);
+                let declared_params = if let Some(signature) = generic_signature {
+                    std::borrow::Cow::Borrowed(signature.params.as_slice())
+                } else {
+                    let parameters = realization
+                        .declared_params
+                        .as_deref()
+                        .unwrap_or(&realization.params);
+                    if realization.is_extension() && parameters.len() > realization.context_count {
+                        let mut parameters = parameters.to_vec();
+                        parameters.remove(realization.context_count);
+                        std::borrow::Cow::Owned(parameters)
+                    } else {
+                        std::borrow::Cow::Borrowed(parameters)
+                    }
+                };
+                let declared_ret = generic_signature
+                    .map(|signature| signature.ret)
+                    .or(realization.declared_ret)
+                    .unwrap_or(realization.ret);
+                let signature = super::super::super::intrinsics::FunctionSignature::new(
+                    owner,
+                    &name,
+                    declared_params.as_ref(),
+                    declared_ret,
+                )
+                .with_receiver(declared_receiver)
+                .with_context_count(realization.context_count)
+                .with_overridden(&realization.overridden_declarations);
+                // The runtime owns `lazy { … }`: the exported body of the library's own `lazy` is
+                // an intrinsic stub that throws, so the export must not win over the construction.
+                if dispatch_receiver.is_none() {
+                    if let Some(realized) = self.lazy_construction(signature, args) {
+                        return realized;
+                    }
+                }
                 let symbols = self.file.dependency_symbols;
                 let export_of = |realization: &krusty::backend::BackendCallableFact| {
                     realization
@@ -496,56 +553,6 @@ impl BodyLowering<'_, '_, '_> {
                 ) {
                     return realized;
                 }
-                let owner = super::super::super::intrinsics::DeclarationOwner::callable(
-                    realization.physical_owner,
-                    realization.declaration_owner,
-                );
-                // The Kotlin name the declaration PUBLISHES, not the spelling it is realized under.
-                // A physical name is an emit handle: a JVM realization may RENAME a member, and
-                // where the signature mentions a value class kotlinc appends a hash of the erasure
-                // (`UInt.compareTo` is realized as `compareTo-WZ4Q5Ns`). Neither is recoverable
-                // from the spelling, and neither has to be: the contract carries the Kotlin name
-                // beside it. Where it does not, the member declines rather than being guessed at.
-                let name = realization
-                    .reflection_name
-                    .clone()
-                    .unwrap_or_else(|| realization.name.clone());
-                // Intrinsic identity is the declaration's signature, not the types produced by
-                // call-site substitution. `compareTo<String>(...)`, for example, still names the
-                // declaration whose parameter is `T`; using the specialized `params`/`ret` here
-                // would make one declaration acquire a different intrinsic key at every call.
-                let generic_signature = realization.generic_sig.as_deref();
-                let declared_receiver = generic_signature
-                    .and_then(|signature| signature.receiver)
-                    .or(realization.source_receiver);
-                let declared_params = if let Some(signature) = generic_signature {
-                    std::borrow::Cow::Borrowed(signature.params.as_slice())
-                } else {
-                    let parameters = realization
-                        .declared_params
-                        .as_deref()
-                        .unwrap_or(&realization.params);
-                    if realization.is_extension() && parameters.len() > realization.context_count {
-                        let mut parameters = parameters.to_vec();
-                        parameters.remove(realization.context_count);
-                        std::borrow::Cow::Owned(parameters)
-                    } else {
-                        std::borrow::Cow::Borrowed(parameters)
-                    }
-                };
-                let declared_ret = generic_signature
-                    .map(|signature| signature.ret)
-                    .or(realization.declared_ret)
-                    .unwrap_or(realization.ret);
-                let signature = super::super::super::intrinsics::FunctionSignature::new(
-                    owner,
-                    &name,
-                    declared_params.as_ref(),
-                    declared_ret,
-                )
-                .with_receiver(declared_receiver)
-                .with_context_count(realization.context_count)
-                .with_overridden(&realization.overridden_declarations);
                 match dispatch_receiver {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.
