@@ -55,6 +55,15 @@ fn fixes_parameter_not_null(
         && parameter.is_reference()
 }
 
+/// Whether `inherited` declares its parameter `index` nullable (`String?`), a qualifier that
+/// conflicts with a not-null one.
+fn accepts_null_parameter(inherited: &FunctionInfo, index: usize) -> bool {
+    inherited
+        .semantic_params()
+        .get(index)
+        .is_some_and(|parameter| parameter.is_nullable())
+}
+
 /// Make each flexible Java parameter (`String!`) that an overridden declaration fixes not-null
 /// reject `null`.
 pub(super) fn enhance_overriding_flexible_parameters(
@@ -86,9 +95,14 @@ pub(super) fn enhance_overriding_flexible_parameters(
             .filter(|inherited| overrides(source, implementation, inherited))
             .collect::<Vec<_>>();
         for index in flexible {
+            // Parameters are contravariant: kotlinc leaves the Java parameter flexible when the
+            // overridden declarations disagree, so one nullable declaration cancels a not-null one.
             if overridden
                 .iter()
                 .any(|inherited| fixes_parameter_not_null(source, inherited, index))
+                && !overridden
+                    .iter()
+                    .any(|inherited| accepts_null_parameter(inherited, index))
             {
                 crate::trace_compiler!(
                     "resolve",
