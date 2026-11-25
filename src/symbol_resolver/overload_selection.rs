@@ -1704,6 +1704,7 @@ fn receiver_argument_fits(
     };
     sam || fun_arg_matches(src, p, &arg.ty(), arg.is_lambda_literal())
         || semantic_arg_assignable(src, p, &arg.ty())
+        || arg.fits_parameter(lib, src, *p)
         || (arg.ty() == Ty::Null && p.non_null().is_ty_param())
         || function_like_fits()
         || arg.binds_result_to(src, *p)
