@@ -926,7 +926,7 @@ pub(crate) fn lower_value_classes(
         if !f.param_checks.is_empty() {
             for (k, chk) in f.param_checks.iter_mut().enumerate() {
                 // Drop the null-check when the param erased to a non-reference, or when its declared
-                // type unwraps to a carrier kotlinc leaves unguarded (`X(val v: Int?)`, a primitive
+                // value class unwraps to a carrier kotlinc leaves unguarded (`X(val v: Int?)`, a primitive
                 // carrier, `TyParam<T : Int>` emitted as `I`). A parameter holding its box (a
                 // generic override's, a lifted lambda's own) is physically a reference, so the
                 // declared type decides. A lowered member's checks start after its carrier.
@@ -934,7 +934,9 @@ pub(crate) fn lower_value_classes(
                     k.checked_sub(usize::from(lowered_value_members.contains(&(fid as u32))));
                 let declared_drops_guard = source_index
                     .and_then(|index| orig_params[fid].get(index))
-                    .is_some_and(|t| !parameter_guards::carrier_keeps_guard(&t.non_null(), &under));
+                    .is_some_and(|t| {
+                        is_vc_ty(t) && !parameter_guards::carrier_keeps_guard(&t.non_null(), &under)
+                    });
                 let physical_is_ref = f
                     .params
                     .get(k)
