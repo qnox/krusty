@@ -170,6 +170,15 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: true,
     }
+    /// A copy of an inline function's anonymous object declares its fields before the objects its
+    /// constructor and methods create are regenerated, so a field whose type is such an object
+    /// keeps the original class's type while the code stores the regenerated copy: reading the
+    /// object throws `NoSuchFieldError`.
+    InlineObjectFieldKeepsOriginalNestedType {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: true,
+    }
     /// The Kotlin/Native and Kotlin/Wasm standard library's `ArrayList.addAll` makes room for the
     /// new elements before it reads the argument, so a range of the list being appended to is
     /// invalidated first: `list.addAll(list.subList(0, 2))` raises

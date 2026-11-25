@@ -106,6 +106,16 @@ const LIST_ADD_ALL_OF_ITS_RANGE: &str = "fun box(): String {\n\
     \x20   return \"$answer $list\"\n\
     }\n";
 
+/// `InlineObjectFieldKeepsOriginalNestedType`: the object the call regenerates stores a nested
+/// object of its own type, which its field does not name.
+const INLINE_OBJECT_NESTED_FIELD: &str = r#"inline fun <reified T> untyped(): Any = object {
+    val type = T::class
+    val nested = object {}
+}
+
+fun box(): String = if (untyped<Int>() is Any) "OK" else "untyped"
+"#;
+
 /// The program that shows `quirk`, for a defect. Every quirk is named, so a new one has to say
 /// here whether it is a defect and, if so, which program shows it.
 fn defect(quirk: Quirk) -> Option<Defect> {
@@ -130,6 +140,17 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             source: CONTEXT_ARGUMENT_ORDER,
             with_defect: Outcome::Answer("crv".to_string()),
             fixed: Outcome::Answer("rcv".to_string()),
+        }),
+        Quirk::InlineObjectFieldKeepsOriginalNestedType => Some(Defect {
+            platforms: &[Platform::Jvm],
+            fixed_on: &[],
+            source: INLINE_OBJECT_NESTED_FIELD,
+            with_defect: Outcome::Answer(
+                "ERROR:NoSuchFieldError:Class MainKt$box$$inlined$untyped$1 does not have member \
+                 field 'MainKt$box$$inlined$untyped$1$1 nested'"
+                    .to_string(),
+            ),
+            fixed: Outcome::Answer("OK".to_string()),
         }),
         Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument => Some(Defect {
             platforms: &[Platform::Native, Platform::WasmJs, Platform::WasmWasi],

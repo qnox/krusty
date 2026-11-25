@@ -405,7 +405,6 @@ pub fn regenerate(
             method: "<init>",
             descriptor: &plan.desc,
             renamed: Vec::new(),
-            lambda_taking: Vec::new(),
             classes: Vec::new(),
             sam_wrappers: Vec::new(),
             reified_parameters_remain: false,
@@ -419,7 +418,7 @@ pub fn regenerate(
             &mut lines,
             &mut objects,
         )?;
-        field_retypes.extend(objects.lambda_taking);
+        field_retypes.extend(objects.renamed.iter().cloned());
         nested.extend(objects.classes);
         sam_wrappers.extend(objects.sam_wrappers);
         reified_parameters_remain |= objects.reified_parameters_remain;
@@ -512,7 +511,6 @@ pub fn regenerate(
                         .unwrap_or(&method.name),
                     descriptor: &method.desc,
                     renamed: Vec::new(),
-                    lambda_taking: Vec::new(),
                     classes: Vec::new(),
                     sam_wrappers: Vec::new(),
                     reified_parameters_remain: false,
@@ -526,7 +524,7 @@ pub fn regenerate(
                     &mut lines,
                     &mut objects,
                 )?;
-                field_retypes.extend(objects.lambda_taking);
+                field_retypes.extend(objects.renamed.iter().cloned());
                 nested.extend(objects.classes);
                 sam_wrappers.extend(objects.sam_wrappers);
                 reified_parameters_remain |= objects.reified_parameters_remain;
@@ -637,8 +635,16 @@ pub fn regenerate(
         nested.push((continuation, regenerated.bytes));
     }
 
-    // A field of a nested object's type that took a lambda is declared with the copy's type.
-    for (index, (desc, signature)) in declared_fields.iter().enumerate() {
+    // A field of a nested object's type is declared with the copy's type once the copy exists. The
+    // releases with `InlineObjectFieldKeepsOriginalNestedType` declare every field before they
+    // regenerate the objects a method creates, so it keeps the original's.
+    let fields_follow_nested_copies = !crate::kotlin_version::Quirks::target()
+        .has(crate::kotlin_version::Quirk::InlineObjectFieldKeepsOriginalNestedType);
+    for (index, (desc, signature)) in declared_fields
+        .iter()
+        .enumerate()
+        .filter(|_| fields_follow_nested_copies)
+    {
         let retype = |text: &str| {
             field_retypes
                 .iter()
