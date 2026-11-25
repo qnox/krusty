@@ -229,7 +229,8 @@ fn a_frame_object_converts_and_guards_its_fields_as_the_heap_object_does() {
     // `lateinit` one no constructor assigns (read before assignment raises Kotlin's exception),
     // and a class whose companion the construction creates first.
     expect_ok_everywhere(
-        "var created = 0\n\
+        "@file:Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n\
+         var created = 0\n\
          class Mixed(val d: Double, val f: Float, val l: Long, val c: Char, val b: Boolean, val n: String?) {\n\
          \x20   lateinit var later: String\n\
          \x20   companion object { init { created++ } }\n\

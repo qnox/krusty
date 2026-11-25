@@ -13,9 +13,7 @@ use crate::inline_expansion::{InlineBodySplice, InlineOperand, SplicedResult};
 use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
 use crate::libraries::{KlibBodyCallable, KlibDependencyCallable};
 use crate::metadata::klib_ir::tree::KlibIrFunction;
-use crate::types::{
-    stored_value_ty, InlineExpansionMode, InlineParameterModifier, Ty, TyKind, TypeName,
-};
+use crate::types::{stored_value_ty, InlineExpansionMode, Ty, TyKind, TypeName};
 
 use super::super::decline::KlibBodyDeclineReason;
 use super::super::function_lowering::FunctionHeader;
@@ -107,22 +105,14 @@ pub(super) fn declare(
     let receiver = header.extension_receiver_index();
     let modifiers = match selected {
         Some(selected) => selected.inline_modifiers().to_vec(),
-        // Only a function-typed parameter's modifier decides its expansion.
-        None if header
-            .params()
+        // A declaration no provider records, a private one, writes its modifiers in its own
+        // serialized parameters.
+        None => declaration
+            .context_parameters
             .iter()
-            .all(|parameter| !parameter.non_null().is_fun()) =>
-        {
-            vec![
-                InlineParameterModifier::None;
-                header.params().len() - usize::from(receiver.is_some())
-            ]
-        }
-        None => {
-            return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                "a call of an inline function whose parameter modifiers are not selected",
-            ))
-        }
+            .chain(&declaration.regular_parameters)
+            .map(|parameter| parameter.inline_modifier())
+            .collect(),
     };
     let modes = expansion_modes(header.params(), receiver, &modifiers)?;
     let info = ir
