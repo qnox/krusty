@@ -82,11 +82,25 @@ fn unsigned_member_impl(declared: Ty, stored: Ty) -> Option<(String, Ty)> {
 }
 
 /// The declared type of each annotation member, before the value-class pass erased it to a
-/// carrier: the constructor parameters the pass recorded, else the stored types themselves.
+/// carrier. The pass records the constructor parameters only for a class whose primary constructor
+/// has a value-class parameter; without a record no member is a value class, so the stored types
+/// are already the declared ones. A record that disagrees with the stored members in length is an
+/// invalid intermediate state, never a reason to render a member through its carrier.
 fn declared_member_types(ir: &IrFile, c: &krusty::ir::IrClass, stored: &[Ty]) -> Vec<Ty> {
     match ir.vc_ctor_declared_params(c.fq_name_id()) {
-        Some(declared) if declared.len() == stored.len() => declared.to_vec(),
-        _ => stored.to_vec(),
+        None => stored.to_vec(),
+        Some(declared) => {
+            assert_eq!(
+                declared.len(),
+                stored.len(),
+                "annotation implementation {}: the value-class pass recorded {} constructor \
+                 parameters for {} stored members",
+                c.fq_name_id().render(),
+                declared.len(),
+                stored.len()
+            );
+            declared.to_vec()
+        }
     }
 }
 
@@ -523,10 +537,8 @@ fn emit_annotation_hashcode(
         let fref = cw.fieldref(fq, name, &type_descriptor(*jt));
         cb.aload(0);
         cb.getfield(fref, slot_words(*jt) as i32);
-        match *jt {
-            _ if unsigned_member_impl(declared[index], *jt).is_some() => {
-                let (owner, carrier) =
-                    unsigned_member_impl(declared[index], *jt).expect("guarded by the match arm");
+        match (unsigned_member_impl(declared[index], *jt), *jt) {
+            (Some((owner, carrier)), _) => {
                 let hc = cw.methodref(
                     &owner,
                     "hashCode-impl",
@@ -534,12 +546,12 @@ fn emit_annotation_hashcode(
                 );
                 cb.invokestatic(hc, slot_words(carrier) as i32, 1);
             }
-            _ if jt.is_array() => {
-                let ad = arrays_param_desc(*jt);
+            (None, array) if array.is_array() => {
+                let ad = arrays_param_desc(array);
                 let hc = cw.methodref("java/util/Arrays", "hashCode", &format!("({ad})I"));
                 cb.invokestatic(hc, 1, 1);
             }
-            other => match prim_wrapper(other) {
+            (None, other) => match prim_wrapper(other) {
                 Some((wrap, pd)) => {
                     let hc = cw.methodref(wrap, "hashCode", &format!("({pd})I"));
                     cb.invokestatic(hc, slot_words(other) as i32, 1);
@@ -655,10 +667,8 @@ fn emit_annotation_tostring(
             },
         );
         let fref = cw.fieldref(fq, name, &type_descriptor(*jt));
-        match *jt {
-            _ if unsigned_member_impl(declared[i], *jt).is_some() => {
-                let (owner, carrier) =
-                    unsigned_member_impl(declared[i], *jt).expect("guarded by the match arm");
+        match (unsigned_member_impl(declared[i], *jt), *jt) {
+            (Some((owner, carrier)), _) => {
                 cb.aload(0);
                 cb.getfield(fref, slot_words(carrier) as i32);
                 let to_string = cw.methodref(
@@ -674,10 +684,10 @@ fn emit_annotation_tostring(
                 );
                 cb.invokevirtual(ap, 1, 1);
             }
-            _ if jt.is_array() => {
+            (None, array) if array.is_array() => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
-                let ad = arrays_param_desc(*jt);
+                let ad = arrays_param_desc(array);
                 let ats = cw.methodref(
                     "java/util/Arrays",
                     "toString",
@@ -686,48 +696,48 @@ fn emit_annotation_tostring(
                 cb.invokestatic(ats, 1, 1);
                 cb.invokevirtual(append_str(cw), 1, 1);
             }
-            Ty::Int | Ty::Short | Ty::Byte => {
+            (None, Ty::Int | Ty::Short | Ty::Byte) => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
                 let ap = cw.methodref(sb, "append", "(I)Ljava/lang/StringBuilder;");
                 cb.invokevirtual(ap, 1, 1);
             }
-            Ty::Char => {
+            (None, Ty::Char) => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
                 let ap = cw.methodref(sb, "append", "(C)Ljava/lang/StringBuilder;");
                 cb.invokevirtual(ap, 1, 1);
             }
-            Ty::Boolean => {
+            (None, Ty::Boolean) => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
                 let ap = cw.methodref(sb, "append", "(Z)Ljava/lang/StringBuilder;");
                 cb.invokevirtual(ap, 1, 1);
             }
-            Ty::Long => {
+            (None, Ty::Long) => {
                 cb.aload(0);
                 cb.getfield(fref, 2);
                 let ap = cw.methodref(sb, "append", "(J)Ljava/lang/StringBuilder;");
                 cb.invokevirtual(ap, 2, 1);
             }
-            Ty::Float => {
+            (None, Ty::Float) => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
                 let ap = cw.methodref(sb, "append", "(F)Ljava/lang/StringBuilder;");
                 cb.invokevirtual(ap, 1, 1);
             }
-            Ty::Double => {
+            (None, Ty::Double) => {
                 cb.aload(0);
                 cb.getfield(fref, 2);
                 let ap = cw.methodref(sb, "append", "(D)Ljava/lang/StringBuilder;");
                 cb.invokevirtual(ap, 2, 1);
             }
-            Ty::String => {
+            (None, Ty::String) => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
                 cb.invokevirtual(append_str(cw), 1, 1);
             }
-            _ => {
+            (None, _) => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
                 let ap = cw.methodref(

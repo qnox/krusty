@@ -970,6 +970,14 @@ fn annotation_implementation_unsigned_members_match_complete_kotlin_class_bytes(
         "UnsignedMemberRendering.kt",
         UNSIGNED_MEMBER_RENDERING,
     )]);
+    assert!(
+        classes
+            .reference
+            .keys()
+            .any(|name| name.contains("$annotationImpl$")),
+        "the reference emitted no annotation implementation class: {:?}",
+        classes.reference.keys().collect::<Vec<_>>()
+    );
     let differences = classes
         .reference
         .iter()
