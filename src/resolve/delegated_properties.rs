@@ -40,6 +40,9 @@ struct DelegateGetValueSelection {
     this_ref: Ty,
     expected_property: Option<Ty>,
     site: DelegateConventionSite,
+    /// Shared with the caller's site. A missing or ambiguous `getValue` on an unannotated
+    /// property records the type kotlinc names in the following `setValue` demand.
+    missing_getvalue_display: std::rc::Rc<std::cell::RefCell<Option<String>>>,
 }
 
 /// What kotlinc's delegate-convention diagnostics name beyond the types already in hand: where the
@@ -311,6 +314,86 @@ fn delegate_diagnostic_ty(ty: Ty) -> String {
         return "Nothing?".to_string();
     }
     ty.source_name()
+}
+
+/// Callable id kotlinc prints inside an ambiguous delegate type. A member keeps its owner
+/// (`/Delegate.getValue`, `demo/Delegate.getValue`); a top-level extension keeps its package
+/// (`/getValue`, `demo/getValue`).
+fn delegate_callable_diagnostic_id(function: &crate::libraries::FunctionInfo) -> String {
+    let name = function.callable.name.as_str();
+    if function.kind != crate::libraries::FnKind::Member {
+        let package = function.callable.owner.package();
+        return if package.is_empty() {
+            format!("/{name}")
+        } else {
+            format!("{package}/{name}")
+        };
+    }
+    let owner = delegate_member_owner(function.callable.owner);
+    format!("{owner}.{name}")
+}
+
+/// `package/Outer.Inner`, or `/Outer.$serializer` when the nested simple name itself contains `$`.
+/// Nesting comes from the name tree, so a `$` that belongs to the class name stays a `$`.
+fn delegate_member_owner(owner: TypeName) -> String {
+    let mut parts = Vec::new();
+    let mut current = owner;
+    loop {
+        match current.exact_nested_owner().and_then(|enclosing| {
+            current
+                .nested_segment_within(enclosing)
+                .map(|segment| (enclosing, segment))
+        }) {
+            Some((enclosing, segment)) => {
+                parts.push(segment);
+                current = enclosing;
+            }
+            None => {
+                parts.push(current.segment_ref());
+                break;
+            }
+        }
+    }
+    parts.reverse();
+    let class_name = parts.join(".");
+    let package = owner.package();
+    if package.is_empty() {
+        format!("/{class_name}")
+    } else {
+        format!("{package}/{class_name}")
+    }
+}
+
+/// The property type kotlinc uses when several `getValue` candidates exist and none applies.
+/// Member-extension candidates do not carry a callable id on this path, so they stay unnamed.
+fn ambiguous_delegate_property_display(
+    name: &str,
+    failure: &DelegateOperatorFailure,
+) -> Option<String> {
+    let functions: Vec<&crate::libraries::FunctionInfo> = match failure {
+        DelegateOperatorFailure::InapplicableCandidates(families) => {
+            if !families.member_extensions.is_empty() {
+                return None;
+            }
+            families
+                .members
+                .iter()
+                .chain(families.extensions.iter())
+                .collect()
+        }
+        DelegateOperatorFailure::AmbiguousOrdinary(candidates) => candidates.iter().collect(),
+        DelegateOperatorFailure::AmbiguousMemberExtensions(_) => return None,
+    };
+    if functions.len() < 2 {
+        return None;
+    }
+    let ids = functions
+        .iter()
+        .copied()
+        .map(delegate_callable_diagnostic_id)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("??? (Ambiguity: {name}, [{ids}])"))
 }
 
 pub(crate) fn delegate_convention_diagnostic_candidate(
@@ -1182,23 +1265,23 @@ impl Checker<'_> {
         provide_ref: Ty,
         this_ref: Ty,
         expected_property: Option<Ty>,
-        site: DelegateConventionSite,
+        site: &mut DelegateConventionSite,
     ) -> (Ty, Option<Ty>) {
         // Only the complete delegate expression is a migration position. Nested expressions keep
         // their ordinary declaration-use semantics, while a selected class companion is identified
         // later from the expression's retained singleton lowering.
         self.deprecation_use_sites.mark_companion_delegate(delegate);
-        let mut site = site;
         self.note_failed_property_syntax(
             scope,
-            &mut site,
+            site,
             expected_property.is_none_or(Ty::mentions_error),
         );
         let selection = DelegateGetValueSelection {
             provide_ref,
             this_ref,
             expected_property,
-            site,
+            site: site.clone(),
+            missing_getvalue_display: std::rc::Rc::new(std::cell::RefCell::new(None)),
         };
         let mut receiver_expectation = None;
         loop {
@@ -1219,6 +1302,10 @@ impl Checker<'_> {
                 selection.clone(),
             ) {
                 DelegateGetValueAttempt::Complete(result) => {
+                    if site.failed_property_display.is_none() {
+                        site.failed_property_display =
+                            selection.missing_getvalue_display.borrow().clone();
+                    }
                     return (delegate_ty, result);
                 }
                 DelegateGetValueAttempt::RetryWithReceiver(expected) => {
@@ -1241,6 +1328,7 @@ impl Checker<'_> {
             this_ref,
             expected_property,
             site,
+            missing_getvalue_display,
         } = selection;
         crate::trace_compiler!(
             "fir",
@@ -1301,6 +1389,9 @@ impl Checker<'_> {
         ) {
             DelegateOperatorSelection::Selected(target) => target,
             DelegateOperatorSelection::None => {
+                // No getValue candidate. An unannotated property's type is that missing name,
+                // which setValue then demands.
+                let unannotated = site.written_property_type.is_none();
                 self.report_delegate_convention_failure(
                     site,
                     stored_ty,
@@ -1309,13 +1400,23 @@ impl Checker<'_> {
                     expected_property,
                     None,
                 );
+                if unannotated {
+                    *missing_getvalue_display.borrow_mut() =
+                        Some("??? (Unresolved name: getValue)".to_string());
+                }
                 return DelegateGetValueAttempt::Complete(None);
             }
             DelegateOperatorSelection::Failure(failure) => {
                 // A written type, including an unresolved one, stays that type. An unannotated
-                // property takes the single getValue candidate's result, which setValue then
-                // demands.
+                // property takes the single getValue candidate's result. Several candidates leave
+                // the property as the ambiguity kotlinc names, which setValue then demands.
                 let unannotated = site.written_property_type.is_none();
+                if unannotated {
+                    if let Some(display) = ambiguous_delegate_property_display("getValue", &failure)
+                    {
+                        *missing_getvalue_display.borrow_mut() = Some(display);
+                    }
+                }
                 let property_type = self.report_delegate_operator_failure(
                     &DelegateConventionQuery {
                         site,
@@ -1720,6 +1821,17 @@ impl Checker<'_> {
                             .expect("a selected source delegate convention must retain its shape"),
                         _ => selected.declared_params.clone(),
                     };
+                    let Some(dispatch_receiver_role) = self.captured_receiver(
+                        scope,
+                        selected.dispatch_receiver.identity,
+                        selected.dispatch_receiver.extension_receiver,
+                        selected
+                            .dispatch_receiver
+                            .class_receiver
+                            .then_some(selected.dispatch_receiver.declared_ty),
+                    ) else {
+                        return DelegateOperatorSelection::None;
+                    };
                     return DelegateOperatorSelection::Selected(Box::new(
                         DelegateGetValueTarget::MemberExtension {
                             stable_declaration: selected.stable_declaration,
@@ -1730,15 +1842,7 @@ impl Checker<'_> {
                             extension_receiver: selected.extension_receiver,
                             dispatch_receiver: self
                                 .implicit_receiver_selection(selected.dispatch_receiver),
-                            dispatch_receiver_role: self.captured_receiver(
-                                scope,
-                                selected.dispatch_receiver.identity,
-                                selected.dispatch_receiver.extension_receiver,
-                                selected
-                                    .dispatch_receiver
-                                    .class_receiver
-                                    .then_some(selected.dispatch_receiver.declared_ty),
-                            ),
+                            dispatch_receiver_role,
                             dispatch_declaration: scope
                                 .implicit_receiver_role(selected.dispatch_receiver.identity),
                             context_count: selected.context_count,

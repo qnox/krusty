@@ -144,6 +144,24 @@ fn the_launcher_bridge_follows_every_declared_function() {
     }
 }
 
+/// `@JvmOverloads` overloads are generated before the launcher bridge kotlinc appends to the
+/// file's declarations.
+#[test]
+fn the_launcher_bridge_follows_jvm_overloads() {
+    match common::byte_diff_against_kotlinc_cp(
+        "BridgeOverloads",
+        "fun main() { println(widen()) }\n\
+         @JvmOverloads\n\
+         fun widen(first: Int = 1, second: Int = 2): Int = first + second\n",
+        "BridgeOverloadsKt",
+        &[common::stdlib_jar()],
+    ) {
+        None => panic!("reference toolchain unavailable"),
+        Some(Ok(())) => {}
+        Some(Err(e)) => panic!("{e}"),
+    }
+}
+
 /// A parameterless `main()` beside a function that already has the launcher's JVM signature: the
 /// frontend's entry (`main(args: Array<String>)`, `vararg args: String`) or another facade method
 /// whose physical signature is `main([Ljava/lang/String;)V` (`Array<String?>`, an
