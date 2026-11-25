@@ -140,27 +140,6 @@ impl BodyLowering<'_, '_, '_> {
         Ok(self.builder.inst_results(call).first().copied())
     }
 
-    /// `receiver.nextUp()` or `receiver.nextDown()`: the runtime function `symbol` answers at the
-    /// receiver's own width `operand`, and the answer is brought to the width the site expects.
-    fn adjacent_floating_call(
-        &mut self,
-        symbol: &'static str,
-        operand: Ty,
-        receiver: u32,
-        ret: Ty,
-    ) -> Result<Option<Value>, Unsupported> {
-        let Some(value) = self.coerce(receiver, operand)? else {
-            return Err("a `Unit` receiver for an adjacent floating value".into());
-        };
-        if self.terminated {
-            return Ok(None);
-        }
-        let Some(produced) = self.runtime_call(symbol, &[operand], operand, &[value])? else {
-            return Ok(None);
-        };
-        self.convert(produced, Some(operand), ret)
-    }
-
     /// A call dispatched through the table of `owner`, a class another file of the module
     /// declares: the slot is the one the module plan gave `target`, which the declaring file
     /// fills, and the call crosses with the declaration's carriers as every override's body takes
@@ -781,18 +760,6 @@ impl BodyLowering<'_, '_, '_> {
                             };
                             return self.convert(produced, Some(operand), *ret);
                         }
-                        // `x.nextUp()` and `x.nextDown()`: the runtime answers on the receiver's own
-                        // width, which is why it is read as a number rather than a reference.
-                        if let Some((symbol, operand)) = receiver_type.and_then(|receiver_type| {
-                            super::super::super::intrinsics::adjacent_floating(
-                                owner,
-                                &name,
-                                receiver_type,
-                                params,
-                            )
-                        }) {
-                            return self.adjacent_floating_call(symbol, operand, receiver, *ret);
-                        }
                         // `kotlin.experimental`'s bit operations on the narrow integers. Kotlin
                         // gives `Int` and `Long` the same four as members and these as extensions,
                         // which is where the library put them rather than a difference in what
@@ -1017,21 +984,6 @@ impl BodyLowering<'_, '_, '_> {
                                 return Ok(None);
                             }
                             return self.runtime_call(symbol, params, *ret, &arguments);
-                        }
-                        // The same extension reached as a package function: its receiver is the
-                        // first operand and the declaration's own parameters follow it.
-                        if let (Some(declared), [receiver]) = (signature.receiver, args) {
-                            if let Some((symbol, operand)) =
-                                super::super::super::intrinsics::adjacent_floating(
-                                    owner,
-                                    &name,
-                                    declared,
-                                    signature.params,
-                                )
-                            {
-                                return self
-                                    .adjacent_floating_call(symbol, operand, *receiver, *ret);
-                            }
                         }
                         let Some(symbol) =
                             super::super::super::intrinsics::runtime_function(signature)

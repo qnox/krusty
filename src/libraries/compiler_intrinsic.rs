@@ -19,6 +19,15 @@ pub enum ClassNameKind {
     Qualified,
 }
 
+/// Which neighbour of a floating-point value an authenticated `nextUp`/`nextDown` answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdjacentDirection {
+    /// `nextUp()`, the adjacent representable value toward positive infinity.
+    Up,
+    /// `nextDown()`, the adjacent representable value toward negative infinity.
+    Down,
+}
+
 /// Which half of a UTF-16 surrogate pair an authenticated `Char` predicate recognizes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SurrogateHalf {
@@ -112,6 +121,17 @@ pub enum CompilerIntrinsic {
     },
     /// The corresponding exact infinity predicate declaration.
     FloatingIsInfinite {
+        operand: crate::types::Ty,
+    },
+    /// Native's exact `GCUnsafeCall` `nextUp`/`nextDown` declaration: the adjacent representable
+    /// value of the extension receiver, at the receiver's own width.
+    FloatingAdjacent {
+        operand: crate::types::Ty,
+        direction: AdjacentDirection,
+    },
+    /// Native's exact `GCUnsafeCall` `countLeadingZeroBits` declaration of `Int` or `Long`: the
+    /// zero bits above the highest set one, the whole width for zero.
+    CountLeadingZeroBits {
         operand: crate::types::Ty,
     },
     /// Native's exact `GCUnsafeCall` `Char` surrogate predicate declaration. A target answers it

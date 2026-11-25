@@ -82,7 +82,9 @@ static void write_hex(uint64_t bits, int nibbles) {
 
 static void check(const char *operation, uint64_t value, uint64_t got, uint64_t want, int nibbles) {
     if (got == want) return;
-    kt_sys_write(2, operation, 9);
+    size_t length = 0;
+    while (operation[length]) length++;
+    kt_sys_write(2, operation, length);
     write_hex(value, nibbles);
     kt_sys_write(2, ": got 0x", 8);
     write_hex(got, nibbles);

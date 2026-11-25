@@ -1796,30 +1796,6 @@ pub(super) fn floor_mod(
     }
 }
 
-/// `x.nextUp()` and `x.nextDown()` on `Float` and `Double` — the adjacent representable value toward
-/// positive or negative infinity — as (runtime symbol, operand type). The receiver crosses at its
-/// own width and the answer comes back at it.
-///
-/// The Native stdlib declares these `external`, so no body exists to lower; the runtime answers
-/// them on the bits (`krusty_fp.c`).
-pub(super) fn adjacent_floating(
-    owner: DeclarationOwner,
-    name: &str,
-    receiver: Ty,
-    params: &[Ty],
-) -> Option<(&'static str, Ty)> {
-    if !owner.package_matches("kotlin/math") || !params.is_empty() {
-        return None;
-    }
-    match (name, receiver.canonical_semantic()) {
-        ("nextUp", Ty::Float) => Some(("kt_next_up_float", Ty::Float)),
-        ("nextUp", Ty::Double) => Some(("kt_next_up_double", Ty::Double)),
-        ("nextDown", Ty::Float) => Some(("kt_next_down_float", Ty::Float)),
-        ("nextDown", Ty::Double) => Some(("kt_next_down_double", Ty::Double)),
-        _ => None,
-    }
-}
-
 /// A bit operation `kotlin.experimental` declares for the NARROW integers.
 ///
 /// Kotlin gives `Int` and `Long` `and`/`or`/`xor`/`inv` as members and gives `Byte` and `Short`
@@ -2608,60 +2584,6 @@ mod tests {
             )),
             None,
             "an unimplemented member must decline"
-        );
-    }
-
-    #[test]
-    fn the_adjacent_floating_value_is_the_runtime_s_for_each_width_and_direction() {
-        // A klib provider presents the receiver as the classifier's `Obj` form, a jar provider as
-        // the primitive; both name the same declaration.
-        let up = |receiver: Ty| adjacent_floating(package("kotlin/math"), "nextUp", receiver, &[]);
-        assert_eq!(up(Ty::Double), Some(("kt_next_up_double", Ty::Double)));
-        assert_eq!(
-            up(Ty::obj("kotlin/Double")),
-            Some(("kt_next_up_double", Ty::Double))
-        );
-        assert_eq!(
-            up(Ty::obj("kotlin/Float")),
-            Some(("kt_next_up_float", Ty::Float))
-        );
-        assert_eq!(
-            adjacent_floating(
-                package("kotlin/math"),
-                "nextDown",
-                Ty::obj("kotlin/Float"),
-                &[]
-            ),
-            Some(("kt_next_down_float", Ty::Float))
-        );
-        assert_eq!(
-            adjacent_floating(
-                package("kotlin/math"),
-                "nextDown",
-                Ty::obj("kotlin/Double"),
-                &[]
-            ),
-            Some(("kt_next_down_double", Ty::Double))
-        );
-        assert_eq!(
-            adjacent_floating(
-                package("kotlin/math"),
-                "nextTowards",
-                Ty::Double,
-                &[Ty::Double]
-            ),
-            None,
-            "a neighbour toward a given value is a different declaration"
-        );
-        assert_eq!(
-            up(Ty::Int),
-            None,
-            "only the floating widths have an adjacent representable value"
-        );
-        assert_eq!(
-            adjacent_floating(package("kotlin"), "nextUp", Ty::Double, &[]),
-            None,
-            "another package's `nextUp` is not `kotlin.math`'s"
         );
     }
 

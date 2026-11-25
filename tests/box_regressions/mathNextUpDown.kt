@@ -3,7 +3,7 @@ import kotlin.math.nextUp
 
 // The adjacent representable value, which the Native runtime answers rather than a stdlib body.
 // `Float.nextUp` and `Float.nextDown` are not declared by the Wasm stdlib, so the `Float` forms are
-// covered by the Native-only `native_math_bits_e2e` test.
+// covered by `mathNextUpDownFloat.kt`.
 fun box(): String {
     if (1.0.nextUp() != 1.0000000000000002) return "Fail double up"
     if (1.0.nextDown() != 0.9999999999999999) return "Fail double down"

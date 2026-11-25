@@ -65,6 +65,24 @@ impl<'a> BodyLowering<'a, '_, '_> {
         )))
     }
 
+    /// An authenticated one-operand intrinsic the runtime answers: `symbol` takes `value` at its
+    /// own width `operand` and returns `ret`.
+    fn scalar_runtime_call(
+        &mut self,
+        symbol: &'static str,
+        operand: Ty,
+        value: u32,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(argument) = self.coerce(value, operand)? else {
+            return Err("an exact runtime-answered intrinsic with a `Unit` operand".into());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        self.runtime_call(symbol, &[operand], ret, &[argument])
+    }
+
     fn primitive_unary(
         &mut self,
         operation: krusty::backend::BackendCompilerIntrinsic,
@@ -510,6 +528,55 @@ impl<'a> BodyLowering<'a, '_, '_> {
                     ));
                 }
                 return Some(self.char_is_surrogate(half, value));
+            }
+            Some(krusty::backend::BackendCompilerIntrinsic::FloatingAdjacent {
+                operand,
+                direction,
+            }) => {
+                let Some(value) = scalar_extension_operand(operand) else {
+                    return Some(Err(
+                        "an exact adjacent floating-point value with malformed operands".into(),
+                    ));
+                };
+                if ret != operand {
+                    return Some(Err(
+                        "an exact adjacent floating-point value with a mismatched result".into(),
+                    ));
+                }
+                let symbol = match (operand, direction) {
+                    (Ty::Float, krusty::libraries::AdjacentDirection::Up) => "kt_next_up_float",
+                    (Ty::Float, krusty::libraries::AdjacentDirection::Down) => "kt_next_down_float",
+                    (Ty::Double, krusty::libraries::AdjacentDirection::Up) => "kt_next_up_double",
+                    (Ty::Double, krusty::libraries::AdjacentDirection::Down) => {
+                        "kt_next_down_double"
+                    }
+                    _ => {
+                        return Some(Err(
+                            "an exact adjacent floating-point value of another type".into(),
+                        ))
+                    }
+                };
+                return Some(self.scalar_runtime_call(symbol, operand, value, ret));
+            }
+            Some(krusty::backend::BackendCompilerIntrinsic::CountLeadingZeroBits { operand }) => {
+                let Some(value) = scalar_extension_operand(operand) else {
+                    return Some(Err(
+                        "an exact `countLeadingZeroBits` with malformed operands".into(),
+                    ));
+                };
+                if ret != Ty::Int {
+                    return Some(Err(
+                        "an exact `countLeadingZeroBits` with a non-Int result".into()
+                    ));
+                }
+                let symbol = match operand {
+                    Ty::Int => "kt_count_leading_zero_bits_int",
+                    Ty::Long => "kt_count_leading_zero_bits_long",
+                    _ => {
+                        return Some(Err("an exact `countLeadingZeroBits` of another type".into()))
+                    }
+                };
+                return Some(self.scalar_runtime_call(symbol, operand, value, ret));
             }
             Some(krusty::backend::BackendCompilerIntrinsic::FloatingIsInfinite { operand }) => {
                 let Some(value) = scalar_extension_operand(operand) else {

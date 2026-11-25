@@ -36,32 +36,6 @@ fn abs_wraps_at_the_integral_minimum_and_clears_the_floating_sign() {
     expect_native_box(source, "MathAbs", "OK");
 }
 
-/// `nextUp` and `nextDown` on `Float`, which the runtime answers.
-///
-/// PLATFORM-SPECIFIC: the Wasm stdlib declares no `Float.nextUp` or `Float.nextDown`, so the shared
-/// `mathNextUpDown.kt` regression carries the `Double` forms and this Native-only program carries
-/// the `Float` ones, with the zeros, the largest finite value, the infinities and NaN that decide
-/// where the adjacent value is.
-#[test]
-fn next_up_and_down_on_a_float_step_to_the_adjacent_value() {
-    let source = "import kotlin.math.nextDown\n\
-         import kotlin.math.nextUp\n\
-         fun box(): String {\n\
-         \x20   if (1.0f.nextUp() != 1.0000001f) return \"fail up\"\n\
-         \x20   if (1.0f.nextDown() != 0.99999994f) return \"fail down\"\n\
-         \x20   if (0.0f.nextUp() != Float.MIN_VALUE) return \"fail zero up\"\n\
-         \x20   if ((-0.0f).nextDown() != -Float.MIN_VALUE) return \"fail negative zero down\"\n\
-         \x20   if (Float.MAX_VALUE.nextUp() != Float.POSITIVE_INFINITY) return \"fail max up\"\n\
-         \x20   if (Float.POSITIVE_INFINITY.nextUp() != Float.POSITIVE_INFINITY) return \"fail infinity up\"\n\
-         \x20   if (Float.NEGATIVE_INFINITY.nextDown() != Float.NEGATIVE_INFINITY) return \"fail negative infinity down\"\n\
-         \x20   if (Float.POSITIVE_INFINITY.nextDown() != Float.MAX_VALUE) return \"fail infinity down\"\n\
-         \x20   if (!Float.NaN.nextUp().isNaN() || !Float.NaN.nextDown().isNaN()) return \"fail nan\"\n\
-         \x20   return \"OK\"\n\
-         }\n";
-    expect_box_ok_with_stdlib(source, "MathNextUpDownFloat");
-    expect_native_box(source, "MathNextUpDownFloat", "OK");
-}
-
 /// The bits of a floating-point value, with the one respect `toBits` and `toRawBits` differ in.
 /// The shared multimodule conformance inventory exercises both directions against each selected
 /// target's real stdlib artifact. This focused source-language cross-check remains JVM-only so it
