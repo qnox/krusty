@@ -1519,22 +1519,18 @@ jobs:
       fail-fast: false
       matrix:
         # Every release in the kotlin-versions manifest runs the full suite on the newest validated
-        # Gradle. The rows below add the older Gradle boundaries, which run the boundary suite: the
+        # Gradle. The row below adds the older maintained Gradle, which runs the boundary suite: the
         # builds whose Gradle API surface differs by Gradle release (task wiring, the configuration
         # and build caches, kotlin-dsl's embedded compiler, kapt, KSP, multiplatform and the verify
         # report). Every other test exercises the plugin and KGP, which the full lanes cover.
         kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
-        gradle: [9.7.0]
-        ksp: [true]
+        gradle: [9.9.2]
         suite: [full]
         include:
-          # KSP's Gradle plugin does not load on Gradle 7.6 (its build-script metadata is newer than
-          # Gradle 7.6's embedded Kotlin compiler reads), so the KSP2 test runs on the other lanes.
-          - { kotlin: 2.4.0,  gradle: 7.6.3,  ksp: false, suite: boundary }
-          - { kotlin: 2.4.0,  gradle: 9.5.0,  ksp: true,  suite: boundary }
-          - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true,  suite: boundary }
-          - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false, suite: boundary }
-    runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['gradle'][format('{0}|{1}|{2}|{3}', matrix.kotlin, matrix.gradle, matrix.ksp, matrix.suite)] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+          # Gradle maintains only the latest minor of the current major and of the previous one:
+          # 9.9 and 8.14. Each lane runs that line's latest patch.
+          - { kotlin: 2.4.10, gradle: 8.14.8, suite: boundary }
+    runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['gradle'][format('{0}|{1}|{2}', matrix.kotlin, matrix.gradle, matrix.suite)] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     permissions:
       contents: read
       # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
@@ -1662,6 +1658,7 @@ jobs:
           tests="kotlin_compiler_slice_compiles_through_krusty kotlin_dsl_build_src_compiles_through_krusty"
           tests="$tests kapt_project_compiles_through_krusty multiplatform_jvm_compiles_through_krusty"
           tests="$tests verify_task_reports_krusty_against_kotlinc verify_task_reports_kotlin_dsl_compiles_after_kotlinc_compiles_them"
+          tests="$tests ksp2_generated_sources_compile_through_krusty"
           if [ "${{ matrix.suite }}" = full ]; then
             tests="$tests serialization_plugin_compiles_through_krusty verify_task_reports_only_the_current_invocation"
             tests="$tests verify_task_reports_an_unsupported_kotlin_gradle_plugin verify_task_reports_projects_that_each_load_the_plugin"
@@ -1669,9 +1666,6 @@ jobs:
             tests="$tests body_only_dependency_edit_keeps_dependent_compile_up_to_date"
             tests="$tests oss_corpus_init_script_applies_the_packaged_plugin"
             tests="$tests compose_refusal_is_handed_to_kotlinc_with_its_classes"
-          fi
-          if [ "${{ matrix.ksp }}" = true ]; then
-            tests="$tests ksp2_generated_sources_compile_through_krusty"
           fi
           # The SDK setup uses the same Gradle compatibility decision as the test inventory.
           if [ "${{ steps.android.outputs.enabled }}" = true ]; then
