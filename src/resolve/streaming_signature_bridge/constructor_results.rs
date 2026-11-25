@@ -22,13 +22,10 @@ pub(super) fn selected_sam_constructor_result(
     if !type_arguments.is_empty() && type_arguments.len() != classifier.type_params.len() {
         return None;
     }
-    let target = if type_arguments.is_empty() {
-        Ty::obj_name(internal)
-    } else {
-        Ty::obj_args_name(internal, type_arguments)
-    };
+    let target = Ty::obj_args_name(internal, type_arguments);
     let signature = crate::symbol_resolver::semantic_sam_signature(&source, target)?;
-    super::super::select_sam_constructor(&source, signature, actual).map(|selected| selected.result)
+    let fixed = (!type_arguments.is_empty()).then_some(target);
+    super::super::select_sam_constructor(&source, signature, fixed, actual).map(|s| s.result)
 }
 
 impl ProductionSignatureSemantics<'_> {

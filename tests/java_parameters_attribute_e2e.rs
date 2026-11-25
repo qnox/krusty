@@ -796,3 +796,16 @@ fn java_parameters_reuses_names_interned_earlier() {
         ],
     );
 }
+
+/// The static bridge of a companion property's compiler-default setter names its value parameter
+/// like the accessor it forwards to, including on an interface, which has no function behind it.
+#[test]
+fn java_parameters_names_a_companion_property_bridge_parameter() {
+    assert_parameter_parity(
+        "CompanionPropertyBridge",
+        "package demo\n\
+         interface I { companion object { @JvmStatic var b: String = \"\"; @JvmStatic fun f(x: Int) = x } }\n\
+         class C { companion object { @JvmStatic var b: String = \"\"; @JvmStatic fun f(x: Int) = x } }\n",
+        &["demo/I", "demo/C"],
+    );
+}
