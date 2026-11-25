@@ -854,8 +854,11 @@ impl<'u, 's> Linker<'u, 's> {
         Ok(class.expect("a class has an initializing constructor"))
     }
 
-    /// Whether the program's closure selected the override `function` of a class of `module` and
-    /// every declaration it overrides, each by one exact provider declaration.
+    /// Whether this unit emits the override `function` of a class of `module`: the program's
+    /// closure selected it and every declaration it overrides, each by one exact provider
+    /// declaration, and no earlier unit already exported it. An override an earlier unit emitted
+    /// is a retained export, which the closure does not walk again, so lowering its body here
+    /// would reach declarations this unit never selected.
     fn selects_override(&self, module: &str, function: &KlibIrFunction) -> bool {
         let selected = |identity: &KlibDependencyCallable| {
             matches!(
@@ -873,7 +876,8 @@ impl<'u, 's> Linker<'u, 's> {
         else {
             return false;
         };
-        selected(&identity)
+        !self.sources.externals.contains_key(&identity)
+            && selected(&identity)
             && function.overridden.iter().all(|symbol| {
                 crate::klib_libraries::member_signature(&symbol.signature)
                     .and_then(|signature| {
