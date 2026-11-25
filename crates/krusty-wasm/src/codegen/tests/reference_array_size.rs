@@ -9,10 +9,10 @@ fn selected_array_size_getters_reach_reference_storage_in_complete_programs() {
         include_str!("../../../../../tests/box_regressions/arrayLiteralSpreadMutation.kt"),
     ];
     for target in WasmTarget::ALL {
-        let path = krusty::toolchain::kotlin_stdlib_klib(
+        let path = krusty::toolchain::kotlin_stdlib_klib_or_reason(
             krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
         )
-        .expect("the exact target stdlib must be provisioned");
+        .unwrap_or_else(|reason| panic!("the exact target stdlib must be provisioned: {reason}"));
         for source in sources {
             let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
                 path.clone(),

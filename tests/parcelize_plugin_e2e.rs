@@ -68,6 +68,8 @@ public final class Parcel {
     public boolean[] createBooleanArray() { return (boolean[]) next(); }
     public void writeCharArray(char[] value) { values.add(value == null ? null : value.clone()); }
     public char[] createCharArray() { return (char[]) next(); }
+    public void writeParcelable(Parcelable value, int flags) { values.add(value); }
+    public <T extends Parcelable> T readParcelable(ClassLoader loader) { return (T) next(); }
 }
 "#;
 
@@ -145,6 +147,12 @@ enum class Color { RED, GREEN, BLUE }
 @Parcelize
 class Palette(val main: Color, val accent: Color?, val tag: String) : Parcelable
 
+@Parcelize
+class Inner(val x: Int) : Parcelable
+
+@Parcelize
+class Holder(val inner: Inner, val maybe: Inner?, val any: Parcelable, val maybeAny: Parcelable?) : Parcelable
+
 class Outer {
     @Parcelize
     class Point(val x: Int, val y: Long?) : Parcelable
@@ -216,6 +224,9 @@ fun box(): String {
     if (roundTrip(Palette(Color.BLUE, Color.RED, ""), Palette::class.java).accent != Color.RED) {
         return "nullable enum"
     }
+    val holder = roundTrip(Holder(Inner(1), null, Inner(2), Inner(3)), Holder::class.java)
+    if (holder.inner.x != 1 || holder.maybe != null) return "parcelable"
+    if ((holder.any as Inner).x != 2 || (holder.maybeAny as Inner).x != 3) return "parcelable interface"
     val users = creator(User::class.java).newArray(2)
     if (users.size != 2 || users[0] != null) return "newArray"
     return "OK"

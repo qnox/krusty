@@ -344,6 +344,13 @@ pub fn configured_target() -> Result<KotlinVersion, String> {
     }
 }
 
+/// Whether a class's static state initializes in program order around its `companion object`, as
+/// kotlinc does from 2.5, rather than with every block property before the companion's body
+/// ([`Quirk::ClassStaticsInitializeBeforeCompanionBody`]).
+pub fn class_statics_in_program_order() -> bool {
+    !Quirks::target().has(Quirk::ClassStaticsInitializeBeforeCompanionBody)
+}
+
 /// Whether the reference version is `version` or newer. A behavior difference is a [`Quirk`]
 /// instead; this answers the wording table and tests.
 pub fn at_least(version: KotlinVersion) -> bool {

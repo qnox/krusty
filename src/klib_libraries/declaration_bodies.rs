@@ -470,17 +470,24 @@ impl KlibDeclarationBodies {
         module: &str,
         classifier: TypeName,
     ) -> bool {
+        let wanted = KlibPublicIdSignature::classifier(classifier);
         let mut found = None;
         for module in self.body_provider_modules(module) {
             let Some(&library) = self.modules.get(&module) else {
                 continue;
             };
             let mut in_module = None;
-            for tree in self.libraries[library].trees() {
-                find_class(&tree.arena, &tree.declaration, classifier, &mut in_module);
-                if in_module == Some(false) {
+            for (arena, class) in self.libraries[library].classes_at_path(&wanted) {
+                if class.base.symbol.kind != KlibIrSymbolKind::Class
+                    || class_identity(&class.base.symbol.signature) != Some(classifier)
+                {
+                    continue;
+                }
+                let inert = class_is_inert(arena, class);
+                if !inert {
                     return false;
                 }
+                in_module = Some(true);
             }
             if let Some(inert) = in_module {
                 if found.replace(inert).is_some() {
@@ -1442,51 +1449,34 @@ impl KlibDeclarationBodies {
     }
 }
 
-fn find_class(
-    arena: &KlibIrArena,
-    member: &KlibIrMember,
-    classifier: TypeName,
-    found: &mut Option<bool>,
-) {
-    let KlibIrMember::Class(id) = member else {
-        return;
-    };
-    let class = arena.class(*id);
-    if class.base.symbol.kind == KlibIrSymbolKind::Class
-        && class_identity(&class.base.symbol.signature) == Some(classifier)
-    {
-        let mut constructors = class.members.iter().filter_map(|member| match member {
-            KlibIrMember::Function(function) if arena.function(*function).constructor => {
-                Some(arena.function(*function))
+fn class_is_inert(arena: &KlibIrArena, class: &KlibIrClass) -> bool {
+    let mut constructors = class.members.iter().filter_map(|member| match member {
+        KlibIrMember::Function(function) if arena.function(*function).constructor => {
+            Some(arena.function(*function))
+        }
+        _ => None,
+    });
+    class.supertypes.len() == 1
+        && inert_any_supertype(arena, class.supertypes[0])
+        && constructors
+            .next()
+            .is_some_and(|constructor| inert_constructor(arena, constructor, &class.base.symbol))
+        && constructors.next().is_none()
+        && class.members.iter().all(|member| match member {
+            KlibIrMember::AnonymousInitializer { statements, .. } => statements.is_empty(),
+            KlibIrMember::Field(field) => field
+                .initializer
+                .is_none_or(|initializer| inert_initializer(arena, initializer)),
+            KlibIrMember::Property(property) => {
+                property.backing_field.as_ref().is_none_or(|field| {
+                    field
+                        .initializer
+                        .is_none_or(|initializer| inert_initializer(arena, initializer))
+                })
             }
-            _ => None,
-        });
-        let inert = class.supertypes.len() == 1
-            && inert_any_supertype(arena, class.supertypes[0])
-            && constructors.next().is_some_and(|constructor| {
-                inert_constructor(arena, constructor, &class.base.symbol)
-            })
-            && constructors.next().is_none()
-            && class.members.iter().all(|member| match member {
-                KlibIrMember::AnonymousInitializer { statements, .. } => statements.is_empty(),
-                KlibIrMember::Field(field) => field
-                    .initializer
-                    .is_none_or(|initializer| inert_initializer(arena, initializer)),
-                KlibIrMember::Property(property) => {
-                    property.backing_field.as_ref().is_none_or(|field| {
-                        field
-                            .initializer
-                            .is_none_or(|initializer| inert_initializer(arena, initializer))
-                    })
-                }
-                // A member function, the constructor aside, runs only when it is called.
-                _ => true,
-            });
-        *found = Some(found.unwrap_or(true) && inert);
-    }
-    for member in &class.members {
-        find_class(arena, member, classifier, found);
-    }
+            // A member function, the constructor aside, runs only when it is called.
+            _ => true,
+        })
 }
 
 fn inert_any_supertype(

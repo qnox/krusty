@@ -916,6 +916,8 @@ fn realize_own_invoke(
                 IrExpr::GetValue(value) => *value >= 1,
                 IrExpr::GetField { .. } => captured_reads.contains(&current),
                 IrExpr::New { .. } => true,
+                // An array factory's adapter builds the array itself: its first instruction.
+                IrExpr::Vararg { .. } => true,
                 _ => false,
             };
             if marks {
