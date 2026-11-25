@@ -97,7 +97,7 @@ impl KotlinVersion {
 
     /// Every reference version the manifest lists, oldest first.
     pub fn supported() -> Vec<Self> {
-        let mut versions: Vec<Self> = manifest_versions(include_str!("../kotlin-versions"));
+        let mut versions: Vec<Self> = manifest_versions(include_str!("../../../kotlin-versions"));
         versions.sort();
         versions
     }
