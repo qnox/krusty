@@ -21,6 +21,24 @@ pub(super) fn primary_constructor_signature(
     formatter.constructor_signature(&primary_constructor_parameters(ir, class))
 }
 
+/// The `Signature` of a `@JvmOverloads` overload of the primary constructor that keeps the source
+/// parameters `kept` and every prefix parameter, or `None` when it needs none.
+pub(super) fn primary_constructor_signature_keeping(
+    formatter: &JvmSignatureFormatter<'_>,
+    ir: &IrFile,
+    class: &IrClass,
+    kept: &[usize],
+) -> Option<String> {
+    let prefix = class.constructor_prefix_count as usize;
+    let parameters = primary_constructor_parameters(ir, class)
+        .into_iter()
+        .enumerate()
+        .filter(|(position, _)| *position < prefix || kept.contains(&(position - prefix)))
+        .map(|(_, parameter)| parameter)
+        .collect::<Vec<_>>();
+    formatter.constructor_signature(&parameters)
+}
+
 /// An enum's constructor `Signature`: its source parameters behind the name and ordinal.
 pub(super) fn enum_constructor_signature(
     formatter: &JvmSignatureFormatter<'_>,
