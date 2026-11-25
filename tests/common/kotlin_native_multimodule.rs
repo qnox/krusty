@@ -1,6 +1,7 @@
 //! A kotlinc-native oracle for an exact multimodule KLIB graph.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -8,7 +9,9 @@ use krusty::compilation_target::CompilationTarget;
 use krusty::fx_hash::{HashMap, HashSet};
 use krusty::kotlin_version::KotlinVersion;
 
-use super::reference_recording_support::{kotlin_native_root, recorded};
+use super::reference_recording_support::{
+    kotlin_native_program_arguments, kotlin_native_root, recorded,
+};
 
 /// What `box()` answers when kotlinc-native builds an exact `// MODULE:` graph as KLIB
 /// dependencies and a final native program. `None` when kotlin-native is not provisioned and no
@@ -163,6 +166,7 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
             krusty::kotlin_version::environment_release(),
         );
 
+        // Only the arguments are used: the persistent server runs the compiler.
         let mut command = Command::new(&compiler);
         command.args(&compiler_arguments);
         command.args(&source_paths);
@@ -198,20 +202,20 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
 
         let klib = unit_root.join(format!("{}.klib", unit.name));
         if final_unit {
+            command.args(kotlin_native_program_arguments(&native_root));
             command.args(["-produce", "program", "-output"]);
             command.arg(work.join("program"));
         } else {
             command.args(["-produce", "library", "-output"]).arg(&klib);
         }
-        let output = command
-            .output()
-            .expect("run kotlinc-native module compiler");
+        let arguments = command.get_args().map(OsString::from).collect::<Vec<_>>();
+        let output = super::common::kotlin_native_server::kotlinc_native(&native_root, &arguments);
         assert!(
-            output.status.success(),
+            output.status == 0,
             "kotlinc-native rejected module {} (status {}):\n{}",
             unit.name,
             output.status,
-            String::from_utf8_lossy(&output.stderr)
+            output.stderr
         );
         if !final_unit {
             assert!(

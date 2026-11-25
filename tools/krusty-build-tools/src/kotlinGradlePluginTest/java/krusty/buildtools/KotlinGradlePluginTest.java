@@ -6,9 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.gradle.testkit.runner.BuildResult;
@@ -63,26 +61,19 @@ class KotlinGradlePluginTest {
             ""));
         assertTrue(recording.toFile().setExecutable(true));
 
-        // CI fills one Gradle user home beforehand and sets KRUSTY_GRADLE_OFFLINE: the inner build
-        // reads that home and never fetches from Maven Central. Otherwise it keeps one home of its
+        // The inner build shares the outer build's Gradle user home when one is set, with its
+        // init scripts (CI's package cache) and its downloads; otherwise it keeps one home of its
         // own across runs, so the Kotlin Gradle plugin is downloaded once.
-        boolean offline = !System.getenv().getOrDefault("KRUSTY_GRADLE_OFFLINE", "").isEmpty();
-        String warmedHome = System.getenv("GRADLE_USER_HOME");
-        assertTrue(!offline || warmedHome != null, "KRUSTY_GRADLE_OFFLINE needs the warmed GRADLE_USER_HOME");
-        Path testKit = Path.of(offline ? warmedHome : System.getProperty("krusty.testKitDir"));
-        List<String> arguments = new ArrayList<>(List.of(
-            "compileKotlin", "--stacktrace", "-Dkrusty.binary=" + recording));
-        if (offline) {
-            arguments.add("--offline");
-        }
+        String userHome = System.getenv("GRADLE_USER_HOME");
+        Path testKit = Path.of(userHome != null ? userHome : System.getProperty("krusty.testKitDir"));
+        List<String> arguments = List.of("compileKotlin", "--stacktrace", "-Dkrusty.binary=" + recording);
         BuildResult result = GradleRunner.create()
             .withTestKitDir(testKit.toFile())
             .withProjectDir(project.toFile())
             // The Gradle daemon reads the binary from this system property before KRUSTY_BIN.
             .withArguments(arguments)
-            .withEnvironment(Map.of(
-                "PATH", System.getenv("PATH"),
-                "HOME", System.getProperty("user.home")))
+            // The outer build's environment, which carries what its init scripts read.
+            .withEnvironment(System.getenv())
             .build();
 
         assertEquals(TaskOutcome.SUCCESS, result.task(":compileKotlin").getOutcome(), result.getOutput());

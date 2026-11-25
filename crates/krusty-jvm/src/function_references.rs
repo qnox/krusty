@@ -976,6 +976,17 @@ fn realize_own_invoke(
         .collect();
     ir.fn_params
         .insert(adapter, krusty::ir::FnParamInfo::identities(identities));
+    // The reference's function type, not the erased target, is what the specialized `invoke` is
+    // generic over: kotlinc signs it with the type parameters those types name.
+    ir.signatures.insert(
+        adapter,
+        krusty::ir::IrGenericSig {
+            type_params: Vec::new(),
+            params: parameters.clone(),
+            ret: Some(result),
+            supers: Vec::new(),
+        },
+    );
     let function = &mut ir.functions[adapter as usize];
     function.name = "invoke".to_string();
     function.params = parameters;
