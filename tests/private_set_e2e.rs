@@ -154,7 +154,9 @@ fn companion_block_private_and_internal_setters_match_kotlinc() {
                \x20   C.published = \"!\"\n\
                \x20   return C.w + C.v + C.p + C.u + C.published\n\
                }\n";
-    let settings = krusty::language_settings::LanguageSettings::new(
+    let settings = krusty::language_settings::LanguageSettings::for_release(
+        krusty::kotlin_version::environment_release(),
+        
         krusty::language_version::LanguageVersion::V2_4,
         None,
         &[krusty::features::FeatureSetting {

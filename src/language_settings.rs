@@ -18,25 +18,12 @@ pub struct LanguageSettings {
 }
 
 impl LanguageSettings {
-    /// Build settings after parsing all version options and ordered feature overrides.
+    /// Build settings under an explicitly chosen reference release, after parsing all version options
+    /// and ordered feature overrides.
     ///
     /// Kotlin defaults the API level to the selected language level. An explicitly newer API is
     /// invalid before source analysis starts. `feature_settings` are kotlinc's `specificFeatures`
     /// in application order: a later setting of the same feature wins.
-    pub fn new(
-        language_version: LanguageVersion,
-        api_version: Option<LanguageVersion>,
-        feature_settings: &[FeatureSetting],
-    ) -> Result<Self, String> {
-        Self::for_release(
-            KotlinVersion::newest(),
-            language_version,
-            api_version,
-            feature_settings,
-        )
-    }
-
-    /// [`Self::new`] under an explicitly chosen reference release.
     pub fn for_release(
         release: KotlinVersion,
         language_version: LanguageVersion,
@@ -120,7 +107,7 @@ impl LanguageSettings {
 
 impl Default for LanguageSettings {
     fn default() -> Self {
-        Self::new(LanguageVersion::default(), None, &[])
+        Self::for_release(KotlinVersion::newest(), LanguageVersion::default(), None, &[])
             .expect("the default language/API versions are compatible")
     }
 }
@@ -169,7 +156,8 @@ mod tests {
 
     #[test]
     fn api_defaults_to_language_and_feature_overrides_apply_after_the_baseline() {
-        let settings = LanguageSettings::new(
+        let settings = LanguageSettings::for_release(
+            KotlinVersion::newest(),
             LanguageVersion::V2_2,
             None,
             &[FeatureSetting {
@@ -185,7 +173,12 @@ mod tests {
     #[test]
     fn api_cannot_be_newer_than_language() {
         assert_eq!(
-            LanguageSettings::new(LanguageVersion::V2_2, Some(LanguageVersion::V2_4), &[],),
+            LanguageSettings::for_release(
+                KotlinVersion::newest(),
+                LanguageVersion::V2_2,
+                Some(LanguageVersion::V2_4),
+                &[],
+            ),
             Err("-api-version (2.4) cannot be greater than -language-version (2.2).".to_owned())
         );
     }

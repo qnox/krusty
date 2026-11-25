@@ -820,13 +820,9 @@ fn stdio_server_reports_mixed_and_missing_argument_diagnostics() {
         "source": "Kotlin",
         "message": "No value passed for parameter 'first'."
     });
-    let expected = if krusty::kotlin_version::environment_release()
-        >= krusty::kotlin_version::KotlinVersion::V2_4_20
-    {
-        vec![missing, mixing]
-    } else {
-        vec![mixing, missing]
-    };
+    // The server analyses under the newest release it models, whatever kotlinc the environment
+    // provisions; from 2.4.20 on that release reports the missing argument first.
+    let expected = vec![missing, mixing];
 
     assert_eq!(diagnostics, expected);
 }

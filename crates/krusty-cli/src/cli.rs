@@ -631,7 +631,12 @@ impl Options {
         api_version: Option<LanguageVersion>,
         feature_settings: &[krusty::features::FeatureSetting],
     ) -> Result<(), String> {
-        let settings = LanguageSettings::new(language_version, api_version, feature_settings)?;
+        let settings = LanguageSettings::for_release(
+            self.language_settings.features.release(),
+            language_version,
+            api_version,
+            feature_settings,
+        )?;
         self.install_language_settings(settings);
         Ok(())
     }

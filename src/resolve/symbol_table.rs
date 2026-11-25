@@ -379,6 +379,7 @@ pub(crate) struct PassTwoSymbols {
     coroutine_runtime: Option<crate::ir::IrCoroutineRuntime>,
     char_sequence_protocol: Option<crate::fir::CharSequenceProtocol>,
     pub(super) native_plugins: crate::plugins::registry::NativePlugins,
+    reference: crate::kotlin_version::ReferenceProfile,
 }
 
 impl PassTwoSymbols {
@@ -405,6 +406,11 @@ impl PassTwoSymbols {
     pub(crate) fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
         &self.native_plugins
     }
+
+    /// What the compilation these symbols belong to reproduces of kotlinc.
+    pub(crate) fn reference(&self) -> crate::kotlin_version::ReferenceProfile {
+        self.reference
+    }
 }
 
 impl SymbolTable {
@@ -417,6 +423,7 @@ impl SymbolTable {
             coroutine_runtime,
             char_sequence_protocol,
             native_plugins: self.native_plugins,
+            reference: self.reference,
         }
     }
 }
