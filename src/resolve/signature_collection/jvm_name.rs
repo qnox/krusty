@@ -3,7 +3,11 @@
 
 use super::*;
 
-pub(super) fn resolved_jvm_name(file: &File, function: &FunDecl, class_names: &ClassNames) -> String {
+pub(super) fn resolved_jvm_name(
+    file: &File,
+    function: &FunDecl,
+    class_names: &ClassNames,
+) -> String {
     let annotation = function
         .annotations
         .iter()

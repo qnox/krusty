@@ -59,7 +59,9 @@ mod constructor_descriptors;
 mod constructor_initialization;
 mod constructor_signatures;
 use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
-use constructor_descriptors::{ctor_field_descs, primary_ctor_descriptor, primary_ctor_parameter_descs};
+use constructor_descriptors::{
+    ctor_field_descs, primary_ctor_descriptor, primary_ctor_parameter_descs,
+};
 mod companion_field;
 mod copied_code;
 mod coroutine_machine;

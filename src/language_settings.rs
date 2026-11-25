@@ -107,8 +107,13 @@ impl LanguageSettings {
 
 impl Default for LanguageSettings {
     fn default() -> Self {
-        Self::for_release(KotlinVersion::newest(), LanguageVersion::default(), None, &[])
-            .expect("the default language/API versions are compatible")
+        Self::for_release(
+            KotlinVersion::newest(),
+            LanguageVersion::default(),
+            None,
+            &[],
+        )
+        .expect("the default language/API versions are compatible")
     }
 }
 
