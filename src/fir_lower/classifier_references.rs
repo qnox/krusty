@@ -258,7 +258,7 @@ impl BodyLowering<'_> {
         });
         self.ir
             .set_method_visibility(function, crate::types::Visibility::Private);
-        if reflective {
+        if reflective || adaptation.is_none() {
             let capture = match captures.as_slice() {
                 [] => None,
                 [capture] => Some(*capture),

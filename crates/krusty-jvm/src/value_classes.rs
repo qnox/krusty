@@ -35,7 +35,7 @@ mod inline_body_slots;
 mod interface_entries;
 mod lambda_slots;
 mod mangled_calls;
-mod member_names;
+pub(crate) mod member_names;
 mod module_members;
 mod module_static_calls;
 mod operand_nullness;
@@ -3374,7 +3374,7 @@ pub(crate) fn lower_value_classes(
         }
         _ => true,
     });
-    substitution_coercions::drop_rebox_round_trips(&mut ops, ir);
+    substitution_coercions::drop_unmaterialized(&mut ops, ir);
     // Each `unbox-impl` realized over a suspend call whose CPS result is the value class's box, as
     // recorded for that exact call. A suspend function returning the same box hands that value
     // back as it is (see `restore_boxed_suspension_tails`).

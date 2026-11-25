@@ -17,7 +17,7 @@ which is why `just fmt` and `just fmt-check` also pass `tests/*_e2e.rs` to rustf
 
 `krusty-plugin-api` records the workspace's existing `KRUSTY_BUILD_CHECKOUT` input in Rust dep-info.
 Its `shared_checkout` integration test builds two copies of the real API crate (with the
-`krusty-names` crate it depends on) against one Cargo target, proves each consumer sees its own API,
+`krusty-core` crate it depends on) against one Cargo target, proves each consumer sees its own API,
 and checks unchanged-checkout artifact reuse. The nested Cargo fixtures build offline and
 unoptimized; they do not inherit the
 parent compiler's coverage flags or wrappers. Keep the shared target intact when reproducing this
@@ -612,7 +612,9 @@ and Java drivers use persistent `BoxRunner` and `JavaRunner` JVMs; `javac` runs 
 source to compile that helper, then in-process. The conformance box runner is a separate persistent
 JVM per test thread, also compiled once. `BoxRunner` gives one `box()` call
 `KRUSTY_BOX_TIMEOUT_MS` (10s by default), and the conformance box runner gives one case
-`KRUSTY_BOX_CASE_TIMEOUT_MS` (2s by default).
+`KRUSTY_BOX_CASE_TIMEOUT_MS` (2s by default). A live kotlinc-native oracle compile also runs in a
+persistent compiler JVM per Native distribution, under the same pool cap; one compile gets
+`KRUSTY_NATIVE_COMPILE_TIMEOUT_MS` (five minutes by default) before its server is replaced.
 
 The `bytecode_parity_e2e` batch compares normalized disassembly for its named fixtures. Each
 fixture receives its own package on both compiler inputs, so independent declarations such as

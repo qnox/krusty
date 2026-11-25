@@ -62,7 +62,7 @@ pub(crate) use raw_erasure::{formal_erasures, raw_member_type, DeclaredFormals};
 mod thin_handles;
 mod ty_kind;
 mod ty_table;
-pub use krusty_names::{
+pub use krusty_core::{
     existing_type_name, existing_type_name_child, existing_type_name_in,
     existing_type_name_nested_child, insert_type_name_in, same, type_name, type_name_child,
     type_name_from, type_name_from_multifile_facade, type_name_nested_child, InternalName,
@@ -91,15 +91,7 @@ pub(crate) use type_parameter_identity::declaration_type_parameter;
 #[cfg(any(test, feature = "test-support"))]
 pub use type_parameter_identity::declaration_type_parameter;
 
-/// Compile-time policy for Kotlin's `assert` operation. Every backend must guard, retain, or elide
-/// the checked operation while preserving lazy condition/message evaluation.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum AssertionMode {
-    #[default]
-    Runtime,
-    AlwaysEnabled,
-    AlwaysDisabled,
-}
+pub use krusty_core::assertions::{AssertionCompilation, AssertionMode};
 
 /// Semantic shape of one compiler-provided Kotlin array factory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

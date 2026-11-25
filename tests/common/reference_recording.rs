@@ -1,6 +1,7 @@
 //! Shared storage and toolchain discovery for recorded reference-compiler observations.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use krusty::compilation_target::CompilationTarget;
@@ -60,4 +61,21 @@ pub(crate) fn kotlin_native_root() -> Option<PathBuf> {
         panic!("KRUSTY_REQUIRE_KOTLIN_NATIVE is set but KRUSTY_KOTLIN_NATIVE is not");
     }
     root
+}
+
+/// How the kotlinc-native oracles build a program: a debug binary against the distribution's
+/// prebuilt static caches, the configuration Kotlin's own Native box tests and Gradle's debug
+/// binaries use. Without the caches every program recompiles the reachable stdlib and the runtime
+/// bitcode through LLVM's optimization pipeline, about three quarters of each case's oracle time.
+pub(crate) fn kotlin_native_program_arguments(root: &Path) -> Vec<OsString> {
+    let caches = krusty::toolchain::kotlin_native_debug_static_caches(root)
+        .expect("the kotlinc-native oracle runs on a Kotlin/Native host");
+    assert!(
+        caches.is_dir(),
+        "the Kotlin/Native distribution has no debug static caches at {}",
+        caches.display()
+    );
+    let mut directory = OsString::from("-Xcache-directory=");
+    directory.push(caches);
+    vec![OsString::from("-g"), directory]
 }
