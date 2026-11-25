@@ -966,6 +966,15 @@ fn the_default_budget_leaves_the_test_process_and_the_machine_their_memory() {
 }
 
 #[test]
+fn a_pool_holds_one_server_per_cpu_between_one_and_six() {
+    use crate::common_core::server_pool::pool_cap;
+
+    assert_eq!(pool_cap(1), 1);
+    assert_eq!(pool_cap(4), 4, "a 4-CPU runner is not left half idle");
+    assert_eq!(pool_cap(64), 6);
+}
+
+#[test]
 fn a_panicking_caller_releases_its_server_claim() {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::{AtomicUsize, Ordering};
