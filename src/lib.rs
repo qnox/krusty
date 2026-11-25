@@ -33,7 +33,6 @@ pub mod fir_lower;
 pub mod frontend;
 pub use krusty_core::fx_hash;
 mod inline_expansion;
-pub(crate) use krusty_core::inline_parameter_modifier;
 pub mod integer_constant;
 pub mod ir;
 pub mod ir_print;
