@@ -19,6 +19,7 @@ use crate::resolve::PassTwoSymbols;
 use crate::types::{Ty, TyKind, TypeName};
 use std::collections::VecDeque;
 
+mod accessor_numbering;
 mod class_declarations;
 mod emitted_roots;
 
@@ -84,12 +85,20 @@ impl DependencySupportState {
     }
 }
 
-/// Emit authenticated intrinsic support and concrete ordinary bodies selected by emitted uses.
-/// Each category closes and validates independently, once across the complete target program.
+/// One checked file whose emitted uses dependency support closes over, with its module's facts.
+#[derive(Clone, Copy)]
+pub(super) struct DependencyUse<'s, 'a> {
+    pub(super) file: &'s CheckedIrFile<'a>,
+    pub(super) facts: &'s BackendModuleFacts,
+}
+
+/// Emit authenticated intrinsic support and concrete ordinary bodies selected by the emitted uses
+/// of `uses`, every checked file of the target program at once. Each category closes and
+/// validates independently, once across the complete target program. The support units belong to
+/// the last use's module, the one every earlier module of the program precedes.
 pub(super) fn emit_dependencies<B: Backend>(
-    source: &CheckedIrFile<'_>,
+    uses: &[DependencyUse<'_, '_>],
     symbols: &PassTwoSymbols,
-    module_facts: &BackendModuleFacts,
     backend: &B,
     state: &mut B::State,
     support_state: &mut DependencySupportState,
@@ -98,6 +107,13 @@ pub(super) fn emit_dependencies<B: Backend>(
     if !backend.emits_dependency_support() {
         return Vec::new();
     }
+    let Some(&DependencyUse {
+        file: source,
+        facts: module_facts,
+    }) = uses.last()
+    else {
+        return Vec::new();
+    };
     let platform = symbols.semantic_platform();
     let Some(facts) = platform.klib_dependency_body_facts() else {
         return Vec::new();
@@ -114,52 +130,79 @@ pub(super) fn emit_dependencies<B: Backend>(
     }
     let bodies = facts.bodies();
     let intrinsics = facts.intrinsics();
-    let selected = source.callables.klib_body_callables();
-    if source.callables.klib_type_hierarchy().is_none() {
+    let selected = uses
+        .iter()
+        .flat_map(|use_| use_.file.callables.klib_body_callables())
+        .collect::<Vec<_>>();
+    let accessors = match accessor_numbering::program_accessors(platform, &selected) {
+        Ok(accessors) => accessors,
+        Err(error) => {
+            diags.error(Span::new(0, 0), format!("internal error: {error}"));
+            return Vec::new();
+        }
+    };
+    let selected = match selected
+        .into_iter()
+        .map(|callable| accessor_numbering::program_numbered(callable, &accessors))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(selected) => selected,
+        Err(error) => {
+            diags.error(Span::new(0, 0), format!("internal error: {error}"));
+            return Vec::new();
+        }
+    };
+    if uses
+        .iter()
+        .any(|use_| use_.file.callables.klib_type_hierarchy().is_none())
+    {
         diags.error(
             Span::new(0, 0),
             "internal error: checked KLIB bodies have no frozen class-hierarchy facts",
         );
         return Vec::new();
     }
-    let emitted_external_ids =
-        match emitted_roots::emitted_dependency_targets(&source.ir, |property, setter| {
-            let property = source
-                .callables
-                .property(property)
-                .ok_or("an emitted dependency property has no frozen fact")?;
-            if setter {
-                property
-                    .setter
-                    .map(Some)
-                    .ok_or("an emitted dependency property write has no selected setter".to_owned())
-            } else {
-                Ok(Some(property.getter))
-            }
-        }) {
-            Ok(targets) => targets
-                .into_iter()
-                .map(|(_, target, _)| target)
-                .collect::<HashSet<_>>(),
+    let mut emitted_dependency_callables = HashSet::default();
+    for use_ in uses {
+        match emitted_roots::emitted_dependency_callables(use_.file) {
+            Ok(callables) => emitted_dependency_callables.extend(callables),
             Err(error) => {
                 diags.error(Span::new(0, 0), format!("internal error: {error}"));
                 return Vec::new();
             }
-        };
-    let emitted_dependency_callables = emitted_external_ids
-        .into_iter()
-        .filter_map(|target| {
-            source
-                .callables
-                .callable(target)
-                .and_then(|callable| callable.dependency_callable.clone())
-        })
-        .collect::<HashSet<_>>();
+        }
+    }
     let target_represents_classifier =
         |classifier| backend.represents_dependency_classifier(classifier);
     let dispatched_classes = backend.dispatched_dependency_classes();
+    // One file's checked graph is its own; several files' graphs are checked again as one, so the
+    // class hierarchy answers for every class any of them reaches.
+    let program_facts;
+    let checked_facts = match uses {
+        [only] => only.file.callables.klib_dependency_facts(),
+        _ => {
+            program_facts = match crate::resolve::for_checked_klib_bodies(
+                platform,
+                bodies,
+                selected.iter().copied(),
+                &dispatched_classes,
+            ) {
+                Ok(facts) => facts,
+                Err(identity) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        format!(
+                            "internal error: checked KLIB body graph has no exact member facts for {identity:?}"
+                        ),
+                    );
+                    return Vec::new();
+                }
+            };
+            &program_facts
+        }
+    };
     let callees = KlibCalleeFacts::new(selected.iter().copied())
-        .with_checked_dependency_facts(source.callables.klib_dependency_facts())
+        .with_checked_dependency_facts(checked_facts)
         .with_target_classifiers(&target_represents_classifier);
     let mut roots: Vec<crate::libraries::KlibBodyCallable<'_>> = Vec::new();
     for callable in selected.iter().copied().filter(|callable| {
@@ -181,43 +224,63 @@ pub(super) fn emit_dependencies<B: Backend>(
     let target_realizes_getter = |signature: crate::backend::DependencyGetterSignature<'_>| {
         backend.realizes_dependency_getter(signature)
     };
-    let mut ordinary = match emitted_roots::ordinary_roots(
-        platform,
-        source,
-        bodies,
-        intrinsics,
-        &callees,
-        &emitted_roots::OrdinaryRootCapabilities {
-            realizes_intrinsic: &target_realizes_intrinsic,
-            realizes_getter: &target_realizes_getter,
-            represents_classifier: &target_represents_classifier,
-            retains_initializer: &|selected| match support_state.emitted.get(selected.identity()) {
-                Some(PublishedDependency::AllocatingConstructor) => Ok(true),
-                Some(PublishedDependency::ConstructorInitializer(identity)) => {
-                    if selected.class_contract().is_some_and(|class| {
-                        class.module == identity.module
-                            && class.signature == identity.signature
-                            && class.module == selected.identity().module
-                            && selected.declaration_owner()
-                                == Some(crate::types::SemanticCallableOwner::Classifier(
-                                    class.classifier,
-                                ))
-                    }) {
-                        Ok(true)
-                    } else {
-                        Err("a retained superclass initializer changed its canonical class contract")
+    let capabilities = emitted_roots::OrdinaryRootCapabilities {
+        realizes_intrinsic: &target_realizes_intrinsic,
+        realizes_getter: &target_realizes_getter,
+        represents_classifier: &target_represents_classifier,
+        retains_initializer: &|selected| match support_state.emitted.get(selected.identity()) {
+            Some(PublishedDependency::AllocatingConstructor) => Ok(true),
+            Some(PublishedDependency::ConstructorInitializer(identity)) => {
+                if selected.class_contract().is_some_and(|class| {
+                    class.module == identity.module
+                        && class.signature == identity.signature
+                        && class.module == selected.identity().module
+                        && selected.declaration_owner()
+                            == Some(crate::types::SemanticCallableOwner::Classifier(
+                                class.classifier,
+                            ))
+                }) {
+                    Ok(true)
+                } else {
+                    Err("a retained superclass initializer changed its canonical class contract")
+                }
+            }
+            _ => Ok(false),
+        },
+    };
+    let mut ordinary: Vec<crate::libraries::KlibBodyCallable<'_>> = Vec::new();
+    for use_ in uses {
+        match emitted_roots::ordinary_roots(
+            platform,
+            use_.file,
+            bodies,
+            intrinsics,
+            &callees,
+            &capabilities,
+        ) {
+            Ok(roots) => {
+                for root in roots {
+                    let root = match accessor_numbering::program_numbered(root, &accessors) {
+                        Ok(root) => root,
+                        Err(error) => {
+                            diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                            return Vec::new();
+                        }
+                    };
+                    if !ordinary
+                        .iter()
+                        .any(|known| known.identity() == root.identity())
+                    {
+                        ordinary.push(root);
                     }
                 }
-                _ => Ok(false),
-            },
-        },
-    ) {
-        Ok(roots) => roots,
-        Err(error) => {
-            diags.error(Span::new(0, 0), format!("internal error: {error}"));
-            return Vec::new();
+            }
+            Err(error) => {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                return Vec::new();
+            }
         }
-    };
+    }
     // Category ownership is a declaration capability, not an emission-success test. An intrinsic
     // wrapper whose unsupported body transaction declines must not be retried as an ordinary body.
     let intrinsic_roots: HashSet<_> = roots.iter().map(|root| root.identity()).collect();
@@ -234,19 +297,31 @@ pub(super) fn emit_dependencies<B: Backend>(
             && !support_state.emitted.contains_key(root.identity())
             && !support_state.in_progress.contains_key(root.identity())
     });
-    let root_objects = match emitted_roots::ordinary_root_objects(
-        platform,
-        source,
-        bodies,
-        &callees,
-        &target_represents_classifier,
-    ) {
-        Ok(objects) => objects,
-        Err(error) => {
-            diags.error(Span::new(0, 0), format!("internal error: {error}"));
-            return Vec::new();
+    let mut root_objects: Vec<crate::libraries::KlibBodyClassContract> = Vec::new();
+    for use_ in uses {
+        match emitted_roots::ordinary_root_objects(
+            platform,
+            use_.file,
+            bodies,
+            &callees,
+            &target_represents_classifier,
+        ) {
+            Ok(objects) => {
+                for object in objects {
+                    if !root_objects
+                        .iter()
+                        .any(|known| known.classifier == object.classifier)
+                    {
+                        root_objects.push(object);
+                    }
+                }
+            }
+            Err(error) => {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                return Vec::new();
+            }
         }
-    };
+    }
     let root_objects = root_objects
         .into_iter()
         .filter(|object| {
@@ -291,7 +366,8 @@ pub(super) fn emit_dependencies<B: Backend>(
                 .chain(support_state.materializing_classes.keys())
                 .copied(),
         )
-        .presetting_constant_statics(backend.presets_constant_top_level_initializers());
+        .presetting_constant_statics(backend.presets_constant_top_level_initializers())
+        .adding_members_to_realized_classes(backend.adds_members_to_realized_classes());
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,
@@ -335,7 +411,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                     .map(|callable| (*target, callable))
             }),
         )
-        .with_checked_dependency_facts(source.callables.klib_dependency_facts())
+        .with_checked_dependency_facts(checked_facts)
         .with_authorized_member_edges(authorized_member_edges)
         .with_read_objects(read_objects)
         .with_target_classifiers(&target_represents_classifier);
@@ -437,10 +513,11 @@ pub(super) fn emit_dependencies<B: Backend>(
         for (classifier, identity) in &materialized {
             // Current-module representation facts take precedence in the checked backend view.
             // They cannot describe an unrelated imported class with the same unqualified key.
-            if module_facts.classifier(*classifier).is_some()
-                || module_facts.is_body_local(*classifier)
-                || source.ir.class_id_by_name(*classifier).is_some()
-            {
+            if uses.iter().any(|use_| {
+                use_.facts.classifier(*classifier).is_some()
+                    || use_.facts.is_body_local(*classifier)
+                    || use_.file.ir.class_id_by_name(*classifier).is_some()
+            }) {
                 diags.error(
                     Span::new(0, 0),
                     "cannot materialize a dependency class that collides with a current-module classifier",
@@ -814,9 +891,11 @@ pub(super) fn emit_dependencies<B: Backend>(
         // this unit. Recursion emits dependencies first and sees this unit's reserved exports as
         // exact provisional owners, not as completed class layouts.
         let nested_outputs = emit_dependencies(
-            &support,
+            &[DependencyUse {
+                file: &support,
+                facts: module_facts,
+            }],
             symbols,
-            module_facts,
             backend,
             state,
             support_state,

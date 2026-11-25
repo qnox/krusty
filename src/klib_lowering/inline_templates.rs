@@ -732,7 +732,9 @@ impl CallLinker for TemplateCalls<'_> {
             KlibIrSignature::Accessor(accessor) => {
                 KlibDeclarationSignature::Accessor(accessor.clone())
             }
-            KlibIrSignature::FileLocal { .. } => return Ok(None),
+            KlibIrSignature::FileLocal { .. } | KlibIrSignature::TypeParameter { .. } => {
+                return Ok(None)
+            }
         };
         let binding = match self.callees.references.get(self.module, &signature) {
             KlibReferenceOrigin::Exact(binding) => binding,

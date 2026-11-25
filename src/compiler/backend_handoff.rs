@@ -239,6 +239,9 @@ pub(super) fn prepare_common_ir(
     if !file.ir.suspend_funs.is_empty() && file.ir.coroutine_runtime.is_none() {
         file.ir.coroutine_runtime = coroutine_runtime;
     }
+    if preparation.property_reference_values {
+        crate::backend::property_reference_values::realize(&mut file.ir);
+    }
     crate::backend::counted_loops::realize(&mut file.ir, preparation.counted_loops);
     crate::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
     crate::backend::enums::realize(

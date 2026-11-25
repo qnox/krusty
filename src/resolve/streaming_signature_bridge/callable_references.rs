@@ -236,7 +236,7 @@ impl ProductionSignatureSemantics<'_> {
         if alias.explicit_arguments.is_empty() {
             self.selected_calls.record_inferred_abbreviation(
                 origin,
-                super::selected_call_facts::InferredAbbreviation {
+                crate::resolve::selected_result_aliases::InferredAbbreviation {
                     formals: alias.formals.into_boxed_slice(),
                     expansion: alias.expansion,
                 },
@@ -301,10 +301,8 @@ impl ProductionSignatureSemantics<'_> {
         } else {
             Some(alias.explicit_arguments.clone().into_boxed_slice())
         };
-        let abbreviation = arguments.map(|arguments| crate::fir::ResolvedTypeAbbreviation {
-            alias: alias.identity,
-            arguments,
-            argument_path: Box::new([]),
+        let abbreviation = arguments.map(|arguments| {
+            crate::fir::ResolvedTypeAbbreviation::root(alias.identity, arguments, false)
         });
         Some((result, abbreviation))
     }

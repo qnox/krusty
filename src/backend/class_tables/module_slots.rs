@@ -25,6 +25,7 @@ use crate::fir::{
     CallableId, ExternalCallableId, PropertyId, ResolvedFunctionOverrideTarget,
     ResolvedPropertyOverrideTarget,
 };
+use crate::ir::FunId;
 use crate::types::{SemanticCallRole, Ty, TypeName};
 
 use super::members::any_slot;
@@ -46,6 +47,10 @@ pub enum PlanKey {
     DependencyCallable(ExternalCallableId),
     DependencyGetter(ExternalCallableId),
     DependencySetter(ExternalCallableId),
+    /// An abstract function of an interface a KLIB lowering unit installed in one file. It has no
+    /// declaration identity of its own, so it is named by the function the file's IR holds, and
+    /// only that file numbers it ([`ModuleInterfaces::with_installed`]).
+    Installed(FunId),
 }
 
 impl PlanKey {

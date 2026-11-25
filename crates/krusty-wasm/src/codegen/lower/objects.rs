@@ -788,6 +788,21 @@ impl Body<'_> {
             {
                 return self.dispatch_function(class, function, receiver, args);
             }
+            // An abstract member of an interface a KLIB lowering unit installed has no class
+            // slot and no source callable: it is numbered after the module's members, and a call
+            // through it goes to the stub of that number.
+            if self.ir.classes[class as usize].is_interface {
+                let installed = PlanKey::Installed(function);
+                let numbers = &tables.numbers;
+                if let Some(number) = numbers.number(installed) {
+                    let (params, result) = numbers
+                        .function_carriers(installed)
+                        .ok_or("an installed interface member with no carriers")?;
+                    let (params, result) = (params.to_vec(), result);
+                    let call = self.numbered_member(number, params, result)?;
+                    return self.interface_call(call, receiver, args);
+                }
+            }
         }
         self.direct_member_call(function, receiver, args)
     }

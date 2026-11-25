@@ -485,3 +485,17 @@ fn reads(ir: &IrFile, root: ExprId, slot: u32) -> bool {
     }
     false
 }
+
+/// Whether the selected classifier `name` is an interface: the supertype of an object literal an
+/// inline callee creates.
+pub(super) fn is_interface(
+    linker: &super::Linker<'_, '_>,
+    name: TypeName,
+) -> Result<bool, KlibBodyDeclineReason> {
+    let record = linker.sources.declarations.classifier(name);
+    record.map(|record| record.is_interface()).ok_or_else(|| {
+        KlibBodyDeclineReason::SignatureMismatch(format!(
+            "an object literal's supertype {name:?} is not a selected classifier"
+        ))
+    })
+}

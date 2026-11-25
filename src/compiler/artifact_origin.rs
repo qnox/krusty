@@ -10,9 +10,9 @@
 pub enum ArtifactOrigin {
     /// One source file, by its position in the analyzed source list.
     Source(usize),
-    /// Target support for a dependency declaration, emitted while lowering the source at this
-    /// position because that source uses it first.
-    DependencySupport { requested_by: usize },
+    /// Target support for the dependency declarations the program's sources use, emitted once for
+    /// the whole program before any of them.
+    DependencySupport,
     /// The module as a whole, from `Backend::finalize`: an artifact assembled from several sources
     /// (a multifile facade) or describing the module (its `.kotlin_module`).
     Module,

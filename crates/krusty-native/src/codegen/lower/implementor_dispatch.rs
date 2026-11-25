@@ -16,8 +16,9 @@ pub(super) struct InterfaceMemberCall<'a> {
 }
 
 /// A class of this file that implements a dependency declaration, and the slot it does it in.
+/// A class of another file of the module is an arm too: an arm names its class by descriptor.
 pub(super) struct ImplementorArm {
-    class: ClassId,
+    descriptor: DataId,
     slot: u32,
     params: Vec<ParameterBoundary>,
     ret: Ty,
@@ -89,7 +90,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             })
             .collect();
         Some(ImplementorArm {
-            class,
+            descriptor: self.file.classes[class as usize].descriptor,
             slot,
             params,
             ret: declaration.ret,
@@ -126,11 +127,58 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .model
             .slot(class, &crate::classes::SlotKey::Getter(target))?;
         Some(ImplementorArm {
-            class,
+            descriptor: self.file.classes[class as usize].descriptor,
             slot,
             params: Vec::new(),
             ret: implementation,
         })
+    }
+
+    /// The slot of `class`, a class another file of the module declares, that holds the member
+    /// realizing the dependency property getter `overridden`, answering `declared`: an override
+    /// or a delegation forwarder, at the slot the module plan numbers for every file alike. `None`
+    /// where the plan has no table for the class, no slot for the member, or a slot whose carrier
+    /// is not the declaration's.
+    pub(super) fn planned_property_getter_slot(
+        &mut self,
+        class: krusty::types::TypeName,
+        overridden: krusty::fir::ExternalCallableId,
+        declared: Ty,
+    ) -> Result<Option<ImplementorArm>, Unsupported> {
+        let plan = self.file.slot_plan;
+        let Some(Ok(table)) = plan.table(class) else {
+            return Ok(None);
+        };
+        let Some(key) = self
+            .file
+            .module_facts
+            .classes()
+            .dependency_getter_implementation(class, overridden)
+        else {
+            return Ok(None);
+        };
+        let Some(&slot) = table.slots.get(&key) else {
+            return Ok(None);
+        };
+        let Some(krusty::backend::class_tables::module_slots::PlannedSignature::Member {
+            parameters: [],
+            result,
+        }) = plan.slot_signature(table, slot)
+        else {
+            return Ok(None);
+        };
+        if self.carrier(result) != self.carrier(declared) {
+            return Ok(None);
+        }
+        let Some(descriptor) = self.file.type_descriptor(Ty::obj_name(class))? else {
+            return Ok(None);
+        };
+        Ok(Some(ImplementorArm {
+            descriptor,
+            slot,
+            params: Vec::new(),
+            ret: result,
+        }))
     }
 
     /// A call of a dependency interface member this file does not implement. The link joins the
@@ -156,21 +204,39 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.terminated {
             return Ok(None);
         }
-        let operands: Vec<(Value, Option<Ty>)> = arguments
+        let applied_operands: Vec<(Value, Option<Ty>)> = arguments
             .iter()
             .zip(params)
             .map(|(&value, &param)| (value, Some(param)))
             .collect();
-        self.dispatch_runtime_implementations(&runtime, object, &operands, ret, |body| {
-            body.dispatch_through_stub(
-                object,
-                number,
-                &operands,
-                &declared_member_params,
-                signature.ret,
-                ret,
-            )
-        })
+        // Runtime and linked implementations receive the same declared interface frame.
+        let Some(crossed) =
+            self.dependency_interface_arguments(&applied_operands, &declared_member_params)?
+        else {
+            return Ok(None);
+        };
+        let operands: Vec<(Value, Option<Ty>)> = crossed
+            .iter()
+            .zip(&declared_member_params)
+            .map(|(&value, &param)| (value, Some(param)))
+            .collect();
+        let declared_ret = signature.ret;
+        let produced = self.dispatch_runtime_implementations(
+            &runtime,
+            object,
+            &operands,
+            declared_ret,
+            |body| {
+                body.dispatch_through(
+                    object,
+                    model::Dispatch::Interface(number),
+                    &declared_member_params,
+                    declared_ret,
+                    &crossed,
+                )
+            },
+        )?;
+        self.dependency_interface_result(produced, declared_ret, ret)
     }
 
     /// Call the link stub `number` with `operands`. The stub takes the declaration's own ABI,
@@ -186,13 +252,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         declared_ret: Ty,
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        let mut declared_arguments = Vec::with_capacity(operands.len());
-        for (&(value, applied), &declared) in operands.iter().zip(declared_params) {
-            let Some(converted) = self.convert(value, applied, declared)? else {
-                return Ok(None);
-            };
-            declared_arguments.push(converted);
-        }
+        let Some(declared_arguments) =
+            self.dependency_interface_arguments(operands, declared_params)?
+        else {
+            return Ok(None);
+        };
         let produced = self.dispatch_through(
             object,
             model::Dispatch::Interface(number),
@@ -200,9 +264,38 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             declared_ret,
             &declared_arguments,
         )?;
+        self.dependency_interface_result(produced, declared_ret, ret)
+    }
+
+    /// Cross each applied operand into the interface declaration's frame before dispatch.
+    fn dependency_interface_arguments(
+        &mut self,
+        operands: &[(Value, Option<Ty>)],
+        declared_params: &[Ty],
+    ) -> Result<Option<Vec<Value>>, Unsupported> {
+        let mut declared_arguments = Vec::with_capacity(operands.len());
+        for (&(value, applied), &declared) in operands.iter().zip(declared_params) {
+            let Some(converted) = self.convert(value, applied, declared)? else {
+                return Ok(None);
+            };
+            declared_arguments.push(converted);
+        }
+        Ok(Some(declared_arguments))
+    }
+
+    /// Cross the merged declared result back to the site's applied result, including Unit.
+    fn dependency_interface_result(
+        &mut self,
+        produced: Option<Value>,
+        declared_ret: Ty,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        if self.terminated {
+            return Ok(None);
+        }
         match produced {
-            Some(value) if !self.terminated => self.convert(value, Some(declared_ret), ret),
-            _ => Ok(None),
+            Some(value) => self.convert(value, Some(declared_ret), ret),
+            None => self.unit_where_wanted(ret),
         }
     }
 
@@ -226,8 +319,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         if declared_member_params.len() != params.len() {
             return Err(declined!(
-                "the dependency interface member `{}` is called with another arity than it declares",
-                signature.name
+                "the dependency interface member `{}` is applied to {} parameters but declares {}",
+                signature.name,
+                params.len(),
+                declared_member_params.len()
             ));
         }
         if let Some(reason) = self.file.unimplementable_interface_members.get(&identity) {
@@ -605,8 +700,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             self.builder.append_block_param(merge, clif);
         }
         for arm in implementors {
-            let descriptor = self.file.classes[arm.class as usize].descriptor;
-            let type_address = self.data_address(descriptor);
+            let type_address = self.data_address(arm.descriptor);
             let matches = self
                 .runtime_call(
                     "kt_is_instance",
@@ -705,11 +799,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         value: Value,
         boundary: &ParameterBoundary,
     ) -> Result<Option<(Block, Block)>, Unsupported> {
-        if boundary.implementation.non_null() == boundary.declared.non_null() {
-            return Ok(None);
-        }
-        let Some(descriptor) = self.file.type_descriptor(boundary.implementation)? else {
-            return Ok(None);
+        let descriptor = if boundary.implementation.non_null() == boundary.declared.non_null() {
+            None
+        } else {
+            self.file.type_descriptor(boundary.implementation)?
+        };
+        let Some(descriptor) = descriptor else {
+            // No type to test (the same reference on both sides, or `Any`, which every non-null
+            // value is): only a `null` the override's type excludes is rejected, as the erased
+            // bridge answers it.
+            if boundary.implementation.upper_bound_admits_null() {
+                return Ok(None);
+            }
+            let absent = self.builder.ins().icmp_imm_u(IntCC::Equal, value, 0);
+            let accepted = self.builder.create_block();
+            let rejected = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(absent, rejected, &[], accepted, &[]);
+            return Ok(Some((accepted, rejected)));
         };
         let type_address = self.data_address(descriptor);
         let mut matches = self
