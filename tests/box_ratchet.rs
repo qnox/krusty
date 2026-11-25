@@ -316,6 +316,17 @@ pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     }
 }
 
+/// The subject a lane's expectation mismatches are reported under, in place of a corpus file.
+pub fn expectations_subject(platform: Platform) -> PathBuf {
+    PathBuf::from(format!("<{} box expectations>", platform.name()))
+}
+
+/// One failed subject as every box lane prints it. The merge queue's autoheal recipes read these
+/// lines, so each lane reports through this one format.
+pub fn failed_line(subject: &Path, reason: &str) -> String {
+    format!("FAILED {}: {reason}", subject.display())
+}
+
 pub fn corpus_key(box_dir: &Path, file: &Path) -> String {
     super::box_inventory::key(box_dir, file)
 }
@@ -496,6 +507,31 @@ mod tests {
                  KRUSTY_BLESS_BOX_EXPECTATIONS=1",
                 failure_path(Platform::Native, version).display(),
                 not_applicable_path(Platform::Native, version).display(),
+            )
+        );
+    }
+
+    #[test]
+    fn an_expectation_mismatch_is_reported_as_a_failed_line_of_its_lane() {
+        let version = KotlinVersion::V2_4_20;
+        let expected = Baseline {
+            failures: BTreeSet::new(),
+            not_applicable: set(&["na-to-pass.kt"]),
+        };
+        let outcomes = BTreeMap::from([("na-to-pass.kt".into(), Outcome::Pass)]);
+        let corpus = outcomes.keys().cloned().collect();
+        let mismatches = compare(&expected, &outcomes, &corpus);
+        assert_eq!(
+            failed_line(
+                &expectations_subject(Platform::Jvm),
+                &mismatches.report(Platform::Jvm, version)
+            ),
+            format!(
+                "FAILED <jvm box expectations>: 1 file(s) outcome changed:\n  na-to-pass.kt: expected \
+                 not-applicable, got pass\njvm box conformance disagrees with {} and {}; update them \
+                 from one full local run with KRUSTY_BLESS_BOX_EXPECTATIONS=1",
+                failure_path(Platform::Jvm, version).display(),
+                not_applicable_path(Platform::Jvm, version).display(),
             )
         );
     }
