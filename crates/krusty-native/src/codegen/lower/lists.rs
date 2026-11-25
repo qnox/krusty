@@ -1120,14 +1120,18 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let name = signature.name;
         let params = signature.params;
-        // A member Kotlin gives a SPECIAL BRIDGE is not this dispatch's to make: a call through the
+        // A member Kotlin gives a SPECIAL BRIDGE is not this dispatch's to make, except the `Map` reads
+        // the runtime's own thunks guard (`KType.map_members`): a call through the
         // wide type answers the member's default rather than reaching the override when the
         // argument cannot be what the declaration accepts, and there is no bridge here to put in
         // front of an implementor's arm. Every one of them takes an argument, so the nullary
         // members are untouched.
-        if classifier_shapes::mapped_collection(self.file.classifiers, internal)
-            .is_some_and(|collection| collection.has_special_bridge(name))
-        {
+        if classifier_shapes::mapped_collection(self.file.classifiers, internal).is_some_and(
+            |collection| {
+                collection.has_special_bridge(name)
+                    && !super::super::super::intrinsics::map_thunk_guards_bridge(collection, name)
+            },
+        ) {
             return None;
         }
         let ty = self.checked_type(receiver)?;
@@ -1185,7 +1189,15 @@ impl BodyLowering<'_, '_, '_> {
             carried: &carried,
             answer,
         };
-        Some(self.member_by_implementor(&implementors, runtime, receiver, args, ret))
+        // A `Map` read the runtime's thunks guard goes to the runtime entry point alone: an arm of
+        // this dispatch would hand the override an argument its bridge has not checked, and the
+        // thunk of `KType.map_members` is where the guard lives for a program class.
+        let guarded = classifier_shapes::mapped_collection(self.file.classifiers, internal)
+            .is_some_and(|collection| {
+                super::super::super::intrinsics::map_thunk_guards_bridge(collection, name)
+            });
+        let arms: &[ImplementorArm] = if guarded { &[] } else { &implementors };
+        Some(self.member_by_implementor(arms, runtime, receiver, args, ret))
     }
 
     /// One of those, with the runtime entry point as the last arm.

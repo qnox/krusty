@@ -8,6 +8,9 @@ use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantic
 #[path = "klib_closure_frames_e2e/companion_private_members.rs"]
 mod companion_private_members;
 
+#[path = "klib_closure_frames_e2e/constructor_defaults.rs"]
+mod constructor_defaults;
+
 #[path = "klib_closure_frames_e2e/elvis_blocks.rs"]
 mod elvis_blocks;
 

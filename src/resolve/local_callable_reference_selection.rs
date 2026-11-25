@@ -7,6 +7,15 @@
 use super::*;
 use crate::types::TyKind;
 
+/// One receiverless local function adapted to an expected function type.
+pub(super) struct AdaptedLocalReferenceShape {
+    pub(super) params: Vec<Ty>,
+    pub(super) ret: Ty,
+    pub(super) plan: Vec<AdaptedRefArgument>,
+    /// Leading context parameters the reference site binds.
+    pub(super) bound_contexts: usize,
+}
+
 impl Checker<'_> {
     /// Semantic callable shape of a local function reference. The lifted method signature keeps
     /// erased JVM parameter/return types in `params`/`ret`; source generic types live in
@@ -43,6 +52,7 @@ impl Checker<'_> {
         receiver: Option<Ty>,
         expected_params: &[Ty],
         expected_ret: Ty,
+        bound_contexts: usize,
     ) -> Option<(Vec<Ty>, Ty)> {
         let Some(generic) = signature.generic_sig.as_ref() else {
             return Some(Self::local_function_reference_shape(signature, receiver));
@@ -63,7 +73,7 @@ impl Checker<'_> {
             callable_reference_selection::ReferenceExpectation {
                 params: Some(expected_params),
                 ret: Some(expected_ret),
-                bound_contexts: 0,
+                bound_contexts,
                 type_variable_inputs: self.active_reference_type_variable_inputs(),
                 quirks: self.file.reference.quirks(),
             },
@@ -71,6 +81,56 @@ impl Checker<'_> {
         )
         .ok()?;
         Some((specialized.params, specialized.ret))
+    }
+
+    /// How many leading context parameters a reference to a local function fills from its own
+    /// site, exactly as for any other declaration: all of them with `CallableReferencesToContextual`,
+    /// none without it.
+    fn local_reference_bound_contexts(&self, signature: &Signature) -> usize {
+        if self.file.language.callable_references_to_contextual {
+            signature.context_count
+        } else {
+            0
+        }
+    }
+
+    /// The adapted shape of one receiverless local function against an expected function type:
+    /// its specialized parameters and result, and the plan mapping the expected inputs onto them.
+    /// Every receiverless local reference probe and selection goes through this one applicability
+    /// rule.
+    pub(super) fn adapted_local_reference_shape(
+        &self,
+        signature: &Signature,
+        expected: &crate::types::FnSig,
+    ) -> Option<AdaptedLocalReferenceShape> {
+        let bound_contexts = self.local_reference_bound_contexts(signature);
+        let (params, ret) = self.contextual_local_function_reference_shape(
+            signature,
+            None,
+            &expected.params,
+            expected.ret,
+            bound_contexts,
+        )?;
+        let call_sig = CallSig {
+            param_defaults: signature.param_defaults,
+            required: signature.required,
+            vararg: signature.vararg(),
+            vararg_index: signature.vararg_index,
+            ..CallSig::default()
+        };
+        let plan = extension_reference_selection::checked_parameter_plan(
+            &params,
+            &call_sig,
+            bound_contexts,
+            &expected.params,
+            self,
+        )?;
+        Some(AdaptedLocalReferenceShape {
+            params,
+            ret,
+            plan,
+            bound_contexts,
+        })
     }
 
     pub(super) fn select_receiverless_local_reference(
@@ -97,6 +157,26 @@ impl Checker<'_> {
             }
         }
         let (statement, signature) = self.lookup_local_fun(scope, name)?;
+        // Without an expected function type a reference that binds context parameters has the
+        // shape of the declaration's remaining parameters, selected like any adapted reference.
+        let bound_contexts = self.local_reference_bound_contexts(&signature);
+        if bound_contexts > 0 && signature.generic_sig.is_none() {
+            let parameters = signature.params.get(bound_contexts..)?.to_vec();
+            let natural = if signature.is_suspend() {
+                Ty::fun_suspend(parameters, signature.ret)
+            } else {
+                Ty::fun(parameters, signature.ret)
+            };
+            let TyKind::Fun(natural) = natural.kind() else {
+                unreachable!("a function type has a function shape")
+            };
+            return Some(self.select_adapted_receiverless_local_reference(
+                expression,
+                name,
+                natural,
+                &[(statement, signature)],
+            ));
+        }
         self.record_local_reference_diagnostic(expression, statement, signature.ret);
         self.mark_local_function_ref(expression, statement, false);
         let (params, ret) = Self::local_function_reference_shape(&signature, None);
@@ -123,21 +203,12 @@ impl Checker<'_> {
                 if signature.is_suspend() && !expected.suspend {
                     return None;
                 }
-                let (params, ret) = self.contextual_local_function_reference_shape(
-                    signature,
-                    None,
-                    &expected.params,
-                    expected.ret,
-                )?;
-                let call_sig = crate::libraries::CallSig {
-                    param_defaults: signature.param_defaults,
-                    required: signature.required,
-                    vararg: signature.vararg(),
-                    vararg_index: signature.vararg_index,
-                    ..crate::libraries::CallSig::default()
-                };
-                let plan =
-                    self.callable_ref_parameter_plan(&params, &call_sig, &expected.params)?;
+                let AdaptedLocalReferenceShape {
+                    params,
+                    ret,
+                    plan,
+                    bound_contexts,
+                } = self.adapted_local_reference_shape(signature, expected)?;
                 if !self.callable_ref_is_compatible(
                     &expected.params,
                     ret,
@@ -154,6 +225,7 @@ impl Checker<'_> {
                     plan,
                     expected.suspend && !signature.is_suspend(),
                     signature.vararg_index.is_some(),
+                    bound_contexts,
                 ))
             })
             .collect::<Vec<_>>();
@@ -174,7 +246,8 @@ impl Checker<'_> {
             },
         );
         if let [selected] = maximal.as_slice() {
-            let (statement, params, ret, plan, suspend_conversion, _) = &candidates[*selected];
+            let (statement, params, ret, plan, suspend_conversion, _, bound_contexts) =
+                &candidates[*selected];
             self.record_local_reference_diagnostic(expression, *statement, *ret);
             // The expected shape may still hold the enclosing call's type variables
             // (`s.let(::local)`); the reference's type is the shape the local function realizes.
@@ -191,6 +264,7 @@ impl Checker<'_> {
                         argument_mapping: plan.clone(),
                         signature: realized,
                         suspend_conversion: *suspend_conversion,
+                        bound_context_types: params[..*bound_contexts].to_vec(),
                     },
                 );
             }
