@@ -127,7 +127,7 @@ pub(crate) use array_factories::kotlin_array_factory_kind;
 pub(crate) use class_name_property::realize_class_name_property;
 pub use compiler_intrinsic::{
     AtomicOperation, ClassNameKind, CompilerIntrinsic, IndicesReceiver, ListStorageConstruction,
-    ResultFailureIntrinsic,
+    ResultFailureIntrinsic, SurrogateHalf,
 };
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
