@@ -2449,6 +2449,9 @@ impl JvmLibraries {
                     .then(|| classpath_annotation_targets(&ci)),
                 mapped_collection: None,
                 mapped_builtin: is_mapped_builtin,
+                purely_implemented: super::pure_implementations::purely_implemented_supertype(
+                    internal_name,
+                ),
                 annotation_element_defaults: annotation_element_defaults(&ci),
                 deprecation,
             })
