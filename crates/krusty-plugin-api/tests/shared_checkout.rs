@@ -33,13 +33,13 @@ impl Checkouts {
             root.join("Cargo.toml"),
             "[package]\nname = \"checkout-consumer\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\
              [dependencies]\nkrusty-plugin-api = { path = \"crates/krusty-plugin-api\" }\n\
-             [workspace]\nmembers = [\"crates/krusty-plugin-api\", \"crates/krusty-names\"]\n",
+             [workspace]\nmembers = [\"crates/krusty-plugin-api\", \"crates/krusty-core\"]\n",
         )
         .unwrap();
         // Distinct compatible checkouts publish distinct APIs. Copy the actual crates, laid out as
         // the workspace lays them out, so a cache-identity fix must live in production code.
         let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        for krate in ["krusty-plugin-api", "krusty-names"] {
+        for krate in ["krusty-plugin-api", "krusty-core"] {
             copy_crate(&crates.join(krate), &root.join("crates").join(krate));
         }
         let source = root.join("crates/krusty-plugin-api/src");

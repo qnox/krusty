@@ -420,6 +420,10 @@ impl<'u, 's> Linker<'u, 's> {
         let mut class = IrClass::synthetic(classifier);
         class.is_source_declared = true;
         class.is_object = plan.header.contract.kind == crate::libraries::TypeKind::Object;
+        if class.is_object {
+            class.applied_annotations =
+                super::super::object_instances::instance_annotations(plan.header.class);
+        }
         class.supertypes.clone_from(&plan.supertypes);
         set_materialized_modality(&mut class, plan.header.contract.modality);
         if let Some(call) = &plan.superclass {
@@ -676,6 +680,12 @@ impl<'u, 's> Linker<'u, 's> {
         let class = if contract.kind == crate::libraries::TypeKind::Enum {
             // Every constant is an instance of the enum class the unit materializes for them.
             self.materialize_member_enum(ir, header)?
+        } else if self.adds_members_to_realized_classes
+            && self.realized_classes.contains(&contract.classifier)
+        {
+            // The class's one owner is an earlier unit: this unit adds a final member of it, so
+            // it declares only the facts that member reads.
+            self.declare_earlier_unit_class(ir, header)?
         } else if contract.kind == crate::libraries::TypeKind::Object {
             // An object's instance is the one its own private constructor created.
             let primary = contract.primary_constructor.as_ref().ok_or(
@@ -715,6 +725,70 @@ impl<'u, 's> Linker<'u, 's> {
             properties: super::super::class_storage::backed_properties(&header.class.members),
             contract,
         })
+    }
+
+    /// The class an earlier unit owns, declared here for the final members this unit adds to it:
+    /// its fields, type parameters, supertypes and modality, with no constructor, initializer or
+    /// dispatch table, which stay with the unit that owns it.
+    fn declare_earlier_unit_class(
+        &self,
+        ir: &mut IrFile,
+        header: &super::super::class_headers::ClassMemberHeader<'s, 's>,
+    ) -> Result<crate::ir::ClassId, KlibBodyDeclineReason> {
+        let contract = header.contract;
+        let classifier = contract.classifier;
+        if let Some(class) = ir.class_id_by_name(classifier) {
+            return Ok(class);
+        }
+        let mut class = IrClass::synthetic(classifier);
+        class.ownership = crate::ir::ClassOwnership::EarlierUnit;
+        class.is_source_declared = true;
+        class.is_object = contract.kind == crate::libraries::TypeKind::Object;
+        class.supertypes = header
+            .class
+            .supertypes
+            .iter()
+            .map(|&supertype| {
+                super::super::klib_types::semantic_type(header.arena, &header.types, supertype)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        set_materialized_modality(&mut class, contract.modality);
+        class.declaration_name = Some(super::super::klib_types::classifier_declaration(
+            &contract.signature,
+        )?);
+        let parameters = &contract.parameters;
+        for (formal, bounds) in parameters.formals.iter().zip(&parameters.bounds) {
+            let crate::types::TyKind::TyParam(identity, _) = formal.kind() else {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a class parameter has no declared formal identity".to_owned(),
+                ));
+            };
+            let identity = identity.as_str().to_owned();
+            class.type_params.push(identity.clone());
+            class
+                .type_param_bounds
+                .extend(bounds.iter().map(|bound| (identity.clone(), *bound)));
+        }
+        let mut identities = HashSet::default();
+        class.fields = header
+            .class
+            .members
+            .iter()
+            .filter_map(super::super::class_storage::member_field)
+            .map(|field| {
+                super::super::class_storage::declared_field(header, field, &mut identities).map(
+                    |stored| {
+                        IrField::new(stored.name.clone(), stored.ty)
+                            .with_is_final(stored.final_)
+                            .with_is_private(stored.private)
+                    },
+                )
+            })
+            .collect::<Result<_, _>>()?;
+        let self_type = contract.self_type();
+        let class = ir.add_class(class);
+        ir.record_declared_class_self_type(classifier, self_type);
+        Ok(class)
     }
 
     /// The class every public initializing constructor of the ordinary class `contract`
@@ -833,7 +907,7 @@ impl<'u, 's> Linker<'u, 's> {
                             body,
                             Some(selected),
                             implemented,
-                        );
+                        )?;
                         continue;
                     }
                     let (arena, function) =
@@ -845,7 +919,7 @@ impl<'u, 's> Linker<'u, 's> {
                     self.declare(ir, body, Some(selected), arena, function)?;
                 }
             }
-            self.record_inherited_implementation(ir, owner, body, None, implemented);
+            self.record_inherited_implementation(ir, owner, body, None, implemented)?;
         }
         Ok(())
     }
@@ -863,7 +937,10 @@ impl<'u, 's> Linker<'u, 's> {
             KlibDeclarationSignature::Accessor(signature) => {
                 KlibIrSignature::Accessor(signature.clone())
             }
-            _ => return None,
+            KlibDeclarationSignature::FileLocal { file, slot } => KlibIrSignature::FileLocal {
+                file: *file,
+                slot: *slot,
+            },
         };
         self.local_functions
             .get(&super::super::same_library_class::LocalIdentity {
@@ -875,7 +952,7 @@ impl<'u, 's> Linker<'u, 's> {
 
     /// Record that `owner` implements each interface declaration of `implemented` with the
     /// inherited member `body`, unless an edge already names that declaration. A body this unit
-    /// did not declare, or a declaration outside the program's closure, records nothing.
+    /// did not declare, or a declaration with no registered provider handle, records nothing.
     pub(super) fn record_inherited_implementation(
         &self,
         ir: &mut IrFile,
@@ -883,13 +960,13 @@ impl<'u, 's> Linker<'u, 's> {
         body: &KlibDependencyCallable,
         realized: Option<KlibBodyCallable<'s>>,
         implemented: &[KlibDependencyCallable],
-    ) {
+    ) -> Result<(), KlibBodyDeclineReason> {
         // The implementation's own method when this unit declared it, and otherwise the
         // declaration the earlier unit exported (`realized`), which the edge names by callable.
         let (method, name, params, result) = match realized {
             None => {
                 let Some(method) = self.declared_member(body) else {
-                    return;
+                    return Ok(());
                 };
                 let function = &ir.functions[method as usize];
                 (
@@ -923,8 +1000,17 @@ impl<'u, 's> Linker<'u, 's> {
             else {
                 continue;
             };
-            let Some(target) = self.sources.callees.reference_target(declared) else {
-                continue;
+            // The declaration's provider handle, which a source call of it selects even when no
+            // body of the closure calls it (`ListIterator.next` on a list iterator inheriting
+            // `next` from its superclass), as an own override's edge names it.
+            let target = match super::local_class::registered_override_handle(
+                declared,
+                self.sources.externals,
+                self.sources.declarations,
+            ) {
+                Ok(handle) => handle.target(),
+                Err(KlibBodyDeclineReason::UnsupportedDeclaration(_)) => continue,
+                Err(reason) => return Err(reason),
             };
             // A member of a class private to its library has no provider handle of its own; the
             // edge then names the interface declaration it implements, as an installed class's
@@ -966,6 +1052,7 @@ impl<'u, 's> Linker<'u, 's> {
                 depth: 0,
             });
         }
+        Ok(())
     }
 
     /// Declare `function`, a member dispatch on an instance of the materialized class `member`

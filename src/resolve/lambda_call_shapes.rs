@@ -1248,7 +1248,7 @@ impl Checker<'_> {
         } else {
             ExplicitTypeArgumentBounds::Enforced
         };
-        let shaped = overloads
+        let mut shaped = overloads
             .iter()
             .filter(|overload| overload.kind == crate::libraries::FnKind::TopLevel)
             .filter_map(|overload| {
@@ -1256,6 +1256,11 @@ impl Checker<'_> {
                     .map(|shape| (overload, shape))
             })
             .collect::<Vec<_>>();
+        // The nearest level with a candidate that shapes the lambda owns it; a farther level's
+        // different inputs are no ambiguity (`foo { it }` beside an imported `foo((Int) -> _)`).
+        crate::symbol_resolver::retain_nearest_scope_level(&mut shaped, |(overload, _)| {
+            crate::symbol_resolver::scope_level(overload)
+        });
         let Some((_, first)) = shaped.first() else {
             return Ok(self.companion_invoke_lambda_shape(
                 lexical_scope,

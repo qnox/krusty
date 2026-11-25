@@ -366,7 +366,8 @@ pub(super) fn emit_dependencies<B: Backend>(
                 .chain(support_state.materializing_classes.keys())
                 .copied(),
         )
-        .presetting_constant_statics(backend.presets_constant_top_level_initializers());
+        .presetting_constant_statics(backend.presets_constant_top_level_initializers())
+        .adding_members_to_realized_classes(backend.adds_members_to_realized_classes());
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,
@@ -774,17 +775,6 @@ pub(super) fn emit_dependencies<B: Backend>(
                 diags.error(
                     Span::new(0, 0),
                     format!("internal error: cannot freeze the CharSequence members: {error:?}"),
-                );
-                return Vec::new();
-            }
-        }
-        if backend.reads_collections_through_interfaces() {
-            if let Err(error) =
-                super::backend_handoff::freeze_collection_protocol(&mut callables, platform)
-            {
-                diags.error(
-                    Span::new(0, 0),
-                    format!("internal error: cannot freeze the collection members: {error:?}"),
                 );
                 return Vec::new();
             }

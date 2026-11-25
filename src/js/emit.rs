@@ -865,6 +865,9 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                         emit_expr(ir, dispatch_receiver.unwrap(), inst)
                     )
                 }
+                crate::ir::IrIntrinsic::EnumName => {
+                    format!("{}.name", emit_expr(ir, dispatch_receiver.unwrap(), inst))
+                }
                 crate::ir::IrIntrinsic::StringGet | crate::ir::IrIntrinsic::ArrayGet => format!(
                     "{}[{}]",
                     emit_expr(ir, dispatch_receiver.unwrap(), inst),
@@ -1316,6 +1319,7 @@ mod tests {
             declaration_name: None,
             is_source_declared: true,
             is_compiler_generated: false,
+            ownership: crate::ir::ClassOwnership::ThisUnit,
             is_anonymous_object: false,
             site_name: None,
             enclosure: None,

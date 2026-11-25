@@ -1122,7 +1122,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::ListStorageConstruction(_)
                 | krusty::libraries::CompilerIntrinsic::CharCode
                 | krusty::libraries::CompilerIntrinsic::StringLength
-                | krusty::libraries::CompilerIntrinsic::Assert
+                | krusty::libraries::CompilerIntrinsic::Assert { .. }
                 | krusty::libraries::CompilerIntrinsic::AssertFailsWith
                 | krusty::libraries::CompilerIntrinsic::Print
                 | krusty::libraries::CompilerIntrinsic::Println

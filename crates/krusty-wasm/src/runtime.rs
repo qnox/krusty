@@ -28,7 +28,6 @@ pub(super) use object_strings::ObjectStrings;
 
 use krusty::fx_hash::HashMap;
 
-use super::array_lists::ArrayLists;
 use super::array_objects::ArrayObjects;
 use super::boxes::Boxes;
 use super::builtin_instances::BuiltinInstances;
@@ -36,7 +35,6 @@ use super::builtin_members::BuiltinMembers;
 use super::callable_references::CallableReferences;
 use super::char_sequence_appends::CharSequenceAppends;
 use super::class_tokens::{ClassTokens, TokenRuntime};
-use super::collection_arguments::CollectionArguments;
 use super::encode::{
     BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
 };
@@ -89,10 +87,6 @@ pub(super) struct Runtime {
     pub(super) string_builders: StringBuilders,
     /// `StringBuilder.append(CharSequence?)`, as the target declares it.
     pub(super) char_sequence_appends: CharSequenceAppends,
-    /// `kotlin.collections.ArrayList`, which the runtime lays out.
-    pub(super) array_lists: ArrayLists,
-    /// The members the list reads a collection argument through.
-    pub(super) collection_arguments: CollectionArguments,
     /// Kotlin's `hashCode()` rules.
     pub(super) hashing: Hashing,
     pub(super) exceptions: ExceptionTransport,
@@ -164,15 +158,6 @@ impl Runtime {
         let string_builders =
             StringBuilders::declare(module, &mut objects, &identity, chars, string);
         let object_equals = module.declare();
-        let array_lists = ArrayLists::declare(
-            module,
-            &mut objects,
-            &identity,
-            references,
-            chars,
-            string,
-            object_equals,
-        );
         let callable_references =
             CallableReferences::declare(module, &objects, object_equals, references);
         let string_concat = module.declare();
@@ -213,8 +198,6 @@ impl Runtime {
             char_sequence_appends: CharSequenceAppends::new(
                 host.target() == crate::target::WasmTarget::Wasi,
             ),
-            array_lists,
-            collection_arguments: CollectionArguments::default(),
             hashing,
             class_tokens,
             exceptions,
