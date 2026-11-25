@@ -85,7 +85,7 @@ pub use type_parameter_identity::{
     call_site_type_variable, constructor_type_parameter, generated_function_type_parameter,
     hidden_captured_type_parameter, is_nested_result_type_variable, metadata_type_parameter,
     nested_result_type_variable, postponed_call_type_variable, postponed_variable_origin,
-    ty_declared_at_call, ty_mentions_call_variable, CallSiteIdentity,
+    retain_open_formals, ty_declared_at_call, ty_mentions_call_variable, CallSiteIdentity,
 };
 
 pub use crate::assertions::{AssertionCompilation, AssertionMode};
