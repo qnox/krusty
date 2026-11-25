@@ -18,6 +18,36 @@ use krusty::ir::{
 pub(crate) use krusty::jvm::names::sanitize_module_name;
 use krusty::types::{TypeName, Visibility};
 
+/// The members `mangle_internal_members` renames, with the module suffix they receive. A pass that
+/// runs before the rename and must call a member by its final JVM name asks this for it.
+pub(crate) struct MangledMembers {
+    suffix: String,
+    members: HashSet<FunId>,
+}
+
+impl MangledMembers {
+    pub(crate) fn plan(ir: &IrFile, module_name: &str, facade: &str) -> Self {
+        let facade = krusty::types::type_name(facade);
+        Self {
+            suffix: format!("${}", sanitize_module_name(module_name)),
+            members: (0..ir.functions.len())
+                .map(|fid| fid as FunId)
+                .filter(|&fid| declares_mangled_member(ir, fid, facade))
+                .collect(),
+        }
+    }
+
+    /// The JVM name `function` has once internal members are renamed.
+    pub(crate) fn jvm_name(&self, ir: &IrFile, function: FunId) -> String {
+        let name = &ir.functions[function as usize].name;
+        if self.members.contains(&function) {
+            append_module_suffix(name, &self.suffix)
+        } else {
+            name.clone()
+        }
+    }
+}
+
 /// Append `$<module>` to every internal member that is not a facade or constructor, and to the
 /// bridges that publish that member's JVM name.
 pub(crate) fn mangle_internal_members(

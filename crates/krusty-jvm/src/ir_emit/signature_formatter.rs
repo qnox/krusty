@@ -494,7 +494,11 @@ impl<'a> JvmSignatureFormatter<'a> {
         if let Some(continuation) = Self::nothing_continuation(result) {
             return Some(continuation.to_string());
         }
-        let wildcard = if self.wildcard_is_redundant(TypeVariance::In, result)? {
+        // Below a supertype's arguments every declaration-site variance is written, redundant or
+        // not: `Function1<Continuation<-Object>;Object>`, the `in` over `Any` kept.
+        let wildcard = if wildcards != Wildcards::Generic
+            && self.wildcard_is_redundant(TypeVariance::In, result)?
+        {
             ""
         } else {
             "-"
@@ -751,22 +755,22 @@ impl<'a> JvmSignatureFormatter<'a> {
                     arguments.as_slice(),
                     declared_arguments,
                 )?;
-                let outer = chain.last()?.classifier;
-                let jvm = krusty::jvm::names::classfile_internal_name_of(outer);
+                // The outer-class chain is written with `.` only below the first classifier that has
+                // type arguments: an outer chain without any is part of the class's own binary name.
+                let outermost_first: Vec<&ClassifierSignatureSegment> =
+                    chain.iter().rev().collect();
+                let named = outermost_first
+                    .iter()
+                    .position(|segment| !segment.variances.is_empty())
+                    .unwrap_or(outermost_first.len() - 1);
+                let jvm = krusty::jvm::names::classfile_internal_name_of(
+                    outermost_first[named].classifier,
+                );
                 let mut signature = format!("L{jvm}");
-                for (segment_index, segment) in chain.iter().rev().enumerate() {
-                    if segment_index != 0 {
-                        // `Outer<T>.Inner` spells the inner segment after the arguments of its
-                        // outer. Without any, the whole chain is one class's internal name.
-                        if signature.contains('<') {
-                            signature.push('.');
-                            signature.push_str(segment.classifier.nested_segment_ref());
-                        } else {
-                            signature = format!(
-                                "L{}",
-                                krusty::jvm::names::classfile_internal_name_of(segment.classifier)
-                            );
-                        }
+                for (segment_index, segment) in outermost_first.iter().enumerate().skip(named) {
+                    if segment_index != named {
+                        signature.push('.');
+                        signature.push_str(segment.classifier.nested_segment_ref());
                     }
                     if !segment.variances.is_empty() {
                         signature.push('<');
