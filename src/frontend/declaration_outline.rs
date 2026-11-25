@@ -5,7 +5,7 @@
 //! range lie. This is that one structure, built from the parsed AST, so none of them re-lexes the
 //! source to find a declaration again. Nodes are in source order and a node's parent precedes it.
 
-use crate::ast::{ClassDecl, ClassKind, Decl, File, FunDecl, PropDecl};
+use crate::ast::{ClassDecl, ClassKind, Decl, File, FunDecl, PropDecl, TypeAliasDecl};
 use crate::diag::Span;
 
 /// What a declaration is.
@@ -78,6 +78,10 @@ impl DeclarationOutline {
                 }),
             }
         }
+        drafts.extend(file.type_alias_decls.iter().map(|alias| Draft {
+            node: type_alias_node(alias),
+            container: None,
+        }));
         // A nested classifier is a separate declaration of the file: its container is the
         // innermost other classifier whose source range encloses it.
         for &(index, class) in &classes {
@@ -164,6 +168,16 @@ fn property_node(property: &PropDecl) -> OutlineNode {
     }
 }
 
+fn type_alias_node(alias: &TypeAliasDecl) -> OutlineNode {
+    OutlineNode {
+        kind: OutlineKind::TypeAlias,
+        name: crate::types::intern(&alias.name),
+        name_span: alias.name_span,
+        range: alias.declaration_span,
+        parent: None,
+    }
+}
+
 fn class_member_drafts(class: &ClassDecl, container: usize) -> Vec<Draft> {
     let container = Some(container);
     let entries = class.enum_entries.iter().map(|entry| OutlineNode {
@@ -175,14 +189,20 @@ fn class_member_drafts(class: &ClassDecl, container: usize) -> Vec<Draft> {
     });
     let functions = class.methods.iter().map(function_node);
     let properties = class.body_props.iter().map(property_node);
-    let aliases = class.type_aliases.iter().map(|alias| OutlineNode {
-        kind: OutlineKind::TypeAlias,
-        name: crate::types::intern(&alias.name),
-        name_span: alias.name_span,
-        range: alias.declaration_span,
-        parent: None,
-    });
+    let constructor_properties = class
+        .props
+        .iter()
+        .filter(|property| property.is_property)
+        .map(|property| OutlineNode {
+            kind: OutlineKind::Property,
+            name: crate::types::intern(&property.name),
+            name_span: property.span,
+            range: property.declaration_span,
+            parent: None,
+        });
+    let aliases = class.type_aliases.iter().map(type_alias_node);
     entries
+        .chain(constructor_properties)
         .chain(functions)
         .chain(properties)
         .chain(aliases)
@@ -235,6 +255,21 @@ mod tests {
                 (EnumEntry, "B", Some("E")),
                 (Function, "f", Some("E")),
                 (Function, "last", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn includes_file_scope_aliases_and_constructor_properties() {
+        use OutlineKind::*;
+        assert_eq!(
+            outline("typealias Label = String\nclass C(val x: Int, var y: String, plain: Int) {\n    typealias Inner = Int\n}\n"),
+            [
+                (TypeAlias, "Label", None),
+                (Class, "C", None),
+                (Property, "x", Some("C")),
+                (Property, "y", Some("C")),
+                (TypeAlias, "Inner", Some("C")),
             ]
         );
     }
