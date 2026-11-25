@@ -1,6 +1,7 @@
 //! A lambda parameter whose type is a value class over a primitive is not guarded, as in kotlinc,
 //! even though the lambda implementation receives the box: kotlinc decides a guard from the
-//! declared type unwrapped to its carrier, and a primitive carrier cannot be null.
+//! declared type unwrapped to its carrier, and a primitive carrier (a bounded `T : Int` included)
+//! cannot be null.
 
 use super::common;
 
@@ -13,11 +14,15 @@ const SOURCE: &str = "fun <T> T.runExt(fn: T.() -> String) = fn()\n\
                       @JvmInline value class Reference(private val r: String) {\n\
                       \x20   fun receiver() = runExt { \"OK\" }\n\
                       \x20   fun parameter() = runWith(this) { \"OK\" }\n\
+                      }\n\
+                      @JvmInline value class Bounded<T : Int>(private val r: T) {\n\
+                      \x20   fun receiver() = runExt { \"OK\" }\n\
+                      \x20   fun parameter() = runWith(this) { \"OK\" }\n\
                       }\n";
 
 #[test]
 fn a_lambda_parameter_over_a_primitive_value_class_is_not_guarded() {
-    for class in ["Primitive", "Reference"] {
+    for class in ["Primitive", "Reference", "Bounded"] {
         common::byte_diff_against_kotlinc_cp(
             "ValueClassLambdaParameterGuard",
             SOURCE,

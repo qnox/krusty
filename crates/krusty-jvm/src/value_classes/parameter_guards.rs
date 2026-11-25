@@ -18,16 +18,6 @@ pub(super) fn carrier_keeps_guard(declared: &Ty, under: &Under) -> bool {
     is_ref(&erase(declared, under)) && !vc_underlying_nullable(declared, under)
 }
 
-/// Whether `declared` is a value class whose carrier is primitive. kotlinc never guards such a
-/// parameter, even where the realized one holds the box (a lifted lambda's own parameter).
-pub(super) fn has_primitive_carrier(declared: &Ty, under: &Under) -> bool {
-    let declared = declared.non_null();
-    declared
-        .obj_internal()
-        .is_some_and(|name| under.contains_key(&name))
-        && !is_ref(&erase(&declared, under))
-}
-
 /// A value-class member realized as a static over its carrier takes that carrier as parameter 0.
 /// The box already holds it, so kotlinc never guards it; the declared parameters keep their own
 /// contracts one position later.
