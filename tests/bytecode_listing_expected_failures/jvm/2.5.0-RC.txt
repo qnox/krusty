@@ -127,7 +127,6 @@ multifileClasses/jvmSynthetic.kt
 multifileClasses/kt43519.kt
 multiplatform/optionalExpectation.kt
 nullabilityAnnotationInInnerClasses.kt
-nullabilityAnnotations/platformTypes.kt
 privateCompanionFields.kt
 sam/callableRefGenericFunInterface.kt
 sam/callableRefSpecializedFunInterface.kt

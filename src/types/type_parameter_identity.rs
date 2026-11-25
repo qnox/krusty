@@ -294,6 +294,17 @@ pub fn type_parameter_source_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
+/// Drop from `formals` every type parameter already fixed at the scope: it belongs to an enclosing
+/// declaration, so it is a rigid type there and never an open variable of a postponed call.
+pub(crate) fn retain_open_formals<E>(
+    formals: &mut crate::fx_hash::HashSet<&'static str>,
+    fixed: Result<crate::fx_hash::HashSet<&'static str>, E>,
+) {
+    if let Ok(fixed) = fixed {
+        formals.retain(|formal| !fixed.contains(formal));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

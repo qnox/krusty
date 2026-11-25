@@ -410,6 +410,7 @@ pub(super) fn specialize_generic_signature(
         crate::symbol_resolver::unify_ty_from_symbols(source, declared, actual, &mut inferred);
         crate::symbol_resolver::merge_generic_bindings(generic, 0, &mut bindings, inferred);
     }
+    let mut deferred_inputs = Vec::new();
     if let Some(expected) = expected_params {
         let vararg = call_sig.vararg_index;
         // A whole array is the vararg's single input. When it is the last expected input, any
@@ -446,8 +447,14 @@ pub(super) fn specialize_generic_signature(
                 };
                 Some((parameter, actual, whole_vararg && index == parameter))
             });
+        // An input that is one of the enclosing call's still-unfixed type variables is a
+        // constraint on the reference (`T <: E` for the parameter `E`), not a value that fixes the
+        // formal: the result can fix it first (`(T) -> List<Int>` takes `E = Int`, which then
+        // bounds `T`). Such inputs bind a formal only when nothing else does.
+        let (fixing, unfixed): (Vec<_>, Vec<_>) = actuals
+            .partition(|(_, actual, _)| !matches!(actual.non_null().kind(), TyKind::Var(..)));
         let inferred = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
-            source, generic, actuals, vararg,
+            source, generic, fixing, vararg,
         );
         crate::symbol_resolver::merge_generic_bindings_from(
             Some(source),
@@ -456,6 +463,7 @@ pub(super) fn specialize_generic_signature(
             &mut bindings,
             inferred,
         );
+        deferred_inputs = unfixed;
     }
     if let Some(expected) = expected_ret {
         if let Some(inferred) = crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
@@ -471,6 +479,17 @@ pub(super) fn specialize_generic_signature(
                 inferred,
                 &mut is_assignable,
             );
+        }
+    }
+    if !deferred_inputs.is_empty() {
+        let inferred = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
+            source,
+            generic,
+            deferred_inputs,
+            call_sig.vararg_index,
+        );
+        for (formal, actual) in inferred {
+            bindings.entry(formal).or_insert(actual);
         }
     }
     let receiver_validated = match (generic.receiver, extension_receiver) {

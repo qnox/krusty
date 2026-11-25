@@ -521,6 +521,10 @@ fn instantiate_slot_with_input_projection(
     let bindings = &*signature.map_or(std::borrow::Cow::Borrowed(bindings), |signature| {
         super::with_intersection_upper_types(source, signature, bindings)
     });
+    let ty = match (signature, position) {
+        (Some(signature), TypePosition::Out) => flexible_type_variable_arguments(ty, signature),
+        _ => ty,
+    };
     if !bindings
         .values()
         .any(|binding| binding.projection_inner().is_some())
@@ -633,6 +637,44 @@ pub(crate) fn instantiate_vararg_element(
         TypePosition::In,
         UnboundSpecialization::UseUpperBound,
     ))
+}
+
+/// `ty` with every type argument naming one of the declaration's own type variables, as a Java
+/// signature uses it, made flexible. A Java type variable used as a type argument is `E!` at that
+/// occurrence (`<E> List<E> of(E)` returns `(Mutable)List<E!>!`), which the provider records on the
+/// variable's bound; a call that instantiates the variable keeps the flexibility (`List<String!>`).
+/// A class's own variables are not the declaration's: Java enhancement from overridden Kotlin
+/// declarations decides their positions.
+fn flexible_type_variable_arguments(ty: Ty, signature: &GenericSig) -> Ty {
+    fn argument(ty: Ty, signature: &GenericSig) -> Ty {
+        match ty.kind() {
+            TyKind::TyParam(name, bound) | TyKind::Var(name, bound)
+                if bound.is_platform_nullable() && signature.formals.contains(&name) =>
+            {
+                Ty::platform_nullable(ty)
+            }
+            TyKind::InProjection(inner) => Ty::in_projection(argument(inner, signature)),
+            TyKind::OutProjection(inner) => Ty::out_projection(argument(inner, signature)),
+            _ => flexible_type_variable_arguments(ty, signature),
+        }
+    }
+    match ty.kind() {
+        TyKind::Obj(owner, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+            owner,
+            &arguments
+                .iter()
+                .map(|ty| argument(*ty, signature))
+                .collect::<Vec<_>>(),
+        ),
+        TyKind::PlatformNullable(inner) => {
+            Ty::platform_nullable(flexible_type_variable_arguments(inner, signature))
+        }
+        TyKind::Nullable(inner) => Ty::nullable(flexible_type_variable_arguments(inner, signature)),
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(flexible_type_variable_arguments(inner, signature))
+        }
+        _ => ty,
+    }
 }
 
 fn contains_flexible_variable(ty: Ty) -> bool {

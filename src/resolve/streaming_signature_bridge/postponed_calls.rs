@@ -437,19 +437,7 @@ impl ProductionSignatureSemantics<'_> {
             }
         };
         let constraint_frame = self.active_scoped_constraint_frame(scope.owner);
-        let mut active = crate::fx_hash::HashSet::default();
-        if let Some(inputs) = constraint_frame.and_then(|(owner, index)| {
-            self.scoped_frames
-                .inputs
-                .borrow()
-                .get(&owner)
-                .and_then(|stack| stack.get(index))
-                .cloned()
-        }) {
-            for input in inputs {
-                collect_type_parameters(input, &mut active);
-            }
-        }
+        let active = self.open_frame_type_parameters(scope);
         if active.is_empty() {
             return PostponedCallableFamily {
                 callables,
@@ -713,26 +701,41 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
     ) -> Vec<crate::types::TyParamName> {
-        let mut active = crate::fx_hash::HashSet::default();
-        if let Some(inputs) =
-            self.active_scoped_constraint_frame(scope.owner)
-                .and_then(|(owner, index)| {
-                    self.scoped_frames
-                        .inputs
-                        .borrow()
-                        .get(&owner)
-                        .and_then(|stack| stack.get(index))
-                        .cloned()
-                })
-        {
-            for input in inputs {
-                collect_type_parameters(input, &mut active);
-            }
-        }
-        active
+        self.frame_type_parameters(scope)
             .into_iter()
             .map(crate::types::TyParamName::new)
             .collect()
+    }
+
+    /// The type parameters the active constraint frame's inputs mention.
+    pub(super) fn frame_type_parameters(
+        &self,
+        scope: crate::fir::SignatureScope,
+    ) -> crate::fx_hash::HashSet<&'static str> {
+        let mut active = crate::fx_hash::HashSet::default();
+        let frame = self.active_scoped_constraint_frame(scope.owner);
+        let inputs = frame.and_then(|(owner, index)| {
+            let frames = self.scoped_frames.inputs.borrow();
+            frames.get(&owner)?.get(index).cloned()
+        });
+        for input in inputs.into_iter().flatten() {
+            collect_type_parameters(input, &mut active);
+        }
+        active
+    }
+
+    /// The frame's type parameters still open at `scope`; a fixed one is rigid. Type resolution
+    /// reads the unfiltered set: the fixed parameters are being declared at that point.
+    pub(super) fn open_frame_type_parameters(
+        &self,
+        scope: crate::fir::SignatureScope,
+    ) -> crate::fx_hash::HashSet<&'static str> {
+        let mut active = self.frame_type_parameters(scope);
+        crate::types::retain_open_formals(
+            &mut active,
+            self.lexically_visible_type_parameters(scope),
+        );
+        active
     }
 
     pub(super) fn commit_postponed_bindings(

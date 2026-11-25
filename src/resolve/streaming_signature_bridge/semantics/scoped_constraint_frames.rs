@@ -310,20 +310,7 @@ impl ProductionSignatureSemantics<'_> {
         let Some((constraint_owner, constraint_index)) = constraint_frame else {
             return;
         };
-        let active_formals = self
-            .scoped_frames
-            .inputs
-            .borrow()
-            .get(&constraint_owner)
-            .and_then(|stack| stack.get(constraint_index))
-            .map(|inputs| {
-                let mut formals = crate::fx_hash::HashSet::default();
-                for input in inputs {
-                    super::super::postponed_calls::collect_type_parameters(*input, &mut formals);
-                }
-                formals
-            })
-            .unwrap_or_default();
+        let active_formals = self.open_frame_type_parameters(scope);
         if active_formals.is_empty() {
             return;
         }

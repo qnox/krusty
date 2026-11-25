@@ -154,10 +154,20 @@ pub(super) fn publish(
                         .to_owned(),
                     params,
                     ret: signature.result.get(),
+                    // A companion declaration's receiver names the classifier it is associated
+                    // with, not a value type: it carries no type arguments, not even the implicit
+                    // outer ones an inner classifier's spelling resolves with.
                     receiver: callable
                         .shape
                         .extension_receiver
-                        .map(crate::fir::ResolvedTy::get),
+                        .map(crate::fir::ResolvedTy::get)
+                        .map(|receiver| {
+                            receiver
+                                .non_null()
+                                .obj_internal()
+                                .filter(|_| header.flags.has(DeclarationFlags::COMPANION))
+                                .map_or(receiver, crate::types::Ty::obj_name)
+                        }),
                     param_defaults,
                     suspend: header.flags.has(DeclarationFlags::SUSPEND),
                     inline: header.flags.has(DeclarationFlags::INLINE),

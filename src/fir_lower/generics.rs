@@ -290,7 +290,14 @@ pub(super) fn attach_callable_generic_facts(
         }
     }
     let callable = index.callable_for_declaration(declaration);
-    let extension_receiver = callable.and_then(|callable| callable.shape.extension_receiver);
+    // A `companion` declaration's receiver only names the classifier it is associated with. It is
+    // a name-resolution coordinate, never a value parameter of the common-IR function.
+    let companion_associated = index
+        .declaration_header(declaration)
+        .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::COMPANION));
+    let extension_receiver = callable
+        .and_then(|callable| callable.shape.extension_receiver)
+        .filter(|_| !companion_associated);
     if !parameters.is_empty()
         || extension_receiver
             .is_some_and(|receiver| crate::types::ty_mentions_any_param(receiver.get()))
