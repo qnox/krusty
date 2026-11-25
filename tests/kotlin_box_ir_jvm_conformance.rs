@@ -20,7 +20,7 @@
 //! The kotlin-stdlib jar is located from local caches (`common::stdlib_jar`) and supplied via
 //! `-classpath` only to `// WITH_STDLIB` tests, plus the JVM runner's runtime classpath.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
@@ -326,8 +326,17 @@ fn read_exact_deadline(fd: i32, buf: &mut [u8], deadline: Instant) -> std::io::R
 /// visible and then enforces reflection accessibility. Tests that do not say `// WITH_REFLECT`
 /// must not see the jar, or `::p.getDelegate()` stops throwing `KotlinReflectionNotSupportedError`.
 struct ThreadRunners {
-    plain: Option<BoxRunner>,
-    reflect: Option<BoxRunner>,
+    runners: HashMap<RunnerKey, BoxRunner>,
+}
+
+/// What distinguishes one persistent JVM from another: the JDK it runs on (a `boxModernJdk`
+/// case's directory names it; every other case runs on the harness JDK), whether it enables
+/// preview features, and whether it sees `kotlin-reflect`.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RunnerKey {
+    java_home: Option<PathBuf>,
+    preview: bool,
+    reflect: bool,
 }
 
 /// A persistent JVM subprocess that accepts class bytes and runs box().
@@ -338,13 +347,18 @@ struct BoxRunner {
 }
 
 impl BoxRunner {
-    fn new(java: &str, runner_cp: &str, stdlib: &str) -> Self {
+    fn new(java: &str, preview: bool, runner_cp: &str, stdlib: &str) -> Self {
         let cp = if stdlib.is_empty() {
             runner_cp.to_string()
         } else {
             format!("{runner_cp}:{stdlib}")
         };
-        let mut child = Command::new(java)
+        let mut command = Command::new(java);
+        if preview {
+            // `JvmBoxRunner` passes the same flag for a case declaring `ENABLE_JVM_PREVIEW`.
+            command.arg("--enable-preview");
+        }
+        let mut child = command
             .args(["-cp", &cp, "BoxRunner"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1226,6 +1240,11 @@ fn kotlin_codegen_box_conformance() {
     let jdk_roots = krusty::conformance::BoxJdkRoots::new(
         krusty::toolchain::box_mock_jdk_rt_jar(&box_dir).unwrap_or_else(|error| panic!("{error}")),
         Some(Path::new(&java_home).join("lib").join("modules")).filter(|p| p.is_file()),
+    )
+    .with_jdk_homes(
+        super::jdk_homes::available_jdks(&[11, 17, 21])
+            .into_iter()
+            .map(|(release, home)| (release as u16, home)),
     );
     // Locate a real kotlin-stdlib jar (drop-in `-classpath`), used for `// WITH_STDLIB` tests at
     // compile time and on the JVM at runtime. No bespoke env var.
@@ -1313,8 +1332,7 @@ fn kotlin_codegen_box_conformance() {
     let runners: Vec<Mutex<ThreadRunners>> = (0..n_threads)
         .map(|_| {
             Mutex::new(ThreadRunners {
-                plain: None,
-                reflect: None,
+                runners: HashMap::new(),
             })
         })
         .collect();
@@ -1427,6 +1445,13 @@ fn kotlin_codegen_box_conformance() {
                     &src,
                     krusty::conformance::TestTarget::Jvm,
                 );
+                // A `boxModernJdk` case compiles against, and runs on, the JDK its directory names.
+                let modern = super::box_inventory::codegen_relative(&box_dir, file)
+                    .and_then(|relative| krusty::conformance::modern_jdk(&relative));
+                let src = match modern {
+                    Some(jdk) => krusty::conformance::with_default_directives(&src, jdk),
+                    None => src,
+                };
                 t_read.fetch_add(tr0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 let __ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let owned = super::box_inventory::owned(file);
@@ -1456,10 +1481,14 @@ fn kotlin_codegen_box_conformance() {
                     let compile_cp = common::classpath_jars_for(&src);
                     t_cpjars.fetch_add(tj0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     let owned_jdk = owned.then(common::jdk_modules);
-                    let jdk = match owned_jdk.as_deref() {
-                        Some(root) => krusty::conformance::BoxJdk::Full { root: Some(root) },
-                        None => jdk_roots.select(&src),
+                    let jdk = match (owned_jdk.as_deref(), modern) {
+                        (Some(root), _) => krusty::conformance::BoxJdk::Full { root: Some(root) },
+                        (None, Some(modern)) => jdk_roots
+                            .for_release(modern.release)
+                            .unwrap_or_else(|error| panic!("{}: {error}", file.display())),
+                        (None, None) => jdk_roots.select(&src),
                     };
+                    let modern_jdk_home = modern.and_then(|_| jdk.home().map(|(home, _)| home.to_path_buf()));
                     let jdk_modules = jdk.classpath_root();
 
                     // Box outcome and krusty's module-qualified classes (`None` when krusty emitted
@@ -1526,24 +1555,32 @@ fn kotlin_codegen_box_conformance() {
                             &runtime_classpath
                         };
                         let mut guard = runners[tid].lock().unwrap();
-                        let slot = if wants_reflect {
-                            &mut guard.reflect
-                        } else {
-                            &mut guard.plain
+                        let key = RunnerKey {
+                            java_home: modern_jdk_home.clone(),
+                            preview: krusty::conformance::needs_preview(&src),
+                            reflect: wants_reflect,
                         };
-                        if slot.is_none() {
-                            *slot = Some(BoxRunner::new(&java, &runner_cp_str, classpath));
-                        }
+                        let java = match &key.java_home {
+                            Some(home) => format!("{}/bin/java", home.display()),
+                            None => java.clone(),
+                        };
+                        let slot = guard.runners.remove(&key);
+                        let mut slot = Some(slot.unwrap_or_else(|| {
+                            BoxRunner::new(&java, key.preview, &runner_cp_str, classpath)
+                        }));
                         let t1 = std::time::Instant::now();
                         mark_box_case_phase(&active, tid, file, "jvm");
                         let result = match slot.as_mut().unwrap().run(&compiled.flat, &box_class) {
                             Some(r) => r,
                             None => {
                                 // BoxRunner died (JVM crash/OOM); restart it for the next test.
-                                *slot = None;
+                                slot = None;
                                 "ERROR:BoxRunnerCrash".to_string()
                             }
                         };
+                        if let Some(runner) = slot {
+                            guard.runners.insert(key, runner);
+                        }
                         t_jvm.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
                         if result == "OK" {
@@ -1623,7 +1660,12 @@ fn kotlin_codegen_box_conformance() {
                                 .unwrap_or("File")
                                 .to_string();
                             let compile_cp = common::classpath_jars_for(&src);
-                            let jdk = jdk_roots.select(&src);
+                            let jdk = match modern {
+                                Some(modern) => jdk_roots
+                                    .for_release(modern.release)
+                                    .unwrap_or_else(|error| panic!("{}: {error}", file.display())),
+                                None => jdk_roots.select(&src),
+                            };
                             let reference = box_reference_classes::reference_compile(
                                 &src,
                                 &stem,

@@ -96,7 +96,12 @@ pub fn key(corpus: &Path, file: &Path) -> String {
     let relative = file
         .strip_prefix(&regressions)
         .map(|path| Path::new("regressions").join(path))
-        .unwrap_or_else(|_| file.strip_prefix(corpus).unwrap_or(file).to_path_buf());
+        .unwrap_or_else(|_| {
+            // A `boxModernJdk` case keys under its directory, which is not below `codegen/box`.
+            codegen_relative(corpus, file)
+                .filter(|relative| krusty::conformance::is_modern_jdk_case(relative))
+                .unwrap_or_else(|| file.strip_prefix(corpus).unwrap_or(file).to_path_buf())
+        });
     relative
         .components()
         .map(|part| part.as_os_str().to_string_lossy())
@@ -130,6 +135,29 @@ fn join(
     Ok(files)
 }
 
+/// The `codegen/boxModernJdk` cases that name a JDK to run on (`krusty::conformance::modern_jdk`).
+/// `testsWithValhalla` names none: it needs a Valhalla JDK that has no release, which JetBrains'
+/// own configuration skips, so it is outside the lane.
+fn modern_jdk_files(corpus: &Path) -> Vec<PathBuf> {
+    let Some(codegen) = corpus.parent() else {
+        return Vec::new();
+    };
+    krusty::conformance::kotlin_files(&codegen.join(krusty::conformance::MODERN_JDK_DIRECTORY))
+        .into_iter()
+        .filter(|file| {
+            file.strip_prefix(codegen)
+                .is_ok_and(|relative| krusty::conformance::modern_jdk(relative).is_some())
+        })
+        .collect()
+}
+
+/// The path of `file` below `compiler/testData/codegen`, for the cases that live beside
+/// `codegen/box` rather than in it.
+pub fn codegen_relative(corpus: &Path, file: &Path) -> Option<PathBuf> {
+    let codegen = corpus.parent()?;
+    file.strip_prefix(codegen).ok().map(Path::to_path_buf)
+}
+
 /// The cases a `target` lane runs: the codegen/box cases that target's pinned generators select,
 /// and every owned regression (whose own directives decide its applicability). An owned regression
 /// whose `// KOTLINC_VERSION:` range excludes the reference release is outside every lane, as an
@@ -146,7 +174,11 @@ pub fn discover(corpus: &Path, target: TestTarget) -> Result<Vec<PathBuf>, Strin
         ));
     }
     let selected = model_files(corpus, target)?;
-    let upstream: Vec<PathBuf> = krusty::conformance::kotlin_files(corpus)
+    let mut candidates = krusty::conformance::kotlin_files(corpus);
+    if target == TestTarget::Jvm {
+        candidates.extend(modern_jdk_files(corpus));
+    }
+    let upstream: Vec<PathBuf> = candidates
         .into_iter()
         .filter(|file| selected.contains(file))
         .collect();
