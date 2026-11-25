@@ -2421,7 +2421,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// Initialize the companion object of `class`, when it has one: through its singleton
     /// getter. An enum's companion stays with the enum initializer.
-    fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
+    pub(super) fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
         let getter = {
             let ir = self.file.ir;
             let classes = &self.file.classes;
