@@ -311,6 +311,7 @@ fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, action: Exp
         constructor_default_entries: _,
         construction_entries: _,
         dispatch_entries: _,
+        runtime_bindings: _,
         enum_initializers: _,
         fn_params: _,
         fn_declared_spellings: _,

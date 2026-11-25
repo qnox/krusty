@@ -254,6 +254,12 @@ impl PackageInventory {
                     crate::libraries::CallablePlacement::Package(identity),
                     &signed.declaration,
                 );
+                if signed.direct_c_function.is_none() && signed.target_intrinsic.is_none() {
+                    signed.direct_c_function = super::direct_c_calls::runtime_entry(
+                        intrinsic_platform,
+                        &signed.declaration,
+                    );
+                }
                 inventory.intrinsics.insert(&signed);
                 inventory.private_externals.push((identity, signed));
             }
@@ -280,6 +286,12 @@ impl PackageInventory {
                             crate::libraries::CallablePlacement::Package(identity),
                             &signed.declaration,
                         );
+                        if signed.direct_c_function.is_none() && signed.target_intrinsic.is_none() {
+                            signed.direct_c_function = super::direct_c_calls::runtime_entry(
+                                intrinsic_platform,
+                                &signed.declaration,
+                            );
+                        }
                         Ok(signed)
                     })
                 })
@@ -367,6 +379,12 @@ impl PackageInventory {
                         member,
                         &function.declaration,
                     );
+                    if function.direct_c_function.is_none() && function.target_intrinsic.is_none() {
+                        function.direct_c_function = super::direct_c_calls::runtime_entry(
+                            intrinsic_platform,
+                            &function.declaration,
+                        );
+                    }
                     inventory.intrinsics.insert(function);
                 }
                 for function in &mut signed.associated_functions {
@@ -388,6 +406,12 @@ impl PackageInventory {
                         associated,
                         &function.declaration,
                     );
+                    if function.direct_c_function.is_none() && function.target_intrinsic.is_none() {
+                        function.direct_c_function = super::direct_c_calls::runtime_entry(
+                            intrinsic_platform,
+                            &function.declaration,
+                        );
+                    }
                     inventory.intrinsics.insert(function);
                 }
                 let selected = inventory

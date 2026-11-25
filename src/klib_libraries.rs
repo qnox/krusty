@@ -44,6 +44,9 @@ pub use declaration_signatures::KlibLibraryError;
 pub use serialized_references::{
     KlibReferenceBinding, KlibReferenceBindings, KlibReferenceDispatch, KlibReferenceOrigin,
 };
+pub(crate) use target_intrinsics::{
+    is_runtime_entry_ir, runtime_entry_symbol, runtime_export_symbol,
+};
 pub use target_intrinsics::{KlibIntrinsicCallable, KlibIntrinsicFacts};
 
 /// Declarations of a set of KLIB libraries, published as one symbol source.

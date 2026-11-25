@@ -68,6 +68,19 @@ fn lineage<'a>(
     }
 }
 
+/// The `kotlin.Any` slot the dependency function `key` names overrides, by the override edges its
+/// provider's headers select.
+fn overridden_any_slot(classes: &[&ModuleClass], key: PlanKey) -> Option<u32> {
+    let PlanKey::DependencyCallable(callable) = key else {
+        return None;
+    };
+    classes
+        .iter()
+        .flat_map(|class| class.function_overrides.iter())
+        .filter(|edge| edge.implementation == ResolvedFunctionOverrideTarget::External(callable))
+        .find_map(|edge| any_slot(edge.overridden_role))
+}
+
 fn table(
     classes: &[&ModuleClass],
     representation: &dyn Representation,
@@ -147,10 +160,14 @@ fn table(
             }
         };
         for (key, identity, frame) in members {
-            let &slot = physical
-                .declarations
-                .get(&identity)
-                .ok_or("an inherited declaration without its producer slot binding")?;
+            // A member the provider declares without a body of its own, such as the `equals`,
+            // `hashCode` or `toString` a value class is declared to have, occupies the
+            // `kotlin.Any` slot it overrides and publishes no declaration of its own.
+            let slot = match physical.declarations.get(&identity) {
+                Some(&slot) => slot,
+                None => overridden_any_slot(classes, key)
+                    .ok_or("an inherited declaration without its producer slot binding")?,
+            };
             let entry = entries
                 .get_mut(slot as usize)
                 .ok_or("a published member slot outside its class table")?;

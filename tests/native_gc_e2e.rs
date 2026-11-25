@@ -194,7 +194,58 @@ const FAILURES: &[(i32, &str)] = &[
         "a reused slot of some size class was recorded as another slot: a live object was freed \
           and handed out again",
     ),
+    (41, "the runtime reported a collection before one had run"),
+    (
+        42,
+        "the runtime did not report the first collection as epoch 1, once",
+    ),
+    (
+        43,
+        "the reported times do not bracket the collection they describe",
+    ),
+    (
+        44,
+        "the reported memory usage or marked count disagrees with the heap after the collection",
+    ),
+    (45, "the reported sweep statistics or pool name are wrong"),
+    (46, "the second collection was not reported as epoch 2"),
+    (
+        47,
+        "the runtime reported a collection other than the last one",
+    ),
+    (
+        48,
+        "a collection during the report mixed two collections' statistics into it",
+    ),
 ];
+
+/// Compile `source` and link it against the prebuilt runtime through krusty's linker, as every
+/// Kotlin program is linked — only the entry point is the program's own — then run it.
+fn run_c_program(tag: &str, source: &str, target: NativeTarget) -> std::process::Output {
+    let scratch = Scratch::new(tag);
+    let object = compile_c(scratch.path(), source);
+    let image = krusty_native::link_program(&[&object], target)
+        .unwrap_or_else(|error| panic!("the test program must link against the runtime: {error}"));
+    let executable = scratch.path().join("program");
+    std::fs::write(&executable, &image).expect("write executable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+    }
+    let output = common::run_freshly_written(Command::new(&executable).env_clear())
+        .expect("run the built executable");
+    let code = output.status.code().unwrap_or(-1);
+    assert_eq!(
+        code,
+        0,
+        "{}\nstderr: {}",
+        describe(code),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
 
 fn describe(code: i32) -> String {
     FAILURES
@@ -790,31 +841,7 @@ fn the_collector_reclaims_garbage_and_keeps_what_is_reachable() {
         eprintln!("skipping: needs a C compiler and a prebuilt native runtime for the host");
         return;
     };
-    // The program links against exactly what a Kotlin program links against — the prebuilt
-    // runtime, through krusty's linker — only the entry point is the program's own.
-    let scratch = Scratch::new("collector");
-    let object = compile_c(scratch.path(), PROGRAM);
-    let image = krusty_native::link_program(&[&object], target)
-        .unwrap_or_else(|error| panic!("the test program must link against the runtime: {error}"));
-    let executable = scratch.path().join("program");
-    std::fs::write(&executable, &image).expect("write executable");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod");
-    }
-    let output = common::run_freshly_written(Command::new(&executable).env_clear())
-        .expect("run the built executable");
-    let code = output.status.code().unwrap_or(-1);
-    assert_eq!(
-        code,
-        0,
-        "{}\nstderr: {}",
-        describe(code),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
+    let output = run_c_program("collector", PROGRAM, target);
     let mut expected = (0..300)
         .map(|i| char::from(b'0' + (i % 10) as u8))
         .collect::<String>();
@@ -825,6 +852,133 @@ fn the_collector_reclaims_garbage_and_keeps_what_is_reachable() {
         "a string built across collections must keep its text, and values outside the heap must \
          pass through a collection untouched"
     );
+}
+
+/// A program that stands in for `GCInfoBuilder`: it defines the setters the library exports, which
+/// override the runtime's weak references, and has the runtime fill them after a collection.
+const GC_INFO_PROGRAM: &str = r#"
+#include "krusty_rt.h"
+
+typedef struct Leaf {
+    KObjectHeader header;
+    kt_long value;
+    kt_long address;
+} Leaf;
+static const KType leaf_type = {"Leaf", 4, sizeof(Leaf), 0, 0, NULL};
+
+static int64_t epoch, start_ns, end_ns, request_ns, pause_start_ns, pause_end_ns, cleanup_ns;
+static int64_t marked, kept, swept, before, after, globals;
+static int calls, pools;
+static const char *pool_name;
+
+static int collect_in_setter;
+void Kotlin_Internal_GC_GCInfoBuilder_setEpoch(void *b, int64_t v) {
+    (void)b;
+    calls++;
+    epoch = v;
+    if (collect_in_setter) {
+        /* A setter that allocates may collect; the rest of the report must still describe the
+           collection that was being reported. */
+        collect_in_setter = 0;
+        kt_gc_collect();
+    }
+}
+void Kotlin_Internal_GC_GCInfoBuilder_setStartTime(void *b, int64_t v) { (void)b; start_ns = v; }
+void Kotlin_Internal_GC_GCInfoBuilder_setEndTime(void *b, int64_t v) { (void)b; end_ns = v; }
+void Kotlin_Internal_GC_GCInfoBuilder_setFirstPauseRequestTime(void *b, int64_t v) { (void)b; request_ns = v; }
+void Kotlin_Internal_GC_GCInfoBuilder_setFirstPauseStartTime(void *b, int64_t v) { (void)b; pause_start_ns = v; }
+void Kotlin_Internal_GC_GCInfoBuilder_setFirstPauseEndTime(void *b, int64_t v) { (void)b; pause_end_ns = v; }
+void Kotlin_Internal_GC_GCInfoBuilder_setPostGcCleanupTime(void *b, int64_t v) { (void)b; cleanup_ns = v; }
+void Kotlin_Internal_GC_GCInfoBuilder_setRootSet(void *b, int64_t t, int64_t s, int64_t g, int64_t st) {
+    (void)b; (void)t; (void)s; (void)st; globals = g;
+}
+void Kotlin_Internal_GC_GCInfoBuilder_setMarkStats(void *b, int64_t m) { (void)b; marked = m; }
+void Kotlin_Internal_GC_GCInfoBuilder_setSweepStats(void *b, const char *pool, int64_t k, int64_t s) {
+    (void)b; pool_name = pool; pools++; kept = k; swept = s;
+}
+void Kotlin_Internal_GC_GCInfoBuilder_setMemoryUsageBefore(void *b, const char *pool, int64_t v) {
+    (void)b; (void)pool; before = v;
+}
+void Kotlin_Internal_GC_GCInfoBuilder_setMemoryUsageAfter(void *b, const char *pool, int64_t v) {
+    (void)b; (void)pool; after = v;
+}
+
+__attribute__((noinline)) static void allocate_garbage(uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) {
+        Leaf *leaf = (Leaf *)kt_gc_allocate(&leaf_type, sizeof(Leaf));
+        leaf->value = i;
+    }
+}
+
+__attribute__((noinline)) static void clobber_stack(void) {
+    volatile uintptr_t scratch[2048];
+    for (size_t i = 0; i < 2048; i++) {
+        scratch[i] = 0;
+    }
+}
+
+static int same_text(const char *a, const char *b) {
+    while (*a != 0 && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+void kt_program_entry(void) {
+    kt_long stack_anchor = 0;
+    kt_runtime_init(&stack_anchor);
+
+    Kotlin_Internal_GC_GCInfoBuilder_Fill((void *)1, 0);
+    if (calls != 0) {
+        kt_exit(41);
+    }
+    allocate_garbage(1000);
+    clobber_stack();
+    kt_gc_collect();
+    Kotlin_Internal_GC_GCInfoBuilder_Fill((void *)1, 0);
+    if (epoch != 1 || calls != 1) {
+        kt_exit(42);
+    }
+    if (start_ns <= 0 || end_ns < start_ns || request_ns != start_ns || pause_start_ns != start_ns ||
+        pause_end_ns != end_ns || cleanup_ns != end_ns) {
+        kt_exit(43);
+    }
+    if (before <= after || after != (int64_t)kt_gc_live_bytes() || marked != (int64_t)kt_gc_live_objects()) {
+        kt_exit(44);
+    }
+    if (swept <= 0 || kept != marked || pools != 1 || pool_name == NULL || !same_text(pool_name, "heap")) {
+        kt_exit(45);
+    }
+    kt_gc_collect();
+    Kotlin_Internal_GC_GCInfoBuilder_Fill((void *)1, 0);
+    if (epoch != 2) {
+        kt_exit(46);
+    }
+    int64_t second_start = start_ns;
+    int64_t second_end = end_ns;
+    collect_in_setter = 1;
+    Kotlin_Internal_GC_GCInfoBuilder_Fill((void *)1, 0);
+    if (epoch != 2 || start_ns != second_start || end_ns != second_end) {
+        kt_exit(48);
+    }
+    int before_other = calls;
+    Kotlin_Internal_GC_GCInfoBuilder_Fill((void *)1, 1);
+    if (calls != before_other) {
+        kt_exit(47);
+    }
+    (void)globals;
+    kt_exit(0);
+}
+"#;
+
+#[test]
+fn the_last_collection_is_reported_to_the_gc_info_builder() {
+    let Some(target) = host() else {
+        eprintln!("skipping: needs a C compiler and a prebuilt native runtime for the host");
+        return;
+    };
+    run_c_program("gc-info", GC_INFO_PROGRAM, target);
 }
 
 #[test]
