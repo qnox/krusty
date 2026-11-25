@@ -11,9 +11,7 @@ class Slot(var content: String) {
     }
 }
 
-class Tag(val text: String)
-
-inline operator fun Tag.getValue(thisRef: Any?, property: KProperty<*>): String = text + property.name
+inline operator fun Int.getValue(thisRef: Any?, property: KProperty<*>): String = "t" + this
 
 // MODULE: main(lib)
 import kotlin.reflect.KProperty
@@ -24,7 +22,7 @@ class Holder {
 
 var topLevel: String by Slot("k")
 
-val tagged: String by Tag("t")
+val tagged: String by 7
 
 fun box(): String {
     val holder = Holder()
@@ -33,6 +31,6 @@ fun box(): String {
     var local: String by Slot("l")
     local = "L"
     if (local != "L") return "fail local"
-    if (tagged != "ttagged") return "fail extension"
+    if (tagged != "t7") return "fail extension"
     return holder.member + topLevel
 }
