@@ -778,6 +778,14 @@ impl Emitter<'_> {
         };
         // A `Unit` body may or may not leave `Unit.INSTANCE`; any other body leaves its value. A
         // body that always throws or returns non-locally ends without a return of its own.
+        // An expression body that ends in an inlined call has forgotten the line in effect, so
+        // the return the lambda's body falls into writes its own end line again: the entry the
+        // inliner's `nop` keeps once the lambda is placed.
+        if !scratch.is_dead() && scratch.line_forgotten() {
+            if let Some(returned) = self.lambda_value_return(impl_fn) {
+                self.mark_return(returned, &mut scratch);
+            }
+        }
         let own_return = scratch.bytes.len();
         let return_type = match type_descriptor(result).as_str() {
             _ if scratch.is_dead() => match type_descriptor(declared_result).as_str() {
@@ -948,6 +956,16 @@ impl Emitter<'_> {
 
     /// The closing line of the lambda `impl_fn` when its body falls off its end into the implicit
     /// return of `Unit`.
+    /// The `return` of the lambda `impl_fn`'s expression body.
+    fn lambda_value_return(&self, impl_fn: u32) -> Option<u32> {
+        let body = self.ir.functions[impl_fn as usize].body?;
+        let IrExpr::Block { stmts, .. } = self.ir.expr(body) else {
+            return None;
+        };
+        let returned = *stmts.last()?;
+        matches!(self.ir.expr(returned), IrExpr::Return(Some(_))).then_some(returned)
+    }
+
     fn lambda_fallthrough_line(&self, impl_fn: u32) -> Option<u32> {
         let body = self.ir.functions[impl_fn as usize].body?;
         let IrExpr::Block { stmts, value: None } = self.ir.expr(body) else {
