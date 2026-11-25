@@ -1323,6 +1323,10 @@ kt_long kt_abs_long(kt_long value);
 kt_float kt_abs_float(kt_float value);
 kt_double kt_abs_double(kt_double value);
 
+/* `countLeadingZeroBits`: the zero bits above the highest set one; the whole width for zero. */
+kt_int kt_count_leading_zero_bits_int(kt_int value);
+kt_int kt_count_leading_zero_bits_long(kt_long value);
+
 /* `compareTo` on scalars. Separate functions rather than an emitted `a < b ? -1 : ...` so neither
    operand is evaluated twice, and so the floating-point cases can implement Kotlin's TOTAL order
    (NaN above everything, -0.0 below 0.0) rather than C's comparison operators. */

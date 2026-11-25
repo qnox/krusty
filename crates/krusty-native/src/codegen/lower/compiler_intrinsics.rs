@@ -558,6 +558,34 @@ impl<'a> BodyLowering<'a, '_, '_> {
                 };
                 return Some(self.scalar_runtime_call(symbol, operand, value, ret));
             }
+            Some(krusty::backend::BackendCompilerIntrinsic::CountLeadingZeroBits { operand }) => {
+                // A top-level function of one parameter, not an extension.
+                let Some(value) = (match (receiver, args, extension_receiver_parameter) {
+                    (None, [value], None)
+                        if self.checked_type(*value).map(Ty::non_null) == Some(operand) =>
+                    {
+                        Some(*value)
+                    }
+                    _ => None,
+                }) else {
+                    return Some(Err(
+                        "an exact `countLeadingZeroBits` with malformed operands".into(),
+                    ));
+                };
+                if ret != Ty::Int {
+                    return Some(Err(
+                        "an exact `countLeadingZeroBits` with a non-Int result".into()
+                    ));
+                }
+                let symbol = match operand {
+                    Ty::Int => "kt_count_leading_zero_bits_int",
+                    Ty::Long => "kt_count_leading_zero_bits_long",
+                    _ => {
+                        return Some(Err("an exact `countLeadingZeroBits` of another type".into()))
+                    }
+                };
+                return Some(self.scalar_runtime_call(symbol, operand, value, ret));
+            }
             Some(krusty::backend::BackendCompilerIntrinsic::FloatingIsInfinite { operand }) => {
                 let Some(value) = scalar_extension_operand(operand) else {
                     return Some(Err(
