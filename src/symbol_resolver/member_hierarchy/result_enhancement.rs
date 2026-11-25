@@ -52,7 +52,7 @@ pub(super) fn publish_flexible_result(enhancement: &mut ResultEnhancement, rigid
 }
 
 /// Whether `inherited` is a declaration `implementation` overrides in this receiver-ranked family.
-fn overrides(
+pub(super) fn overrides(
     source: &dyn SymbolSource,
     implementation: &FunctionInfo,
     inherited: &FunctionInfo,
