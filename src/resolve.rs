@@ -14463,7 +14463,7 @@ impl<'a> Checker<'a> {
                             self.declared_function_semantic_type(parameter)
                         });
                         if let (Some(TyKind::Fun(expected_function)), true) = (
-                            lambda_parameter.map(|ty| ty.kind()),
+                            lambda_parameter.map(|ty| ty.non_null().kind()),
                             matches!(self.file.expr(a), Expr::Lambda { .. }),
                         ) {
                             crate::trace_compiler!(

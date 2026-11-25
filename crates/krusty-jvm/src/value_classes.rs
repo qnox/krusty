@@ -35,7 +35,7 @@ mod inline_body_slots;
 mod interface_entries;
 mod lambda_slots;
 mod mangled_calls;
-mod member_names;
+pub(crate) mod member_names;
 mod module_members;
 mod module_static_calls;
 mod operand_nullness;
