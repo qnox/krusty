@@ -918,6 +918,9 @@ fn realize_own_invoke(
                 IrExpr::New { .. } => true,
                 // An array factory's adapter builds the array itself: its first instruction.
                 IrExpr::Vararg { .. } => true,
+                // The return marks the line after its value, which an inlined body made the line
+                // mapper forget: kotlinc restores the reference's line there.
+                IrExpr::Return(_) => true,
                 _ => false,
             };
             if marks {
