@@ -30,6 +30,17 @@ use super::runtime::Runtime;
 /// `i32.ge_u`.
 const I32_GE_U: u8 = 0x4f;
 
+/// `i32.gt_u`.
+const I32_GT_U: u8 = 0x4b;
+
+/// The locals a sub-sequence implementation reads its range from and builds its result in: the
+/// range's start and end are the member's own parameters, then come the units the range is read
+/// from and the units of the new string.
+const SUB_SEQUENCE_START: u32 = 1;
+const SUB_SEQUENCE_END: u32 = 2;
+const SUB_SEQUENCE_UNITS: u32 = 3;
+const SUB_SEQUENCE_COPY: u32 = 4;
+
 /// A function's wasm parameters (the receiver first) and results.
 type Signature = (Vec<ValType>, Vec<ValType>);
 
@@ -84,7 +95,12 @@ impl BoxImplementations {
             .iter()
             .find(|(known, _)| Some(*known) == identity)
             .map(|(_, declaration)| {
-                operation(Representation::Box(boxed), declaration, &self.signature)
+                operation(
+                    Representation::Box(boxed),
+                    declaration,
+                    &self.signature,
+                    &mut || Err(format!("a range operation of a boxed `{boxed:?}`")),
+                )
             })
             .transpose()
     }
@@ -125,6 +141,10 @@ enum Operation {
     StringGet,
     /// The order of a string and another (`String.compareTo`).
     StringCompare,
+    /// A new string of the units of a range of a string (`String.subSequence`), which throws the
+    /// runtime `IndexOutOfBoundsException` whose struct is `index_out_of_bounds` for a range
+    /// outside the string.
+    StringSubSequence { index_out_of_bounds: u32 },
     /// The order of the value a box holds and the value another box of its class holds
     /// (`Int.compareTo(Int)`).
     Compare,
@@ -154,9 +174,58 @@ enum BuilderMember {
     /// `get(Int)`, which throws the runtime `IndexOutOfBoundsException` whose struct is
     /// `index_out_of_bounds` for an index outside the units in use.
     Get { index_out_of_bounds: u32 },
+    /// `subSequence(Int, Int)`: a new string of the units of a range of those in use, which throws
+    /// the runtime `IndexOutOfBoundsException` whose struct is `index_out_of_bounds` for a range
+    /// outside them.
+    SubSequence { index_out_of_bounds: u32 },
 }
 
 impl Runtime {
+    /// The new string of the range `SUB_SEQUENCE_START..SUB_SEQUENCE_END` of the units in
+    /// `SUB_SEQUENCE_UNITS`, left on the stack. A range outside the units throws the runtime
+    /// `IndexOutOfBoundsException` whose struct is `index_out_of_bounds`.
+    fn emit_sub_sequence(
+        &mut self,
+        code: &mut Code,
+        index_out_of_bounds: u32,
+    ) -> Result<(), String> {
+        let (start, end, units, copy) = (
+            SUB_SEQUENCE_START,
+            SUB_SEQUENCE_END,
+            SUB_SEQUENCE_UNITS,
+            SUB_SEQUENCE_COPY,
+        );
+        // `0 <= start <= end <= length`: unsigned, a negative endpoint is outside too.
+        code.local_get(end)
+            .local_get(units)
+            .array_len()
+            .op(I32_GT_U)
+            .local_get(start)
+            .local_get(end)
+            .op(I32_GT_U)
+            .op(super::runtime::OR32)
+            .if_(BlockType::Empty);
+        self.exceptions
+            .construct_class(code, index_out_of_bounds, None, self.string)?;
+        code.throw(self.exceptions.tag).end();
+        code.local_get(end)
+            .local_get(start)
+            .op(super::runtime::SUB32)
+            .array_new_default(self.chars)
+            .local_set(copy);
+        // array.copy dst dst_offset src src_offset length
+        code.local_get(copy)
+            .i32_const(0)
+            .local_get(units)
+            .local_get(start)
+            .local_get(end)
+            .local_get(start)
+            .op(super::runtime::SUB32)
+            .array_copy(self.chars, self.chars);
+        code.local_get(copy).struct_new(self.string);
+        Ok(())
+    }
+
     /// Record the builtin implementations of `member`, the library member `declared` carried as
     /// `signature` (the receiver first), which a call goes through: a string's and the runtime
     /// builder's and list's now, and each box's now or when the box is declared. Declines when a builtin class
@@ -205,7 +274,18 @@ impl Runtime {
             };
             match representation {
                 Representation::String => {
-                    string = Some(operation(representation, implementation, signature)?);
+                    string = Some(operation(
+                        representation,
+                        implementation,
+                        signature,
+                        &mut || {
+                            self.exception_class(
+                                module,
+                                classifiers,
+                                RuntimeExceptionKind::IndexOutOfBounds.classifier(),
+                            )
+                        },
+                    )?);
                 }
                 Representation::StringBuilder => {
                     builder = Some(builder_operation(
@@ -417,6 +497,21 @@ impl Runtime {
                     .ref_cast(false, HeapType::Concrete(self.string))
                     .call(compare);
             }
+            (
+                Receiver::String,
+                Operation::StringSubSequence {
+                    index_out_of_bounds,
+                },
+            ) => {
+                code.ref_cast(false, HeapType::Concrete(self.string))
+                    .struct_get(self.string, 0)
+                    .local_set(SUB_SEQUENCE_UNITS);
+                self.emit_sub_sequence(&mut code, index_out_of_bounds)?;
+                locals.extend([
+                    ValType::reference(self.chars),
+                    ValType::reference(self.chars),
+                ]);
+            }
             (Receiver::Box(form), Operation::Convert(to)) => {
                 form.emit_unbox(&mut code);
                 numeric_conversions::convert(&mut code, form.boxed, to)?;
@@ -492,6 +587,21 @@ impl Runtime {
                         code.throw(self.exceptions.tag).end();
                         code.local_get(1).call(builders.get);
                     }
+                    BuilderMember::SubSequence {
+                        index_out_of_bounds,
+                    } => {
+                        // The units in use, copied as `toString` copies them, are the string the
+                        // range is read from.
+                        code.call(builders.to_string)
+                            .ref_cast(false, HeapType::Concrete(self.string))
+                            .struct_get(self.string, 0)
+                            .local_set(SUB_SEQUENCE_UNITS);
+                        self.emit_sub_sequence(&mut code, index_out_of_bounds)?;
+                        locals.extend([
+                            ValType::reference(self.chars),
+                            ValType::reference(self.chars),
+                        ]);
+                    }
                 }
             }
             _ => return Err("a builtin implementation of another representation".to_string()),
@@ -549,6 +659,13 @@ fn builder_operation(
                 index_out_of_bounds: index_out_of_bounds()?,
             })
         }
+        ("subSequence", [Ty::Int, Ty::Int])
+            if params[1..] == [ValType::I32, ValType::I32] && *results == reference =>
+        {
+            Some(BuilderMember::SubSequence {
+                index_out_of_bounds: index_out_of_bounds()?,
+            })
+        }
         _ => None,
     };
     let appends = matches!(
@@ -568,6 +685,7 @@ fn operation(
     representation: Representation,
     implementation: &BuiltinImplementation,
     (params, results): &Signature,
+    index_out_of_bounds: &mut dyn FnMut() -> Result<u32, String>,
 ) -> Result<Operation, String> {
     let Some(declaration) = &implementation.declaration else {
         return Err(format!(
@@ -614,6 +732,15 @@ fn operation(
                 && *results == [ValType::I32] =>
         {
             Ok(Operation::StringCompare)
+        }
+        (Representation::String, Some(BackendCompilerIntrinsic::StringSubSequence))
+            if *declaration.params == [Ty::Int, Ty::Int]
+                && params[1..] == [ValType::I32, ValType::I32]
+                && *results == [crate::objects::REFERENCE] =>
+        {
+            Ok(Operation::StringSubSequence {
+                index_out_of_bounds: index_out_of_bounds()?,
+            })
         }
         (_, Some(operation)) => Err(format!(
             "a library member {} overrides as {operation:?}",

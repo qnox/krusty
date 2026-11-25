@@ -1589,6 +1589,14 @@ fn wasm_library_object_values_preserve_identity() {
 }
 
 #[test]
+fn wasm_a_string_and_a_builder_cut_a_range_out_of_themselves() {
+    expect_wasm_box(
+        include_str!("box_regressions/textSubSequenceRanges.kt"),
+        "wasmTextSubSequenceRanges",
+    );
+}
+
+#[test]
 fn wasm_class_equality_and_rendering_use_the_class_own_members() {
     expect_wasm_box(
         r#"
