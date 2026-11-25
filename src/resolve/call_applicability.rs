@@ -305,9 +305,12 @@ pub(super) fn score_with_declaration(
         {
             return None;
         }
+        // A result-only producer is an ordinary fit for a parameter its result can bind. For any
+        // other parameter (`emptyList()` against a function type) it stays a candidate, so a lone
+        // one still reports the argument mismatch, but it ranks below every candidate that binds.
         checker
             .argument_uses_context_only_result(scope, argument)
-            .then_some(1)
+            .then_some(usize::from(contextual_call_result))
             .or_else(|| {
                 let fit = checker.member_argument_score(expected, semantic_actual)?;
                 let inferred_fit = declared.is_some_and(|declared| {
