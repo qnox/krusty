@@ -41,13 +41,10 @@ const ACC_BRIDGE: u16 = 0x0040;
 const OBJECT: &str = "Ljava/lang/Object;";
 
 /// The super classes of the lambda classes a default lambda cannot be: a suspend lambda's body is
-/// its state machine, and a callable reference reads its target through its own members.
-const UNSUPPORTED_SUPER_CLASSES: [&str; 13] = [
+/// its state machine, and a property reference reads its target through its own members.
+const UNSUPPORTED_SUPER_CLASSES: [&str; 10] = [
     "kotlin/coroutines/jvm/internal/SuspendLambda",
     "kotlin/coroutines/jvm/internal/RestrictedSuspendLambda",
-    "kotlin/jvm/internal/FunctionReference",
-    "kotlin/jvm/internal/FunctionReferenceImpl",
-    "kotlin/jvm/internal/AdaptedFunctionReference",
     "kotlin/jvm/internal/PropertyReference0",
     "kotlin/jvm/internal/PropertyReference1",
     "kotlin/jvm/internal/PropertyReference2",
@@ -58,6 +55,15 @@ const UNSUPPORTED_SUPER_CLASSES: [&str; 13] = [
     "kotlin/jvm/internal/PropertyReference1Impl",
 ];
 
+/// The super classes of a function reference's class. Its typed `invoke` carries the call itself;
+/// the super class only holds the reflection metadata and, for a bound reference, the receiver the
+/// arm's constructor call passes. An unbound one is a singleton whose body never reads its object.
+const FUNCTION_REFERENCE_SUPER_CLASSES: [&str; 3] = [
+    "kotlin/jvm/internal/FunctionReference",
+    "kotlin/jvm/internal/FunctionReferenceImpl",
+    "kotlin/jvm/internal/AdaptedFunctionReference",
+];
+
 /// The lambda `extracted` names, read from its class: the body every `invoke` of the parameter
 /// is replaced with. `function` is the inline function's name, without `$default`.
 pub fn load(
@@ -66,11 +72,11 @@ pub fn load(
     function: &str,
     reified: &ReifiedArguments,
 ) -> Result<Lambda, InlineError> {
-    if class
-        .super_name
-        .as_deref()
-        .is_some_and(|super_name| UNSUPPORTED_SUPER_CLASSES.contains(&super_name))
-    {
+    if class.super_name.as_deref().is_some_and(|super_name| {
+        UNSUPPORTED_SUPER_CLASSES.contains(&super_name)
+            || (extracted.constructor.is_some()
+                && FUNCTION_REFERENCE_SUPER_CLASSES.contains(&super_name))
+    }) {
         return Err(unsupported(
             "a default lambda that is not a plain lambda class",
         ));

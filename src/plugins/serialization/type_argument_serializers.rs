@@ -13,6 +13,7 @@
 //! and [`Spelled::expansion_annotations`] carries the annotations the alias's right-hand side wrote
 //! on its root (`typealias Coded = @Serializable(with = S::class) Item`).
 
+use super::annotations::CONTEXTUAL_FQ;
 use super::SERIALIZABLE_FQ;
 use crate::ir::Spelled;
 use crate::ir::{ClassId, IrFile};
@@ -28,7 +29,16 @@ pub(super) fn declared_type_spelling(
     class: ClassId,
     property: &str,
 ) -> Spelled {
-    ctx.property_declared_type(ir, class, property).clone()
+    let mut spelled = ctx.property_declared_type(ir, class, property).clone();
+    let used = super::use_serializers::used_serializers(ir);
+    if !used.is_empty() {
+        if let Some(ty) = ctx.property_type(ir, class, property) {
+            let contextual =
+                ctx.property_has_annotation(ir, class, property, type_name(CONTEXTUAL_FQ));
+            super::use_serializers::apply(&mut spelled, ty, &used, contextual);
+        }
+    }
+    spelled
 }
 
 /// The serializer class a checked `@Serializable(with = …)` on the spelled type itself names: the

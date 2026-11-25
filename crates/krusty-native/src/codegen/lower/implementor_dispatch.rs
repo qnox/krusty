@@ -799,11 +799,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         value: Value,
         boundary: &ParameterBoundary,
     ) -> Result<Option<(Block, Block)>, Unsupported> {
-        if boundary.implementation.non_null() == boundary.declared.non_null() {
-            return Ok(None);
-        }
-        let Some(descriptor) = self.file.type_descriptor(boundary.implementation)? else {
-            return Ok(None);
+        let descriptor = if boundary.implementation.non_null() == boundary.declared.non_null() {
+            None
+        } else {
+            self.file.type_descriptor(boundary.implementation)?
+        };
+        let Some(descriptor) = descriptor else {
+            // No type to test (the same reference on both sides, or `Any`, which every non-null
+            // value is): only a `null` the override's type excludes is rejected, as the erased
+            // bridge answers it.
+            if boundary.implementation.upper_bound_admits_null() {
+                return Ok(None);
+            }
+            let absent = self.builder.ins().icmp_imm_u(IntCC::Equal, value, 0);
+            let accepted = self.builder.create_block();
+            let rejected = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(absent, rejected, &[], accepted, &[]);
+            return Ok(Some((accepted, rejected)));
         };
         let type_address = self.data_address(descriptor);
         let mut matches = self

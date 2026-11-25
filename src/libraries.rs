@@ -42,6 +42,7 @@ mod param_flags;
 pub mod physical_parameter_plan;
 mod platform_abi;
 mod platform_contract;
+mod property_accessor_role;
 mod property_producer;
 mod provider_override;
 mod result_nullability;
@@ -70,6 +71,7 @@ pub use callable_scope_rung::CallableScopeRung;
 pub use class_identity::KlibClassIdentity;
 pub(crate) use classifier_application::{
     application_arguments_with_star_bounds, classifier_bindings, classifier_type_parameter_bounds,
+    has_placeholder_star,
 };
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
@@ -106,6 +108,7 @@ pub use platform_abi::PlatformAbi;
 pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
 };
+pub use property_accessor_role::{PropertyAccessorCandidate, PropertyAccessorRole};
 pub use property_producer::PropertyProducer;
 pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
@@ -591,6 +594,12 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
+    /// Whether a suspension point inside a `synchronized` or `withLock` block is an error on this
+    /// platform: the JVM releases a monitor only on the thread that acquired it.
+    fn rejects_suspension_in_critical_sections(&self) -> bool {
+        false
+    }
+
     /// Normalize a semantic type to the identity used when comparing source call arguments against
     /// compiled-library signatures. This is not an emit descriptor; it is a semantic compatibility key.
     /// Implementations that do not need library-name normalization return the type unchanged.
@@ -943,21 +952,6 @@ pub enum Origin {
 
 /// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
 /// first parameter). `owner` is the internal name of the facade/declaring container for emit.
-/// The properties whose getter or setter a platform method is named as: a Java `getA()` is the
-/// getter of `a`, and `setOpen(v)` the setter of `open` or `isOpen`. Each candidate names the
-/// methods that would be the same property's other accessor (`setA` for `getA`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PropertyAccessorRole {
-    pub candidates: Box<[PropertyAccessorCandidate]>,
-    pub setter: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PropertyAccessorCandidate {
-    pub property: String,
-    pub counterparts: Box<[String]>,
-}
-
 #[derive(Clone, Debug)]
 pub struct LibraryCallable {
     /// Stable provider-owned declaration identity. Current-module declarations use FIR's
