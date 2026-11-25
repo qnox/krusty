@@ -1,7 +1,7 @@
 //! Declaration facts a file records about its classes: synthetic and deprecated marks, constructor
 //! defaults, generic and field signatures. Lowering records them once; backends read them by class.
 
-use super::{ClassId, ExprId, IrClass, IrFile, IrGenericSig, IrTypeParameter};
+use super::{ExprId, IrClass, IrFile, IrGenericSig, IrTypeParameter};
 use crate::types::{Ty, TypeName};
 
 /// The Kotlin visibility a plugin gives a class it generates without a declaration. No declaration
@@ -15,14 +15,6 @@ pub enum IrDeclarationlessVisibility {
 }
 
 impl IrFile {
-    /// Whether `class` is declared in executable code: a local or anonymous class, or the copy of
-    /// an anonymous object an inline expansion specialized for its call. No other file names such
-    /// a class, and every file that expands an inline function declaring one realizes it again.
-    pub fn is_local_class(&self, class: ClassId) -> bool {
-        self.local_class_name_provenance.contains_key(&class)
-            || self.specialized_anonymous_classes.contains_key(&class)
-    }
-
     /// The class and method index of `function` when it is a method of an open class, which a
     /// subclass may override, so a call reaches it through the class's dispatch table.
     pub(crate) fn overridable_method(

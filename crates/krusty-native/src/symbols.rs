@@ -196,10 +196,6 @@ pub(super) struct Symbols {
     /// Per IR function index, whether its symbol is the module symbol another file of the module
     /// calls it by.
     pub cross_file: Vec<bool>,
-    /// Per IR function index, whether no other file names it: a member of a local or anonymous
-    /// class, or a local or compiler-generated function. Every file that expands an inline function
-    /// declaring one realizes it again under the same name, so the symbol stays inside its object.
-    pub file_local: Vec<bool>,
 }
 
 fn class_symbol_family(base: &str) -> [String; 6] {
@@ -224,6 +220,15 @@ fn module_class_symbol_base(module_name: &str, fq_name: &str) -> String {
     base
 }
 
+/// Whether `class` is declared in executable code: a local or anonymous class, or the copy of an
+/// anonymous object an inline expansion specialized for its call. No other file names one, and
+/// every file that expands an inline function declaring one realizes it again under the same name,
+/// so its descriptor and members stay inside the object.
+pub(super) fn is_local_class(ir: &IrFile, class: krusty::ir::ClassId) -> bool {
+    ir.local_class_name_provenance.contains_key(&class)
+        || ir.specialized_anonymous_classes.contains_key(&class)
+}
+
 pub(super) fn symbols(
     ir: &IrFile,
     module_name: &str,
@@ -239,7 +244,6 @@ pub(super) fn symbols(
     // and a member, which another file calls directly when dispatch cannot select a different body.
     let mut functions = vec![String::new(); ir.functions.len()];
     let mut cross_file = vec![false; ir.functions.len()];
-    let mut file_local = vec![false; ir.functions.len()];
     for (callable, function) in &ir.checked_callable_functions {
         let index = *function as usize;
         let Some(declared) = ir.functions.get(index) else {
@@ -251,7 +255,7 @@ pub(super) fn symbols(
         if let Some(owner) = declared.dispatch_receiver {
             let named = ir
                 .class_id_by_name(owner)
-                .is_some_and(|class| !ir.is_local_class(class));
+                .is_some_and(|class| !is_local_class(ir, class));
             if !named {
                 continue;
             }
@@ -345,10 +349,8 @@ pub(super) fn symbols(
         .filter(|package| !package.is_empty());
     // Methods are named by their class, then everything else by the package. A slot filled above
     // is a cross-file symbol and stays.
-    for (id, (class, base)) in ir.classes.iter().zip(&classes).enumerate() {
-        let id = krusty::ir::ClassId::try_from(id).expect("class identity fits ClassId");
+    for (class, base) in ir.classes.iter().zip(&classes) {
         for &fid in &class.methods {
-            file_local[fid as usize] = ir.is_local_class(id);
             if !functions[fid as usize].is_empty() {
                 continue;
             }
@@ -371,7 +373,6 @@ pub(super) fn symbols(
         }
         // An entry constructing a class, or answering its object, is named after that class.
         if let Some(&class) = ir.construction_entries().get(&(index as krusty::ir::FunId)) {
-            file_local[index] = ir.is_local_class(class);
             let base = format!(
                 "kt_{}_{}",
                 classes[class as usize],
@@ -392,7 +393,6 @@ pub(super) fn symbols(
             .dispatch_receiver
             .and_then(|owner| ir.class_id_by_name(owner))
         {
-            file_local[index] = ir.is_local_class(class);
             let base = format!(
                 "kt_{}_{}",
                 classes[class as usize],
@@ -423,7 +423,6 @@ pub(super) fn symbols(
         classes,
         functions,
         cross_file,
-        file_local,
     }
 }
 
@@ -476,26 +475,6 @@ mod tests {
         first_file.functions.push(first_file.functions[0].clone());
         let repeated = symbols(&first_file, "shared-module", file(0), HashSet::default());
         assert_ne!(repeated.functions[0], repeated.functions[1]);
-    }
-
-    #[test]
-    fn module_local_functions_and_named_class_members_need_no_local_linkage() {
-        // A local function is named by its source file instead, so it needs no local linkage.
-        let local = symbols(
-            &fallback_function("local"),
-            "module",
-            file(0),
-            HashSet::default(),
-        );
-        assert_eq!(local.file_local, [false]);
-        // A named class's member is reachable from another file of the module.
-        let mut named = fallback_function("member");
-        let owner = krusty::types::type_name("sample/Named");
-        named.classes.push(krusty::ir::IrClass::synthetic(owner));
-        named.functions[0].is_static = false;
-        named.functions[0].dispatch_receiver = Some(owner);
-        let member = symbols(&named, "module", file(0), HashSet::default());
-        assert_eq!(member.file_local, [false]);
     }
 
     #[test]

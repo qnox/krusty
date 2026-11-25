@@ -84,7 +84,9 @@ impl<'a> FileLowering<'a> {
         // source file asks an instance this unit made (an object's single instance, a library
         // `Result.Failure`) its class against it.
         let named = match self.unit_kind {
-            krusty::backend::CheckedIrUnitKind::Source => !self.ir.is_local_class(class),
+            krusty::backend::CheckedIrUnitKind::Source => {
+                !super::super::super::symbols::is_local_class(self.ir, class)
+            }
             krusty::backend::CheckedIrUnitKind::DependencySupport => {
                 self.exported.contains(&class)
                     || self.dependency_signatures.classifier(class).is_some()
