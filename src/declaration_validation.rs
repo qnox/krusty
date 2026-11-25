@@ -113,3 +113,42 @@ pub(crate) fn interface_block_property_diagnostics(
         message: "abstract property in interface cannot be private.",
     })
 }
+
+/// Under a release that takes an initialized `companion { … }` block property of an interface for
+/// an interface property, kotlinc refuses its initializer
+/// ([`crate::kotlin_version::Quirk::InterfaceBlockPropertyInitializerProhibited`]). Reported at the
+/// initializer expression.
+pub(crate) fn interface_block_initializer_diagnostic(
+    initializer: Option<Span>,
+    quirks: crate::kotlin_version::Quirks,
+) -> Option<DeclarationDiagnostic> {
+    let span = initializer.filter(|_| {
+        quirks.has(crate::kotlin_version::Quirk::InterfaceBlockPropertyInitializerProhibited)
+    })?;
+    Some(DeclarationDiagnostic {
+        span,
+        message: "property initializers in interfaces are prohibited.",
+    })
+}
+
+#[cfg(test)]
+mod interface_block_initializer_tests {
+    use super::*;
+    use crate::kotlin_version::{Quirk, Quirks};
+
+    #[test]
+    fn a_release_that_prohibits_the_initializer_reports_it_where_it_is_written() {
+        let span = Span::new(10, 13);
+        let prohibiting =
+            Quirks::NONE.with(Quirk::InterfaceBlockPropertyInitializerProhibited, true);
+        let diagnostic = interface_block_initializer_diagnostic(Some(span), prohibiting)
+            .expect("the release prohibits it");
+        assert_eq!(diagnostic.span, span);
+        assert_eq!(
+            diagnostic.message,
+            "property initializers in interfaces are prohibited."
+        );
+        assert!(interface_block_initializer_diagnostic(None, prohibiting).is_none());
+        assert!(interface_block_initializer_diagnostic(Some(span), Quirks::NONE).is_none());
+    }
+}

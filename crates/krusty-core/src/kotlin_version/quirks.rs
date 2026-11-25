@@ -190,6 +190,24 @@ quirks! {
         fixed_in: None,
         defect: true,
     }
+    /// A constant or stored property of an interface's `companion { … }` block with an initializer
+    /// is taken for an interface property's initializer, which an interface cannot have:
+    /// `property initializers in interfaces are prohibited.`, reported at each initializer. From
+    /// 2.4.20 the block's members are statics of the interface.
+    InterfaceBlockPropertyInitializerProhibited {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: true,
+    }
+    /// A stored property of an interface's `companion { … }` block keeps its field in the
+    /// interface itself, as a `private static` (`final` for a `val`) field, which the JVM refuses
+    /// to load: `ClassFormatError: Illegal field modifiers`. From 2.5 the fields live in
+    /// `<Interface>$$PrivateFieldsN` classes.
+    InterfaceBlockPropertyFieldIsPrivateStatic {
+        since: Some(KotlinVersion::V2_4_20),
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: true,
+    }
 }
 
 const _: () = assert!(Quirk::ALL.len() <= u64::BITS as usize);
