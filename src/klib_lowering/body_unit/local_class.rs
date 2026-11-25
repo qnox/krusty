@@ -69,6 +69,11 @@ impl<'s> Linker<'_, 's> {
             }
             None => None,
         };
+        // The class's own library's non-public interfaces are installed before it, so its members
+        // name the members they override.
+        for interface in &prepared.local_interfaces {
+            self.install_local_interface(ir, interface)?;
+        }
         let mut class = super::super::same_library_class::installed_class(&prepared);
         // The initializer lowers the arguments the constructor passes, as its body reads them.
         if let Some((name, params)) = superclass {
@@ -229,6 +234,13 @@ impl<'s> Linker<'_, 's> {
                 self.sources.externals,
                 self.sources.declarations,
             )?;
+            self.record_installed_overrides(
+                ir,
+                class_id,
+                function,
+                &prepared.key.module,
+                &member.installed_overrides,
+            )?;
         }
         // A member the class inherits from a superclass this unit installed or materialized
         // implements the interface declarations the class reaches only through its supertypes.
@@ -263,6 +275,46 @@ impl<'s> Linker<'_, 's> {
             },
         );
         Ok(constructor)
+    }
+
+    /// Record that `function`, a method of the installed class `class`, overrides each member of
+    /// an installed interface of `module` that `overridden` names. The interface member and the
+    /// override share one signature: a member whose signature differs would need a bridge, which
+    /// an installed interface does not have.
+    fn record_installed_overrides(
+        &self,
+        ir: &mut IrFile,
+        class: crate::ir::ClassId,
+        function: crate::ir::FunId,
+        module: &str,
+        overridden: &[KlibIrSignature],
+    ) -> Result<(), KlibBodyDeclineReason> {
+        for signature in overridden {
+            let key = super::super::same_library_class::LocalIdentity {
+                module: module.to_owned(),
+                signature: signature.clone(),
+            };
+            let Some(member) = self.local_functions.get(&key) else {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "an overridden non-public interface member was not installed".to_owned(),
+                ));
+            };
+            let declared = &ir.functions[member.function as usize];
+            let implementation = &ir.functions[function as usize];
+            if declared.params != implementation.params || declared.ret != implementation.ret {
+                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "an override of a non-public interface member with another signature",
+                ));
+            }
+            let edge = crate::ir::IrInstalledOverride {
+                implementation: function,
+                overridden: member.function,
+            };
+            ir.classes[class as usize]
+                .installed_interface_overrides
+                .push(edge);
+        }
+        Ok(())
     }
 
     /// The constructor a file-local construction invokes: one of a class already installed for

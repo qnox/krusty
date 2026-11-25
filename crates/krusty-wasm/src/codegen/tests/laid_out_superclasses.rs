@@ -92,10 +92,10 @@ const EXCEPTION_SUBCLASSES: &str =
 #[test]
 fn a_class_extends_a_runtime_exception_subclass_an_earlier_file_laid_out() {
     for target in WasmTarget::ALL {
-        let path = krusty::toolchain::kotlin_stdlib_klib(
+        let path = krusty::toolchain::kotlin_stdlib_klib_or_reason(
             krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
         )
-        .expect("the exact target stdlib must be provisioned");
+        .unwrap_or_else(|reason| panic!("the exact target stdlib must be provisioned: {reason}"));
         let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
             path,
             KlibStdlibSemantics::Wasm,
@@ -116,10 +116,10 @@ fn a_class_extends_a_runtime_exception_subclass_an_earlier_file_laid_out() {
 fn root_any_construction_keeps_identity_and_interface_dispatch() {
     let source = include_str!("../../../../../tests/box_regressions/runtimeAnyConstruction.kt");
     for target in WasmTarget::ALL {
-        let path = krusty::toolchain::kotlin_stdlib_klib(
+        let path = krusty::toolchain::kotlin_stdlib_klib_or_reason(
             krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
         )
-        .expect("the exact target stdlib must be provisioned");
+        .unwrap_or_else(|reason| panic!("the exact target stdlib must be provisioned: {reason}"));
         let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
             path,
             KlibStdlibSemantics::Wasm,

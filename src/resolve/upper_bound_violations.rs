@@ -722,15 +722,15 @@ impl<'a> Checker<'a> {
     }
 
     /// Check the declared types of a member without a body (an abstract or interface function or
-    /// property), which no body check visits: `receiver`, the value `parameters` (with whether each
-    /// is a vararg), and the declared result `ret`, against the header Pass 1 finalized for
-    /// `declaration`.
+    /// property), which no body check visits: `receiver`, the value `parameters` (each under its
+    /// own annotations' policies), and the declared result `ret`, against the header Pass 1
+    /// finalized for `declaration`.
     pub(super) fn check_bodyless_member_bounds(
         &mut self,
         scope: &CheckerScope<'_>,
         declaration: Option<crate::fir::DeclarationId>,
         receiver: Option<&TypeRef>,
-        parameters: &[(&TypeRef, bool)],
+        parameters: &[crate::ast::Param],
         ret: Option<&TypeRef>,
         getter_ret: Option<&TypeRef>,
     ) -> bool {
@@ -767,21 +767,23 @@ impl<'a> Checker<'a> {
         if signature.parameters.len() != parameters.len() {
             return false;
         }
-        for (position, ((reference, is_vararg), finalized)) in parameters
+        for (position, (parameter, finalized)) in parameters
             .iter()
             .zip(signature.parameters.iter())
             .enumerate()
         {
-            self.record_or_bind_deferred_parameter_type(
-                scope,
-                declaration,
-                reference,
-                *is_vararg,
-                finalized.get(),
-                spellings
-                    .as_ref()
-                    .and_then(|spellings| spellings.param(position)),
-            );
+            self.with_parameter_policies(scope, parameter.into(), |checker| {
+                checker.record_or_bind_deferred_parameter_type(
+                    scope,
+                    declaration,
+                    &parameter.ty,
+                    parameter.is_vararg,
+                    finalized.get(),
+                    spellings
+                        .as_ref()
+                        .and_then(|spellings| spellings.param(position)),
+                )
+            });
         }
         if let Some(reference) = ret {
             self.record_or_bind_deferred_declaration_type(
@@ -890,7 +892,9 @@ impl<'a> Checker<'a> {
                 self.check_declaration_type(&method_scope, receiver);
             }
             for parameter in &function.params {
-                self.check_declaration_type(&method_scope, &parameter.ty);
+                self.with_parameter_policies(&method_scope, parameter.into(), |checker| {
+                    checker.check_declaration_type(&method_scope, &parameter.ty)
+                });
             }
             if let Some(result) = function.ret.as_ref() {
                 self.check_declaration_type(&method_scope, result);
@@ -899,16 +903,11 @@ impl<'a> Checker<'a> {
             self.restore_type_parameter_owners(owned);
             return;
         }
-        let value_parameters = function
-            .params
-            .iter()
-            .map(|parameter| (&parameter.ty, parameter.is_vararg))
-            .collect::<Vec<_>>();
         if !self.check_bodyless_member_bounds(
             &method_scope,
             declaration,
             function.receiver.as_ref(),
-            &value_parameters,
+            &function.params,
             function.ret.as_ref(),
             None,
         ) {
@@ -1043,16 +1042,11 @@ impl<'a> Checker<'a> {
             self.restore_type_parameter_owners(owned);
             return;
         }
-        let context_parameters = property
-            .context_params
-            .iter()
-            .map(|parameter| (&parameter.ty, parameter.is_vararg))
-            .collect::<Vec<_>>();
         if !self.check_bodyless_member_bounds(
             &property_scope,
             declaration,
             property.receiver.as_ref(),
-            &context_parameters,
+            &property.context_params,
             property.ty.as_ref(),
             property.getter_ty.as_ref(),
         ) {

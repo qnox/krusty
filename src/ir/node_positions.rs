@@ -238,6 +238,14 @@ impl IrFile {
         self.positions.get(expression).factory_line
     }
 
+    /// The line a property initializer's store takes: its initializer expression's line. fir2ir
+    /// builds the store at the initializer's offsets before an array factory call becomes its
+    /// vararg, so a factory's store sits on the call's line, not on its first element's.
+    pub fn initializer_store_line(&self, initializer: ExprId) -> Option<u32> {
+        self.factory_line(initializer)
+            .or_else(|| self.source_line(initializer))
+    }
+
     pub fn set_source_line(&mut self, expression: ExprId, line: u32) {
         self.positions.settle(expression).source_line = Some(line);
     }

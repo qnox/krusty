@@ -43,6 +43,7 @@ mod synthesized_accessor;
 mod transient_initializer;
 mod type_argument_serializers;
 mod type_parameter_serializers;
+mod use_serializers;
 mod value_class_body;
 mod value_class_types;
 
@@ -1149,10 +1150,10 @@ impl IrPlugin for SerializationPlugin {
 
     fn publish_frontend_generated_classifiers(
         &self,
-        ctx: &FrontendClassContext<'_>,
+        header: &crate::plugins::FrontendClassifierHeader<'_>,
         classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
     ) {
-        publish_generated_classifier_facts(ctx, classifiers);
+        publish_generated_classifier_facts(header, classifiers);
     }
 
     fn check_frontend_class(

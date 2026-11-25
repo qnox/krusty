@@ -6,9 +6,28 @@
 //! type the body declares, calls the body and hands its result back as a reference.
 
 use super::*;
+use crate::callable_references::{AccessorShape, PropertyAccess};
 use crate::encode::{CompositeType, SubType};
 use crate::function_value_names;
 use crate::objects::immutable;
+
+/// The class of a new function value, the entry its table names and how many operands that entry
+/// takes after the value itself.
+pub(super) struct FunctionValueClass {
+    pub(super) class: crate::interface_dispatch::ClassRef,
+    pub(super) entry: u32,
+    pub(super) arity: usize,
+    pub(super) captures: CaptureLayout,
+}
+
+/// Where a function value's struct holds its captures, which another entry over the same value
+/// unpacks the same way.
+#[derive(Clone)]
+pub(super) struct CaptureLayout {
+    structure: u32,
+    first: u32,
+    carriers: Vec<ValType>,
+}
 
 /// What `==` on a function value compares.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -27,7 +46,8 @@ pub(super) enum FunctionEquality {
 impl Body<'_> {
     /// A new function value, created by the expression `site`, whose body is `function`, carrying
     /// `captures` as its leading arguments. With `sam`, the value is also an instance of that
-    /// `fun interface`, whose member it implements. Answers the class the value is an instance of.
+    /// `fun interface`, whose member it implements. Answers the class the value is an instance of
+    /// and the entry its table names.
     pub(super) fn function_value(
         &mut self,
         site: u32,
@@ -35,7 +55,7 @@ impl Body<'_> {
         captures: &[u32],
         equality: FunctionEquality,
         sam: Option<&krusty::ir::IrSamTarget>,
-    ) -> Result<crate::interface_dispatch::ClassRef, Unsupported> {
+    ) -> Result<FunctionValueClass, Unsupported> {
         let instance = self.type_of(site)?;
         let declaration = self
             .ir
@@ -46,7 +66,6 @@ impl Body<'_> {
             return Err("a function value whose body is a member".into());
         }
         let params = declaration.params.clone();
-        let ret = declaration.ret;
         let own = params
             .get(captures.len()..)
             .ok_or("a function value capturing more than its body takes")?
@@ -59,7 +78,6 @@ impl Body<'_> {
         {
             return Err("a function value with a shared parameter outside its captures".into());
         }
-        let body = self.emitted_function(function)?;
         let shape = self.runtime.function_shape(self.module, own.len());
 
         let mut fields = vec![
@@ -100,31 +118,12 @@ impl Body<'_> {
             open: false,
         });
 
-        // The entry: `(this, arguments…) -> result`, every operand a reference.
-        let mut entry = Code::default();
-        let mut locals = Vec::new();
-        for field in 0..captures.len() as u32 {
-            entry
-                .local_get(0)
-                .ref_cast(false, HeapType::Concrete(structure))
-                .struct_get(structure, field + first_capture);
-        }
-        for (index, &param) in own.iter().enumerate() {
-            entry.local_get(index as u32 + 1);
-            self.unpack_argument(&mut entry, param)?;
-        }
-        entry.call(body);
-        let scratch = own.len() as u32 + 1;
-        self.pack_result(&mut entry, &mut locals, scratch, ret)?;
-        let invoke = self.module.declare();
-        self.module.define(
-            invoke,
-            Function {
-                ty: shape.invoke,
-                locals,
-                code: entry,
-            },
-        );
+        let layout = CaptureLayout {
+            structure,
+            first: first_capture,
+            carriers: captured_types.clone(),
+        };
+        let invoke = self.function_value_entry(function, &layout)?;
 
         let [_, _, to_string_ty] = self.runtime.objects.any_slot_types;
         let equals = match equality {
@@ -151,10 +150,14 @@ impl Body<'_> {
                 let name = function_value_names::class_name(shape, &codes);
                 self.runtime.function_value_to_string(self.module, &name)
             }
-            None => match function_value_names::sam_class_name(self.ir, site) {
-                Some(name) => self.runtime.function_value_to_string(self.module, &name),
+            None => match (
+                function_value_names::sam_class_name(self.ir, site),
+                self.property_reference_text(site),
+            ) {
+                (Some(name), _) => self.runtime.function_value_to_string(self.module, &name),
+                (None, Some(text)) => self.runtime.constant_to_string(self.module, &text),
                 // kotlinc-wasm names this value's class otherwise, or prints it otherwise.
-                None => self.runtime.objects.trap(self.module, to_string_ty),
+                (None, None) => self.runtime.objects.trap(self.module, to_string_ty),
             },
         };
         let callable = sam.is_none_or(|target| {
@@ -264,7 +267,88 @@ impl Body<'_> {
             self.code.local_get(local);
         }
         self.code.struct_new(structure);
-        Ok(class)
+        Ok(FunctionValueClass {
+            class,
+            entry: invoke,
+            arity: own.len(),
+            captures: layout,
+        })
+    }
+
+    /// The entry calling `function` on a function value whose captures `layout` places:
+    /// `(this, arguments…) -> result`, every operand a reference. It unpacks the captures as
+    /// `function`'s leading arguments, converts each other argument to the type `function`
+    /// declares, calls it and hands its result back as a reference.
+    fn function_value_entry(
+        &mut self,
+        function: FunId,
+        layout: &CaptureLayout,
+    ) -> Result<u32, Unsupported> {
+        let declaration = self
+            .ir
+            .functions
+            .get(function as usize)
+            .ok_or("a function value with an invalid body identity")?;
+        let own = declaration
+            .params
+            .get(layout.carriers.len()..)
+            .ok_or("a function value capturing more than its body takes")?
+            .to_vec();
+        let ret = declaration.ret;
+        for (parameter, &carrier) in layout.carriers.iter().enumerate() {
+            if parameter_carrier(self.module, self.ir, function, parameter as u32)? != carrier {
+                return Err("a function value entry whose captures differ from its value's".into());
+            }
+        }
+        let body = self.emitted_function(function)?;
+        let shape = self.runtime.function_shape(self.module, own.len());
+        let mut entry = Code::default();
+        let mut locals = Vec::new();
+        for field in 0..layout.carriers.len() as u32 {
+            entry
+                .local_get(0)
+                .ref_cast(false, HeapType::Concrete(layout.structure))
+                .struct_get(layout.structure, field + layout.first);
+        }
+        for (index, &param) in own.iter().enumerate() {
+            entry.local_get(index as u32 + 1);
+            self.unpack_argument(&mut entry, param)?;
+        }
+        entry.call(body);
+        let scratch = own.len() as u32 + 1;
+        self.pack_result(&mut entry, &mut locals, scratch, ret)?;
+        let invoke = self.module.declare();
+        self.module.define(
+            invoke,
+            Function {
+                ty: shape.invoke,
+                locals,
+                code: entry,
+            },
+        );
+        Ok(invoke)
+    }
+
+    /// The text a function value that is a property reference prints, as kotlinc-wasm prints it:
+    /// `property NAME (Kotlin reflection is not available)`. `None` for any other value.
+    fn property_reference_text(&self, site: u32) -> Option<String> {
+        let IrExpr::CallableReference(reference) = self.ir.expr(site) else {
+            return None;
+        };
+        let krusty::ir::IrCallableReferenceTarget::Property(property) = &reference.target else {
+            return None;
+        };
+        if !property.reflective {
+            return None;
+        }
+        let name = krusty::backend::reference_names::callable_reference_name(
+            self.ir,
+            self.callables,
+            reference,
+        )?;
+        Some(format!(
+            "property {name} (Kotlin reflection is not available)"
+        ))
     }
 
     /// A new function value for the callable reference `id`. Its adapter takes the referenced
@@ -281,7 +365,12 @@ impl Body<'_> {
             .chain(reference.bound_receiver)
             .collect();
         let kind = self.callable_reference_kind(reference)?;
-        let class = self.function_value(
+        let FunctionValueClass {
+            class,
+            entry,
+            arity,
+            captures: layout,
+        } = self.function_value(
             id,
             reference.adapter,
             &captures,
@@ -300,6 +389,35 @@ impl Body<'_> {
             reference,
         ) {
             self.runtime.reference_name(self.module, class, &name)?;
+        }
+        // A `KProperty` value reads its property through `get` as its entry does. A mutable one
+        // writes it through `set` with the entry of its write adapter, over the same captures.
+        let krusty::ir::IrCallableReferenceTarget::Property(property) = &reference.target else {
+            return Ok(());
+        };
+        if !property.reflective {
+            return Ok(());
+        }
+        self.runtime.property_reference_accessor(
+            self.module,
+            class,
+            AccessorShape {
+                access: PropertyAccess::Read,
+                operands: arity,
+            },
+            entry,
+        )?;
+        if let Some(writer) = property.writer {
+            let write = self.function_value_entry(writer, &layout)?;
+            self.runtime.property_reference_accessor(
+                self.module,
+                class,
+                AccessorShape {
+                    access: PropertyAccess::Write,
+                    operands: arity + 1,
+                },
+                write,
+            )?;
         }
         Ok(())
     }

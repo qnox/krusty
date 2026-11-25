@@ -53,7 +53,8 @@ impl BodyLowering<'_> {
             }
             KlibIrSignature::Public(_)
             | KlibIrSignature::Accessor(_)
-            | KlibIrSignature::FileLocal { .. } => {
+            | KlibIrSignature::FileLocal { .. }
+            | KlibIrSignature::TypeParameter { .. } => {
                 let linked = match self.object_members.get(signature) {
                     Some(member) => member.linked(),
                     None => self.linker.link_local_function(self.ir, signature)?,

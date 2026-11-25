@@ -169,7 +169,9 @@ impl BodyLowering<'_> {
         self.next_temporary = enclosing_temporary;
         let value = value?;
 
-        let body = self.callable_reference_adapter_body(value, array_type.get(), reference.ret);
+        let body = self
+            .ir
+            .callable_reference_adapter_body(value, array_type.get(), reference.ret);
         let function = self.ir.add_fun(IrFunction {
             name: format!(
                 "$fir_array_factory_ref_{}_{}",

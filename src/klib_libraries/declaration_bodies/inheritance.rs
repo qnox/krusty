@@ -284,19 +284,10 @@ impl KlibDeclarationBodies {
             let Some(&library) = self.modules.get(&module) else {
                 continue;
             };
-            for tree in self.libraries[library].trees() {
-                let mut pending = vec![&tree.declaration];
-                while let Some(declaration) = pending.pop() {
-                    let KlibIrMember::Class(id) = declaration else {
-                        continue;
-                    };
-                    let class = tree.arena.class(*id);
-                    pending.extend(class.members.iter());
-                    if class.base.symbol.signature == wanted
-                        && found.replace((&tree.arena, class)).is_some()
-                    {
-                        return Err(());
-                    }
+            for (arena, class) in self.libraries[library].classes_at_path(signature) {
+                if class.base.symbol.signature == wanted && found.replace((arena, class)).is_some()
+                {
+                    return Err(());
                 }
             }
         }
@@ -334,7 +325,7 @@ pub(crate) fn member_signature(signature: &KlibIrSignature) -> Option<KlibDeclar
         KlibIrSignature::Accessor(signature) => {
             Some(KlibDeclarationSignature::Accessor(signature.clone()))
         }
-        KlibIrSignature::FileLocal { .. } => None,
+        KlibIrSignature::FileLocal { .. } | KlibIrSignature::TypeParameter { .. } => None,
     }
 }
 

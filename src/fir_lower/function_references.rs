@@ -78,8 +78,11 @@ impl BodyLowering<'_> {
         if suspend {
             self.ir.suspend_calls.insert(invoke, target_result.get());
         }
-        let body =
-            self.callable_reference_adapter_body(invoke, target_result.get(), target_result.get());
+        let body = self.ir.callable_reference_adapter_body(
+            invoke,
+            target_result.get(),
+            target_result.get(),
+        );
         let bound_parameters = target_parameters
             .iter()
             .enumerate()
@@ -171,7 +174,7 @@ impl BodyLowering<'_> {
         if target_suspend {
             self.ir.suspend_calls.insert(invoke, target_result.get());
         }
-        let body = self.callable_reference_adapter_body(
+        let body = self.ir.callable_reference_adapter_body(
             invoke,
             target_result.get(),
             reference_result.get(),

@@ -685,3 +685,25 @@ impl Checker<'_> {
         }
     }
 }
+
+impl Checker<'_> {
+    /// Types the arguments of a `this(...)`/`super(...)` delegation ahead of constructor selection.
+    ///
+    /// A lambda or callable reference is contextual: its initial `Error` placeholder stays until the
+    /// shared constructor selector maps it to a parameter slot, just like a primary class-header
+    /// base argument.
+    pub(super) fn type_delegation_arguments(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        arguments: &[ExprId],
+    ) {
+        for &argument in arguments {
+            if !matches!(
+                self.file.expr(argument),
+                Expr::Lambda { .. } | Expr::CallableRef { .. }
+            ) {
+                self.expr(scope, argument);
+            }
+        }
+    }
+}

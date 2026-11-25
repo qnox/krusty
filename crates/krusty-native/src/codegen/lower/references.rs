@@ -526,6 +526,8 @@ impl<'a> FileLowering<'a> {
             })
             .transpose()?;
         let name = self.declare_local_function(&format!("{base}_name"), &[any()], any())?;
+        let to_string =
+            self.declare_local_function(&format!("{base}_to_string"), &[any()], any())?;
 
         let mut vtable = self.any_vtable()?;
         // Kotlin compares two references by the declaration they name and the receiver they bind.
@@ -534,6 +536,7 @@ impl<'a> FileLowering<'a> {
         let marker = self.reference_identity_marker(identity)?;
         vtable[0] = self.runtime_member_import("kt_reference_equals")?;
         vtable[1] = self.runtime_member_import("kt_reference_hash_code")?;
+        vtable[2] = to_string;
         vtable.push(getter);
         vtable.push(match setter {
             Some(setter) => setter,
@@ -600,6 +603,7 @@ impl<'a> FileLowering<'a> {
             self.define_reference_set(setter, &base, &site, receiver_offset)?;
         }
         self.define_reference_name(name, &base, &site.name)?;
+        self.define_reference_to_string(to_string, &base, &site.name)?;
 
         let singleton = match site.bound {
             Some(_) => None,
@@ -769,7 +773,8 @@ impl<'a> FileLowering<'a> {
                     }
                     Access::TopLevel { property } => {
                         let ty = body.top_level_written_ty(&property)?;
-                        let Some(value) = body.convert(params[2], Some(any()), ty)? else {
+                        let written = body.check_erased_value(params[2], ty)?;
+                        let Some(value) = body.convert(written, Some(any()), ty)? else {
                             return Err(declined!("a `Unit` value assigned to `{name}`"));
                         };
                         body.top_level_write_value(&property, value)?;
@@ -778,7 +783,8 @@ impl<'a> FileLowering<'a> {
                         let ty = body.written_property_ty(class, index)?;
                         let object = receiver(body, params, receiver_offset);
                         body.null_check(object)?;
-                        let Some(value) = body.convert(params[2], Some(any()), ty)? else {
+                        let written = body.check_erased_value(params[2], ty)?;
+                        let Some(value) = body.convert(written, Some(any()), ty)? else {
                             return Err(declined!("a `Unit` value assigned to `{name}`"));
                         };
                         body.property_write_of(class, index, object, value)?;
@@ -792,7 +798,13 @@ impl<'a> FileLowering<'a> {
                             setter.ok_or_else(|| format!("a write to the read-only `{name}`"))?;
                         let object =
                             takes_receiver.then(|| receiver(body, params, receiver_offset));
-                        body.accessor_of(setter, object, Some(params[2]))?;
+                        let written_ty = body.file.ir.functions[setter as usize]
+                            .params
+                            .last()
+                            .copied()
+                            .ok_or_else(|| format!("a setter of `{name}` without a value"))?;
+                        let written = body.check_erased_value(params[2], written_ty)?;
+                        body.accessor_of(setter, object, Some(written))?;
                     }
                 }
                 body.builder.ins().return_(&[]);
@@ -803,6 +815,30 @@ impl<'a> FileLowering<'a> {
     }
 
     /// `name(self)`: the property's Kotlin name.
+    /// `toString(self)`: a property reference prints as `property NAME (Kotlin reflection is not
+    /// available)`, which is what kotlinc-native's references print.
+    fn define_reference_to_string(
+        &mut self,
+        id: FuncId,
+        base: &str,
+        property: &str,
+    ) -> Result<(), Unsupported> {
+        let signature = self.signature_of(&[any()], any())?;
+        let text = format!("property {property} (Kotlin reflection is not available)").into_bytes();
+        self.emit_function(
+            id,
+            signature,
+            any(),
+            &format!("{base}_to_string"),
+            &mut |body, _| {
+                let value = body.string_literal(&text)?;
+                body.builder.ins().return_(&[value]);
+                body.terminate();
+                Ok(())
+            },
+        )
+    }
+
     pub(super) fn define_reference_name(
         &mut self,
         id: FuncId,
@@ -954,8 +990,72 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let property = self.file.callables.property(target)?;
-        let role = self.file.callables.callable(property.getter)?.semantic_role;
-        self.reference_member(role, receiver, &[], property.result)
+        let getter = self.file.callables.callable(property.getter)?;
+        let slot = reference_slot(getter.semantic_role, 0)?;
+        let owner = getter.physical_owner;
+        Some(self.reference_property_read(slot, owner, property.getter, receiver, property.result))
+    }
+
+    /// A reflection property read whose receiver may be a class of the module rather than a
+    /// reference object: `KCallable.name` on a class that implements `KProperty` by delegation or
+    /// override. Such a class lays its table out as a class, so the reference-object slot means
+    /// something else in it. Each class of the module that can stand behind the getter's owner is
+    /// tested first and enters its own getter: one of this file through its laid-out slot, one of
+    /// another file through the slot the module plan gives it. Any other object is a reference
+    /// object and answers from its fixed slot.
+    fn reference_property_read(
+        &mut self,
+        slot: u32,
+        owner: krusty::types::TypeName,
+        getter: krusty::fir::ExternalCallableId,
+        receiver: u32,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let local = self.file.implementors_of(owner);
+        let mut implementors = Vec::with_capacity(local.len());
+        for &class in &local {
+            let Some(arm) = self.external_property_getter_slot(class, getter) else {
+                return Err(self.undispatched_reference_read(owner));
+            };
+            implementors.push(arm);
+        }
+        // The module's other files, by the dependency classifiers their classes name: the owner
+        // itself or one of its dependency subtypes, such as `KProperty` for `KCallable.name`.
+        let mut remote = Vec::new();
+        for (dependency, classes) in self.file.module_facts.dependency_implementor_roots() {
+            if !self.file.is_subclassifier(dependency, owner) {
+                continue;
+            }
+            for implementor in classes {
+                if implementor.file != self.file.source && !remote.contains(&implementor.class) {
+                    remote.push(implementor.class);
+                }
+            }
+        }
+        for class in remote {
+            let Some(arm) = self.planned_property_getter_slot(class, getter, ret)? else {
+                return Err(self.undispatched_reference_read(owner));
+            };
+            implementors.push(arm);
+        }
+        if implementors.is_empty() {
+            return self.reference_call(slot, receiver, &[], ret);
+        }
+        let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.dispatch_by_implementor_with(&implementors, object, &[], ret, false, |body, object| {
+            body.reference_slot_call(slot, object, Vec::new(), ret)
+        })
+    }
+
+    fn undispatched_reference_read(&self, owner: krusty::types::TypeName) -> Unsupported {
+        declined!(
+            "a read of a `{}` member where the module implements it with a class whose override \
+             cannot be dispatched to",
+            owner.render().replace('/', ".")
+        )
     }
 
     /// `p.getValue(thisRef, property)` and `p.setValue(thisRef, property, value)`.
@@ -1052,6 +1152,17 @@ impl BodyLowering<'_, '_, '_> {
         if self.terminated {
             return Ok(None);
         }
+        self.reference_slot_call(slot, object, arguments, ret)
+    }
+
+    /// Enter `slot` of the reference object `object` with `arguments`, each already a reference.
+    fn reference_slot_call(
+        &mut self,
+        slot: u32,
+        object: Value,
+        mut arguments: Vec<Value>,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
         // `get()` on a BOUND reference passes no receiver and the body ignores the slot anyway; a
         // null keeps one signature for both shapes.
         let expected = usize::from(slot == SET) + 1;
