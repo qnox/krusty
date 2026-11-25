@@ -16,7 +16,7 @@ use crate::metadata::id_signature::{
     accessor_mangled, mangled_id, property_mangled, Accessor, ClassScope, DeclarationContainer,
     Placement, PropertyShape,
 };
-use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrClass, KlibIrMember};
+use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrClass, KlibIrMember, KlibIrType};
 use crate::metadata::klib_ir::{KlibFileLocalOrigin, KlibIrSignature};
 use crate::metadata::semantic::KotlinType;
 use enclosing_function::enclosing_function_mangle;
@@ -52,33 +52,7 @@ pub(crate) fn resolve_inherited_getter(
     module: &str,
     callee: &KlibIrSignature,
 ) -> Inherited {
-    match resolve_inherited_composite(bodies, module, callee)? {
-        Some(inherited) => Ok(Some(inherited)),
-        None => LocalHierarchy { bodies, module }.resolve_inherited_getter(callee),
-    }
-}
-
-/// Resolve the file-local `callee` of `module`, which wraps the public identity of a member of a
-/// class private to its file, as the declaration that class inherits under it. kotlinc's member ids
-/// hash the member's own mangled signature, never its owner, so the inherited declaration is the one
-/// of a supertype that has the same member identity.
-fn resolve_inherited_composite(
-    bodies: &KlibDeclarationBodies,
-    module: &str,
-    callee: &KlibIrSignature,
-) -> Inherited {
-    let Some(matching) = bodies.module_inherited_composite_functions(module, callee) else {
-        return Ok(None);
-    };
-    match matching.as_slice() {
-        [only] => Ok(Some(only.clone())),
-        [] => Err(KlibBodyDeclineReason::UnsupportedOperation(
-            "a fake override that no supertype declares",
-        )),
-        _ => Err(KlibBodyDeclineReason::SignatureMismatch(
-            "a fake override names two inherited functions".to_owned(),
-        )),
-    }
+    LocalHierarchy { bodies, module }.resolve_inherited_getter(callee)
 }
 
 struct LocalHierarchy<'b> {
@@ -119,7 +93,7 @@ impl LocalHierarchy<'_> {
         };
         let enclosing = self.enclosing_function_mangle(class_signature)?;
         let mut matching: Vec<Candidate> = Vec::new();
-        let mut pending = arena.direct_supertype_signatures(class);
+        let mut pending = supertype_signatures(arena, class);
         let mut seen = crate::fx_hash::HashSet::default();
         while let Some(owner) = pending.pop() {
             if !seen.insert(owner.clone()) {
@@ -163,7 +137,7 @@ impl LocalHierarchy<'_> {
                     });
                 }
             }
-            pending.extend(owner_arena.direct_supertype_signatures(owner_class));
+            pending.extend(supertype_signatures(owner_arena, owner_class));
         }
         most_specific_getter(&matching).map(Some)
     }
@@ -261,6 +235,19 @@ fn most_specific_getter(
             "a fake override names two inherited properties".to_owned(),
         )),
     }
+}
+
+/// The serialized signatures of the direct supertypes of a class.
+fn supertype_signatures(arena: &KlibIrArena, class: &KlibIrClass) -> Vec<KlibIrSignature> {
+    class
+        .supertypes
+        .iter()
+        .rev()
+        .filter_map(|&supertype| match arena.ty(supertype) {
+            KlibIrType::Simple { classifier, .. } => Some(classifier.signature.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The ids of the non-extension, non-generic property `name` and of its getter as a fake override

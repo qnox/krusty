@@ -29,6 +29,20 @@ pub(super) fn annotation_interface_member(
     (descriptor, signature)
 }
 
+/// The generic `Signature` of the field that stores a `KClass` member: `Class<*>` (`Class<*>[]` for
+/// an array of them), whatever projection the member declares. The accessor keeps the declared
+/// argument ([`annotation_kclass_signature`]); the stored field never does.
+fn stored_kclass_field_signature(declared: Ty) -> Option<&'static str> {
+    use crate::annotation_kclass::{is_annotation_kclass, is_annotation_kclass_array};
+    if is_annotation_kclass(declared) {
+        Some("Ljava/lang/Class<*>;")
+    } else if is_annotation_kclass_array(declared) {
+        Some("[Ljava/lang/Class<*>;")
+    } else {
+        None
+    }
+}
+
 fn annotation_kclass_signature(
     formatter: &super::JvmSignatureFormatter<'_>,
     ty: Ty,
@@ -50,6 +64,44 @@ fn annotation_kclass_signature(
         }
     };
     Some(format!("{prefix}{rendered}>;"))
+}
+
+/// The `-impl` owner and JVM carrier of a member declared as an unsigned value class (`UInt`, an
+/// unsigned array). kotlinc renders and hashes such a member through that class's `toString-impl`
+/// and `hashCode-impl` over the stored carrier, not through the carrier's own signed rendering.
+fn unsigned_member_impl(declared: Ty, stored: Ty) -> Option<(String, Ty)> {
+    if let Some((owner, carrier)) = super::scalar_coercion::native_unsigned_impl_target(declared) {
+        return Some((owner.render(), carrier));
+    }
+    let declared = declared.non_null();
+    declared
+        .is_unsigned_array()
+        .then(|| declared.obj_internal())
+        .flatten()
+        .map(|owner| (owner.render(), stored))
+}
+
+/// The declared type of each annotation member, before the value-class pass erased it to a
+/// carrier. The pass records the constructor parameters only for a class whose primary constructor
+/// has a value-class parameter; without a record no member is a value class, so the stored types
+/// are already the declared ones. A record that disagrees with the stored members in length is an
+/// invalid intermediate state, never a reason to render a member through its carrier.
+fn declared_member_types(ir: &IrFile, c: &krusty::ir::IrClass, stored: &[Ty]) -> Vec<Ty> {
+    match ir.vc_ctor_declared_params(c.fq_name_id()) {
+        None => stored.to_vec(),
+        Some(declared) => {
+            assert_eq!(
+                declared.len(),
+                stored.len(),
+                "annotation implementation {}: the value-class pass recorded {} constructor \
+                 parameters for {} stored members",
+                c.fq_name_id().render(),
+                declared.len(),
+                stored.len()
+            );
+            declared.to_vec()
+        }
+    }
 }
 
 /// The boxed-wrapper internal name + a static `hashCode` helper descriptor for a primitive `Ty`, used by
@@ -93,6 +145,7 @@ pub(super) fn emit_annotation_impl_class(
         .iter()
         .map(|(_, ty)| crate::annotation_kclass::annotation_member_jvm_type(*ty))
         .collect();
+    let hides_constructor = ir.has_value_param_ctor_of(c.fq_name_id());
     let mut cw = new_writer(&fq, "java/lang/Object", opts);
     cw.set_access(0x0001 | 0x0010 | 0x0020 | 0x1000); // PUBLIC | FINAL | SUPER | SYNTHETIC
     cw.add_interface(iface);
@@ -103,13 +156,20 @@ pub(super) fn emit_annotation_impl_class(
         "an annotation implementation is enclosed by its owner as a whole"
     );
     cw.set_enclosing_class(&owner);
-    for ((name, _), jt) in members.iter().zip(&stored) {
+    for ((name, declared), jt) in members.iter().zip(&stored) {
         // SYNTHETIC: nothing in source declares these — the class is generated for an annotation
         // instantiation, and kotlinc marks its fields and member accessors so tooling skips them.
         // The constructor and the `Object` overrides are NOT marked, which is kotlinc's split.
         // Like any field, kotlinc interns them when it visits the field table, after the methods.
         let access = 0x0002 | 0x0010 | 0x1000; // PRIVATE|FINAL|SYNTHETIC
-        cw.add_field_late(access, name, &type_descriptor(*jt), None, None);
+        cw.add_field_late_sig(
+            access,
+            name,
+            &type_descriptor(*jt),
+            stored_kclass_field_signature(*declared),
+            None,
+            None,
+        );
     }
 
     // <init>(members…): super(); store each arg to its field. kotlinc visits each method's header
@@ -195,7 +255,13 @@ pub(super) fn emit_annotation_impl_class(
         } else {
             1 + params_words
         };
-        finish_code::<0x0001>(&mut cw, "<init>", &desc, &mut ctor, ctor_locals);
+        // A member typed as a value class hides the constructor like any other constructor taking
+        // one: private here, with the `DefaultConstructorMarker` overload emitted after the members.
+        if hides_constructor {
+            finish_code::<0x0002>(&mut cw, "<init>", &desc, &mut ctor, ctor_locals);
+        } else {
+            finish_code::<0x0001>(&mut cw, "<init>", &desc, &mut ctor, ctor_locals);
+        }
         let mut locals = vec![("this".to_string(), format!("L{fq};"), 0)];
         let mut debug_slot = 1u16;
         for (name, jt) in &members {
@@ -259,8 +325,9 @@ pub(super) fn emit_annotation_impl_class(
     }
 
     emit_annotation_equals(env, &mut cw, &fq, iface, &members, &stored);
-    emit_annotation_hashcode(ir, env, &mut cw, &fq, &stored, &members);
-    emit_annotation_tostring(&mut cw, &fq, iface, &stored, &members);
+    let declared = declared_member_types(ir, c, &stored);
+    emit_annotation_hashcode(ir, env, &mut cw, &fq, &stored, &declared, &members);
+    emit_annotation_tostring(&mut cw, &fq, iface, &stored, &declared, &members);
     // annotationType(): return <iface>.class. LAST, after the `Object` overrides — kotlinc's member
     // order, and the method table is part of the class file, so emitting it beside the member
     // accessors diverged from the reference on every annotation that is instantiated.
@@ -278,6 +345,12 @@ pub(super) fn emit_annotation_impl_class(
             None,
             &[("this".to_string(), format!("L{fq};"), 0)],
         );
+    }
+    if hides_constructor {
+        let parameters: Vec<Ty> = members.iter().map(|(_, ty)| *ty).collect();
+        let identities: Vec<Option<String>> =
+            members.iter().map(|(name, _)| Some(name.clone())).collect();
+        constructor_defaults::emit_ctor_marker_accessor(&fq, &parameters, &identities, &mut cw);
     }
     env.inner_classes.register(&mut cw);
     // Part of the public ABI when created in a public inline function's body.
@@ -436,6 +509,7 @@ fn emit_annotation_hashcode(
     cw: &mut ClassWriter,
     fq: &str,
     stored: &[Ty],
+    declared: &[Ty],
     members: &[(String, Ty)],
 ) {
     // kotlinc's shape, instruction for instruction. Two things are deliberate rather than
@@ -463,13 +537,21 @@ fn emit_annotation_hashcode(
         let fref = cw.fieldref(fq, name, &type_descriptor(*jt));
         cb.aload(0);
         cb.getfield(fref, slot_words(*jt) as i32);
-        match *jt {
-            _ if jt.is_array() => {
-                let ad = arrays_param_desc(*jt);
+        match (unsigned_member_impl(declared[index], *jt), *jt) {
+            (Some((owner, carrier)), _) => {
+                let hc = cw.methodref(
+                    &owner,
+                    "hashCode-impl",
+                    &format!("({})I", type_descriptor(carrier)),
+                );
+                cb.invokestatic(hc, slot_words(carrier) as i32, 1);
+            }
+            (None, array) if array.is_array() => {
+                let ad = arrays_param_desc(array);
                 let hc = cw.methodref("java/util/Arrays", "hashCode", &format!("({ad})I"));
                 cb.invokestatic(hc, 1, 1);
             }
-            other => match prim_wrapper(other) {
+            (None, other) => match prim_wrapper(other) {
                 Some((wrap, pd)) => {
                     let hc = cw.methodref(wrap, "hashCode", &format!("({pd})I"));
                     cb.invokestatic(hc, slot_words(other) as i32, 1);
@@ -532,6 +614,7 @@ fn emit_annotation_tostring(
     fq: &str,
     iface: &str,
     stored: &[Ty],
+    declared: &[Ty],
     members: &[(String, Ty)],
 ) {
     let return_annotation =
@@ -584,11 +667,27 @@ fn emit_annotation_tostring(
             },
         );
         let fref = cw.fieldref(fq, name, &type_descriptor(*jt));
-        match *jt {
-            _ if jt.is_array() => {
+        match (unsigned_member_impl(declared[i], *jt), *jt) {
+            (Some((owner, carrier)), _) => {
+                cb.aload(0);
+                cb.getfield(fref, slot_words(carrier) as i32);
+                let to_string = cw.methodref(
+                    &owner,
+                    "toString-impl",
+                    &format!("({})Ljava/lang/String;", type_descriptor(carrier)),
+                );
+                cb.invokestatic(to_string, slot_words(carrier) as i32, 1);
+                let ap = cw.methodref(
+                    sb,
+                    "append",
+                    "(Ljava/lang/Object;)Ljava/lang/StringBuilder;",
+                );
+                cb.invokevirtual(ap, 1, 1);
+            }
+            (None, array) if array.is_array() => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
-                let ad = arrays_param_desc(*jt);
+                let ad = arrays_param_desc(array);
                 let ats = cw.methodref(
                     "java/util/Arrays",
                     "toString",
@@ -597,48 +696,48 @@ fn emit_annotation_tostring(
                 cb.invokestatic(ats, 1, 1);
                 cb.invokevirtual(append_str(cw), 1, 1);
             }
-            Ty::Int | Ty::Short | Ty::Byte => {
+            (None, Ty::Int | Ty::Short | Ty::Byte) => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
                 let ap = cw.methodref(sb, "append", "(I)Ljava/lang/StringBuilder;");
                 cb.invokevirtual(ap, 1, 1);
             }
-            Ty::Char => {
+            (None, Ty::Char) => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
                 let ap = cw.methodref(sb, "append", "(C)Ljava/lang/StringBuilder;");
                 cb.invokevirtual(ap, 1, 1);
             }
-            Ty::Boolean => {
+            (None, Ty::Boolean) => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
                 let ap = cw.methodref(sb, "append", "(Z)Ljava/lang/StringBuilder;");
                 cb.invokevirtual(ap, 1, 1);
             }
-            Ty::Long => {
+            (None, Ty::Long) => {
                 cb.aload(0);
                 cb.getfield(fref, 2);
                 let ap = cw.methodref(sb, "append", "(J)Ljava/lang/StringBuilder;");
                 cb.invokevirtual(ap, 2, 1);
             }
-            Ty::Float => {
+            (None, Ty::Float) => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
                 let ap = cw.methodref(sb, "append", "(F)Ljava/lang/StringBuilder;");
                 cb.invokevirtual(ap, 1, 1);
             }
-            Ty::Double => {
+            (None, Ty::Double) => {
                 cb.aload(0);
                 cb.getfield(fref, 2);
                 let ap = cw.methodref(sb, "append", "(D)Ljava/lang/StringBuilder;");
                 cb.invokevirtual(ap, 2, 1);
             }
-            Ty::String => {
+            (None, Ty::String) => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
                 cb.invokevirtual(append_str(cw), 1, 1);
             }
-            _ => {
+            (None, _) => {
                 cb.aload(0);
                 cb.getfield(fref, 1);
                 let ap = cw.methodref(

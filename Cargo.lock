@@ -832,8 +832,8 @@ dependencies = [
  "dhat",
  "flate2",
  "krusty-cli",
+ "krusty-core",
  "krusty-jvm",
- "krusty-names",
  "krusty-native",
  "krusty-plugin-allopen",
  "krusty-plugin-api",
@@ -859,9 +859,10 @@ name = "krusty-build"
 version = "0.0.1"
 dependencies = [
  "krusty",
+ "krusty-native",
  "krusty-test-support",
  "libc",
- "object 0.41.0",
+ "object 0.40.0",
  "once_cell",
 ]
 
@@ -879,6 +880,13 @@ dependencies = [
  "serde",
  "serde_json",
  "zip",
+]
+
+[[package]]
+name = "krusty-core"
+version = "0.0.1"
+dependencies = [
+ "ahash",
 ]
 
 [[package]]
@@ -907,13 +915,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "krusty-names"
-version = "0.0.1"
-dependencies = [
- "ahash",
-]
-
-[[package]]
 name = "krusty-native"
 version = "0.0.1"
 dependencies = [
@@ -937,7 +938,7 @@ dependencies = [
 name = "krusty-plugin-api"
 version = "0.0.1"
 dependencies = [
- "krusty-names",
+ "krusty-core",
 ]
 
 [[package]]

@@ -16,7 +16,7 @@ mod bytecode_comparison_support;
 #[path = "common/mod.rs"]
 mod common_core;
 #[cfg(test)]
-pub(crate) use common_core::server_pool::Pool as ServerPool;
+pub(crate) use common_core::server_pool::{Budget as ServerBudget, Pool as ServerPool};
 #[path = "common/compiler_plugin_fixture.rs"]
 mod compiler_plugin_fixture;
 #[path = "common/e2e.rs"]
@@ -27,7 +27,7 @@ mod inner_class_rows_support;
 mod reference_box_support;
 #[path = "common/reference_compiler.rs"]
 mod reference_compiler_support;
-#[path = "common/reference_targets/invocation.rs"]
+#[path = "common/reference_targets/recorded_library.rs"]
 mod reference_invocation_support;
 #[path = "common/reference_recording.rs"]
 mod reference_recording_support;

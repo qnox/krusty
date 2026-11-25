@@ -18,6 +18,36 @@ use krusty::ir::{
 pub(crate) use krusty::jvm::names::sanitize_module_name;
 use krusty::types::{TypeName, Visibility};
 
+/// The members `mangle_internal_members` renames, with the module suffix they receive. A pass that
+/// runs before the rename and must call a member by its final JVM name asks this for it.
+pub(crate) struct MangledMembers {
+    suffix: String,
+    members: HashSet<FunId>,
+}
+
+impl MangledMembers {
+    pub(crate) fn plan(ir: &IrFile, module_name: &str, facade: &str) -> Self {
+        let facade = krusty::types::type_name(facade);
+        Self {
+            suffix: format!("${}", sanitize_module_name(module_name)),
+            members: (0..ir.functions.len())
+                .map(|fid| fid as FunId)
+                .filter(|&fid| declares_mangled_member(ir, fid, facade))
+                .collect(),
+        }
+    }
+
+    /// The JVM name `function` has once internal members are renamed.
+    pub(crate) fn jvm_name(&self, ir: &IrFile, function: FunId) -> String {
+        let name = &ir.functions[function as usize].name;
+        if self.members.contains(&function) {
+            append_module_suffix(name, &self.suffix)
+        } else {
+            name.clone()
+        }
+    }
+}
+
 /// Append `$<module>` to every internal member that is not a facade or constructor, and to the
 /// bridges that publish that member's JVM name.
 pub(crate) fn mangle_internal_members(
@@ -59,7 +89,7 @@ pub(crate) fn mangle_internal_members(
         })
         .filter(|(.., accessor)| old_names.contains_key(accessor))
         .collect::<Vec<_>>();
-    for (class, index, side, accessor) in renamed_accessors {
+    for &(class, index, side, accessor) in &renamed_accessors {
         let name = ir.functions[accessor as usize].name.clone();
         ir.set_jvm_property_accessor_name(class, index, side, name);
     }
@@ -100,6 +130,7 @@ pub(crate) fn mangle_internal_members(
     );
     suffix_override_bridges(ir, &old_names, &synthesized, &suffix);
     apply_synthesized_accessors(ir, &synthesized, &suffix);
+    suffix_annotation_markers(ir, &renamed_accessors, &synthesized, &suffix);
     rewrite_call_names(ir, &old_names, &synthesized, &suffix);
 }
 
@@ -514,6 +545,43 @@ fn mangle_companion_block_default_accessors(
         });
     }
     names
+}
+
+/// kotlinc names a property's `$annotations` marker after its getter's final JVM name, so a getter
+/// that took the module suffix moves its marker's name along: `getX$main$annotations`.
+fn suffix_annotation_markers(
+    ir: &mut IrFile,
+    renamed_accessors: &[(TypeName, u32, JvmAccessorSide, FunId)],
+    synthesized: &[SynthesizedAccessor],
+    suffix: &str,
+) {
+    let renamed_getters = renamed_accessors
+        .iter()
+        .filter(|(_, _, side, _)| *side == JvmAccessorSide::Getter)
+        .filter_map(|&(class, index, _, _)| {
+            let class = ir.classes.iter().position(|c| c.fq_name == class)?;
+            Some((class, index))
+        });
+    let synthesized_getters = synthesized
+        .iter()
+        .filter(|accessor| accessor.getter.is_some())
+        .map(|accessor| (accessor.class as usize, accessor.member));
+    let markers = renamed_getters
+        .chain(synthesized_getters)
+        .filter_map(|(class, member)| {
+            let class = ir.classes.get(class)?;
+            let source_order = class.properties.get(member as usize)?.source_order;
+            ir.property_annotation_markers
+                .get(&(class.fq_name_id(), source_order))
+                .copied()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for marker in markers {
+        let function = &mut ir.functions[marker as usize];
+        if let Some(getter) = function.name.strip_suffix("$annotations") {
+            function.name = format!("{getter}{suffix}$annotations");
+        }
+    }
 }
 
 fn apply_synthesized_accessors(ir: &mut IrFile, accessors: &[SynthesizedAccessor], suffix: &str) {

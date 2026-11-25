@@ -865,6 +865,9 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                         emit_expr(ir, dispatch_receiver.unwrap(), inst)
                     )
                 }
+                crate::ir::IrIntrinsic::EnumName => {
+                    format!("{}.name", emit_expr(ir, dispatch_receiver.unwrap(), inst))
+                }
                 crate::ir::IrIntrinsic::StringGet | crate::ir::IrIntrinsic::ArrayGet => format!(
                     "{}[{}]",
                     emit_expr(ir, dispatch_receiver.unwrap(), inst),
@@ -1316,6 +1319,7 @@ mod tests {
             declaration_name: None,
             is_source_declared: true,
             is_compiler_generated: false,
+            ownership: crate::ir::ClassOwnership::ThisUnit,
             is_anonymous_object: false,
             site_name: None,
             enclosure: None,
@@ -1345,6 +1349,7 @@ mod tests {
             pre_super_param_fields: Vec::new(),
             explicit_param_stores: false,
             methods: Vec::new(),
+            installed_interface_overrides: Vec::new(),
             is_interface: false,
             is_fun_interface: false,
             is_annotation: false,

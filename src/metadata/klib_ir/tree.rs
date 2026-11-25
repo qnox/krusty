@@ -54,21 +54,6 @@ pub struct KlibIrArena {
 }
 
 impl KlibIrArena {
-    /// The serialized signatures of the direct supertypes of `class`.
-    pub(crate) fn direct_supertype_signatures(&self, class: &KlibIrClass) -> Vec<KlibIrSignature> {
-        class
-            .supertypes
-            .iter()
-            .rev()
-            .filter_map(|&supertype| match self.ty(supertype) {
-                KlibIrType::Simple { classifier, .. } => Some(classifier.signature.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-}
-
-impl KlibIrArena {
     pub fn expr(&self, id: KlibIrExprId) -> &KlibIrExpr {
         &self.exprs[id.index()]
     }
@@ -1003,6 +988,22 @@ pub struct KlibIrClass {
     pub members: Vec<KlibIrMember>,
     pub value_class_representation: Option<KlibIrValueClassRepresentation>,
     pub sealed_subclasses: Vec<KlibIrSymbol>,
+}
+
+impl KlibIrClass {
+    /// Whether the class declares a property whose getter is an enum's synthetic `entries` body
+    /// (`IrSyntheticBody(ENUM_ENTRIES)`), which Kotlin builds by passing the enum's `values()` to
+    /// `kotlin.enums.enumEntries`.
+    pub fn declares_synthetic_enum_entries(&self, arena: &KlibIrArena) -> bool {
+        self.members.iter().any(|member| {
+            matches!(member, KlibIrMember::Property(property) if property.getter.is_some_and(
+                |getter| matches!(
+                    arena.function(getter).body,
+                    Some(KlibIrBody::Synthetic(KlibIrSyntheticBody::EnumEntries))
+                )
+            ))
+        })
+    }
 }
 
 #[cfg(test)]

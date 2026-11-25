@@ -586,11 +586,14 @@ fn target_regressions_run_only_their_focused_module_after_provisioning() {
     assert_eq!(wasm.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(wasm.stdout).expect("Wasm stdout is UTF-8"),
-        "language=2.4.10 native=0 js=1 wasi=1 runner=unset\n\
+        format!(
+            "language=2.4.10 native=0 js=1 wasi=1 runner=unset\n\
          kotlin_box_wasm_conformance::\n--skip\n\
          kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_js_conformance\n--skip\n\
          kotlin_box_wasm_conformance::kotlin_codegen_box_wasm_wasi_conformance\n\
-         --test-threads\n1\n"
+         --test-threads\n{}\n",
+            regression_threads()
+        )
     );
     fs::remove_dir_all(temp).expect("remove target ownership fixture");
 }
@@ -776,6 +779,190 @@ fn a_finished_server_is_reused_instead_of_growing_the_pool() {
     }
     assert_eq!(seen, vec![0, 0, 0, 0]);
     assert_eq!(next_id.load(Ordering::Relaxed), 1);
+}
+
+/// A pool server that counts when it is stopped.
+struct StoppedCounter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for StoppedCounter {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn budget(limit_mib: u64) -> std::sync::Arc<super::ServerBudget> {
+    super::ServerBudget::new(
+        Some(limit_mib),
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(10),
+    )
+}
+
+#[test]
+fn a_pool_over_budget_stops_another_pools_idle_server_to_make_room() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let budget = budget(3000);
+    let stopped = Arc::new(AtomicUsize::new(0));
+    let first = super::ServerPool::resident(&budget, 2000);
+    let second = super::ServerPool::resident(&budget, 2000);
+    first
+        .with_server(1, || Some(StoppedCounter(Arc::clone(&stopped))), |_| ())
+        .expect("first pool's server");
+    assert_eq!(stopped.load(Ordering::SeqCst), 0);
+
+    second
+        .with_server(1, || Some(StoppedCounter(Arc::clone(&stopped))), |_| ())
+        .expect("second pool's server");
+
+    assert_eq!(
+        stopped.load(Ordering::SeqCst),
+        1,
+        "the second pool's server did not displace the first's idle one"
+    );
+}
+
+#[test]
+fn the_first_server_is_admitted_even_when_it_alone_exceeds_the_budget() {
+    let budget = budget(1000);
+    let pool = super::ServerPool::resident(&budget, 5000);
+    let id = pool
+        .with_server(1, || Some(7usize), |id| *id)
+        .expect("a server over budget");
+    assert_eq!(id, 7);
+}
+
+#[test]
+fn a_busy_server_is_not_stopped_and_the_waiting_pool_takes_its_place_once_idle() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    let budget = budget(3000);
+    let stopped = Arc::new(AtomicUsize::new(0));
+    let first = super::ServerPool::resident(&budget, 2000);
+    let second = super::ServerPool::resident(&budget, 2000);
+    let first_was_stopped_when_second_started = AtomicBool::new(false);
+    let (busy_tx, busy_rx) = mpsc::channel();
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            first
+                .with_server(
+                    1,
+                    || Some(StoppedCounter(Arc::clone(&stopped))),
+                    |_| {
+                        busy_tx.send(()).expect("controller listens");
+                        std::thread::sleep(Duration::from_millis(600));
+                        assert_eq!(
+                            stopped.load(Ordering::SeqCst),
+                            0,
+                            "a server was stopped while it was claimed"
+                        );
+                    },
+                )
+                .expect("first pool's server");
+        });
+        busy_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the first server became busy");
+        second
+            .with_server(
+                1,
+                || {
+                    first_was_stopped_when_second_started
+                        .store(stopped.load(Ordering::SeqCst) == 1, Ordering::SeqCst);
+                    Some(StoppedCounter(Arc::clone(&stopped)))
+                },
+                |_| (),
+            )
+            .expect("second pool's server");
+    });
+
+    assert!(
+        first_was_stopped_when_second_started.load(Ordering::SeqCst),
+        "the second pool created its server before the first was released and stopped"
+    );
+}
+
+#[test]
+fn a_pool_that_cannot_grow_within_the_budget_waits_for_its_own_server() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let budget = budget(1500);
+    let pool = super::ServerPool::resident(&budget, 1000);
+    let created = AtomicUsize::new(0);
+    let (busy_tx, busy_rx) = mpsc::channel();
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            pool.with_server(
+                2,
+                || Some(created.fetch_add(1, Ordering::SeqCst)),
+                |_| {
+                    busy_tx.send(()).expect("controller listens");
+                    std::thread::sleep(Duration::from_millis(300));
+                },
+            )
+            .expect("first caller's server");
+        });
+        busy_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the first server became busy");
+        pool.with_server(2, || Some(created.fetch_add(1, Ordering::SeqCst)), |_| ())
+            .expect("the second caller's server");
+    });
+
+    assert_eq!(
+        created.load(Ordering::SeqCst),
+        1,
+        "the pool grew past the budget instead of waiting for its busy server"
+    );
+}
+
+#[test]
+fn callers_that_race_a_full_budget_never_wait_on_an_idle_server() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let budget = budget(1500);
+    let pool = super::ServerPool::resident(&budget, 1000);
+    let (done_tx, done_rx) = mpsc::channel();
+
+    std::thread::scope(|scope| {
+        for _ in 0..16 {
+            let done_tx = done_tx.clone();
+            let pool = &pool;
+            scope.spawn(move || {
+                for _ in 0..500 {
+                    pool.with_server(2, || Some(()), |_| std::thread::yield_now())
+                        .expect("a server");
+                }
+                done_tx.send(()).expect("controller listens");
+            });
+        }
+        for _ in 0..16 {
+            done_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("a caller waited for a server that was already idle");
+        }
+    });
+}
+
+#[test]
+fn the_default_budget_leaves_the_test_process_and_the_machine_their_memory() {
+    use crate::common_core::server_pool::default_limit_mib;
+
+    assert_eq!(default_limit_mib(7782), 4198, "a 7.6 GiB CI runner");
+    assert_eq!(default_limit_mib(16100), 9660, "a 16 GiB workstation");
+    assert_eq!(
+        default_limit_mib(2000),
+        0,
+        "a host too small for any server"
+    );
 }
 
 #[test]

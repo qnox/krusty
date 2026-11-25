@@ -44,7 +44,10 @@ impl BodyLowering<'_> {
         if access.symbol.kind != KlibIrSymbolKind::Function {
             return Err(mismatch("a call target's symbol is not a function"));
         }
-        let inherited = self.linker.inherited_getter(&access.symbol.signature)?;
+        let inherited = match self.linker.inherited_member(&access.symbol.signature) {
+            Some(member) => Some(member),
+            None => self.linker.inherited_getter(&access.symbol.signature)?,
+        };
         let signature = inherited.as_ref().unwrap_or(&access.symbol.signature);
         let callee = match signature {
             KlibIrSignature::Public(callee) if !self.linker.links_privately(signature) => callee,
@@ -53,7 +56,8 @@ impl BodyLowering<'_> {
             }
             KlibIrSignature::Public(_)
             | KlibIrSignature::Accessor(_)
-            | KlibIrSignature::FileLocal { .. } => {
+            | KlibIrSignature::FileLocal { .. }
+            | KlibIrSignature::TypeParameter { .. } => {
                 let linked = match self.object_members.get(signature) {
                     Some(member) => member.linked(),
                     None => self.linker.link_local_function(self.ir, signature)?,
@@ -66,9 +70,6 @@ impl BodyLowering<'_> {
         }
         if let Some(operation) = self.linker.atomic_array_element(callee)? {
             return self.atomic_array_element(operation, access, ty);
-        }
-        if let Some((classifier, member)) = self.linker.enum_static_member(self.ir, callee)? {
-            return self.enum_static_member_call(classifier, member, access, ty);
         }
         if let Some(arity) = suspend_function_invocation_arity(callee) {
             if !access.type_arguments.is_empty() {
@@ -101,6 +102,11 @@ impl BodyLowering<'_> {
             }
             BuiltinCallDisposition::Dependency => {
                 let signature = crate::libraries::KlibDeclarationSignature::Public(callee.clone());
+                if let Some((classifier, member)) =
+                    self.linker.implicit_enum_member(self.ir, &signature)?
+                {
+                    return self.implicit_enum_member(classifier, member, access, ty);
+                }
                 if let Some(suspension) = self.linker.unintercepted_suspension(&signature)? {
                     return self.unintercepted_suspension_call(suspension, access, ty);
                 }
@@ -118,6 +124,11 @@ impl BodyLowering<'_> {
         };
         if operator == BuiltinOperator::CheckNotNull {
             return self.not_null_assertion(access, ty);
+        }
+        if operator == BuiltinOperator::NoWhenBranchMatched {
+            return unsupported(
+                "`noWhenBranchMatchedException` outside an exhaustive `when`'s `else`",
+            );
         }
         if !access.type_arguments.is_empty() {
             return Err(mismatch(
@@ -338,54 +349,6 @@ impl BodyLowering<'_> {
         }))
     }
 
-    /// `values()` or `valueOf(name)` of a dependency enum class: the common enum operation, which
-    /// the backend realizes as it does for a source enum's call of the same member.
-    fn enum_static_member_call(
-        &mut self,
-        classifier: crate::types::TypeName,
-        member: super::super::enum_classes::EnumStaticMember,
-        access: &KlibIrMemberAccess,
-        ty: Ty,
-    ) -> Lowered<ExprId> {
-        use super::super::enum_classes::EnumStaticMember;
-        if !access.type_arguments.is_empty() {
-            return Err(mismatch(
-                "an enum's compiler-generated member is called with type arguments",
-            ));
-        }
-        let operands = arguments(access);
-        let value = match (member, operands.as_slice()) {
-            (EnumStaticMember::Values, []) => {
-                if ty != Ty::obj_args("kotlin/Array", &[Ty::obj_name(classifier)]) {
-                    return Err(mismatch("an enum's `values()` is typed apart from its array"));
-                }
-                IrExpr::EnumValues { classifier }
-            }
-            (EnumStaticMember::ValueOf, &[Some(name)]) => {
-                if ty != Ty::obj_name(classifier) {
-                    return Err(mismatch("an enum's `valueOf` is typed apart from its enum"));
-                }
-                let arg = self.expression(name)?;
-                if self.lowered_type(arg) != Ty::String {
-                    return Err(mismatch("an enum's `valueOf` is called on a non-String name"));
-                }
-                IrExpr::EnumValueOf {
-                    classifier,
-                    arg,
-                    declaration: crate::ir::EnumValueOfDeclaration::Member,
-                }
-            }
-            _ => {
-                return Err(mismatch(
-                    "an enum's compiler-generated member is called with another shape than its declaration's",
-                ))
-            }
-        };
-        let value = self.ir.add_expr(value);
-        self.ir.set_logical_type(value, ty);
-        Ok(value)
-    }
-
     /// A data class array member, as a call of the array's content extension on the operand.
     /// The prewalk adds the same extension as the call's edge (`array_content_members`).
     fn data_class_array_member(
@@ -537,6 +500,7 @@ impl BodyLowering<'_> {
                 | BuiltinOperator::IsNan { .. }
                 | BuiltinOperator::NumericConversion { .. }
                 | BuiltinOperator::CheckNotNull
+                | BuiltinOperator::NoWhenBranchMatched
                 | BuiltinOperator::DataClassArrayMember(_),
                 _,
             ) => {
@@ -1186,6 +1150,9 @@ impl BodyLowering<'_> {
         ty: Ty,
     ) -> Lowered<ExprId> {
         let signature = crate::libraries::KlibDeclarationSignature::Accessor(accessor.clone());
+        if let Some((classifier, member)) = self.linker.implicit_enum_member(self.ir, &signature)? {
+            return self.implicit_enum_member(classifier, member, access, ty);
+        }
         if access.type_arguments.is_empty() {
             if let Some(primitive) = self.linker.common_primitive(&signature)? {
                 return self.primitive_call(primitive, access, ty);
@@ -1390,18 +1357,7 @@ impl BodyLowering<'_> {
             crate::types::TyKind::Nullable(inner) => Ty::nullable(inner.projection_read_ty()),
             _ => substitute(callee.ret).projection_read_ty(),
         };
-        // A read through a star projection is bounded by the class parameter's declared bound,
-        // which the producer's checked type states and a star's own read type (`Any?`) does not.
-        let read_through_star = matches!(
-            substitute(callee.ret).kind(),
-            crate::types::TyKind::StarProjection(_)
-        );
-        let ret = if self.linker.same_type(ret, ty)
-            || (read_through_star
-                && self
-                    .linker
-                    .is_subtype(self.header.type_parameters(), ty, ret))
-        {
+        let ret = if self.linker.same_type(ret, ty) {
             ty
         } else {
             return Err(mismatch("a call is typed apart from its callee's result"));

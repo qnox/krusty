@@ -1817,9 +1817,9 @@ fn lower_counter(
     Some((unit, lowered))
 }
 
-/// A private object is installed as the one process-wide instance only when its declaration
-/// proves that storage. The same object marked per-thread needs an instance and state on every
-/// thread, which the installed class does not carry, so the body stays refused.
+/// A private object's installed class records the storage its declaration proves: one
+/// process-wide instance, or, for the same object marked per-thread, the `ThreadLocal` annotation
+/// the backend gives an instance on every thread.
 #[test]
 fn official_klib_private_object_storage_is_authenticated() {
     let Some((unit, lowered)) = lower_counter("process-object", PROCESS_OBJECT) else {
@@ -1837,13 +1837,20 @@ fn official_klib_private_object_storage_is_authenticated() {
 
     let (unit, lowered) =
         lower_counter("per-thread-object", PER_THREAD_OBJECT).expect("the producer ran above");
-    assert_eq!(
-        lowered,
-        Err(super::super::KlibBodyDeclineReason::UnsupportedOperation(
-            "a non-public per-thread object"
-        ))
-    );
-    assert!(unit.ir().classes.iter().all(|class| !class.is_object));
+    assert_eq!(lowered, Ok(()));
+    validated(unit.ir());
+    let objects = unit
+        .ir()
+        .classes
+        .iter()
+        .filter(|class| class.is_object)
+        .map(|class| {
+            class
+                .applied_annotations
+                .declares(crate::types::wk::thread_local())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(objects, [true]);
 }
 
 const PRIVATE_INTERFACE: &str = r#"package fixture
@@ -1961,3 +1968,38 @@ fn official_klib_private_interface_is_installed_for_a_type_test_and_a_member_cal
 }
 
 mod hierarchy_publication;
+
+const PRIVATE_COMPANION: &str = "\
+package fixture
+private class Box {
+    private companion object {
+        val Shared = Box()
+    }
+    fun shared(): Box = Shared
+}
+fun make(): Any = Box().shared()
+";
+
+/// An object private to its enclosing class is linked as a class private to its enclosing class
+/// is: installed in the unit that lowers the library's bodies, its value one shared instance.
+#[test]
+fn a_body_reads_the_value_of_an_object_private_to_its_enclosing_class() {
+    let Some((directory, libraries)) = produce_library("private-companion", PRIVATE_COMPANION)
+    else {
+        return;
+    };
+    let mut unit = DependencyBodyUnit::default();
+    let externals = ProducedExternals::default();
+    lower_fixture(&mut unit, &libraries, "make", &externals, &libraries);
+    validated(unit.ir());
+    let ir = unit.ir();
+    let objects = ir.classes.iter().filter(|class| class.is_object).count();
+    assert_eq!(objects, 1, "the companion is the one installed object");
+    let values = ir
+        .exprs
+        .iter()
+        .filter(|expression| matches!(expression, IrExpr::SingletonValue { .. }))
+        .count();
+    assert_eq!(values, 1, "one read of the companion's value");
+    let _ = std::fs::remove_dir_all(&directory);
+}

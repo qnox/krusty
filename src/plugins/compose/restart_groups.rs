@@ -210,11 +210,38 @@ pub(super) fn transform(ir: &mut IrFile) {
     for function in &facts.functions {
         add_composer_parameters(ir, function);
     }
+    for taker in &facts.lambda_takers {
+        // An extension receiver precedes the declared parameters in the physical ones.
+        let receiver = usize::from(ir.extension_receiver_fns.contains(&taker.function));
+        let declaration = &mut ir.functions[taker.function as usize];
+        for &(index, _) in &taker.parameters {
+            if let TyKind::Fun(signature) = declaration.params[index + receiver].kind() {
+                declaration.params[index + receiver] =
+                    runtime::composable_function(&signature.params);
+            }
+        }
+        ir.plugin_extended_signatures.insert(taker.function);
+        if let Some(scheme) = &taker.inferred_target {
+            ir.function_annotations
+                .entry(taker.function)
+                .or_default()
+                .push_metadata_visible(runtime::composable_inferred_target(scheme));
+        }
+    }
     // A lambda's calls are given their composer before its callers read it from the singletons
     // or remember it.
     for lambda in &facts.lambdas {
         add_lambda_composer_parameters(ir, lambda);
         let slots = Slots::lambda(lambda);
+        for inner in &facts.lambdas {
+            if inner.memoization
+                == (Memoization::Remembered {
+                    caller: lambda.implementation,
+                })
+            {
+                remember(ir, &facts.runtime, inner, slots);
+            }
+        }
         for site in &lambda.calls {
             pass_composer(ir, slots, &callees, site);
         }
@@ -222,6 +249,11 @@ pub(super) fn transform(ir: &mut IrFile) {
         annotate_lambda(ir, lambda);
     }
     super::singleton_lambdas::memoize(ir, &facts.runtime, &facts.lambdas, facts.singletons);
+    for lambda in &facts.lambdas {
+        if matches!(lambda.memoization, Memoization::Instance { .. }) {
+            instantiate(ir, &facts.runtime, lambda);
+        }
+    }
     for function in &facts.functions {
         let slots = Slots::of(function);
         for lambda in &facts.lambdas {
@@ -335,6 +367,23 @@ fn add_lambda_composer_parameters(ir: &mut IrFile, lambda: &ComposableLambda) {
     if let Some(template) = template {
         retire_library_calls(ir, template);
     }
+    // Another expression for the same implementation, a copy the lowering made of the body that
+    // wrote it, carries a form of the lambda too.
+    let copies = (0..ir.exprs.len() as ExprId)
+        .filter(|&copy| {
+            matches!(
+                ir.exprs[copy as usize],
+                IrExpr::Lambda { impl_fn, inline_body: Some(_), .. } if impl_fn == function
+            )
+        })
+        .collect::<Vec<_>>();
+    for copy in copies {
+        if let IrExpr::Lambda { inline_body, .. } = &mut ir.exprs[copy as usize] {
+            if let Some(template) = inline_body.take() {
+                retire_library_calls(ir, template);
+            }
+        }
+    }
 }
 
 /// Empty the library composable calls of a lambda's dropped inline form. Nothing emits that form,
@@ -349,6 +398,14 @@ fn retire_library_calls(ir: &mut IrFile, template: ExprId) {
                 library.push(expression);
                 continue;
             }
+        }
+        // A lambda written in the form carries a form of its own.
+        if let IrExpr::Lambda {
+            inline_body: Some(body),
+            ..
+        } = ir.exprs[expression as usize]
+        {
+            pending.push(body);
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
@@ -464,14 +521,36 @@ fn remember(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLambda
         None,
         vec![key, tracked, lambda.lambda, composer, changed],
     );
+    pass_wrapped(ir, lambda, key, remembered);
+}
+
+/// Pass `composableLambdaInstance(key, true, lambda)` in a capturing lambda's place, where a
+/// function that is not composable passes it: no composition keeps the wrapper, so each call
+/// makes one.
+fn instantiate(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLambda) {
+    let key = ir.add_expr(IrExpr::Const(IrConst::Int(lambda.key)));
+    let tracked = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+    ir.mark_positionless(tracked);
+    let created = runtime::call(
+        ir,
+        &runtime.composable_lambda_instance,
+        None,
+        vec![key, tracked, lambda.lambda],
+    );
+    pass_wrapped(ir, lambda, key, created);
+}
+
+/// Replace `lambda` in its call's arguments by `wrapper`, cast to the composable calling
+/// convention. `key` is the wrapper's first argument.
+fn pass_wrapped(ir: &mut IrFile, lambda: &ComposableLambda, key: ExprId, wrapper: ExprId) {
     let value = ir.add_expr(IrExpr::TypeOp {
         op: IrTypeOp::ImplicitCoercion,
-        arg: remembered,
+        arg: wrapper,
         type_operand: runtime::composable_function(&lambda.parameter_types()),
     });
     // kotlinc builds the call at the lambda's offsets, so the lambda's line begins at its key.
     if lambda.opening_line != 0 {
-        for expression in [key, remembered, value] {
+        for expression in [key, wrapper, value] {
             ir.set_source_line(expression, lambda.opening_line);
         }
     }

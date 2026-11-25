@@ -38,6 +38,6 @@
 8	uses	merge_inferred_lower_bounds_from_symbols
 5	uses	try_branch_join
 # Call selection without a shared applicability ranking.
-176	fns	select_
+175	fns	select_
 # The temporary signature bridge, which must disappear.
-31451	lines	src/resolve/streaming_signature_bridge*
+31429	lines	src/resolve/streaming_signature_bridge*

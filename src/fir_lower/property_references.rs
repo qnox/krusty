@@ -238,7 +238,9 @@ impl BodyLowering<'_> {
             }),
             _ => read,
         };
-        let body = self.callable_reference_adapter_body(read, property_type.get(), reference.ret);
+        let body =
+            self.ir
+                .callable_reference_adapter_body(read, property_type.get(), reference.ret);
         let mut parameters = capture_types;
         parameters.extend(reference.params.iter().copied());
         let function = self.ir.add_fun(IrFunction {
@@ -272,6 +274,8 @@ impl BodyLowering<'_> {
                         binding,
                         bound_extension_receiver: extension_capture.is_some(),
                         mutable,
+                        reflective: false,
+                        writer: None,
                         substitutions: super::checked::lower_substitutions(substitutions),
                     },
                 )),

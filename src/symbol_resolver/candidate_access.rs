@@ -216,13 +216,8 @@ impl SymbolResolver<'_> {
         inaccessible: &mut Vec<FunctionInfo>,
         hides_members: bool,
     ) {
-        let hides_members_annotation = crate::types::type_name("kotlin/internal/HidesMembers");
         candidates.retain(|(_, _, candidate)| {
-            candidate
-                .callable
-                .annotations
-                .contains(&hides_members_annotation)
-                == hides_members
+            super::overload_selection::hides_members(&candidate.callable) == hides_members
         });
         inaccessible.extend(
             candidates

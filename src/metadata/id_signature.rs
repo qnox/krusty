@@ -135,23 +135,6 @@ impl KlibPublicIdSignature {
         })
     }
 
-    /// The class that declares this member as a classifier identity: its package and its
-    /// declaration path without the member segment. `None` for an empty declaration path.
-    pub(crate) fn owner_class(&self) -> Option<Self> {
-        let (_, owner) = self.declaration.segments.split_last()?;
-        if owner.is_empty() {
-            return None;
-        }
-        Some(Self {
-            package: self.package.clone(),
-            declaration: KlibNamePath {
-                segments: owner.into(),
-            },
-            member_id: None,
-            mask: 0,
-        })
-    }
-
     /// Public class identity for an already-resolved classifier.
     ///
     /// KLIB serialized IR names classifier types by the same structural package/declaration paths

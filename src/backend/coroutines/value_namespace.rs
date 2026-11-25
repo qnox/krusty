@@ -10,8 +10,22 @@ use super::CoroutineRepresentation;
 
 /// The maximum value-index referenced anywhere in the arena (params, locals). New state-machine locals
 /// are allocated above this so they never collide with an existing index in any function.
+///
+/// A parameter occupies its slot even when no body reads it: the continuation a suspend function
+/// takes is a parameter its source body never names, and a fresh temporary that took its slot
+/// would overwrite the completion the machine resumes.
 pub fn max_value_index(ir: &IrFile) -> u32 {
-    let mut m = 0u32;
+    let mut m = ir
+        .functions
+        .iter()
+        .map(|function| {
+            let receiver = u32::from(function.dispatch_receiver.is_some() && !function.is_static);
+            let parameters = u32::try_from(function.params.len())
+                .expect("a function has fewer than u32::MAX parameters");
+            (receiver + parameters).saturating_sub(1)
+        })
+        .max()
+        .unwrap_or(0);
     for e in &ir.exprs {
         match e {
             IrExpr::GetValue(i) | IrExpr::GetStatic(i) => m = m.max(*i),

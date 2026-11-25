@@ -169,6 +169,10 @@ pub enum IrCheckedOperation {
         mutable: bool,
         substitutions: Vec<IrCheckedSubstitution>,
         adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
+        /// The function type a source reference is a value of (`(T) -> V` for a `KProperty1<T, V>`
+        /// one), as the checker selected it. `None` for a delegated property's metadata argument,
+        /// which is no function value.
+        function_type: Option<Ty>,
     },
 }
 
