@@ -180,8 +180,11 @@ pub struct Options {
     /// `-Xexplicit-api=strict|warning|disable`: kotlinc's explicit API mode, applied to the
     /// language settings once they are built.
     pub explicit_api: Option<String>,
-    /// `-Xassertions=always-enable|always-disable`: an unconditional `assert(...)` mode, applied to
-    /// the language settings once they are built.
+    /// `-XXexplicit-return-types=strict|warning|disable`: only the return-type checks of explicit
+    /// API mode.
+    pub explicit_return_types: Option<String>,
+    /// `-Xassertions=always-enable|always-disable|legacy`: the `assert(...)` mode, applied to the
+    /// language settings once they are built.
     pub assertions: Option<String>,
     /// `-Xstring-concat=inline`: build every string concatenation with `StringBuilder`, whatever
     /// the JVM target.
@@ -252,6 +255,7 @@ impl Default for Options {
             no_receiver_assertions: false,
             plugins: PluginConfig::default(),
             explicit_api: None,
+            explicit_return_types: None,
             assertions: None,
             inline_string_concat: false,
             inline_scopes_numbers: false,
@@ -643,6 +647,9 @@ impl Options {
     pub(super) fn install_language_settings(&mut self, mut settings: LanguageSettings) {
         if let Some(mode) = &self.explicit_api {
             settings.features.apply_explicit_api_mode(mode);
+        }
+        if let Some(mode) = &self.explicit_return_types {
+            settings.features.apply_explicit_return_types_mode(mode);
         }
         if let Some(mode) = &self.assertions {
             settings.features.apply_assertions_mode(mode);
@@ -1151,13 +1158,14 @@ mod tests {
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
     }
 
-    /// The unconditional assertion modes reach the frontend; the runtime-checked ones and an
-    /// unknown mode are refused, the unknown one in kotlinc's words.
+    /// The unconditional assertion modes and kotlinc's default `legacy` reach the frontend; the
+    /// `jvm` shape and an unknown mode are refused, the unknown one in kotlinc's words.
     #[test]
-    fn assertions_select_the_unconditional_modes_only() {
+    fn assertions_select_the_modes_krusty_emits() {
         for (mode, feature) in [
             ("always-enable", "AssertionsAlwaysEnable"),
             ("always-disable", "AssertionsAlwaysDisable"),
+            ("legacy", "AssertionsLegacy"),
         ] {
             let parsed = parse_args(&[&format!("-Xassertions={mode}"), "x.kt"]);
             assert_eq!(parsed.errors, Vec::<String>::new(), "{mode}");

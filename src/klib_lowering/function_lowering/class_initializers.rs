@@ -43,7 +43,6 @@ pub(in super::super) fn initializer_header(
         params.push(semantic_type(header.arena, &header.types, parameter.ty)?);
         identities.push(IrParameterIdentity::source(parameter.name.clone()));
     }
-    let count = params.len();
     Ok(FunctionHeader {
         name: header.function.name.clone(),
         params,
@@ -56,7 +55,14 @@ pub(in super::super) fn initializer_header(
         value_receiver: None,
         singleton_extension_unread_receiver: None,
         values,
-        defaults: vec![None; count],
+        // Each parameter's default, lowered in this frame for the constructor's default-argument
+        // entry, whose frame lays out the instance and the parameters as this one does.
+        defaults: header
+            .function
+            .regular_parameters
+            .iter()
+            .map(|parameter| parameter.default_value)
+            .collect(),
         type_parameters: header.types.clone(),
         erasures: HashMap::default(),
         erased_result: None,

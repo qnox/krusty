@@ -228,7 +228,7 @@ impl Checker<'_> {
         let Some(parts) = Self::receiver_function_parts(signature) else {
             return false;
         };
-        if !self.receiver_is_assignable(receiver_ty, parts.receiver)
+        if !self.receiver_accepts_inference(receiver_ty, parts.receiver)
             || !self.receiver_function_context_available(scope, &parts)
         {
             return false;
@@ -301,6 +301,10 @@ impl Checker<'_> {
                 ) {
                     return None;
                 }
+                // An explicit receiver typed by an open builder variable is admitted by a trial;
+                // committing the invoke publishes its constraint like any argument's.
+                let span = self.span(call);
+                self.expect_assignable(expected_receiver, actual, span, "extension receiver");
                 None
             }
             None => Some(self.receiver_function_implicit_receiver(
