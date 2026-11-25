@@ -65,10 +65,49 @@ pub(super) fn specialize_property(
     property
 }
 
+/// Reduce equal receiver-MRO extension-property candidates to the most specific ones. Generic
+/// bounds decide first; the receiver, the property's only specificity position, then goes through
+/// the shared declaration specificity, whose tie goes to a non-generic declaration over a generic
+/// one as for every other callable family: `PipelineContext<*, PipelineCall>.call` beats
+/// `<C> PipelineContext<*, C>.call`.
+pub(super) fn retain_most_specific_properties<R>(
+    source: &dyn SymbolSource,
+    candidates: &mut Vec<(R, PropertyInfo)>,
+) {
+    if candidates.len() > 1 {
+        let dominated = (0..candidates.len())
+            .filter(|&candidate| {
+                (0..candidates.len()).any(|other| {
+                    candidate != other
+                        && generic_property_more_specific(
+                            source,
+                            &candidates[other].1,
+                            &candidates[candidate].1,
+                        )
+                })
+            })
+            .collect::<crate::fx_hash::HashSet<_>>();
+        let mut index = 0;
+        candidates.retain(|_| {
+            let keep = !dominated.contains(&index);
+            index += 1;
+            keep
+        });
+    }
+    retain_most_specific_declarations(source, None, candidates, |(_, property)| {
+        (
+            property.receiver,
+            &[][..],
+            !property.formals.is_empty(),
+            None,
+        )
+    });
+}
+
 /// Declaration-site specificity for equal receiver-MRO extension-property candidates. Receiver
 /// inference establishes applicability first; this comparison then prefers the declaration whose
 /// generic bounds form a strict subtype of the other's after alpha-renaming its formals.
-pub(super) fn generic_property_more_specific(
+fn generic_property_more_specific(
     source: &dyn SymbolSource,
     left: &PropertyInfo,
     right: &PropertyInfo,

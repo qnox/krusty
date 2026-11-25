@@ -209,20 +209,39 @@ pub fn kotlinc_path() -> Option<PathBuf> {
 /// library that is not provisioned.
 pub fn kotlin_stdlib_klib(target: crate::compilation_target::CompilationTarget) -> Option<PathBuf> {
     use crate::compilation_target::CompilationTarget;
+    if matches!(target, CompilationTarget::Jvm) {
+        return None;
+    }
+    kotlin_stdlib_klib_or_reason(target).ok()
+}
+
+/// [`kotlin_stdlib_klib`] that says why the library is unavailable: the URL and status or deadline
+/// of a failed wasm-wasi download, or the distribution the other targets read it from.
+pub fn kotlin_stdlib_klib_or_reason(
+    target: crate::compilation_target::CompilationTarget,
+) -> Result<PathBuf, String> {
+    use crate::compilation_target::CompilationTarget;
+    let missing = |what: &str| format!("{what} is not provisioned");
     match target {
-        CompilationTarget::Jvm => None,
-        CompilationTarget::Js => dist_jar("kotlin-stdlib-js.klib"),
-        CompilationTarget::WasmJs => dist_jar("kotlin-stdlib-wasm-js.klib"),
+        CompilationTarget::Jvm => Err("the JVM stdlib is a jar, not a KLIB".to_string()),
+        CompilationTarget::Js => {
+            dist_jar("kotlin-stdlib-js.klib").ok_or_else(|| missing("the kotlinc distribution"))
+        }
+        CompilationTarget::WasmJs => dist_jar("kotlin-stdlib-wasm-js.klib")
+            .ok_or_else(|| missing("the kotlinc distribution")),
         CompilationTarget::WasmWasi => kotlin_wasm_wasi_stdlib_klib(),
-        CompilationTarget::Native => kotlin_native_stdlib_klib(),
+        CompilationTarget::Native => {
+            kotlin_native_stdlib_klib().ok_or_else(|| missing("the Kotlin/Native distribution"))
+        }
     }
 }
 
 /// Kotlin publishes the wasm-wasi stdlib as a target-specific Maven KLIB for every supported
 /// release. Some compiler distributions do not bundle that publication, so use its versioned
 /// coordinate as the one authoritative source rather than selecting a different platform's bytes.
-fn kotlin_wasm_wasi_stdlib_klib() -> Option<PathBuf> {
-    ensure_maven_artifact(
+fn kotlin_wasm_wasi_stdlib_klib() -> Result<PathBuf, String> {
+    fetch_repository_artifact(
+        MAVEN_CENTRAL,
         "org.jetbrains.kotlin",
         "kotlin-stdlib-wasm-wasi",
         &reference_version(),
@@ -672,8 +691,8 @@ pub fn compose_runtime_jars() -> Option<Vec<PathBuf>> {
     crate::conformance::plugin_corpus::named("compose").runtime_jars()
 }
 
-/// The atomicfu runtime version, for callers that name it as a constant (the conformance-deps
-/// fetch script). The atomicfu corpus descriptor is the producer;
+/// The atomicfu runtime version, for callers that name it as a constant. The atomicfu corpus
+/// descriptor is the producer;
 /// `plugin_runtime_version_constants_match_descriptors` pins this to it.
 pub const ATOMICFU_RUNTIME_VERSION: &str = "0.32.1";
 
@@ -719,6 +738,15 @@ fn atomicfu_klib_unavailable(
     format!(
         "box directive `// WITH_ATOMICFU` needs the atomicfu runtime KLIB for {target:?}: {reason}"
     )
+}
+
+/// The prebuilt static caches a Kotlin/Native distribution rooted at `native_root` ships for debug
+/// binaries of this host (`klib/cache/linux_x64-gSTATIC-system`), the caches Gradle's debug
+/// binaries and Kotlin's own Native box tests link against. `None` on a host Kotlin/Native does
+/// not target.
+pub fn kotlin_native_debug_static_caches(native_root: &Path) -> Option<PathBuf> {
+    let konan = crate::native_target::NativeTarget::host()?.konan_name()?;
+    Some(native_root.join(format!("klib/cache/{konan}-gSTATIC-system")))
 }
 
 /// The atomicfu runtime KLIB for `target`, pinned to the version of the atomicfu corpus's runtime; `Ok(None)` for
@@ -838,6 +866,16 @@ fn find_exact_jar(dir: &std::path::Path, expected: &str, depth: usize) -> Option
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_jvm_has_no_stdlib_klib_and_says_so() {
+        use crate::compilation_target::CompilationTarget;
+        assert_eq!(
+            kotlin_stdlib_klib_or_reason(CompilationTarget::Jvm),
+            Err("the JVM stdlib is a jar, not a KLIB".to_string())
+        );
+        assert_eq!(kotlin_stdlib_klib(CompilationTarget::Jvm), None);
+    }
+
     use super::*;
 
     fn distribution_with(files: &[&str]) -> PathBuf {
@@ -871,6 +909,21 @@ mod tests {
         assert!(kotlinc_distribution_complete(&whole));
         let _ = std::fs::remove_dir_all(partial);
         let _ = std::fs::remove_dir_all(whole);
+    }
+
+    #[test]
+    fn debug_static_caches_are_the_host_targets_gstatic_system_directory() {
+        let konan = crate::native_target::NativeTarget::host().and_then(|host| host.konan_name());
+        assert_eq!(
+            kotlin_native_debug_static_caches(Path::new("/dist")),
+            konan.map(|konan| PathBuf::from(format!("/dist/klib/cache/{konan}-gSTATIC-system")))
+        );
+        if std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64" {
+            assert_eq!(
+                kotlin_native_debug_static_caches(Path::new("/dist")),
+                Some(PathBuf::from("/dist/klib/cache/linux_x64-gSTATIC-system"))
+            );
+        }
     }
 
     #[test]

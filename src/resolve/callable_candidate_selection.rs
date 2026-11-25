@@ -9,6 +9,19 @@ pub(super) fn is_exact_argument_rank(expected: Ty, actual: Ty) -> bool {
     expected == actual && !matches!(expected.kind(), TyKind::TyParam(..) | TyKind::Var(..))
 }
 
+/// The call-site signature's parameters, before inference binds its variables, in the order of
+/// the scored shape. `None` when the shape names a parameter the signature does not declare.
+fn shaped_declared_parameters(
+    signature: &crate::libraries::GenericSig,
+    shape: &ContextualCallShape,
+) -> Option<Vec<Ty>> {
+    shape
+        .parameter_indices
+        .iter()
+        .map(|&index| signature.params.get(index).copied())
+        .collect()
+}
+
 impl Checker<'_> {
     /// Select one declaration from a provider's raw callable family. Receiver/name lookup has already
     /// produced the family; applicability, generic binding, and contextual argument shape are shared.
@@ -1013,6 +1026,14 @@ impl Checker<'_> {
                     argument_names,
                 )?
             };
+            let Some(declared_params) = shaped_declared_parameters(&signature, &shape) else {
+                crate::trace_compiler!(
+                    "resolve",
+                    "candidate {} rejected: call shape names an undeclared parameter",
+                    candidate.callable.name,
+                );
+                continue;
+            };
             let Some(mut score) = call_applicability::score_with_declaration(
                 self,
                 scope,
@@ -1030,6 +1051,10 @@ impl Checker<'_> {
                         bindings: &specialized_bindings,
                         parameter_indices: &shape.parameter_indices,
                     }
+                }),
+                Some(call_applicability::DeclaredParameters {
+                    params: &declared_params,
+                    formals: &signature.formals,
                 }),
             ) else {
                 crate::trace_compiler!(
@@ -1107,6 +1132,14 @@ impl Checker<'_> {
                         argument_names,
                     )?
                 };
+                let Some(declared_params) = shaped_declared_parameters(&signature, &shape) else {
+                    crate::trace_compiler!(
+                        "resolve",
+                        "candidate {} rejected: call shape names an undeclared parameter",
+                        candidate.callable.name,
+                    );
+                    continue;
+                };
                 let Some(specialized_score) = call_applicability::score_with_declaration(
                     self,
                     scope,
@@ -1124,6 +1157,10 @@ impl Checker<'_> {
                             bindings: &specialized_bindings,
                             parameter_indices: &shape.parameter_indices,
                         }
+                    }),
+                    Some(call_applicability::DeclaredParameters {
+                        params: &declared_params,
+                        formals: &signature.formals,
                     }),
                 ) else {
                     continue;

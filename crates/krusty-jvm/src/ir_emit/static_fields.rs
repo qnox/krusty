@@ -236,7 +236,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
 /// field store. An explicit backing field's `field = …` and a `val x =` whose initializer starts on
 /// the next line both differ from the declaration line; generated storage has only the latter.
 pub(super) fn initializer_line(ir: &IrFile, s: &krusty::ir::IrStatic, init: ExprId) -> u32 {
-    ir.source_line(init).unwrap_or(s.line)
+    ir.initializer_store_line(init).unwrap_or(s.line)
 }
 
 /// The HOISTED outer-class static backing a companion property of `c` (a companion class), if any:
@@ -1092,9 +1092,7 @@ pub(super) fn class_initializer_steps<'ir>(
     };
     let companion_order = c
         .companion_class
-        .filter(|_| {
-            krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_5_0_RC)
-        })
+        .filter(|_| krusty::kotlin_version::class_statics_in_program_order())
         .and_then(|companion| ir.class_id_by_name(companion))
         .and_then(|companion| ir.class_source_order(companion));
     let mut steps = Vec::with_capacity(statics.len() + 2);

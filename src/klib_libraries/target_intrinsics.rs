@@ -703,6 +703,11 @@ pub(super) fn authenticate(
             return Some(shape);
         }
     }
+    if platform == Some(TargetIntrinsicPlatform::Wasm) {
+        if let Some(shape) = wasm_continuation(placement, declaration) {
+            return Some(shape);
+        }
+    }
     if declaration.context_count != 0
         || !declaration.context_kinds.is_empty()
         || declaration.is_suspend
@@ -880,6 +885,98 @@ fn wasm_array_copy(
             receiver: None,
             params: vec![array, Ty::Int, array, Ty::Int, Ty::Int],
             ret: Ty::Unit,
+        }
+    })
+}
+
+/// Wasm's two continuation intrinsics in `kotlin.wasm.internal`, which kotlinc's pre-serialization
+/// inliner leaves in a KLIB body that expanded `suspendCoroutineUninterceptedOrReturn<T>`:
+/// `getContinuation<T>(): Continuation<T>`, the enclosing suspend body's own continuation, and the
+/// suspend `suspendOrReturn<T>(blockResult: Any?): T`.
+fn wasm_continuation(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    wasm_current_continuation(placement, declaration)
+        .or_else(|| wasm_suspend_or_return(placement, declaration))
+}
+
+/// `suspendOrReturn<T>(blockResult: Any?): T` in `kotlin.wasm.internal`, a suspend declaration
+/// kotlinc binds by name and expands in place: its operand is the suspension point.
+fn wasm_suspend_or_return(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    let [result] = declaration.formals.as_slice() else {
+        return None;
+    };
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/wasm/internal"))
+        && declaration.name == "suspendOrReturn"
+        && declaration.is_suspend
+        && declaration.receiver.is_none()
+        && !result.reified
+        && result.bounds.iter().all(is_nullable_any)
+        && matches!(declaration.params.as_slice(), [operand] if is_nullable_any(operand))
+        && matches!(&declaration.ret, KotlinType::Param { id, nullable: false, .. } if *id == result.id))
+    .then(|| {
+        let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+        KlibIntrinsicShape {
+            operation: CompilerIntrinsic::ReturnIfSuspended,
+            kind: ExternalCallableKind::TopLevel,
+            receiver: None,
+            params: vec![any],
+            ret: any,
+        }
+    })
+}
+
+/// `getContinuation<T>(): Continuation<T>`: the enclosing suspend body's own continuation.
+fn wasm_current_continuation(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    let [result] = declaration.formals.as_slice() else {
+        return None;
+    };
+    let excluded = declaration
+        .annotation_applications
+        .iter()
+        .filter(|annotation| {
+            annotation.identity == type_name("kotlin/wasm/internal/ExcludedFromCodegen")
+        })
+        .count();
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/wasm/internal"))
+        && declaration.name == "getContinuation"
+        && excluded == 1
+        && declaration.receiver.is_none()
+        && !result.reified
+        && result.bounds.iter().all(is_nullable_any)
+        && declaration.params.is_empty()
+        && matches!(
+            &declaration.ret,
+            KotlinType::Class {
+                internal,
+                args,
+                nullable: false,
+                shape: KotlinFunctionTypeShape {
+                    receiver: false,
+                    context_count: 0,
+                    suspend: false,
+                },
+            } if internal == "kotlin/coroutines/Continuation"
+                && matches!(
+                    args.as_slice(),
+                    [KotlinType::Param { id, nullable: false, .. }] if *id == result.id
+                )
+        ))
+    .then(|| {
+        let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+        KlibIntrinsicShape {
+            operation: CompilerIntrinsic::CurrentContinuation,
+            kind: ExternalCallableKind::TopLevel,
+            receiver: None,
+            params: Vec::new(),
+            ret: Ty::obj_args("kotlin/coroutines/Continuation", &[any]),
         }
     })
 }
@@ -2206,6 +2303,108 @@ mod tests {
         let mut concrete = generic("interceptedIntrinsic", excluded);
         concrete.params[0] = continuation(KotlinType::class("kotlin/Int"));
         assert!(authenticate(wasm, internal, &concrete).is_none());
+    }
+
+    #[test]
+    fn wasm_continuation_intrinsics_require_their_exact_declarations() {
+        let wasm = Some(TargetIntrinsicPlatform::Wasm);
+        let internal =
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/wasm/internal"));
+        let excluded = AnnotationApplication {
+            identity: type_name("kotlin/wasm/internal/ExcludedFromCodegen"),
+            arguments: Vec::new(),
+        };
+        let result = crate::metadata::semantic::KotlinTypeParameterId(5);
+        let formal = KotlinType::Param {
+            name: "T".to_owned(),
+            id: result,
+            nullable: false,
+        };
+        let continuation = KotlinType::Class {
+            internal: "kotlin/coroutines/Continuation".to_owned(),
+            args: vec![formal.clone()],
+            nullable: false,
+            shape: KotlinFunctionTypeShape {
+                receiver: false,
+                context_count: 0,
+                suspend: false,
+            },
+        };
+        let generic = |name: &str, annotation: AnnotationApplication| {
+            let mut declaration = declaration(name, &[], "kotlin/Int", annotation);
+            declaration.is_external = false;
+            declaration.formals = vec![crate::metadata::semantic::KotlinTypeParameter {
+                id: result,
+                name: "T".to_owned(),
+                bounds: Vec::new(),
+                variance: crate::types::TypeVariance::Invariant,
+                only_input: false,
+                reified: false,
+            }];
+            declaration
+        };
+        let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+        let continuation_of_any = Ty::obj_args("kotlin/coroutines/Continuation", &[any]);
+
+        let current = || {
+            let mut current = generic("getContinuation", excluded.clone());
+            current.ret = continuation.clone();
+            current
+        };
+        assert_eq!(
+            authenticate(wasm, internal, &current()),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::CurrentContinuation,
+                kind: ExternalCallableKind::TopLevel,
+                receiver: None,
+                params: Vec::new(),
+                ret: continuation_of_any,
+            })
+        );
+        assert!(
+            authenticate(Some(TargetIntrinsicPlatform::Native), internal, &current()).is_none()
+        );
+        let mut unannotated = current();
+        unannotated.annotation_applications.clear();
+        assert!(authenticate(wasm, internal, &unannotated).is_none());
+        let mut renamed = current();
+        renamed.name = "currentContinuation".to_owned();
+        assert!(authenticate(wasm, internal, &renamed).is_none());
+
+        let suspend_or_return = || {
+            let mut declaration = generic("suspendOrReturn", excluded.clone());
+            declaration.is_suspend = true;
+            declaration.params = vec![KotlinType::Class {
+                internal: "kotlin/Any".to_owned(),
+                args: Vec::new(),
+                nullable: true,
+                shape: KotlinFunctionTypeShape::default(),
+            }];
+            declaration.ret = formal.clone();
+            declaration
+        };
+        assert_eq!(
+            authenticate(wasm, internal, &suspend_or_return()),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::ReturnIfSuspended,
+                kind: ExternalCallableKind::TopLevel,
+                receiver: None,
+                params: vec![any],
+                ret: any,
+            })
+        );
+        let mut not_suspend = suspend_or_return();
+        not_suspend.is_suspend = false;
+        assert!(authenticate(wasm, internal, &not_suspend).is_none());
+        let mut concrete = suspend_or_return();
+        concrete.ret = KotlinType::class("kotlin/Int");
+        assert!(authenticate(wasm, internal, &concrete).is_none());
+        assert!(authenticate(
+            wasm,
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/coroutines")),
+            &suspend_or_return()
+        )
+        .is_none());
     }
 
     #[test]

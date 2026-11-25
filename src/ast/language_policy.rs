@@ -6,12 +6,6 @@
 /// One file's language-feature decisions.
 #[derive(Default)]
 pub struct FileLanguagePolicy {
-    /// `// ASSERTIONS_MODE: always-enable` — `assert(...)` is emitted UNGUARDED (always checks + throws),
-    /// not behind the per-class `desiredAssertionStatus()` guard. From the test directive / `-Xassertions`.
-    pub assert_always_enabled: bool,
-    /// `// ASSERTIONS_MODE: always-disable` — `assert(...)` is elided entirely (the condition is not even
-    /// evaluated). Mutually exclusive with `assert_always_enabled`; both unset ⇒ the per-class guard.
-    pub assert_always_disabled: bool,
     /// `+ExplicitContextArguments`: named context parameters may be supplied at a call site instead
     /// of being selected from the implicit receiver and lexical scope.
     pub explicit_context_arguments: bool,

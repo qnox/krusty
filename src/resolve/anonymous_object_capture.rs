@@ -311,9 +311,9 @@ impl Checker<'_> {
         identity: (usize, usize),
         extension: Option<Span>,
         class_receiver: Option<Ty>,
-    ) -> FirCapturedReceiver {
+    ) -> Option<FirCapturedReceiver> {
         if let Some(ty) = class_receiver {
-            return enclosing_instance(ty);
+            return Some(enclosing_instance(ty));
         }
         if let Some(context) = scope.implicit_receiver_context(identity) {
             let kind = match context.kind {
@@ -322,18 +322,13 @@ impl Checker<'_> {
                 ContextReceiverKind::LegacyReceiver => CapturedContextKind::LegacyReceiver,
                 ContextReceiverKind::Named => unreachable!("a named context value is no receiver"),
             };
-            let types = context.types.into_iter().map(|ty| {
-                crate::fir::ResolvedTy::new(ty).expect("a context parameter's type is published")
-            });
-            return FirCapturedReceiver::Context {
-                kind,
-                types: types.collect(),
-                index: u32::try_from(context.index).expect("too many context parameters"),
-            };
+            return published_context_receiver(kind, context.types, context.index);
         }
         let Some(declaration) = extension else {
             let label = scope.implicit_receiver_lambda_label(identity);
-            return FirCapturedReceiver::Lambda(label.map(String::into_boxed_str));
+            return Some(FirCapturedReceiver::Lambda(
+                label.map(String::into_boxed_str),
+            ));
         };
         let (index, _) = self
             .extension_receiver_labels
@@ -347,10 +342,10 @@ impl Checker<'_> {
         } else {
             CapturedCallableOwner::Declaration
         };
-        FirCapturedReceiver::Callable {
+        Some(FirCapturedReceiver::Callable {
             label: label.clone().into_boxed_str(),
             owner,
-        }
+        })
     }
 }
 
@@ -609,7 +604,7 @@ impl Checker<'_> {
             // singleton identity and deliberately use `usize::MAX` instead of a scoped
             // receiver coordinate. They are not closure captures.
             .filter(|receiver| receiver.receiver_depth != usize::MAX)
-            .map(|receiver| {
+            .filter_map(|receiver| {
                 let class_label_identity = receiver
                     .class_receiver
                     .then(|| {
@@ -639,6 +634,12 @@ impl Checker<'_> {
                 );
                 let receiver_capture = self
                     .implicit_receiver_capture_id(receiver.class_receiver, receiver.receiver_role);
+                let published = self.captured_receiver(
+                    scope,
+                    receiver.identity,
+                    receiver.extension_receiver,
+                    receiver.class_receiver.then_some(receiver.ty),
+                )?;
                 let capture = AnonymousObjectCapture {
                     enum_entry_storage: None,
                     name: if matches!(
@@ -656,12 +657,7 @@ impl Checker<'_> {
                     storage_ty: None,
                     source,
                     receiver_label: label,
-                    receiver: Some(self.captured_receiver(
-                        scope,
-                        receiver.identity,
-                        receiver.extension_receiver,
-                        receiver.class_receiver.then_some(receiver.ty),
-                    )),
+                    receiver: Some(published),
                     semantic_receiver: Some(
                         if matches!(
                             source,
@@ -703,10 +699,10 @@ impl Checker<'_> {
                         )
                     })
                     .collect();
-                ObservedReceiverCapture {
+                Some(ObservedReceiverCapture {
                     capture,
                     uses_before,
-                }
+                })
             })
             .collect()
     }
@@ -1545,6 +1541,27 @@ pub(super) fn record_anonymous_construction_captures(
     );
     captures.insert(declaration, selected);
     field_remap
+}
+
+/// A context-parameter receiver whose types can be published. An unresolved type is already
+/// diagnosed; absence omits that capture instead of labeling it as another receiver kind.
+fn published_context_receiver(
+    kind: CapturedContextKind,
+    types: impl IntoIterator<Item = Ty>,
+    index: usize,
+) -> Option<FirCapturedReceiver> {
+    let Ok(types) = types
+        .into_iter()
+        .map(crate::fir::ResolvedTy::new)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return None;
+    };
+    Some(FirCapturedReceiver::Context {
+        kind,
+        types: types.into_boxed_slice(),
+        index: u32::try_from(index).expect("too many context parameters"),
+    })
 }
 
 /// The captured instance of the enclosing class whose receiver type is `ty`: a class scope's or a

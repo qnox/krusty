@@ -1689,13 +1689,10 @@ where
         .iter()
         .take(inferred_end)
         .any(|roots| !roots.is_empty());
-    let retained_anonymous_captures = if retain_inspection_analysis {
-        Some(crate::resolve::discover_anonymous_object_captures(
-            &files[..inferred_end],
-            &syntax_errors[..inferred_end],
-            &mut symbols,
-        ))
-    } else if has_inline_capture_roots {
+    // Only retained inline bodies need their captures before signature finalization. Every other
+    // capture is discovered once the signatures it reads are final: a local typed by a call to an
+    // inferred-return function is still pending here.
+    if has_inline_capture_roots {
         crate::resolve::discover_inline_anonymous_object_captures(
             &files[..inferred_end],
             &syntax_errors[..inferred_end],
@@ -1703,11 +1700,6 @@ where
             &inline_capture_selection.bodies[..inferred_end],
             &mut symbols,
         );
-        None
-    } else {
-        None
-    };
-    if retain_inspection_analysis || has_inline_capture_roots {
         crate::resolve::install_streamed_anonymous_capture_declarations(
             &files[..inferred_end],
             &mut pass1_headers,
@@ -1930,6 +1922,11 @@ where
     // checking and inline preparation finish; the next source set must not see them.
     let _supertype_projection = crate::resolve::SupertypeProjectionCache::enter();
     let (types, streamed) = if retain_inspection_analysis {
+        let retained_anonymous_captures = crate::resolve::discover_anonymous_object_captures(
+            &files[..inferred_end],
+            &syntax_errors[..inferred_end],
+            &mut symbols,
+        );
         // Successful finalization and diagnostic recovery both publish the same stable declaration
         // inventory. Recovery merely lacks signatures for declarations that failed to finalize;
         // it must not reopen the parser-keyed checker and silently switch identity models.
@@ -1946,9 +1943,7 @@ where
             &files,
             &mut symbols,
             index,
-            retained_anonymous_captures
-                .as_deref()
-                .expect("retained analysis must preserve capture discovery"),
+            &retained_anonymous_captures,
             &parse_errors,
             checked_count,
             diags,
