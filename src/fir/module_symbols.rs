@@ -68,7 +68,17 @@ impl StreamedModuleProjectionCache {
 struct PropertyProjectionShape {
     receiver: Option<Ty>,
     context_count: usize,
-    mutable: bool,
+    owner_is_annotation: bool,
+}
+
+/// The name of a property's getter. An annotation class's property is read through a method named
+/// after the property; any other property through its `get` accessor.
+fn projected_getter_name(name: &str, owner_is_annotation: bool) -> String {
+    if owner_is_annotation {
+        name.to_owned()
+    } else {
+        crate::names::property_getter_name(name)
+    }
 }
 
 impl<'a> StreamedModuleSymbols<'a> {
@@ -778,8 +788,14 @@ impl<'a> StreamedModuleSymbols<'a> {
         let PropertyProjectionShape {
             receiver,
             context_count,
-            mutable,
+            owner_is_annotation,
         } = shape;
+        let header = self
+            .index
+            .declaration_header(declaration)
+            .expect("a failed property projection requires its stable declaration header");
+        // Mutability is part of the declaration's stable header, available before its signature.
+        let mutable = header.flags.has(DeclarationFlags::MUTABLE);
         let mut parameters = vec![Ty::Error; context_count];
         if receiver.is_some() {
             let receiver_index = if matches!(kind, PropKind::MemberExtension) {
@@ -789,20 +805,26 @@ impl<'a> StreamedModuleSymbols<'a> {
             };
             parameters.insert(receiver_index, Ty::Error);
         }
-        let mut getter =
-            Self::semantic_callable(name, parameters.clone(), Ty::Error, receiver, context_count);
+        let mut getter = Self::semantic_callable(
+            &projected_getter_name(name, owner_is_annotation),
+            parameters.clone(),
+            Ty::Error,
+            receiver,
+            context_count,
+        );
         getter.owner = owner;
         let setter = mutable.then(|| {
             parameters.push(Ty::Error);
-            let mut setter =
-                Self::semantic_callable(name, parameters, Ty::Unit, receiver, context_count);
+            let mut setter = Self::semantic_callable(
+                &crate::names::property_setter_name(name),
+                parameters,
+                Ty::Unit,
+                receiver,
+                context_count,
+            );
             setter.owner = owner;
             setter
         });
-        let header = self
-            .index
-            .declaration_header(declaration)
-            .expect("a failed property projection requires its stable declaration header");
         let setter_visibility = self
             .index
             .owned_declaration(declaration, DeclarationKind::Accessor, 1)
@@ -1324,7 +1346,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                             receiver,
                             context_count: property
                                 .map_or(0, |property| property.context_parameter_count as usize),
-                            mutable: property.is_some_and(|property| property.mutable),
+                            owner_is_annotation,
                         },
                     ),
                 );
@@ -1349,13 +1371,8 @@ impl<'a> StreamedModuleSymbols<'a> {
             if let Some(receiver) = receiver {
                 getter_parameters.insert(context_count, receiver);
             }
-            let getter_name = if owner_is_annotation {
-                name.to_owned()
-            } else {
-                crate::names::property_getter_name(name)
-            };
             let mut getter = Self::semantic_callable(
-                &getter_name,
+                &projected_getter_name(name, owner_is_annotation),
                 getter_parameters.clone(),
                 public_ty,
                 receiver,
@@ -1771,7 +1788,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                         receiver,
                         context_count: property
                             .map_or(0, |property| property.context_parameter_count as usize),
-                        mutable: property.is_some_and(|property| property.mutable),
+                        owner_is_annotation: false,
                     },
                 );
                 failed.associated_classifier = associated_classifier;

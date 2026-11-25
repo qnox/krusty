@@ -349,7 +349,7 @@ impl Checker<'_> {
     /// Candidate union at one exact receiver rung. The provider and active checked-local overlay
     /// contribute the same normalized shape; callers decide whether to stop at this rung or combine
     /// several direct supertypes for override matching.
-    fn body_local_classifier_bindings(
+    pub(super) fn body_local_classifier_bindings(
         &self,
         owner: TypeName,
         receiver: Ty,

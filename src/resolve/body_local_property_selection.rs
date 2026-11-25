@@ -489,3 +489,56 @@ impl Checker<'_> {
             .next()
     }
 }
+
+impl Checker<'_> {
+    /// A reference to a member property of a classifier declared in the active bounded body takes
+    /// its type from the checked declaration, as a read of that property does: the provider's
+    /// model of the classifier does not type it until the body is finalized.
+    pub(super) fn typed_body_local_property_ref(
+        &self,
+        receiver: Ty,
+        property: Option<crate::symbol_resolver::ResolvedPropertyRef>,
+    ) -> Option<crate::symbol_resolver::ResolvedPropertyRef> {
+        let mut property = property?;
+        self.type_body_local_property_ref(receiver, &mut property);
+        Some(property)
+    }
+
+    fn type_body_local_property_ref(
+        &self,
+        receiver: Ty,
+        property: &mut crate::symbol_resolver::ResolvedPropertyRef,
+    ) {
+        let Some(checked) = self.checked_body_local_property(receiver, &property.name) else {
+            return;
+        };
+        if checked.stable_declaration != property.stable_declaration {
+            return;
+        }
+        // The declared type is applied to the receiver's type arguments, as a member function of
+        // the classifier is. An inherited property would need the supertype's application; it
+        // keeps the unresolved projection.
+        let declaring_receiver = crate::symbol_resolver::member_scope_receiver(receiver);
+        if declaring_receiver.obj_internal() != Some(checked.owner) {
+            return;
+        }
+        let Some((bindings, _)) = self.body_local_classifier_bindings(checked.owner, receiver)
+        else {
+            return;
+        };
+        let ty = crate::symbol_resolver::specialize_signature_output_type(
+            &self.fed_source(),
+            checked.ty,
+            &bindings,
+        );
+        property.prop_ty = ty;
+        property.getter.ret = ty;
+        if let Some(value) = property
+            .setter
+            .as_mut()
+            .and_then(|setter| setter.params.last_mut())
+        {
+            *value = ty;
+        }
+    }
+}
