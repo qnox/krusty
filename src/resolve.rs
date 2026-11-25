@@ -29,8 +29,7 @@ use crate::types::{
     existing_type_name, semantic_value_parameter_ty, ty_mentions_param, type_name,
     type_name_nested_child, Ty, TypeName, Visibility,
 };
-use scope::ScopeKind;
-use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns};
+use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns, ScopeKind};
 
 mod callable_signature;
 mod class_names;
@@ -65,8 +64,8 @@ mod abstract_obligations;
 mod argument_parameter_mapping;
 mod builtin_implementation;
 mod char_sequence_protocol;
-pub(crate) mod collection_protocol;
 mod coroutine_runtime;
+mod enum_entries_factory;
 mod selected_external_members;
 use argument_parameter_mapping::{
     call_argument_parameter_indices, call_argument_parameter_indices_result,
@@ -509,7 +508,7 @@ use postponed_diagnostics::PostponedDiagnostics;
 use property_read_selection::{PropertyReadAmbiguity, PropertyReadMemberSelection};
 use property_write_selection::PropertyWriteSelection;
 use qualifiers::*;
-use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
+use sam_constructors::select_sam_constructor;
 pub(crate) use serialization_generated_members::resolve as resolve_serialization_generated_member_statuses;
 use stable_path::StablePathRead;
 #[cfg(any(test, feature = "test-support"))]
