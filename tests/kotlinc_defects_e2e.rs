@@ -108,8 +108,34 @@ const LIST_ADD_ALL_OF_ITS_RANGE: &str = "fun box(): String {\n\
 
 /// KT-89466: a platform module's class over the class of a library its common module depends on.
 /// kotlinc-native builds the library, then crashes actualizing the application's fragments.
-const PLATFORM_CLASS_OVER_LIBRARY_CLASS: &str =
-    include_str!("box_regressions/multimodule/platformRedeclaresCommonClass.kt");
+const PLATFORM_CLASS_OVER_LIBRARY_CLASS: &str = r#"// LANGUAGE: +MultiPlatformProjects
+
+// MODULE: lib-common
+class Some(val origin: String = "common")
+
+object Single {
+    fun origin(): String = "common"
+}
+
+// MODULE: lib-platform()()(lib-common)
+
+// MODULE: app-common(lib-common)
+fun accept(s: Some) {}
+
+// MODULE: app-platform(lib-platform)()(app-common)
+class Some(val origin: String = "platform")
+
+object Single {
+    fun origin(): String = "platform"
+}
+
+fun box(): String {
+    val some: Any = Some()
+    if (some !is Some) return "type test"
+    if (Single.origin() != "platform") return "object"
+    return if (Some().origin == "platform") "OK" else "constructor"
+}
+"#;
 
 /// The program that shows `quirk`, for a defect. Every quirk is named, so a new one has to say
 /// here whether it is a defect and, if so, which program shows it.
