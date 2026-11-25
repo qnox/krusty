@@ -1112,12 +1112,13 @@ jobs:
         continue-on-error: true
         # The corpus deadline fits a cold row on the slowest pool: an evicted recordings cache
         # must slow a row down, not fail it. A cold 2.4.21 row (no kotlinc-native recordings, no
-        # KLIB references) took 1,157 s on a 4-vCPU GitHub-class runner; the slowest pool compiles
-        # up to 2.4x slower, about 2,780 s, and this budget keeps a quarter on top of that. Keep
-        # ordinary and focused deadlines unchanged; a corpus timeout still fails this row.
+        # KLIB references) took 765 s on a 4-vCPU GitHub-class runner with the oracle in persistent
+        # kotlinc-native servers; the slowest pool compiles up to 2.4x slower, about 1,840 s, and
+        # this budget keeps a quarter on top of that. Keep ordinary and focused deadlines
+        # unchanged; a corpus timeout still fails this row.
         env:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
-          KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "3500"
+          KRUSTY_NATIVE_CONFORMANCE_TIMEOUT_SECONDS: "2300"
           KRUSTY_NATIVE_BYTE_REPORT: ${{ github.workspace }}/native-byte-equality.txt
           KRUSTY_KLIB_REFERENCE_CACHE: ${{ github.workspace }}/target/cache/klib-references
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/native-recordings
