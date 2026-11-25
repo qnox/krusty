@@ -924,6 +924,35 @@ fn a_pool_that_cannot_grow_within_the_budget_waits_for_its_own_server() {
 }
 
 #[test]
+fn callers_that_race_a_full_budget_never_wait_on_an_idle_server() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let budget = budget(1500);
+    let pool = super::ServerPool::resident(&budget, 1000);
+    let (done_tx, done_rx) = mpsc::channel();
+
+    std::thread::scope(|scope| {
+        for _ in 0..16 {
+            let done_tx = done_tx.clone();
+            let pool = &pool;
+            scope.spawn(move || {
+                for _ in 0..500 {
+                    pool.with_server(2, || Some(()), |_| std::thread::yield_now())
+                        .expect("a server");
+                }
+                done_tx.send(()).expect("controller listens");
+            });
+        }
+        for _ in 0..16 {
+            done_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("a caller waited for a server that was already idle");
+        }
+    });
+}
+
+#[test]
 fn the_default_budget_leaves_the_test_process_and_the_machine_their_memory() {
     use crate::common_core::server_pool::default_limit_mib;
 

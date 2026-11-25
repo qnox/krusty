@@ -134,6 +134,10 @@ impl<S> Shared<S> {
                     if len == 0 {
                         return None;
                     }
+                } else if state.slots.iter().any(|slot| !slot.claimed) {
+                    // A caller released its server while this one waited on the budget with the
+                    // lock dropped, and its notification is already gone: claim it, do not wait.
+                    continue;
                 }
             }
 
