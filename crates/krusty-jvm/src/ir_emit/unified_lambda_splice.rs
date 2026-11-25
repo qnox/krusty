@@ -20,6 +20,7 @@
 //! literal is an emission error, never another lowering.
 
 use super::inline_call_outcome::InlineCallOutcome;
+use super::inline_return_frames::LambdaBody;
 use super::*;
 use krusty::jvm::inline::SplicedFrame;
 use krusty::types::TyKind;
@@ -533,12 +534,14 @@ impl Emitter<'_> {
                     "I".to_string(),
                 ));
             }
-            let body_ret = self.emit_fn_body_inline_with_aliases(
-                facts.inline_body,
-                &param_slots,
-                cap_bindings.aliases.clone(),
-                &mut scratch,
-            );
+            let body_ret = self.in_lambda_body(LambdaBody::Placed, |emitter| {
+                emitter.emit_fn_body_inline_with_aliases(
+                    facts.inline_body,
+                    &param_slots,
+                    cap_bindings.aliases.clone(),
+                    &mut scratch,
+                )
+            });
             // The erased `invoke` result is `Object`. Coerce from the BODY's value type, not the
             // contextual lambda declaration return: a block accepted as `() -> Any?` can still
             // produce a primitive `Boolean`/`Int` here.

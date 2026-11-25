@@ -276,6 +276,18 @@ impl KlibIrModuleTrees {
             .map(|at| self.class_at(*at))
     }
 
+    /// Every public class, outside enum entries, serialized under `class`'s package and
+    /// declaration paths. The caller checks the rest of the identity.
+    pub(crate) fn classes_at_path(
+        &self,
+        class: &crate::metadata::id_signature::KlibPublicIdSignature,
+    ) -> impl Iterator<Item = (&KlibIrArena, &KlibIrClass)> {
+        self.classes
+            .at_path(class)
+            .iter()
+            .map(|at| self.class_at(*at))
+    }
+
     fn class_at(&self, at: super::class_index::ClassAt) -> (&KlibIrArena, &KlibIrClass) {
         let arena = &self.trees[at.tree].arena;
         (arena, arena.class(at.class))

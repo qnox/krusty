@@ -38,6 +38,9 @@ pub(crate) struct KlibTypeParameters {
     bounds: HashMap<String, Vec<Ty>>,
     /// Each class formal's declared variance. A function formal is always invariant.
     variances: HashMap<String, crate::types::TypeVariance>,
+    /// The non-public classes of the declaring library its signature names, each by the identity
+    /// that library's bodies give it.
+    classifiers: HashMap<KlibIrSignature, TypeName>,
 }
 
 impl KlibTypeParameters {
@@ -84,6 +87,12 @@ impl KlibTypeParameters {
             .is_none()
     }
 
+    /// Name the non-public classifier `signature` as `name`. A repeated signature is a malformed
+    /// declaration.
+    pub(crate) fn bind_classifier(&mut self, signature: &KlibIrSignature, name: TypeName) -> bool {
+        self.classifiers.insert(signature.clone(), name).is_none()
+    }
+
     /// The declared variance of the formal `name`: a class formal's recorded one, otherwise the
     /// invariance every function formal has.
     pub(crate) fn declared_variance(&self, name: &str) -> crate::types::TypeVariance {
@@ -103,7 +112,7 @@ fn class_type<E: From<KlibTypeError>>(
     annotations: &[KlibIrAnnotation],
     local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, E>,
 ) -> Result<Ty, E> {
-    let (name, receiver) = class_head(classifier, annotations, local_class)?;
+    let (name, receiver) = class_head(parameters, classifier, annotations, local_class)?;
     let mut arguments = arguments
         .iter()
         .map(|argument| type_argument(arena, parameters, *argument, local_class))
@@ -202,6 +211,7 @@ pub(crate) fn semantic_type_in<E: From<KlibTypeError>>(
 }
 
 fn class_head<E: From<KlibTypeError>>(
+    parameters: &KlibTypeParameters,
     classifier: &KlibIrSymbol,
     annotations: &[KlibIrAnnotation],
     local_class: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, E>,
@@ -213,9 +223,12 @@ fn class_head<E: From<KlibTypeError>>(
             }
             classifier_name(signature)?
         }
-        signature => {
-            local_class(signature)?.ok_or(unsupported::<E>("a type of a non-public class"))?
-        }
+        signature => match parameters.classifiers.get(signature) {
+            Some(&name) => name,
+            None => {
+                local_class(signature)?.ok_or(unsupported::<E>("a type of a non-public class"))?
+            }
+        },
     };
     let mut receiver = false;
     for annotation in annotations {
@@ -266,7 +279,13 @@ pub(crate) fn closure_type_arity(arena: &KlibIrArena, id: KlibIrTypeId) -> Optio
     {
         return None;
     }
-    let (name, _) = class_head(classifier, annotations, &|_| Ok::<_, KlibTypeError>(None)).ok()?;
+    let (name, _) = class_head(
+        &KlibTypeParameters::default(),
+        classifier,
+        annotations,
+        &|_| Ok::<_, KlibTypeError>(None),
+    )
+    .ok()?;
     let function = function_shape(name, arguments.len()).ok()??;
     (!function.is_reflective()).then(|| (function.arity(), function.is_suspend()))
 }

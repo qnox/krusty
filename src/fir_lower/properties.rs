@@ -1204,18 +1204,20 @@ fn materialize_member_property(
     } else {
         false
     };
-    let has_storage = !class_flags.has(DeclarationFlags::INTERFACE)
-        && property.delegate.is_none()
-        && !fieldless_capture
-        && (property.flags.has(DeclarationFlags::PROPERTY_PARAMETER)
-            || property.initializer.is_some()
-            || property.flags.has(DeclarationFlags::LATEINIT)
-            || property.flags.has(DeclarationFlags::EXPLICIT_BACKING_FIELD)
-            || property
-                .flags
-                .has(DeclarationFlags::GETTER_READS_BACKING_FIELD)
-            || (!property.flags.has(DeclarationFlags::CUSTOM_GETTER)
-                && !property.flags.has(DeclarationFlags::ABSTRACT)));
+    debug_assert_eq!(
+        property.flags.has(DeclarationFlags::HAS_INITIALIZER),
+        property.initializer.is_some(),
+        "the header's initializer fact and the checked property disagree for {}",
+        property.name
+    );
+    debug_assert_eq!(
+        property.flags.has(DeclarationFlags::DELEGATED),
+        property.delegate.is_some(),
+        "the header's delegation fact and the checked property disagree for {}",
+        property.name
+    );
+    let has_storage =
+        crate::fir::property_stores_field(class_flags, property.flags) && !fieldless_capture;
     if has_storage && !context_parameters.is_empty() {
         return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
             property.declaration,
@@ -1339,7 +1341,7 @@ fn materialize_member_property(
             });
             ir.property_initializer_stores.insert(store);
             // kotlinc's initializer store sits at its initializer expression, not the declaration.
-            if let Some(line) = ir.source_line(initializer) {
+            if let Some(line) = ir.initializer_store_line(initializer) {
                 ir.set_statement_line(store, line);
                 ir.set_source_line(store, line);
             }
