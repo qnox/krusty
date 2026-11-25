@@ -67,6 +67,8 @@ mod builtin_implementation;
 mod char_sequence_protocol;
 pub(crate) mod collection_protocol;
 mod coroutine_runtime;
+mod plugin_runtime;
+pub(crate) use plugin_runtime::PluginRuntimeInventory;
 mod selected_external_members;
 use argument_parameter_mapping::{
     call_argument_parameter_indices, call_argument_parameter_indices_result,

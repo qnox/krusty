@@ -573,13 +573,21 @@ mod tests {
     }
 
     #[test]
-    fn plugin_runtime_binding_uses_provider_declarations() {
+    fn plugin_runtime_binding_uses_resolution_owned_selection() {
         let path = source_path("src/compiler/backend_handoff/plugin_handoff.rs");
         let text = fs::read_to_string(&path).expect("read plugin runtime handoff");
-        for forbidden in ["SymbolResolver", "symbol_resolver::", "resolve_symbol("] {
+        for forbidden in [
+            "SymbolResolver",
+            "symbol_resolver::",
+            "resolve_symbol(",
+            "SymbolNamespace",
+            "SymbolSource",
+            ".symbols(",
+            "SemanticPlatform",
+        ] {
             assert!(
                 !text.contains(forbidden),
-                "plugin runtime declarations are provider-owned facts, not resolver candidates: {forbidden}"
+                "plugin runtime handoff must consume resolution-selected declarations: {forbidden}"
             );
         }
     }

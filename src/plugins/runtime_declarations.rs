@@ -25,7 +25,7 @@ pub struct RuntimeFunction {
 }
 
 /// Where a [`RuntimeFunction`] is declared.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RuntimeDeclaration {
     /// A top-level function of this package.
     Package(TypeName),
@@ -33,6 +33,15 @@ pub enum RuntimeDeclaration {
     Member(TypeName),
     /// A static function this classifier declares (a Java `static` method).
     Static(TypeName),
+}
+
+/// A runtime function a plugin declares it may call, by where it is declared and its name. A
+/// plugin lists these before the file is checked, so resolution can read their declarations once
+/// and the handoff selects among them without asking a provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RuntimeRequirement {
+    pub declaration: RuntimeDeclaration,
+    pub name: &'static str,
 }
 
 /// One [`RuntimeFunction`] the compilation selected.

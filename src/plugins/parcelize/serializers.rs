@@ -3,7 +3,7 @@
 
 use crate::ir::{ClassId, ExprId, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::plugins::runtime_declarations::{
-    BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
+    BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction, RuntimeRequirement,
 };
 use crate::types::{type_name, Ty, TypeName};
 
@@ -180,6 +180,57 @@ fn array_names(element: Ty) -> (&'static str, &'static str) {
         Ty::Char => ("writeCharArray", "createCharArray"),
         other => unreachable!("{other:?} is not a Parcel-serialized primitive array element"),
     }
+}
+
+/// Every `Parcel`, `Parcelable.Creator` and `Class` member [`ParcelRuntime::bind`] may select.
+pub(super) fn requirements() -> Vec<RuntimeRequirement> {
+    let parcel = RuntimeDeclaration::Member(type_name(super::PARCEL));
+    let creator = RuntimeDeclaration::Member(super::creator_interface());
+    let members = [
+        ParcelMember::Parcelable,
+        ParcelMember::String,
+        ParcelMember::Byte,
+        ParcelMember::Int,
+        ParcelMember::Long,
+        ParcelMember::Float,
+        ParcelMember::Double,
+    ]
+    .into_iter()
+    .chain(
+        [
+            Ty::Int,
+            Ty::Byte,
+            Ty::Long,
+            Ty::Float,
+            Ty::Double,
+            Ty::Boolean,
+            Ty::Char,
+        ]
+        .map(ParcelMember::PrimitiveArray),
+    );
+    let mut required = vec![
+        RuntimeRequirement {
+            declaration: creator,
+            name: "createFromParcel",
+        },
+        RuntimeRequirement {
+            declaration: creator,
+            name: "newArray",
+        },
+        RuntimeRequirement {
+            declaration: RuntimeDeclaration::Member(type_name("java/lang/Class")),
+            name: "getClassLoader",
+        },
+    ];
+    for member in members {
+        for name in [member.write_name(), member.read_name()] {
+            required.push(RuntimeRequirement {
+                declaration: parcel,
+                name,
+            });
+        }
+    }
+    required
 }
 
 impl ParcelMember {
@@ -637,4 +688,76 @@ fn call(
         dispatch_receiver: Some(receiver),
         args,
     })
+}
+
+#[cfg(test)]
+mod requirement_tests {
+    use super::*;
+    use crate::plugins::runtime_declarations::PluginClassifier;
+
+    /// A runtime that answers every request and records what was asked.
+    struct Recording(Vec<RuntimeRequirement>);
+
+    impl PluginRuntime for Recording {
+        fn function(&mut self, function: &RuntimeFunction) -> Result<BoundRuntimeFunction, String> {
+            self.0.push(RuntimeRequirement {
+                declaration: function.declaration,
+                name: function.name,
+            });
+            Ok(BoundRuntimeFunction {
+                target: crate::ir::ExternalCallableId::from_raw(0),
+                params: function.params.clone(),
+                ret: function.ret,
+            })
+        }
+
+        fn classifier(&self, _classifier: TypeName) -> Option<PluginClassifier> {
+            None
+        }
+
+        fn appended_parameters(
+            &mut self,
+            _target: crate::ir::ExternalCallableId,
+            _appended: Vec<Ty>,
+        ) {
+        }
+    }
+
+    #[test]
+    fn the_declared_requirements_are_every_function_binding_all_values_requests() {
+        let mut used = vec![
+            ParcelValue::Parcelable,
+            ParcelValue::String,
+            ParcelValue::Byte,
+            ParcelValue::Int,
+            ParcelValue::Long,
+            ParcelValue::Float,
+            ParcelValue::Double,
+        ];
+        used.extend(
+            [
+                Ty::Int,
+                Ty::Byte,
+                Ty::Long,
+                Ty::Float,
+                Ty::Double,
+                Ty::Boolean,
+                Ty::Char,
+            ]
+            .map(ParcelValue::PrimitiveArray),
+        );
+        let mut runtime = Recording(Vec::new());
+        ParcelRuntime::bind(&mut runtime, &used)
+            .expect("the recording runtime answers every request");
+        let declared = requirements();
+        for requested in &runtime.0 {
+            assert!(declared.contains(requested), "undeclared: {requested:?}");
+        }
+        for requirement in &declared {
+            assert!(
+                runtime.0.contains(requirement),
+                "declared but never requested: {requirement:?}"
+            );
+        }
+    }
 }

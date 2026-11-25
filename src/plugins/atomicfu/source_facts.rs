@@ -12,7 +12,7 @@ use crate::diag::Span;
 use crate::fx_hash::HashMap;
 use crate::ir::{for_each_child, Callee, ClassId, ExprId, IrCheckedOperation, IrExpr, IrFile};
 use crate::plugins::runtime_declarations::{
-    BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
+    BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction, RuntimeRequirement,
 };
 use crate::plugins::{PluginRejection, PluginRelease, PluginSourceView};
 use crate::types::{type_name, wk, Ty, TypeName, Visibility};
@@ -205,6 +205,38 @@ fn updater_function(
         "addAndGet" => ("addAndGet", vec![value], value),
         _ => return None,
     })
+}
+
+/// The functions of a field updater class [`updater_function`] can name.
+const UPDATER_FUNCTIONS: [&str; 10] = [
+    "get",
+    "set",
+    "compareAndSet",
+    "getAndSet",
+    "getAndIncrement",
+    "getAndDecrement",
+    "incrementAndGet",
+    "decrementAndGet",
+    "getAndAdd",
+    "addAndGet",
+];
+
+/// Every runtime function the lowering through field updaters may call.
+pub(super) fn requirements() -> Vec<RuntimeRequirement> {
+    [AtomicValue::Int, AtomicValue::Long]
+        .into_iter()
+        .flat_map(|value| {
+            let updater = value.updater();
+            std::iter::once(RuntimeRequirement {
+                declaration: RuntimeDeclaration::Static(updater),
+                name: "newUpdater",
+            })
+            .chain(UPDATER_FUNCTIONS.map(|name| RuntimeRequirement {
+                declaration: RuntimeDeclaration::Member(updater),
+                name,
+            }))
+        })
+        .collect()
 }
 
 fn unsupported(what: &str) -> String {
@@ -794,4 +826,53 @@ fn publication_error(declaration: &str, release: Option<PluginRelease>) -> Strin
          public val a: T by _a \n\
          ```\n"
     )
+}
+
+#[cfg(test)]
+mod requirement_tests {
+    use super::*;
+
+    #[test]
+    fn every_updater_function_the_lowering_names_is_declared() {
+        for (name, arguments) in [
+            ("value", 0),
+            ("value", 1),
+            ("lazySet", 1),
+            ("compareAndSet", 2),
+            ("getAndSet", 1),
+            ("getAndIncrement", 0),
+            ("getAndDecrement", 0),
+            ("incrementAndGet", 0),
+            ("decrementAndGet", 0),
+            ("getAndAdd", 1),
+            ("addAndGet", 1),
+        ] {
+            let (function, _, _) = updater_function(name, arguments, Ty::Int).unwrap();
+            assert!(
+                UPDATER_FUNCTIONS.contains(&function),
+                "`{function}` is not a declared updater function"
+            );
+        }
+        for function in UPDATER_FUNCTIONS {
+            assert!(
+                [
+                    "value",
+                    "lazySet",
+                    "compareAndSet",
+                    "getAndSet",
+                    "getAndIncrement",
+                    "getAndDecrement",
+                    "incrementAndGet",
+                    "decrementAndGet",
+                    "getAndAdd",
+                    "addAndGet"
+                ]
+                .iter()
+                .any(|name| (0..=2).any(|n| {
+                    updater_function(name, n, Ty::Int).is_some_and(|(f, _, _)| f == function)
+                })),
+                "`{function}` is declared but never named"
+            );
+        }
+    }
 }
