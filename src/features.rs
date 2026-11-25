@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::kotlin_version::KotlinVersion;
 use crate::language_version::LanguageVersion;
+use crate::types::{AssertionCompilation, AssertionMode};
 
 pub(crate) mod deprecation_cycle_messages;
 
@@ -81,6 +82,26 @@ impl DeprecationWarningFormat {
         warning
     }
 }
+
+/// kotlinc's `-Xassertions` spellings, the pseudo-feature each is carried as, and its mode.
+const ASSERTION_MODES: [(&str, &str, AssertionCompilation); 4] = [
+    (
+        "always-enable",
+        "AssertionsAlwaysEnable",
+        AssertionCompilation::Checked(AssertionMode::AlwaysEnabled),
+    ),
+    (
+        "always-disable",
+        "AssertionsAlwaysDisable",
+        AssertionCompilation::Checked(AssertionMode::AlwaysDisabled),
+    ),
+    (
+        "jvm",
+        "AssertionsJvm",
+        AssertionCompilation::Checked(AssertionMode::Runtime),
+    ),
+    ("legacy", "AssertionsLegacy", AssertionCompilation::Legacy),
+];
 
 /// The set of enabled language features (by their kotlinc `LanguageFeature` name, e.g.
 /// `NameBasedDestructuring`).
@@ -439,19 +460,28 @@ impl LangFeatures {
         true
     }
 
-    /// Select one of kotlinc's two unconditional `-Xassertions` modes for the `assert(...)`
-    /// intrinsic, carried as pseudo-features. Returns `false`, changing nothing, for any other
-    /// spelling, including the runtime-checked `jvm` and `legacy` modes.
+    /// Select one of kotlinc's `-Xassertions` modes for `assert(...)`, carried as pseudo-features.
+    /// Returns `false`, changing nothing, for any other spelling.
     pub fn apply_assertions_mode(&mut self, mode: &str) -> bool {
-        let feature = match mode {
-            "always-enable" => "AssertionsAlwaysEnable",
-            "always-disable" => "AssertionsAlwaysDisable",
-            _ => return false,
+        let Some(&(_, feature, _)) = ASSERTION_MODES
+            .iter()
+            .find(|(spelling, ..)| *spelling == mode)
+        else {
+            return false;
         };
-        self.disable("AssertionsAlwaysEnable");
-        self.disable("AssertionsAlwaysDisable");
+        for (_, other, _) in ASSERTION_MODES {
+            self.disable(other);
+        }
         self.enable(feature);
         true
+    }
+
+    /// How a `-Xassertions` mode compiles `assert(...)`, or `None` for the platform default.
+    pub fn assertions(&self) -> Option<AssertionCompilation> {
+        ASSERTION_MODES
+            .iter()
+            .find(|(_, feature, _)| self.has(feature))
+            .map(|&(.., mode)| mode)
     }
 
     /// Collect every `// LANGUAGE:` directive in a source file.
