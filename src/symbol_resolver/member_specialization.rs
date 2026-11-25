@@ -452,7 +452,7 @@ fn specialize_member_type_with_unbound(
 /// `specialized` with each classifier argument that the declaration wrote as a Java type variable
 /// (`Class<? extends T>`) kept flexible. Such a variable is `T!` at that occurrence: its bound
 /// records the Java flexibility, so binding it to a not-null `File` gives `Class<out File!>`, which
-/// a Kotlin override may state with either face. The specialization itself (raw erasure, refreshed
+/// a Kotlin override may state with either face, and binding it to a caller's own `T` gives `T!`. The specialization itself (raw erasure, refreshed
 /// bounds) is already done; where the two shapes differ there is no argument to rewrap.
 pub(crate) fn retain_flexible_type_arguments(declared: Ty, specialized: Ty) -> Ty {
     fn argument(declared: Ty, specialized: Ty) -> Ty {
@@ -467,8 +467,7 @@ pub(crate) fn retain_flexible_type_arguments(declared: Ty, specialized: Ty) -> T
                 if bound.is_platform_nullable()
                     && specialized.is_reference()
                     && !specialized.is_nullable()
-                    && !specialized.is_platform_nullable()
-                    && !specialized.is_ty_param() =>
+                    && !specialized.is_platform_nullable() =>
             {
                 Ty::platform_nullable(specialized)
             }
@@ -563,7 +562,35 @@ pub(crate) fn instantiate_input_slot(
     (ty, projection)
 }
 
+/// A result slot keeps the Java flexibility of a type variable its declaration wrote as a type
+/// argument: `<E> List<E> of(E)` instantiated with `E = String` returns `(Mutable)List<String!>!`,
+/// so the elements admit `null`. [`retain_flexible_type_arguments`] is the one walker for that rule,
+/// shared with the override slot.
 fn instantiate_slot_with_input_projection(
+    source: &dyn SymbolSource,
+    signature: Option<&GenericSig>,
+    ty: Ty,
+    bindings: &GSigBinds,
+    position: TypePosition,
+    unbound: UnboundSpecialization,
+    input_projection: &mut Option<InputProjection>,
+) -> Ty {
+    let instantiated = instantiate_declared_slot(
+        source,
+        signature,
+        ty,
+        bindings,
+        position,
+        unbound,
+        input_projection,
+    );
+    match (signature, position) {
+        (Some(_), TypePosition::Out) => retain_flexible_type_arguments(ty, instantiated),
+        _ => instantiated,
+    }
+}
+
+fn instantiate_declared_slot(
     source: &dyn SymbolSource,
     signature: Option<&GenericSig>,
     ty: Ty,
