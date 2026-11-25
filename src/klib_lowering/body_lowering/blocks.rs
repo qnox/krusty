@@ -146,7 +146,7 @@ impl BodyLowering<'_> {
 
     /// Whether `expression` is a loop whose condition is the constant `true` and whose lowered
     /// body contains no `break` naming that loop.
-    fn loops_forever(&self, expression: KlibIrExprId) -> bool {
+    pub(super) fn loops_forever(&self, expression: KlibIrExprId) -> bool {
         let (KlibIrExprKind::While(serialized) | KlibIrExprKind::DoWhile(serialized)) =
             &self.arena.expr(expression).kind
         else {
@@ -296,15 +296,6 @@ impl BodyLowering<'_> {
                 .into_iter()
                 .flatten()
                 .any(|argument| self.diverges(argument)),
-            // A loop on the constant `true` that nothing breaks out of never completes.
-            KlibIrExprKind::While(repeated) | KlibIrExprKind::DoWhile(repeated) => {
-                matches!(
-                    self.arena.expr(repeated.condition).kind,
-                    KlibIrExprKind::Const(KlibIrConstant::Boolean(true))
-                ) && repeated
-                    .body
-                    .is_none_or(|body| !self.arena.breaks_from(body, repeated.id))
-            }
             _ => false,
         }
     }
