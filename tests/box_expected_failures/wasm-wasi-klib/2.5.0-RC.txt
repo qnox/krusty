@@ -254,16 +254,11 @@ constants/comparisonFalse.kt
 constants/divisionByZero.kt
 constants/float.kt
 constants/kt9532.kt
-contextParameters/callableReferences/contextual/delegation/boundExtensionReceiver.kt
-contextParameters/callableReferences/contextual/delegation/boundReceiver.kt
 contextParameters/callableReferences/contextual/delegation/localProperty.kt
-contextParameters/callableReferences/contextual/delegation/multipleBoundValues.kt
 contextParameters/callableReferences/contextual/delegation/singleContextArgUnboundReceiver.kt
 contextParameters/callableReferences/contextual/delegation/smartCastContextArg.kt
-contextParameters/callableReferences/contextual/delegation/thisAsContextArg.kt
 contextParameters/callableReferences/contextual/delegation/unboundReceiver.kt
 contextParameters/callableReferences/contextual/delegation/unboundReceiverVar.kt
-contextParameters/callableReferences/contextual/delegation/varProperty.kt
 contextParameters/callableReferences/contextual/funInterfaceEquality.kt
 contextParameters/callableReferences/contextual/generic.kt
 contextParameters/callableReferences/contextual/simple.kt

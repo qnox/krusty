@@ -646,6 +646,7 @@ impl Checker<'_> {
     /// declaration named `name` is reachable.
     pub(super) fn associated_callable_ref(
         &mut self,
+        scope: &CheckerScope<'_>,
         expression: ExprId,
         name: &str,
         (functions, properties): (
@@ -656,8 +657,9 @@ impl Checker<'_> {
     ) -> Option<Ty> {
         if !functions.is_empty() {
             if let Some(TyKind::Fun(expected)) = expected.map(Ty::kind) {
-                return self
-                    .selected_receiverless_function_ref(expression, name, expected, functions);
+                return self.selected_receiverless_function_ref(
+                    scope, expression, name, expected, functions,
+                );
             }
             let nearest = functions
                 .iter()

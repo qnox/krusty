@@ -82,6 +82,7 @@ impl Checker<'_> {
                                 None,
                                 Some(&expected.params),
                                 Some(expected.ret),
+                                None,
                             )
                             .is_ok()
                         && self
