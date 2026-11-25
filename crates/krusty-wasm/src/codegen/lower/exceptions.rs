@@ -220,9 +220,6 @@ impl Body<'_> {
             {
                 return self.string_builder_construction(target, args);
             }
-            if let Some(target) = external.filter(|_| super::array_lists::is_array_list(internal)) {
-                return self.array_list_construction(target, args);
-            }
             if let Some(constructed) =
                 external.and_then(|target| self.dependency_construction(target, internal, args))
             {

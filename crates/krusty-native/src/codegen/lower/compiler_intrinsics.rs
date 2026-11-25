@@ -39,6 +39,32 @@ impl<'a> BodyLowering<'a, '_, '_> {
         Ok(Some(self.bits_of(value, clif)))
     }
 
+    /// Whether a `Char` code unit lies in one half of the UTF-16 surrogate block: one unsigned
+    /// comparison of its offset from the half's first code unit.
+    fn char_is_surrogate(
+        &mut self,
+        half: krusty::libraries::SurrogateHalf,
+        operand: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(value) = self.coerce(operand, Ty::Char)? else {
+            return Err("a surrogate test of `Unit`".into());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let units = half.code_units();
+        let offset = self
+            .builder
+            .ins()
+            .iadd_imm_s(value, -i64::from(*units.start()));
+        let width = i64::from(units.end() - units.start());
+        Ok(Some(self.builder.ins().icmp_imm_u(
+            IntCC::UnsignedLessThanOrEqual,
+            offset,
+            width,
+        )))
+    }
+
     fn primitive_unary(
         &mut self,
         operation: krusty::backend::BackendCompilerIntrinsic,
@@ -300,7 +326,7 @@ impl<'a> BodyLowering<'a, '_, '_> {
             };
             return Some(self.primitive_unary(operation, operand, ret));
         }
-        let floating_extension_operand = |operand: Ty| {
+        let scalar_extension_operand = |operand: Ty| {
             let value = exact_extension_operand(receiver, args, extension_receiver_parameter)?;
             (self.checked_type(value).map(Ty::non_null) == Some(operand)).then_some(value)
         };
@@ -469,7 +495,7 @@ impl<'a> BodyLowering<'a, '_, '_> {
                 })());
             }
             Some(krusty::backend::BackendCompilerIntrinsic::FloatingIsNaN { operand }) => {
-                let Some(value) = floating_extension_operand(operand) else {
+                let Some(value) = scalar_extension_operand(operand) else {
                     return Some(Err(
                         "an exact floating-point `isNaN` with malformed operands".into(),
                     ));
@@ -484,8 +510,21 @@ impl<'a> BodyLowering<'a, '_, '_> {
                     value,
                 ));
             }
+            Some(krusty::backend::BackendCompilerIntrinsic::CharIsSurrogate(half)) => {
+                let Some(value) = scalar_extension_operand(Ty::Char) else {
+                    return Some(Err(
+                        "an exact `Char` surrogate test with malformed operands".into(),
+                    ));
+                };
+                if ret != Ty::Boolean {
+                    return Some(Err(
+                        "an exact `Char` surrogate test with a non-Boolean result".into(),
+                    ));
+                }
+                return Some(self.char_is_surrogate(half, value));
+            }
             Some(krusty::backend::BackendCompilerIntrinsic::FloatingIsInfinite { operand }) => {
-                let Some(value) = floating_extension_operand(operand) else {
+                let Some(value) = scalar_extension_operand(operand) else {
                     return Some(Err(
                         "an exact floating-point `isInfinite` with malformed operands".into(),
                     ));

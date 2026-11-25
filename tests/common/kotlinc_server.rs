@@ -303,11 +303,22 @@ const KOTLINC_SERVER_JVM_OPTIONS: [&str; 5] = [
     "-Xmn256m",
 ];
 
+/// What one reference-compiler server holds once warm, for [`server_pool::Budget`]: its 1 GiB heap
+/// and 256 MiB code cache, plus metaspace and thread stacks.
+const KOTLINC_SERVER_RESIDENT_MIB: u64 = 1536;
+
 /// A persistent JVM running the in-process `KotlincServer` compiler, fed compiler arg-lists over a pipe.
 struct KotlincServer {
-    _child: Child,
+    child: Child,
     stdin: ChildStdin,
     stdout: ChildStdout,
+}
+
+impl Drop for KotlincServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl KotlincServer {
@@ -352,7 +363,7 @@ impl KotlincServer {
         let stdin = child.stdin.take()?;
         let stdout = child.stdout.take()?;
         Some(KotlincServer {
-            _child: child,
+            child,
             stdin,
             stdout,
         })
@@ -571,7 +582,12 @@ pub fn kotlinc_compile_for_target(
         let mut pools = pools.lock().unwrap_or_else(|err| err.into_inner());
         pools
             .entry(pool_key)
-            .or_insert_with(|| Arc::new(server_pool::Pool::new()))
+            .or_insert_with(|| {
+                Arc::new(server_pool::Pool::resident(
+                    server_pool::Budget::process(),
+                    KOTLINC_SERVER_RESIDENT_MIB,
+                ))
+            })
             .clone()
     };
     let admission = Instant::now();

@@ -180,21 +180,19 @@ impl ProductionSignatureSemantics<'_> {
                 } else {
                     expected.ret
                 };
-                Some(Ty::fun_with_shape(
-                    parameters,
-                    result,
-                    expected.context_count,
-                    expected.has_receiver,
-                    expected.suspend,
+                Some((
+                    crate::symbol_resolver::scope_level(&candidate),
+                    Ty::fun_with_shape(
+                        parameters,
+                        result,
+                        expected.context_count,
+                        expected.has_receiver,
+                        expected.suspend,
+                    ),
                 ))
             })
             .collect::<Vec<_>>();
-        Ok(selected.into_iter().fold(Vec::new(), |mut unique, ty| {
-            if !unique.contains(&ty) {
-                unique.push(ty);
-            }
-            unique
-        }))
+        Ok(crate::symbol_resolver::nearest_level_distinct(selected))
     }
 
     pub(super) fn applied_source_alias_expansion(

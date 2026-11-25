@@ -17,7 +17,7 @@ which is why `just fmt` and `just fmt-check` also pass `tests/*_e2e.rs` to rustf
 
 `krusty-plugin-api` records the workspace's existing `KRUSTY_BUILD_CHECKOUT` input in Rust dep-info.
 Its `shared_checkout` integration test builds two copies of the real API crate (with the
-`krusty-names` crate it depends on) against one Cargo target, proves each consumer sees its own API,
+`krusty-core` crate it depends on) against one Cargo target, proves each consumer sees its own API,
 and checks unchanged-checkout artifact reuse. The nested Cargo fixtures build offline and
 unoptimized; they do not inherit the
 parent compiler's coverage flags or wrappers. Keep the shared target intact when reproducing this
@@ -859,6 +859,11 @@ Performance-relevant harness state:
   per lib entry — the convergence inventory for making byte equality the assertion.
 - Persistent JVM pools (kotlinc compiler servers, JavaRunner) scale with the host: `ncpu/2` clamped
   to `[1, 6]`. `KRUSTY_SERVER_POOL=<n>` overrides in either direction (e.g. `1` on a swapping host).
+  The kotlinc and kotlinc-native servers also share one memory budget, the host's memory less the
+  larger of 3.5 GiB and two fifths of it (about 4 GiB on a 7.6 GiB runner): a pool that would pass it
+  stops another pool's server that has been idle for five seconds, or waits. A cold run that reaches
+  every oracle at once otherwise holds six server JVMs beside the test process.
+  `KRUSTY_SERVER_MEMORY_MIB=<n>` sets the budget, `0` removes it.
 - Directory classpath entries are shipped into the box runner's per-request classloader, so lib
   static state is fresh per `box()` call and runner JVMs are shared across tests.
 
