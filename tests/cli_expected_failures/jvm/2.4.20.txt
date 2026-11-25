@@ -103,7 +103,6 @@ diagnosticTests/returnAsWhenKey.args
 diagnosticTests/sanitized-name.clash.args
 diagnosticTests/signatureClash.args
 diagnosticTests/singleJavaFileRoots.args
-diagnosticTests/suspensionPointInMonitor.args
 diagnosticTests/wrongAnnotationArgumentInCtor.args
 errorSuppressionWarning.args
 experimentalCheckers.args
