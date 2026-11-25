@@ -2822,9 +2822,17 @@ impl Linker<'_, '_> {
             .ok_or_else(|| callee_declined(KlibBodyDeclineReason::Unjoined))?;
         // A generic one binds the formals its own identity mints, as a provider's record binds a
         // published declaration's.
-        let (types, type_parameters, type_parameter_bounds) =
+        let (mut types, type_parameters, type_parameter_bounds) =
             super::function_lowering::file_private_formals(&identity, arena, declaration)
                 .map_err(callee_declined)?;
+        super::private_signature_classes::bind(
+            &mut types,
+            self.sources.bodies,
+            &identity.module,
+            arena,
+            declaration,
+        )
+        .map_err(callee_declined)?;
         self.private_members.entry(identity.clone()).or_default();
         let function = match self.functions.get(&identity) {
             Some(function) => *function,

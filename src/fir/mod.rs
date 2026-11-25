@@ -20,6 +20,8 @@ mod dependency_superclasses;
 mod entry_point;
 mod enum_entries;
 mod enum_entries_factory;
+mod field_layout;
+pub(crate) use field_layout::property_stores_field;
 mod header;
 mod identities;
 mod inherited_defaults;
