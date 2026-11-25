@@ -1,5 +1,6 @@
 //! Generic call and constructor constraint collection, solving, and substitution.
 
+use super::hierarchy_projection::flexible_supertype_with_classifier;
 use super::*;
 use crate::types::TyKind;
 

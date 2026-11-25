@@ -177,7 +177,8 @@ pub(crate) fn direct_supertypes(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
 /// J<T>` is `J<T!>`), so binding `T` to a not-null type keeps the interval `String!` instead of
 /// fixing the argument to `String`. The provider records the occurrence as the template variable's
 /// platform bound, and only a Java declaration's template carries it: a Kotlin declaration, a mapped
-/// builtin included, states its own nullability. Only this consumer reads the interval: the shared
+/// builtin included, states its own nullability, and so does a pure implementation's pure supertype.
+/// Only this consumer reads the interval: the shared
 /// hierarchy keeps the fixed binding, so the platform wrapper does not spread through supertypes and
 /// source-declared generic operations.
 pub(crate) fn direct_supertypes_with_flexible_arguments(
@@ -198,7 +199,20 @@ pub(crate) fn direct_supertypes_with_flexible_arguments(
         .supertype_templates
         .iter()
         .zip(applied)
-        .map(|(template, applied)| retain_flexible_arguments(*template, applied))
+        .map(|(template, applied)| {
+            // A pure implementation states its arguments rigidly through its pure supertype.
+            if classifier.purely_implemented.is_some_and(|kind| {
+                applied
+                    .obj_internal()
+                    .and_then(|supertype| source.classifier(supertype))
+                    .and_then(|supertype| supertype.mapped_collection)
+                    .is_some_and(|mapped| mapped.kind == kind)
+            }) {
+                applied
+            } else {
+                retain_flexible_arguments(*template, applied)
+            }
+        })
         .collect()
 }
 

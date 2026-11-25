@@ -96,10 +96,7 @@ pub(crate) use hierarchy_projection::{
     inherited_classifier_shape, member_scope_receiver, supports_member_lookup,
     ClassifierCompanionInstance, SupertypeProjectionCache,
 };
-use hierarchy_projection::{
-    flexible_supertype_with_classifier, projected_supertypes, receiver_hierarchy,
-    supertype_with_classifier,
-};
+use hierarchy_projection::{projected_supertypes, receiver_hierarchy, supertype_with_classifier};
 pub use lambda_call_shape::LambdaCallShape;
 pub(crate) use member_hierarchy::{
     apply_inner_alias_outer_in_source, apply_inner_classifier_outer_in_source,

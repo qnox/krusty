@@ -819,11 +819,6 @@ fn specialize_fixed_extension(
     }
     let mut bindings = GSigBinds::default();
     super::unify_receiver_from_symbols(source, declared_receiver, receiver, &mut bindings);
-    // The receiver is a fixed accumulator the plan names, not a Java value read through its
-    // supertypes: its variables keep the argument it states instead of a flexible interval.
-    for binding in bindings.values_mut() {
-        *binding = binding.platform_lower_bound();
-    }
     for (&declared, &actual) in signature.params.iter().zip(arguments) {
         super::unify_ty_from_symbols(source, declared, actual, &mut bindings);
     }
