@@ -4025,19 +4025,6 @@ struct ScopedProperty {
     stable_declaration: Option<crate::fir::DeclarationId>,
 }
 
-#[derive(Clone)]
-struct CheckedLocalProperty {
-    ty: Ty,
-    owner: TypeName,
-    mutable: bool,
-    visibility: Visibility,
-    interface: bool,
-    source_member: crate::libraries::SourceMember,
-    stable_declaration: Option<crate::fir::DeclarationId>,
-    deprecated_hidden: bool,
-    accessor_availability: crate::libraries::PropertyAccessorAvailability,
-}
-
 struct DispatchPropertyBinding {
     read_ty: Ty,
     declared_ty: Ty,
@@ -4856,6 +4843,13 @@ impl<'a> Checker<'a> {
                         format!("No context argument for '{name}' found."),
                     );
                 }
+                return Ty::Error;
+            }
+            Err(PropertyReadAmbiguity::UnpublishedLocalProperty) => {
+                self.diags.error(
+                    diagnostic_span,
+                    body_local_property_selection::unpublished_local_property_message(name),
+                );
                 return Ty::Error;
             }
             Err(PropertyReadAmbiguity::Accessors(candidates)) => {
@@ -26551,7 +26545,8 @@ struct Checker<'a> {
     /// finalized module provider is immutable during that check, so later expressions in the same
     /// unit consult this semantic overlay. It is dropped with the checker and never becomes a third
     /// pass, retained AST coordinate, or lowering fallback.
-    checked_local_properties: HashMap<(TypeName, String), CheckedLocalProperty>,
+    checked_local_properties:
+        HashMap<(TypeName, String), body_local_property_selection::CheckedLocalProperty>,
     /// Member-extension property headers declared by classifiers in the active bounded body. They
     /// join provider declarations before ordinary applicability/specificity and disappear with the
     /// checker; the immutable index is completed only after the body check succeeds.
@@ -28768,7 +28763,7 @@ impl<'a> Checker<'a> {
                 .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
             {
                 Some(Symbol::Member(facets)) => CallableRefCandidates {
-                    property: facets.property_ref.clone(),
+                    property: self.typed_body_local_property_ref(recv, facets.property_ref.clone()),
                     method: facets.method_ref.clone(),
                     overloads: facets.overloads.clone(),
                     inaccessible_extensions: facets.inaccessible_extensions.clone(),

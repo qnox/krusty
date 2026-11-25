@@ -65,6 +65,13 @@ impl Checker<'_> {
                         );
                         return Some(Ty::Error);
                     }
+                    Err(PropertyReadAmbiguity::UnpublishedLocalProperty) => {
+                        self.diags.error(
+                            self.span(expression),
+                            body_local_property_selection::unpublished_local_property_message(name),
+                        );
+                        return Some(Ty::Error);
+                    }
                     Err(_) => {
                         self.diags.error(
                             self.span(expression),

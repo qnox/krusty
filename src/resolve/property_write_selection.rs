@@ -127,11 +127,18 @@ impl Checker<'_> {
         name: &str,
     ) -> Result<Option<ImplicitPropertyWriteResolution>, Vec<String>> {
         if let Some(property) = self.checked_body_local_property_for_write(receiver.ty, name) {
+            // A scope without a value for one of its context parameters cannot write it through
+            // this receiver, as for a provider property.
+            let Ok(access) =
+                self.body_local_property_context_access(scope, receiver.ty, name, property)
+            else {
+                return Ok(None);
+            };
             return Ok(Some(ImplicitPropertyWriteResolution {
                 receiver,
                 property_ty: property.ty,
                 is_var: property.mutable,
-                context_args: Vec::new(),
+                context_args: access.map_or_else(Vec::new, |access| access.context_args),
                 getter: None,
                 setter: None,
                 extension: None,

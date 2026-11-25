@@ -35,6 +35,9 @@ pub(super) enum PropertyReadAmbiguity {
     MemberExtension,
     Extension,
     MissingContext,
+    /// A checked body-local property whose declaration the module provider does not publish: an
+    /// overlay and provider disagreement, never a missing context value.
+    UnpublishedLocalProperty,
     /// Synthetic properties of one classifier declared by different accessor methods.
     Accessors(Vec<String>),
 }
@@ -134,6 +137,8 @@ impl Checker<'_> {
         if !receiver.is_nullable() {
             let local = self.checked_body_local_property(receiver, name).cloned();
             if let Some(local) = local {
+                let context_access =
+                    self.body_local_property_context_access(scope, receiver, name, &local)?;
                 return Ok(Some(PropertyReadSelection::Member(Box::new(
                     PropertyReadMemberSelection {
                         name: name.to_string(),
@@ -145,7 +150,7 @@ impl Checker<'_> {
                         accessor: None,
                         producer: crate::libraries::PropertyProducer::KotlinAccessor,
                         metadata_constant_read: false,
-                        context_access: None,
+                        context_access,
                         compiler_intrinsic: None,
                         compile_time_constant: None,
                         source_member: Some(local.source_member),

@@ -4,9 +4,6 @@
 # Regenerate both exact inventories with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local
 # jvm run. The lists only shrink.
 companionBlocksAndExtensions/crossModuleExtensions.kt
-contextParameters/callableReferences/contextual/delegation/singleContextArgUnboundReceiver.kt
-contextParameters/callableReferences/contextual/delegation/unboundReceiver.kt
-contextParameters/callableReferences/contextual/delegation/unboundReceiverVar.kt
 contextParameters/callableReferences/contextual/valueClassContextArg.kt
 regressions/contextParameters/contextualReferenceNullableValueClassContext.kt
 suspendConversion/suspendConversionNullableNpe2.kt
