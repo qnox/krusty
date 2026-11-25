@@ -951,10 +951,7 @@ pub(crate) fn lower_value_classes(
                 // primitive carrier is never guarded.
                 let primitive_carrier = source_index
                     .and_then(|index| orig_params[fid].get(index))
-                    .is_some_and(|t| {
-                        let declared = t.non_null();
-                        is_vc_ty(&declared) && !is_ref(&erase(&declared, &under))
-                    });
+                    .is_some_and(|t| parameter_guards::has_primitive_carrier(t, &under));
                 if chk.is_some() && (!physical_is_ref || under_nullable || primitive_carrier) {
                     *chk = None;
                 }
