@@ -814,7 +814,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
                 .unwrap_or_default(),
             name: ext.name.clone(),
             ty: ext.ty,
-            context_params: Vec::new(),
+            context_params: ext.context_params.clone(),
             is_var: ext.is_var,
             visibility: ext.visibility,
             has_constant: false,

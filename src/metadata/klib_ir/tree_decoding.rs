@@ -118,7 +118,9 @@ impl KlibIrModuleTrees {
     pub(crate) fn top_level_file(&self, signature: &KlibIrSignature) -> Option<u32> {
         let functions = match signature {
             KlibIrSignature::FileLocal { .. } => &self.local_functions,
-            KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_) => &self.functions,
+            KlibIrSignature::Public(_)
+            | KlibIrSignature::Accessor(_)
+            | KlibIrSignature::TypeParameter { .. } => &self.functions,
         };
         let (tree, function) = *functions.get(signature)?;
         self.trees[tree]

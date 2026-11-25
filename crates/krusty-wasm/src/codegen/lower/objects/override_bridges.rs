@@ -115,6 +115,11 @@ pub(super) fn define_override_bridges(
         );
         body.code.local_get(0);
         for (index, (from, to)) in declared.0.iter().zip(&implemented.0).enumerate() {
+            if *to == Ty::Unit {
+                // The operand is the `Unit` instance the implementation's slot receives.
+                body.unit_argument(*to);
+                continue;
+            }
             body.code.local_get(index as u32 + 1);
             body.coerce_emitted_value(*from, *to)?;
         }

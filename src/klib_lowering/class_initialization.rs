@@ -867,14 +867,7 @@ fn dispatched_members(
     // A member the class inherits implements the interface declarations it reaches only through
     // its supertypes (`Itr.remove` for `MutableIterator.remove` under a subclass), so dispatch
     // through the interface runs the inherited body, which is emitted with the class.
-    let inherited = bodies
-        .inherited_implementations(
-            &plan.header.contract.module,
-            plan.header.arena,
-            plan.header.class,
-        )
-        .map_err(mismatch)?;
-    for (body, _) in inherited {
+    for (body, _) in inherited_implementations(plan, bodies)? {
         // Only a body a superclass declares: an interface's default is inherited by its own
         // mechanism.
         let from_class = matches!(
@@ -887,6 +880,21 @@ fn dispatched_members(
         }
     }
     Ok(members)
+}
+
+/// The bodies an admitted class inherits that implement interface members it reaches only through
+/// its supertypes, with the interface declarations each implements.
+fn inherited_implementations(
+    plan: &ClassInitialization<'_, '_>,
+    bodies: &KlibDeclarationBodies,
+) -> Result<Vec<(KlibDependencyCallable, Vec<KlibDependencyCallable>)>, KlibBodyDeclineReason> {
+    bodies
+        .inherited_implementations(
+            &plan.header.contract.module,
+            plan.header.arena,
+            plan.header.class,
+        )
+        .map_err(mismatch)
 }
 
 /// The declarations an admitted class initialization names without emitting their bodies: the
@@ -937,6 +945,9 @@ fn overridden_declarations(
                 .overridden_closure(&plan.header.contract.module, &signature)
                 .map_err(mismatch)?,
         );
+    }
+    for (_, implemented) in inherited_implementations(plan, bodies)? {
+        declarations.extend(implemented);
     }
     Ok(declarations)
 }

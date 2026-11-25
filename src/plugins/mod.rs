@@ -213,17 +213,25 @@ pub enum FrontendCallableOwner {
     Companion,
 }
 
-/// The resolved source-class information available to frontend declaration generation.
-pub struct FrontendClassContext<'a> {
+/// The header facts of a source class: everything a plugin may read to decide which nested
+/// classifiers it generates. The source type universe asks for those before any signature exists,
+/// so a written `Owner.Generated` type binds to them like to a declared nested classifier.
+#[derive(Clone, Copy)]
+pub struct FrontendClassifierHeader<'a> {
     pub classifier: TypeName,
     pub companion: Option<TypeName>,
     pub kind: crate::libraries::TypeKind,
     pub is_sealed: bool,
     pub is_abstract: bool,
-    pub type_parameters: &'a crate::types::TypeParameters<Vec<Ty>>,
     pub annotations: &'a [TypeName],
     /// Resolved class-literal arguments grouped by the ordinal of the annotation occurrence.
     pub annotation_class_arguments: &'a [(u32, TypeName)],
+}
+
+/// The resolved source-class information available to frontend declaration generation.
+pub struct FrontendClassContext<'a> {
+    pub header: FrontendClassifierHeader<'a>,
+    pub type_parameters: &'a crate::types::TypeParameters<Vec<Ty>>,
     /// The functions the class itself declares in source. A plugin that generates a member only
     /// where the class does not declare it reads its decision from here.
     pub declared_functions: &'a [FrontendDeclaredFunction],
@@ -244,7 +252,7 @@ pub struct FrontendClassCheckContext<'a> {
     pub kind: crate::libraries::TypeKind,
     pub annotations: &'a [TypeName],
     /// Explicit class-literal arguments grouped by the ordinal of the annotation occurrence, as in
-    /// [`FrontendClassContext::annotation_class_arguments`].
+    /// [`FrontendClassifierHeader::annotation_class_arguments`].
     pub annotation_class_arguments: &'a [(u32, TypeName)],
     /// The class's properties in declaration order: primary-constructor properties first, then
     /// the properties declared in its body.
@@ -755,7 +763,7 @@ pub trait IrPlugin {
     /// Consumers must not reconstruct these declarations from annotation or JVM-name spellings.
     fn publish_frontend_generated_classifiers(
         &self,
-        _ctx: &FrontendClassContext<'_>,
+        _header: &FrontendClassifierHeader<'_>,
         _classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
     ) {
     }
@@ -948,6 +956,12 @@ pub trait CheckedSourceFacts {
         &self,
         property: crate::ir::ExternalPropertyId,
     ) -> Option<DependencyDeclaration<'_>>;
+    /// The getter of the dependency property a read selected by `property`, the declaration a
+    /// read calls and whose annotations say what role it has.
+    fn dependency_property_getter(
+        &self,
+        property: crate::ir::ExternalPropertyId,
+    ) -> Option<crate::ir::ExternalCallableId>;
     /// The declaration shape of the dependency function a call selected by `callable`.
     fn dependency_shape(
         &self,
@@ -1520,11 +1534,11 @@ impl PluginHost {
 
     pub fn publish_frontend_generated_classifiers(
         &self,
-        ctx: &FrontendClassContext<'_>,
+        header: &FrontendClassifierHeader<'_>,
         classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
     ) {
         for plugin in &self.plugins {
-            plugin.publish_frontend_generated_classifiers(ctx, classifiers);
+            plugin.publish_frontend_generated_classifiers(header, classifiers);
         }
     }
 

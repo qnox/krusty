@@ -1977,7 +1977,12 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                                 sibling.get(),
                                 joined.get(),
                             );
+                                // A `Nothing` sibling (`?: throw`, a `return` arm) is only the
+                                // trivial lower constraint of the join's variable. As an
+                                // expectation it would instead cap the branch's own variables at
+                                // `Nothing` and override what its inputs proved.
                                 if current == sibling
+                                    || sibling.get() == Ty::Nothing
                                     || (!current.get().mentions_ty_param() && joined != current)
                                 {
                                     continue;
@@ -2222,6 +2227,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             result: approximated.published,
             inferred_body_result: approximated.inferred_body_result,
             result_abbreviation,
+            declared_result_alias: None,
         })
     }
 
@@ -2251,6 +2257,12 @@ fn result_abbreviation<S: SignatureSemantics>(
     match graph.expr(expression)? {
         SigExpr::Call { target, .. } => {
             semantics.call_result_abbreviation(graph.callable_selection(target)?.origin)
+        }
+        SigExpr::Value(selection) => {
+            semantics.call_result_abbreviation(graph.value_selection(selection)?.origin)
+        }
+        SigExpr::Member { origin, .. } | SigExpr::MemberCall { origin, .. } => {
+            semantics.call_result_abbreviation(origin)
         }
         SigExpr::ClassLiteral {
             classifier: Some(classifier),

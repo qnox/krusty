@@ -161,6 +161,16 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// The continuation interception this linker's selected declaration of `callee` is:
+    /// Kotlin/Wasm's `interceptedIntrinsic`, which a body expands to its coroutine class's own
+    /// interception.
+    fn intercepted_continuation(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<super::intercepted_continuation::InterceptedContinuationExpansion>> {
+        Ok(None)
+    }
+
     /// The continuation intrinsic this linker's selected declaration of `callee` is: Native's
     /// `getContinuation`/`returnIfSuspended`, which a body realizes as its suspension point.
     fn continuation_intrinsic(
@@ -354,12 +364,13 @@ pub(super) trait CallLinker {
         unsupported("a call of a file-private declaration")
     }
 
-    /// The dependency property a call of its accessor `callee` reads or writes.
+    /// What a call of the property accessor `callee` reaches: the dependency property it reads or
+    /// writes, or the accessor function the unit emits.
     fn link_accessor(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibAccessorIdSignature,
-    ) -> Lowered<LinkedAccessor>;
+    ) -> Lowered<LinkedAccessorCall>;
 
     /// The static storage of the top-level property whose backing field is `field`, which a body
     /// of that property's own library reads or writes. `None` leaves the access to the body's
@@ -478,7 +489,7 @@ pub(super) struct LinkedConstructor {
 /// and the accessor's dispatch receiver, parameters (context parameters, extension receiver, and a
 /// setter's value) and result.
 pub(super) struct LinkedAccessor {
-    pub(super) target: LinkedAccessorTarget,
+    pub(super) property: crate::fir::ExternalPropertyId,
     pub(super) write: bool,
     pub(super) receiver: Option<Ty>,
     pub(super) params: Vec<Ty>,
@@ -533,13 +544,12 @@ pub(super) struct StaticField {
 }
 
 /// What an accessor call reaches.
-#[derive(Clone, Copy)]
-pub(super) enum LinkedAccessorTarget {
+pub(super) enum LinkedAccessorCall {
     /// The provider's property, read or written through its accessor.
-    External(crate::fir::ExternalPropertyId),
-    /// The getter this unit emits, for a member of a value class: a member function of its
-    /// class, called on the receiver in place of the property read.
-    Local(FunId),
+    Property(LinkedAccessor),
+    /// The accessor function this unit emits, called as any function of the unit is: a member of
+    /// a class the unit materializes, or a top-level accessor, generic ones among them.
+    Function(LinkedCallee),
 }
 
 /// The function a body is lowered into: its serialized symbol, the only target its `return`s may

@@ -421,6 +421,11 @@ pub(crate) fn class_kind(flags: u64) -> TypeKind {
     }
 }
 
+/// Whether the class kind (bits 6-8) is `COMPANION_OBJECT`: the companion of its containing class.
+pub(crate) fn class_is_companion(flags: u64) -> bool {
+    (flags >> 6) & 0x7 == 6
+}
+
 /// Class flag `IS_INNER` (bit 9): an `inner class`, whose instance holds its outer one.
 pub(crate) fn class_is_inner(flags: u64) -> bool {
     flags & (1 << 9) != 0

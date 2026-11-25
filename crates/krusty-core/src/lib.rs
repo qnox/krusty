@@ -1,6 +1,7 @@
 //! Interned classifier identities. `TypeName` is a handle into one process-wide name tree; every
 //! phase and every compiler plugin shares it, so it lives below both.
 
+pub mod assertions;
 pub mod context_parameters;
 pub mod enhanced_nullability;
 pub mod features;

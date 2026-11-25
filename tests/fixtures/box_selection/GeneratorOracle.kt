@@ -75,6 +75,9 @@ fun generateTestGroupSuiteWithJUnit5(
     init: TestGroupSuite.() -> Unit,
 ) { TestGroupSuite().init() }
 fun <T> provider(): Any = Any()
+// Upstream's reified annotation factory (generators/model/AnnotationModel.kt since 2.5); annotations
+// never take part in model selection, so the oracle constructs none.
+inline fun <reified T> annotation(vararg arguments: Pair<String, Any>): AnnotationModel = Any()
 fun codegenBox(): Any = Any()
 fun klib(): Any = Any()
 fun temporarilyDisabledBecauseOfKt85080(): Any = Any()

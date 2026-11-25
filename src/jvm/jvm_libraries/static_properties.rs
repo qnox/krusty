@@ -532,7 +532,7 @@ impl JvmLibraries {
             );
             return None;
         };
-        let Some((gparams, gret)) = parse_method_desc(&getter_sig.desc) else {
+        let Some((mut gparams, gret)) = parse_method_desc(&getter_sig.desc) else {
             crate::trace_compiler!(
                 "metadata_properties",
                 "property {}.{name} rejected: malformed getter descriptor {}",
@@ -541,12 +541,12 @@ impl JvmLibraries {
             );
             return None;
         };
-        if gparams.len() != context_count + receiver_params {
+        let physical_count = gparams.len();
+        if !super::parameter_plans::declared_prefix(&mut gparams, context_count + receiver_params) {
             crate::trace_compiler!(
                 "metadata_properties",
-                "property {}.{name} rejected: getter parameter count {} != metadata context/receiver count {}",
+                "property {}.{name} rejected: getter parameter count {physical_count} < metadata context/receiver count {}",
                 owner.render(),
-                gparams.len(),
                 context_count + receiver_params,
             );
             return None;
@@ -614,6 +614,7 @@ impl JvmLibraries {
         getter.source_receiver = receiver;
         getter.context_count = context_count;
         getter.inline = getter_inline;
+        getter.result_alias = mp.ret_alias;
         getter.generic_sig = property_gsig.clone().map(Box::new);
         getter.compiler_intrinsic = property_intrinsic;
         let setter = mp.setter.clone().and_then(|setter_sig| {

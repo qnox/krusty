@@ -54,6 +54,40 @@ pub(super) fn reject_unavailable_member(
     true
 }
 
+/// kotlinc's UNSAFE_CALL for a bare member of a nullable implicit receiver: the name is not found
+/// on the receiver as written, but the member exists on its non-null view. Ordinary lexical values
+/// and available receivers must have had their turn before this probe.
+pub(super) fn reject_unsafe_implicit_receiver_member(
+    checker: &mut Checker<'_>,
+    scope: &CheckerScope<'_>,
+    expression: ExprId,
+    name: &str,
+) -> bool {
+    let nullable_receiver = checker
+        .implicit_receivers(scope)
+        .into_iter()
+        .find_map(|receiver| {
+            let non_null = receiver.ty.non_null();
+            (receiver.ty != non_null
+                && matches!(
+                    checker.select_property_read(scope, non_null, name),
+                    Ok(Some(PropertyReadSelection::Member(_)))
+                ))
+            .then_some(receiver.ty)
+        });
+    let Some(receiver) = nullable_receiver else {
+        return false;
+    };
+    let rendered = checker.diagnostic_type_name(receiver, &[receiver]);
+    checker.diags.error(
+        checker.span(expression),
+        format!(
+            "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '{rendered}'."
+        ),
+    );
+    true
+}
+
 fn enclosing_class_role(ty: Ty) -> ReceiverDeclarationRole {
     ReceiverDeclarationRole::EnclosingClass(
         ty.kotlin_class_internal()
@@ -115,6 +149,7 @@ fn complete_class_receivers(
                 class_receiver: true,
                 current: receiver_depth == 0,
                 receiver_depth,
+                dsl_shadowed: false,
             },
         );
     }
@@ -151,6 +186,7 @@ pub(super) fn declared_receivers(
                     } else {
                         coordinate
                     },
+                    dsl_shadowed: false,
                 }
             },
         )
@@ -199,6 +235,7 @@ pub(super) fn declared_receivers(
                         class_receiver: false,
                         current: depth == 0,
                         receiver_depth: depth,
+                        dsl_shadowed: false,
                     },
                 );
             }
@@ -254,6 +291,7 @@ pub(super) fn declared_receivers(
                 class_receiver: false,
                 current: false,
                 receiver_depth: usize::MAX,
+                dsl_shadowed: false,
             });
         }
     }
@@ -295,9 +333,11 @@ pub(super) fn declared_receivers(
                 class_receiver: false,
                 current: false,
                 receiver_depth: usize::MAX,
+                dsl_shadowed: false,
             });
         }
     }
+    checker.mark_dsl_shadowed_receivers(&mut receivers);
     receivers
 }
 
@@ -315,6 +355,7 @@ impl ImplicitReceiver {
             class_receiver: true,
             current: true,
             receiver_depth: 0,
+            dsl_shadowed: false,
         }
     }
 }
@@ -355,6 +396,7 @@ mod tests {
             class_receiver,
             current: receiver_depth == 0,
             receiver_depth,
+            dsl_shadowed: false,
         }
     }
 

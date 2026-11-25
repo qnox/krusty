@@ -11,6 +11,7 @@
 mod enclosing_function;
 
 use super::*;
+use crate::klib_libraries::KlibDeclarationBodies;
 use crate::metadata::id_signature::{
     accessor_mangled, mangled_id, property_mangled, Accessor, ClassScope, DeclarationContainer,
     Placement, PropertyShape,
@@ -27,18 +28,47 @@ pub(super) type Inherited = Result<Option<KlibIrSignature>, KlibBodyDeclineReaso
 /// The getter of the inherited property that the file-local `callee` of the active module is a
 /// fake override of, or `None` when `callee` is no fake override of a local class.
 pub(super) fn inherited_getter(linker: &Linker<'_, '_>, callee: &KlibIrSignature) -> Inherited {
-    linker.resolve_inherited_getter(callee)
+    resolve_inherited_getter(linker.sources.bodies, &linker.active_module, callee)
 }
 
-impl Linker<'_, '_> {
+/// What the emitted body of `identity` reaches: its serialized edges, with a call of a fake
+/// override of a local class resolved to the inherited getter lowering links. A fake override no
+/// unit can resolve keeps its serialized edge, and lowering reports it.
+pub(crate) fn emitted_body(
+    bodies: &KlibDeclarationBodies,
+    identity: &KlibDependencyCallable,
+) -> crate::klib_libraries::EmittedBody {
+    bodies.emitted_body(identity, super::super::EMITTED_CALL_FORMS, &|callee| {
+        resolve_inherited_getter(bodies, &identity.module, callee)
+            .ok()
+            .flatten()
+    })
+}
+
+/// [`inherited_getter`] for a body of `module`, over the libraries alone. The dependency closure
+/// walks the calls a body lowers, so it resolves a fake override as lowering does.
+pub(crate) fn resolve_inherited_getter(
+    bodies: &KlibDeclarationBodies,
+    module: &str,
+    callee: &KlibIrSignature,
+) -> Inherited {
+    LocalHierarchy { bodies, module }.resolve_inherited_getter(callee)
+}
+
+struct LocalHierarchy<'b> {
+    bodies: &'b KlibDeclarationBodies,
+    module: &'b str,
+}
+
+impl LocalHierarchy<'_> {
     /// Resolve the file-local `callee` of the active module as a getter of a property its class
     /// inherits.
     fn resolve_inherited_getter(
         &self,
         callee: &KlibIrSignature,
     ) -> Result<Option<KlibIrSignature>, KlibBodyDeclineReason> {
-        let module = &self.active_module;
-        let bodies = self.sources.bodies;
+        let module = self.module;
+        let bodies = self.bodies;
         // A getter the module declares carries a counter id, whatever its container chain: only a
         // call no declaration of the module defines can be a fake override.
         if bodies.module_local_function(module, callee).is_some() {
@@ -118,8 +148,8 @@ impl Linker<'_, '_> {
         &self,
         class: &KlibIrSignature,
     ) -> Result<String, KlibBodyDeclineReason> {
-        let module = &self.active_module;
-        let bodies = self.sources.bodies;
+        let module = self.module;
+        let bodies = self.bodies;
         // The type-parameter containers kotlinc meets before the function: the property or getter
         // itself, then each local class outward.
         let mut containers = 1;
@@ -156,9 +186,7 @@ impl Linker<'_, '_> {
 
     /// The class the serialized `signature` names, among the classes of the active module.
     fn class_of(&self, signature: &KlibIrSignature) -> Option<(&KlibIrArena, &KlibIrClass)> {
-        self.sources
-            .bodies
-            .module_declared_class(&self.active_module, signature)
+        self.bodies.module_declared_class(self.module, signature)
     }
 }
 

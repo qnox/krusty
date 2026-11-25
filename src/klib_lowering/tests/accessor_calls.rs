@@ -174,11 +174,7 @@ fn getter_leaves_reject_malformed_class_and_property_headers() {
     )
     .unwrap()
     .unwrap();
-    assert!(matches!(
-        linked.target,
-        super::super::body_lowering::LinkedAccessorTarget::External(property)
-            if property == selected.accessor().unwrap().property
-    ));
+    assert_eq!(linked.property, selected.accessor().unwrap().property);
     assert_eq!(linked.ret, selected.ret());
     assert!(!linked.write);
     for change in [
@@ -371,6 +367,96 @@ fn a_generic_extension_getter_keeps_its_selected_formal_through_body_lowering() 
         }
     );
     assert_eq!(substitutions[0].value, Ty::String);
+}
+
+/// A generic top-level getter no export realizes is emitted by the unit and called as a generic
+/// function of the unit is: the call keeps the getter's declared `T` result and the use reads it
+/// at the access's type argument.
+#[test]
+fn a_generic_top_level_getter_the_unit_emits_is_called_as_a_generic_function() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let work = ProducerDirectory::new();
+    let source = work.0.join("GenericTopLevel.kt");
+    std::fs::write(
+        &source,
+        "package fixture\nval <T> T.echo: T get() = this\nfun read(value: String): String = value.echo\n",
+    )
+    .unwrap();
+    let library = work.0.join("generic-top-level");
+    let output = std::process::Command::new(root.join("bin/kotlinc-native"))
+        .args(["-p", "library", "-nopack", "-o"])
+        .arg(&library)
+        .arg(&source)
+        .output()
+        .expect("run exact generic accessor producer");
+    assert!(
+        output.status.success(),
+        "producer: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let libraries = KlibLibraries::open(&[
+        crate::klib_libraries::KlibLibraryInput::platform_stdlib(
+            root.join("klib/common/stdlib"),
+            crate::klib_libraries::KlibStdlibSemantics::Native,
+        ),
+        crate::klib_libraries::KlibLibraryInput::dependency(library),
+    ])
+    .unwrap();
+    let property_symbols =
+        libraries.symbols(SymbolNamespace::Package(type_name("fixture")), "echo");
+    let [property] = property_symbols.callables.properties() else {
+        panic!("one provider generic extension property")
+    };
+    let getter = libraries
+        .external_callable(property.getter.external_identity.expect("exact getter id"))
+        .expect("the provider realizes its getter");
+    let selected_getter = getter.klib_body_callable().expect("signed getter");
+    let read_symbols = libraries.symbols(SymbolNamespace::Package(type_name("fixture")), "read");
+    let [read] = read_symbols.callables.functions() else {
+        panic!("one provider read function")
+    };
+    let read = libraries
+        .external_callable(read.callable.external_identity.expect("exact read id"))
+        .expect("the provider realizes read");
+    let mut unit = super::super::DependencyBodyUnit::default();
+    let function = unit
+        .lower_function_with_declarations(
+            read.klib_body_callable().expect("signed read"),
+            libraries.declaration_bodies(),
+            &super::super::KlibCalleeFacts::new([selected_getter]),
+            crate::klib_libraries::KlibIntrinsicFacts::empty(),
+            &crate::fx_hash::HashMap::default(),
+            &libraries,
+        )
+        .unwrap_or_else(|decline| panic!("generic top-level getter body: {decline}"));
+    super::validated(unit.ir());
+    let ir = unit.ir();
+    assert_eq!(ir.functions.len(), 2);
+    let getter = u32::from(function == 0);
+    assert!(ir.functions[getter as usize].body.is_some());
+    let calls = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(id, expression)| match expression {
+            crate::ir::IrExpr::Call { callee, .. } => Some((id as u32, callee.as_ref())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(call, crate::ir::Callee::Local(callee))] = calls.as_slice() else {
+        panic!("one call of the emitted getter: {calls:?}")
+    };
+    assert_eq!(*callee, getter);
+    let declared = ir.functions[getter as usize].ret;
+    assert!(matches!(declared.kind(), crate::types::TyKind::TyParam(..)));
+    assert_eq!(ir.call_declared_ret.get(call), Some(&declared));
+    assert!(ir.exprs.iter().all(|expression| !matches!(
+        expression,
+        crate::ir::IrExpr::Checked(operation)
+            if matches!(**operation, crate::ir::IrCheckedOperation::ExternalPropertyRead { .. })
+    )));
 }
 
 #[test]

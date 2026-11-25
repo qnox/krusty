@@ -9,7 +9,8 @@
 //! exception: its private copy wraps a public-form signature in an exact
 //! `Composite(File, Public)` identity. That component projects the serialized inner identity for
 //! references inside the copied body; the declaration table separately owns the original public
-//! join key. Ordinary IR composites remain file-local.
+//! join key. A type parameter of a public declaration, `Composite(Public, Local(<TP>, index))`, is
+//! that owner and index in every module. Other IR composites remain file-local.
 
 use super::wire::{message, unique_bytes, unique_varint};
 use super::KlibIrDecodeError;
@@ -71,6 +72,13 @@ pub enum KlibIrSignature {
     /// A declaration whose identity is private to one serialized file: file index within the
     /// KLIB and slot in that file's signature table.
     FileLocal { file: u32, slot: u32 },
+    /// The type parameter at `index` of the public declaration `owner`: Kotlin's
+    /// `Composite(owner, Local(<TP>, index))`. Every module that links against the owner names
+    /// it alike, so a body may reference one its own declarations do not declare.
+    TypeParameter {
+        owner: KlibPublicIdSignature,
+        index: u32,
+    },
 }
 
 /// One decoded symbol reference.
@@ -245,6 +253,9 @@ impl<'a> SignatureTable<'a> {
                 }
             }
         }
+        if let Some((owner, index)) = self.public_type_parameter(&fields)? {
+            return Ok(KlibIrSignature::TypeParameter { owner, index });
+        }
         let local = KlibIrSignature::FileLocal {
             file: self.file,
             slot: u32::try_from(slot).expect("a table slot fits u32"),
@@ -269,6 +280,53 @@ impl<'a> SignatureTable<'a> {
             }
         }
         Ok(local)
+    }
+
+    /// `Composite(Public(owner), Local(<TP>, index))`, the identity Kotlin gives the type
+    /// parameter `index` of a public declaration. A composite of any other shape stays file-local.
+    fn public_type_parameter(
+        &self,
+        fields: &[super::wire::WireField<'_>],
+    ) -> Result<Option<(KlibPublicIdSignature, u32)>, KlibIrDecodeError> {
+        let Some(composite) = unique_bytes(fields, 5, "composite signature", ENTRY)? else {
+            return Ok(None);
+        };
+        let composite_offset = composite.value_offset;
+        let composite = message(composite.value, ENTRY, composite_offset)?;
+        let container = unique_varint(&composite, 1, "composite signature container", ENTRY)?;
+        let inner = unique_varint(&composite, 2, "composite inner signature", ENTRY)?;
+        let (Some(container), Some(inner)) = (container, inner) else {
+            return Ok(None);
+        };
+        let container = self.slot(container, "composite signature container")?;
+        let inner = self.slot(inner, "composite inner signature")?;
+        let Some(owner) = self.direct_public_signature(container)? else {
+            return Ok(None);
+        };
+        let inner_fields = message(self.entries[inner], ENTRY, 0)?;
+        // IdSignature.local_sig: LocalSignature { local_fq_name, local_hash, debug_info }.
+        let Some(local) = unique_bytes(&inner_fields, 6, "local signature", ENTRY)? else {
+            return Ok(None);
+        };
+        let local = message(local.value, ENTRY, local.value_offset)?;
+        let name = super::wire::packed_values(&local, 1, ENTRY, "local signature name")?;
+        let [name] = name.as_slice() else {
+            return Ok(None);
+        };
+        if string(self.strings, *name, "local signature name")? != "<TP>" {
+            return Ok(None);
+        }
+        let Some(index) = unique_varint(&local, 2, "local signature hash", ENTRY)? else {
+            return Ok(None);
+        };
+        let Ok(index) = u32::try_from(index) else {
+            return Err(KlibIrDecodeError::malformed(
+                ENTRY,
+                composite_offset,
+                format!("type parameter index {index} does not fit u32"),
+            ));
+        };
+        Ok(Some((owner, index)))
     }
 
     fn direct_public_signature(
@@ -361,6 +419,64 @@ mod tests {
         let mut signature = Vec::new();
         bytes_field(&mut signature, 5, &body);
         signature
+    }
+
+    /// `IdSignature.local_sig`: `LocalSignature { local_fq_name = [name], local_hash = hash }`.
+    fn local(name: u64, hash: u64) -> Vec<u8> {
+        let mut body = Vec::new();
+        bytes_field(&mut body, 1, &varint(name));
+        varint_field(&mut body, 2, hash);
+        let mut signature = Vec::new();
+        bytes_field(&mut signature, 6, &body);
+        signature
+    }
+
+    #[test]
+    fn a_public_declaration_type_parameter_is_its_owner_and_index_in_every_table() {
+        let public = public_signature();
+        let parameter = local(2, 1);
+        let composite = composite(0, 1);
+        let entries = [
+            public.as_slice(),
+            parameter.as_slice(),
+            composite.as_slice(),
+        ];
+        let strings = ["fixture".to_owned(), "probe".to_owned(), "<TP>".to_owned()];
+        for table in [
+            SignatureTable::new(3, &entries, &strings),
+            SignatureTable::prepared_inline(3, &entries, &strings),
+        ] {
+            let mut table = table;
+            let symbol = table
+                .symbol(2 << 8 | KlibIrSymbolKind::TypeParameter as u64)
+                .expect("a type parameter symbol");
+            let KlibIrSignature::TypeParameter { owner, index } = symbol.signature else {
+                panic!("the owner's type parameter, not {:?}", symbol.signature)
+            };
+            assert_eq!(owner.declaration().segments(), ["probe"]);
+            assert_eq!(owner.member_id(), Some(0x14ab_8f30_859f_59a9));
+            assert_eq!(index, 1);
+        }
+    }
+
+    #[test]
+    fn another_local_name_under_a_public_owner_stays_file_local() {
+        let public = public_signature();
+        let parameter = local(2, 1);
+        let composite = composite(0, 1);
+        let entries = [
+            public.as_slice(),
+            parameter.as_slice(),
+            composite.as_slice(),
+        ];
+        let strings = ["fixture".to_owned(), "probe".to_owned(), "<BF>".to_owned()];
+        let symbol = SignatureTable::new(3, &entries, &strings)
+            .symbol(2 << 8)
+            .expect("a local symbol");
+        assert_eq!(
+            symbol.signature,
+            KlibIrSignature::FileLocal { file: 3, slot: 2 }
+        );
     }
 
     #[test]

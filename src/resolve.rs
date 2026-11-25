@@ -32,6 +32,20 @@ use crate::types::{
 use scope::ScopeKind;
 use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns};
 
+mod callable_signature;
+mod class_signature;
+use callable_signature::extract_ctor_default;
+pub use callable_signature::{
+    CtorDefaultValue, ExtensionOverloads, MemberExtFunSig, SigFlags, Signature, SourceMethodPlan,
+};
+use class_signature::{
+    compact_generated_member_declaration, generic_member_lambda_params,
+    module_member_lambda_params, source_class_flags, source_declared_callable_order,
+    streamed_declaration_is_within, streamed_declared_callable_order, streamed_source_class_flags,
+    ArrayBuiltin, DeclaredCallableClassHeader, GenericMemberPlan, GenericMemberQuery,
+    SourceClassHeader,
+};
+pub use class_signature::{ClassFlags, ClassSig, DeclaredPropertySig, GenericMethod, MethodMap};
 mod abstract_obligations;
 mod argument_parameter_mapping;
 mod builtin_implementation;
@@ -137,6 +151,7 @@ mod checker_symbol_queries;
 mod class_body_bindings;
 mod classifier_associated;
 mod classifier_binding;
+mod classifier_capture_types;
 mod collection_literals;
 mod common_classifier_views;
 #[cfg(test)]
@@ -236,8 +251,7 @@ use lexical_value_invoke::{DeferredInvokePeers, DeferredLexicalInvoke, LexicalIn
 mod lambda_call_shapes;
 mod property_read_selection;
 use lambda_call_shapes::{
-    projected_function_shape, ExplicitTypeArgumentBounds, ExplicitTypeArgumentProbe,
-    UntypedLambdaCall,
+    ExplicitTypeArgumentBounds, ExplicitTypeArgumentProbe, UntypedLambdaCall,
 };
 use lexical_policies::LexicalPolicy;
 use library_constructor_failure::LibraryConstructorFailure;
@@ -315,6 +329,7 @@ use receiver_flow::ReceiverNarrowing;
 mod receiver_function_values;
 use receiver_function_values::ImplicitReceiverFunctionInvoke;
 pub use receiver_function_values::ReceiverFunctionPropertyCallee;
+mod dsl_markers;
 mod package_qualifier_forms;
 mod package_qualifier_type_arguments;
 mod receiver_tower;
@@ -360,6 +375,7 @@ use source_type_resolution::{
 };
 mod scope;
 mod selected_argument_commitment;
+mod selected_result_aliases;
 mod selected_result_publication;
 use selected_argument_commitment::{
     indexed_operator_argument_parameters, indexed_operator_argument_slots, SelectedArgumentBinding,
@@ -719,1393 +735,6 @@ fn callable_ref_lhs_classifier_segments(
     }
     Ok(())
 }
-
-/// Bit-packed boolean flags for a [`Signature`], collapsing `vararg`/`is_inline`/`is_operator`/
-/// `is_override`/`is_final`/`is_suspend`/`requires_splice`/`has_reified_type_params`/`is_abstract`/
-/// `low_priority` into one word. Read through the
-/// `Signature` accessors of the same names; `vararg` is also mutated through `set_vararg`; built with
-/// the `with_*` chain.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SigFlags(u16);
-
-impl SigFlags {
-    const VARARG: u16 = 1 << 0;
-    const IS_INLINE: u16 = 1 << 1;
-    const IS_OPERATOR: u16 = 1 << 2;
-    const IS_OVERRIDE: u16 = 1 << 3;
-    const IS_FINAL: u16 = 1 << 4;
-    const IS_SUSPEND: u16 = 1 << 5;
-    const REQUIRES_SPLICE: u16 = 1 << 6;
-    const IS_ABSTRACT: u16 = 1 << 7;
-    const IS_INFIX: u16 = 1 << 8;
-    const HAS_REIFIED_TYPE_PARAMS: u16 = 1 << 9;
-    const IS_COMPANION_EXTENSION: u16 = 1 << 10;
-    const IS_COMPANION_BLOCK_MEMBER: u16 = 1 << 11;
-
-    #[inline]
-    const fn with(mut self, mask: u16, on: bool) -> Self {
-        if on {
-            self.0 |= mask;
-        } else {
-            self.0 &= !mask;
-        }
-        self
-    }
-    #[inline]
-    const fn has(self, mask: u16) -> bool {
-        self.0 & mask != 0
-    }
-
-    #[inline]
-    pub const fn with_vararg(self, on: bool) -> Self {
-        self.with(Self::VARARG, on)
-    }
-    #[inline]
-    pub const fn with_is_inline(self, on: bool) -> Self {
-        self.with(Self::IS_INLINE, on)
-    }
-    #[inline]
-    pub const fn with_is_operator(self, on: bool) -> Self {
-        self.with(Self::IS_OPERATOR, on)
-    }
-    #[inline]
-    pub const fn with_is_override(self, on: bool) -> Self {
-        self.with(Self::IS_OVERRIDE, on)
-    }
-    #[inline]
-    pub const fn with_is_final(self, on: bool) -> Self {
-        self.with(Self::IS_FINAL, on)
-    }
-    #[inline]
-    pub const fn with_is_suspend(self, on: bool) -> Self {
-        self.with(Self::IS_SUSPEND, on)
-    }
-    #[inline]
-    pub const fn with_requires_splice(self, on: bool) -> Self {
-        self.with(Self::REQUIRES_SPLICE, on)
-    }
-    #[inline]
-    pub const fn with_has_reified_type_params(self, on: bool) -> Self {
-        self.with(Self::HAS_REIFIED_TYPE_PARAMS, on)
-    }
-    #[inline]
-    pub const fn with_is_abstract(self, on: bool) -> Self {
-        self.with(Self::IS_ABSTRACT, on)
-    }
-    #[inline]
-    pub const fn with_is_infix(self, on: bool) -> Self {
-        self.with(Self::IS_INFIX, on)
-    }
-    #[inline]
-    pub const fn with_is_companion_extension(self, on: bool) -> Self {
-        self.with(Self::IS_COMPANION_EXTENSION, on)
-    }
-    #[inline]
-    pub const fn with_is_companion_block_member(self, on: bool) -> Self {
-        self.with(Self::IS_COMPANION_BLOCK_MEMBER, on)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Signature {
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-    /// Declared generic callable shape retained for call-site inference.
-    pub generic_sig: Option<GenericSig>,
-    pub projected_return_hazard: bool,
-    /// Bit-packed `vararg`/`is_inline`/`is_operator`/`is_override`/`is_final`/`is_suspend`/
-    /// `requires_splice` (read via the accessors below; `vararg` set via `set_vararg`). `vararg` marks
-    /// a variadic signature. `is_final` — a `final` member a subclass cannot override. `is_suspend`
-    /// — a `suspend fun`. `requires_splice` — no direct-call fallback is semantically legal even when
-    /// the backend emits a method so another compilation can obtain and inline its body.
-    pub flags: SigFlags,
-    /// Annotation class identities declared on the source declaration. Consumers decide which
-    /// annotations affect resolution/emission; the signature layer only records their identities.
-    pub annotations: Vec<crate::types::TypeName>,
-    /// Classifier promised by `@EqualityBound(C::class)` on the `equals(Any?)` parameter. The
-    /// physical parameter remains `Any?`; this compact semantic fact drives strict-equality flow.
-    pub equality_bound: Option<Ty>,
-    pub vararg_index: Option<usize>,
-    /// Minimum number of arguments a caller must supply — params beyond this have default values
-    /// that the caller fills in. Equals `params.len()` when there are no defaults.
-    pub required: usize,
-    /// For each parameter: whether it has a default value (so it may be omitted by name or position).
-    /// Parallel to `params`; empty when unknown (callers then fall back to the `required` prefix count).
-    /// This captures a *non-trailing* default (`f(x: Int = 3, g: () -> Int)`) that `required` cannot.
-    pub param_defaults: crate::libraries::ParamFlags,
-    /// Per parameter: its declared type carries Kotlin's internal `@Exact` constraint.
-    pub exact_params: crate::libraries::ParamFlags,
-    /// Per parameter: its declared type carries Kotlin's internal `@NoInfer` constraint.
-    pub no_infer_params: crate::libraries::ParamFlags,
-    /// Per parameter, the resolved declaration carries
-    /// `kotlin.internal.ImplicitIntegerCoercion`.
-    pub implicit_integer_coercion: crate::libraries::ParamFlags,
-    /// Parameter names, parallel to `params`. Used to map named arguments (`f(x = 1)`) to positions.
-    /// Empty for signatures where named-argument calls aren't supported (methods, synthesized members).
-    pub param_names: Vec<String>,
-    /// Provider-normalized semantic identities parallel to `params`. Source context roles are
-    /// captured from compact headers instead of being reconstructed from their spelling later.
-    pub parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
-    /// File-independent default values, parallel to `params`. `Some` only for literal/object defaults the
-    /// lowerer can emit without dereferencing the declaring file's AST arena.
-    pub param_default_values: Vec<Option<CtorDefaultValue>>,
-    /// For each parameter: if the parameter is a function type `(A, B) -> R`, the inner parameter
-    /// types `[A, B]`; otherwise an empty Vec. Used to type-check lambda arguments with the correct
-    /// `it` / parameter types. Parallel to `params`.
-    pub lambda_param_types: Vec<Vec<Ty>>,
-    /// For each parameter: `true` when it is a RECEIVER function type `Recv.(A) -> R` (vs a plain
-    /// `(Recv, A) -> R`). A lambda passed to such a param binds `lambda_param_types[i][0]` as the
-    /// implicit `this` receiver (so a bare member/extension call inside resolves against it). Parallel
-    /// to `params`; empty = none are receivers.
-    pub lambda_recv: crate::libraries::ParamFlags,
-    /// Per logical parameter, the `crossinline`/`noinline` modifier it wrote. Parallel to `params`;
-    /// empty when the source publishes none.
-    pub inline_modifiers: Vec<crate::types::InlineParameterModifier>,
-    /// Source visibility.
-    pub visibility: Visibility,
-    /// Number of leading context parameters in `params`. Ordinary functions leave this at 0.
-    pub context_count: usize,
-    /// Source declaration id for a top-level function in the current compilation. Member, local, and
-    /// classpath signatures leave this unset.
-    pub source_decl: Option<DeclId>,
-    /// Stable frontend identity for this source declaration. Unlike `source_decl`, this survives
-    /// body reparsing and is the only identity copied into checked FIR.
-    pub stable_declaration: Option<crate::fir::DeclarationId>,
-    /// Source file index for an AST-backed top-level or member signature.
-    pub source_file: Option<u32>,
-    /// Exact AST coordinate of a selected member declaration. Top-level and synthesized signatures
-    /// leave it unset; lowering follows this coordinate without scanning names, owners, or spans.
-    pub source_member: Option<crate::libraries::SourceMember>,
-    /// Declared extension receiver before lookup-key erasure.
-    pub source_receiver: Option<Ty>,
-    /// Declaring package of a source top-level declaration. The root is the default package.
-    pub package: TypeName,
-    /// The function's decoded `contract { … }`, when it declares one. Filled by the checker
-    /// (which confirms the intrinsic identity) after checking, so cross-file call sites and the
-    /// `@Metadata` emitter see the same effects the checker's call-site application uses.
-    pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
-    /// Plugin-owned implementation for a compiler-contributed declaration. This is declaration
-    /// identity carried through ordinary overload selection, never a source-name convention.
-    pub plugin_expression: Option<crate::libraries::PluginExpressionDeclaration>,
-}
-
-impl Signature {
-    #[inline]
-    pub fn vararg(&self) -> bool {
-        self.flags.has(SigFlags::VARARG)
-    }
-    #[inline]
-    pub fn is_inline(&self) -> bool {
-        self.flags.has(SigFlags::IS_INLINE)
-    }
-    /// Whether a lambda argument for logical parameter `parameter` is inlined into the caller's
-    /// frame: the callable is inline and the parameter wrote neither `crossinline` nor `noinline`.
-    pub fn inlines_lambda_for(&self, parameter: usize) -> bool {
-        self.is_inline()
-            && crate::types::InlineParameterModifier::runs_parameter_in_caller_frame(
-                &self.inline_modifiers,
-                parameter,
-            )
-    }
-    #[inline]
-    pub fn is_operator(&self) -> bool {
-        self.flags.has(SigFlags::IS_OPERATOR)
-    }
-    #[inline]
-    pub fn is_infix(&self) -> bool {
-        self.flags.has(SigFlags::IS_INFIX)
-    }
-    #[inline]
-    pub fn is_override(&self) -> bool {
-        self.flags.has(SigFlags::IS_OVERRIDE)
-    }
-    #[inline]
-    pub fn is_final(&self) -> bool {
-        self.flags.has(SigFlags::IS_FINAL)
-    }
-    #[inline]
-    pub fn is_suspend(&self) -> bool {
-        self.flags.has(SigFlags::IS_SUSPEND)
-    }
-    #[inline]
-    pub fn requires_splice(&self) -> bool {
-        self.flags.has(SigFlags::REQUIRES_SPLICE)
-    }
-    #[inline]
-    pub fn has_reified_type_params(&self) -> bool {
-        self.flags.has(SigFlags::HAS_REIFIED_TYPE_PARAMS)
-    }
-    #[inline]
-    pub fn is_abstract(&self) -> bool {
-        self.flags.has(SigFlags::IS_ABSTRACT)
-    }
-    #[inline]
-    pub fn is_companion_extension(&self) -> bool {
-        self.flags.has(SigFlags::IS_COMPANION_EXTENSION)
-    }
-    #[inline]
-    pub fn is_companion_block_member(&self) -> bool {
-        self.flags.has(SigFlags::IS_COMPANION_BLOCK_MEMBER)
-    }
-    #[inline]
-    pub fn set_vararg(&mut self, on: bool) {
-        self.flags = self.flags.with_vararg(on);
-        if !on {
-            self.vararg_index = None;
-        }
-    }
-    #[inline]
-    pub fn set_is_operator(&mut self, on: bool) {
-        self.flags = self.flags.with_is_operator(on);
-    }
-    #[inline]
-    pub fn set_is_inline(&mut self, on: bool) {
-        self.flags = self.flags.with_is_inline(on);
-    }
-
-    pub fn single_param(&self) -> Option<Ty> {
-        (self.params.len() == 1).then(|| self.params[0])
-    }
-
-    pub fn call_sig(&self) -> CallSig {
-        let mut call_sig = CallSig::source(
-            self.param_names.clone(),
-            self.param_defaults,
-            self.lambda_param_types.clone(),
-            self.lambda_recv,
-            self.params
-                .iter()
-                .map(|parameter| match parameter.kind() {
-                    TyKind::Fun(function) => function.context_count,
-                    _ => 0,
-                })
-                .collect(),
-            self.required,
-            self.vararg_index,
-        );
-        call_sig.exact_params = self.exact_params;
-        call_sig.no_infer_params = self.no_infer_params;
-        call_sig.implicit_integer_coercion = self.implicit_integer_coercion;
-        call_sig.inline_modifiers = self.inline_modifiers.clone();
-        copy_parameter_identities(&mut call_sig, &self.parameter_identities, self.params.len());
-        call_sig
-    }
-}
-
-/// Source extension overloads applicable to one receiver.
-pub struct ExtensionOverloads<'symbols, 'scope> {
-    exact: Option<&'symbols [Signature]>,
-    ranked: Vec<(u32, &'symbols Signature)>,
-    packages: Option<&'scope [TypeName]>,
-    import_scope: Option<&'scope crate::symbol_resolver::FunctionImportScope>,
-    scope_name: Option<&'scope str>,
-}
-
-impl<'symbols, 'scope> ExtensionOverloads<'symbols, 'scope> {
-    pub fn iter(&self) -> impl Iterator<Item = &'symbols Signature> + '_ {
-        let packages = self.packages;
-        let import_scope = self.import_scope;
-        let scope_name = self.scope_name;
-        let explicit_packages = import_scope
-            .zip(scope_name)
-            .map(|(scope, name)| {
-                scope
-                    .explicit_targets(name)
-                    .into_iter()
-                    .filter_map(|(owner, _)| match owner {
-                        crate::symbol_source::SymbolNamespace::Package(package) => Some(package),
-                        crate::symbol_source::SymbolNamespace::Classifier(_) => None,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let selected_import_level = import_scope.and_then(|scope| {
-            let name = scope_name?;
-            if scope.has_explicit(name) {
-                return None;
-            }
-            scope.levels().iter().position(|level| {
-                self.exact
-                    .unwrap_or(&[])
-                    .iter()
-                    .chain(self.ranked.iter().map(|(_, signature)| *signature))
-                    .any(|signature| level.contains(&signature.package))
-            })
-        });
-        self.exact
-            .unwrap_or(&[])
-            .iter()
-            .chain(self.ranked.iter().map(|(_, signature)| *signature))
-            .filter(move |signature| {
-                import_scope.is_some_and(|scope| {
-                    let name = scope_name.expect("an import-scoped overload view has a name");
-                    if scope.has_explicit(name) {
-                        return explicit_packages.contains(&signature.package);
-                    }
-                    selected_import_level
-                        .is_some_and(|level| scope.levels()[level].contains(&signature.package))
-                }) || (import_scope.is_none()
-                    && packages.is_some_and(|packages| packages.contains(&signature.package)))
-                    || (import_scope.is_none() && packages.is_none())
-            })
-    }
-
-    pub fn first(&self) -> Option<&'symbols Signature> {
-        self.iter().next()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.iter().next().is_none()
-    }
-}
-
-/// Compatibility name for source signatures built in this module. The data itself belongs to the
-/// shared callable metadata model and is not constructor-specific.
-pub use crate::libraries::DefaultValue as CtorDefaultValue;
-
-/// Capture a primary-constructor parameter default in the file-independent [`CtorDefaultValue`] form, or
-/// `None` for an unmodeled default (a non-literal/non-object — kept conservative so behavior matches the
-/// previous literal-only handling). Resolves an object-singleton `Name` (`= EmptyCoroutineContext`) to its
-/// internal via the type universe, so the default lowers cross-file as `getstatic …INSTANCE`.
-fn extract_ctor_default(
-    file: &File,
-    dx: ExprId,
-    class_names: &ClassNames,
-    libraries: &dyn SymbolSource,
-) -> Option<CtorDefaultValue> {
-    Some(match file.expr(dx) {
-        Expr::IntLit(v) => CtorDefaultValue::Int(*v),
-        Expr::LongLit(v) => CtorDefaultValue::Long(*v),
-        Expr::DoubleLit(v) => CtorDefaultValue::Double(*v),
-        Expr::FloatLit(v) => CtorDefaultValue::Float(*v),
-        Expr::BoolLit(v) => CtorDefaultValue::Bool(*v),
-        Expr::CharLit(v) => CtorDefaultValue::Char(*v),
-        Expr::StringLit(s) => CtorDefaultValue::Str(s.clone()),
-        Expr::NullLit => CtorDefaultValue::Null,
-        Expr::Name(n) => {
-            let internal = class_names.get(n)?;
-            if libraries
-                .classifier(internal)
-                .is_some_and(|t| t.is_object())
-            {
-                CtorDefaultValue::Object(internal)
-            } else {
-                return None;
-            }
-        }
-        _ => return None,
-    })
-}
-
-/// Everything a caller needs about a declared Kotlin class.
-#[derive(Clone, Debug)]
-pub struct MemberExtFunSig {
-    /// Semantic receiver shape, its type parameters symbolic until the call site unifies them: no
-    /// source `TypeRef`, descriptor or provider identity, so module and dependency share selection.
-    receiver_ty: Ty,
-    physical_receiver: Ty,
-    signature: Signature,
-    /// Exact declaration type-parameter capabilities retained from the normalized provider/header
-    /// record. Reconstructing `CallSig` from `Signature` cannot recover this sparse semantic fact.
-    reified_type_parameter_ordinals: Vec<u32>,
-    /// Physical method parameters after the extension receiver, opaque to semantic resolution.
-    physical_params: Vec<Ty>,
-    /// Provider-owned physical method spelling, travelling with the selected target only so a
-    /// backend can emit a mangled dependency method; never selection or diagnostic input.
-    physical_name: String,
-    /// Stable provider identity for a dependency declaration. Current-module declarations use
-    /// `signature.stable_declaration` instead; exactly one identity is present after selection.
-    external_identity: Option<crate::fir::ExternalCallableId>,
-    external_default_provider: Option<crate::fir::ExternalCallableId>,
-    declared_ret: Option<Ty>,
-    overridden_results: Box<[Ty]>,
-    inline_body_plan: Option<Box<crate::libraries::InlineBodyPlan>>,
-}
-
-/// Resolved declaration types keyed by the parsed declaration's source identity. Lowering consumes
-/// this exact record; it never re-selects or re-pairs an overload by name, arity, or table order.
-#[derive(Clone, Debug)]
-pub struct SourceMethodPlan {
-    pub signature: Signature,
-    pub extension_receiver: Option<Ty>,
-}
-
-impl MemberExtFunSig {
-    pub(crate) fn receiver_ty(&self) -> Ty {
-        self.receiver_ty
-    }
-
-    pub(crate) fn signature(&self) -> &Signature {
-        &self.signature
-    }
-}
-
-/// Bit-packed boolean modifiers for a [`ClassSig`]. The per-class flags below each cost a full
-/// byte as a separate `bool` field (plus struct padding); collapsed into one `u16` they save several
-/// bytes per sig, and the compiler builds a few thousand. Built with the `with_*` chain from
-/// [`ClassFlags::default`]; read through the `ClassSig::is_*` / `has_*` accessors.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ClassFlags(u16);
-
-impl ClassFlags {
-    const INTERFACE: u16 = 1 << 0;
-    const OBJECT: u16 = 1 << 1;
-    const ABSTRACT: u16 = 1 << 2;
-    const FUN_INTERFACE: u16 = 1 << 3;
-    const SEALED: u16 = 1 << 4;
-    const FINAL: u16 = 1 << 5;
-    const HAS_ABSTRACT_MEMBERS: u16 = 1 << 6;
-    const ANNOTATION: u16 = 1 << 7;
-    const DATA: u16 = 1 << 8;
-    const ENUM: u16 = 1 << 9;
-
-    #[inline]
-    const fn with(mut self, mask: u16, on: bool) -> Self {
-        if on {
-            self.0 |= mask;
-        } else {
-            self.0 &= !mask;
-        }
-        self
-    }
-    #[inline]
-    const fn has(self, mask: u16) -> bool {
-        self.0 & mask != 0
-    }
-
-    #[inline]
-    pub const fn with_interface(self, on: bool) -> Self {
-        self.with(Self::INTERFACE, on)
-    }
-    #[inline]
-    pub const fn with_object(self, on: bool) -> Self {
-        self.with(Self::OBJECT, on)
-    }
-    #[inline]
-    pub const fn with_abstract(self, on: bool) -> Self {
-        self.with(Self::ABSTRACT, on)
-    }
-    #[inline]
-    pub const fn with_fun_interface(self, on: bool) -> Self {
-        self.with(Self::FUN_INTERFACE, on)
-    }
-    #[inline]
-    pub const fn with_sealed(self, on: bool) -> Self {
-        self.with(Self::SEALED, on)
-    }
-    #[inline]
-    pub const fn with_final(self, on: bool) -> Self {
-        self.with(Self::FINAL, on)
-    }
-    #[inline]
-    pub const fn with_has_abstract_members(self, on: bool) -> Self {
-        self.with(Self::HAS_ABSTRACT_MEMBERS, on)
-    }
-    #[inline]
-    pub const fn with_annotation(self, on: bool) -> Self {
-        self.with(Self::ANNOTATION, on)
-    }
-    #[inline]
-    pub const fn with_data(self, on: bool) -> Self {
-        self.with(Self::DATA, on)
-    }
-    #[inline]
-    pub const fn with_enum(self, on: bool) -> Self {
-        self.with(Self::ENUM, on)
-    }
-}
-
-/// The compiler-built array operation a call checks as, and the label of its initializer lambda
-/// in diagnostics when it is a size constructor.
-#[derive(Clone, Copy)]
-struct ArrayBuiltin {
-    kind: crate::synthetics::SyntheticKind,
-    initializer_label: Option<&'static str>,
-}
-
-impl ArrayBuiltin {
-    fn of(kind: crate::synthetics::SyntheticKind) -> Self {
-        Self {
-            kind,
-            initializer_label: None,
-        }
-    }
-
-    fn constructor(synthetic: &crate::synthetics::Synthetic) -> Self {
-        Self {
-            kind: synthetic.kind,
-            initializer_label: Some(synthetic.name),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SourceClassHeader {
-    flags: ClassFlags,
-    direct_supertypes: crate::types::TypeNameList,
-}
-
-/// One source of truth for declaration-level classifier flags. The same packed value seeds the
-/// all-files header index and is later installed on the complete `ClassSig`, preventing early
-/// inference and final checking from classifying a declaration differently.
-fn source_class_flags(class: &ClassDecl) -> ClassFlags {
-    ClassFlags::default()
-        .with_interface(class.is_interface())
-        .with_object(class.is_singleton())
-        .with_abstract(class.is_abstract())
-        .with_fun_interface(class.is_fun_interface)
-        .with_sealed(class.is_sealed())
-        .with_final(class.is_final())
-        .with_has_abstract_members(
-            class.methods.iter().any(|method| method.is_abstract())
-                || class.body_props.iter().any(|property| property.is_abstract),
-        )
-        .with_annotation(class.is_annotation())
-        .with_data(class.is_data)
-        .with_enum(class.is_enum())
-}
-
-/// Classifier flags read from the compact Pass-1 declaration inventory.
-///
-/// `HAS_ABSTRACT_MEMBERS` is a property of the classifier's direct declaration children, not of
-/// its parser container. Computing it from stable ownership lets production bootstrap source
-/// classifiers after the corresponding `ClassDecl` has been destroyed.
-fn streamed_source_class_flags(
-    headers: &crate::fir::StreamedHeaderModule,
-    classifier: &crate::fir::DeclarationStub,
-) -> ClassFlags {
-    let flags = classifier.flags;
-    let has_abstract_members = headers.stubs.iter().any(|candidate| {
-        candidate.flags.has(crate::fir::DeclarationFlags::ABSTRACT)
-            && matches!(
-                candidate.kind,
-                crate::fir::DeclarationKind::Function
-                    | crate::fir::DeclarationKind::Property
-                    | crate::fir::DeclarationKind::Accessor
-            )
-            && headers
-                .declarations
-                .anchor(candidate.id)
-                .is_some_and(|anchor| anchor.owner == Some(classifier.id))
-    });
-    ClassFlags::default()
-        .with_interface(flags.has(crate::fir::DeclarationFlags::INTERFACE))
-        .with_object(flags.has(crate::fir::DeclarationFlags::SINGLETON))
-        .with_abstract(flags.has(crate::fir::DeclarationFlags::ABSTRACT))
-        .with_fun_interface(flags.has(crate::fir::DeclarationFlags::FUN_INTERFACE))
-        .with_sealed(flags.has(crate::fir::DeclarationFlags::SEALED))
-        .with_final(flags.has(crate::fir::DeclarationFlags::FINAL))
-        .with_has_abstract_members(has_abstract_members)
-        .with_annotation(flags.has(crate::fir::DeclarationFlags::ANNOTATION_CLASS))
-        .with_data(flags.has(crate::fir::DeclarationFlags::DATA))
-        .with_enum(flags.has(crate::fir::DeclarationFlags::ENUM))
-}
-
-/// Capture the source-level callable inventory before functions and properties are normalized into
-/// separate name-indexed maps. Byte offsets are parser facts, so this preserves interleaving without
-/// deriving order later from arena indices or stable identities.
-fn source_declared_callable_order(class: &ClassDecl) -> Vec<String> {
-    let mut declarations = Vec::new();
-    declarations.extend(
-        class
-            .props
-            .iter()
-            .filter(|property| property.is_property)
-            .map(|property| (property.span.lo, property.name.clone())),
-    );
-    declarations.extend(
-        class
-            .methods
-            .iter()
-            .map(|method| (method.span.lo, method.name.clone())),
-    );
-    declarations.extend(
-        class
-            .body_props
-            .iter()
-            .map(|property| (property.span.lo, property.name.clone())),
-    );
-    declarations.sort_by_key(|(position, _)| *position);
-    let mut names = Vec::new();
-    for (_, name) in declarations {
-        if !names.contains(&name) {
-            names.push(name);
-        }
-    }
-    names
-}
-
-/// Direct callable names of a compact classifier in lexical declaration order.
-///
-/// This is declaration metadata, not executable-body location. The compact inventory already owns
-/// every direct member's stable owner and source order, so production need not retain the enclosing
-/// `ClassDecl` merely to reconstruct function/property interleaving.
-fn streamed_declared_callable_order(
-    headers: &crate::fir::StreamedHeaderModule,
-    classifier: crate::fir::DeclarationId,
-) -> Vec<String> {
-    let declarations = headers.owned_stubs(classifier).filter_map(|stub| {
-        matches!(
-            stub.kind,
-            crate::fir::DeclarationKind::Function | crate::fir::DeclarationKind::Property
-        )
-        .then(|| {
-            headers
-                .lookup_names
-                .get(stub.lookup_name?)
-                .map(str::to_owned)
-        })
-        .flatten()
-    });
-    let mut names = Vec::new();
-    for name in declarations {
-        if !names.contains(&name) {
-            names.push(name);
-        }
-    }
-    names
-}
-
-fn streamed_declaration_is_within(
-    headers: &crate::fir::StreamedHeaderModule,
-    declaration: crate::fir::DeclarationId,
-    classifier: crate::fir::DeclarationId,
-) -> bool {
-    let mut current = Some(declaration);
-    while let Some(candidate) = current {
-        if candidate == classifier {
-            return true;
-        }
-        current = headers
-            .declarations
-            .stable_anchor(candidate)
-            .and_then(|anchor| anchor.owner);
-    }
-    false
-}
-
-fn compact_generated_member_declaration(
-    headers: Option<&crate::fir::StreamedHeaderModule>,
-    owner: Option<crate::fir::DeclarationId>,
-    name: &str,
-) -> Option<crate::fir::DeclarationId> {
-    let headers = headers?;
-    let owner = owner?;
-    headers.owned_stubs(owner).find_map(|stub| {
-        (stub.kind == crate::fir::DeclarationKind::Function
-            && stub
-                .flags
-                .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
-            && stub
-                .lookup_name
-                .and_then(|lookup| headers.lookup_names.get(lookup))
-                == Some(name))
-        .then_some(stub.id)
-    })
-}
-
-#[derive(Clone, Debug)]
-pub struct DeclaredPropertySig {
-    pub ty: Ty,
-    pub storage_ty: Option<Ty>,
-    pub visibility: Visibility,
-    /// Whether this declaration participates in Kotlin source member lookup. A captured lexical
-    /// value may need typed classifier storage while its member bodies are checked, but that
-    /// storage is not a Kotlin property and cannot shadow a real inherited declaration.
-    pub source_visible: bool,
-    /// A source `const val` is realized as a static field and deliberately has no instance getter.
-    /// Keep that ABI fact in the semantic declaration handoff: consumers that only see a module
-    /// signature must not mistake the conventional `getter_name` spelling for an emitted accessor.
-    pub is_const: bool,
-    /// Resolved declaration annotation identities. This is Kotlin semantic metadata; a target may
-    /// interpret its own annotations when choosing a physical representation.
-    pub annotations: Vec<TypeName>,
-    pub getter_name: String,
-    pub setter_name: Option<String>,
-    pub setter_parameter_name: Option<String>,
-    /// Visibility of the setter declaration. `None` means `val`; a `var` normally inherits the
-    /// property's visibility, while an explicit `private set` narrows only this value. Keeping it beside
-    /// `setter_name` prevents backend accessor synthesis from accidentally widening the source ABI.
-    pub setter_visibility: Option<Visibility>,
-    /// `true` for a property with a custom getter or a delegate — a re-read can then observe a
-    /// different value than an earlier proof, so flow narrowing (smart casts) must skip it
-    /// (kotlinc: "smart cast is impossible, because the property has a custom getter").
-    pub has_custom_getter: bool,
-    /// The property declares no accessor implementation. Providers carry this semantic modality
-    /// beside the accessor handles so consumers never infer a body from source/classpath origin.
-    pub is_abstract: bool,
-    /// Whether this property's accessor remains overridable. Smart-cast stability depends on the
-    /// selected property's modality, not merely on whether its declaring class is open: a default
-    /// `val` is final even in an open class, while an `open val` becomes stable when viewed through
-    /// a statically final receiver type because no runtime subclass can replace its getter.
-    pub is_open: bool,
-    pub context_params: Vec<Ty>,
-    pub context_param_names: Vec<String>,
-    pub context_parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
-    pub source_member: Option<crate::libraries::SourceMember>,
-    pub stable_declaration: Option<crate::fir::DeclarationId>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ClassSig {
-    pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
-    pub internal: TypeName,
-    /// Stable frontend identity for a source classifier. Parser `DeclId` remains a temporary
-    /// collection coordinate and is never needed by signature solving or checked FIR.
-    pub stable_declaration: Option<crate::fir::DeclarationId>,
-    /// File that declares this source classifier. Class visibility cannot be decided from the module
-    /// alone: a top-level `private` class is visible only to declarations in this same file.
-    pub source_file: u32,
-    /// Arena declaration that owns this source classifier. Synthetic companion classifiers have no
-    /// independent class declaration and therefore leave this unset.
-    pub source_decl: Option<DeclId>,
-    /// The classifier's NAME in [`Self::source_file`], where a plugin's class rule reports. A
-    /// synthetic companion has no name of its own and leaves this empty.
-    pub name_span: crate::diag::Span,
-    /// Whether the declaration is structurally owned by another classifier. This is captured from
-    /// the declaration graph while source ownership is live; an internal-name `$` is not ownership.
-    pub is_nested: bool,
-    pub visibility: Visibility,
-    /// Resolved classifier declaration annotations, projected to the stable module index before
-    /// Pass 2 so plugins and semantic checks never revisit source occurrences.
-    pub annotations: Vec<TypeName>,
-    /// Fully checked applications of those annotations. This is populated while the Pass-1
-    /// declaration expression arena is live, then projected by stable declaration identity.
-    pub applied_annotations: Vec<crate::types::ResolvedAnnotation>,
-    /// Resolved CLASS arguments of those annotations, by annotation ordinal — the identity behind
-    /// `@Serializable(with = X::class)`. Resolved here, with the annotation's own name and through
-    /// the same classifier rules, because no later phase may recover it from a spelling.
-    pub annotation_class_arguments: Vec<(u32, TypeName)>,
-    /// Exact identities of plugin-generated nested classifiers. The generating frontend extension
-    /// publishes these with the source header; backends never infer them from annotations or names.
-    pub generated_nested_classifiers: Vec<crate::types::GeneratedClassifierFact>,
-    pub props: Vec<(String, Ty, bool)>, // backing-field properties (name, type, is_var)
-    pub declared_props: HashMap<String, DeclaredPropertySig>,
-    /// Context-parameter properties are overloadable by their context shape and may share a name
-    /// with an ordinary stored property.
-    pub contextual_props: HashMap<String, Vec<DeclaredPropertySig>>,
-    /// Compile-time values of source constants physically owned by this classifier. A checker read
-    /// copies the selected value onto the expression; lowering never searches by source spelling.
-    pub constants: HashMap<String, crate::libraries::LibraryConst>,
-    /// Extension properties declared inside this class/object.
-    pub member_ext_props: HashMap<String, Vec<MemberExtPropSig>>,
-    /// Member extension functions keyed by source name.
-    pub member_ext_funs: HashMap<String, Vec<MemberExtFunSig>>,
-    pub has_primary_ctor: bool,
-    pub primary_constructor_declaration: Option<crate::fir::DeclarationId>,
-    /// Resolved annotations on the primary constructor declaration. These are signature/header
-    /// facts and are projected into the stable module index before Pass 2.
-    pub primary_constructor_annotations: Vec<TypeName>,
-    /// Full semantic primary-constructor parameter types in order (includes non-property params;
-    /// a vararg slot is its array type, while the AST retains the written element type).
-    pub ctor_params: Vec<Ty>,
-    /// Symbolic constructor parameter types and their definitely-non-null marker.
-    pub ctor_param_shapes: Vec<(Ty, bool)>,
-    /// Primary-constructor parameter NAMES, in order, and whether each declares a default. Needed to
-    /// map a named-argument call (`C(b = 9)`) onto positions from ANY file in the module — the AST
-    /// declaration is only reachable from the file that declares it.
-    pub ctor_param_names: Vec<(String, bool)>,
-    /// Per primary-constructor parameter, the resolved declaration carries Kotlin's internal
-    /// `@ImplicitIntegerCoercion`. This is stable declaration behavior, not body syntax.
-    pub ctor_implicit_integer_coercion: Vec<bool>,
-    pub ctor_vararg: Option<usize>,
-    pub methods: MethodMap,
-    /// Direct callable names in exact lexical declaration order. This is captured while the class
-    /// AST is present because the semantic maps deliberately group functions and properties by
-    /// name and cannot reconstruct their interleaving afterwards.
-    pub declared_callable_order: Vec<String>,
-    pub source_methods: Vec<SourceMethodPlan>,
-    /// Bit-packed class modifiers (`interface`, `object`, `abstract`, `fun interface`, `sealed`,
-    /// `final`, `has_abstract_members`, `annotation`). Read via the `is_*`/`has_*` accessors; the
-    /// `annotation` bit lives here too (its doc stays at the former field position below).
-    pub flags: ClassFlags,
-    /// Declared enum entry names in source order. Non-empty only for an `enum class` (the
-    /// [`ClassFlags::ENUM`] kind); an enum is an ordinary classifier of that kind, not a separate
-    /// table.
-    pub enum_entries: Vec<String>,
-    /// `Some(outer_internal)` for an `inner class` — it captures the enclosing instance (a `this$0`
-    /// field of the outer type); constructed as `outerInstance.Inner(...)`.
-    pub inner_of: Option<TypeName>,
-    /// The declared companion classifier, independent of whether it owns any methods or properties.
-    pub companion_internal: Option<TypeName>,
-    /// Names of `lateinit` properties (instance and companion) — reads emit a null-check that throws.
-    pub lateinit_props: crate::fx_hash::HashSet<String>,
-    /// Internal names of interfaces this type implements (for subtyping).
-    pub interfaces: crate::types::TypeNameList,
-    /// Declaration-scoped type arguments, parallel to [`Self::interfaces`].
-    pub interface_type_args: Vec<Vec<Ty>>,
-    /// Applied interfaces whose implementations are forwarded through a constructor value by
-    /// Kotlin's `Interface by delegate` convention.
-    pub delegated_interfaces: Vec<Ty>,
-    /// Exact function-type supertype, preserving receiver/context/suspend shape that a classifier
-    /// name such as `Function1` cannot encode on its own.
-    pub callable_signature: Option<Ty>,
-    /// All directly declared function-type supertypes. `callable_signature` remains the unique/first
-    /// compatibility view for consumers that cannot accept an intersection.
-    pub callable_signatures: Vec<Ty>,
-    /// Internal name of the base class (`: Base(..)`), if any.
-    pub super_internal: Option<TypeName>,
-    /// How many of [`Self::interfaces`] the declaration lists before [`Self::super_internal`].
-    pub interfaces_before_superclass: u32,
-    /// Applied type arguments on [`Self::super_internal`].
-    pub super_type_args: Vec<Ty>,
-    /// The parameter types of the base constructor that this class's `super(args)` targets, as the
-    /// CHECKER resolved it (uniformly for a same-file, module, or classpath base, via the symbol
-    /// source). Empty when the class has no base arguments. The lowerer emits `super(args)` against
-    /// these instead of re-resolving the constructor itself.
-    pub super_ctor_params: Vec<Ty>,
-    /// Each primary-constructor parameter's default, captured FILE-INDEPENDENTLY (see
-    /// [`CtorDefaultValue`]) so a different file can fill it without dereferencing a cross-file `ExprId`.
-    /// `None` = required (or an unmodeled default → treated as required → skip).
-    pub ctor_defaults: Vec<Option<CtorDefaultValue>>,
-    /// Semantic secondary-constructor parameter-type lists (`constructor(p…) : this(…)`); a vararg
-    /// slot is its array type. A construction call resolves to one of these when its arguments don't
-    /// match the primary.
-    pub secondary_ctors: Vec<Vec<Ty>>,
-    /// The same declarations with classifier type parameters preserved. Stable FIR signatures use
-    /// these source shapes; `secondary_ctors` remains the erased legacy selection shape.
-    pub secondary_ctor_shapes: Vec<Vec<Ty>>,
-    /// Source-level argument mapping facts for each secondary constructor. These are declaration
-    /// header facts, not retained default-expression bodies: names, omitted-default positions,
-    /// function-parameter shapes, and the vararg slot travel with the normalized callable candidate.
-    pub secondary_ctor_call_sigs: Vec<CallSig>,
-    pub secondary_constructor_declarations: Vec<Option<crate::fir::DeclarationId>>,
-    /// Resolved annotations parallel to [`Self::secondary_constructor_declarations`].
-    pub secondary_constructor_annotations: Vec<Vec<TypeName>>,
-    /// This class's own type parameters, in declaration order (`class Box<T, U>` → `["T", "U"]`).
-    /// Lets a member read substitute the receiver's type arguments for a property whose declared
-    /// type is one of these parameters.
-    pub type_parameters: crate::types::TypeParameters<Vec<Ty>>,
-    /// Upper bounds beyond the first, parallel to `type_parameters`. `Ty::TyParam` intentionally
-    /// carries only the first/JVM-erasure bound; source and dependency symbol providers retain the
-    /// remaining intersection members here so contextual uses can perform ordinary member lookup.
-    pub type_parameter_extra_bounds: Vec<Vec<Ty>>,
-    /// Type parameters captured through an `inner`/local classifier's enclosing instance. These are
-    /// not declared by this classifier and therefore do not participate in its explicit type-argument
-    /// arity, but member signatures may mention them and must substitute them from the bound outer.
-    pub captured_type_parameters: crate::types::TypeParameters<Vec<Ty>>,
-    /// The same captured declaration identities in Kotlin metadata ID order: outermost declaration
-    /// first. Applied receiver arguments deliberately use the opposite, nearest-owner-first order.
-    pub metadata_captured_type_parameters: Vec<String>,
-    /// Explicit semantic bounds parallel to `tparam_names`; `Error` means no explicit bound.
-    /// Properties whose *declared* type is exactly one of this class's type parameters, mapped to
-    /// that parameter's index (`class Box<T>(val x: T)` → `{"x": 0}`). A read of such a property on
-    /// `Box<Int>` substitutes the argument at that index (`Int`) for the erased `Object`.
-    pub generic_props: HashMap<String, (usize, bool)>,
-    /// Properties whose DECLARED type is a direct nullable type parameter (`val value: T?`), by
-    /// class-type-parameter index. This is separate from `generic_props`, which represents a bare
-    /// `T`, and from the recursive shapes in `generic_property_shapes`; all three are semantic
-    /// declaration templates consumed uniformly by property selection.
-    pub nullable_tparam_props: HashMap<String, usize>,
-    /// Function-property signatures that require class type-parameter substitution.
-    /// Declared property types that mention class parameters anywhere in their shape (`Cell<T>`,
-    /// `(T) -> R`, and similar). Read-site substitution consumes this uniformly; callable-specific
-    /// behavior is decided only after the resulting type is known.
-    pub generic_property_shapes: HashMap<String, Ty>,
-    /// For a `@JvmInline value class X(val v: U)` — the sole underlying property's `(name, type U)`.
-    /// A value-class value is represented unboxed as `U`; `X` carries static `box-impl`/`unbox-impl`/
-    /// `constructor-impl` members for boxed contexts. `None` for an ordinary class and for a boxed
-    /// `value class` enabled by `FullValueClasses`.
-    pub value_field: Option<(String, Ty)>,
-    /// Boxed `value class` (`+FullValueClasses`, no `@JvmInline`): structural `equals`/`hashCode`/
-    /// `toString`, no `componentN`/`copy`, and no unboxed carrier.
-    pub full_value: bool,
-    /// For a generic higher-order method (`fun <R> map(f: (T) -> R): R`), the un-erased declared shape
-    /// needed to substitute the receiver's type arguments into the lambda parameter types and infer the
-    /// method's own type parameters from the lambda body. Keyed by method name; only methods whose
-    /// substitution actually depends on a type parameter are recorded (ordinary methods are absent).
-    pub generic_methods: HashMap<String, Vec<GenericMethod>>,
-}
-
-impl std::ops::Deref for ClassSig {
-    type Target = crate::types::TypeParameters<Vec<Ty>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.type_parameters
-    }
-}
-
-struct DeclaredCallableClassHeader {
-    declaration_name: Option<crate::types::ClassifierDeclarationName>,
-    internal: TypeName,
-    stable_declaration: Option<crate::fir::DeclarationId>,
-    source_file: u32,
-    source_decl: DeclId,
-    is_nested: bool,
-    visibility: Visibility,
-    flags: ClassFlags,
-    methods: MethodMap,
-    declared_callable_order: Vec<String>,
-    member_ext_funs: HashMap<String, Vec<MemberExtFunSig>>,
-    companion_internal: Option<TypeName>,
-    direct_supertypes: crate::types::TypeNameList,
-    direct_supertype_arguments: Vec<Vec<Ty>>,
-    type_parameters: crate::types::TypeParameters<Vec<Ty>>,
-    type_parameter_extra_bounds: Vec<Vec<Ty>>,
-    captured_type_parameters: crate::types::TypeParameters<Vec<Ty>>,
-}
-
-impl ClassSig {
-    /// A source classifier header used while its properties and inferred-return members are still
-    /// being collected. Declared callable signatures are already complete semantic candidates, so
-    /// publishing them here lets initializer inference use the ordinary module symbol source and
-    /// overload selector. The authoritative class pass replaces this header with the complete
-    /// signature before checking or lowering.
-    fn with_declared_callable_headers(header: DeclaredCallableClassHeader) -> Self {
-        let DeclaredCallableClassHeader {
-            declaration_name,
-            internal,
-            stable_declaration,
-            source_file,
-            source_decl,
-            is_nested,
-            visibility,
-            flags,
-            methods,
-            declared_callable_order,
-            member_ext_funs,
-            companion_internal,
-            direct_supertypes,
-            direct_supertype_arguments,
-            type_parameters,
-            type_parameter_extra_bounds,
-            captured_type_parameters,
-        } = header;
-        Self {
-            declaration_name,
-            internal,
-            stable_declaration,
-            source_file,
-            source_decl: Some(source_decl),
-            name_span: crate::diag::Span::new(0, 0),
-            is_nested,
-            visibility,
-            annotations: Vec::new(),
-            applied_annotations: Vec::new(),
-            annotation_class_arguments: Vec::new(),
-            generated_nested_classifiers: Vec::new(),
-            props: Vec::new(),
-            declared_props: HashMap::default(),
-            contextual_props: HashMap::default(),
-            constants: HashMap::default(),
-            member_ext_props: HashMap::default(),
-            member_ext_funs,
-            has_primary_ctor: false,
-            primary_constructor_declaration: None,
-            primary_constructor_annotations: Vec::new(),
-            ctor_params: Vec::new(),
-            ctor_param_shapes: Vec::new(),
-            ctor_param_names: Vec::new(),
-            ctor_implicit_integer_coercion: Vec::new(),
-            ctor_vararg: None,
-            methods,
-            declared_callable_order,
-            source_methods: Vec::new(),
-            flags,
-            enum_entries: Vec::new(),
-            inner_of: None,
-            companion_internal,
-            lateinit_props: Default::default(),
-            // Header inference only needs the semantic hierarchy, not the class/interface JVM
-            // partition. Publishing every direct parent here keeps inherited candidate traversal
-            // on the common provider path; the complete signature restores the representation split.
-            interfaces: direct_supertypes,
-            interface_type_args: direct_supertype_arguments,
-            delegated_interfaces: Vec::new(),
-            callable_signature: None,
-            callable_signatures: Vec::new(),
-            super_internal: None,
-            interfaces_before_superclass: 0,
-            super_type_args: Vec::new(),
-            super_ctor_params: Vec::new(),
-            ctor_defaults: Vec::new(),
-            secondary_ctors: Vec::new(),
-            secondary_ctor_shapes: Vec::new(),
-            secondary_ctor_call_sigs: Vec::new(),
-            secondary_constructor_declarations: Vec::new(),
-            secondary_constructor_annotations: Vec::new(),
-            type_parameters,
-            type_parameter_extra_bounds,
-            captured_type_parameters,
-            metadata_captured_type_parameters: Vec::new(),
-            generic_props: HashMap::default(),
-            nullable_tparam_props: HashMap::default(),
-            generic_property_shapes: HashMap::default(),
-            value_field: None,
-            full_value: false,
-            generic_methods: HashMap::default(),
-        }
-    }
-
-    pub fn type_params(&self) -> &Vec<String> {
-        &self.type_parameters.type_params
-    }
-
-    pub fn type_param_bounds(&self) -> &Vec<Ty> {
-        &self.type_parameters.type_param_bounds
-    }
-
-    pub fn type_param_variances(&self) -> &Vec<crate::types::TypeVariance> {
-        &self.type_parameters.type_param_variances
-    }
-}
-
-/// The symbolic declaration shape of a generic member method.
-#[derive(Clone, Debug)]
-pub struct GenericMethod {
-    /// The declaration's one normalized generic contract. Keeping the full [`GenericSig`] avoids
-    /// flattening an absent or intersection bound into a second member-only representation.
-    pub signature: GenericSig,
-    /// Erased checker parameter types used to identify the selected overload.
-    pub params: Vec<Ty>,
-    pub param_names: Vec<String>,
-}
-
-struct GenericMemberPlan {
-    method: GenericMethod,
-    class_bindings: crate::types::TyParamBindings,
-    call_bindings: crate::types::TyParamBindings,
-}
-
-struct GenericMemberQuery<'a> {
-    owner: Option<TypeName>,
-    params: Option<&'a [Ty]>,
-    partial_args: Option<&'a [Option<Ty>]>,
-    partial_arg_names: Option<&'a [Option<String>]>,
-    explicit_type_args: &'a [Ty],
-    expected_result: Option<Ty>,
-}
-
-fn generic_member_lambda_params(
-    source: &dyn SymbolSource,
-    plan: &GenericMemberPlan,
-    parameter: usize,
-) -> Option<Vec<Ty>> {
-    let shape = *plan.method.signature.params.get(parameter)?;
-    let target = apply_inference_bindings(shape, &plan.call_bindings);
-    match target.non_null().kind() {
-        TyKind::Fun(signature) => Some(signature.params.clone()),
-        _ => crate::symbol_resolver::semantic_sam_signature(source, target).map(|sam| sam.params),
-    }
-}
-
-fn module_member_lambda_params(
-    source: &dyn SymbolSource,
-    member: &crate::libraries::LibraryMember,
-    parameter: usize,
-) -> Option<Vec<Ty>> {
-    let param = *member.params.get(parameter)?;
-    match param.kind() {
-        TyKind::Fun(function) => Some(
-            member
-                .call_sig
-                .lambda_param_types
-                .get(parameter)
-                .cloned()
-                .unwrap_or_else(|| function.params.clone()),
-        ),
-        // A functional-interface parameter contributes its single abstract method's value-parameter
-        // shape. `LibraryMember` is already the federated semantic form, so declaration origin does
-        // not enter this fallback.
-        _ => crate::symbol_resolver::semantic_sam_signature(source, param).map(|sam| sam.params),
-    }
-}
-
-impl ClassSig {
-    fn set_inferred_source_method_return(
-        &mut self,
-        source_member: crate::libraries::SourceMember,
-        ret: Ty,
-    ) -> bool {
-        self.source_methods
-            .iter_mut()
-            .find(|plan| plan.signature.source_member == Some(source_member))
-            .is_some_and(|plan| plan.signature.set_inferred_return(ret))
-    }
-
-    fn set_inferred_method_return(&mut self, name: &str, params: &[Ty], ret: Ty) -> bool {
-        let ret = inferred_declaration_ty(ret);
-        let mut changed = false;
-        if let Some(signature) = self.methods.get_mut(name).and_then(|overloads| {
-            overloads
-                .iter_mut()
-                .find(|signature| same_erased_params(&signature.params, params))
-        }) {
-            changed |= signature.set_inferred_return(ret);
-        }
-        if let Some(method) = self.generic_methods.get_mut(name).and_then(|overloads| {
-            overloads
-                .iter_mut()
-                .find(|method| same_erased_params(&method.params, params))
-        }) {
-            changed |= method.signature.ret != ret;
-            method.signature.ret = ret;
-        }
-        changed
-    }
-
-    fn set_inferred_member_extension_return(
-        &mut self,
-        name: &str,
-        receiver: Ty,
-        params: &[Ty],
-        ret: Ty,
-    ) -> bool {
-        self.member_ext_funs
-            .get_mut(name)
-            .and_then(|overloads| {
-                overloads.iter_mut().find(|function| {
-                    erased_type_key(function.receiver_ty) == erased_type_key(receiver)
-                        && same_erased_params(&function.signature.params, params)
-                })
-            })
-            .is_some_and(|function| function.signature.set_inferred_return(ret))
-    }
-
-    /// True if this is an `interface` (calls dispatch via `invokeinterface`).
-    #[inline]
-    pub fn is_interface(&self) -> bool {
-        self.flags.has(ClassFlags::INTERFACE)
-    }
-    /// True for an `enum class`.
-    #[inline]
-    pub fn is_enum(&self) -> bool {
-        self.flags.has(ClassFlags::ENUM)
-    }
-    /// Record a declared enum entry once, keeping source order.
-    pub(crate) fn declare_enum_entry(&mut self, name: &str) {
-        if !self.enum_entries.iter().any(|entry| entry == name) {
-            self.enum_entries.push(name.to_owned());
-        }
-    }
-    /// True if declared `object` (a singleton).
-    #[inline]
-    pub fn is_object(&self) -> bool {
-        self.flags.has(ClassFlags::OBJECT)
-    }
-    /// True if declared `abstract` (or `sealed`, which is abstract) — cannot be instantiated directly.
-    #[inline]
-    pub fn is_abstract(&self) -> bool {
-        self.flags.has(ClassFlags::ABSTRACT)
-    }
-    /// True if declared `fun interface` — a single-abstract-method interface eligible for SAM conversion.
-    #[inline]
-    pub fn is_fun_interface(&self) -> bool {
-        self.flags.has(ClassFlags::FUN_INTERFACE)
-    }
-    /// True if declared `sealed` — all subclasses are known in this module.
-    #[inline]
-    pub fn is_sealed(&self) -> bool {
-        self.flags.has(ClassFlags::SEALED)
-    }
-    /// True when the declaration cannot be subclassed.
-    #[inline]
-    pub fn is_final(&self) -> bool {
-        self.flags.has(ClassFlags::FINAL)
-    }
-    /// True when the type declares one or more abstract members.
-    #[inline]
-    pub fn has_abstract_members(&self) -> bool {
-        self.flags.has(ClassFlags::HAS_ABSTRACT_MEMBERS)
-    }
-    /// True for an `annotation class` — emitted as an interface; instantiation builds a synthetic impl.
-    #[inline]
-    pub fn is_annotation(&self) -> bool {
-        self.flags.has(ClassFlags::ANNOTATION)
-    }
-    /// True for a Kotlin `data class`.
-    #[inline]
-    pub fn is_data(&self) -> bool {
-        self.flags.has(ClassFlags::DATA)
-    }
-    #[inline]
-    pub fn set_is_abstract(&mut self, on: bool) {
-        self.flags = self.flags.with_abstract(on);
-    }
-    #[inline]
-    pub fn set_is_sealed(&mut self, on: bool) {
-        self.flags = self.flags.with_sealed(on);
-    }
-    #[inline]
-    pub fn set_is_final(&mut self, on: bool) {
-        self.flags = self.flags.with_final(on);
-    }
-
-    pub(crate) fn type_parameter_bindings(&self, applied: Ty) -> crate::types::TyParamBindings {
-        let mut bindings = self
-            .type_params
-            .iter()
-            .enumerate()
-            .map(|(index, name)| {
-                let bound = self
-                    .type_param_bounds
-                    .get(index)
-                    .copied()
-                    .filter(|bound| *bound != Ty::Error)
-                    .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                (crate::types::TyParamName::from(name), bound)
-            })
-            .collect::<HashMap<_, _>>();
-        for (name, argument) in self.type_params.iter().zip(applied.type_args()) {
-            bindings.insert(crate::types::TyParamName::from(name), *argument);
-        }
-        bindings.extend(
-            self.captured_type_parameters
-                .type_params
-                .iter()
-                .enumerate()
-                .map(|(index, name)| {
-                    let bound = self
-                        .captured_type_parameters
-                        .type_param_bounds
-                        .get(index)
-                        .copied()
-                        .filter(|bound| *bound != Ty::Error)
-                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                    (crate::types::TyParamName::from(name), bound)
-                }),
-        );
-        for (name, argument) in self
-            .captured_type_parameters
-            .type_params
-            .iter()
-            .zip(applied.type_args().iter().skip(self.type_params.len()))
-        {
-            bindings.insert(crate::types::TyParamName::from(name), *argument);
-        }
-        bindings
-    }
-
-    pub(crate) fn has_no_arg_constructor(&self) -> bool {
-        (self.has_primary_ctor
-            && (self.ctor_params.is_empty()
-                || (self.ctor_param_names.len() == self.ctor_params.len()
-                    && self
-                        .ctor_param_names
-                        .iter()
-                        .all(|(_, has_default)| *has_default))))
-            || self.secondary_ctors.iter().any(Vec::is_empty)
-    }
-
-    pub fn internal_name(&self) -> TypeName {
-        self.internal
-    }
-
-    pub fn internal(&self) -> String {
-        self.internal.render()
-    }
-
-    pub fn internal_matches(&self, internal: &str) -> bool {
-        self.internal.matches(internal)
-    }
-
-    pub fn inner_of_name(&self) -> Option<TypeName> {
-        self.inner_of
-    }
-
-    pub fn inner_of_matches(&self, internal: &str) -> bool {
-        self.inner_of.is_some_and(|outer| outer.matches(internal))
-    }
-
-    pub fn super_internal_name(&self) -> Option<TypeName> {
-        self.super_internal
-    }
-
-    pub fn interface_names(&self) -> impl Iterator<Item = TypeName> + '_ {
-        self.interfaces.iter_ids()
-    }
-
-    pub fn prop(&self, name: &str) -> Option<(Ty, bool)> {
-        if let Some(property) = self.declared_props.get(name) {
-            return property
-                .context_params
-                .is_empty()
-                .then_some((property.ty, property.setter_name.is_some()));
-        }
-        self.props
-            .iter()
-            .find_map(|(n, t, v)| (n == name).then_some((*t, *v)))
-    }
-
-    /// Stable identity of a declared property while both the source declaration inventory and the
-    /// compact declaration projection are live. Exact transient identity wins; the name fallback
-    /// covers the compact projection, which deliberately carries no parser coordinate.
-    pub fn stable_property_declaration(
-        &self,
-        source: crate::libraries::SourceMember,
-        name: &str,
-    ) -> Option<crate::fir::DeclarationId> {
-        self.declared_props
-            .values()
-            .chain(self.contextual_props.values().flatten())
-            .find(|property| property.source_member == Some(source))
-            .or_else(|| self.declared_props.get(name))
-            .and_then(|property| property.stable_declaration)
-    }
-
-    /// A property visible to Kotlin source lookup. Internal capture storage deliberately remains
-    /// available through [`Self::prop`] for bounded classifier checking, while this operation
-    /// excludes it and lets an inherited declaration with the same spelling remain visible.
-    pub fn source_prop(&self, name: &str) -> Option<(Ty, bool)> {
-        if let Some(property) = self.declared_props.get(name) {
-            return (property.source_visible && property.context_params.is_empty())
-                .then_some((property.ty, property.setter_name.is_some()));
-        }
-        self.props
-            .iter()
-            .find_map(|(n, t, v)| (n == name).then_some((*t, *v)))
-    }
-
-    pub fn member_ext_props(&self, name: &str) -> &[MemberExtPropSig] {
-        self.member_ext_props.get(name).map_or(&[], Vec::as_slice)
-    }
-
-    pub fn contextual_props(&self, name: &str) -> &[DeclaredPropertySig] {
-        self.contextual_props.get(name).map_or(&[], Vec::as_slice)
-    }
-
-    pub fn member_ext_funs(&self, name: &str) -> &[MemberExtFunSig] {
-        self.member_ext_funs.get(name).map_or(&[], Vec::as_slice)
-    }
-
-    /// The SOLE signature declared under `name` — `None` when the name is absent OR overloaded
-    /// (an overloaded name needs [`Self::method_matching`] with the call's argument types; callers
-    /// without arguments in hand must not guess an overload).
-    pub fn method(&self, name: &str) -> Option<&Signature> {
-        match self.methods.get(name)?.as_slice() {
-            [one] => Some(one),
-            _ => None,
-        }
-    }
-
-    /// The overload of `name` matching `args` (same arity/assignability scoring as top-level
-    /// [`pick_overload`]); ambiguity resolves to `None` so the caller skips rather than misdispatches.
-    pub fn method_matching(&self, name: &str, args: &[Ty]) -> Option<&Signature> {
-        let sigs = self.methods.get(name)?;
-        pick_overload(sigs, args).map(|i| &sigs[i])
-    }
-
-    /// All signatures declared under `name`, in declaration order (empty slice if none).
-    pub fn methods_named(&self, name: &str) -> &[Signature] {
-        self.methods.get(name).map_or(&[], Vec::as_slice)
-    }
-
-    pub fn has_method(&self, name: &str) -> bool {
-        self.methods.get(name).is_some_and(|v| !v.is_empty())
-    }
-
-    /// Append an overload under `name` (declaration order preserved per name).
-    pub fn add_method(&mut self, name: String, sig: Signature) {
-        if !self.methods.contains_key(&name) {
-            self.declared_callable_order.push(name.clone());
-        }
-        self.methods.entry(name).or_default().push(sig);
-    }
-}
-
-/// Per-name overload lists (declaration order within a name). One `Vec` per name keeps the common
-/// single-overload case cheap while letting member overloading resolve by argument types.
-pub type MethodMap = HashMap<String, Vec<Signature>>;
 
 /// Narrow a member-overload candidate list to the overloads that FIT the call's argument types —
 /// the member analog of [`pick_overload`]. Keeps every candidate tied for the best score, in input
@@ -11284,6 +9913,7 @@ impl<'a> Checker<'a> {
                         class_receiver: false,
                         current: false,
                         receiver_depth: 0,
+                        dsl_shadowed: false,
                     },
                     declared_name,
                     singleton,
@@ -13320,7 +11950,7 @@ impl<'a> Checker<'a> {
                                     identity,
                                     extension_declaration,
                                     receiver.class_receiver.then_some(receiver.ty),
-                                )),
+                                )?),
                                 receiver_capture: self.implicit_receiver_capture_id(
                                     receiver.class_receiver,
                                     receiver.receiver_role,
@@ -18210,12 +16840,7 @@ impl<'a> Checker<'a> {
                     };
                     let receiver = implicit_receiver.ty;
                     let mut receiver_extension = None;
-                    if receiver == Ty::String
-                        || matches!(
-                            receiver.kind(),
-                            TyKind::Obj(..) | TyKind::TyParam(..) | TyKind::Var(..)
-                        )
-                    {
+                    if implicit_rungs::receiver_has_member_scope(receiver) {
                         match self.record_member_call_with_slots(
                             scope,
                             call,
@@ -18257,9 +16882,7 @@ impl<'a> Checker<'a> {
                             Some(CallableCandidateSelection::Selected(selected))
                             | Some(CallableCandidateSelection::MissingContext(selected)) => {
                                 selected.scope_rung.is_import()
-                                    && !selected.callable.annotations.contains(
-                                        &crate::types::type_name("kotlin/internal/HidesMembers"),
-                                    )
+                                    && !crate::symbol_resolver::hides_members(&selected.callable)
                             }
                             Some(CallableCandidateSelection::Ambiguous(tied, _)) => tied
                                 .iter()
@@ -29855,6 +28478,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         postponed_diagnostics: PostponedDiagnostics::default(),
         eager_eliminated_members: HashMap::default(),
         implicit_receiver_selections: HashMap::default(),
+        dsl_scope_violations: HashSet::default(),
         implicit_receiver_identities: HashMap::default(),
         constructor_receiver_frames: Vec::new(),
         read_flow_roots: HashMap::default(),
@@ -31856,6 +30480,9 @@ pub(crate) struct ImplicitReceiver {
     class_receiver: bool,
     current: bool,
     receiver_depth: usize,
+    /// A nearer receiver in the tower shares a `@DslMarker` with this one, so binding it
+    /// implicitly is a DSL scope violation.
+    dsl_shadowed: bool,
 }
 
 /// Stable identity for a semantic receiver supplied by the checker's `this`-label stack rather
@@ -32407,6 +31034,8 @@ struct Checker<'a> {
     /// state, so this decision must cross the frontend/backend boundary rather than being guessed from
     /// JVM slot names.
     implicit_receiver_selections: HashMap<ExprId, ImplicitReceiverSelection>,
+    /// Expressions already rejected for binding a `@DslMarker`-shadowed implicit receiver.
+    dsl_scope_violations: HashSet<ExprId>,
     /// Receiver-tower coordinate of each implicit receiver selected above; checker-only, it keys
     /// the smart-cast paths of member reads through that receiver.
     implicit_receiver_identities: HashMap<ExprId, (usize, usize)>,
@@ -35486,6 +34115,7 @@ impl<'a> Checker<'a> {
                 receiver_depth,
             },
         );
+        self.record_dsl_scope_use(expression, receiver);
         self.mark_extension_receiver_used(expression, receiver);
     }
 
@@ -35544,26 +34174,6 @@ impl<'a> Checker<'a> {
 
     fn implicit_receiver_identity_use_count(&self, identity: (usize, usize)) -> usize {
         self.implicit_receiver_identity_uses.count(identity)
-    }
-
-    fn mark_context_extension_receiver_used(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        sources: &[ResolvedContextArgument],
-    ) {
-        for source in sources {
-            let ResolvedContextArgument::ImplicitReceiver(selected) = source else {
-                continue;
-            };
-            if let Some(receiver) = self
-                .implicit_receivers(scope)
-                .into_iter()
-                .find(|receiver| receiver.ty == selected.ty && receiver.current == selected.current)
-            {
-                self.mark_extension_receiver_used(call, receiver);
-            }
-        }
     }
 
     /// Specialize a selected generic property from its implicit context arguments. Context values
@@ -38250,6 +36860,7 @@ impl<'a> Checker<'a> {
             class_receiver: false,
             current: false,
             receiver_depth: 0,
+            dsl_shadowed: false,
         };
         let ty = self.read_implicit_receiver_name(scope, expression, name, receiver)?;
         self.mark_implicit_receiver_selection(expression, receiver);
@@ -40139,7 +38750,7 @@ impl<'a> Checker<'a> {
         // declaration applications below belong to the passes that retain their arguments.
         if !self.fragment.is_type_use_annotations() {
             self.check_classifier_own_annotations(scope, cl, current_owner);
-            self.check_supertype_usage(cl, current_owner);
+            self.check_supertype_usage(scope, cl, current_owner);
             // Member annotations see the classifier's own static rungs (nested classifiers and
             // its companion), which the class body scope below has not opened yet.
             let member_rung = self.enter_annotation_class_rung(current_owner);
@@ -40359,7 +38970,7 @@ impl<'a> Checker<'a> {
             self.record_finalized_superclass_type(span, superclass);
         }
         if let Some(declaration) = stable_classifier_header {
-            if !self.check_finalized_supertype_bounds(cl, declaration)
+            if !self.check_finalized_supertype_bounds(scope, cl, declaration)
                 && finalized_local_classifier_header
             {
                 self.failed_local_declaration_bindings.insert(declaration);
@@ -42462,14 +41073,7 @@ impl<'a> Checker<'a> {
                     std::mem::replace(&mut self.static_companion_this, static_this);
                 self.with_this_unavailable(|c| match &sc.delegation {
                     CtorDelegation::This(delegation) => {
-                        for &argument in &delegation.args {
-                            // A delegation lambda is contextual: leave its initial `Error`
-                            // placeholder until the shared constructor selector maps it to a
-                            // parameter slot, just like a primary class-header base argument.
-                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
-                                c.expr(delegation_scope, argument);
-                            }
-                        }
+                        c.type_delegation_arguments(delegation_scope, &delegation.args);
                         let candidates = c.this_ctor_delegation_candidates(
                             delegation_scope,
                             cl,
@@ -42507,11 +41111,7 @@ impl<'a> Checker<'a> {
                         );
                     }
                     CtorDelegation::Super(delegation) => {
-                        for &argument in &delegation.args {
-                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
-                                c.expr(delegation_scope, argument);
-                            }
-                        }
+                        c.type_delegation_arguments(delegation_scope, &delegation.args);
                         let candidates = c.super_ctor_delegation_candidates(current_owner);
                         c.select_ctor_delegation(
                             delegation_scope,
@@ -44756,10 +43356,7 @@ impl<'a> Checker<'a> {
         // from the surrounding lexical declaration is universally quantified. Both use the same
         // semantic `TyParam` representation, so decide ownership from the active scope rather than
         // treating every generic argument as fixed or every erased upper bound as constructible.
-        if expected.non_null().is_ty_param()
-            && !actual.mentions_ty_param()
-            && scope.is_some_and(|scope| Self::type_is_lexically_fixed(scope, expected))
-        {
+        if scope.is_some_and(|scope| self.lexical_type_parameter_rejects(scope, expected, actual)) {
             self.report_assignability_error(expected, actual, span, "argument");
             return;
         }
@@ -45673,7 +44270,7 @@ impl<'a> Checker<'a> {
         // already been admitted by the ordinary nullability relation above.
         if !matches!(ctx, "argument" | "generic argument")
             && expected.non_null().is_ty_param()
-            && !actual.mentions_ty_param()
+            && (!actual.mentions_ty_param() || !self.receiver_is_assignable(actual, expected))
         {
             self.report_assignability_error(declared_expected, declared_actual, span, ctx);
             return;
@@ -46213,27 +44810,6 @@ impl<'a> Checker<'a> {
             .zip(params)
             .map(|(&a, param)| self.expr_result(scope, a, Some(param), true))
             .collect()
-    }
-
-    /// Project an explicitly declared Kotlin function classifier (`FunctionN<P..., R>`) onto the
-    /// exact callable shape published by its semantic provider. Callable objects remain nominal:
-    /// only classifiers whose declaration says they represent a function type are normalized.
-    fn declared_function_semantic_type(&self, ty: Ty) -> Ty {
-        let Some(internal) = ty.non_null().kotlin_class_internal() else {
-            return ty;
-        };
-        let source = self.fed_source();
-        if !source
-            .classifier(internal)
-            .is_some_and(|classifier| classifier.represents_function_type())
-        {
-            return ty;
-        }
-        self.stable_classifier_callable_signatures(ty)
-            .into_iter()
-            .next()
-            .map(|function| ty.rewrap_nullability(projected_function_shape(function)))
-            .unwrap_or(ty)
     }
 
     /// Exact function signature of a value expression. Callable references retain this separately
@@ -47680,6 +46256,7 @@ impl<'a> Checker<'a> {
                                 class_receiver: self.this_labels[idx].2,
                                 current: idx == top,
                                 receiver_depth: label_depth,
+                                dsl_shadowed: false,
                             },
                         };
                         let ty = self

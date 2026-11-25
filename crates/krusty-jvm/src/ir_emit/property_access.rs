@@ -63,9 +63,13 @@ impl Emitter<'_> {
         else {
             return true;
         };
+        let layout = self
+            .ir
+            .property_layout_at(operation, *property)
+            .expect("a realized property retains its checked specialization");
         let Some(krusty::ir::IrLocalPropertyLayout::Member {
             class, property, ..
-        }) = self.ir.local_property_layouts.get(property)
+        }) = layout.as_ref()
         else {
             return true;
         };
@@ -542,11 +546,15 @@ impl Emitter<'_> {
         else {
             return None;
         };
+        let layout = self
+            .ir
+            .property_layout_at(operation, *property)
+            .expect("a realized property retains its checked specialization")?;
         let krusty::ir::IrLocalPropertyLayout::Member {
             class,
             backing_field: Some(field),
             ..
-        } = self.ir.local_property_layouts.get(property)?
+        } = &layout
         else {
             return None;
         };

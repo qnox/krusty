@@ -1,3 +1,6 @@
+// A list appending a range of itself differs by platform: kotlinc-native and kotlinc-wasm grow the
+// list before they read the range and raise ConcurrentModificationException. That program is the
+// ArrayListAddAllGrowsBeforeReadingItsArgument entry of tests/kotlinc_defects_e2e.rs.
 fun ints(vararg values: Int): ArrayList<Int> {
     val list = ArrayList<Int>()
     for (value in values) list.add(value)
@@ -74,10 +77,6 @@ fun box(): String {
     } catch (e: IllegalArgumentException) {
     }
 
-    val appended = ints(1, 2, 3)
-    val head = (appended as List<Int>).subList(0, 2)
-    appended.addAll(head)
-    if (appended != ints(1, 2, 3, 1, 2)) return "aliased addAll"
     if (fresh.size != 5) return "whole"
     return "OK"
 }

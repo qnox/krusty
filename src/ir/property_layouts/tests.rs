@@ -473,8 +473,14 @@ fn a_copied_default_field_override_keeps_its_declaration_slot_and_own_storage() 
     use crate::fir::ResolvedPropertyOverrideTarget::Module;
     let (ir, copied) = copied_override(false);
     assert_eq!(local_property_target(&ir, copied, 0), Some(Module(TARGET)));
-    let tables = build_numbered(&ReferenceMembers, &ir, &ModuleSlotPlan::empty(), &|_| None)
-        .expect("copied default accessors retain checked declaration authority");
+    let tables = build_numbered(
+        &ReferenceMembers,
+        &ir,
+        &ModuleSlotPlan::empty(),
+        &mut Default::default(),
+        &|_| None,
+    )
+    .expect("copied default accessors retain checked declaration authority");
     let base = ir.class_id_by_name("p/Base".into()).unwrap();
     let getter = tables
         .slot(base, &SlotKey::Getter(Module(PropertyId::from_raw(8))))
@@ -518,8 +524,14 @@ fn a_copied_explicit_accessor_uses_the_same_property_key_as_its_default_override
         SlotKey::Getter(Module(TARGET))
     );
     ir.property_overrides.insert(owner, edge);
-    let tables =
-        build_numbered(&ReferenceMembers, &ir, &ModuleSlotPlan::empty(), &|_| None).unwrap();
+    let tables = build_numbered(
+        &ReferenceMembers,
+        &ir,
+        &ModuleSlotPlan::empty(),
+        &mut Default::default(),
+        &|_| None,
+    )
+    .unwrap();
     let slot = tables
         .slot(copied, &SlotKey::Getter(Module(TARGET)))
         .unwrap();
@@ -538,7 +550,14 @@ fn a_cyclic_copy_cannot_claim_a_default_property_by_its_spelling_or_ordinal() {
         .unwrap()
         .source = copied;
     assert_eq!(
-        build_numbered(&ReferenceMembers, &ir, &ModuleSlotPlan::empty(), &|_| None).map(|_| ()),
+        build_numbered(
+            &ReferenceMembers,
+            &ir,
+            &ModuleSlotPlan::empty(),
+            &mut Default::default(),
+            &|_| None
+        )
+        .map(|_| ()),
         Err("a virtual property without a stable declaration identity (`p/Copy.value`)".to_owned())
     );
 }

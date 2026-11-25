@@ -856,46 +856,6 @@ impl<'a> BodyLowering<'a> {
         self.ir.class_static_local_functions.insert(function, owner);
     }
 
-    /// Build the implementation body of a function-like reference after the frontend has selected
-    /// its target and adaptation. Kotlin `Unit` is `void` only at a declared-call boundary; a
-    /// `FunctionN.invoke` result is a value and therefore returns the `kotlin.Unit` singleton after
-    /// discarding the selected callable's result.
-    fn callable_reference_adapter_body(
-        &mut self,
-        value: ExprId,
-        selected_result: crate::types::Ty,
-        reference_result: crate::types::Ty,
-    ) -> ExprId {
-        let mut statements = Vec::with_capacity(2);
-        // A `Unit` function type discards the selected result, but the invocation still runs.
-        // Publish that call as an effect of the returned value: the splice emits only this value,
-        // so a bare `Unit` singleton would drop the call.
-        let result = if reference_result == crate::types::Ty::Unit {
-            let unit = self.ir.add_expr(crate::ir::IrExpr::UnitInstance);
-            self.ir.add_expr(crate::ir::IrExpr::Block {
-                stmts: vec![value],
-                value: Some(unit),
-            })
-        } else if selected_result == reference_result {
-            value
-        } else {
-            self.ir.add_expr(crate::ir::IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::ImplicitCoercion,
-                arg: value,
-                type_operand: reference_result,
-            })
-        };
-        statements.push(self.ir.add_expr(crate::ir::IrExpr::Return(Some(result))));
-        let body = self.ir.add_expr(crate::ir::IrExpr::Block {
-            stmts: statements,
-            value: None,
-        });
-        self.ir
-            .callable_reference_adapter_results
-            .insert(body, result);
-        body
-    }
-
     fn value_slot(&self, value: crate::fir::LocalValueId) -> u32 {
         let parameter_start = self.capture_count
             + self.class_constructor_capture_count

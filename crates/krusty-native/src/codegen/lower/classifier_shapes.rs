@@ -672,6 +672,28 @@ impl<'a> FileLowering<'a> {
             .collect()
     }
 
+    /// How many concrete classes of this file the instance tests of `arms` answer for: each arm and
+    /// every concrete class below it, since an instance test of a class also matches its
+    /// subclasses.
+    pub(super) fn classes_answered_by(&self, arms: &[ClassId]) -> usize {
+        let answered_by_arm = |mut class: ClassId| loop {
+            if arms.contains(&class) {
+                return true;
+            }
+            let superclass = self.ir.classes[class as usize].superclass;
+            match self.ir.class_id_by_name(superclass) {
+                Some(next) if next != class => class = next,
+                _ => return false,
+            }
+        };
+        (0..self.ir.classes.len() as ClassId)
+            .filter(|&id| {
+                let class = &self.ir.classes[id as usize];
+                !class.is_interface && !class.is_abstract && answered_by_arm(id)
+            })
+            .count()
+    }
+
     /// Whether a concrete class of this file can be an instance of `internal`.
     fn class_stands_behind(&self, class: &krusty::ir::IrClass, internal: TypeName) -> bool {
         let mut external_supertypes = Vec::new();

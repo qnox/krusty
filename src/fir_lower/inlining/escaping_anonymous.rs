@@ -252,69 +252,52 @@ fn retarget_caller_property_use(
     let IrExpr::Checked(operation) = ir.expr(expression).clone() else {
         return Ok(());
     };
-    let (target, receiver, extension_receiver, context_arguments, value) = match *operation {
+    let (target, receiver, extension_receiver, context_arguments) = match *operation {
         crate::ir::IrCheckedOperation::PropertyRead {
             target,
             dispatch_receiver,
             extension_receiver,
             context_arguments,
             ..
-        } => (
+        }
+        | crate::ir::IrCheckedOperation::PropertyWrite {
             target,
             dispatch_receiver,
             extension_receiver,
             context_arguments,
-            None,
-        ),
-        crate::ir::IrCheckedOperation::PropertyWrite {
-            target,
-            dispatch_receiver,
-            extension_receiver,
-            context_arguments,
-            value,
             ..
         } => (
             target,
             dispatch_receiver,
             extension_receiver,
             context_arguments,
-            Some(value),
         ),
         _ => return Ok(()),
     };
     if extension_receiver.is_some() || !context_arguments.is_empty() {
         return Err(malformed(source_name));
     }
-    let name = match ir.local_property_layouts.get(&target) {
-        Some(crate::ir::IrLocalPropertyLayout::Member { name, .. }) => name.clone(),
-        _ => return Err(malformed(source_name)),
+    let receiver = receiver.ok_or_else(|| malformed(source_name))?;
+    let IrExpr::New { internal, .. } = ir.expr(receiver) else {
+        return Err(malformed(source_name));
     };
-    let property = ir.classes[copy_id as usize]
-        .properties
-        .iter()
-        .find(|property| property.name == name)
+    let actual = ir
+        .class_id_by_name(*internal)
         .ok_or_else(|| malformed(source_name))?;
-    let ty = property.ty;
-    let owner = ir.classes[copy_id as usize].fq_name;
-    ir.exprs[expression as usize] = match value {
-        Some(value) => IrExpr::PropertyWrite {
-            receiver,
-            owner,
-            name,
-            value,
-            ty,
-            interface: false,
-            operation: Some(expression),
-        },
-        None => IrExpr::PropertyRead {
-            receiver,
-            owner,
-            name,
-            ty,
-            interface: false,
-            operation: Some(expression),
-        },
-    };
+    if actual != copy_id && !specialization_descends_from(ir, actual, copy_id, receiver) {
+        return Err(malformed(source_name));
+    }
+    if !matches!(
+        ir.property_layout_for_class(target, actual)
+            .map_err(|_| malformed(source_name))?,
+        Some(crate::ir::IrLocalPropertyLayout::Member { .. })
+    ) {
+        return Err(malformed(source_name));
+    }
+    // Retain the selected PropertyId. The projection authenticated either same-ordinal copied
+    // storage/accessors or the original inherited declaration through recorded supertypes.
+    ir.dispatch_classes
+        .insert(expression, ir.classes[actual as usize].fq_name);
     Ok(())
 }
 
@@ -394,14 +377,14 @@ fn specialized_class(
         // Member descriptors stay the declaration's erasure. Reified operations in the body are
         // specialized above; substituting the signature would emit a concrete descriptor plus a
         // bridge where kotlinc keeps the erased member.
-        shape.dispatch_receiver = Some(placeholder);
         // A concrete instantiation updates the generic signature so it matches that erased member.
         // A replacement that is still a type parameter belongs to the enclosing inline function.
         // It is not in this class's declaration table, so the copy keeps the declared parameter.
-        cloned_methods.push(crate::ir::clone_class_method(
+        cloned_methods.push(copy_member(
             ir,
             method,
             shape,
+            placeholder,
             &signature_bindings(expansion.bindings),
         ));
     }
@@ -1517,11 +1500,31 @@ fn clone_member_function(
     // Member descriptors stay the declaration's erasure. Reified operations in the body are
     // specialized above; substituting the signature would emit a concrete descriptor plus a
     // bridge where kotlinc keeps the erased accessor.
-    shape.dispatch_receiver = Some(dispatch_receiver);
     Ok((
-        crate::ir::clone_class_method(ir, method, shape, &HashMap::default()),
+        copy_member(ir, method, shape, dispatch_receiver, &HashMap::default()),
         copied,
     ))
+}
+
+/// Copy `method` into the copied class `owner`. An instance member takes the copy as its dispatch
+/// receiver. A class-static local function (a lambda or local function one of the members
+/// declares) takes no receiver; the copy is owned through the class-static owner instead.
+fn copy_member(
+    ir: &mut crate::ir::IrFile,
+    method: FunId,
+    mut shape: crate::ir::IrFunction,
+    owner: TypeName,
+    bindings: &HashMap<String, Ty>,
+) -> FunId {
+    let class_static = ir.class_static_local_functions.contains_key(&method);
+    if !class_static {
+        shape.dispatch_receiver = Some(owner);
+    }
+    let copy = crate::ir::clone_class_method(ir, method, shape, bindings);
+    if class_static {
+        ir.class_static_local_functions.insert(copy, owner);
+    }
+    copy
 }
 
 fn clone_initializer(

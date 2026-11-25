@@ -56,6 +56,13 @@ impl CheckedSourceFacts for HandoffSourceFacts<'_> {
         })
     }
 
+    fn dependency_property_getter(
+        &self,
+        property: ExternalPropertyId,
+    ) -> Option<ExternalCallableId> {
+        Some(self.callables.property(property)?.getter)
+    }
+
     fn dependency_shape(&self, callable: ExternalCallableId) -> Option<DependencyCallableShape> {
         let fact = self.callables.callable(callable)?;
         Some(DependencyCallableShape {

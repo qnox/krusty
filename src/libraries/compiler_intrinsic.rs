@@ -159,7 +159,13 @@ pub enum CompilerIntrinsic {
     /// the common comparison carrier; checked FIR publishes that carrier so backends implement the
     /// declaration without inventing a virtual wrapper method.
     PrimitiveCompare,
-    Assert,
+    /// Kotlin's `assert`. `platform_default` is how the platform compiles it when no
+    /// `-Xassertions` mode is selected: kotlinc's JVM compiler defaults to
+    /// [`AssertionCompilation::Legacy`](crate::types::AssertionCompilation::Legacy), an ordinary
+    /// inline call.
+    Assert {
+        platform_default: crate::types::AssertionCompilation,
+    },
     AssertFailsWith,
     Print,
     Println,
@@ -182,6 +188,11 @@ pub enum CompilerIntrinsic {
     /// and otherwise goes on with `argument` as its `T`. It is the suspension point of an expanded
     /// `suspendCoroutineUninterceptedOrReturn`, whose block computed `argument`.
     ReturnIfSuspended,
+    /// Kotlin/Wasm's `kotlin.wasm.internal.interceptedIntrinsic<T>(cont)`, an
+    /// `@ExcludedFromCodegen` declaration behind `Continuation<T>.intercepted()`. kotlinc's
+    /// `BuiltInsLowering` expands it to `if (cont is CoroutineImpl) cont.intercepted() else cont`
+    /// over the stdlib's state-machine `kotlin.coroutines.CoroutineImpl`.
+    InterceptedContinuation,
     EnumValues,
     EnumValueOf,
     /// The zero-argument `kotlin.enums.enumEntries<T>()`. Its stdlib body only throws; the selected

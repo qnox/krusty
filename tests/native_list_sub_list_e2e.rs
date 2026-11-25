@@ -99,9 +99,14 @@ fn a_change_of_the_root_list_invalidates_every_range_and_walk() {
     );
 }
 
-/// Appending a range of the list to the list itself reads the range before the first append.
+/// A list appends itself, and a range of another list, as the elements they hold before the append.
+///
+/// A list appending a range of itself differs by platform: kotlinc-native's library grows the list
+/// before reading the range and raises `ConcurrentModificationException`. That program is the
+/// `ArrayListAddAllGrowsBeforeReadingItsArgument` entry of `tests/kotlinc_defects_e2e.rs`, which
+/// pins each platform's kotlinc and krusty's fix mode.
 #[test]
-fn a_list_takes_a_range_of_itself_before_it_appends() {
+fn a_list_appends_itself_and_a_range_of_another_list() {
     every_backend_agrees_with_kotlinc(
         "AddAllOfView",
         include_str!("box_regressions/listSubListAddAllOfView.kt"),

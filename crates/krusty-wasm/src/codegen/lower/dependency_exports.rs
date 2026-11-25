@@ -394,12 +394,11 @@ impl Body<'_> {
         let mut supplied = arguments.iter();
         for (position, &parameter) in abi.iter().enumerate() {
             if omitted.contains(&position) {
-                let carrier = carrier(parameter)?
-                    .ok_or_else(|| "a defaulted call with a `Unit` parameter".to_string())?;
+                let carrier = super::parameter_carrier_of(parameter)?;
                 super::absent_arguments::push_zero(&mut self.code, carrier);
             } else {
                 let argument = supplied.next().expect("counted above");
-                self.value(*argument, parameter)?;
+                self.argument(*argument, parameter)?;
             }
         }
         Ok(())
@@ -412,7 +411,7 @@ impl Body<'_> {
             );
         }
         for (&argument, &parameter) in arguments.iter().zip(abi) {
-            self.value(argument, parameter)?;
+            self.argument(argument, parameter)?;
         }
         Ok(())
     }
@@ -442,7 +441,7 @@ impl Body<'_> {
                 );
             }
             for (argument, parameter) in args.iter().zip(signature.parameters()) {
-                self.value(*argument, *parameter)?;
+                self.argument(*argument, *parameter)?;
             }
             self.code.call(function);
             self.coerce_emitted_value(signature.result(), Ty::obj_name(internal))

@@ -133,6 +133,16 @@ impl<'a> BodyLowering<'a> {
             ),
         );
         self.read_outer_instance(plan.class, plan.outer);
+        // The superclass constructor's arguments read the constructor's values, which this
+        // initialization's frame numbers as the constructor does.
+        if !plan.superclass_arguments.is_empty() {
+            let arguments = plan
+                .superclass_arguments
+                .iter()
+                .map(|&argument| self.expression(argument))
+                .collect::<Lowered<Vec<_>>>()?;
+            self.ir.classes[plan.class as usize].super_args = arguments;
+        }
         let mut stmts = Vec::new();
         for step in &plan.steps {
             let statement = match step {

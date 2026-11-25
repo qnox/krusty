@@ -65,6 +65,11 @@ krusty -help                                 # all options
 The reference `kotlinc` version krusty targets defaults to the newest supported release; select
 another with `-Xkotlin-reference-version=<version>`.
 
+krusty reproduces that release's defects too, so its output is kotlinc's. With
+`-Xfix-kotlinc-defects` it fixes them instead: a program the release wrongly rejects or compiles
+to the wrong behavior compiles as the release that fixed the defect does, or as the language rules
+say when no release has, and the output then differs from kotlinc's wherever a defect applies.
+
 ### Gradle
 
 Download `krusty-gradle-plugin-<version>.zip` from the
@@ -115,7 +120,9 @@ signature, `krusty-<version>-SHA256SUMS.asc`, made by a subkey that the maintain
 signing, as published in `krusty-<version>-signing-key.asc`; a missing or invalid signature fails
 the build. Every release file also carries GitHub build provenance
 (`gh attestation verify <file> -R qnox/krusty`). `-Pkrusty.releases=<url>` reads releases from a
-mirror with the same layout instead. To run another compiler binary, use either form:
+mirror with the same layout instead. `-Pkrusty.fixKotlincDefects=true` (or `krusty.fixKotlincDefects=true` in
+`gradle.properties`) fixes kotlinc's defects in every compile krusty runs; a compile left to kotlinc
+keeps them, and the plugin says so. To run another compiler binary, use either form:
 
 ```sh
 ./gradlew -Pkrusty.binary=/absolute/path/to/krusty krustyCompile

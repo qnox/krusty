@@ -10,7 +10,8 @@
 //! A `Unit` frame has no result slot. Its labeled return is still a `break` of that frame, and the
 //! break uses the frame's own loop exit. That exit is bound after the lambda's closing-brace `nop`.
 //! Only the frame's synthetic trailing `break` keeps the fallthrough that enters the `nop`. A nested
-//! lambda does not lend its exit to an outer return.
+//! lambda does not lend its exit to an outer return. A lambda body placed into its caller's code
+//! (a coroutine's splice) has no method return to land after, so its frame exit stays in the body.
 
 use super::*;
 
@@ -26,6 +27,18 @@ pub(super) struct InlineReturnState {
     /// The label is the fallthrough into that frame's closing brace, when the loop exit itself is
     /// bound after the brace.
     trailing: Vec<TrailingUnitReturn>,
+    /// Lambda bodies being emitted, innermost last: whether each is a lambda method's body, which
+    /// ends with the method's return, or a body placed into its caller's code, which ends with the
+    /// value it leaves for the caller.
+    lambda_bodies: Vec<LambdaBody>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum LambdaBody {
+    /// The inliner turns the method's return into the closing-brace `nop`.
+    Method,
+    /// The body leaves its value where the caller reads it; it has no return of its own.
+    Placed,
 }
 
 struct UnitLambdaBrace {
@@ -170,6 +183,25 @@ impl Emitter<'_> {
 
     pub(super) fn inline_return_frame_result_type(&self, value: u32) -> Option<Ty> {
         self.inline_returns.result_type(value)
+    }
+
+    /// Emit `within` as a lambda body of `kind`.
+    pub(super) fn in_lambda_body<R>(
+        &mut self,
+        kind: LambdaBody,
+        within: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.inline_returns.lambda_bodies.push(kind);
+        let result = within(self);
+        self.inline_returns.lambda_bodies.pop();
+        result
+    }
+
+    /// Whether a `Unit` frame closing with the innermost lambda body lands its early break after
+    /// the body's return. A placed body has none: its frame's loop exit is bound in the body, where
+    /// the trailing break joins it with the body's value still to come.
+    pub(super) fn lambda_body_returns(&self) -> bool {
+        self.inline_returns.lambda_bodies.last() != Some(&LambdaBody::Placed)
     }
 
     pub(super) fn unit_lambda_brace_depth(&self) -> usize {

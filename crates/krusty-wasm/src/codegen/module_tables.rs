@@ -20,7 +20,7 @@ use krusty::fx_hash::HashMap;
 use krusty::backend::class_tables::module_slots::{ModuleSlotPlan, PlannedSignature};
 use krusty::types::TypeName;
 
-use super::super::encode::{Module, SubType};
+use super::super::encode::{FieldType, Module, SubType};
 use super::super::objects::{ObjectRoot, REFERENCE};
 use super::lower::{carrier, parameter_carrier_of, Unsupported};
 
@@ -38,6 +38,10 @@ pub(super) struct ModuleTables {
     tables: HashMap<TypeName, Result<ModuleTable, Unsupported>>,
     published: HashMap<TypeName, Result<ModuleTable, Unsupported>>,
     dependencies: HashMap<TypeName, ModuleTable>,
+    /// The interface member numbers the current module's files take beyond the plan's: the
+    /// members of interfaces KLIB units installed, numbered alike in every file.
+    pub(super) extended: krusty::backend::class_tables::module_interfaces::ExtendedNumbers,
+    structures: HashMap<TypeName, (Vec<FieldType>, Option<u32>, u32)>,
 }
 
 impl ModuleTables {
@@ -55,6 +59,7 @@ impl ModuleTables {
     ) {
         self.tables.clear();
         self.published.clear();
+        self.extended = Default::default();
         for (name, _) in classes.iter() {
             if !classes.is_dependency_class(name) {
                 continue;
@@ -99,9 +104,9 @@ impl ModuleTables {
         if let Some(known) = self.dependencies.get(&class) {
             if known.slot_types != slot_types {
                 return Err(format!(
-                    "a dependency class whose table two modules lay out differently (`{}`)",
+                    "a dependency class whose table two modules lay out differently (`{}`) {:?} vs {:?}",
                     // Boundary conversion for a diagnostic.
-                    class.render().replace('/', ".")
+                    class.render().replace('/', "."), known.slot_types, slot_types
                 ));
             }
             return Ok(known.table_type);
@@ -115,6 +120,32 @@ impl ModuleTables {
             },
         );
         Ok(table_type)
+    }
+
+    /// The struct type of the dependency class `class`: the one an earlier support unit built for
+    /// it, or else `build`'s, which every later one then takes. A struct built twice would be two
+    /// types, and a value one unit made would fail the other's casts.
+    pub(super) fn dependency_structure(
+        &mut self,
+        class: TypeName,
+        fields: &[FieldType],
+        supertype: Option<u32>,
+        build: impl FnOnce() -> u32,
+    ) -> Result<u32, Unsupported> {
+        if let Some((known_fields, known_supertype, structure)) = self.structures.get(&class) {
+            if known_fields.as_slice() != fields || *known_supertype != supertype {
+                return Err(format!(
+                    "a dependency class whose struct two modules lay out differently (`{}`)",
+                    // Boundary conversion for a diagnostic.
+                    class.render().replace('/', ".")
+                ));
+            }
+            return Ok(*structure);
+        }
+        let structure = build();
+        self.structures
+            .insert(class, (fields.to_vec(), supertype, structure));
+        Ok(structure)
     }
 
     /// The table of `class`, building it (and its superclasses') the first time a file asks;
@@ -169,7 +200,7 @@ impl ModuleTables {
                 PlannedSignature::Member { parameters, result } => {
                     let mut params = vec![REFERENCE];
                     for &parameter in parameters {
-                        params.push(parameter_carrier_of(parameter)?.ok_or("a `Unit` parameter")?);
+                        params.push(parameter_carrier_of(parameter)?);
                     }
                     module.func_type(params, carrier(result)?.into_iter().collect())
                 }
@@ -211,7 +242,7 @@ impl ModuleTables {
                 PlannedSignature::Member { parameters, result } => {
                     let mut params = vec![REFERENCE];
                     for &parameter in parameters {
-                        params.push(parameter_carrier_of(parameter)?.ok_or("a `Unit` parameter")?);
+                        params.push(parameter_carrier_of(parameter)?);
                     }
                     Some(module.func_type(params, carrier(result)?.into_iter().collect()))
                 }

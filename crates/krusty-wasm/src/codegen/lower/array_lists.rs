@@ -142,7 +142,7 @@ impl Body<'_> {
         let function = self.runtime.array_lists.member(operation)?.function;
         self.value(receiver, Ty::obj("kotlin/collections/ArrayList"))?;
         for (&arg, &param) in args.iter().zip(fact.params.as_slice()) {
-            self.value(arg, param)?;
+            self.argument(arg, param)?;
         }
         if let Some(bound) = operation.index_bound() {
             // The index the member takes, its only argument, must stay within `bound`.

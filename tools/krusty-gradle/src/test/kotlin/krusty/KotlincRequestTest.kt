@@ -93,6 +93,8 @@ class KotlincRequestTest {
                 "freeCompilerArg '-Xcompiler-plugin=forbidden.jar' conflicts with compiler plugin configuration; configure the structured Gradle input instead",
             listOf("-Xkotlin-reference-version=2.4.0") to
                 "freeCompilerArg '-Xkotlin-reference-version=2.4.0' conflicts with the Kotlin Gradle plugin version; configure the structured Gradle input instead",
+            listOf("-Xfix-kotlinc-defects") to
+                "freeCompilerArg '-Xfix-kotlinc-defects' conflicts with the krusty.fixKotlincDefects Gradle property; configure the structured Gradle input instead",
             listOf("-no-stdlib=false") to
                 "freeCompilerArg '-no-stdlib=false' conflicts with the plugin-owned dependency policy; configure the structured Gradle input instead",
         )) {
