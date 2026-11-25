@@ -54,6 +54,7 @@ fn class_info_within(
         kotlin_targets: Vec::new(),
         java_targets: Vec::new(),
         inner_classes: Vec::new(),
+        permitted_subclasses: Vec::<String>::new().into(),
         annotation_element_defaults: Vec::new(),
         inner_metadata: None,
     }

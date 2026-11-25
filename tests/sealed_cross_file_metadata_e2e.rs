@@ -58,7 +58,10 @@ fn sealed_metadata_includes_sibling_file_subclasses() {
         .windows("PermittedSubclasses".len())
         .any(|window| window == b"PermittedSubclasses"));
     let class = krusty::jvm::classreader::parse_class(bytes).expect("parse Root class");
-    let mut subclasses = krusty::jvm::metadata::class_sealed_subclasses(&class);
+    let mut subclasses = krusty::jvm::metadata::class_sealed_subclasses(&class)
+        .iter()
+        .map(krusty::types::TypeName::render)
+        .collect::<Vec<_>>();
     subclasses.sort();
     assert_eq!(subclasses, ["p/A", "p/B"]);
 
