@@ -3,6 +3,7 @@
 # removes the stems it fixes. A listed stem that starts matching is an error until it is removed.
 callInitializers
 lambdasInPlainFunctions
+layoutCalls
 libraryCalls
 libraryLambdaParameters
 libraryReceiverLambdas
