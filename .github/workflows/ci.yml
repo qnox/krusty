@@ -735,7 +735,8 @@ jobs:
           source scripts/test-deadline.sh
           chmod +x e2e-bin krusty
           export KRUSTY_BIN="$PWD/krusty"
-          run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" ./e2e-bin --test-threads="$(nproc)"
+          # One thread per CPU, as many as memory holds: four on the 8 GB runners were OOM-killed.
+          run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" ./e2e-bin --test-threads="$(bash scripts/memory-workers.sh 2048)"
       - name: save recorded kotlinc bytes
         if: steps.recorded-mode.outputs.write == '1'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
