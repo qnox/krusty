@@ -36,6 +36,10 @@ pub(super) fn emit_func_ref_class(
         .iter()
         .map(|capture| type_descriptor(*capture))
         .collect::<Vec<_>>();
+    // The constructor's field captures follow the bound contexts, which it takes as one array.
+    let stored_contexts = fr.bound_contexts as usize;
+    let ctor_capture_tys = &field_capture_tys[stored_contexts..];
+    let ctor_capture_descs = &field_capture_descs[stored_contexts..];
     let capture_signatures = capture_signatures(ir, env, fr);
     // A missing `owner_class`/`call_owner` is the facade sentinel (a top-level function lives on the
     // file facade, whose name isn't known until emit) — resolve it here.
@@ -103,12 +107,17 @@ pub(super) fn emit_func_ref_class(
     // private ones.
     let capture_access = if fr.invoke.is_some() { 0x1010 } else { 0x0012 };
     let capture_constructor = format!(
-        "({}{})V",
-        field_capture_descs.concat(),
+        "({}{}{})V",
+        ctor_capture_descs.concat(),
+        if fr.bound_contexts > 0 {
+            "[Ljava/lang/Object;"
+        } else {
+            ""
+        },
         if fr.bound { "Ljava/lang/Object;" } else { "" }
     );
     let capture_constructor_signature =
-        capture_signatures.constructor(&field_capture_descs, fr.bound);
+        capture_signatures.constructor(ctor_capture_descs, fr.bound_contexts > 0, fr.bound);
     if !fr.capture_fields.is_empty() {
         // kotlinc visits its constructor first: the fields it fills are interned as its code
         // stores them, and declared after it.
@@ -192,21 +201,29 @@ pub(super) fn emit_func_ref_class(
         d
     };
 
-    if fr.bound_contexts == 0 && !field_capture_tys.is_empty() {
+    if !ctor_capture_tys.is_empty() {
         let descriptor = capture_constructor;
-        let capture_words: u16 = field_capture_tys.iter().map(|ty| slot_words(*ty)).sum();
-        let ctor_locals = 1 + capture_words + u16::from(fr.bound);
+        let capture_words: u16 = ctor_capture_tys.iter().map(|ty| slot_words(*ty)).sum();
+        let ctor_locals =
+            1 + capture_words + u16::from(fr.bound_contexts > 0) + u16::from(fr.bound);
         let mut ctor = CodeBuilder::new(ctor_locals);
         let mut slot = 1u16;
-        for (index, ty) in field_capture_tys.iter().copied().enumerate() {
+        for (index, ty) in ctor_capture_tys.iter().copied().enumerate() {
             ctor.aload(0);
             load(ty, slot, &mut ctor);
-            let field = cw.fieldref(&fq, &fr.capture_fields[index], &field_capture_descs[index]);
+            let field = cw.fieldref(&fq, &fr.capture_fields[index], &ctor_capture_descs[index]);
             ctor.putfield(field, slot_words(ty) as i32 + 1);
             slot += slot_words(ty);
         }
         ctor.aload(0);
         ctor.push_int(physical_arity as i32, &mut cw);
+        // The bound context array follows the field captures and precedes the bound receiver,
+        // the order of kotlinc's constructor.
+        let contexts = fr.bound_contexts > 0;
+        if contexts {
+            ctor.aload(slot);
+            slot += 1;
+        }
         if fr.bound {
             ctor.aload(slot);
         }
@@ -214,18 +231,25 @@ pub(super) fn emit_func_ref_class(
         ctor.push_string(&fr.fn_name, &mut cw);
         ctor.push_string(&signature, &mut cw);
         ctor.push_int(fr.flags, &mut cw);
-        let super_descriptor = if fr.bound {
-            "(ILjava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
-        } else {
-            "(ILjava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
+        let super_descriptor = match (contexts, fr.bound) {
+            (false, true) => {
+                "(ILjava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
+            }
+            (false, false) => "(ILjava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V",
+            (true, true) => {
+                "(I[Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
+            }
+            (true, false) => {
+                "(I[Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V"
+            }
         };
         let sup = cw.methodref(&superclass, "<init>", super_descriptor);
-        ctor.invokespecial(sup, if fr.bound { 6 } else { 5 }, 0);
+        ctor.invokespecial(sup, 5 + i32::from(fr.bound) + i32::from(contexts), 0);
         ctor.ret_void();
         for ((name, descriptor), signature) in fr
             .capture_fields
             .iter()
-            .zip(&field_capture_descs)
+            .zip(ctor_capture_descs)
             .zip(&capture_signatures.fields)
         {
             // The constructor's stores intern the name and descriptor; kotlinc visits the field
@@ -245,8 +269,11 @@ pub(super) fn emit_func_ref_class(
                 .capture_fields
                 .iter()
                 .map(String::as_str)
-                .zip(field_capture_descs.iter().map(String::as_str))
+                .zip(ctor_capture_descs.iter().map(String::as_str))
                 .collect::<Vec<_>>();
+            if fr.bound_contexts > 0 {
+                parameters.push(("boundContextArguments", "[Ljava/lang/Object;"));
+            }
             if fr.bound {
                 parameters.push(("receiver0", "Ljava/lang/Object;"));
             }
@@ -720,7 +747,7 @@ fn capture_signatures(ir: &IrFile, env: &EmitEnv, fr: &krusty::ir::FuncRef) -> C
         .local_target
         .map(|target| signature_function_params(ir, target))
         .unwrap_or_else(|| fr.target_param_tys.clone());
-    let captures = &declared[..fr.field_capture_count as usize];
+    let captures = &declared[fr.bound_contexts as usize..fr.field_capture_count as usize];
     CaptureSignatures {
         fields: captures
             .iter()
@@ -736,13 +763,16 @@ fn capture_signatures(ir: &IrFile, env: &EmitEnv, fr: &krusty::ir::FuncRef) -> C
 impl CaptureSignatures {
     /// The constructor's `Signature`: each capture's parameterized type or its descriptor, then the
     /// bound receiver; `None` when no capture is parameterized.
-    fn constructor(&self, descriptors: &[String], bound: bool) -> Option<String> {
+    fn constructor(&self, descriptors: &[String], contexts: bool, bound: bool) -> Option<String> {
         if self.parameters.iter().all(Option::is_none) {
             return None;
         }
         let mut signature = String::from("(");
         for (parameter, descriptor) in self.parameters.iter().zip(descriptors) {
             signature.push_str(parameter.as_deref().unwrap_or(descriptor));
+        }
+        if contexts {
+            signature.push_str("[Ljava/lang/Object;");
         }
         if bound {
             signature.push_str("Ljava/lang/Object;");
