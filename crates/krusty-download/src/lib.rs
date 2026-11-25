@@ -53,6 +53,7 @@ pub fn download(
 ) -> (DownloadOutcome, Option<String>) {
     let mut attempts = 0;
     let mut failure = None;
+    let mut retry_after = Duration::ZERO;
     while attempts < policy.max_attempts {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -72,7 +73,7 @@ pub fn download(
             .arg(seconds(policy.connect_timeout.min(max_time)))
             .arg("--max-time")
             .arg(seconds(max_time))
-            .args(["-w", "%{http_code} %{remote_ip} %{url_effective}"])
+            .args(["-w", "%{http_code} %{remote_ip} %header{retry-after} %{url_effective}"])
             .arg("-o")
             .arg(dest)
             .arg(url)
@@ -88,6 +89,7 @@ pub fn download(
                 );
             }
             Ok(output) => {
+                retry_after = retry_after_of(&output.stdout);
                 let message = String::from_utf8_lossy(&output.stderr);
                 let message = message.trim();
                 let message = if message.is_empty() {
@@ -103,10 +105,13 @@ pub fn download(
             Err(error) => failure = Some(format!("curl could not start: {error}")),
         }
         let _ = std::fs::remove_file(dest);
-        if attempts == policy.max_attempts || Instant::now() + policy.retry_delay >= deadline {
+        // A server that says how long to wait is obeyed, within the deadline: retrying sooner only
+        // extends the block.
+        let delay = policy.retry_delay.max(retry_after);
+        if attempts == policy.max_attempts || Instant::now() + delay >= deadline {
             break;
         }
-        std::thread::sleep(policy.retry_delay);
+        std::thread::sleep(delay);
     }
     (
         DownloadOutcome {
@@ -157,9 +162,21 @@ static REQUESTS: Pacer = Pacer::new();
 /// request never reached a server, where curl prints a zero status.
 fn answered_by(stdout: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stdout);
-    let mut fields = text.trim().splitn(3, ' ');
-    let (status, address, url) = (fields.next()?, fields.next()?, fields.next()?);
+    let mut fields = text.trim().splitn(4, ' ');
+    let (status, address, _retry_after, url) =
+        (fields.next()?, fields.next()?, fields.next()?, fields.next()?);
     (status != "000").then(|| format!("HTTP {status} from {address} for {url}"))
+}
+
+/// The whole seconds of the `Retry-After` header curl reports through `-w`, zero when the server
+/// sent none or sent a date.
+fn retry_after_of(stdout: &[u8]) -> Duration {
+    let text = String::from_utf8_lossy(stdout);
+    text.trim()
+        .split(' ')
+        .nth(2)
+        .and_then(|seconds| seconds.parse::<u64>().ok())
+        .map_or(Duration::ZERO, Duration::from_secs)
 }
 
 fn seconds(duration: Duration) -> String {
@@ -266,6 +283,22 @@ mod tests {
     }
 
     #[test]
+    fn a_retry_after_header_is_read_as_seconds() {
+        assert_eq!(
+            retry_after_of(b"429 1.2.3.4 45 https://repo/a.jar"),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            retry_after_of(b"429 1.2.3.4  https://repo/a.jar"),
+            Duration::ZERO
+        );
+        assert_eq!(
+            retry_after_of(b"503 1.2.3.4 Wed,-21-Oct https://repo/a.jar"),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
     fn requests_start_a_gap_apart() {
         let pacer = Pacer::new();
         let gap = Duration::from_secs(3);
@@ -346,6 +379,37 @@ mod tests {
         );
         assert_eq!(requests.load(Ordering::SeqCst), 2);
         assert_eq!(std::fs::read(&dest).expect("downloaded jar"), b"jar");
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[test]
+    fn a_server_that_asks_for_a_wait_is_waited_for() {
+        const THROTTLED: &str = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\n\
+                                 Content-Length: 0\r\nConnection: close\r\n\r\n";
+        let (url, requests) = endpoint(vec![Some(THROTTLED), Some(JAR)]);
+        let dest = destination("throttled");
+        let start = Instant::now();
+
+        let outcome = download(
+            &url,
+            &dest,
+            policy(Duration::from_secs(5)),
+            start + Duration::from_secs(30),
+        );
+
+        assert_eq!(
+            outcome,
+            DownloadOutcome {
+                attempts: 2,
+                completed: true
+            }
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert!(
+            start.elapsed() >= Duration::from_secs(1),
+            "the retry came after {:?}, before the 1s the server asked for",
+            start.elapsed()
+        );
         let _ = std::fs::remove_file(&dest);
     }
 
