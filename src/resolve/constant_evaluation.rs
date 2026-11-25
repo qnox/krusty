@@ -5,6 +5,8 @@
 //! `const val` publication from growing a second syntax-only resolver and prevents an overloaded
 //! `plus`/`compareTo` from being mistaken for a builtin constant operation.
 
+use std::cell::Cell;
+
 use crate::fx_hash::HashMap;
 
 use crate::ast::{BinOp, Expr, ExprId, File, TemplatePart, UnOp};
@@ -132,11 +134,23 @@ pub(crate) fn checked_constant_expression(
     expression: ExprId,
     declared_ty: Ty,
 ) -> Option<LibraryConst> {
-    Evaluator { context }.evaluate(expression, Some(declared_ty), 0)
+    Evaluator {
+        context,
+        depth: Cell::new(0),
+    }
+    .evaluate(expression, Some(declared_ty))
 }
+
+/// How many evaluation levels run between stack-headroom checks, on the schedule the checked-FIR
+/// constant evaluator uses (`src/fir_lower/constant_evaluation.rs`).
+const STACK_CHECK_INTERVAL: u32 = 64;
 
 struct Evaluator<'a> {
     context: CheckedConstantExpression<'a>,
+    /// Current recursion depth. Evaluation has no depth cap of its own: the checker already bounds
+    /// source nesting at `MAX_SEMANTIC_EXPR_DEPTH`, and the recursion grows the stack as it
+    /// descends so that bound is survivable on any thread.
+    depth: Cell<u32>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -163,13 +177,16 @@ impl<'a> Evaluator<'a> {
     /// The value of `expression`, as kotlinc's FIR evaluator turns each evaluated node into a
     /// literal (`toConstExpression`): under `NormalizeNaNValuesInConstContext` a NaN is the
     /// canonical NaN of its type.
-    fn evaluate(
-        &self,
-        expression: ExprId,
-        requested: Option<Ty>,
-        depth: u32,
-    ) -> Option<LibraryConst> {
-        let constant = self.evaluate_node(expression, requested, depth)?;
+    fn evaluate(&self, expression: ExprId, requested: Option<Ty>) -> Option<LibraryConst> {
+        let depth = self.depth.get() + 1;
+        self.depth.set(depth);
+        let constant = if depth == 1 || depth.is_multiple_of(STACK_CHECK_INTERVAL) {
+            crate::wide_stack::on_wide_stack(|| self.evaluate_node(expression, requested))
+        } else {
+            self.evaluate_node(expression, requested)
+        };
+        self.depth.set(depth - 1);
+        let constant = constant?;
         Some(
             if self.context.file.language.normalize_nan_in_const_context {
                 canonical_nan(constant)
@@ -179,15 +196,7 @@ impl<'a> Evaluator<'a> {
         )
     }
 
-    fn evaluate_node(
-        &self,
-        expression: ExprId,
-        requested: Option<Ty>,
-        depth: u32,
-    ) -> Option<LibraryConst> {
-        if depth > 64 {
-            return None;
-        }
+    fn evaluate_node(&self, expression: ExprId, requested: Option<Ty>) -> Option<LibraryConst> {
         let ty = self.expression_ty(expression, requested)?;
         if let Some(constant) = self.context.resolved_constants.get(&expression) {
             return retype_constant(constant.clone(), ty);
@@ -197,12 +206,12 @@ impl<'a> Evaluator<'a> {
         }
         match self.context.file.expr(expression) {
             Expr::Unary { op, operand } => {
-                let operand = self.evaluate(*operand, None, depth + 1)?;
+                let operand = self.evaluate(*operand, None)?;
                 evaluate_unary(*op, operand, ty)
             }
             Expr::Binary { op, lhs, rhs, .. } => {
-                let left = self.evaluate(*lhs, None, depth + 1)?;
-                let right = self.evaluate(*rhs, None, depth + 1)?;
+                let left = self.evaluate(*lhs, None)?;
+                let right = self.evaluate(*rhs, None)?;
                 self.evaluate_binary(expression, *op, left, right, ty)
             }
             Expr::Template(parts) => {
@@ -211,7 +220,7 @@ impl<'a> Evaluator<'a> {
                     match part {
                         TemplatePart::Str(value) => output.push_kt(value),
                         TemplatePart::Expr(value) => {
-                            let value = self.evaluate(*value, None, depth + 1)?;
+                            let value = self.evaluate(*value, None)?;
                             push_constant_string(&value, &mut output)?;
                         }
                     }
@@ -223,7 +232,7 @@ impl<'a> Evaluator<'a> {
             }
             Expr::Member { receiver, .. } => match self.selected_role(expression)? {
                 SemanticCallRole::KotlinStringLength => {
-                    let text = self.evaluate(*receiver, None, depth + 1)?;
+                    let text = self.evaluate(*receiver, None)?;
                     let length = crate::fir::constant_string_length(
                         &crate::fir::library_constant_value(&text),
                     )?;
@@ -242,7 +251,7 @@ impl<'a> Evaluator<'a> {
                 SemanticCallRole::KotlinCallableReferenceName
                     if self.context.file.language.intrinsic_const_evaluation =>
                 {
-                    let name = self.reference_name(*receiver, depth)?;
+                    let name = self.reference_name(*receiver)?;
                     Some(LibraryConst {
                         ty,
                         value: LibConst::Str(KtString::from(name)),
@@ -258,7 +267,7 @@ impl<'a> Evaluator<'a> {
                 let Expr::Member { receiver, .. } = self.context.file.expr(*callee) else {
                     return None;
                 };
-                let operand = self.evaluate(*receiver, None, depth + 1)?;
+                let operand = self.evaluate(*receiver, None)?;
                 let mut output = KtStringBuf::new();
                 push_constant_string(&operand, &mut output)?;
                 Some(LibraryConst {
@@ -275,7 +284,7 @@ impl<'a> Evaluator<'a> {
                 let Expr::Member { receiver, .. } = self.context.file.expr(*callee) else {
                     return None;
                 };
-                let operand = self.evaluate(*receiver, None, depth + 1)?;
+                let operand = self.evaluate(*receiver, None)?;
                 match intrinsic {
                     CompilerIntrinsic::NumericConversion => {
                         evaluate_numeric_conversion(operand, ty)
@@ -293,8 +302,8 @@ impl<'a> Evaluator<'a> {
                 let Expr::Member { receiver, .. } = self.context.file.expr(*callee) else {
                     return None;
                 };
-                let receiver = self.evaluate(*receiver, None, depth + 1)?;
-                let argument = self.evaluate(args[0], None, depth + 1)?;
+                let receiver = self.evaluate(*receiver, None)?;
+                let argument = self.evaluate(args[0], None)?;
                 evaluate_primitive_intrinsic(intrinsic, receiver, argument, ty)
             }
             _ => None,
@@ -304,7 +313,7 @@ impl<'a> Evaluator<'a> {
     /// The name of the declaration a reference literal selected. kotlinc evaluates it only when
     /// the reference has no value receiver or its explicit receiver is itself a constant; a
     /// reference bound to an implicit `this` or to any other value is not a constant.
-    fn reference_name(&self, reference: ExprId, depth: u32) -> Option<&'a str> {
+    fn reference_name(&self, reference: ExprId) -> Option<&'a str> {
         let Expr::CallableRef { receiver, .. } = self.context.file.expr(reference) else {
             return None;
         };
@@ -314,7 +323,7 @@ impl<'a> Evaluator<'a> {
             ReferenceReceiver::None => {}
             ReferenceReceiver::Value => {
                 if let Some(receiver) = receiver {
-                    self.evaluate(*receiver, None, depth + 1)?;
+                    self.evaluate(*receiver, None)?;
                 }
             }
             ReferenceReceiver::Implicit => return None,
