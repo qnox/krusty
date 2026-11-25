@@ -35,6 +35,7 @@ mod ir_builtins;
 mod klib_types;
 mod local_values;
 mod lowering_checkpoint;
+mod object_instances;
 mod primitive_calls;
 mod private_signature_classes;
 mod range_membership;
