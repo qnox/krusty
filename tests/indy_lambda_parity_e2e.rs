@@ -203,7 +203,7 @@ fn the_class_strategy_emits_a_different_class_set_than_indy() {
 }
 
 #[test]
-fn indy_rejects_a_pre_java_7_target_without_emitting_invalid_classes() {
+fn indy_rejects_a_pre_java_8_target_in_kotlincs_words() {
     let work = common::scratch_dir().expect("allocate rejected target fixture");
     let source = work.join("RejectedTarget.kt");
     let output = work.join("out");
@@ -220,7 +220,7 @@ fn indy_rejects_a_pre_java_7_target_without_emitting_invalid_classes() {
         common::kotlinc_compile(&reference_args).expect("reference compiler unavailable");
     assert_ne!(
         reference_code, 0,
-        "kotlinc accepted the pre-Java-7 indy target: {reference_stderr}"
+        "kotlinc accepted the pre-Java-8 indy target: {reference_stderr}"
     );
     let result = std::process::Command::new(common::krusty_binary())
         .args([
@@ -235,14 +235,14 @@ fn indy_rejects_a_pre_java_7_target_without_emitting_invalid_classes() {
         .expect("run krusty CLI");
     assert_eq!(
         result.status.code(),
-        Some(1),
+        Some(2),
         "invalid indy target compiled"
     );
-    assert!(
-        String::from_utf8_lossy(&result.stderr).contains("requires JVM target 1.7 or newer"),
-        "the rejection did not explain the class-version constraint: stdout={} stderr={}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stderr),
+        reference_stderr.replace("error: ", "krusty: error: "),
+        "the rejection differs from kotlinc's"
     );
     let emitted = output.exists()
         && std::fs::read_dir(&output)
