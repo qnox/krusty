@@ -390,6 +390,18 @@ pub(super) fn apply(
                 "unknown `-Xstring-concat` mode: {text}\nSupported modes: inline, indy-with-constants, indy"
             )),
         },
+        // `-Xwhen-expressions` selects how a `when` over types and constants is compiled from JVM 21
+        // on. `inline` (instanceof and comparison chains) is kotlinc's default and krusty's only
+        // shape; `indy` (`invokedynamic` `typeSwitch`) is not modeled yet.
+        "-Xwhen-expressions" => match text {
+            "inline" => {}
+            "indy" => opts.refuse(format!(
+                "{name}={text} selects an output shape krusty does not emit"
+            )),
+            _ => opts.errors.push(format!(
+                "unknown `-Xwhen-expressions` mode: {text}\nSupported modes: inline, indy"
+            )),
+        },
         "-opt-in" => opts
             .opt_in
             .extend(list.iter().filter(|marker| !marker.is_empty()).cloned()),

@@ -1834,9 +1834,14 @@ pub fn class_companion_name(ci: &ClassInfo) -> Option<String> {
     ci.meta.companion_name.clone()
 }
 
-/// The direct subclasses of a `sealed` class, from its `@Metadata`, as JVM internal names.
-pub fn class_sealed_subclasses(ci: &ClassInfo) -> Vec<String> {
-    ci.meta.sealed_subclasses.clone()
+/// The direct subclasses of a `sealed` class, as JVM internal names: Kotlin `@Metadata` is
+/// authoritative for a Kotlin class, and a Java class states them in `PermittedSubclasses`.
+pub fn class_sealed_subclasses(ci: &ClassInfo) -> crate::types::TypeNameList {
+    if ci.meta.is_present() {
+        ci.meta.sealed_subclasses.clone().into()
+    } else {
+        ci.permitted_subclasses.clone()
+    }
 }
 
 pub fn class_inline(ci: &ClassInfo) -> Option<&InlineClass> {

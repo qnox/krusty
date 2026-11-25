@@ -1240,6 +1240,22 @@ mod tests {
     }
 
     #[test]
+    fn when_expressions_selects_inline_only() {
+        assert_eq!(
+            parse_args(&["-Xwhen-expressions=inline", "x.kt"]).errors,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            parse_args(&["-Xwhen-expressions=indy", "x.kt"]).errors,
+            vec!["-Xwhen-expressions=indy selects an output shape krusty does not emit"]
+        );
+        assert_eq!(
+            parse_args(&["-Xwhen-expressions=sideways", "x.kt"]).errors,
+            vec!["unknown `-Xwhen-expressions` mode: sideways\nSupported modes: inline, indy"]
+        );
+    }
+
+    #[test]
     fn kotlinc_style_flags() {
         let o = parse_args(&[
             "-d",
