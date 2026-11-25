@@ -10,6 +10,25 @@ use crate::name_tree::{NameId, NameTree};
 use crate::types::{existing_type_name_in, type_name, TypeName};
 
 impl Classpath {
+    /// The named JDK module declaring `internal` when that module does not export the classifier's
+    /// package to code outside every named module. Only a classifier whose first definition is in
+    /// the JDK image has a module; a jar or directory class, and a class under a mock JDK, belongs
+    /// to none.
+    pub fn unexported_jdk_module(&self, internal: TypeName) -> Option<String> {
+        if self.stub_overlay_contains_classifier(internal) {
+            return None;
+        }
+        let spelling = crate::jvm::names::classfile_internal_name_of(internal);
+        let entry = self.package_tree().first_jar_for_spelling(spelling)?;
+        if !matches!(self.entries.get(entry), Some(Entry::Jimage(_))) {
+            return None;
+        }
+        self.ensure_jimage_index();
+        let image = self.jimage.borrow();
+        let (_, index) = image.as_ref()?;
+        index.unexported_class_module(spelling).map(str::to_string)
+    }
+
     /// Whether the first classpath definition of `internal` belongs to a friend entry.
     /// A complete catalog already records that entry, so the check does not render the classifier
     /// or open its class bytes. An incomplete catalog still reads the entry to confirm ownership.

@@ -219,6 +219,7 @@ mod diagnostic_selection;
 mod eager_lambda_analysis;
 mod elvis_expression;
 mod integer_literal_types;
+mod module_export_usage;
 mod type_test_narrowing;
 use type_test_narrowing::TypeTest;
 mod enum_entries;
@@ -13277,14 +13278,14 @@ impl<'a> Checker<'a> {
                 }
                 let (message, name, identity, diagnostic_span) = if had_rejected_callable {
                     (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, None, span)
-                } else if let Some((internal, access)) = self.inaccessible_classifier(scope, &fname)
+                } else if let Some((internal, denial)) = self.inaccessible_classifier(scope, &fname)
                 {
                     let reference = self.call_callee_name_span(call);
-                    if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
+                    if self.suppresses_diagnostic(denial.suppression_name()) {
                         (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, None, span)
                     } else {
                         (
-                            inaccessible_classifier_message(&fname, access),
+                            inaccessible_classifier_message(&fname, &denial),
                             None,
                             Some(DiagnosticIdentity::ClassifierAccess {
                                 reference,
@@ -49387,12 +49388,12 @@ impl<'a> Checker<'a> {
         &self,
         scope: &CheckerScope<'_>,
         name: &str,
-    ) -> Option<(TypeName, crate::symbol_source::ClassifierAccess)> {
+    ) -> Option<(TypeName, crate::symbol_resolver::ClassifierDenial)> {
         let InheritedNestedClassifier::Found(internal) = self.select_classifier(scope, name) else {
             return None;
         };
         self.inaccessible_classifier_reference(internal)
-            .map(|access| (internal, access))
+            .map(|denial| (internal, denial))
     }
 
     fn reject_inaccessible_classifier_expression(
@@ -49400,15 +49401,15 @@ impl<'a> Checker<'a> {
         expression: ExprId,
         internal: TypeName,
     ) -> bool {
-        if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
-            return false;
-        }
-        let Some(access) = self.inaccessible_classifier_reference(internal) else {
+        let Some(denial) = self.inaccessible_classifier_reference(internal) else {
             return false;
         };
+        if self.suppresses_diagnostic(denial.suppression_name()) {
+            return false;
+        }
         crate::trace_compiler!(
             "resolve",
-            "reject inaccessible classifier expression={expression:?} internal={} access={access:?} ast={:?}",
+            "reject inaccessible classifier expression={expression:?} internal={} access={denial:?} ast={:?}",
             internal,
             self.file.expr(expression),
         );
@@ -49417,13 +49418,16 @@ impl<'a> Checker<'a> {
             Expr::Name(name) => name.clone(),
             _ => internal.render().replace(['/', '$'], "."),
         };
-        let message = if access == crate::libraries::ClassifierAccess::PackagePrivate {
+        let message = if denial
+            == crate::symbol_resolver::ClassifierDenial::Access(
+                crate::libraries::ClassifierAccess::PackagePrivate,
+            ) {
             self.classifier_access_display(internal).map_or_else(
-                || inaccessible_classifier_message(&display, access),
+                || inaccessible_classifier_message(&display, &denial),
                 |display| format!("cannot access '{display}': it is package-private in file."),
             )
         } else {
-            inaccessible_classifier_message(&display, access)
+            inaccessible_classifier_message(&display, &denial)
         };
         self.diags.error_with_identity(
             reference,
@@ -49495,7 +49499,9 @@ impl<'a> Checker<'a> {
         selected: &SelectedCallable,
     ) {
         if self.inaccessible_classifier_reference(classifier)
-            == Some(crate::libraries::ClassifierAccess::PackagePrivate)
+            == Some(crate::symbol_resolver::ClassifierDenial::Access(
+                crate::libraries::ClassifierAccess::PackagePrivate,
+            ))
         {
             let display = self
                 .classifier_access_display(classifier)

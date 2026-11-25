@@ -10,6 +10,7 @@ pub(crate) struct HeaderVisibilitySuppressionApplication {
     pub invisible_reference: bool,
     pub invisible_member: bool,
     pub optional_declaration_usage: bool,
+    pub module_export: bool,
 }
 
 /// Compact `@Suppress` argument facts needed while signatures are solved after ordinary expression
@@ -36,6 +37,7 @@ impl HeaderVisibilitySuppressionArena {
                 let mut invisible_reference = false;
                 let mut invisible_member = false;
                 let mut optional_declaration_usage = false;
+                let mut module_export = false;
                 for argument in arguments {
                     let Some(value) = file.const_string_value(*argument) else {
                         continue;
@@ -46,17 +48,18 @@ impl HeaderVisibilitySuppressionArena {
                         Some("OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE") => {
                             optional_declaration_usage = true
                         }
+                        Some("JAVA_MODULE_DOES_NOT_EXPORT_PACKAGE") => module_export = true,
                         _ => {}
                     }
                 }
-                (invisible_reference || invisible_member || optional_declaration_usage).then_some(
-                    HeaderVisibilitySuppressionApplication {
+                (invisible_reference || invisible_member || optional_declaration_usage || module_export)
+                    .then_some(HeaderVisibilitySuppressionApplication {
                         annotation: annotation.span,
                         invisible_reference,
                         invisible_member,
                         optional_declaration_usage,
-                    },
-                )
+                        module_export,
+                    })
             })
             .collect()
     }

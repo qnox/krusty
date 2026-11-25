@@ -67,6 +67,26 @@ impl ProductionSignatureSemantics<'_> {
         self.table.declaration_suppresses_visibility(scope.owner)
     }
 
+    /// Why a signature of `scope` may not name `classifier`, once the scope's lexical `@Suppress`
+    /// is applied: its resolver carries the visibility policy, and a package its module does not
+    /// export is exempted by `JAVA_MODULE_DOES_NOT_EXPORT_PACKAGE`.
+    pub(super) fn signature_classifier_denial(
+        &self,
+        scope: crate::fir::SignatureScope,
+        classifier: crate::types::TypeName,
+    ) -> Option<crate::symbol_resolver::ClassifierDenial> {
+        self.with_resolver(scope, |resolver| {
+            resolver.inaccessible_classifier_access(classifier)
+        })
+        .ok()
+        .filter(|denial| {
+            !matches!(
+                denial,
+                crate::symbol_resolver::ClassifierDenial::PackageNotExported { .. }
+            ) || !self.table.declaration_suppresses_module_export(scope.owner)
+        })
+    }
+
     /// A superclass constructor call (`: pkg.Base(args)`) names its classifier apart from the
     /// supertype reference, and kotlinc reports an inaccessible one at the call's callee as well.
     /// The scope's resolver carries the declaration's lexical visibility policy, so a suppressed
@@ -77,24 +97,20 @@ impl ProductionSignatureSemantics<'_> {
         callee: crate::diag::Span,
         superclass: crate::types::TypeName,
     ) {
-        let access = self
-            .with_resolver(scope, |resolver| {
-                resolver.inaccessible_classifier_access(superclass)
-            })
-            .ok();
+        let denial = self.signature_classifier_denial(scope, superclass);
         crate::trace_compiler!(
             "resolve",
-            "superclass call access declaration={:?} superclass={superclass} inaccessible={access:?}",
+            "superclass call access declaration={:?} superclass={superclass} inaccessible={denial:?}",
             scope.owner,
         );
-        if let Some(access) = access {
+        if let Some(denial) = denial {
             let display = superclass.render().replace(['/', '$'], ".");
             self.record_unconditional_diagnostic_at(
                 scope.owner,
                 scope.source,
                 callee,
                 crate::diag::DiagnosticIdentity::classifier_access(callee, superclass),
-                super::super::inaccessible_classifier_message(&display, access),
+                super::super::inaccessible_classifier_message(&display, &denial),
             );
         }
     }

@@ -15,7 +15,7 @@ use crate::libraries::{
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TyKind, TyParamName, TypeName, Visibility};
 mod access_site;
-pub(crate) use access_site::CallableAccessSite;
+pub(crate) use access_site::{CallableAccessSite, ClassifierDenial};
 mod argument_compatibility;
 mod call_argument;
 mod callable_shapes;

@@ -180,6 +180,8 @@ pub(super) struct VisibilitySuppressions {
     pub(super) invisible_reference: bool,
     pub(super) invisible_member: bool,
     pub(super) optional_declaration_usage: bool,
+    /// `JAVA_MODULE_DOES_NOT_EXPORT_PACKAGE`: a classifier of a package its module does not export.
+    pub(super) module_export: bool,
 }
 
 impl VisibilitySuppressions {
@@ -188,7 +190,7 @@ impl VisibilitySuppressions {
     }
 
     pub(super) fn has_any(self) -> bool {
-        self.bypasses_visibility() || self.optional_declaration_usage
+        self.bypasses_visibility() || self.optional_declaration_usage || self.module_export
     }
 }
 
@@ -704,6 +706,16 @@ impl SymbolTable {
             .get(&declaration)
             .copied()
             .is_some_and(VisibilitySuppressions::bypasses_visibility)
+    }
+
+    /// Whether the declaration's lexical `@Suppress` names `JAVA_MODULE_DOES_NOT_EXPORT_PACKAGE`.
+    pub(super) fn declaration_suppresses_module_export(
+        &self,
+        declaration: crate::fir::DeclarationId,
+    ) -> bool {
+        self.declaration_visibility_suppressions
+            .get(&declaration)
+            .is_some_and(|suppressions| suppressions.module_export)
     }
 
     pub(super) fn visibility_suppressed_declarations(

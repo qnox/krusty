@@ -251,26 +251,22 @@ impl ProductionSignatureSemantics<'_> {
                 });
             }
             let internal = binding.selected.classifier;
-            let access = self
-                .with_resolver(scope, |resolver| {
-                    resolver.inaccessible_classifier_access(internal)
-                })
-                .ok();
+            let denial = self.signature_classifier_denial(scope, internal);
             crate::trace_compiler!(
                 "resolve",
-                "compact type access declaration={:?} source={:?} spelling={} classifier={} inaccessible={access:?}",
+                "compact type access declaration={:?} source={:?} spelling={} classifier={} inaccessible={denial:?}",
                 scope.owner,
                 scope.source,
                 reference.name,
                 internal,
             );
-            if let Some(access) = access {
+            if let Some(denial) = denial {
                 self.record_unconditional_diagnostic_at(
                     scope.owner,
                     scope.source,
                     reference.span,
                     crate::diag::DiagnosticIdentity::classifier_access(reference.span, internal),
-                    super::super::inaccessible_classifier_message(&reference.name, access),
+                    super::super::inaccessible_classifier_message(&reference.name, &denial),
                 );
             }
             // The provider-normalized declaration, whichever module or classpath entry supplies it:
