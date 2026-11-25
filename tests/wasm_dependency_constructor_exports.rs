@@ -219,6 +219,16 @@ fn wasm_official_dependency_subclasses_inherit_members_realized_by_an_earlier_so
     );
 }
 
+/// A later source calls a final member of a class an earlier source realized: the class keeps its
+/// one owner and the member is emitted for the later source as a function of the receiver.
+#[test]
+fn wasm_official_dependency_calls_final_members_of_a_class_an_earlier_source_realized() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyCrossUnitFinalMembers.kt"),
+        "DependencyCrossUnitFinalMembers",
+    );
+}
+
 /// A library body reads an abstract accessor of a class an earlier source realized: the read
 /// dispatches through that class's frozen declaration rather than declaring the accessor again.
 #[test]

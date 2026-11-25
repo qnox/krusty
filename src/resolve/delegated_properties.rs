@@ -45,8 +45,8 @@ struct DelegateGetValueSelection {
     this_ref: Ty,
     expected_property: Option<Ty>,
     site: DelegateConventionSite,
-    /// Shared with the caller's site. A missing `getValue` on an unannotated property records
-    /// the type kotlinc names in the following `setValue` demand.
+    /// Shared with the caller's site. A missing or ambiguous `getValue` on an unannotated
+    /// property records the type kotlinc names in the following `setValue` demand.
     missing_getvalue_display: std::rc::Rc<std::cell::RefCell<Option<String>>>,
 }
 
@@ -319,6 +319,86 @@ fn delegate_diagnostic_ty(ty: Ty) -> String {
         return "Nothing?".to_string();
     }
     ty.source_name()
+}
+
+/// Callable id kotlinc prints inside an ambiguous delegate type. A member keeps its owner
+/// (`/Delegate.getValue`, `demo/Delegate.getValue`); a top-level extension keeps its package
+/// (`/getValue`, `demo/getValue`).
+fn delegate_callable_diagnostic_id(function: &crate::libraries::FunctionInfo) -> String {
+    let name = function.callable.name.as_str();
+    if function.kind != crate::libraries::FnKind::Member {
+        let package = function.callable.owner.package();
+        return if package.is_empty() {
+            format!("/{name}")
+        } else {
+            format!("{package}/{name}")
+        };
+    }
+    let owner = delegate_member_owner(function.callable.owner);
+    format!("{owner}.{name}")
+}
+
+/// `package/Outer.Inner`, or `/Outer.$serializer` when the nested simple name itself contains `$`.
+/// Nesting comes from the name tree, so a `$` that belongs to the class name stays a `$`.
+fn delegate_member_owner(owner: TypeName) -> String {
+    let mut parts = Vec::new();
+    let mut current = owner;
+    loop {
+        match current.exact_nested_owner().and_then(|enclosing| {
+            current
+                .nested_segment_within(enclosing)
+                .map(|segment| (enclosing, segment))
+        }) {
+            Some((enclosing, segment)) => {
+                parts.push(segment);
+                current = enclosing;
+            }
+            None => {
+                parts.push(current.segment_ref());
+                break;
+            }
+        }
+    }
+    parts.reverse();
+    let class_name = parts.join(".");
+    let package = owner.package();
+    if package.is_empty() {
+        format!("/{class_name}")
+    } else {
+        format!("{package}/{class_name}")
+    }
+}
+
+/// The property type kotlinc uses when several `getValue` candidates exist and none applies.
+/// Member-extension candidates do not carry a callable id on this path, so they stay unnamed.
+fn ambiguous_delegate_property_display(
+    name: &str,
+    failure: &DelegateOperatorFailure,
+) -> Option<String> {
+    let functions: Vec<&crate::libraries::FunctionInfo> = match failure {
+        DelegateOperatorFailure::InapplicableCandidates(families) => {
+            if !families.member_extensions.is_empty() {
+                return None;
+            }
+            families
+                .members
+                .iter()
+                .chain(families.extensions.iter())
+                .collect()
+        }
+        DelegateOperatorFailure::AmbiguousOrdinary(candidates) => candidates.iter().collect(),
+        DelegateOperatorFailure::AmbiguousMemberExtensions(_) => return None,
+    };
+    if functions.len() < 2 {
+        return None;
+    }
+    let ids = functions
+        .iter()
+        .copied()
+        .map(delegate_callable_diagnostic_id)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("??? (Ambiguity: {name}, [{ids}])"))
 }
 
 pub(crate) fn delegate_convention_diagnostic_candidate(
@@ -1338,9 +1418,15 @@ impl Checker<'_> {
             }
             DelegateOperatorSelection::Failure(failure) => {
                 // A written type, including an unresolved one, stays that type. An unannotated
-                // property takes the single getValue candidate's result, which setValue then
-                // demands.
+                // property takes the single getValue candidate's result. Several candidates leave
+                // the property as the ambiguity kotlinc names, which setValue then demands.
                 let unannotated = site.written_property_type.is_none();
+                if unannotated {
+                    if let Some(display) = ambiguous_delegate_property_display("getValue", &failure)
+                    {
+                        *missing_getvalue_display.borrow_mut() = Some(display);
+                    }
+                }
                 let property_type = self.report_delegate_operator_failure(
                     &DelegateConventionQuery {
                         site,
