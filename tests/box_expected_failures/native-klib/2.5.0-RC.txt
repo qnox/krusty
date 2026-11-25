@@ -224,9 +224,6 @@ compileKotlinAgainstKotlin/useDeserializedFunInterface.kt
 constants/comparisonFalse.kt
 constants/comparisonTrue.kt
 constants/float.kt
-contextParameters/callableReferences/contextual/delegation/singleContextArgUnboundReceiver.kt
-contextParameters/callableReferences/contextual/delegation/unboundReceiver.kt
-contextParameters/callableReferences/contextual/delegation/unboundReceiverVar.kt
 contextParameters/contextPropertyInInterface.kt
 contextParameters/contextualCallableReferenceReturnType.kt
 contextParameters/evaluationOrder.kt

@@ -8,6 +8,24 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
+/// A property declared by a classifier in the active bounded body, checked before the module
+/// provider can publish it.
+#[derive(Clone)]
+pub(super) struct CheckedLocalProperty {
+    pub(super) ty: Ty,
+    pub(super) owner: TypeName,
+    pub(super) mutable: bool,
+    pub(super) visibility: Visibility,
+    pub(super) interface: bool,
+    pub(super) source_member: crate::libraries::SourceMember,
+    pub(super) stable_declaration: Option<crate::fir::DeclarationId>,
+    pub(super) deprecated_hidden: bool,
+    pub(super) accessor_availability: crate::libraries::PropertyAccessorAvailability,
+    /// The checked types of the property's context parameters, in declaration order. Every
+    /// access selects a scope value for each of them, as for a provider property.
+    pub(super) context_params: Vec<Ty>,
+}
+
 impl CheckedLocalProperty {
     fn readable(&self) -> bool {
         !self.deprecated_hidden && self.accessor_availability.getter
@@ -43,6 +61,10 @@ struct RecordedLocalProperty {
     stable_declaration: Option<crate::fir::DeclarationId>,
     ty: Ty,
     interface: bool,
+    /// The checked context parameter types, or `None` when the declaration has context parameters
+    /// this recording did not check; an earlier recording of the same declaration then supplies
+    /// them, and without one the property stays out of the overlay.
+    context_params: Option<Vec<Ty>>,
 }
 
 impl Checker<'_> {
@@ -179,14 +201,27 @@ impl Checker<'_> {
             );
             return false;
         }
-        // Context-dependent and generic property candidates require their own argument-selection
-        // shape. They never enter the receiver-less overlay until that normalized shape exists.
-        if !property.context_params.is_empty() || !property.type_params.is_empty() {
+        // Generic property candidates require their own argument-selection shape. They never
+        // enter the receiver-less overlay until that normalized shape exists.
+        if !property.type_params.is_empty() {
             return false;
         }
         let checked = self.check_declaration_type(scope, declared);
         if checked.mentions_error() || checked.mentions_pending() {
             return false;
+        }
+        if !property.context_params.is_empty() {
+            return self.register_deferred_context_body_property(
+                scope,
+                owner,
+                property,
+                DeferredBodyProperty {
+                    source_member,
+                    stable_declaration,
+                    interface,
+                },
+                checked,
+            );
         }
         self.property_decl_types
             .insert((property.span.lo, property.span.hi), checked);
@@ -229,6 +264,52 @@ impl Checker<'_> {
         let checked = &properties[index];
         self.declare_scoped_property(scope, checked, false);
         true
+    }
+
+    /// A receiver-less body property with context parameters enters the overlay with its checked
+    /// context types, which every access selects scope values for. It is never a scoped
+    /// property: an implicit-receiver access selects it through the same overlay member read.
+    fn register_deferred_context_body_property(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        owner: TypeName,
+        property: &PropDecl,
+        publication: DeferredBodyProperty,
+        checked: Ty,
+    ) -> bool {
+        let context_params = property
+            .context_params
+            .iter()
+            .map(|parameter| {
+                semantic_value_parameter_ty(
+                    self.check_declaration_type(scope, &parameter.ty),
+                    parameter.is_vararg,
+                )
+            })
+            .collect::<Vec<_>>();
+        if context_params
+            .iter()
+            .any(|ty| ty.mentions_error() || ty.mentions_pending())
+        {
+            return false;
+        }
+        self.property_decl_types
+            .insert((property.span.lo, property.span.hi), checked);
+        self.record_checked_local_property_shape(
+            owner,
+            &property.name,
+            RecordedLocalProperty {
+                has_receiver: false,
+                mutable: property.is_var,
+                visibility: property.visibility,
+                source_member: publication.source_member,
+                stable_declaration: publication.stable_declaration,
+                ty: checked,
+                interface: publication.interface,
+                context_params: Some(context_params),
+            },
+        );
+        false
     }
 
     pub(super) fn record_checked_local_member_extension_property(
@@ -312,14 +393,27 @@ impl Checker<'_> {
             stable_declaration,
             ty,
             interface,
+            context_params,
         } = recorded;
         if has_receiver || ty.mentions_error() || ty.mentions_pending() {
             return;
         }
+        let key = (owner, name.to_owned());
+        let Some(context_params) = context_params.or_else(|| {
+            self.checked_local_properties
+                .get(&key)
+                .filter(|existing| {
+                    existing.stable_declaration == stable_declaration
+                        && !existing.context_params.is_empty()
+                })
+                .map(|existing| existing.context_params.clone())
+        }) else {
+            return;
+        };
         let (deprecated_hidden, accessor_availability) =
             self.checked_property_availability(stable_declaration, None);
         self.checked_local_properties.insert(
-            (owner, name.to_owned()),
+            key,
             CheckedLocalProperty {
                 ty,
                 owner,
@@ -330,6 +424,7 @@ impl Checker<'_> {
                 stable_declaration,
                 deprecated_hidden,
                 accessor_availability,
+                context_params,
             },
         );
     }
@@ -411,6 +506,7 @@ impl Checker<'_> {
                 stable_declaration,
                 ty,
                 interface,
+                context_params: property.context_params.is_empty().then(Vec::new),
             },
         );
     }
@@ -438,6 +534,7 @@ impl Checker<'_> {
                 stable_declaration,
                 ty,
                 interface,
+                context_params: Some(Vec::new()),
             },
         );
     }
@@ -487,5 +584,129 @@ impl Checker<'_> {
                 .then_some(property)
             })
             .next()
+    }
+}
+
+impl Checker<'_> {
+    /// A reference to a member property of a classifier declared in the active bounded body takes
+    /// its type from the checked declaration, as a read of that property does: the provider's
+    /// model of the classifier does not type it until the body is finalized.
+    pub(super) fn typed_body_local_property_ref(
+        &self,
+        receiver: Ty,
+        property: Option<crate::symbol_resolver::ResolvedPropertyRef>,
+    ) -> Option<crate::symbol_resolver::ResolvedPropertyRef> {
+        let mut property = property?;
+        self.type_body_local_property_ref(receiver, &mut property);
+        Some(property)
+    }
+
+    /// The context arguments an access to the checked body-local `local` selects at this site,
+    /// published with the provider's view of the declaration at its checked types. `Ok(None)` for a
+    /// property without context parameters; a scope without a value for one of them is
+    /// `MissingContext`, and a declaration the provider does not publish `UnpublishedLocalProperty`.
+    pub(super) fn body_local_property_context_access(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: Ty,
+        name: &str,
+        local: &CheckedLocalProperty,
+    ) -> Result<Option<Box<ResolvedPropertyAccess>>, PropertyReadAmbiguity> {
+        if local.context_params.is_empty() {
+            return Ok(None);
+        }
+        let context_args = self
+            .select_context_arguments(scope, &local.context_params)
+            .ok_or(PropertyReadAmbiguity::MissingContext)?;
+        let mut property = self
+            .resolver()
+            .select_member_property_applicable_where(receiver.non_null(), name, |property| {
+                (property.stable_declaration == local.stable_declaration)
+                    .then_some((true, property.context_count))
+            })
+            .and_then(|selected| selected.property)
+            .ok_or(PropertyReadAmbiguity::UnpublishedLocalProperty)?;
+        property.ty = local.ty;
+        property.context_count = local.context_params.len();
+        apply_checked_accessor_shape(
+            &mut property.getter,
+            property.setter.as_deref_mut(),
+            &local.context_params,
+            local.ty,
+        );
+        Ok(Some(Box::new(ResolvedPropertyAccess {
+            property,
+            context_args,
+        })))
+    }
+
+    fn type_body_local_property_ref(
+        &self,
+        receiver: Ty,
+        property: &mut crate::symbol_resolver::ResolvedPropertyRef,
+    ) {
+        let Some(checked) = self.checked_body_local_property(receiver, &property.name) else {
+            return;
+        };
+        if checked.stable_declaration != property.stable_declaration {
+            return;
+        }
+        // The declared type is applied to the receiver's type arguments, as a member function of
+        // the classifier is. An inherited property would need the supertype's application; it
+        // keeps the unresolved projection.
+        let declaring_receiver = crate::symbol_resolver::member_scope_receiver(receiver);
+        if declaring_receiver.obj_internal() != Some(checked.owner) {
+            return;
+        }
+        let Some((bindings, _)) = self.body_local_classifier_bindings(checked.owner, receiver)
+        else {
+            return;
+        };
+        let ty = crate::symbol_resolver::specialize_signature_output_type(
+            &self.fed_source(),
+            checked.ty,
+            &bindings,
+        );
+        property.prop_ty = ty;
+        property.context_count = checked.context_params.len();
+        apply_checked_accessor_shape(
+            &mut property.getter,
+            property.setter.as_mut(),
+            &checked.context_params,
+            ty,
+        );
+    }
+}
+
+/// The diagnostic for a checked body-local property the module provider does not publish. It is a
+/// compiler invariant failure, reported as such rather than as a missing context value.
+pub(super) fn unpublished_local_property_message(name: &str) -> String {
+    format!("internal error: the local property '{name}' has no published declaration")
+}
+
+/// Give a provider's accessors of a body-local property the overlay's checked shape: its leading
+/// context parameters, the getter's result, and the setter's value. The provider's projection of
+/// a declaration whose header is still deferred may not know the context parameters yet; the
+/// checked ones replace whatever leading prefix it published.
+fn apply_checked_accessor_shape(
+    getter: &mut crate::libraries::LibraryCallable,
+    setter: Option<&mut crate::libraries::LibraryCallable>,
+    context_params: &[Ty],
+    ty: Ty,
+) {
+    let checked_contexts = |accessor: &mut crate::libraries::LibraryCallable| {
+        let published = accessor.context_count.min(accessor.params.len());
+        accessor
+            .params
+            .splice(..published, context_params.iter().copied());
+        accessor.context_count = context_params.len();
+    };
+    checked_contexts(getter);
+    getter.ret = ty;
+    if let Some(setter) = setter {
+        checked_contexts(setter);
+        if let Some(value) = setter.params.last_mut() {
+            *value = ty;
+        }
     }
 }

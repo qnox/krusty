@@ -300,6 +300,34 @@ impl Checker<'_> {
             "assignment",
         );
         if is_var || deferred_constructor_write {
+            // A body-local property with context parameters takes the values this site selects
+            // for them, exactly as its read does.
+            let local = self
+                .checked_body_local_property_for_write(site.receiver_ty, site.name)
+                .filter(|local| local.stable_declaration == stable_declaration)
+                .cloned();
+            let context_access = match local.map(|local| {
+                self.body_local_property_context_access(scope, site.receiver_ty, site.name, &local)
+            }) {
+                None => None,
+                Some(Ok(access)) => access,
+                Some(Err(PropertyReadAmbiguity::UnpublishedLocalProperty)) => {
+                    self.diags.error(
+                        target_span,
+                        body_local_property_selection::unpublished_local_property_message(
+                            site.name,
+                        ),
+                    );
+                    return;
+                }
+                Some(Err(_)) => {
+                    self.diags.error(
+                        target_span,
+                        format!("No context argument for '{}' found.", site.name),
+                    );
+                    return;
+                }
+            };
             let lowering = StmtLowering::MemberPropertyWrite {
                 stable_declaration,
                 backing_field: deferred_constructor_write,
@@ -308,7 +336,7 @@ impl Checker<'_> {
                 owner,
                 ty,
                 interface: self.resolved_owner_is_interface(owner),
-                context_access: None,
+                context_access,
             };
             self.stmt_lowers.insert(site.stmt, lowering);
         }

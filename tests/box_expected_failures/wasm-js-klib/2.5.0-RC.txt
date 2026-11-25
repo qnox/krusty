@@ -256,10 +256,6 @@ constants/divisionByZero.kt
 constants/float.kt
 constants/kt9532.kt
 contextParameters/callableReferences/contextual/delegation/localProperty.kt
-contextParameters/callableReferences/contextual/delegation/singleContextArgUnboundReceiver.kt
-contextParameters/callableReferences/contextual/delegation/smartCastContextArg.kt
-contextParameters/callableReferences/contextual/delegation/unboundReceiver.kt
-contextParameters/callableReferences/contextual/delegation/unboundReceiverVar.kt
 contextParameters/callableReferences/contextual/funInterfaceEquality.kt
 contextParameters/callableReferences/contextual/generic.kt
 contextParameters/callableReferences/contextual/simple.kt
@@ -627,7 +623,6 @@ defaultArguments/useThisInLambda.kt
 delegatedProperty/callableReferenceAsSecondArgumentOfDelegate.kt
 delegatedProperty/correctFieldsOrder.kt
 delegatedProperty/delegateToConstVal.kt
-delegatedProperty/delegateToSmartCastReceiver.kt
 delegatedProperty/delegatedByExtensionProperty.kt
 delegatedProperty/delegatedOverride.kt
 delegatedProperty/genericDelegateUncheckedCast1.kt
