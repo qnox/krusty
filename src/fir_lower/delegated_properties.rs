@@ -1166,7 +1166,7 @@ pub(super) fn delegated_call_with_dispatch(
                     default_provider: *default_provider,
                     params: parameters.iter().map(|ty| ty.get()).collect(),
                     ret: result.get(),
-                    substitutions: Vec::new(),
+                    substitutions: super::checked::lower_substitutions(&call.substitutions),
                     defaults: Vec::new(),
                     extension_receiver_parameter: *extension_receiver_parameter,
                 }),
