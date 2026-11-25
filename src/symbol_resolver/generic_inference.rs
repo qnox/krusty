@@ -634,13 +634,7 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
                     })
                     .or_else(|| {
                         source.and_then(|source| {
-                            receiver_hierarchy(source, actual)
-                                .into_iter()
-                                .map(|(ty, _)| ty)
-                                .find(|ty| {
-                                    ty.obj_internal()
-                                        .is_some_and(|actual_name| name == actual_name)
-                                })
+                            flexible_supertype_with_classifier(source, actual, name)
                         })
                     }),
                 _ => None,
@@ -1399,13 +1393,7 @@ pub(super) fn unify_inferred_ty_impl(
                     })
                     .or_else(|| {
                         source.and_then(|source| {
-                            receiver_hierarchy(source, actual)
-                                .into_iter()
-                                .map(|(ty, _)| ty)
-                                .find(|ty| {
-                                    ty.obj_internal()
-                                        .is_some_and(|actual_name| name == actual_name)
-                                })
+                            flexible_supertype_with_classifier(source, actual, name)
                         })
                     }),
                 _ => None,
