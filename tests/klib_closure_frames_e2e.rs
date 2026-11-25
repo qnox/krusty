@@ -8,8 +8,14 @@ use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantic
 #[path = "klib_closure_frames_e2e/companion_private_members.rs"]
 mod companion_private_members;
 
+#[path = "klib_closure_frames_e2e/constructor_defaults.rs"]
+mod constructor_defaults;
+
 #[path = "klib_closure_frames_e2e/elvis_blocks.rs"]
 mod elvis_blocks;
+
+#[path = "klib_closure_frames_e2e/private_member_signatures.rs"]
+mod private_member_signatures;
 
 #[path = "klib_closure_frames_e2e/library_enums.rs"]
 mod library_enums;
@@ -19,6 +25,9 @@ mod file_private_function_receivers;
 
 #[path = "klib_closure_frames_e2e/local_superclass_arguments.rs"]
 mod local_superclass_arguments;
+
+#[path = "klib_closure_frames_e2e/thread_local_objects.rs"]
+mod thread_local_objects;
 
 #[path = "klib_closure_frames_e2e/top_level_properties.rs"]
 mod top_level_properties;

@@ -68,6 +68,8 @@ public final class Parcel {
     public boolean[] createBooleanArray() { return (boolean[]) next(); }
     public void writeCharArray(char[] value) { values.add(value == null ? null : value.clone()); }
     public char[] createCharArray() { return (char[]) next(); }
+    public void writeParcelable(Parcelable value, int flags) { values.add(value); }
+    public <T extends Parcelable> T readParcelable(ClassLoader loader) { return (T) next(); }
 }
 "#;
 
@@ -140,6 +142,17 @@ class Arrays(
     val chars: CharArray,
 ) : Parcelable
 
+enum class Color { RED, GREEN, BLUE }
+
+@Parcelize
+class Palette(val main: Color, val accent: Color?, val tag: String) : Parcelable
+
+@Parcelize
+class Inner(val x: Int) : Parcelable
+
+@Parcelize
+class Holder(val inner: Inner, val maybe: Inner?, val any: Parcelable, val maybeAny: Parcelable?) : Parcelable
+
 class Outer {
     @Parcelize
     class Point(val x: Int, val y: Long?) : Parcelable
@@ -206,13 +219,21 @@ fun box(): String {
     if (!arrays.doubles.contentEquals(doubleArrayOf(2.5, 3.5))) return "double array"
     if (!arrays.flags!!.contentEquals(booleanArrayOf(true, false))) return "boolean array"
     if (!arrays.chars.contentEquals(charArrayOf('a', 'b'))) return "char array"
+    val palette = roundTrip(Palette(Color.GREEN, null, "p"), Palette::class.java)
+    if (palette.main != Color.GREEN || palette.accent != null || palette.tag != "p") return "enum"
+    if (roundTrip(Palette(Color.BLUE, Color.RED, ""), Palette::class.java).accent != Color.RED) {
+        return "nullable enum"
+    }
+    val holder = roundTrip(Holder(Inner(1), null, Inner(2), Inner(3)), Holder::class.java)
+    if (holder.inner.x != 1 || holder.maybe != null) return "parcelable"
+    if ((holder.any as Inner).x != 2 || (holder.maybeAny as Inner).x != 3) return "parcelable interface"
     val users = creator(User::class.java).newArray(2)
     if (users.size != 2 || users[0] != null) return "newArray"
     return "OK"
 }
 "#;
 
-/// Strings, primitives (booleans, shorts, chars and unsigned integers and primitive arrays included) and their nullable forms, top-level and nested classes: `describeContents`,
+/// Strings, primitives (booleans, shorts, chars, unsigned integers, primitive arrays and enums included) and their nullable forms, top-level and nested classes: `describeContents`,
 /// `writeToParcel`, `CREATOR` and its local `Creator` class with their bridges, generic signature
 /// and debug tables match kotlinc's, and each class reads back what it wrote.
 #[test]

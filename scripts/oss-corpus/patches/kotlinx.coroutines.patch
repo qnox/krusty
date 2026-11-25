@@ -76,3 +76,15 @@ index 1948eb7..f0161d1 100644
 +
 +# Kotlin 2.4 deprecations are warnings, not errors, for the corpus build.
 +kotlin_Werror_override=disable
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index 423c613..9b8da91 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -6,7 +6,6 @@ pluginManagement {
+     }
+ 
+     repositories {
+-        maven(url = "https://maven.pkg.jetbrains.space/kotlin/p/dokka/dev/")
+         gradlePluginPortal()
+     }
+ }

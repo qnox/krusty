@@ -1068,8 +1068,6 @@ fn realize_class(
         .specialized_functions
         .get(&fid)
         .is_some_and(|specialization| specialization.consumed_inline_capture);
-    let inline_default = role.default;
-    let kotlin_lambda = role.lambda_origin.is_some() && role.sam.is_none();
     let sam = role.sam.clone();
     super::shared_captures::realize_lambda_capture_parameters(ir, fid, captures.len());
     let class = declare_class(ir, fid, site, signature, captures, role);
@@ -1169,9 +1167,7 @@ fn realize_class(
         .as_deref()
         .map_or_else(|| "invoke".to_string(), |target| target.method.clone());
     become_invoke(ir, fid, class, captures.len(), result, method);
-    if (inline_default.is_some() || kotlin_lambda || sam.is_some())
-        && site.function_type.mentions_ty_param()
-    {
+    if site.function_type.mentions_ty_param() {
         // The class captures the enclosing declaration's type parameters; its specialized
         // `invoke` does not redeclare them, but its method Signature still names those exact
         // identities.

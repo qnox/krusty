@@ -89,7 +89,8 @@ nothing is reported as unverified, not left out), the projects' tests that pass 
 what both builds cost, krusty's hotspots, and the Gradle and compiler plugins the corpus uses.
 Each `corpus-<project>` workflow artifact holds that project's comparison and logs. The `summary`
 artifact holds `summary.md` and `summary.json` for the results produced by this run; the job summary
-displays the same Markdown report. No table cell is empty: a project whose job left no comparison has no
+displays the same Markdown report, except that the page refuses more than 1 MiB: the per-project error
+listings, largest first, are then reduced to one line that points at `summary.md`. No table cell is empty: a project whose job left no comparison has no
 row and is listed under "Not measured" with why (the first failed build, Gradle's cause line, and the HTTP
 status of a failed download, read from the logs its job uploaded), a test run that cannot be compared is
 listed under its table, and totals are sentences below the tables. The run itself fails while any project
@@ -139,8 +140,11 @@ These projects carry a patch for that bump:
 - `kotlin`: the build compiles itself with a bootstrap compiler, by default a development build
   from JetBrains' bootstrap repository. The patch takes the bootstrap from Maven Central instead, at
   the version the pin (`bootstrap.kotlin.version` in `gradle.properties`) names, and turns Gradle's
-  dependency verification off, since its metadata lists only the default bootstrap's artifacts. The
-  pinned commit is the v2.4.21 tag, whose sources are Kotlin 2.4.
+  dependency verification off, since its metadata lists only the default bootstrap's artifacts. A
+  second pin, `kotlin-for-gradle-plugins-compilation` in `gradle/libs.versions.toml`, moves the
+  compiler that builds the modules its Gradle plugins load (2.2.21 at the tag) to the same release,
+  so both builds compile them with a release krusty supports. The pinned commit is the v2.4.21 tag,
+  whose sources are Kotlin 2.4.
 
 A project too large to build whole on one runner names a target set in `gradle/<name>.targets`: Gradle
 task paths, one per line. `corpusCompile` then builds only the listed tasks that are not tests, the

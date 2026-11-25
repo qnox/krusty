@@ -1198,7 +1198,7 @@ impl Emitter<'_> {
         value: Option<u32>,
     ) -> Option<String> {
         let value = value?;
-        if !matches!(self.ir.expr(value), IrExpr::UnitInstance) {
+        if !matches!(self.ir.expr(value), IrExpr::UnitInstance) || !self.lambda_body_returns() {
             return None;
         }
         if self.spliced_lambda_result_read(stmts, value)

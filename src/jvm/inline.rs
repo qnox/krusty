@@ -1599,25 +1599,28 @@ pub fn splice_unified(
         crate::trace_compiler!("splice", "body requires class reification — not spliceable");
         return None;
     }
-    // `assert` is a codegen INTRINSIC, not a normal inline: kotlinc guards it on a synthetic per-class
-    // `$assertionsDisabled` field (or elides it per `-Xassertions`/`ASSERTIONS_MODE`), and when disabled
-    // does NOT even evaluate the argument. Splicing its library body (which reads `kotlin/_Assertions.
-    // ENABLED`) reproduces neither — refuse a body that READS such a field (this method, not the whole
-    // class pool, which `require`/`check` share with `assert`), leaving the call unresolved (skip).
-    if insns.iter().any(|i| {
-        let Insn::Plain { op: 0xb2, operands } = i else {
+    // A body compiled under `-Xassertions=jvm` reads its own class's synthetic `$assertionsDisabled`,
+    // a field kotlinc moves to the calling class. Spliced bytes would keep reading the callee's
+    // package-private copy, so such a body is not spliceable. `kotlin/_Assertions.ENABLED`, which
+    // the stdlib's own `assert` reads, is a public field and splices like any other read.
+    if insns.iter().any(|insn| {
+        let Insn::Plain { op: 0xb2, operands } = insn else {
             return false;
-        }; // getstatic
-        let Some(idx) = operands
+        };
+        let Some(index) = operands
             .first()
             .zip(operands.get(1))
-            .map(|(a, b)| (*a as u16) << 8 | *b as u16)
+            .map(|(high, low)| (*high as u16) << 8 | *low as u16)
         else {
             return false;
         };
-        matches!(body.source_cp.get(idx as usize), Some(C::Fieldref(ci, _))
-            if class_name(&body.source_cp, *ci).is_some_and(|n| n.contains("_Assertions")))
+        matches!(body.source_cp.get(index as usize), Some(C::Fieldref(_, signature))
+            if name_and_type(&body.source_cp, *signature) == Some(("$assertionsDisabled", "Z")))
     }) {
+        crate::trace_compiler!(
+            "splice",
+            "body reads its class's assertion status — not spliceable"
+        );
         return None;
     }
     // Decode input frames against the ORIGINAL body, keyed by old instruction index. They are used
