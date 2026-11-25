@@ -1144,7 +1144,8 @@ fn imported_object_extension_property_write_keeps_its_selected_singleton_dispatc
 #[test]
 fn companion_extension_properties_keep_associated_targets_without_runtime_receivers() {
     let (body, index) = checked_function_body(
-        "class C\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+         class C\n\
          companion val C.readonly = \"O\"\n\
          companion var C.mutable = \"\"\n\
          companion fun C.getOk(): String { mutable = \"K\"; return readonly + mutable }\n",
@@ -1195,7 +1196,8 @@ fn companion_extension_properties_keep_associated_targets_without_runtime_receiv
 #[test]
 fn classifier_qualified_companion_property_write_has_no_runtime_receiver() {
     let (body, index) = checked_function_body(
-        "class C\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+         class C\n\
          companion var C.mutable: String = \"\"\n\
          fun write() { C.mutable = \"OK\" }\n",
         "write",
