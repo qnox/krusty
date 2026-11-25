@@ -1,3 +1,5 @@
+// TARGET_BACKEND: JVM_IR
+// PLATFORM-SPECIFIC: `-Xstring-concat` and the `StringConcatFactory` argument limit are JVM only.
 // JVM_TARGET: 11
 // STRING_CONCAT: indy
 // A template whose argument slots cross the bootstrap's limit of 200 (a `long` and a `double` take
