@@ -10,7 +10,7 @@
 //! runtime decides from the descriptor, and the pair of loops in
 //! `an_interface_typed_receiver_iterates_whichever_it_holds` is that decision's whole point.
 
-use super::common::expect_native_box;
+use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
 #[test]
 fn a_for_loop_walks_a_list_in_order() {
@@ -418,6 +418,13 @@ fn an_indexed_value_is_a_data_class() {
         "IndexedValueIsAData",
         "OK",
     );
+}
+
+#[test]
+fn a_written_indexed_value_constructor_builds_the_walks_carrier() {
+    let source = include_str!("box_regressions/indexedValueConstructor.kt");
+    expect_box_ok_with_stdlib(source, "WrittenIndexedValue");
+    expect_native_box(source, "WrittenIndexedValue", "OK");
 }
 
 #[test]

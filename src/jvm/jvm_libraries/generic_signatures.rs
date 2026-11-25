@@ -516,6 +516,19 @@ impl JvmLibraries {
     }
 }
 
+/// Whether `ty` still mentions a type parameter anywhere in its structure.
+fn has_free_ty_params(ty: Ty) -> bool {
+    match ty.kind() {
+        TyKind::TyParam(..) => true,
+        TyKind::Fun(sig) => {
+            sig.params.iter().any(|param| has_free_ty_params(*param)) || has_free_ty_params(sig.ret)
+        }
+        TyKind::Obj(_, args) => args.iter().any(|arg| has_free_ty_params(*arg)),
+        TyKind::Nullable(inner) => has_free_ty_params(inner),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod class_formal_bound_tests {
     use super::*;
