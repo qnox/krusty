@@ -42,6 +42,40 @@ fn mapped_builtin_property_and_function_calls_match_kotlinc_bytes() {
 }
 
 #[test]
+fn a_source_superclass_suspend_member_leaves_the_mutable_declaration_its_stub_byte_for_byte() {
+    // The suspend `clear()` sits on a source superclass of the `Map` implementer, abstract in one
+    // class and with a body in the other: neither implements `MutableMap.clear()`, so kotlinc
+    // writes the throwing `clear()` stub on the subclass beside the inherited suspend member.
+    for (tag, member) in [
+        (
+            "SuspendSuperAbstractClearStubBytes",
+            "abstract suspend fun clear()",
+        ),
+        (
+            "SuspendSuperBodiedClearStubBytes",
+            "open suspend fun clear() {}",
+        ),
+    ] {
+        let source = format!(
+            "abstract class {tag}Base {{\n\
+            \x20   {member}\n\
+            }}\n\
+            abstract class {tag}<K : Any, V : Any> : {tag}Base(), Map<K, V> {{\n\
+            \x20   override val entries: Set<Map.Entry<K, V>> get() = TODO()\n\
+            \x20   override val keys: Set<K> get() = TODO()\n\
+            \x20   override val size: Int get() = TODO()\n\
+            \x20   override val values: Collection<V> get() = TODO()\n\
+            \x20   override fun isEmpty(): Boolean = TODO()\n\
+            \x20   override fun get(key: K): V? = TODO()\n\
+            \x20   override fun containsValue(value: V): Boolean = TODO()\n\
+            \x20   override fun containsKey(key: K): Boolean = TODO()\n\
+            }}\n"
+        );
+        assert_byte_equal(tag, &source, tag);
+    }
+}
+
+#[test]
 fn suspend_member_leaves_the_mutable_declaration_its_stub_byte_for_byte() {
     // `suspend fun clear()` takes a continuation, so it does not implement `MutableMap.clear()`:
     // kotlinc still writes the throwing `clear()` stub beside it.
