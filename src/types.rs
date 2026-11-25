@@ -62,7 +62,7 @@ pub(crate) use raw_erasure::{formal_erasures, raw_member_type, DeclaredFormals};
 mod thin_handles;
 mod ty_kind;
 mod ty_table;
-pub use krusty_names::{
+pub use krusty_core::{
     existing_type_name, existing_type_name_child, existing_type_name_in,
     existing_type_name_nested_child, insert_type_name_in, same, type_name, type_name_child,
     type_name_from, type_name_from_multifile_facade, type_name_nested_child, InternalName,
