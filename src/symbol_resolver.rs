@@ -803,6 +803,8 @@ pub struct SymbolResolver<'a> {
     type_variables: &'a [TyParamName],
     /// `+EagerLambdaAnalysis` in the calling file: a lambda's checked result decides applicability.
     eager_lambda_results: bool,
+    /// `+CompanionExtensions` in the calling file: written companion extensions are nameable.
+    companion_extensions: bool,
     /// The access site's member visibility ([`MemberAccessSite`]), when the caller has a site.
     member_access: Option<&'a dyn MemberAccessSite>,
 }

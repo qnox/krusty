@@ -564,7 +564,7 @@ impl SymbolResolver<'_> {
         classifier: TypeName,
         name: &str,
     ) -> (Vec<FunctionInfo>, Vec<PropertyInfo>) {
-        let Some(scope) = self.fn_scope else {
+        let Some(scope) = self.fn_scope.filter(|_| self.companion_extensions) else {
             return Default::default();
         };
         let mut functions = Vec::new();

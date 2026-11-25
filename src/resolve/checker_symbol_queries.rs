@@ -17,6 +17,7 @@ impl Checker<'_> {
             self.access_context_class_names(),
         )
         .with_eager_lambda_results(self.file.language.eager_lambda_analysis)
+        .with_companion_extensions(self.file.language.companion_extensions)
         .with_member_access(self)
     }
 

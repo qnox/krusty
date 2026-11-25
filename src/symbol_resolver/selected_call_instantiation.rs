@@ -60,6 +60,12 @@ impl<'a> SymbolResolver<'a> {
         self
     }
 
+    /// Let the calling file name written companion extensions, as `+CompanionExtensions` does.
+    pub(crate) fn with_companion_extensions(mut self, enabled: bool) -> Self {
+        self.companion_extensions = enabled;
+        self
+    }
+
     /// Tracking form used by synthesized language conventions. It preserves ambiguity and the exact
     /// specialized return beside the selected declaration so the checker can commit one target and
     /// lowering never has to repeat receiver or overload resolution.
