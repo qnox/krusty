@@ -166,7 +166,6 @@ classes/kt2566_2.kt
 classes/kt3001.kt
 classes/typedDelegation.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
-collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collections/clashWithInternalMapMethod.kt
 collections/inheritFromAbstractMutableListInt.kt
