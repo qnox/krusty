@@ -4372,6 +4372,9 @@ struct Emitter<'a> {
     suspend_lambda_parameter_reads: HashSet<krusty::ir::ExprId>,
     /// Function-value invocations whose consumer takes `invoke`'s erased `Object` as it is.
     erased_invocations: HashSet<krusty::ir::ExprId>,
+    /// Signature-polymorphic calls being emitted as statements, which the JVM resolves against a
+    /// `void` result.
+    discarded_polymorphic_calls: HashSet<krusty::ir::ExprId>,
     /// Values held boxed in an erased slot whose semantic type is this built-in primitive: an
     /// inlined type-parameter value (`b.also { }`). A read unboxes the value.
     boxed_scalar_values: HashMap<u32, Ty>,
@@ -4553,6 +4556,7 @@ impl<'a> Emitter<'a> {
             transformed_suspensions: Default::default(),
             suspend_lambda_parameter_reads: HashSet::default(),
             erased_invocations: HashSet::default(),
+            discarded_polymorphic_calls: HashSet::default(),
             boxed_scalar_values: inline_body_emission::collect_boxed_scalar_values(
                 ir,
                 roots.iter().copied(),

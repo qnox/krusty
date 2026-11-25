@@ -107,6 +107,7 @@ fn realize_expressions(
     let dispatch_classifiers =
         crate::member_dispatch::CheckedDispatchClassifiers::new(ir, classifiers);
     let expression_count = ir.exprs.len();
+    let polymorphic_casts = super::signature_polymorphic_calls::cast_targets(ir);
     let mut realized_calls = Vec::new();
     for index in 0..expression_count {
         if !realized.includes(index, &ir.exprs[index], callables) {
@@ -1017,6 +1018,56 @@ fn realize_expressions(
                 detail,
             })?;
         }
+        let mut declared_params = declared_params;
+        let mut descriptor = descriptor;
+        let mut semantic_ret = semantic_ret;
+        let mut polymorphic_result = None;
+        if super::signature_polymorphic_calls::is_signature_polymorphic(&callable) {
+            if kind != ExternalCallableKind::Member || !defaults.is_empty() {
+                return Err(target.into());
+            }
+            let operands = match &ir.exprs[index] {
+                IrExpr::Call { args, .. } => args.clone(),
+                _ => unreachable!(),
+            };
+            let polymorphic = super::signature_polymorphic_calls::realize(
+                ir,
+                &operands,
+                callable.physical_ret,
+                polymorphic_casts
+                    .get(&expression)
+                    .map(|(_, target)| *target),
+            )
+            .map_err(|detail| ExternalRealizationError::Arguments {
+                target: target.into(),
+                detail: format!(
+                    "call {expression} ({}.{}) {detail}",
+                    callable.physical_owner.render(),
+                    physical_name
+                ),
+            })?;
+            descriptor = polymorphic.descriptor;
+            declared_params = Some(polymorphic.parameters.into_boxed_slice());
+            inline_modifiers = Box::new([]);
+            if polymorphic.result != callable.physical_ret {
+                semantic_ret = polymorphic.result;
+                ir.set_logical_type(expression, polymorphic.result);
+                // The instruction returns the cast's type, so the cast is nothing more: kotlinc
+                // drops it, and its null check with it.
+                if let Some((cast, _)) = polymorphic_casts.get(&expression) {
+                    ir.exprs[*cast as usize] = IrExpr::TypeOp {
+                        op: krusty::ir::IrTypeOp::ImplicitCoercion,
+                        arg: expression,
+                        type_operand: polymorphic.result,
+                    };
+                }
+            }
+            polymorphic_result = Some(polymorphic.result);
+            let IrExpr::Call { args, .. } = &mut ir.exprs[index] else {
+                unreachable!()
+            };
+            *args = polymorphic.arguments;
+        }
         let mut extension_receiver_at = None;
         let annotation_receiver = match &ir.exprs[index] {
             IrExpr::Call {
@@ -1033,7 +1084,7 @@ fn realize_expressions(
         else {
             unreachable!()
         };
-        let mut physical_result = callable.physical_ret;
+        let mut physical_result = polymorphic_result.unwrap_or(callable.physical_ret);
         let selected_intrinsic = match callable.compiler_intrinsic {
             Some(krusty::libraries::CompilerIntrinsic::StringPlus) => {
                 unreachable!("a String.plus call is realized as a concatenation above")
@@ -1535,6 +1586,14 @@ fn realize_expressions(
             inline_modifiers,
         )?;
         let realized_call = bridge_external_result(ir, index, physical_result, semantic_ret);
+        if polymorphic_result.is_some_and(|result| {
+            krusty::jvm::names::type_descriptor(result)
+                == krusty::jvm::names::type_descriptor(krusty::types::Ty::obj_name(
+                    krusty::types::wk::java_object(),
+                ))
+        }) {
+            default_call_operands.record_polymorphic_object_result(realized_call);
+        }
         record_protected_dependency_call(ir, realized_call, &callable);
         if let Some(role) = semantic_role {
             ir.semantic_call_roles.insert(realized_call, role);
