@@ -4,14 +4,16 @@ impl Parser<'_> {
     /// Parses the entry list of an enum body up to the `;` that starts its members.
     pub(super) fn parse_enum_entries(&mut self, name: &str) -> Vec<AstEnumEntry> {
         let mut entries: Vec<AstEnumEntry> = Vec::new();
+        // The gap in front of an entry starts where the previous entry, with the comments that
+        // trail it, ends, or after the token that opens the body.
+        let mut gap_start = self
+            .i
+            .checked_sub(1)
+            .map_or(0, |previous| self.t[previous].span.hi);
         loop {
-            let previous_end = self
-                .i
-                .checked_sub(1)
-                .map_or(0, |previous| self.t[previous].span.hi);
             let entry_start = comment_binding::leading_start(
                 self.src,
-                previous_end,
+                gap_start,
                 self.syntactic_ident_span(self.tok()).lo,
             );
             let (entry_ann_names, entry_ann_args) = self.parse_enum_entry_prefix();
@@ -122,6 +124,7 @@ impl Parser<'_> {
                 self.syntactic_ident_span(self.t[self.i.saturating_sub(1)])
                     .hi,
             );
+            gap_start = entry_end;
             entries.push(AstEnumEntry {
                 name: entry_name,
                 span: entry_span,
@@ -177,78 +180,62 @@ mod tests {
             .collect()
     }
 
-    /// Every expectation below is the text of the entry's PSI element as kotlinc's parser builds it,
-    /// read through the Analysis API's standalone session.
-    fn assert_entries(source: &str, expected: &[(&str, &str)]) {
+    /// Each fixture is a source with, for every entry, the text of its PSI element as kotlinc
+    /// builds it. `tools/krusty-analysis-api` checks the same files against kotlinc's parser.
+    fn assert_matches_psi(source: &str, expected: &str) {
         let expected = expected
-            .iter()
-            .map(|(name, text)| (name.to_string(), text.to_string()))
+            .lines()
+            .map(|line| {
+                let (name, text) = line.split_once('\t').expect("a name and a text");
+                (name.to_string(), unescape(text))
+            })
             .collect::<Vec<_>>();
         assert_eq!(entry_texts(source), expected);
     }
 
-    #[test]
-    fn range_covers_annotations_arguments_body_and_the_separator() {
-        assert_entries(
-            "enum class E(val v: Int) {\n    /** doc */\n    A(1),\n    @Deprecated(\"x\") B(2) { },\n    // c\n    C(3), `in`,\n    D;\n    fun f() = 1\n}\n",
-            &[
-                ("A", "/** doc */\n    A(1),"),
-                ("B", "@Deprecated(\"x\") B(2) { },"),
-                ("C", "// c\n    C(3),"),
-                ("in", "`in`,"),
-                ("D", "D;"),
-            ],
-        );
+    fn unescape(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(character) = chars.next() {
+            if character != '\\' {
+                out.push(character);
+                continue;
+            }
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some(other) => out.push(other),
+                None => out.push('\\'),
+            }
+        }
+        out
     }
 
-    #[test]
-    fn comments_lead_the_next_entry_from_the_line_after_the_previous_token() {
-        assert_entries(
-            "enum class E {\n    A, // trailing a\n    // own line b\n    B,\n\n    // after blank\n    C,\n    /* block */ D,\n    /** kdoc */\n\n    E1, // t\n    F // t2\n    ;\n}\n",
-            &[
-                ("A", "A, // trailing a"),
-                ("B", "// own line b\n    B,"),
-                ("C", "// after blank\n    C,"),
-                ("D", "/* block */ D,"),
-                ("E1", "/** kdoc */\n\n    E1, // t"),
-                ("F", "F // t2\n    ;"),
-            ],
-        );
+    macro_rules! psi_fixtures {
+        ($($name:ident),+ $(,)?) => {$(
+            #[test]
+            fn $name() {
+                assert_matches_psi(
+                    include_str!(concat!("../../tests/psi_ranges/enum_entries/", stringify!($name), ".kt")),
+                    include_str!(concat!("../../tests/psi_ranges/enum_entries/", stringify!($name), ".expected")),
+                );
+            }
+        )+};
     }
 
-    #[test]
-    fn same_line_comments_stay_with_the_entry_before_them() {
-        assert_entries(
-            "enum class E { // c0\n    A /* x */, /* y */ B, // tb\n    /* z */ C /* w */ ; // after semi\n    fun f() = 1\n}\n",
-            &[
-                ("A", "A /* x */, /* y */"),
-                ("B", "B, // tb"),
-                ("C", "/* z */ C /* w */ ; // after semi"),
-            ],
-        );
-    }
-
-    #[test]
-    fn an_entry_without_a_separator_keeps_its_trailing_comment() {
-        assert_entries(
-            "enum class E {\n    A, B // t\n}\n",
-            &[("A", "A,"), ("B", "B // t")],
-        );
-        assert_entries(
-            "enum class F {\n    A, B /* u */ }\n",
-            &[("A", "A,"), ("B", "B /* u */")],
-        );
-    }
-
-    #[test]
-    fn escaped_entry_names_keep_their_backticks() {
-        assert_entries(
-            "enum class E { `in`, `is`(1), @Deprecated(\"x\") `fun` }",
-            &[
-                ("in", "`in`,"),
-                ("is", "`is`(1),"),
-                ("fun", "@Deprecated(\"x\") `fun`"),
-            ],
-        );
-    }
+    psi_fixtures!(
+        separators_and_bodies,
+        comments_around_entries,
+        same_line_comments,
+        last_entry_trailing_line_comment,
+        last_entry_trailing_block_comment,
+        escaped_names,
+        comment_before_blank_line,
+        kdoc_after_plain_comment,
+        only_comments_after_last_blank_line,
+        comma_then_semicolon,
+        comment_adjacent_to_brace,
+        kdoc_trailing_previous_entry,
+    );
 }
