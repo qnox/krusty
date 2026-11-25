@@ -207,20 +207,6 @@ fn updater_function(
     })
 }
 
-/// The functions of a field updater class [`updater_function`] can name.
-const UPDATER_FUNCTIONS: [&str; 10] = [
-    "get",
-    "set",
-    "compareAndSet",
-    "getAndSet",
-    "getAndIncrement",
-    "getAndDecrement",
-    "incrementAndGet",
-    "decrementAndGet",
-    "getAndAdd",
-    "addAndGet",
-];
-
 /// The operations an atomic's surface names, by name and argument count.
 const SURFACE_OPERATIONS: [(&str, usize); 11] = [
     ("value", 0),
@@ -850,46 +836,21 @@ mod requirement_tests {
     use super::*;
 
     #[test]
-    fn every_updater_function_the_lowering_names_is_declared() {
-        for (name, arguments) in [
-            ("value", 0),
-            ("value", 1),
-            ("lazySet", 1),
-            ("compareAndSet", 2),
-            ("getAndSet", 1),
-            ("getAndIncrement", 0),
-            ("getAndDecrement", 0),
-            ("incrementAndGet", 0),
-            ("decrementAndGet", 0),
-            ("getAndAdd", 1),
-            ("addAndGet", 1),
-        ] {
-            let (function, _, _) = updater_function(name, arguments, Ty::Int).unwrap();
-            assert!(
-                UPDATER_FUNCTIONS.contains(&function),
-                "`{function}` is not a declared updater function"
-            );
-        }
-        for function in UPDATER_FUNCTIONS {
-            assert!(
-                [
-                    "value",
-                    "lazySet",
-                    "compareAndSet",
-                    "getAndSet",
-                    "getAndIncrement",
-                    "getAndDecrement",
-                    "incrementAndGet",
-                    "decrementAndGet",
-                    "getAndAdd",
-                    "addAndGet"
-                ]
-                .iter()
-                .any(|name| (0..=2).any(|n| {
-                    updater_function(name, n, Ty::Int).is_some_and(|(f, _, _)| f == function)
-                })),
-                "`{function}` is declared but never named"
-            );
+    fn the_requirements_are_every_updater_function_the_lowering_binds() {
+        let required = requirements();
+        // `newUpdater` plus the ten distinct updater functions the surface operations name, for
+        // each of the two atomic value types.
+        assert_eq!(required.len(), 2 * (1 + 10));
+        for value in [AtomicValue::Int, AtomicValue::Long] {
+            assert!(required.contains(&new_updater_function(value).requirement()));
+            for (name, arguments) in SURFACE_OPERATIONS {
+                let function = updater_member_function(value, name, arguments).unwrap();
+                assert!(
+                    required.contains(&function.requirement()),
+                    "undeclared: {}",
+                    function.described()
+                );
+            }
         }
     }
 }
