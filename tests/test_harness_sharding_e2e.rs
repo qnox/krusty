@@ -808,20 +808,12 @@ fn a_pool_over_budget_stops_another_pools_idle_server_to_make_room() {
     let first = super::ServerPool::resident(&budget, 2000);
     let second = super::ServerPool::resident(&budget, 2000);
     first
-        .with_server(
-            1,
-            || Some(StoppedCounter(Arc::clone(&stopped))),
-            |_| (),
-        )
+        .with_server(1, || Some(StoppedCounter(Arc::clone(&stopped))), |_| ())
         .expect("first pool's server");
     assert_eq!(stopped.load(Ordering::SeqCst), 0);
 
     second
-        .with_server(
-            1,
-            || Some(StoppedCounter(Arc::clone(&stopped))),
-            |_| (),
-        )
+        .with_server(1, || Some(StoppedCounter(Arc::clone(&stopped))), |_| ())
         .expect("second pool's server");
 
     assert_eq!(
@@ -937,7 +929,11 @@ fn the_default_budget_leaves_the_test_process_and_the_machine_their_memory() {
 
     assert_eq!(default_limit_mib(7782), 4198, "a 7.6 GiB CI runner");
     assert_eq!(default_limit_mib(16100), 9660, "a 16 GiB workstation");
-    assert_eq!(default_limit_mib(2000), 0, "a host too small for any server");
+    assert_eq!(
+        default_limit_mib(2000),
+        0,
+        "a host too small for any server"
+    );
 }
 
 #[test]
