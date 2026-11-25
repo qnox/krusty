@@ -27,7 +27,6 @@ mod default_value;
 mod dependency_access_policy;
 mod dependency_body_contract;
 mod dependency_body_modifiers;
-
 pub mod function_classifiers;
 mod generic_signature;
 mod inline_body;
