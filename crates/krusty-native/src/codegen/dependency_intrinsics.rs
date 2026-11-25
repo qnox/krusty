@@ -14,6 +14,9 @@ pub(super) enum DependencyOperation {
     /// protocol answers it through the receiver's descriptor, as it answers `Iterator.next`.
     PrimitiveIteratorNext,
     ResultFailureException,
+    /// The stdlib's assertion switches, which the build answers: off, as in kotlinc-native's
+    /// default build.
+    AssertionSwitch,
 }
 
 pub(super) fn operation_plan(operation: CompilerIntrinsic) -> Option<DependencyOperation> {
@@ -30,6 +33,7 @@ pub(super) fn operation_plan(operation: CompilerIntrinsic) -> Option<DependencyO
         CompilerIntrinsic::ResultFailureException => {
             Some(DependencyOperation::ResultFailureException)
         }
+        CompilerIntrinsic::AssertionSwitch => Some(DependencyOperation::AssertionSwitch),
         _ => None,
     }
 }
@@ -62,6 +66,14 @@ mod tests {
         for &target in NativeTarget::ALL {
             assert!(CraneliftBackend::new(target)
                 .realizes_dependency_intrinsic(CompilerIntrinsic::StringPlus));
+        }
+    }
+
+    #[test]
+    fn klib_assertion_switches_are_a_native_dependency_capability() {
+        for &target in NativeTarget::ALL {
+            assert!(CraneliftBackend::new(target)
+                .realizes_dependency_intrinsic(CompilerIntrinsic::AssertionSwitch));
         }
     }
 

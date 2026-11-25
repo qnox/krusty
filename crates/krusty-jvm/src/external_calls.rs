@@ -1123,6 +1123,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::StringLength
                 | krusty::libraries::CompilerIntrinsic::Assert { .. }
                 | krusty::libraries::CompilerIntrinsic::AssertFailsWith
+                | krusty::libraries::CompilerIntrinsic::AssertionSwitch
                 | krusty::libraries::CompilerIntrinsic::Print
                 | krusty::libraries::CompilerIntrinsic::Println
                 | krusty::libraries::CompilerIntrinsic::StartCoroutine
