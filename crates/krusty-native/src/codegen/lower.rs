@@ -363,7 +363,7 @@ pub fn lower_file(
         extension_tables: HashMap::default(),
         published_dependency_bridges: HashMap::default(),
         module: &mut module,
-        symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
+        symbols: super::super::symbols::symbols(ir, module_name, source, runtime_symbols.clone()),
         model: class_model,
         functions: Vec::new(),
         imports: imported_functions::ImportedFunctions::new(imported_abis),

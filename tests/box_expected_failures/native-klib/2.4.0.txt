@@ -205,7 +205,6 @@ constants/comparisonTrue.kt
 constants/float.kt
 contextParameters/contextPropertyInInterface.kt
 contextParameters/explicitPassing.kt
-contextParameters/inlineAnonymousParameter.kt
 contextParameters/kt51863.kt
 contracts/contractForCast.kt
 contracts/isNullString.kt
@@ -219,7 +218,6 @@ controlStructures/breakContinueInExpressions/inlinedBreakContinue/initializerBlo
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/inlineFunctionWithMultipleParameters.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/lambdaPassedToInlineFunction.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/loopWithinInlineFunction.kt
-controlStructures/breakContinueInExpressions/kt17384.kt
 controlStructures/factorialTest.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNameBasedDestructuringShortForm.kt
 controlStructures/forInCharSequenceWithIndex/forInCharSequenceWithIndexNameBasedDestructuringShortForm.kt
@@ -530,7 +528,6 @@ dataflow/scope1.kt
 dataflow/uninitialized_val.kt
 deadCodeElimination/emptyVariableRange.kt
 defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
-defaultArguments/function/defaultLambdaInline.kt
 delegatedProperty/callableReferenceAsSecondArgumentOfDelegate.kt
 delegatedProperty/correctFieldsOrder.kt
 delegatedProperty/delegateForExtPropertyInClass.kt
@@ -655,7 +652,6 @@ functions/bigArity/instanceOfCallableReference.kt
 functions/bigArity/subclass.kt
 functions/delegatedPropertyWithMultipleOverriddens_generics.kt
 functions/delegatedPropertyWithMultipleOverriddens_noGenerics.kt
-functions/kt47449.kt
 functions/localFunctions/callInlineLocalInLambda.kt
 functions/localFunctions/definedWithinLambda.kt
 functions/localFunctions/definedWithinLambdaInnerUsage1.kt
@@ -782,7 +778,6 @@ inline/propertyAccessorInline.kt
 inline/redundantCoercionsCleaner.kt
 inline/redundantCoercionsCleanerKT48876.kt
 inline/redundantCoercionsCleanerKT49356.kt
-inline/rootConstructor.kt
 inline/safeCall.kt
 inline/sharedVar.kt
 inline/simpleReturnFunctionWithResultUnused.kt
