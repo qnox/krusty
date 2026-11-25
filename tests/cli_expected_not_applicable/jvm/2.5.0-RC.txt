@@ -7,8 +7,6 @@
 # AbstractCliTest passes the .env text through kotlin.language.settings, which CLICompiler reads
 # only when its class path carries LanguageVersionSettings.RESOURCE_NAME_TO_ALLOW_READING_FROM_ENVIRONMENT.
 # A release dist does not, so no released compiler reads it.
-hmpp/intermediateHasNonExistentDependency.args
-hmpp/jvmDependenciesInCommonClasspath_friendsWithKlib.args
 readingConfigFromEnvironment/appendingArgs.args
 readingConfigFromEnvironment/overridingArgs.args
 readingConfigFromEnvironment/overridingLv.args

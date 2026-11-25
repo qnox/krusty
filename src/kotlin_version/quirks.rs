@@ -170,6 +170,15 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: true,
     }
+    /// A class's static state initializes with its `companion object` first: the companion is
+    /// constructed, then every `companion { }` block property of the class is stored, then the
+    /// companion's initializer body runs. From 2.5 kotlinc initializes in program order: the block
+    /// properties written before the `companion object`, the companion, then the ones after it.
+    ClassStaticsInitializeBeforeCompanionBody {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
     /// A `tailrec` function's recursive infix call or operator expression is reported at the infix
     /// name or the operator token. From 2.5 the position is the start of the whole expression,
     /// as wide as the function's name.

@@ -15,6 +15,7 @@ pub mod compilation_inputs;
 pub mod emission_readiness;
 pub mod emit_modes;
 mod facade_registration;
+pub mod fragment_library;
 pub mod function_classifiers;
 pub mod inline;
 pub mod inline_class;
