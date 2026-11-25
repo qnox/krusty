@@ -46,10 +46,11 @@ fn selected_anonymous_member_effect_constrains_postponed_receiver_lambda() {
 }
 
 #[test]
-fn retained_builder_receiver_capture_publishes_the_completed_builder_solution() {
+fn retained_builder_receiver_capture_records_the_completed_builder_solution() {
     // The anonymous object captures the builder receiver while `build`'s `T` is still the
-    // postponed call's variable. Pass 1 publishes that capture with the solution the signature
-    // graph completed the lambda with, never with the variable or its bound.
+    // postponed call's variable. The retained analysis records that capture with the solution the
+    // signature graph completed the lambda with, never with the variable or its bound. The object
+    // is not owned by an inline body, so its capture storage stays out of the Pass-1 index.
     let inputs = [SourceInput::kotlin(
         r#"class Buildee<T : Any> {
             fun consume(value: T) {}
@@ -77,19 +78,23 @@ fn retained_builder_receiver_capture_publishes_the_completed_builder_solution() 
     let index = analysis
         .streamed
         .as_ref()
-        .expect("the retained capture must finalize in Pass 1")
+        .expect("the module must finalize in Pass 1")
         .module
         .index();
-    let captures = (0..index.declaration_count())
-        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
-        .filter(|declaration| index.declaration_name(*declaration) == Some("this$receiver"))
-        .map(|declaration| {
-            index
-                .signature(declaration)
-                .expect("capture signature")
-                .result
-                .get()
-        })
+    assert_eq!(
+        (0..index.declaration_count())
+            .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+            .filter(|declaration| index.declaration_name(*declaration) == Some("this$receiver"))
+            .count(),
+        0,
+    );
+    let captures = analysis
+        .symbols
+        .anonymous_object_captures
+        .values()
+        .flatten()
+        .filter(|capture| capture.name == "this$receiver")
+        .map(crate::resolve::AnonymousObjectCapture::stored_ty)
         .collect::<Vec<_>>();
     assert_eq!(captures, vec![Ty::obj_args("Buildee", &[Ty::String])]);
 }

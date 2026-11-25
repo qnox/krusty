@@ -16,14 +16,28 @@ impl<'a> BodyLowering<'a> {
         // The superclass constructor's arguments read the constructor's own parameters, which the
         // initialization frame numbers as the constructor does.
         if let Some(superclass) = &plan.superclass {
-            let arguments = superclass
+            let mut arguments = Vec::with_capacity(superclass.arguments.len());
+            let mut omitted = Vec::new();
+            for (ordinal, (argument, &ty)) in superclass
                 .arguments
                 .iter()
-                .map(|&argument| self.expression(argument))
-                .collect::<Lowered<Vec<_>>>()?;
+                .zip(&superclass.params)
+                .enumerate()
+            {
+                arguments.push(match *argument {
+                    Some(argument) => self.expression(argument)?,
+                    None => self.omitted_argument(ordinal, ty, &mut omitted),
+                });
+            }
+            let classifier = self.ir.classes[class as usize].fq_name_id();
             let declaration = &mut self.ir.classes[class as usize];
             if plan.primary {
                 declaration.super_args = arguments;
+                if !omitted.is_empty() {
+                    self.ir
+                        .super_constructor_default_arguments
+                        .insert(classifier, omitted);
+                }
             } else {
                 // The secondary constructor this initialization is for declares exactly its
                 // parameters; Kotlin declares no two constructors of a class with the same ones.
@@ -36,6 +50,7 @@ impl<'a> BodyLowering<'a> {
                         mismatch("a secondary constructor's initialization has no constructor")
                     })?;
                 secondary.delegate_args = arguments;
+                secondary.default_parameters = omitted;
             }
         }
         let mut stmts = Vec::new();
@@ -76,7 +91,7 @@ impl<'a> BodyLowering<'a> {
         class: ClassId,
         secondary: usize,
         member: &super::super::body_unit::MemberClass<'a>,
-        arguments: &[crate::metadata::klib_ir::tree::KlibIrExprId],
+        arguments: &[Option<crate::metadata::klib_ir::tree::KlibIrExprId>],
         statements: &'a [KlibIrStatement],
     ) -> Lowered<ExprId> {
         let declared = &self.ir.classes[class as usize];
@@ -110,13 +125,28 @@ impl<'a> BodyLowering<'a> {
         ));
         // The arguments read the constructor's own parameters, which this frame numbers as the
         // constructor does.
-        let arguments = arguments
-            .iter()
-            .zip(target)
-            .map(|(&argument, ty)| self.operand(argument, ty))
-            .collect::<Lowered<Vec<_>>>()?;
-        self.ir.classes[class as usize].secondary_ctors[secondary].delegate_args = arguments;
+        let mut lowered = Vec::with_capacity(arguments.len());
+        let mut omitted = Vec::new();
+        for (ordinal, (argument, ty)) in arguments.iter().zip(target).enumerate() {
+            lowered.push(match *argument {
+                Some(argument) => self.operand(argument, ty)?,
+                None => self.omitted_argument(ordinal, ty, &mut omitted),
+            });
+        }
+        let delegating = &mut self.ir.classes[class as usize].secondary_ctors[secondary];
+        delegating.delegate_args = lowered;
+        delegating.default_parameters = omitted;
         self.body(statements)
+    }
+
+    /// The operand of a delegation's parameter `ordinal` of type `ty` it leaves to the
+    /// constructor's default, recorded among the `omitted` ordinals: the delegation is rewritten
+    /// to reach the constructor's default-argument entry, which fills it.
+    fn omitted_argument(&mut self, ordinal: usize, ty: Ty, omitted: &mut Vec<u32>) -> ExprId {
+        omitted.push(u32::try_from(ordinal).expect("a parameter ordinal fits u32"));
+        let absent = self.ir.add_expr(IrExpr::AbsentArgument { ty });
+        self.ir.set_logical_type(absent, ty);
+        absent
     }
 
     /// Field stores and anonymous initializers of a same-library file-local class, in member order.

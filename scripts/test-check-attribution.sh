@@ -43,6 +43,24 @@ strips "cursor and the rule footer" \
   $'Summary.\n'
 strips "other div kept" $'Summary.\n\n<div><a href="https://example.com/">x</a></div>\n' $'Summary.\n\n<div><a href="https://example.com/">x</a></div>\n'
 
+robot='🤖 Generated with [Claude Code](https://claude.com/claude-code)'
+session='https://claude.ai/code/session_01AbC'
+strips "robot footer and session link" $'Summary.\n\n'"$robot"$'\n\n'"$session"$'\n' $'Summary.\n'
+strips "robot footer without session link" $'Summary.\n\n---\n'"$robot" $'Summary.\n'
+strips "robot footer CRLF" $'Summary.\r\n\r\n'"$robot"$'\r\n\r\n'"$session"$'\r\n' $'Summary.\r\n'
+strips "other session link kept" $'Summary.\n\n'"$session"$'\n' $'Summary.\n\n'"$session"$'\n'
+
+header='<!-- claude-projects-attribution: {"github_login":"someone"} -->'
+requested='_Requested by **Someone** · [project thread](https://claude.ai/code/project/chan_1?thread=cmsg_2)_'
+strips "header and requested-by" "$header"$'\n'"$requested"$'\n\n## What\n\nSummary.\n' $'## What\n\nSummary.\n'
+strips "header CRLF" "$header"$'\r\n'"$requested"$'\r\n\r\nSummary.\r\n' $'Summary.\r\n'
+strips "requested-by of another link" \
+  $'_Requested by **Someone** · [session](https://claude.ai/code/session_3)_\nSummary.\n' $'Summary.\n'
+strips "header, requested-by and footer" \
+  "$header"$'\n'"$requested"$'\n\nSummary.\n\n---\n'"$footer"$'\n' $'Summary.\n'
+strips "requested-by elsewhere kept" \
+  $'_Requested by **Someone** · [issue](https://example.com/1)_\n' $'_Requested by **Someone** · [issue](https://example.com/1)_\n'
+
 # What is left still goes through --text: a stripped footer passes, any other mention still fails.
 printf 'Title\n\nSummary.\n\n---\n%s' "$footer" > "$work/pr"
 "$repo/scripts/check-attribution.sh" --strip-footer "$work/pr" > "$work/clean"
