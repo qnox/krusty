@@ -204,6 +204,14 @@ pub trait Backend {
         false
     }
 
+    /// Whether this target lays out a dependency class an earlier support unit realized from that
+    /// unit's record, so a later unit may add the final members it needs of the class
+    /// ([`crate::ir::ClassOwnership::EarlierUnit`]) instead of realizing the class again. A target
+    /// that does not keeps the error that one class is never realized twice.
+    fn adds_members_to_realized_classes(&self) -> bool {
+        false
+    }
+
     /// Whether a dependency-support body may call an exact provider declaration which has no
     /// serialized KLIB body. Such a call is admitted only when the target's ordinary dependency
     /// registry can realize the frozen provider handle directly.

@@ -24,8 +24,13 @@ use crate::types::{wk, TypeName};
 #[derive(Debug)]
 pub struct ClassStatics {
     pub class: ClassId,
-    /// Indexes into `IrFile::statics`, in declaration order.
+    /// Indexes into `IrFile::statics`, in the order they run.
     pub statics: Box<[u32]>,
+    /// When the class's static state initializes in program order around its `companion object`
+    /// (kotlinc 2.5): how many leading `statics` were written before the companion and so run
+    /// before it, the rest after its whole initialization. `None` runs every static first, then
+    /// the companion.
+    pub before_companion: Option<usize>,
 }
 
 /// A class owns a static whose initialization this plan cannot order with the rest of the class:
@@ -48,7 +53,10 @@ pub struct ClassStaticPlan {
 }
 
 impl ClassStaticPlan {
-    pub fn new(ir: &IrFile) -> Result<Self, UnorderedClassStatic> {
+    /// Plan `ir`'s class statics. `program_order` is whether a class's static state initializes in
+    /// program order around its companion object, as kotlinc 2.5 does, rather than with the
+    /// companion's body last.
+    pub fn new(ir: &IrFile, program_order: bool) -> Result<Self, UnorderedClassStatic> {
         let mut groups: HashMap<ClassId, Vec<u32>> = HashMap::new();
         let mut owners = HashMap::new();
         for (index, declaration) in ir.statics.iter().enumerate() {
@@ -76,9 +84,23 @@ impl ClassStaticPlan {
         }
         let mut classes: Vec<ClassStatics> = groups
             .into_iter()
-            .map(|(class, statics)| ClassStatics {
-                class,
-                statics: statics.into_boxed_slice(),
+            .map(|(class, mut statics)| {
+                let before_companion = companion_source_order(ir, class)
+                    .filter(|_| program_order)
+                    .map(|companion| {
+                        // Stable: each side keeps declaration order.
+                        statics.sort_by_key(|&index| {
+                            ir.statics[index as usize].source_order >= companion
+                        });
+                        statics.partition_point(|&index| {
+                            ir.statics[index as usize].source_order < companion
+                        })
+                    });
+                ClassStatics {
+                    class,
+                    statics: statics.into_boxed_slice(),
+                    before_companion,
+                }
             })
             .collect();
         classes.sort_unstable_by_key(|group| group.class);
@@ -177,27 +199,47 @@ impl ClassStaticPlan {
     /// it initializes first (each one's statics, then its companion), its own statics, then its
     /// companion object. The chain itself is walked root first.
     pub fn activation_steps(&self, class: ClassId) -> std::vec::IntoIter<ClassActivationStep> {
+        let mut steps = self.superinterface_steps(class);
+        let mut all: Vec<_> = steps.by_ref().collect();
+        all.extend(self.owner_steps(class));
+        all.into_iter()
+    }
+
+    /// The part of [`Self::activation_steps`] that initializes the superinterfaces of `class`.
+    pub fn superinterface_steps(&self, class: ClassId) -> std::vec::IntoIter<ClassActivationStep> {
         self.superinterfaces
             .get(&class)
             .into_iter()
             .flat_map(|interfaces| interfaces.iter().copied())
-            .chain([class])
-            .flat_map(|owner| {
-                let own = self
-                    .has_statics(owner)
-                    .then_some(ClassActivationStep::OwnStatics(owner));
-                own.into_iter()
-                    .chain([ClassActivationStep::Companion(owner)])
-            })
+            .flat_map(|owner| self.owner_steps(owner))
             .collect::<Vec<_>>()
             .into_iter()
     }
+
+    /// `owner`'s own statics, when it has any, then its companion object.
+    fn owner_steps(&self, owner: ClassId) -> impl Iterator<Item = ClassActivationStep> {
+        self.has_statics(owner)
+            .then_some(ClassActivationStep::OwnStatics(owner))
+            .into_iter()
+            .chain([ClassActivationStep::Companion(owner)])
+    }
+}
+
+/// Where the `companion object` of `class` was written, for the class's static state to initialize
+/// in program order around it: for a class with a companion object declared in this
+/// file.
+fn companion_source_order(ir: &IrFile, class: ClassId) -> Option<u32> {
+    ir.classes[class as usize]
+        .companion_class
+        .and_then(|companion| ir.class_id_by_name(companion))
+        .and_then(|companion| ir.class_source_order(companion))
 }
 
 /// One part of activating a class of a superclass chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassActivationStep {
-    /// Run the class's own statics.
+    /// Run the class's own statics, which initialize its companion object among them when the
+    /// class's state initializes in program order.
     OwnStatics(ClassId),
     /// Initialize the class's companion object, when it has one.
     Companion(ClassId),

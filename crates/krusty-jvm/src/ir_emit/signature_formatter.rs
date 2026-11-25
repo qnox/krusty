@@ -530,11 +530,7 @@ impl<'a> JvmSignatureFormatter<'a> {
         if arity > 22 {
             // `FunctionN` has only its covariant result parameter. Kotlin metadata carries the
             // complete parameter list; the Java generic Signature records only this JVM carrier.
-            let result = if signature.suspend {
-                Ty::nullable(Ty::obj("kotlin/Any"))
-            } else {
-                signature.ret
-            };
+            let result = signature.ret;
             if matches!(result.non_null(), Ty::Nothing | Ty::Null) {
                 return Some("Lkotlin/jvm/functions/FunctionN;".to_string());
             }
