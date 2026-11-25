@@ -2,9 +2,8 @@
 # (Now in Android, Bitwarden, Element X), one per line (tab-separated):
 #   <name>  <git URL>  <commit>  <Gradle root>  <JDK>  <Kotlin version pin>  [<Android variants>]  [<lane>]
 # The Kotlin version pin names the file and key that select the project's Kotlin Gradle plugin;
-# run.sh rewrites it to the newest release in the repository's `kotlin-versions` manifest. Several
-# comma-separated `<file>:<key>` pins are each rewritten, for a build that selects more than one
-# Kotlin compiler. "-" means the project already builds with that release. A patches/<name>.patch is applied after checkout.
+# run.sh rewrites it to the newest release in the repository's `kotlin-versions` manifest. "-" means
+# the project already builds with that release. A patches/<name>.patch is applied after checkout.
 # Android modules are compared only for a project that names a variant: its main, unit-test and
 # instrumented-test compiles. Several comma-separated variants name, in order, the variant each
 # module contributes: the first it has (an app's `fdroidDebug`, then `debug` for the library modules
@@ -29,4 +28,4 @@ nowinandroid	https://github.com/android/nowinandroid	2982e63cb691ad49cd009aab43d
 bitwarden	https://github.com/bitwarden/android	6829b0add474461912f1c817975756011ab68cdd	.	21	-	fdroidDebug,debug
 element-x-android	https://github.com/element-hq/element-x-android	010fe5a25d55214a3c9c764406a67598ad4e6f5f	.	21	-	fdroidDebug,debug
 intellij-community	https://github.com/JetBrains/intellij-community	1608e029bb2c308b5c5f81a91a3e3d55830eb804	.	21	-	-	compile,lsp
-kotlin	https://github.com/JetBrains/kotlin	9180ce6a7a7d3627f88b424717583f28ddca052d	.	21	gradle.properties:bootstrap.kotlin.version,gradle/libs.versions.toml:kotlin-for-gradle-plugins-compilation	-	compile,lsp
+kotlin	https://github.com/JetBrains/kotlin	9180ce6a7a7d3627f88b424717583f28ddca052d	.	21	gradle.properties:bootstrap.kotlin.version	-	compile,lsp
