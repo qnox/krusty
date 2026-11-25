@@ -41,7 +41,8 @@ fn an_uninitialized_property_answers_false_and_an_assigned_one_true() {
 /// The test does NOT throw where an ordinary read would, which is the whole reason it exists.
 #[test]
 fn the_test_does_not_throw_where_a_read_would() {
-    let source = "class Holder {\n\
+    let source = "@file:Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n\
+         class Holder {\n\
          \x20   lateinit var value: String\n\
          \x20   fun ready(): Boolean = ::value.isInitialized\n\
          \x20   fun read(): String = value\n\
