@@ -1704,9 +1704,10 @@ pub(super) fn define_class_functions(
                 .global_get(singleton.global)
                 .ref_is_null()
                 .if_(BlockType::Empty);
-            // A companion's getter is its owner's initialization: the owner's superclasses
-            // initialize first, then the companion's own superclasses, then the companion. The
-            // owner itself is in progress here, so the companion's chain does not re-enter it.
+            // A companion's getter is its owner's initialization: the owner's superclasses and
+            // superinterfaces and its own statics initialize first, then the companion's own
+            // superclasses, then the companion. The owner itself is in progress here, so neither
+            // its companion nor the companion's chain re-enters it.
             let owner = class
                 .is_companion
                 .then(|| {
@@ -1716,14 +1717,22 @@ pub(super) fn define_class_functions(
                 })
                 .flatten()
                 .map(|owner| owner as ClassId);
-            for activated in owner.into_iter().chain([id]) {
-                body.activate_superclasses(activated, owner)?;
+            if let Some(owner) = owner {
+                body.activate_class(owner, Some(owner))?;
             }
+            body.activate_superclasses(id, owner)?;
+            // Initializing them may have reached this getter and built the instance; that one
+            // stands, so it is neither replaced nor constructed twice.
+            body.code
+                .global_get(singleton.global)
+                .ref_is_null()
+                .if_(BlockType::Empty);
             body.allocate(id)?;
             body.code
                 .global_set(singleton.global)
                 .global_get(singleton.global)
                 .call(constructor)
+                .end()
                 .end()
                 .global_get(singleton.global);
             let (code, locals) = body.finish();
