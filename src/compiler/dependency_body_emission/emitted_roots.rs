@@ -324,6 +324,13 @@ pub(super) fn declarations(
             state.declarations.push((declaration_target, realization));
             continue;
         }
+        // A counted loop over a collection's or text's indices reads the receiver's size, which
+        // the loop's lowering calls in its place.
+        if let Some(member) = crate::klib_lowering::indices_bound_member(selected, bodies)
+            .map_err(|reason| format!("an invalid indices bound: {reason:?}"))?
+        {
+            state.pending.push_back((member, None));
+        }
         let retained = externals
             .get(&identity)
             .and_then(|external| external.constructor_initializer_target());

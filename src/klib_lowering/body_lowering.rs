@@ -249,6 +249,16 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// The getter of the receiver property that bounds a counted loop over the indices `getter`
+    /// is: a collection's `size` or a text's `length`. `None` when the bound is no member read
+    /// (an array's intrinsic size), or the linker does not model it.
+    fn indices_bound(
+        &self,
+        _getter: &crate::metadata::id_signature::KlibAccessorIdSignature,
+    ) -> Lowered<Option<crate::metadata::id_signature::KlibAccessorIdSignature>> {
+        Ok(None)
+    }
+
     /// Whether `callee` is kotlinc's progression `reversed`, by its provider declaration. A
     /// linker that does not model it keeps the iterator protocol.
     fn reverses_progression(
