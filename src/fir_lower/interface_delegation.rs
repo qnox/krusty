@@ -519,7 +519,7 @@ fn materialize_delegation(
                             context_params,
                             is_var: setter.is_some(),
                             is_abstract: false,
-                            modifiers: DELEGATION_PROPERTY_MODIFIERS,
+                            modifiers: delegation_property_modifiers(&property.overridden),
                             delegate_field: None,
                             getter,
                             setter,
@@ -549,7 +549,7 @@ fn materialize_delegation(
                     backing_field: None,
                     is_var: property.setter.is_some(),
                     is_open: true,
-                    modifiers: DELEGATION_PROPERTY_MODIFIERS,
+                    modifiers: delegation_property_modifiers(&property.overridden),
                     delegate_field: None,
                     has_constant_initializer: false,
                     is_private: false,
@@ -880,16 +880,22 @@ fn add_forwarder(
 }
 
 /// A delegated property is an overridable override, whatever the delegating class's modality, and
-/// Kotlin metadata records it as a delegation member rather than a declaration.
-const DELEGATION_PROPERTY_MODIFIERS: crate::ir::IrPropertyModifiers =
+/// Kotlin metadata records it as a delegation member rather than a declaration. The accessors of
+/// the delegated declaration (the first overridden) that have bodies make the forwarder's own
+/// non-default, as kotlinc writes them.
+fn delegation_property_modifiers(
+    overridden: &[crate::fir::ResolvedDelegatedPropertyDeclaration],
+) -> crate::ir::IrPropertyModifiers {
+    let delegated = overridden.first();
     crate::ir::IrPropertyModifiers {
         modality: crate::ir::IrPropertyModality::Open,
-        declared_getter: false,
-        declared_setter: false,
+        declared_getter: delegated.is_some_and(|declaration| declaration.getter_has_body),
+        declared_setter: delegated.is_some_and(|declaration| declaration.setter_has_body),
         delegated: false,
         lateinit: false,
         member_kind: crate::ir::IrMemberKind::Delegation,
-    };
+    }
+}
 
 fn stamp_generated(ir: &mut IrFile, first: usize) {
     let cause = crate::fir::OriginId::from_raw(0);

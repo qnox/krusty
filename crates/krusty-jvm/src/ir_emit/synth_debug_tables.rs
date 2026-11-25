@@ -183,12 +183,23 @@ pub(super) fn attach_synth_debug_tables(
             .map(|property| accessor_line(property.accessor_lines.setter))
             .unwrap_or(pline);
         let (g, s) = accessor_jvm_names(ir, c, &f.name);
+        let static_accessor = |side| {
+            declared_property.is_some_and(|property| {
+                super::jvm_static_members::singleton_static_accessor(c, property, side)
+            })
+        };
         if declared_property.is_none_or(|property| property.getter.is_none()) {
+            let locals: &[(String, String, u16)] = if static_accessor(PropertyAccessorSide::Getter)
+            {
+                &[]
+            } else {
+                &this_only
+            };
             cw.set_method_debug(
                 &g,
                 &format!("(){}", desc(getter_result)),
                 at(0, getter_line),
-                &this_only,
+                locals,
             );
         }
         // A plugin's `val` may keep its field mutable; it still has no setter.
@@ -196,22 +207,20 @@ pub(super) fn attach_synth_debug_tables(
             && declared_property.is_none_or(|property| property.is_var && property.setter.is_none())
         {
             let pd = desc(accessor_ty);
-            // The setter's value param is always slot 1 (`this`=0): guard = `aload_1`(1) + the
-            // `<set-?>` String's real ldc width + invokestatic(3).
+            // The setter's value param is slot 1 (`this`=0), or slot 0 of a static one: guard =
+            // `aload`(value) + the `<set-?>` String's real ldc width + invokestatic(3).
+            let value_slot = u16::from(!static_accessor(PropertyAccessorSide::Setter));
             let set_pc = if param_assertions && is_nonnull_reference_field(f.ty) {
-                aload_len(1) + cw.string_ldc_len("<set-?>").unwrap_or(2) + 3
+                aload_len(value_slot) + cw.string_ldc_len("<set-?>").unwrap_or(2) + 3
             } else {
                 0
             };
-            cw.set_method_debug(
-                &s,
-                &format!("({pd})V"),
-                at(set_pc, setter_line),
-                &[
-                    ("this".to_string(), this_desc.clone(), 0),
-                    ("<set-?>".to_string(), pd, 1),
-                ],
-            );
+            let mut locals = Vec::new();
+            if value_slot == 1 {
+                locals.push(("this".to_string(), this_desc.clone(), 0));
+            }
+            locals.push(("<set-?>".to_string(), pd.clone(), value_slot));
+            cw.set_method_debug(&s, &format!("({pd})V"), at(set_pc, setter_line), &locals);
         }
     }
     // HOISTED companion properties: no companion field, but the delegating accessors get the same

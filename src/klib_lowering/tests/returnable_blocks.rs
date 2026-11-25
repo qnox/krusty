@@ -330,3 +330,57 @@ fn a_value_frame_ending_in_a_call_that_returns_still_may_complete_without_a_valu
         "the KLIB body of `demo.f` (it uses a value-returning block that may complete without a value)"
     );
 }
+
+/// `f(c) = run { while (true) { if (c) return@run 1; if (breaks) break } }`: a value frame
+/// whose last statement is a loop on the constant `true`, optionally broken out of.
+fn frame_ending_in_a_true_loop(breaks: bool) -> Demo {
+    demo(&[("f", &[T::Boolean], T::Int)], move |_, body| {
+        let target = local_symbol(KlibIrSymbolKind::ReturnableBlock, 500);
+        let condition = body.param(0);
+        let one = body.int(1);
+        let early = body.expr(
+            T::Nothing,
+            KlibIrExprKind::Return {
+                target: target.clone(),
+                value: one,
+            },
+        );
+        let mut statements = vec![KlibIrStatement::Expression(body.branches(
+            "IF",
+            vec![(condition, early)],
+            T::Unit,
+        ))];
+        if breaks {
+            statements.push(KlibIrStatement::Expression(body.break_(9)));
+        }
+        let loop_body = body.block(statements, T::Unit);
+        let forever = body.boolean(true);
+        let repeated = body.loop_(9, forever, loop_body, false);
+        let frame = body.expr(
+            T::Int,
+            KlibIrExprKind::ReturnableBlock {
+                symbol: target,
+                statements: vec![repeated],
+                origin: None,
+            },
+        );
+        Some(vec![body.ret(frame)])
+    })
+}
+
+#[test]
+fn a_value_frame_ending_in_an_unbroken_true_loop_never_completes_without_a_value() {
+    let demo = frame_ending_in_a_true_loop(false);
+    let mut unit = DependencyBodyUnit::default();
+    demo.lower(&mut unit, "f", &[])
+        .expect("only the return leaves the loop");
+    validated(unit.ir());
+}
+
+#[test]
+fn a_value_frame_ending_in_a_true_loop_that_breaks_may_complete_without_a_value() {
+    assert_eq!(
+        frame_ending_in_a_true_loop(true).declined("f", &[]),
+        "the KLIB body of `demo.f` (it uses a value-returning block that may complete without a value)"
+    );
+}
