@@ -113,6 +113,7 @@ fn platform_compiler_configuration_for_release(
 /// | `// ALLOW_KOTLIN_PACKAGE`, or a `package kotlin…` declaration | `-Xallow-kotlin-package` |
 /// | `// JVM_TARGET: X` | `-jvm-target X` |
 /// | `// JVM_EXPOSE_BOXED` | `-Xjvm-expose-boxed` |
+/// | `// JDK_RELEASE: X` | `-Xjdk-release=X` |
 /// | `// ENABLE_JVM_PREVIEW` | `-Xjvm-enable-preview` |
 /// | `// STRING_CONCAT: X` | `-Xstring-concat=X` |
 /// | `// ASSERTIONS_MODE: X` | `-Xassertions=X` |
@@ -200,6 +201,9 @@ fn case_cli_arguments(
         }
         if directive(src, "JVM_EXPOSE_BOXED") {
             arguments.push("-Xjvm-expose-boxed".to_string());
+        }
+        if let Some(release) = last_value(src, "JDK_RELEASE") {
+            arguments.push(format!("-Xjdk-release={release}"));
         }
         if directive(src, "ENABLE_JVM_PREVIEW") {
             arguments.push("-Xjvm-enable-preview".to_string());
@@ -426,6 +430,7 @@ mod tests {
                    // ALLOW_KOTLIN_PACKAGE\n\
                    // RETURN_VALUE_CHECKER_MODE: CHECKER\n\
                    // JVM_TARGET: 1.8\n\
+                   // JDK_RELEASE: 11\n\
                    // ENABLE_JVM_PREVIEW\n\
                    // STRING_CONCAT: inline\n\
                    // ASSERTIONS_MODE: always-enable\n\
@@ -445,6 +450,7 @@ mod tests {
                 "-Xallow-kotlin-package",
                 "-jvm-target",
                 "1.8",
+                "-Xjdk-release=11",
                 "-Xjvm-enable-preview",
                 "-Xstring-concat=inline",
                 "-Xassertions=always-enable",
