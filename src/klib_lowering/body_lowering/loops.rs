@@ -316,6 +316,10 @@ impl BodyLowering<'_> {
                          does not read",
                     );
                 };
+                // The range counts from zero in `Int`: the bound's declared type must be it.
+                if bound.ty != Ty::Int {
+                    return Err(mismatch("an indices bound is not declared `Int`"));
+                }
                 (None, self.indices_bound_read(&bound, receiver)?)
             }
         };
@@ -368,13 +372,13 @@ impl BodyLowering<'_> {
     /// getter called on the receiver, as a serialized call of it would be.
     fn indices_bound_read(
         &mut self,
-        bound: &crate::metadata::id_signature::KlibAccessorIdSignature,
+        bound: &super::IndicesBound,
         receiver: KlibIrExprId,
     ) -> Lowered<ExprId> {
         let access = KlibIrMemberAccess {
             symbol: KlibIrSymbol {
                 kind: KlibIrSymbolKind::Function,
-                signature: KlibIrSignature::Accessor(bound.clone()),
+                signature: KlibIrSignature::Accessor(bound.accessor.clone()),
             },
             arguments: KlibIrArguments::Split {
                 dispatch_receiver: Some(receiver),
@@ -384,7 +388,7 @@ impl BodyLowering<'_> {
             type_arguments: Vec::new(),
             origin: None,
         };
-        self.accessor_call(bound, &access, Ty::Int)
+        self.accessor_call(&bound.accessor, &access, bound.ty)
     }
 
     /// A `for` loop over a range literal, counted as kotlinc's `ForLoopsLowering` and checked FIR

@@ -114,6 +114,12 @@ impl LinkedCallableReference {
     }
 }
 
+/// The getter bounding a counted loop over indices, with the type its declaration answers.
+pub(super) struct IndicesBound {
+    pub(super) accessor: crate::metadata::id_signature::KlibAccessorIdSignature,
+    pub(super) ty: Ty,
+}
+
 /// The declared shape of a member a range literal's membership calls.
 pub(super) struct RangeMembershipHeader {
     pub(super) receiver: Option<Ty>,
@@ -255,7 +261,7 @@ pub(super) trait CallLinker {
     fn indices_bound(
         &self,
         _getter: &crate::metadata::id_signature::KlibAccessorIdSignature,
-    ) -> Lowered<Option<crate::metadata::id_signature::KlibAccessorIdSignature>> {
+    ) -> Lowered<Option<IndicesBound>> {
         Ok(None)
     }
 

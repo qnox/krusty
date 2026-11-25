@@ -1398,18 +1398,29 @@ impl<'s> CallLinker for Linker<'_, 's> {
     fn indices_bound(
         &self,
         getter: &KlibAccessorIdSignature,
-    ) -> Result<Option<KlibAccessorIdSignature>, KlibBodyDeclineReason> {
+    ) -> Result<Option<super::body_lowering::IndicesBound>, KlibBodyDeclineReason> {
         let identity = self.indices_getter_identity(getter)?;
-        match self.sources.callees.indices_bound(&identity) {
-            Some(KlibDependencyCallable {
-                declaration: KlibDeclarationSignature::Accessor(bound),
-                ..
-            }) => Ok(Some(bound.clone())),
-            Some(_) => Err(KlibBodyDeclineReason::SignatureMismatch(
+        let Some(bound) = self.sources.callees.indices_bound(&identity) else {
+            return Ok(None);
+        };
+        let KlibDeclarationSignature::Accessor(accessor) = &bound.declaration else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "an `indices` bound is not a property accessor".to_owned(),
-            )),
-            None => Ok(None),
-        }
+            ));
+        };
+        let selected = match self.sources.callees.get(bound) {
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for an `indices` bound".to_owned(),
+                ))
+            }
+            None => return Err(KlibBodyDeclineReason::Unjoined),
+        };
+        Ok(Some(super::body_lowering::IndicesBound {
+            accessor: accessor.clone(),
+            ty: selected.ret(),
+        }))
     }
 
     fn reverses_progression(
@@ -2365,8 +2376,6 @@ impl<'s> Linker<'_, 's> {
             })
     }
 
-    /// Whether `identity` is an abstract accessor of a class an earlier unit realized and this
-    /// unit does not declare: a call of it dispatches through the member's frozen declaration.
     /// The exact declaration of the `indices` getter a loop calls, which dependency preparation
     /// reached as the loop's edge.
     fn indices_getter_identity(
@@ -2390,6 +2399,8 @@ impl<'s> Linker<'_, 's> {
         }
     }
 
+    /// Whether `identity` is an abstract accessor of a class an earlier unit realized and this
+    /// unit does not declare: a call of it dispatches through the member's frozen declaration.
     fn is_earlier_abstract_accessor(&self, identity: &KlibDependencyCallable) -> bool {
         let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(identity) else {
             return false;

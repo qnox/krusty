@@ -19,11 +19,11 @@ fun box(): String {
 }
 ";
 
-/// The functions the dependency support units lower, and their external property reads.
+/// The external property reads in each function the dependency support units lower, as
+/// `(function, receiver type, result type)`.
 struct IndicesProbe {
     native: krusty_native::CraneliftBackend,
-    functions: std::cell::RefCell<Vec<String>>,
-    reads: std::cell::Cell<usize>,
+    reads: std::cell::RefCell<Vec<(String, String, String)>>,
 }
 
 impl Backend for IndicesProbe {
@@ -82,12 +82,27 @@ impl Backend for IndicesProbe {
     ) -> Vec<Artifact> {
         if file.kind == CheckedIrUnitKind::DependencySupport {
             for function in &file.ir.functions {
-                self.functions.borrow_mut().push(function.name.clone());
-            }
-            for expression in &file.ir.exprs {
-                if let IrExpr::Checked(checked) = expression {
-                    if matches!(&**checked, IrCheckedOperation::ExternalPropertyRead { .. }) {
-                        self.reads.set(self.reads.get() + 1);
+                let Some(body) = function.body else {
+                    continue;
+                };
+                let mut pending = vec![body];
+                while let Some(expression) = pending.pop() {
+                    krusty::ir::for_each_child(&file.ir.exprs, expression, &mut |child| {
+                        pending.push(child)
+                    });
+                    if let IrExpr::Checked(checked) = &file.ir.exprs[expression as usize] {
+                        if let IrCheckedOperation::ExternalPropertyRead {
+                            result,
+                            source_receiver,
+                            ..
+                        } = &**checked
+                        {
+                            self.reads.borrow_mut().push((
+                                function.name.clone(),
+                                format!("{source_receiver:?}"),
+                                format!("{result:?}"),
+                            ));
+                        }
                     }
                 }
             }
@@ -128,8 +143,7 @@ fn lowered(consumer: &str) -> Option<IndicesProbe> {
     );
     let probe = IndicesProbe {
         native: krusty_native::CraneliftBackend::new(target).with_entry(krusty_native::Entry::Box),
-        functions: std::cell::RefCell::default(),
-        reads: std::cell::Cell::default(),
+        reads: std::cell::RefCell::default(),
     };
     krusty::compiler::emit_analyzed(
         analysis,
@@ -154,13 +168,13 @@ fn trim_end_lowers_its_indices_loop_with_the_receivers_length_read() {
     let Some(probe) = lowered(CONSUMER) else {
         return;
     };
-    let functions = probe.functions.into_inner();
-    assert!(
-        functions.iter().any(|name| name == "trimEnd"),
-        "the dependency support units hold {functions:?}"
-    );
-    assert!(
-        probe.reads.get() > 0,
-        "no external property read bounds the loop"
+    // The loop's one bound: `CharSequence.length`, read inside `trimEnd`'s body.
+    assert_eq!(
+        probe.reads.into_inner(),
+        [(
+            "trimEnd".to_owned(),
+            "Some(Obj(TypeName(\"kotlin/CharSequence\"), []))".to_owned(),
+            "Obj(TypeName(\"kotlin/Int\"), [])".to_owned(),
+        )]
     );
 }
