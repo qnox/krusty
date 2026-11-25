@@ -40732,7 +40732,13 @@ impl<'a> Checker<'a> {
                                 );
                                 let (primary, source_primary) = match primary_declaration {
                                     Some(declaration) => {
-                                        let signature = index.signature(declaration)?;
+                                        let Some(signature) = index.signature(declaration) else {
+                                            return Some(
+                                                source_constructors::unpublished_primary_shapes(
+                                                    index, owner, cl,
+                                                ),
+                                            );
+                                        };
                                         let callable =
                                             index.callable_for_declaration(declaration)?;
                                         let context_count =
@@ -40907,14 +40913,7 @@ impl<'a> Checker<'a> {
                             cl.span,
                             "internal error: Pass-2 class has no finalized constructor signatures",
                         );
-                        (
-                            vec![Ty::Error; cl.props.len()],
-                            vec![Ty::Error; cl.props.len()],
-                            cl.secondary_ctors
-                                .iter()
-                                .map(|constructor| vec![Ty::Error; constructor.params.len()])
-                                .collect(),
-                        )
+                        source_constructors::unpublished_constructor_shapes(cl)
                     }
                 }
             } else if let Some(class_signature) = collected {

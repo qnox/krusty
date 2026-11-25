@@ -4,11 +4,19 @@
 //! slot while holding that mutex, grows the pool, or waits until a claim is released. The claim
 //! guard returns the slot even when the test body unwinds.
 
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 pub(crate) struct Pool<S> {
+    shared: Arc<Shared<S>>,
+}
+
+struct Shared<S> {
     state: Mutex<PoolState<S>>,
     available: Condvar,
+    /// Resident memory one server of this pool holds, and the budget that counts it. A pool with
+    /// no budget is unaccounted.
+    resident: Option<(Arc<Budget>, u64)>,
 }
 
 struct PoolState<S> {
@@ -19,21 +27,42 @@ struct PoolState<S> {
 struct SlotState<S> {
     server: Arc<Mutex<S>>,
     claimed: bool,
+    /// When the server was last released; an idle server is evictable once it has sat this long.
+    idle_since: Instant,
 }
 
 struct Claim<'a, S> {
-    pool: &'a Pool<S>,
+    pool: &'a Shared<S>,
     server: Arc<Mutex<S>>,
 }
 
 impl<S> Pool<S> {
     pub(crate) fn new() -> Self {
+        Self::with_resident(None)
+    }
+
+    /// A pool whose servers each hold `mib` of resident memory against `budget`. A pool never
+    /// creates a server that would exceed the budget while another pool's idle server could be
+    /// stopped instead; see [`Budget`].
+    pub(crate) fn resident(budget: &Arc<Budget>, mib: u64) -> Self
+    where
+        S: Send + 'static,
+    {
+        let pool = Self::with_resident(Some((Arc::clone(budget), mib)));
+        budget.register(Arc::downgrade(&pool.shared) as Weak<dyn Evict>);
+        pool
+    }
+
+    fn with_resident(resident: Option<(Arc<Budget>, u64)>) -> Self {
         Self {
-            state: Mutex::new(PoolState {
-                slots: Vec::new(),
-                cursor: 0,
+            shared: Arc::new(Shared {
+                state: Mutex::new(PoolState {
+                    slots: Vec::new(),
+                    cursor: 0,
+                }),
+                available: Condvar::new(),
+                resident,
             }),
-            available: Condvar::new(),
         }
     }
 
@@ -43,9 +72,15 @@ impl<S> Pool<S> {
         create: impl FnOnce() -> Option<S>,
         body: impl FnOnce(&mut S) -> R,
     ) -> Option<R> {
-        let claim = self.admit(cap, create)?;
+        let claim = self.shared.admit(cap, create)?;
         let mut server = lock(&claim.server);
         Some(body(&mut server))
+    }
+}
+
+impl<S> Shared<S> {
+    fn weight(&self) -> u64 {
+        self.resident.as_ref().map_or(0, |(_, mib)| *mib)
     }
 
     fn admit(&self, cap: usize, create: impl FnOnce() -> Option<S>) -> Option<Claim<'_, S>> {
@@ -66,21 +101,44 @@ impl<S> Pool<S> {
                 }
             }
 
-            // A second or later server also needs the memory to hold it right now: a process can
-            // keep several pools (one per classpath), and their idle servers stay resident.
-            if len < cap && create.is_some() && (len == 0 || host_has_room_for_a_server()) {
-                let make_server = create.take().expect("server creation attempted once");
-                if let Some(server) = make_server() {
-                    let server = Arc::new(Mutex::new(server));
-                    state.slots.push(SlotState {
-                        server: Arc::clone(&server),
-                        claimed: true,
-                    });
-                    state.cursor = state.slots.len();
-                    return Some(Claim { pool: self, server });
-                }
-                if len == 0 {
-                    return None;
+            if len < cap && create.is_some() {
+                // Making room stops other pools' servers, which takes their locks: not while
+                // holding this one's.
+                let reserved = match &self.resident {
+                    Some((budget, mib)) => {
+                        drop(state);
+                        let reserved = budget.reserve(*mib, len == 0);
+                        state = lock(&self.state);
+                        reserved
+                    }
+                    None => true,
+                };
+                if reserved {
+                    if state.slots.len() != len {
+                        // Another caller grew the pool or released a server while this one waited.
+                        self.give_back_reservation();
+                        continue;
+                    }
+                    let make_server = create.take().expect("server creation attempted once");
+                    if let Some(server) = make_server() {
+                        let server = Arc::new(Mutex::new(server));
+                        state.slots.push(SlotState {
+                            server: Arc::clone(&server),
+                            claimed: true,
+                            idle_since: Instant::now(),
+                        });
+                        state.cursor = state.slots.len();
+                        return Some(Claim { pool: self, server });
+                    }
+                    self.give_back_reservation();
+                    if len == 0 {
+                        return None;
+                    }
+                } else if state.slots.len() != len || state.slots.iter().any(|slot| !slot.claimed) {
+                    // A caller grew the pool or released its server while this one waited on the
+                    // budget with the lock dropped, and its notification is already gone: take
+                    // it, do not wait (or give up on an empty pool that is no longer empty).
+                    continue;
                 }
             }
 
@@ -91,6 +149,12 @@ impl<S> Pool<S> {
                 .available
                 .wait(state)
                 .unwrap_or_else(|err| err.into_inner());
+        }
+    }
+
+    fn give_back_reservation(&self) {
+        if let Some((budget, mib)) = &self.resident {
+            budget.release(*mib);
         }
     }
 }
@@ -105,100 +169,190 @@ impl<S> Drop for Claim<'_, S> {
             .expect("claimed server belongs to its pool");
         assert!(slot.claimed, "server claim released twice");
         slot.claimed = false;
+        slot.idle_since = Instant::now();
         self.pool.available.notify_one();
+        if let Some((budget, _)) = &self.pool.resident {
+            budget.idle_server_appeared();
+        }
     }
 }
 
-/// How many persistent compiler-server JVMs to pool per classpath. Scales with the host — a single
-/// server serializes every kotlinc-dependency compile AND every java-driver test behind one mutex,
-/// which measured as the e2e suite's dominant wall-clock cost (hundreds of ~0.4s warm compiles all
-/// queueing on one JVM while the other N-1 cores idle). One server per CPU, as many as the host's
-/// memory holds at [`SERVER_FOOTPRINT_MIB`] each, clamped to [1, 6]. `KRUSTY_SERVER_POOL`
-/// overrides in either direction (e.g. 1 on a swapping shared box).
+/// A pool whose idle servers another pool may stop to make room.
+pub(crate) trait Evict: Send + Sync {
+    /// Stops one server that has been idle for at least `idle_for`, returning the resident memory
+    /// it held, or `None` when every server is busy or was used more recently.
+    fn evict_idle(&self, idle_for: Duration) -> Option<u64>;
+}
+
+impl<S: Send + 'static> Evict for Shared<S> {
+    fn evict_idle(&self, idle_for: Duration) -> Option<u64> {
+        let evicted = {
+            let mut state = lock(&self.state);
+            let index = state
+                .slots
+                .iter()
+                .position(|slot| !slot.claimed && slot.idle_since.elapsed() >= idle_for)?;
+            let slot = state.slots.remove(index);
+            state.cursor = 0;
+            slot
+        };
+        // Dropping the slot stops its JVM, which waits for the process: not under the lock.
+        drop(evicted);
+        Some(self.weight())
+    }
+}
+
+/// How much resident memory the persistent servers of every pool may hold together.
+///
+/// Each pool is sized per host on its own, so a cold run that reaches the JVM kotlinc, the Native
+/// library oracle and the kotlinc-native oracle at once held six server JVMs beside the test
+/// process: about 5 GiB measured, more on a slower host, on a runner with 7.6 GiB. A server counts
+/// its pool's weight from creation until it is stopped. When creating one would pass the limit, the
+/// pool first stops another pool's server that has been idle for a while, then waits for one to
+/// become evictable. The first server is always admitted, and a creation that has waited past
+/// [`Budget::patience`] proceeds over the limit rather than deadlock a test.
+pub(crate) struct Budget {
+    limit_mib: Option<u64>,
+    idle_before_eviction: Duration,
+    patience: Duration,
+    inner: Mutex<BudgetState>,
+    changed: Condvar,
+}
+
+struct BudgetState {
+    used_mib: u64,
+    pools: Vec<Weak<dyn Evict>>,
+}
+
+impl Budget {
+    pub(crate) fn new(
+        limit_mib: Option<u64>,
+        idle_before_eviction: Duration,
+        patience: Duration,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            limit_mib,
+            idle_before_eviction,
+            patience,
+            inner: Mutex::new(BudgetState {
+                used_mib: 0,
+                pools: Vec::new(),
+            }),
+            changed: Condvar::new(),
+        })
+    }
+
+    /// The process-wide budget: `KRUSTY_SERVER_MEMORY_MIB` when set (`0` for none), otherwise what
+    /// is left of the host's memory after the test process and the machine's own needs.
+    pub(crate) fn process() -> &'static Arc<Budget> {
+        static PROCESS: OnceLock<Arc<Budget>> = OnceLock::new();
+        PROCESS.get_or_init(|| {
+            let limit = match std::env::var("KRUSTY_SERVER_MEMORY_MIB")
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+            {
+                Some(0) => None,
+                Some(mib) => Some(mib),
+                None => host_memory_mib().map(default_limit_mib),
+            };
+            Budget::new(limit, Duration::from_secs(5), Duration::from_secs(60))
+        })
+    }
+
+    fn register(&self, pool: Weak<dyn Evict>) {
+        lock(&self.inner).pools.push(pool);
+    }
+
+    fn release(&self, mib: u64) {
+        let mut inner = lock(&self.inner);
+        inner.used_mib = inner.used_mib.saturating_sub(mib);
+        self.changed.notify_all();
+    }
+
+    fn idle_server_appeared(&self) {
+        self.changed.notify_all();
+    }
+
+    /// Counts `mib` for a server about to be created, stopping other pools' idle servers to make
+    /// room. `false` when `may_wait` is unset and there is no room; a pool with no server of its
+    /// own waits, because it cannot make progress without one.
+    fn reserve(&self, mib: u64, may_wait: bool) -> bool {
+        let Some(limit) = self.limit_mib else {
+            return true;
+        };
+        let deadline = Instant::now() + self.patience;
+        loop {
+            let pools = {
+                let mut inner = lock(&self.inner);
+                if inner.used_mib == 0 || inner.used_mib + mib <= limit {
+                    inner.used_mib += mib;
+                    return true;
+                }
+                inner.pools.retain(|pool| pool.strong_count() > 0);
+                inner.pools.clone()
+            };
+            let freed = pools
+                .iter()
+                .filter_map(Weak::upgrade)
+                .find_map(|pool| pool.evict_idle(self.idle_before_eviction));
+            if let Some(freed) = freed {
+                self.release(freed);
+                continue;
+            }
+            if !may_wait {
+                return false;
+            }
+            let mut inner = lock(&self.inner);
+            if Instant::now() >= deadline {
+                inner.used_mib += mib;
+                return true;
+            }
+            let (guard, _) = self
+                .changed
+                .wait_timeout(inner, Duration::from_millis(500))
+                .unwrap_or_else(|err| err.into_inner());
+            drop(guard);
+        }
+    }
+}
+
+/// What the servers may hold on a host with `total_mib`: all but the test process and the
+/// machine's own needs, which are the larger of 3.5 GiB and two fifths of the host. A 7.6 GiB CI
+/// runner leaves about 4 GiB, a 16 GiB workstation about 9.5 GiB.
+pub(crate) fn default_limit_mib(total_mib: u64) -> u64 {
+    total_mib.saturating_sub((total_mib * 2 / 5).max(3584))
+}
+
+fn host_memory_mib() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kib = meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    Some(kib / 1024)
+}
+
+/// How many persistent compiler-server JVMs one pool may hold: one per CPU, clamped to [1, 6]. A
+/// single server serializes every kotlinc-dependency compile AND every java-driver test behind one
+/// mutex, and a cold corpus that waits for two servers on a 4-CPU host leaves half its CPUs idle.
+/// Memory is not decided here: the resident-server budget shared by every pool stops a server when
+/// another pool needs the room, so a pool that cannot grow waits for its own server instead.
+/// `KRUSTY_SERVER_POOL` overrides in either direction (e.g. 1 on a swapping shared box).
 pub(crate) fn server_pool_cap() -> usize {
     std::env::var("KRUSTY_SERVER_POOL")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n >= 1)
-        .unwrap_or_else(|| {
-            let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
-            pool_cap(cpus, host_memory_mib())
-        })
+        .unwrap_or_else(|| pool_cap(std::thread::available_parallelism().map_or(1, |n| n.get())))
 }
 
-/// The measured peak a pooled server adds to the host, its share of the test process that feeds
-/// it included. A cold 2.4.21 JVM box corpus with four servers per pool peaked 5.1 GB above an
-/// idle 4-CPU host (four kotlinc servers at 3.2 GB, the box JVM runners at 1.1 GB, the test process
-/// at 0.8 GB), about 1.3 GB a server. With two servers on that host its kotlinc compiles waited
-/// 978 s for a server and the corpus took 597 s; with four it took 398 s.
-const SERVER_FOOTPRINT_MIB: u64 = 1536;
-
-/// The pool size for a host with `cpus` CPUs and `memory_mib` of memory (`None` when the host
-/// reports none, which leaves the CPU count alone to decide).
-fn pool_cap(cpus: usize, memory_mib: Option<u64>) -> usize {
-    let by_memory = memory_mib.map_or(usize::MAX, |mib| {
-        usize::try_from(mib / SERVER_FOOTPRINT_MIB).unwrap_or(usize::MAX)
-    });
-    cpus.min(by_memory).clamp(1, 6)
-}
-
-/// `MemTotal` from `/proc/meminfo`, in MiB.
-fn host_memory_mib() -> Option<u64> {
-    meminfo_mib(&std::fs::read_to_string("/proc/meminfo").ok()?, "MemTotal:")
-}
-
-/// Whether the host's available memory holds one more server at its measured peak. A host that
-/// reports no figure (not Linux) is decided by the pool cap alone.
-fn host_has_room_for_a_server() -> bool {
-    std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|meminfo| meminfo_mib(&meminfo, "MemAvailable:"))
-        .is_none_or(|available| available >= SERVER_FOOTPRINT_MIB)
-}
-
-/// One `/proc/meminfo` field (`MemTotal:`, `MemAvailable:`), in MiB.
-fn meminfo_mib(meminfo: &str, field: &str) -> Option<u64> {
-    meminfo.lines().find_map(|line| {
-        let kib = line.strip_prefix(field)?.trim().strip_suffix("kB")?;
-        Some(kib.trim().parse::<u64>().ok()? / 1024)
-    })
+pub(crate) fn pool_cap(cpus: usize) -> usize {
+    cpus.clamp(1, 6)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|err| err.into_inner())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{meminfo_mib, pool_cap};
-
-    #[test]
-    fn meminfo_fields_are_read_in_mib() {
-        let meminfo = "MemTotal:        7969012 kB\nMemFree:          812340 kB\nMemAvailable:    1478656 kB\n";
-        assert_eq!(meminfo_mib(meminfo, "MemTotal:"), Some(7782));
-        assert_eq!(meminfo_mib(meminfo, "MemAvailable:"), Some(1444));
-        assert_eq!(meminfo_mib(meminfo, "SwapTotal:"), None);
-    }
-
-    #[test]
-    fn a_four_cpu_host_pools_one_server_per_cpu_when_its_memory_holds_them() {
-        // The 4-vCPU, 16 GB GitHub-hosted runner and a 7.6 GiB self-hosted runner.
-        assert_eq!(pool_cap(4, Some(15_990)), 4);
-        assert_eq!(pool_cap(4, Some(7_782)), 4);
-    }
-
-    #[test]
-    fn memory_caps_the_pool_below_the_cpu_count() {
-        assert_eq!(pool_cap(8, Some(7_782)), 5);
-        assert_eq!(pool_cap(4, Some(4_096)), 2);
-        assert_eq!(pool_cap(4, Some(1_024)), 1);
-    }
-
-    #[test]
-    fn the_pool_stays_between_one_and_six_servers() {
-        assert_eq!(pool_cap(64, Some(262_144)), 6);
-        assert_eq!(pool_cap(1, Some(262_144)), 1);
-        assert_eq!(pool_cap(16, None), 6);
-        assert_eq!(pool_cap(2, None), 2);
-    }
 }
