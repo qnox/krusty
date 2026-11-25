@@ -1,4 +1,4 @@
-//! Fetching one jar over HTTP within a bounded time. A test binary runs under the harness deadline
+//! Fetching one artifact over HTTP within a bounded time. A test binary runs under the harness deadline
 //! (120 seconds by default), so provisioning a missing jar must give up well before it: every attempt
 //! is capped, retries stop at an overall deadline, and the whole process shares one download budget,
 //! so several missing jars cannot add up to the suite timeout either.
@@ -9,20 +9,25 @@ use std::time::{Duration, Instant};
 
 /// How long one download may take, and how often it is retried.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct RetryPolicy {
-    pub(super) connect_timeout: Duration,
-    pub(super) attempt_timeout: Duration,
-    pub(super) retry_delay: Duration,
-    pub(super) max_attempts: u32,
+pub struct RetryPolicy {
+    pub connect_timeout: Duration,
+    pub attempt_timeout: Duration,
+    pub retry_delay: Duration,
+    pub max_attempts: u32,
+    /// The least time between the starts of two requests from this process. Maven Central answers
+    /// back-to-back artifact requests with `429` and extends the block for every request made
+    /// during it, so a download never starts within this gap of another.
+    pub request_gap: Duration,
 }
 
 /// Maven Central refuses or drops a connection now and then; a missing jar silently leaves its
 /// library off every test's classpath, so a failed attempt is retried a few times.
-pub(super) const MAVEN_CENTRAL_RETRIES: RetryPolicy = RetryPolicy {
+pub const MAVEN_CENTRAL_RETRIES: RetryPolicy = RetryPolicy {
     connect_timeout: Duration::from_secs(5),
     attempt_timeout: Duration::from_secs(20),
     retry_delay: Duration::from_secs(2),
     max_attempts: 5,
+    request_gap: Duration::from_secs(3),
 };
 
 /// The default time one process may spend downloading, well below the harness's 120-second
@@ -31,16 +36,16 @@ const DEFAULT_BUDGET: Duration = Duration::from_secs(60);
 
 /// What a download did: how many transfers it started and whether one completed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct DownloadOutcome {
-    pub(super) attempts: u32,
-    pub(super) completed: bool,
+pub struct DownloadOutcome {
+    pub attempts: u32,
+    pub completed: bool,
 }
 
 /// Download `url` into `dest`, retrying under `policy` until `deadline`. No attempt starts after the
 /// deadline, and a running attempt is cut off at it. When no attempt completed, the second value is
 /// why the last one failed: curl's own message, the status, server address and final URL of the
 /// refusal, or the deadline that stopped the retries.
-pub(super) fn download(
+pub fn download(
     url: &str,
     dest: &Path,
     policy: RetryPolicy,
@@ -49,6 +54,12 @@ pub(super) fn download(
     let mut attempts = 0;
     let mut failure = None;
     while attempts < policy.max_attempts {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            failure.get_or_insert_with(|| "the download deadline passed".to_string());
+            break;
+        }
+        REQUESTS.pace(policy.request_gap, deadline);
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             failure.get_or_insert_with(|| "the download deadline passed".to_string());
@@ -106,6 +117,41 @@ pub(super) fn download(
     )
 }
 
+/// Spaces request starts at least a gap apart; callers take turns.
+struct Pacer {
+    last: Mutex<Option<Instant>>,
+}
+
+impl Pacer {
+    const fn new() -> Self {
+        Pacer {
+            last: Mutex::new(None),
+        }
+    }
+
+    /// How long a request starting at `now` must wait; it counts as started once it has waited.
+    fn delay(&self, now: Instant, gap: Duration) -> Duration {
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        let wait = last
+            .map(|last| (last + gap).saturating_duration_since(now))
+            .unwrap_or_default();
+        *last = Some(now + wait);
+        wait
+    }
+
+    /// Waits for the gap, but never past `deadline`.
+    fn pace(&self, gap: Duration, deadline: Instant) {
+        let now = Instant::now();
+        let wait = self.delay(now, gap).min(deadline.saturating_duration_since(now));
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
+        }
+    }
+}
+
+/// Every download in the process shares one pacer.
+static REQUESTS: Pacer = Pacer::new();
+
 /// Who refused: the status, server address and final URL curl reports through `-w` (the address
 /// and URL after redirects are what tell a mirror or proxy from Central itself). `None` when the
 /// request never reached a server, where curl prints a zero status.
@@ -122,12 +168,12 @@ fn seconds(duration: Duration) -> String {
 
 /// The time a process may still spend downloading. Every download charges its wall time, including
 /// ones that succeed, so the total a process blocks on the network stays within the budget.
-pub(super) struct DownloadBudget {
+pub struct DownloadBudget {
     remaining: Mutex<Duration>,
 }
 
 impl DownloadBudget {
-    pub(super) const fn new(budget: Duration) -> Self {
+    pub const fn new(budget: Duration) -> Self {
         DownloadBudget {
             remaining: Mutex::new(budget),
         }
@@ -136,7 +182,7 @@ impl DownloadBudget {
     /// Run `fetch` with the deadline the remaining budget allows, then charge the time it took.
     /// Returns `None` without calling `fetch` once the budget is spent. The budget stays locked for
     /// the whole fetch, so concurrent callers take turns and each sees what the previous one left.
-    pub(super) fn spend<T>(&self, fetch: impl FnOnce(Instant) -> T) -> Option<T> {
+    pub fn spend<T>(&self, fetch: impl FnOnce(Instant) -> T) -> Option<T> {
         let mut remaining = self.remaining.lock().unwrap_or_else(|e| e.into_inner());
         if remaining.is_zero() {
             return None;
@@ -149,7 +195,7 @@ impl DownloadBudget {
 }
 
 /// The process-wide download budget, read once from `KRUSTY_DEPS_DEADLINE_SECONDS`.
-pub(super) fn process_budget() -> &'static DownloadBudget {
+pub fn process_budget() -> &'static DownloadBudget {
     static BUDGET: std::sync::OnceLock<DownloadBudget> = std::sync::OnceLock::new();
     BUDGET.get_or_init(|| {
         let budget = std::env::var("KRUSTY_DEPS_DEADLINE_SECONDS")
@@ -215,7 +261,19 @@ mod tests {
             attempt_timeout,
             retry_delay: Duration::from_millis(100),
             max_attempts: 5,
+            request_gap: Duration::ZERO,
         }
+    }
+
+    #[test]
+    fn requests_start_a_gap_apart() {
+        let pacer = Pacer::new();
+        let gap = Duration::from_secs(3);
+        let start = Instant::now();
+        assert_eq!(pacer.delay(start, gap), Duration::ZERO);
+        assert_eq!(pacer.delay(start, gap), gap);
+        assert_eq!(pacer.delay(start, gap), gap * 2);
+        assert_eq!(pacer.delay(start + gap * 10, gap), Duration::ZERO);
     }
 
     fn destination(name: &str) -> std::path::PathBuf {

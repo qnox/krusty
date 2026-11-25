@@ -14,7 +14,7 @@ use crate::jvm::classpath::Classpath;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-mod maven_download;
+use krusty_download as maven_download;
 
 /// Locate the kotlin-stdlib jar from the dist or standard local caches, mirroring how a drop-in
 /// `kotlinc` user supplies it via `-classpath`. Each source names the exact reference release's

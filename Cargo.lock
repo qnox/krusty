@@ -832,6 +832,7 @@ dependencies = [
  "dhat",
  "flate2",
  "krusty-cli",
+ "krusty-download",
  "krusty-jvm",
  "krusty-names",
  "krusty-native",
@@ -881,6 +882,10 @@ dependencies = [
  "serde_json",
  "zip",
 ]
+
+[[package]]
+name = "krusty-download"
+version = "0.0.1"
 
 [[package]]
 name = "krusty-jvm"
@@ -952,6 +957,7 @@ dependencies = [
 name = "krusty-plugin-host"
 version = "0.0.1"
 dependencies = [
+ "krusty-download",
  "krusty-plugin-api",
  "sha2",
  "zip",
