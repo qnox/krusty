@@ -30,6 +30,8 @@
 //!   and its fields, entry constants included, intern where a body first references them.
 //! - An enum declaring only secondary constructors interns each one's header and locals at its own
 //!   place; there is no synthesized primary to visit ahead of them.
+//! - A constant a removed null check interned in one method is placed where a later method
+//!   first names it, even when a later rewritten method names it too.
 //! - An enum's property accessors intern at their declarations: a getter's name does not precede
 //!   the setter of an earlier property.
 //! - A data class's declared functions intern before its synthesized `componentN`/`copy`/
@@ -449,8 +451,7 @@ object Counter {
 fn an_enum_with_only_secondary_constructors_interns_them_at_their_declarations() {
     assert_identical(
         "EnumSecondaries",
-        "var seen = \"\"\n\
-         enum class Gate {\n\
+        "enum class Gate {\n\
          \x20   Open(\"x\"), Shut;\n\
          \n\
          \x20   val label: String\n\
@@ -459,6 +460,46 @@ fn an_enum_with_only_secondary_constructors_interns_them_at_their_declarations()
          \x20   constructor() : this(\"\")\n\
          }\n",
         &["Gate"],
+    );
+}
+
+/// `park`'s `as` interns an `Intrinsics.checkNotNull` that a later pass removes. `launch` is the
+/// first body that still names `Intrinsics`, so kotlinc interns it there; a later rewritten method
+/// (`run`, which also uses it through `!!`) must not keep it where `park` interned it.
+#[test]
+fn a_removed_null_check_s_class_interns_where_a_later_method_names_it() {
+    assert_identical_with_stdlib(
+        "RemovedNullCheck",
+        "import kotlin.coroutines.*\n\
+         \n\
+         object Sink : Continuation<Any?> {\n\
+             override val context: CoroutineContext = EmptyCoroutineContext\n\
+             override fun resumeWith(result: Result<Any?>) { result.getOrThrow() }\n\
+         }\n\
+         \n\
+         @JvmInline value class Tag(val s: String)\n\
+         \n\
+         var pending: Continuation<Any>? = null\n\
+         \n\
+         suspend fun <T> park(): T = suspendCoroutine {\n\
+             @Suppress(\"UNCHECKED_CAST\")\n\
+             pending = it as Continuation<Any>\n\
+         }\n\
+         \n\
+         fun launch(body: suspend () -> Unit) {\n\
+             body.startCoroutine(Sink)\n\
+         }\n\
+         \n\
+         fun run(): String {\n\
+             var out: String? = null\n\
+             launch {\n\
+                 out = \"x\"\n\
+             }\n\
+             pending?.resume(Tag(\"OK\"))\n\
+             return out!!\n\
+         }\n\
+         \n",
+        &["RemovedNullCheckKt"],
     );
 }
 

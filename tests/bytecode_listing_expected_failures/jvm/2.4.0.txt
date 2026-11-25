@@ -112,7 +112,6 @@ jvm8/defaults/enable/specialization/primitiveAndNullable.kt
 jvmOverloadsAndParametersAnnotations.kt
 jvmOverloadsExternal.kt
 jvmStatic/jvmStaticExternal.kt
-jvmStatic/jvmStaticPrivate.kt
 jvmStatic/kt31389.kt
 kt45853.kt
 localFunctions/inInitBlock.kt
