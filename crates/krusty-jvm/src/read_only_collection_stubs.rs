@@ -1195,6 +1195,7 @@ fn implemented_members(
         .get(&class.fq_name_id())
         .into_iter()
         .flatten()
+        .filter(|default| !default.suspend)
     {
         if let krusty::fir::InheritedMemberName::Function(name) = &default.name {
             implemented

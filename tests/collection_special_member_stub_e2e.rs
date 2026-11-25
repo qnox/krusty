@@ -76,6 +76,30 @@ fn a_source_superclass_suspend_member_leaves_the_mutable_declaration_its_stub_by
 }
 
 #[test]
+fn a_suspend_interface_default_leaves_the_mutable_declaration_its_stub_byte_for_byte() {
+    // A suspend `clear()` with a body on a source interface is a default member, not an
+    // implementation of `MutableMap.clear()`: kotlinc still writes the throwing stub.
+    assert_byte_equal(
+        "SuspendInterfaceDefaultClearStubBytes",
+        "interface SuspendInterfaceDefaultClearHolder {\n\
+        \x20   suspend fun clear() {}\n\
+        }\n\
+        abstract class SuspendInterfaceDefaultClearStubBytes<K : Any, V : Any> :\n\
+        \x20   SuspendInterfaceDefaultClearHolder, Map<K, V> {\n\
+        \x20   override val entries: Set<Map.Entry<K, V>> get() = TODO()\n\
+        \x20   override val keys: Set<K> get() = TODO()\n\
+        \x20   override val size: Int get() = TODO()\n\
+        \x20   override val values: Collection<V> get() = TODO()\n\
+        \x20   override fun isEmpty(): Boolean = TODO()\n\
+        \x20   override fun get(key: K): V? = TODO()\n\
+        \x20   override fun containsValue(value: V): Boolean = TODO()\n\
+        \x20   override fun containsKey(key: K): Boolean = TODO()\n\
+        }\n",
+        "SuspendInterfaceDefaultClearStubBytes",
+    );
+}
+
+#[test]
 fn suspend_member_leaves_the_mutable_declaration_its_stub_byte_for_byte() {
     // `suspend fun clear()` takes a continuation, so it does not implement `MutableMap.clear()`:
     // kotlinc still writes the throwing `clear()` stub beside it.
