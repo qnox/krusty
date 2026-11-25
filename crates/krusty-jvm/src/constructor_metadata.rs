@@ -79,6 +79,7 @@ mod tests {
             declared_spellings: krusty::spelling::DeclaredSpellings::default(),
             named_params: Vec::new(),
             metadata_visibility: Some(Visibility::Internal),
+            return_value_status: Default::default(),
             generated_debug: krusty::ir::IrGeneratedDeclarationDebug::None,
             vararg_index: None,
             defaults: Vec::new(),
