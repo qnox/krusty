@@ -1840,10 +1840,7 @@ serialization/serializedVararg.kt
 specialBuiltins/bridgeNotEmptyMap.kt
 specialBuiltins/bridges.kt
 specialBuiltins/emptyList.kt
-specialBuiltins/emptyMap.kt
-specialBuiltins/emptyStringMap.kt
 specialBuiltins/enumAsOrdinaled.kt
-specialBuiltins/notEmptyListAny.kt
 specialBuiltins/notEmptyMap.kt
 specialBuiltins/throwableComplex.kt
 specialBuiltins/throwableImpl.kt

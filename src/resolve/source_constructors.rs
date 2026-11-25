@@ -11,6 +11,57 @@ use crate::types::TyKind;
 pub(super) type StableConstructorParameterFacts =
     (Vec<String>, Vec<bool>, Option<usize>, Vec<bool>);
 
+/// Parameter types for a constructor whose signature was not published. An unpublishable
+/// parameter type leaves no signature; these error types keep the unresolved diagnostic and
+/// give the checker a parameter for every source slot.
+pub(super) fn unpublished_constructor_shapes(
+    class: &ClassDecl,
+) -> (Vec<Ty>, Vec<Ty>, Vec<Vec<Ty>>) {
+    (
+        vec![Ty::Error; class.props.len()],
+        vec![Ty::Error; class.props.len()],
+        class
+            .secondary_ctors
+            .iter()
+            .map(|constructor| vec![Ty::Error; constructor.params.len()])
+            .collect(),
+    )
+}
+
+/// The primary constructor has no published signature, so its parameters stay error types.
+/// A secondary constructor that did publish its signature keeps those parameter types. Its body
+/// is checked against them, and an error kotlinc reports there is not replaced by `Ty::Error`.
+pub(super) fn unpublished_primary_shapes(
+    index: &crate::fir::ResolvedModuleIndex,
+    owner: crate::fir::DeclarationId,
+    class: &ClassDecl,
+) -> (Vec<Ty>, Vec<Ty>, Vec<Vec<Ty>>) {
+    let secondary = class
+        .secondary_ctors
+        .iter()
+        .enumerate()
+        .map(|(ordinal, constructor)| {
+            let sibling = u32::try_from(ordinal + 1).expect("too many secondary constructors");
+            index
+                .owned_declaration(owner, crate::fir::DeclarationKind::Constructor, sibling)
+                .and_then(|declaration| index.signature(declaration))
+                .map(|signature| {
+                    signature
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.get())
+                        .collect()
+                })
+                .unwrap_or_else(|| vec![Ty::Error; constructor.params.len()])
+        })
+        .collect();
+    (
+        vec![Ty::Error; class.props.len()],
+        vec![Ty::Error; class.props.len()],
+        secondary,
+    )
+}
+
 impl Checker<'_> {
     /// Normalize constructor headers already checked on an active body-local classifier's lexical
     /// rung into the ordinary constructor-candidate surface. No lookup or inference happens here:

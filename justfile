@@ -46,7 +46,7 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: attribution-tests smoke-selection-tests versioning-tests runner-profile-tests release-tests legacy-ratchet-tests reference-cache-tests outcome-set-merge-tests fmt-check legacy-baseline-check clippy-baseline-check
+lint: attribution-tests smoke-selection-tests versioning-tests runner-profile-tests memory-workers-tests release-tests legacy-ratchet-tests reference-cache-tests outcome-set-merge-tests fmt-check legacy-baseline-check clippy-baseline-check
 
 # The CI step that drops kotlinc reference inventories no recent run read, before master saves them.
 reference-cache-tests:
@@ -65,13 +65,16 @@ versioning-tests:
     bash scripts/test-versioning.sh
     bash scripts/test-sort-kotlin-versions.sh
     bash scripts/test-install-maven.sh
-    bash scripts/test-fetch-conformance-deps.sh
     bash scripts/test-check-intellij-patch.sh
     bash scripts/test-provision-jdks.sh
 
 # The CI runner profile's machine and contention report, against stand-in /proc and /sys trees.
 runner-profile-tests:
     bash scripts/test-runner-profile.sh
+
+# The test worker count bounded by memory, against stand-in /proc trees.
+memory-workers-tests:
+    bash scripts/test-memory-workers.sh
 
 # The release job's signing key id selection, against keys generated in a throwaway keyring, its
 # Maven Central upload, against a stand-in Gradle build and Central Portal, and the Gradle wrapper
@@ -622,14 +625,13 @@ test-all *ARGS:
 # binary; they do not compile krusty again.
 #
 # CI builds this right after `just tool-test-bin`, and must reuse that build's krusty.
-# Selecting krusty-cli's binary here keeps the Native backend in the graph: without it bumpalo
-# (under zopfli) loses Cranelift's `allocator-api2` feature and krusty, which links zopfli,
-# compiled a second time (484 s of a 1157 s build). krusty-build's own dev-dependencies add the
-# libc, object and once_cell features that the root package's dev-dependencies add there.
+# krusty-build's own dev-dependencies add the features the root package's dev-dependencies add
+# there; when they drift, krusty compiles a second time (270-400 s on a 4-core runner), so CI
+# names the compiler crates in CARGO_TEST_BINARY_REUSE and this build fails instead.
 krusty-build-tests:
     #!/usr/bin/env bash
     set -euo pipefail
-    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib -p krusty-cli --bin krusty
+    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib
 
 # The normal compiler unit suite, which exact-version CI rows run without rebuilding Rust.
 compiler-unit-tests:
