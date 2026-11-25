@@ -466,12 +466,12 @@ mod tests {
             }
         );
         assert_eq!(requests.load(Ordering::SeqCst), 1);
+        // curl's own wording of the status differs between releases; the answer is ours.
         assert_eq!(
-            failure,
-            Some(format!(
-                "curl: (22) The requested URL returned error: 404 \
-                 (HTTP 404 from 127.0.0.1 for {url})"
-            ))
+            failure.map(|reason| reason
+                .rsplit_once(" (")
+                .map(|(_, answer)| answer.to_string())),
+            Some(Some(format!("HTTP 404 from 127.0.0.1 for {url})")))
         );
     }
 

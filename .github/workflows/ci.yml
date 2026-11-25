@@ -420,6 +420,49 @@ jobs:
         with:
           path: target/cache/kotlin-native/${{ steps.max-version.outputs.version }}
           key: kotlin-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.max-version.outputs.version }}
+      # The Wasm unit tests and the KLIB coverage ratchet read each release's exact wasm-wasi stdlib
+      # KLIB from KRUSTY_DEPS_CACHE and download it on demand when it is missing. Without a cache
+      # restored here, every run downloaded it from Maven Central in the middle of the tests, and a
+      # refused download surfaced only as "the exact target stdlib must be provisioned". Restore the
+      # newest entry the e2e and conformance jobs saved; a master run saves it grown.
+      - name: restore the Maven artifacts
+        id: maven-deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: krusty-deps-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          restore-keys: |
+            krusty-deps-
+      - name: count the restored Maven artifacts
+        id: maven-deps-restored
+        run: echo "files=$(find target/cache/krusty-deps -type f 2> /dev/null | wc -l)" >> "$GITHUB_OUTPUT"
+      # The tests read this KLIB from KRUSTY_DEPS_CACHE, and a download that fails inside a test
+      # surfaces only as "the exact target stdlib must be provisioned". Maven Central answers 429
+      # to a client that asks for several artifacts in a row, and extends the block for every
+      # request made during it, so fetch one release at a time with a pause between requests and a
+      # growing wait after a refusal. A refusal that outlasts the waits fails this step with the
+      # URL and the status.
+      - name: provision the exact wasm stdlib of every release
+        env:
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
+        run: |
+          set -euo pipefail
+          mkdir -p "$KRUSTY_DEPS_CACHE"
+          for version in $(just kotlin-versions); do
+            file="$KRUSTY_DEPS_CACHE/kotlin-stdlib-wasm-wasi-$version.klib"
+            [ -f "$file" ] && continue
+            url="https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-wasm-wasi/$version/kotlin-stdlib-wasm-wasi-$version.klib"
+            for wait in 0 30 90 180; do
+              sleep "$wait"
+              status=$(curl -sSL -o "$file.part" -w '%{http_code}' "$url" || echo "curl failed")
+              [ "$status" = 200 ] && break
+              echo "$url answered $status"
+              rm -f "$file.part"
+            done
+            [ "$status" = 200 ] || { echo "::error::$url was not downloaded: $status"; exit 1; }
+            mv "$file.part" "$file"
+            sleep 5
+          done
       - name: provision Native for the normal test suites
         run: |
           root=$(just kotlin-native "$(just max-version)")
@@ -466,6 +509,7 @@ jobs:
           KRUSTY_TOOLCHAIN_RUN_MISSING: 1
           KRUSTY_REQUIRE_KLIB: "1"
           KRUSTY_REQUIRE_KOTLIN_NATIVE: "1"
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
         run: scripts/own-tests.sh
       # Holds every release's exact Native and Wasm stdlib to its implementation backlog with the
       # compiler unit binary the step above built and ran.
@@ -484,6 +528,22 @@ jobs:
             rm -rf "$PWD/target/cache/kotlin-native/$version"
             echo "::endgroup::"
           done
+      - name: check for new Maven artifacts
+        id: maven-deps-grown
+        if: github.ref == 'refs/heads/master' && success()
+        env:
+          RESTORED: ${{ steps.maven-deps-restored.outputs.files }}
+        run: |
+          now=$(find target/cache/krusty-deps -type f 2> /dev/null | wc -l)
+          echo "Maven artifacts: $RESTORED restored, $now now"
+          [ "$now" -gt "$RESTORED" ] || exit 0
+          echo "grown=true" >> "$GITHUB_OUTPUT"
+      - name: save the Maven artifacts entry
+        if: steps.maven-deps-grown.outputs.grown == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/cache/krusty-deps
+          key: ${{ steps.maven-deps.outputs.cache-primary-key }}
       - name: save Kotlin Toolchain oracle output
         if: github.ref == 'refs/heads/master' && steps.toolchain-oracle.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -735,7 +795,8 @@ jobs:
           source scripts/test-deadline.sh
           chmod +x e2e-bin krusty
           export KRUSTY_BIN="$PWD/krusty"
-          run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" ./e2e-bin --test-threads="$(nproc)"
+          # One thread per CPU, as many as memory holds: four on the 8 GB runners were OOM-killed.
+          run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" ./e2e-bin --test-threads="$(bash scripts/memory-workers.sh 2048)"
       - name: save recorded kotlinc bytes
         if: steps.recorded-mode.outputs.write == '1'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1118,8 +1179,13 @@ jobs:
       # Focused Wasm checks exercise both targets; run that complete inventory once per version.
       - name: run focused Wasm conformance ${{ matrix.version }}
         if: matrix.target == 'wasm-js'
+        # The focused tests that compile with the reference kotlinc-wasm replay its recorded
+        # library from the same cache the corpus step restores, and master publishes new ones.
         env:
           KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
+          KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/klib-references
+          KRUSTY_CLASS_DUMP_COMPILE_MISSING: "1"
+          KRUSTY_CLASS_DUMP_WRITE: ${{ github.ref == 'refs/heads/master' && steps.klib-recordings.outputs.cache-hit != 'true' && '1' || '0' }}
         run: just wasm-conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
       - name: list new KLIB box reference bytes
         if: always() && matrix.target != 'jvm' && github.ref == 'refs/heads/master'
@@ -1347,45 +1413,12 @@ jobs:
           distribution: zulu
           java-version: '17.0.21+0.3.1'
       - name: select the Gradle user home
-        id: gradle-home
         run: |
           echo "GRADLE_USER_HOME=$RUNNER_TEMP/krusty-gradle-user-home" >> "$GITHUB_ENV"
-          echo "version=$(sed -n 's/^distributionUrl=.*gradle-\(.*\)-bin\.zip$/\1/p' tools/krusty-gradle/gradle/wrapper/gradle-wrapper.properties)" >> "$GITHUB_OUTPUT"
-      # One cache per Gradle version, shared by every job that runs that Gradle: the resolved
-      # artifacts, the wrapper distribution, and the transforms, instrumented jars and generated API
-      # jars built from them (without these a full lane's tests ran about 150 s longer on the slower
-      # pool). The Kotlin DSL workspace is rebuilt. A job saves a new generation only when it
-      # downloaded artifacts the restored one lacked: the transforms of the plugin under test change
-      # every run and never cause a save on their own. The entry stops changing once it holds what
-      # every job on that Gradle reads; restore takes the newest generation and the older ones are
-      # never read again. A generation is named by the run, the job and the matrix row,
-      # because the job index alone repeats across jobs: two jobs on one Gradle version in one run
-      # wrote the same key, and the second job's save was refused.
-      - &restore-gradle-home
-        name: restore Gradle ${{ steps.gradle-home.outputs.version }} dependencies
-        id: gradle-deps
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: &gradle-home-paths |
-            ${{ runner.temp }}/krusty-gradle-user-home/caches/modules-2
-            ${{ runner.temp }}/krusty-gradle-user-home/caches/transforms-*
-            ${{ runner.temp }}/krusty-gradle-user-home/caches/*/transforms
-            ${{ runner.temp }}/krusty-gradle-user-home/caches/jars-*
-            ${{ runner.temp }}/krusty-gradle-user-home/caches/*/generated-gradle-jars
-            ${{ runner.temp }}/krusty-gradle-user-home/wrapper/dists
-            !${{ runner.temp }}/krusty-gradle-user-home/caches/**/*.lock
-            !${{ runner.temp }}/krusty-gradle-user-home/caches/modules-2/gc.properties
-          key: gradle-${{ steps.gradle-home.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ strategy.job-index }}
-          restore-keys: |
-            gradle-${{ steps.gradle-home.outputs.version }}-
-      - &count-gradle-home
-        name: count the restored Gradle files
-        id: gradle-restored
-        run: echo "files=$(find "$GRADLE_USER_HOME/caches/modules-2/files-2.1" "$GRADLE_USER_HOME"/caches/modules-2/metadata-*/descriptors "$GRADLE_USER_HOME/wrapper/dists" -type f 2> /dev/null | wc -l)" >> "$GITHUB_OUTPUT"
       - &setup-gradle
         uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
-          # The steps around it cache the Gradle user home.
+          # No Actions cache of the Gradle user home: every job downloads through the package cache.
           cache-disabled: true
       # Maven Central and the Gradle Plugin Portal through Infragnite's package cache
       # (maven.infragnite.dev): an init script in GRADLE_USER_HOME, so set that first.
@@ -1397,23 +1430,6 @@ jobs:
           set -euo pipefail
           version=$(just version)
           scripts/package-gradle-plugin.sh "$version" "$PWD/dist-gradle"
-      - &check-gradle-home
-        name: check for new Gradle files
-        id: gradle-grown
-        if: github.ref == 'refs/heads/master' && success()
-        env:
-          RESTORED: ${{ steps.gradle-restored.outputs.files }}
-        run: |
-          now=$(find "$GRADLE_USER_HOME/caches/modules-2/files-2.1" "$GRADLE_USER_HOME"/caches/modules-2/metadata-*/descriptors "$GRADLE_USER_HOME/wrapper/dists" -type f 2> /dev/null | wc -l)
-          echo "Gradle ${{ steps.gradle-home.outputs.version }}: $RESTORED restored files, $now now"
-          if [ "$now" -gt "$RESTORED" ]; then echo "save=true" >> "$GITHUB_OUTPUT"; fi
-      - &save-gradle-home
-        name: save Gradle ${{ steps.gradle-home.outputs.version }} dependencies
-        if: steps.gradle-grown.outputs.save == 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: *gradle-home-paths
-          key: ${{ steps.gradle-deps.outputs.cache-primary-key }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: krusty-gradle-plugin
@@ -1451,10 +1467,8 @@ jobs:
           distribution: zulu
           java-version: '17.0.21+0.3.1'
       - name: select the Gradle user home
-        id: gradle-home
         run: |
           echo "GRADLE_USER_HOME=$RUNNER_TEMP/krusty-gradle-user-home" >> "$GITHUB_ENV"
-          echo "version=$(sed -n 's/^distributionUrl=.*gradle-\(.*\)-bin\.zip$/\1/p' tools/krusty-build-tools/gradle/wrapper/gradle-wrapper.properties)" >> "$GITHUB_OUTPUT"
       - *setup-gradle
       # No Actions cache: each row downloads its dependencies through the package cache, which
       # answers the rows side by side, and its TestKit build shares this Gradle user home.
@@ -1491,18 +1505,12 @@ jobs:
           distribution: zulu
           java-version: '17.0.21+0.3.1'
       - name: select the Gradle user home
-        id: gradle-home
         run: |
           echo "GRADLE_USER_HOME=$RUNNER_TEMP/krusty-gradle-user-home" >> "$GITHUB_ENV"
-          echo "version=$(sed -n 's/^distributionUrl=.*gradle-\(.*\)-bin\.zip$/\1/p' tools/krusty-analysis-api/gradle/wrapper/gradle-wrapper.properties)" >> "$GITHUB_OUTPUT"
-      - *restore-gradle-home
-      - *count-gradle-home
       - *setup-gradle
       - *package-cache
       - name: test the session provider
         run: tools/krusty-analysis-api/gradlew --no-daemon -p tools/krusty-analysis-api test
-      - *check-gradle-home
-      - *save-gradle-home
 
   # Execute the exact release bytes against every supported Kotlin Gradle plugin.
   gradle:
@@ -1608,16 +1616,12 @@ jobs:
           fi
       # The nested fixture builds share one isolated Gradle user home, outside the checkout.
       - name: select the integration Gradle user home
-        id: gradle-home
         run: |
           echo "GRADLE_USER_HOME=$RUNNER_TEMP/krusty-gradle-user-home" >> "$GITHUB_ENV"
-          echo "version=${{ matrix.gradle }}" >> "$GITHUB_OUTPUT"
-      - *restore-gradle-home
-      - *count-gradle-home
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
           gradle-version: ${{ steps.gradle-on-path.outputs.found != 'true' && matrix.gradle || '' }}
-          # The steps around it cache the Gradle user home.
+          # No Actions cache of the Gradle user home: every job downloads through the package cache.
           cache-disabled: true
       - *package-cache
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -1666,8 +1670,6 @@ jobs:
           fi
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
             ./krusty-build-tests --ignored $tests
-      - *check-gradle-home
-      - *save-gradle-home
 
   # Build the Maven plugin's release bytes once: a portable local Maven repository the release
   # publishes and the job below consumes.

@@ -46,7 +46,7 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: attribution-tests smoke-selection-tests versioning-tests runner-profile-tests release-tests legacy-ratchet-tests reference-cache-tests outcome-set-merge-tests fmt-check legacy-baseline-check clippy-baseline-check
+lint: attribution-tests smoke-selection-tests versioning-tests runner-profile-tests memory-workers-tests release-tests legacy-ratchet-tests reference-cache-tests outcome-set-merge-tests fmt-check legacy-baseline-check clippy-baseline-check
 
 # The CI step that drops kotlinc reference inventories no recent run read, before master saves them.
 reference-cache-tests:
@@ -71,6 +71,10 @@ versioning-tests:
 # The CI runner profile's machine and contention report, against stand-in /proc and /sys trees.
 runner-profile-tests:
     bash scripts/test-runner-profile.sh
+
+# The test worker count bounded by memory, against stand-in /proc trees.
+memory-workers-tests:
+    bash scripts/test-memory-workers.sh
 
 # The release job's signing key id selection, against keys generated in a throwaway keyring, its
 # Maven Central upload, against a stand-in Gradle build and Central Portal, and the Gradle wrapper
@@ -327,7 +331,7 @@ kotlinc VERSION=`just max-version`:
 
 # Regenerate krusty's copy of one kotlinc release's argument table, language feature table and
 # diagnostic names from that release's distribution (crates/krusty-cli/src/kotlinc_arguments/releases/<ver>.tsv,
-# src/features/releases/<ver>.{features,language-versions}.tsv and src/diag/releases/<ver>.diagnostics.tsv). The conformance e2e test fails
+# crates/krusty-core/src/features/releases/<ver>.{features,language-versions}.tsv and src/diag/releases/<ver>.diagnostics.tsv). The conformance e2e test fails
 # until the table each release reads equals what the provisioned compiler declares. A release keeps a
 # file only where it differs from the newest recorded release below it, which it otherwise reads.
 kotlinc-arguments VERSION=`just max-version`:
@@ -349,8 +353,8 @@ kotlinc-arguments VERSION=`just max-version`:
         fi
     }
     dump DumpKotlincArguments crates/krusty-cli/src/kotlinc_arguments/releases .tsv
-    dump DumpLanguageFeatures src/features/releases .features.tsv
-    dump DumpLanguageVersions src/features/releases .language-versions.tsv
+    dump DumpLanguageFeatures crates/krusty-core/src/features/releases .features.tsv
+    dump DumpLanguageVersions crates/krusty-core/src/features/releases .language-versions.tsv
     dump DumpDiagnosticNames src/diag/releases .diagnostics.tsv
 
 # Provision the Kotlin/Native distribution whose stdlib KLIB supplies the real metadata format.

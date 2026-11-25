@@ -192,20 +192,39 @@ pub fn kotlinc_path() -> Option<PathBuf> {
 /// library that is not provisioned.
 pub fn kotlin_stdlib_klib(target: crate::compilation_target::CompilationTarget) -> Option<PathBuf> {
     use crate::compilation_target::CompilationTarget;
+    if matches!(target, CompilationTarget::Jvm) {
+        return None;
+    }
+    kotlin_stdlib_klib_or_reason(target).ok()
+}
+
+/// [`kotlin_stdlib_klib`] that says why the library is unavailable: the URL and status or deadline
+/// of a failed wasm-wasi download, or the distribution the other targets read it from.
+pub fn kotlin_stdlib_klib_or_reason(
+    target: crate::compilation_target::CompilationTarget,
+) -> Result<PathBuf, String> {
+    use crate::compilation_target::CompilationTarget;
+    let missing = |what: &str| format!("{what} is not provisioned");
     match target {
-        CompilationTarget::Jvm => None,
-        CompilationTarget::Js => dist_jar("kotlin-stdlib-js.klib"),
-        CompilationTarget::WasmJs => dist_jar("kotlin-stdlib-wasm-js.klib"),
+        CompilationTarget::Jvm => Err("the JVM stdlib is a jar, not a KLIB".to_string()),
+        CompilationTarget::Js => {
+            dist_jar("kotlin-stdlib-js.klib").ok_or_else(|| missing("the kotlinc distribution"))
+        }
+        CompilationTarget::WasmJs => dist_jar("kotlin-stdlib-wasm-js.klib")
+            .ok_or_else(|| missing("the kotlinc distribution")),
         CompilationTarget::WasmWasi => kotlin_wasm_wasi_stdlib_klib(),
-        CompilationTarget::Native => kotlin_native_stdlib_klib(),
+        CompilationTarget::Native => {
+            kotlin_native_stdlib_klib().ok_or_else(|| missing("the Kotlin/Native distribution"))
+        }
     }
 }
 
 /// Kotlin publishes the wasm-wasi stdlib as a target-specific Maven KLIB for every supported
 /// release. Some compiler distributions do not bundle that publication, so use its versioned
 /// coordinate as the one authoritative source rather than selecting a different platform's bytes.
-fn kotlin_wasm_wasi_stdlib_klib() -> Option<PathBuf> {
-    ensure_maven_artifact(
+fn kotlin_wasm_wasi_stdlib_klib() -> Result<PathBuf, String> {
+    fetch_repository_artifact(
+        MAVEN_CENTRAL,
         "org.jetbrains.kotlin",
         "kotlin-stdlib-wasm-wasi",
         &reference_version(),
@@ -830,6 +849,16 @@ fn find_exact_jar(dir: &std::path::Path, expected: &str, depth: usize) -> Option
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_jvm_has_no_stdlib_klib_and_says_so() {
+        use crate::compilation_target::CompilationTarget;
+        assert_eq!(
+            kotlin_stdlib_klib_or_reason(CompilationTarget::Jvm),
+            Err("the JVM stdlib is a jar, not a KLIB".to_string())
+        );
+        assert_eq!(kotlin_stdlib_klib(CompilationTarget::Jvm), None);
+    }
+
     use super::*;
 
     #[test]
