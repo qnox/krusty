@@ -14,7 +14,7 @@
 
 mod float_text;
 
-pub(crate) use float_text::{push_f32, push_f64};
+pub use float_text::{push_f32, push_f64};
 
 /// A Kotlin `String` value: a sequence of UTF-16 code units.
 ///
@@ -146,7 +146,7 @@ fn join_lines(lines: Vec<Vec<u16>>) -> KtString {
 }
 
 /// The value semantics of Kotlin's `String.trimIndent()` over UTF-16 code units.
-pub(crate) fn trim_indent(value: &KtString) -> KtString {
+pub fn trim_indent(value: &KtString) -> KtString {
     let units = value.units().collect::<Vec<_>>();
     let lines = units.split(|&unit| unit == LF).collect::<Vec<_>>();
     let minimum_indent = lines
@@ -176,7 +176,7 @@ pub(crate) fn trim_indent(value: &KtString) -> KtString {
 }
 
 /// The value semantics of Kotlin's `String.trimMargin(prefix)` over UTF-16 code units.
-pub(crate) fn trim_margin(value: &KtString, margin: &KtString) -> KtString {
+pub fn trim_margin(value: &KtString, margin: &KtString) -> KtString {
     let margin = margin.units().collect::<Vec<_>>();
     let units = value.units().collect::<Vec<_>>();
     let lines = units.split(|&unit| unit == LF).collect::<Vec<_>>();
