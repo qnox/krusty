@@ -215,6 +215,21 @@ impl KlibIrArena {
         count
     }
 
+    /// Whether `body`, the body of the loop `loop_id`, or an expression nested in it breaks out
+    /// of that loop.
+    pub(crate) fn breaks_from(&self, body: KlibIrExprId, loop_id: u32) -> bool {
+        let mut pending = vec![body];
+        while let Some(id) = pending.pop() {
+            let expression = self.expr(id);
+            if matches!(&expression.kind, KlibIrExprKind::Break { loop_id: named, .. } if *named == loop_id)
+            {
+                return true;
+            }
+            push_child_expressions(self, &expression.kind, &mut pending);
+        }
+        false
+    }
+
     /// Whether exactly `function`'s body reads `symbol` as a value. Nested declarations share the
     /// arena but are not part of the function's expression graph, matching `call_symbols_in_body`.
     pub(crate) fn body_reads_value(

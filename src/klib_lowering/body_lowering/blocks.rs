@@ -296,6 +296,15 @@ impl BodyLowering<'_> {
                 .into_iter()
                 .flatten()
                 .any(|argument| self.diverges(argument)),
+            // A loop on the constant `true` that nothing breaks out of never completes.
+            KlibIrExprKind::While(repeated) | KlibIrExprKind::DoWhile(repeated) => {
+                matches!(
+                    self.arena.expr(repeated.condition).kind,
+                    KlibIrExprKind::Const(KlibIrConstant::Boolean(true))
+                ) && repeated
+                    .body
+                    .is_none_or(|body| !self.arena.breaks_from(body, repeated.id))
+            }
             _ => false,
         }
     }
