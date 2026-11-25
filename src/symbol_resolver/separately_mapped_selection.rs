@@ -12,6 +12,7 @@ use super::postponed_lambda_selection::{select_with_postponed_lambda_results, La
 use super::*;
 
 /// One declaration's own mapping of a call's source arguments.
+#[derive(Clone)]
 pub(crate) struct CandidateCall {
     /// The arguments in value-parameter order; a parameter left to its default holds
     /// [`CallArgKind::OmittedDefault`].

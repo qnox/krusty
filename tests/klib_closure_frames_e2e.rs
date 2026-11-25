@@ -29,6 +29,9 @@ mod local_superclass_arguments;
 #[path = "klib_closure_frames_e2e/private_inline_members.rs"]
 mod private_inline_members;
 
+#[path = "klib_closure_frames_e2e/file_private_inherited_members.rs"]
+mod file_private_inherited_members;
+
 #[path = "klib_closure_frames_e2e/thread_local_objects.rs"]
 mod thread_local_objects;
 

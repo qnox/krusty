@@ -500,10 +500,16 @@ fn orphan_anchors(
                     // an orphaned descriptor in a later NameAndType belongs after its fresh name.
                     settle(&mut pending, index, &mut anchored);
                 }
-                seen[index] = true;
-                if !orphaned[index] && matches!(slot.holder, Holder::Class | Holder::Parameter(_)) {
+                // Only a header entry the visit interns itself places what is pending after it; a
+                // name or descriptor an earlier method's code already interned leaves the orphan
+                // pending until the method's code interns its first fresh entry.
+                if !orphaned[index]
+                    && !seen[index]
+                    && matches!(slot.holder, Holder::Class | Holder::Parameter(_))
+                {
                     header_max = header_max.max(index);
                 }
+                seen[index] = true;
             }
             if matches!(slot.holder, Holder::Code(..)) {
                 header_max = 0;
@@ -511,8 +517,10 @@ fn orphan_anchors(
             continue;
         };
         if method != Some(at) {
-            // What is pending now the header named: it follows the header's own entries.
-            settle(&mut pending, header_max + 1, &mut anchored);
+            // What is pending now the header named: it follows the header's own fresh entries.
+            if header_max > 0 {
+                settle(&mut pending, header_max + 1, &mut anchored);
+            }
             method = Some(at);
             named_max = header_max;
         }

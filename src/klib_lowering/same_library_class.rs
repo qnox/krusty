@@ -1882,12 +1882,25 @@ fn class_formals(
         variances.push(variance);
     }
     let mut bounds = Vec::with_capacity(parameters.len());
-    for parameter in parameters {
+    for &parameter in &parameters {
         let mut parameter_bounds = Vec::with_capacity(parameter.supertypes.len());
         for bound in &parameter.supertypes {
             parameter_bounds.push(semantic_type_in(arena, &types, *bound, resolve)?);
         }
         bounds.push(parameter_bounds);
+    }
+    // Each formal carries its first declared bound, as a provider's formal does: a value of
+    // `T : Enum<T>` is an `Enum`, whose members a body calls on it. A bound naming a formal reads
+    // it unbounded, as the provider decodes a recursive bound.
+    let mut types = KlibTypeParameters::default();
+    for ((&parameter, formal), parameter_bounds) in parameters.iter().zip(&mut formals).zip(&bounds)
+    {
+        if let (Some(&bound), Some(name)) = (parameter_bounds.first(), formal.ty_param_name()) {
+            *formal = Ty::ty_param(name, bound);
+        }
+        if !types.bind(&parameter.base.symbol, *formal) {
+            return Err(mismatch("a non-public class repeats a type parameter"));
+        }
     }
     for ((&formal, &variance), declared) in formals.iter().zip(&variances).zip(&bounds) {
         if !types.record_bounds(formal, declared.clone())

@@ -139,7 +139,7 @@ impl<'u, 's> Linker<'u, 's> {
             return Ok(None);
         };
         let callees: &'s super::super::KlibCalleeFacts<'s> = self.sources.callees;
-        let Some(object) = callees.read_object(classifier) else {
+        let Some(object) = callees.read_class(classifier) else {
             return Ok(None);
         };
         let header = super::super::class_headers::authenticate_private_member(
