@@ -350,6 +350,7 @@ impl BodyFirChecker<'_> {
             internal: constructor_owner,
             constructor,
             outer,
+            has_outer_instance,
             argument_mapping,
             signature,
             ..
@@ -504,16 +505,8 @@ impl BodyFirChecker<'_> {
                 ));
             };
             let classifier = constructor_owner;
-            let outer_classifier = classifier_declaration
-                .and_then(|classifier| {
-                    self.index
-                        .declaration_header(classifier)
-                        .filter(|header| header.flags.has(crate::fir::DeclarationFlags::INNER))
-                        .and_then(|header| header.owner)
-                })
-                .and_then(|outer| self.index.classifier_header(outer));
-            let outer_type = outer_classifier
-                .map(|_| match &outer {
+            let outer_type = has_outer_instance
+                .then(|| match &outer {
                     // The selected reference signature owns the exact applied leading parameter.
                     // Rebuilding it from the outer classifier header erases type arguments fixed by
                     // a qualified inner/typealias LHS (`Foo<String>::InnerAlias`).

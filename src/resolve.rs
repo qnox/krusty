@@ -2763,6 +2763,9 @@ pub enum ExprLowering {
         /// Whether an inner constructor receives its outer instance as a callable parameter or
         /// captures an explicitly/implicitly selected value.
         outer: ConstructorReferenceOuter,
+        /// Whether the constructed classifier is inner, so the reference carries an outer
+        /// instance, whichever provider declared the classifier.
+        has_outer_instance: bool,
         /// Explicit only when the expected function shape applies defaults or packs a vararg.
         /// Lowering may realize this plan or decline; it must not repeat constructor selection.
         argument_mapping: Option<Vec<AdaptedRefArgument>>,

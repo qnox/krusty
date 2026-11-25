@@ -525,6 +525,10 @@ impl Checker<'_> {
                     }),
                 constructor: Box::new(selected),
                 outer: outer_binding,
+                has_outer_instance: self
+                    .fed_source()
+                    .classifier(internal)
+                    .is_some_and(|classifier| classifier.outer_instance.is_some()),
                 argument_mapping,
                 signature,
             },
