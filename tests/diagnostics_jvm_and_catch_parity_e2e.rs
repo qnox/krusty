@@ -269,3 +269,78 @@ fn tailrec_overriding_in_a_final_class_is_accepted_by_both_frontends() {
     );
     common::expect_front_end_ok_files_with_stdlib(&[source], "final overriding tailrec parity");
 }
+
+#[test]
+fn suspension_points_inside_critical_sections_match_kotlinc() {
+    // A suspension point in a `synchronized` block or anywhere in a `withLock` call that a suspend
+    // function or a lambda passed to a suspend parameter encloses. A suspend parameter between the
+    // call and the lock (`launch { pause() }`) ends the critical section; a lambda that is only
+    // expected to be suspend (`val later`) does not.
+    let source = r#"import kotlin.concurrent.withLock
+import java.util.concurrent.locks.ReentrantLock
+
+val lock = ReentrantLock()
+
+class Worker {
+    suspend fun step(): Int = 1
+}
+
+suspend fun lockOf(): ReentrantLock = lock
+
+suspend fun pause() {}
+
+fun launch(block: suspend () -> Unit) {}
+
+suspend fun members(worker: Worker): Int = synchronized(lock) { worker.step() }
+
+suspend fun receivers() {
+    lockOf().withLock { }
+    synchronized(lockOf()) { }
+}
+
+suspend fun boundaries() {
+    synchronized(lock) {
+        launch { pause() }
+        val later: suspend () -> Unit = { pause() }
+    }
+    lock.withLock {
+        run { pause() }
+    }
+}
+
+fun nested() {
+    launch {
+        synchronized(lock) {
+            run { pause() }
+        }
+        synchronized(lock, { pause() })
+        synchronized(suspend { lockOf() }()) { }
+    }
+}
+"#;
+    let stdlib = common::stdlib_jar();
+    let result =
+        common::compiler_diagnostics(&[("Monitors.kt", source)], std::slice::from_ref(&stdlib));
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    let error = |line, column, name: &str| ObservedError {
+        file: "Monitors.kt".to_string(),
+        line,
+        column,
+        message: format!("the '{name}' suspension point is inside a critical section."),
+    };
+    let expected = vec![
+        error(16, 72, "step"),
+        error(19, 5, "lockOf"),
+        error(26, 43, "pause"),
+        error(29, 15, "pause"),
+        error(36, 19, "pause"),
+        error(38, 30, "pause"),
+    ];
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(result.reference_code, 0, "kotlinc silently accepted source");
+    assert_eq!(kotlinc_errors.len(), 6);
+    assert_eq!(kotlinc_errors, expected);
+    assert_eq!(krusty_errors, expected);
+}

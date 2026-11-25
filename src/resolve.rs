@@ -190,11 +190,13 @@ mod declaration_usage;
 mod dependency_platform;
 mod deprecation_phase;
 use deprecation_phase::DeprecationNames;
+mod critical_section_suspension;
 mod deprecation_usage;
 mod destructuring;
 mod diagnostic_selection;
 mod eager_lambda_analysis;
 mod elvis_expression;
+mod integer_literal_types;
 mod type_test_narrowing;
 use type_test_narrowing::TypeTest;
 mod enum_entries;
@@ -2533,65 +2535,7 @@ fn constructor_argument_matches(
 use erased_overload_keys::{
     erased_params_semantic_key, erased_type_key, same_erased_params, ErasedTypeKey,
 };
-
-/// The type of an unsigned integer literal (`200u`). Kotlin types an integer literal from its
-/// CONTEXT, unsigned exactly like signed: `val a: UByte = 200u` is a `UByte` the same way
-/// `val b: Byte = 100` is a `Byte`, and `val c: ULong = 7u` is a `ULong`. Absent an unsigned
-/// expected type the literal is `UInt` (the parser already promoted anything above `UInt.MAX` to a
-/// `ULongLit`). A magnitude that does NOT fit the expected type stays `UInt` so the ordinary
-/// initializer-mismatch diagnostic reports it instead of the value silently truncating.
-fn unsigned_literal_ty(value: i64, expected: Option<Ty>) -> Ty {
-    let Some(constant) = u64::try_from(value).ok().map(IntegerConstant::Unsigned) else {
-        return Ty::UInt;
-    };
-    expected
-        .map(Ty::non_null)
-        .map(|expected| match expected.kind() {
-            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => bound.non_null(),
-            _ => expected,
-        })
-        .filter(|ty| constant.fits(*ty))
-        .unwrap_or(Ty::UInt)
-}
-
-/// Kotlin signed integer literals take a concrete built-in type from their expected context when the
-/// value fits; without one they default to `Int`. Overload selection already uses this literal rule,
-/// so checking and selected-call materialization must use the same type instead of reverting to `Int`.
-fn signed_literal_ty(value: i64, expected: Option<Ty>) -> Ty {
-    let fits = |ty: Ty| match ty {
-        Ty::Long => true,
-        other => i32::try_from(value).is_ok_and(|value| IntegerConstant::Signed(value).fits(other)),
-    };
-    expected
-        .map(Ty::non_null)
-        .map(|expected| match expected.kind() {
-            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => bound.non_null(),
-            _ => expected,
-        })
-        .filter(|ty| fits(*ty))
-        .unwrap_or(Ty::Int)
-}
-
-/// Contextual type of a signed integer constant written with a leading `+` or `-`. The parser keeps
-/// the sign as a unary expression, but Kotlin treats the complete constant as the literal for
-/// expected-type narrowing (`val b: Byte? = -1`). Apply the range check to the signed value so the
-/// minimum value of each primitive remains representable.
-fn signed_unary_literal_ty(value: i64, operator: UnOp, expected: Option<Ty>) -> Option<Ty> {
-    let value = match operator {
-        UnOp::Neg => -(value as i128),
-        UnOp::Plus => value as i128,
-        UnOp::Not => return None,
-    };
-    let expected = expected?.non_null();
-    let fits = match expected {
-        Ty::Byte => (i8::MIN as i128..=i8::MAX as i128).contains(&value),
-        Ty::Short => (i16::MIN as i128..=i16::MAX as i128).contains(&value),
-        Ty::Int => (i32::MIN as i128..=i32::MAX as i128).contains(&value),
-        Ty::Long => true,
-        _ => false,
-    };
-    fits.then_some(expected)
-}
+use integer_literal_types::{signed_literal_ty, signed_unary_literal_ty, unsigned_literal_ty};
 
 /// A loose, `self`-free argument-fit test for overload disambiguation: is a value of type `a` plausibly
 /// passable where `p` is expected? Exact match, `Error`/`Nothing`/`null`→reference, numeric→numeric, and
@@ -19191,6 +19135,8 @@ impl<'a> Checker<'a> {
     /// functions are lifted to private static methods; captures become leading parameters.
     fn check_local_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, stmt_id: StmtId) {
         let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
+        self.suspension_points
+            .enter_function(self.expectation_frames.len(), f);
         let enclosing_execution = self.local_function_execution.replace(stmt_id);
         self.local_function_receivers
             .extend(f.receiver.as_ref().map(|receiver| receiver.span));
@@ -19710,6 +19656,7 @@ impl<'a> Checker<'a> {
         self.active_lexical_policies.truncate(suppression_depth);
         self.local_function_execution = enclosing_execution;
         self.lambda_returns.leave_function(enclosing_return_frame);
+        self.suspension_points.leave_function();
     }
 }
 
@@ -28549,6 +28496,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
             &selected_external_members,
         ),
         deprecation_use_sites: Default::default(),
+        suspension_points: Default::default(),
         delegate_property_reference_type: None,
         super_ctor_params: HashMap::default(),
         context_args: HashMap::default(),
@@ -31126,6 +31074,7 @@ struct Checker<'a> {
     delegate_provide_targets:
         selected_external_members::SelectionTable<ExprId, DelegateGetValueTarget>,
     deprecation_use_sites: deprecation_usage::DeprecationUseSites,
+    suspension_points: critical_section_suspension::SuspensionPoints,
     /// See [`TypeInfo::delegate_property_reference_type`].
     delegate_property_reference_type: Option<Ty>,
     /// Implicit context arguments per call (see [`TypeInfo::context_args`]).
@@ -44596,6 +44545,7 @@ impl<'a> Checker<'a> {
         // A statement is done: a probe verdict no closed re-check superseded is authoritative.
         if self.expr_depth == 0 {
             self.postponed_diagnostics.commit(self.diags);
+            self.report_suspension_points();
         }
         #[cfg(feature = "trace")]
         self.expr_stack.pop();
