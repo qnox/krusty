@@ -634,9 +634,9 @@ fn write_forwarder(
 /// first, then the forwarder's parameters. It checks each `@NotNull` parameter, boxes the carrier
 /// and calls the forwarder on the box. Like every generated static it maps no line; its locals and
 /// `MethodParameters` name the carrier `arg0` (synthetic) and move an extension receiver into a
-/// mandated parameter. It is signed exactly when the forwarder is: kotlinc copies the forwarder's
-/// signature and writes the carrier ahead of its parameters by its erased JVM type, without
-/// declaring the class's type parameters.
+/// mandated parameter. It is signed when the forwarder is, or when the carrier's declared type is
+/// generic: kotlinc writes the carrier ahead of the forwarder's parameters as the declared type it
+/// represents, without declaring the class's type parameters.
 fn write_value_class_static(
     ir: &IrFile,
     c: &krusty::ir::IrClass,
@@ -662,20 +662,25 @@ fn write_value_class_static(
     let mut params = vec![carrier];
     params.extend_from_slice(&forwarder.param_tys);
     let desc = method_descriptor(&params, forwarder.ret);
-    let carrier_descriptor = type_descriptor(carrier);
     // The static's leading parameter is the value class itself, which a signature expands to the
     // declared type it represents (`List<? extends Integer>`). That is what makes the static
     // generic even when the forwarder itself is not.
     let carrier_element = formatter
         .parameter_ty(&ir.class_type(c))
-        .unwrap_or_else(|| carrier_descriptor.clone());
+        .expect("a value class's own type has a signature form");
     let signature = match &forwarder.signature {
         Some(signature) => Some(signature.render(Some(&carrier_element))),
         None => {
-            let erased_parameters = method_descriptor(&forwarder.param_tys, forwarder.ret);
+            // An unsigned forwarder erases to what it declares, so its parameters and result stand
+            // as their descriptors behind the carrier's signature element.
+            let parameters: String = forwarder
+                .param_tys
+                .iter()
+                .map(|ty| type_descriptor(*ty))
+                .collect();
             let generic = format!(
-                "({carrier_element}{}",
-                erased_parameters.strip_prefix('(').unwrap_or_default()
+                "({carrier_element}{parameters}){}",
+                type_descriptor(forwarder.ret)
             );
             (generic != desc).then_some(generic)
         }
