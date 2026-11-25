@@ -315,6 +315,12 @@ fn native_library_object_values_preserve_identity() {
 }
 
 #[test]
+fn native_a_string_and_a_builder_cut_a_range_out_of_themselves() {
+    let source = include_str!("box_regressions/textSubSequenceRanges.kt");
+    expect_native_klib_box(source, "nativeTextSubSequenceRanges");
+}
+
+#[test]
 fn native_library_generic_any_override_uses_the_canonical_vtable_slot() {
     let source = include_str!("box_regressions/multimodule/libraryGenericAnyOverride.kt");
     super::box_reference_classes::checked_box(source, "libraryGenericAnyOverride")
