@@ -148,11 +148,13 @@ pub use resolved_symbol::{
 };
 pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamMethodFrame, SamSignature};
 use scope_level_callables::{
-    callables_from_symbols, fn_in_scope, level_functions, level_properties,
-    symbol_levels_in_function_scope, symbols_in_function_scope,
-    tagged_symbol_levels_in_function_scope, FunctionScopeRef,
+    callables_from_symbols, fn_in_scope, level_functions, level_properties, owning_scope_level,
+    symbols_in_function_scope, tagged_symbol_levels_in_function_scope, FunctionScopeRef,
 };
-pub(crate) use scope_level_callables::{CallableImport, FunctionImportScope};
+pub(crate) use scope_level_callables::{
+    nearest_level_distinct, retain_nearest_scope_level, same_callable_declaration, scope_level,
+    CallableImport, FunctionImportScope,
+};
 pub(crate) use statically_known_subtype::{nominal_type, statically_known_subtype};
 
 pub(crate) type GSigBinds = crate::types::TyParamBindings;
@@ -1049,18 +1051,6 @@ impl<'a> SymbolResolver<'a> {
             .unwrap_or_default()
     }
 
-    /// Callable records by Kotlin scope-tower level, nearest first. A declaration with the same
-    /// spelling but the wrong callable facet or an inapplicable receiver does not hide a declaration
-    /// at the next level; selection, not lookup, decides which level is the first applicable one.
-    fn symbol_levels_in_scope(
-        &self,
-        name: &str,
-    ) -> Vec<Vec<std::rc::Rc<crate::libraries::ResolvedSymbols>>> {
-        self.fn_scope
-            .map(|scope| symbol_levels_in_function_scope(&self.src, name, scope))
-            .unwrap_or_default()
-    }
-
     /// `Any` members precede visible extensions on an error receiver.
     pub(crate) fn error_receiver_functions(
         &self,
@@ -1783,8 +1773,7 @@ impl<'a> SymbolResolver<'a> {
                 // scoped to `pkg` (the package is scope, not part of the name) and calling this. The caller
                 // reads `overloads` to inspect the family, or `top_level_call` for the arg/type-arg selected
                 // callable (default/vararg-aware) ready to emit.
-                let levels = self.symbol_levels_in_scope(name);
-                let fs = self.nearest_top_level_functions(&levels);
+                let (fs, levels) = self.top_level_tower(name);
                 crate::trace_compiler!(
                     "signature_inference",
                     "top-level candidates={name} {:?}",
@@ -1804,7 +1793,7 @@ impl<'a> SymbolResolver<'a> {
                         .collect::<Vec<_>>(),
                 );
                 let top_level_call = self.pick_top_level(name, &fs, args, type_args, None);
-                let overloads = fs.overloads;
+                let overloads = owning_scope_level(fs.overloads);
                 let values = self.nearest_top_level_properties(levels);
                 if overloads.is_empty() && top_level_call.is_none() && values.is_empty() {
                     return None;

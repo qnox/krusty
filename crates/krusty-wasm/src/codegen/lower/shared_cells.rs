@@ -287,7 +287,7 @@ mod tests {
         let properties = krusty::backend::local_properties::realize(&mut ir)
             .expect("the body declares no local delegated property");
         super::super::lower_alone(&ir, &properties, &mut started).expect("the cell body lowers");
-        started.encode()
+        started.module.encode()
     }
 
     /// Whether `bytes` holds `struct.set <any type> 0` directly followed by `tail`.

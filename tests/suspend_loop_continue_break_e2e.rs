@@ -4,7 +4,7 @@
 //! jump to a `goto` to the loop's continue/break state. Covers a bare jump, a jump in an `if`, and the
 //! expression-position `?: continue` / `?: break` (elvis whose else-branch diverges), across `for`
 //! (counted range) / `while` / `do`-`while`, plus nested SUSPENDING loops. Production hit:
-//! `ResourceAggregationService` (`val app = appCatalog[id] ?: continue` in a suspend for-loop).
+//! a service's `val app = appCatalog[id] ?: continue` in a suspend for-loop.
 //! Needs the JVM toolchain + kotlin-stdlib + coroutines + real kotlinc; skips otherwise.
 use super::common;
 

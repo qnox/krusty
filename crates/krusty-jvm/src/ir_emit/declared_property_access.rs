@@ -181,7 +181,8 @@ impl Emitter<'_> {
             owner,
             name: f.name.clone(),
             descriptor,
-            is_static: f.is_static,
+            is_static: f.is_static
+                || jvm_static_members::singleton_static_owner(self.ir, setter).is_some(),
             is_interface: is_jvm_interface(class),
             static_receiver,
         }
@@ -250,7 +251,8 @@ impl Emitter<'_> {
                         &self.override_results.physical_result(self.ir, getter),
                     )
                 },
-                is_static: f.is_static,
+                is_static: f.is_static
+                    || jvm_static_members::singleton_static_owner(self.ir, getter).is_some(),
                 is_interface: interface,
                 static_receiver: (f.is_static && f.dispatch_receiver == Some(owner))
                     .then(|| f.params.first().map(jvm_declared_ty))
@@ -350,7 +352,13 @@ impl Emitter<'_> {
                 } else {
                     ir_method_desc(&[], &stored_value_ty(ty))
                 },
-                is_static: false,
+                is_static: declared.is_some_and(|property| {
+                    jvm_static_members::singleton_static_accessor(
+                        class,
+                        property,
+                        PropertyAccessorSide::Getter,
+                    )
+                }),
                 is_interface: interface,
                 static_receiver: None,
             });
@@ -377,7 +385,13 @@ impl Emitter<'_> {
                 owner,
                 name: accessor_name,
                 descriptor: method_descriptor(&[], return_ty),
-                is_static: false,
+                is_static: declared.is_some_and(|property| {
+                    jvm_static_members::singleton_static_accessor(
+                        class,
+                        property,
+                        PropertyAccessorSide::Getter,
+                    )
+                }),
                 is_interface: interface,
                 static_receiver: None,
             });
@@ -521,7 +535,13 @@ impl Emitter<'_> {
                 owner,
                 name: setter_name,
                 descriptor: method_descriptor(&[jvm_value_ty(&field.ty)], Ty::Unit),
-                is_static: false,
+                is_static: declared.is_some_and(|property| {
+                    jvm_static_members::singleton_static_accessor(
+                        class,
+                        property,
+                        PropertyAccessorSide::Setter,
+                    )
+                }),
                 is_interface: is_jvm_interface(class),
                 static_receiver: None,
             });

@@ -28,6 +28,13 @@
 //!   every constant of the body, not where its block closes.
 //! - An enum's declared functions intern before its synthesized `values`/`valueOf`/`getEntries`,
 //!   and its fields, entry constants included, intern where a body first references them.
+//! - An enum's `$values` helper interns after its lifted local functions, which kotlinc visits first.
+//! - A descriptor a removed unboxing interned in one method is placed where a later member's header
+//!   first names it, after what earlier code already interned.
+//! - A constant a removed null check interned in one method is placed where a later method
+//!   first names it, even when a later rewritten method names it too.
+//! - An enum's property accessors intern at their declarations: a getter's name does not precede
+//!   the setter of an earlier property.
 //! - A data class's declared functions intern before its synthesized `componentN`/`copy`/
 //!   `toString`/`hashCode`/`equals`, whose bodies and local-variable tables intern where they are
 //!   emitted.
@@ -436,5 +443,98 @@ object Counter {
 }
 "#,
         &["Counter", "ElidedInstanceKt"],
+    );
+}
+
+/// A function-local lambda inside an enum member is lifted to a method that kotlinc visits before
+/// the private `$values` helper.
+#[test]
+fn an_enum_values_helper_interns_after_its_lifted_local_functions() {
+    assert_identical(
+        "EnumLifted",
+        "class Sink<T> { fun put(value: T) {} }\n\
+         fun <R> build(init: Sink<R>.() -> Unit): Sink<R> = Sink<R>().apply(init)\n\
+         enum class Phase {\n\
+         \x20   Start;\n\
+         \x20   fun run() {\n\
+         \x20       fun inner() {\n\
+         \x20           val phase: Phase = Start\n\
+         \x20           build { put(phase) }\n\
+         \x20       }\n\
+         \x20       inner()\n\
+         \x20   }\n\
+         }\n",
+        &["Phase"],
+    );
+}
+
+/// `test`'s inlined `run` unboxes a value that kotlinc never writes, so the `()I` it interned moves
+/// to the first header that names it, `hashCode()`, which follows `hashCode-impl`'s body.
+#[test]
+fn a_removed_unboxing_s_descriptor_interns_at_the_next_header_that_names_it() {
+    assert_identical_with_stdlib(
+        "RemovedUnboxing",
+        "@JvmInline\n\
+         value class Slot(private val raw: Int) {\n\
+         \x20   fun test() = run { done() }\n\
+         \n\
+         \x20   private fun done() = \"OK\"\n\
+         }\n\
+         \n\
+         fun probe() = Slot(0).test()\n",
+        &["Slot"],
+    );
+}
+
+/// `park`'s `as` interns an `Intrinsics.checkNotNull` that a later pass removes. `launch` is the
+/// first body that still names `Intrinsics`, so kotlinc interns it there; a later rewritten method
+/// (`run`, which also uses it through `!!`) must not keep it where `park` interned it.
+#[test]
+fn a_removed_null_check_s_class_interns_where_a_later_method_names_it() {
+    assert_identical_with_stdlib(
+        "RemovedNullCheck",
+        "import kotlin.coroutines.*\n\
+         \n\
+         object Sink : Continuation<Any?> {\n\
+             override val context: CoroutineContext = EmptyCoroutineContext\n\
+             override fun resumeWith(result: Result<Any?>) { result.getOrThrow() }\n\
+         }\n\
+         \n\
+         @JvmInline value class Tag(val s: String)\n\
+         \n\
+         var pending: Continuation<Any>? = null\n\
+         \n\
+         suspend fun <T> park(): T = suspendCoroutine {\n\
+             @Suppress(\"UNCHECKED_CAST\")\n\
+             pending = it as Continuation<Any>\n\
+         }\n\
+         \n\
+         fun launch(body: suspend () -> Unit) {\n\
+             body.startCoroutine(Sink)\n\
+         }\n\
+         \n\
+         fun run(): String {\n\
+             var out: String? = null\n\
+             launch {\n\
+                 out = \"x\"\n\
+             }\n\
+             pending?.resume(Tag(\"OK\"))\n\
+             return out!!\n\
+         }\n\
+         \n",
+        &["RemovedNullCheckKt"],
+    );
+}
+
+/// Each accessor of an enum's primary-constructor properties interns at its own declaration, so a
+/// getter follows the setter of the property before it.
+#[test]
+fn an_enum_s_property_accessors_intern_at_their_declarations() {
+    assert_identical(
+        "EnumAccessors",
+        "enum class Gear(var speed: Int, var torque: Int = 1, val ratio: Int = 1, var limit: Int = 2) {\n\
+         \x20   First(1)\n\
+         }\n",
+        &["Gear"],
     );
 }

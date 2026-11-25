@@ -934,3 +934,107 @@ fn annotation_implementation_with_value_class_members_has_kotlincs_method_table(
 fn annotation_implementation_with_value_class_members_runs_like_kotlin() {
     common::expect_box_same_as_kotlinc(VALUE_CLASS_MEMBERS, "ValueClassMembers");
 }
+
+const UNSIGNED_MEMBER_RENDERING: &str = r#"@file:OptIn(ExperimentalUnsignedTypes::class)
+annotation class Wide(val u: UInt, val b: UByte, val s: UShort, val l: ULong, val n: Int)
+annotation class Packed(val bytes: UByteArray, val longs: ULongArray, val name: String)
+fun box(): String {
+    val wide = Wide(4294967295u, 255u, 65535u, 18446744073709551615uL, -1)
+    val packed = Packed(ubyteArrayOf(255u), ulongArrayOf(18446744073709551615uL), "p")
+    return "$wide|$packed|${wide.hashCode()}|${packed.hashCode()}"
+}
+"#;
+
+/// An unsigned member renders and hashes through its value class's `toString-impl` and
+/// `hashCode-impl`, so a value above the signed range prints as the unsigned number it is. The JVM
+/// reference decides the text, so the test pins the representation, not a guess at it.
+#[test]
+fn annotation_implementation_renders_unsigned_members_like_kotlin() {
+    let reference = common::kotlinc_box_result(UNSIGNED_MEMBER_RENDERING);
+    assert!(
+        reference.starts_with("@Wide(u=4294967295, b=255, s=65535, l=18446744073709551615, n=-1)|"),
+        "{reference}"
+    );
+    let actual = common::expect_box_run(
+        UNSIGNED_MEMBER_RENDERING,
+        "UnsignedMemberRendering",
+        &[common::stdlib_jar()],
+        Some(common::jdk_modules().as_path()),
+    );
+    assert_eq!(actual, reference, "unsigned members diverge from kotlinc");
+}
+
+#[test]
+fn annotation_implementation_unsigned_members_match_complete_kotlin_class_bytes() {
+    let classes = common::classes_against_kotlinc_module(&[(
+        "UnsignedMemberRendering.kt",
+        UNSIGNED_MEMBER_RENDERING,
+    )]);
+    assert!(
+        classes
+            .reference
+            .keys()
+            .any(|name| name.contains("$annotationImpl$")),
+        "the reference emitted no annotation implementation class: {:?}",
+        classes.reference.keys().collect::<Vec<_>>()
+    );
+    let differences = classes
+        .reference
+        .iter()
+        .filter(|(name, _)| name.contains("$annotationImpl$"))
+        .filter_map(|(name, reference)| {
+            let ours = &classes.krusty[name];
+            (reference != ours).then(|| common::exact_class_difference(name, reference, ours))
+        })
+        .collect::<Vec<_>>();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+#[test]
+fn unsigned_byte_literal_constructor_argument_is_not_narrowed() {
+    let source = "class C(val u: UInt, val b: UByte, val n: Int)\nfun make() = C(1u, 2u, 3)\nfun box(): String = if (make().n == 3) \"OK\" else \"no\"\n";
+    let classes = common::classes_against_kotlinc_module(&[("Probe.kt", source)]);
+    let differences = classes
+        .reference
+        .iter()
+        .filter_map(|(name, reference)| {
+            let ours = &classes.krusty[name];
+            (reference != ours).then(|| common::exact_class_difference(name, reference, ours))
+        })
+        .collect::<Vec<_>>();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+#[test]
+fn unsigned_byte_boundary_constructor_arguments_match_kotlinc() {
+    let source = r#"class C(val b: UByte, val s: UShort)
+fun make() = C(255u, 65535u)
+fun viaConversion() = C(0xFFu.toUByte(), 0xFFFFu.toUShort())
+fun narrowed(i: Int) = C(i.toUByte(), i.toUShort())
+fun box(): String {
+    val a = make()
+    val c = viaConversion()
+    val d = narrowed(0x1FF)
+    if (a.b != 255u.toUByte() || a.s != 65535u.toUShort()) return "literal: ${a.b} ${a.s}"
+    if (c.b != a.b || c.s != a.s) return "conversion: ${c.b} ${c.s}"
+    if (d.b != 255u.toUByte() || d.s != 511u.toUShort()) return "narrowed: ${d.b} ${d.s}"
+    if (a.b.toString() != "255" || a.s.toString() != "65535") return "toString"
+    if (a.b.hashCode() != -1 || a.s.hashCode() != -1) return "hashCode"
+    return "OK"
+}
+"#;
+    common::expect_box_ok_with_stdlib(source, "unsigned_byte_boundary");
+    // Only the constants are byte-compared: a non-constant `Int` still narrows with `i2b`, which the
+    // box run above checks by value.
+    let constants = "class C(val b: UByte, val s: UShort)\nfun make() = C(255u, 65535u)\nfun viaConversion() = C(0xFFu.toUByte(), 0xFFFFu.toUShort())\n";
+    let classes = common::classes_against_kotlinc_module(&[("Probe.kt", constants)]);
+    let differences = classes
+        .reference
+        .iter()
+        .filter_map(|(name, reference)| {
+            let ours = &classes.krusty[name];
+            (reference != ours).then(|| common::exact_class_difference(name, reference, ours))
+        })
+        .collect::<Vec<_>>();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}

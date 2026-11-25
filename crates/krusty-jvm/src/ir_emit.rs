@@ -196,6 +196,7 @@ use class_metadata::build_class_metadata;
 #[cfg(test)]
 use class_metadata::build_class_metadata_with_facts;
 mod constructor_delegation_arguments;
+mod jvm_overloads;
 pub(super) mod jvm_static_members;
 mod method_copies;
 mod method_placement;
@@ -1223,7 +1224,8 @@ fn emit_pass(
         emitted.then_some(i)
     });
     let facade_functions: Vec<u32> = facade_functions.collect();
-    let main_bridge = main_bridge::MainBridge::plan(ir, env, &facade_functions);
+    let mut main_bridge = main_bridge::PendingMainBridge::plan(ir, env, &facade_functions);
+    let mut overloaded = Vec::new();
     for member in member_schedule::facade_source_ordered_members(ir, facade_functions.into_iter()) {
         let i = match member {
             member_schedule::FacadeMember::Function(function) => function as usize,
@@ -1240,6 +1242,9 @@ fn emit_pass(
                 continue;
             }
         };
+        main_bridge.before_function(ir, i as u32, facade, &mut cw, |cw| {
+            jvm_overloads::emit_pending_facade_overloads(ir, &mut overloaded, facade, cw, env)
+        });
         let f = &ir.functions[i];
         let rescued = lambdas.rescued.contains(&(i as u32));
         if rescued {
@@ -1280,12 +1285,7 @@ fn emit_pass(
             &mut cw,
         );
         facade_has_method = true;
-        if let Some(bridge) = main_bridge
-            .as_ref()
-            .filter(|bridge| bridge.follows(i as u32))
-        {
-            bridge.emit(ir, facade, &mut cw);
-        }
+        overloaded.push(i as u32);
         // A top-level function (or extension) with parameter defaults gets kotlinc's
         // `foo$default(params…, int mask, Object marker)` synthetic (dispatches to the real method,
         // filling the masked slots from the defaults), so an omitted-argument caller — same-file or
@@ -1321,6 +1321,11 @@ fn emit_pass(
             );
         }
     }
+    main_bridge.finish(ir, facade, &mut cw, |cw| {
+        jvm_overloads::emit_pending_facade_overloads(ir, &mut overloaded, facade, cw, env)
+    });
+    // `@JvmOverloads` overloads follow every member the file declares.
+    jvm_overloads::emit_pending_facade_overloads(ir, &mut overloaded, facade, &mut cw, env);
     // A multifile facade forwards to the part's declared members and their `$default` stubs,
     // never to the synthetic accessors emitted below.
     if env.multifile_facade.is_some() {
@@ -2506,7 +2511,30 @@ fn emit_class(
             !ir.lifted_functions.contains_key(&function)
                 && ir.functions[function as usize].name == "main"
         });
+    // The members a lowering adds later (the lifted functions and lambdas) follow `@JvmOverloads`.
+    let mut after_primary = after_primary;
+    let lifted = after_primary.split_off(
+        after_primary
+            .iter()
+            .position(|member| matches!(member, SourceOrderedMember::Function(function) if ir.lifted_functions.contains_key(function)))
+            .unwrap_or(after_primary.len()),
+    );
+    let overload_sites = jvm_overloads::sites(&after_primary);
     for member in after_primary {
+        emit_scheduled_member(&member_emission, member, &mut cw);
+    }
+    jvm_overloads::emit_class_overloads(
+        ir,
+        c,
+        jvm_overloads::PrimaryOverloads {
+            access: ctor_access,
+            owner: &fq_name,
+        },
+        &overload_sites,
+        &mut cw,
+        env,
+    );
+    for member in lifted {
         if script_main
             && matches!(member, SourceOrderedMember::Function(function) if ir.lifted_functions.contains_key(&function))
         {
@@ -2518,89 +2546,7 @@ fn emit_class(
     if script_main {
         script_main::emit(&fq_name, opts.param_assertions, &mut cw);
     }
-    // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
-    // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a full
-    // mask — AFTER the declared methods (kotlinc's member order), at the primary's declared
-    // visibility (a PROTECTED primary gets a protected convenience ctor; one hidden behind its
-    // marker accessor for a value-class parameter is still public). A declared constructor without
-    // value parameters already is that `<init>()`, so kotlinc's JvmDefaultConstructorLowering adds
-    // none beside it.
-    let declares_no_arg_ctor = c.secondary_ctors.iter().any(|sc| sc.params.is_empty());
-    if c.has_primary_ctor && !declares_no_arg_ctor {
-        let param_tys = class_ctor_jvm_tys(ir, c);
-        let ctor_access = if is_continuation || c.is_anonymous_object {
-            0x0000
-        } else if c.is_singleton() || c.is_value || c.is_sealed {
-            0x0002
-        } else {
-            match ir.ctor_visibilities.get(&c.fq_name_id()) {
-                Some(krusty::types::Visibility::Protected) => 0x0004,
-                Some(krusty::types::Visibility::Private) => 0x0002,
-                _ => 0x0001,
-            }
-        };
-        if let Some(defaults) = ir.class_ctor_defaults(&fq_name) {
-            if !param_tys.is_empty()
-                && defaults.len() == param_tys.len()
-                && defaults.iter().all(Option::is_some)
-                && !c.is_sealed
-                && (ctor_access == 0x0001 || ctor_access == 0x0004)
-            {
-                // ASM interns a method's name and descriptor at its header visit, before its body.
-                cw.reserve_method_name("<init>");
-                cw.reserve_descriptor("()V");
-                let mut z = CodeBuilder::new(1);
-                z.aload(0);
-                for &t in &param_tys {
-                    push_zero(t, &mut z, &mut cw);
-                }
-                for mask in full_default_masks(param_tys.len()) {
-                    z.push_int(mask, &mut cw);
-                }
-                z.aconst_null();
-                let mut stub_params = param_tys.clone();
-                stub_params.extend(std::iter::repeat_n(
-                    Ty::Int,
-                    default_mask_count(param_tys.len()),
-                ));
-                stub_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-                let aw: i32 = 1 + stub_params
-                    .iter()
-                    .map(|t| slot_words(*t) as i32)
-                    .sum::<i32>();
-                let m = cw.methodref(
-                    &fq_name,
-                    "<init>",
-                    &method_descriptor(&stub_params, Ty::Unit),
-                );
-                z.invokespecial(m, aw, 0);
-                z.ret_void();
-                z.ensure_locals(1);
-                z.link();
-                cw.add_method(ctor_access, "<init>", "()V", &z);
-                // kotlinc gives the convenience ctor a `this` LocalVariableTable (no line table).
-                cw.set_method_debug(
-                    "<init>",
-                    "()V",
-                    None,
-                    &[("this".to_string(), format!("L{fq_name};"), 0)],
-                );
-                // The convenience ctor STANDS IN for the declared primary, so kotlinc repeats the
-                // primary's declared annotations on it (the `$default` overload between them, being
-                // synthetic, gets none). Their descriptors already interned at the primary.
-                let annotations = &c.primary_ctor_annotations;
-                if !annotations.retains_none() {
-                    cw.set_method_annotations("<init>", "()V", annotations);
-                    if annotations.deprecated() {
-                        cw.mark_method_deprecated("<init>", "()V");
-                    }
-                    if function_annotations::hidden_realization_is_synthetic(annotations) {
-                        cw.set_method_synthetic("<init>", "()V");
-                    }
-                }
-            }
-        }
-    }
+    jvm_overloads::emit_default_constructor(ir, c, &fq_name, is_continuation, &mut cw);
     // The child-serializer cache follows both constructors (kotlinc's order), outside the schedule.
     let deferred = accessor_emission_order::deferred_cache_accessor(ir, c);
     for &fid in c
@@ -3150,8 +3096,6 @@ fn emit_enum_class(
 
     let field_tys = field_jvm_tys(&c.fields);
     // (bridges emitted after the methods below — `emit_bridges` references emitted method refs)
-    let n_params = c.ctor_param_count as usize;
-    let user_tys: Vec<Ty> = field_tys[..n_params].to_vec();
     let all_param_tys = class_ctor_jvm_tys(ir, c);
     let ctor_params: Vec<Ty> = [Ty::String, Ty::Int]
         .into_iter()
@@ -3269,7 +3213,7 @@ fn emit_enum_class(
     // Private constructor `(Ljava/lang/String;I<user params>)V` → `super(name, ordinal)` then store the
     // property params / run the body-property initializers. The user params are ALL primary-ctor params
     // (from `ctor_args`) — a `val`/`var` param backs a field, a plain param is an argument only (in scope
-    // for a body-property initializer), so `all_param_tys` can be wider than the `n_params` fields.
+    // for a body-property initializer), so `all_param_tys` can be wider than the property fields.
     let ctor_words: u16 = ctor_params.iter().map(|t| slot_words(*t)).sum();
     let mut ctor = CodeBuilder::new(1 + ctor_words);
     ctor.aload(0);
@@ -3407,26 +3351,6 @@ fn emit_enum_class(
         );
     }
 
-    // The constructors' LocalVariableTable strings follow their bodies, and the property accessors
-    // (`getTag`, its descriptor, its `@NotNull`) come next, each at its method visit.
-    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
-        cw.reserve_method_name(&property_getter_name(&f.name));
-        cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
-        // A parameterized getter's generic `Signature` interns at its method visit, before the
-        // nullability annotation.
-        if let Some(getter) =
-            property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref()).getter
-        {
-            cw.reserve_descriptor(&getter);
-        }
-        // The nullability comes from the declared type; `t` is its erased JVM form.
-        match field_nullability_kind(f.ty) {
-            1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
-            2 => cw.reserve_descriptor("Lorg/jetbrains/annotations/Nullable;"),
-            _ => {}
-        }
-    }
-
     let markers = member_schedule::property_annotation_marker_fids(ir, c);
     // kotlinc's enum member order is `<init>`, the DECLARED members, `values`/`valueOf`/
     // `getEntries`, the lifted local functions, `$values`, the lambdas, anything a PLUGIN
@@ -3447,11 +3371,14 @@ fn emit_enum_class(
         byte_parity: false,
         owner_prefix: &OwnerConstructorPrefix::enum_class(),
     };
-    for member in source_ordered_members(ir, c, None) {
-        if matches!(member, SourceOrderedMember::Function(function) if !schedule.declared.contains(&function))
-        {
-            continue;
-        }
+    let enum_members = source_ordered_members(ir, c, None)
+        .into_iter()
+        .filter(|member| {
+            !matches!(member, SourceOrderedMember::Function(function) if !schedule.declared.contains(function))
+        })
+        .collect::<Vec<_>>();
+    let overload_sites = jvm_overloads::sites(&enum_members);
+    for member in enum_members {
         emit_scheduled_member(&declared_members, member, &mut cw);
     }
     let emit_members = |cw: &mut ClassWriter, members: &[u32]| {
@@ -3553,7 +3480,6 @@ fn emit_enum_class(
         &synthetic_enum_fields.entries,
         "Lkotlin/enums/EnumEntries;",
     );
-    cw.reserve_method_name("$values");
     // values(): `$VALUES.clone()` cast back to the array type.
     let mut vals = CodeBuilder::new(0);
     let valref = cw.fieldref(&fq, &synthetic_enum_fields.values, &arr_desc);
@@ -3601,7 +3527,20 @@ fn emit_enum_class(
         &gent,
         Some(&format!("()Lkotlin/enums/EnumEntries<L{fq};>;")),
     );
+    // `@JvmOverloads` follows the synthesized members: kotlinc's enum lowering runs before it.
+    jvm_overloads::emit_class_overloads(
+        ir,
+        c,
+        jvm_overloads::PrimaryOverloads {
+            access: 0x0002,
+            owner: &fq,
+        },
+        &overload_sites,
+        &mut cw,
+        env,
+    );
     emit_members(&mut cw, &schedule.local_functions);
+    cw.reserve_method_name("$values");
     // $values(): build the backing array — `new E[n]` filled with each entry constant (kotlinc factors
     // this out of `<clinit>`). Private static final synthetic, returning `E[]`.
     let mut vbuild = CodeBuilder::new(1);

@@ -177,3 +177,24 @@ fn rejected_provider_constructors_keep_declaration_genericity_and_complete_mappi
         assert_eq!(observed, expected, "complete provider diagnostic");
     }
 }
+
+#[test]
+fn a_rejected_call_reports_the_mapped_candidate_of_a_farther_scope_tower_level() {
+    let library = "package lib\nfun g(a: String, b: String): Int = 1\n";
+    // The explicitly imported `g` cannot map `g(1.0)` at all, so the current-package `g`, whose
+    // argument maps but mismatches, owns the diagnostic alone.
+    let main = "package app\nimport lib.g\nclass Buf(val n: Int)\n\
+                fun g(b: Buf): Int = 2\nfun h(): Int = g(1.0)\n";
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("lib.kt", library), ("main.kt", main)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "reference accepted the program");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the program");
+    let mut observed = complete_errors(&result.krusty_stderr, false);
+    observed.extend(complete_errors(&result.krusty_stdout, false));
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert_eq!(expected.len(), 1, "reference errors: {expected:?}");
+    assert_eq!(observed, expected, "complete diagnostic mismatch");
+}
