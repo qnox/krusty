@@ -3240,8 +3240,6 @@ fn emit_enum_class(
 
     let field_tys = field_jvm_tys(&c.fields);
     // (bridges emitted after the methods below — `emit_bridges` references emitted method refs)
-    let n_params = c.ctor_param_count as usize;
-    let user_tys: Vec<Ty> = field_tys[..n_params].to_vec();
     let all_param_tys = class_ctor_jvm_tys(ir, c);
     let ctor_params: Vec<Ty> = [Ty::String, Ty::Int]
         .into_iter()
@@ -3359,7 +3357,7 @@ fn emit_enum_class(
     // Private constructor `(Ljava/lang/String;I<user params>)V` → `super(name, ordinal)` then store the
     // property params / run the body-property initializers. The user params are ALL primary-ctor params
     // (from `ctor_args`) — a `val`/`var` param backs a field, a plain param is an argument only (in scope
-    // for a body-property initializer), so `all_param_tys` can be wider than the `n_params` fields.
+    // for a body-property initializer), so `all_param_tys` can be wider than the property fields.
     let ctor_words: u16 = ctor_params.iter().map(|t| slot_words(*t)).sum();
     let mut ctor = CodeBuilder::new(1 + ctor_words);
     ctor.aload(0);
@@ -3495,26 +3493,6 @@ fn emit_enum_class(
             &mut cw,
             env,
         );
-    }
-
-    // The constructors' LocalVariableTable strings follow their bodies, and the property accessors
-    // (`getTag`, its descriptor, its `@NotNull`) come next, each at its method visit.
-    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
-        cw.reserve_method_name(&property_getter_name(&f.name));
-        cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
-        // A parameterized getter's generic `Signature` interns at its method visit, before the
-        // nullability annotation.
-        if let Some(getter) =
-            property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref()).getter
-        {
-            cw.reserve_descriptor(&getter);
-        }
-        // The nullability comes from the declared type; `t` is its erased JVM form.
-        match field_nullability_kind(f.ty) {
-            1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
-            2 => cw.reserve_descriptor("Lorg/jetbrains/annotations/Nullable;"),
-            _ => {}
-        }
     }
 
     let markers = member_schedule::property_annotation_marker_fids(ir, c);

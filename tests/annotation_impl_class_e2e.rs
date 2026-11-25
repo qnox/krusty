@@ -934,3 +934,52 @@ fn annotation_implementation_with_value_class_members_has_kotlincs_method_table(
 fn annotation_implementation_with_value_class_members_runs_like_kotlin() {
     common::expect_box_same_as_kotlinc(VALUE_CLASS_MEMBERS, "ValueClassMembers");
 }
+
+#[test]
+fn unsigned_byte_literal_constructor_argument_is_not_narrowed() {
+    let source = "class C(val u: UInt, val b: UByte, val n: Int)\nfun make() = C(1u, 2u, 3)\nfun box(): String = if (make().n == 3) \"OK\" else \"no\"\n";
+    let classes = common::classes_against_kotlinc_module(&[("Probe.kt", source)]);
+    let differences = classes
+        .reference
+        .iter()
+        .filter_map(|(name, reference)| {
+            let ours = &classes.krusty[name];
+            (reference != ours).then(|| common::exact_class_difference(name, reference, ours))
+        })
+        .collect::<Vec<_>>();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+#[test]
+fn unsigned_byte_boundary_constructor_arguments_match_kotlinc() {
+    let source = r#"class C(val b: UByte, val s: UShort)
+fun make() = C(255u, 65535u)
+fun viaConversion() = C(0xFFu.toUByte(), 0xFFFFu.toUShort())
+fun narrowed(i: Int) = C(i.toUByte(), i.toUShort())
+fun box(): String {
+    val a = make()
+    val c = viaConversion()
+    val d = narrowed(0x1FF)
+    if (a.b != 255u.toUByte() || a.s != 65535u.toUShort()) return "literal: ${a.b} ${a.s}"
+    if (c.b != a.b || c.s != a.s) return "conversion: ${c.b} ${c.s}"
+    if (d.b != 255u.toUByte() || d.s != 511u.toUShort()) return "narrowed: ${d.b} ${d.s}"
+    if (a.b.toString() != "255" || a.s.toString() != "65535") return "toString"
+    if (a.b.hashCode() != -1 || a.s.hashCode() != -1) return "hashCode"
+    return "OK"
+}
+"#;
+    common::expect_box_ok_with_stdlib(source, "unsigned_byte_boundary");
+    // Only the constants are byte-compared: a non-constant `Int` still narrows with `i2b`, which the
+    // box run above checks by value.
+    let constants = "class C(val b: UByte, val s: UShort)\nfun make() = C(255u, 65535u)\nfun viaConversion() = C(0xFFu.toUByte(), 0xFFFFu.toUShort())\n";
+    let classes = common::classes_against_kotlinc_module(&[("Probe.kt", constants)]);
+    let differences = classes
+        .reference
+        .iter()
+        .filter_map(|(name, reference)| {
+            let ours = &classes.krusty[name];
+            (reference != ours).then(|| common::exact_class_difference(name, reference, ours))
+        })
+        .collect::<Vec<_>>();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
