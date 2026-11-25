@@ -77,7 +77,6 @@ compiler/testData/diagnostics/tests/javac/inners/InnerInInner.kt
 compiler/testData/diagnostics/tests/javac/inners/ThriceNestedClass.kt
 compiler/testData/diagnostics/tests/jvm/classpath/classFromJdkInLibrary.kt
 compiler/testData/diagnostics/tests/jvm/modules/dependOnManyModules.kt
-compiler/testData/diagnostics/tests/jvm/modules/jdkModulesFromNamed.kt
 compiler/testData/diagnostics/tests/jvm/modules/jdkReleaseFlag/jdk11.kt
 compiler/testData/diagnostics/tests/jvm/modules/jdkReleaseFlag/jdk17.kt
 compiler/testData/diagnostics/tests/jvm/modules/nonTransitiveDoesNotAffectExplicitDependency.kt

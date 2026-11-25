@@ -262,6 +262,18 @@ fn jvm_libraries(
         .with_api_version(options.language_settings.api_version)
 }
 
+/// The JDK installation whose bootclasspath root is `modules` (`<home>/lib/modules`), which kotlinc
+/// is told as `-jdk-home` and which `-Xjdk-release` reads `lib/ct.sym` from. A root of another
+/// shape (the mock JDK's `rt.jar`) names no installation.
+pub(super) fn jdk_home_of(modules: &Path) -> Option<&Path> {
+    Some(modules)
+        .filter(|modules| modules.file_name().is_some_and(|name| name == "modules"))
+        .and_then(Path::parent)
+        .filter(|lib| lib.file_name().is_some_and(|name| name == "lib"))
+        .and_then(Path::parent)
+        .filter(|home| home.join("release").is_file())
+}
+
 fn compile_source(
     src: &str,
     stem: &str,
@@ -270,7 +282,8 @@ fn compile_source(
     progress: &dyn Fn(&str),
 ) -> Compiled<Vec<(String, Vec<u8>)>> {
     let mut diags = DiagSink::new();
-    let options = unit_options(src, [src]).map_err(harness)?;
+    let mut options = unit_options(src, [src]).map_err(harness)?;
+    options.jdk_home = jdk_modules.and_then(jdk_home_of).map(Path::to_path_buf);
     // The stdlib is on krusty's classpath only for `// WITH_STDLIB` tests — the caller passes the
     // located jar (or `None`), exactly as a drop-in `kotlinc` user supplies `-classpath`.
     // Explicit classpath: the kotlin-stdlib jar (for `// WITH_STDLIB`) plus the JDK `lib/modules`
@@ -516,6 +529,7 @@ fn compile_blocks_mixed(
         .chain(compiled_java)
         .map(|(_, source)| source.as_str());
     let mut options = unit_options(case, unit).map_err(harness)?;
+    options.jdk_home = jdk_modules.and_then(jdk_home_of).map(Path::to_path_buf);
     // A folded `dependsOn` chain is a multiplatform compilation even when the fixture does not
     // repeat the feature as a `// LANGUAGE:` directive. The common/platform source roles already
     // carry that topology into the frontend; enable the matching project feature on the exact

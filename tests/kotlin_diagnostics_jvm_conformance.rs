@@ -362,7 +362,11 @@ fn worker_verdict(root: &Path, jdks: &BoxJdkRoots, file: &Path) -> String {
     };
     let prepared = prepared.text;
     let classpath = common::classpath_jars_for(&prepared);
-    match krusty(&prepared, stem, &classpath, jdks.select(&prepared)) {
+    let jdk = match jdks.for_jdk_kind(&prepared) {
+        Ok(jdk) => jdk,
+        Err(reason) => return format!("F\t{reason}"),
+    };
+    match krusty(&prepared, stem, &classpath, jdk) {
         Verdict::Accepted => "A".to_string(),
         Verdict::Rejected(errors) => format!("R\t{}", errors.first().cloned().unwrap_or_default()),
         Verdict::Failed(reason) => format!("F\t{reason}"),
@@ -392,12 +396,19 @@ pub(super) fn case_stem(file: &Path) -> &str {
         .unwrap_or("case")
 }
 
-/// The JDKs a case compiles against: the box corpus's mock runtime, or the full JDK on request.
+/// The JDKs a case compiles against: the box corpus's mock runtime by default, and what its
+/// `JDK_KIND` names otherwise (the running JDK, or the installed JDK of that feature release).
 pub(super) fn box_jdks(root: &Path) -> BoxJdkRoots {
     let box_dir = root.join("compiler/testData/codegen/box");
     BoxJdkRoots::new(
         krusty::toolchain::box_mock_jdk_rt_jar(&box_dir).unwrap_or_else(|error| panic!("{error}")),
         Some(common::jdk_modules()),
+    )
+    // The releases the corpus names in `JDK_KIND: FULL_JDK_<N>`.
+    .with_jdk_homes(
+        super::jdk_homes::available_jdks(&[8, 11, 17, 21, 25])
+            .into_iter()
+            .map(|(release, home)| (release as u16, home)),
     )
 }
 
@@ -461,7 +472,7 @@ fn run_case(
         .map_err(|reason| fatal(format!("prepare: {reason}")))?
         .text;
     let classpath = common::classpath_jars_for(&prepared);
-    let jdk = jdks.select(&prepared);
+    let jdk = jdks.for_jdk_kind(&prepared).map_err(fatal)?;
     let reference = reference(&prepared, stem, &classpath, jdk).map_err(fatal)?;
     let kotlinc_rejects = matches!(reference, Verdict::Rejected(_));
     let upstream_disagrees = matches!(
