@@ -5610,6 +5610,9 @@ pub enum ExprLowering {
         argument_mapping: Vec<AdaptedRefArgument>,
         signature: Ty,
         suspend_conversion: bool,
+        /// Declared types of the leading context parameters the reference site binds
+        /// (`CallableReferencesToContextual`); empty when it binds none.
+        bound_context_types: Vec<Ty>,
     },
     /// A fun-interface constructor reference (`::Action`) after ordinary SAM discovery and generic
     /// specialization. Checked FIR consumes this complete semantic method shape directly.
@@ -31283,30 +31286,16 @@ impl<'a> Checker<'a> {
                 {
                     return false;
                 }
-                let Some((params, ret)) = self.contextual_local_function_reference_shape(
-                    &signature,
-                    None,
-                    &expected.params,
-                    expected.ret,
-                ) else {
-                    return false;
-                };
-                let call_sig = CallSig {
-                    param_defaults: signature.param_defaults,
-                    required: signature.required,
-                    vararg: signature.vararg(),
-                    vararg_index: signature.vararg_index,
-                    ..CallSig::default()
-                };
-                self.callable_ref_parameter_plan(&params, &call_sig, &expected.params)
-                    .is_some()
-                    && self.callable_ref_is_compatible(
-                        &expected.params,
-                        ret,
-                        signature.is_suspend(),
-                        expected,
-                        true,
-                    )
+                self.adapted_local_reference_shape(&signature, expected)
+                    .is_some_and(|shape| {
+                        self.callable_ref_is_compatible(
+                            &expected.params,
+                            shape.ret,
+                            signature.is_suspend(),
+                            expected,
+                            true,
+                        )
+                    })
             });
         }
 
@@ -49048,6 +49037,7 @@ impl<'a> Checker<'a> {
                                     expected_function.expect("adapted reference"),
                                 )),
                                 suspend_conversion: *suspend_conversion,
+                                bound_context_types: Vec::new(),
                             },
                         );
                     }
@@ -49828,6 +49818,7 @@ impl<'a> Checker<'a> {
                                         expected_function.expect("adapted reference"),
                                     )),
                                     suspend_conversion: *suspend_conversion,
+                                    bound_context_types: Vec::new(),
                                 },
                             );
                         }
