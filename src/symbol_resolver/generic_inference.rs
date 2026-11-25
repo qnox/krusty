@@ -646,6 +646,7 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
                 _ => None,
             };
             if let Some(TyKind::Obj(_, targs)) = projected.map(Ty::kind) {
+                let targs = star_bounded_arguments(source, name, &targs[..]);
                 for (a, t) in args.iter().zip(targs.iter()) {
                     unify_ty_impl(source, *a, *t, binds);
                 }
@@ -673,6 +674,26 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
             unify_ty_impl(source, inner, actual, binds);
         }
         _ => {}
+    }
+}
+
+/// The arguments of an actual application of `classifier`, each decoder-placeholder star read as
+/// the star of its declared bound, as members and supertypes read it: Java's `Class<?>` is a
+/// `Class<*>` of `Class`'s own `T`, whose bound is `Any!`, not the placeholder `Any?`.
+fn star_bounded_arguments(
+    source: Option<&dyn SymbolSource>,
+    classifier: TypeName,
+    arguments: &[Ty],
+) -> Vec<Ty> {
+    if !crate::libraries::has_placeholder_star(arguments) {
+        return arguments.to_vec();
+    }
+    match source.and_then(|source| source.classifier(classifier)) {
+        Some(declaration) => crate::libraries::application_arguments_with_star_bounds(
+            &declaration.type_parameters,
+            arguments,
+        ),
+        None => arguments.to_vec(),
     }
 }
 
@@ -1390,6 +1411,7 @@ pub(super) fn unify_inferred_ty_impl(
                 _ => None,
             };
             if let Some(TyKind::Obj(_, actual_arguments)) = projected.map(Ty::kind) {
+                let actual_arguments = star_bounded_arguments(source, name, &actual_arguments[..]);
                 for (argument, actual) in arguments.iter().zip(actual_arguments.iter()) {
                     unify_inferred_ty_impl(source, *argument, *actual, binds);
                 }
