@@ -257,6 +257,17 @@ fn admit<'a, 'b>(
     };
     // An enum class's constructor delegates to `kotlin.Enum`'s, which the target lays out.
     let (delegation, entries) = if kind == TypeKind::Enum {
+        // An entry leaves a defaulted parameter to its default, which is lowered in the call
+        // frame of a constructor call, not in the entry's initializer frame: such an enum keeps
+        // its target boundary.
+        if header
+            .function
+            .regular_parameters
+            .iter()
+            .any(|parameter| parameter.default_value.is_some())
+        {
+            return Ok(None);
+        }
         if !matches!(&header.arena.expr(*initialize).kind,
             KlibIrExprKind::InstanceInitializerCall(class) if class == &header.class.base.symbol)
         {
