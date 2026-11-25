@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use super::common;
+use super::compiler_plugin_fixture;
 
 /// The annotations on a file, a class and a function. Nothing here is an unused return value, so
 /// the only diagnostics are about the annotations themselves.
@@ -49,9 +50,27 @@ fn ledger(stderr: &str) -> Vec<String> {
         .collect()
 }
 
+/// How much of the output tree two compilers must share.
+#[derive(Clone, Copy, PartialEq)]
+enum Output {
+    /// The same class files by name.
+    Classes,
+    /// The same class files with the same bytes.
+    Bytes,
+}
+
 /// Compile `source` with both compilers under `arguments`; both must exit alike, report the same
-/// words, and write the same output tree byte for byte, which is empty when they fail.
+/// words, and write the same class files, which are none when they fail.
 fn assert_like_kotlinc(source: &str, arguments: &[&str]) {
+    assert_compiles_like_kotlinc(source, arguments, Output::Classes);
+}
+
+/// [`assert_like_kotlinc`] with every class file byte for byte the same.
+fn assert_identical_to_kotlinc(source: &str, arguments: &[&str]) {
+    assert_compiles_like_kotlinc(source, arguments, Output::Bytes);
+}
+
+fn assert_compiles_like_kotlinc(source: &str, arguments: &[&str], output: Output) {
     let work = common::scratch_dir().expect("allocate a scratch directory");
     let path = |name: &str| -> PathBuf { work.join(name) };
     let text = |path: &Path| path.to_string_lossy().into_owned();
@@ -77,7 +96,37 @@ fn assert_like_kotlinc(source: &str, arguments: &[&str]) {
         (Some(kotlinc_code), ledger(&kotlinc_stderr)),
         "{arguments:?}"
     );
+    if kotlinc_code == 0 {
+        match output {
+            Output::Bytes => {
+                compiler_plugin_fixture::assert_same_classes(&path("kotlinc"), &path("krusty"));
+            }
+            Output::Classes => assert_eq!(
+                class_files(&path("krusty")),
+                class_files(&path("kotlinc")),
+                "{arguments:?}"
+            ),
+        }
+    }
     let _ = std::fs::remove_dir_all(work);
+}
+
+/// The class files under `directory`, relative to it, in name order.
+fn class_files(directory: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(next).expect("read the output directory") {
+            let entry = entry.expect("read an output entry").path();
+            if entry.is_dir() {
+                pending.push(entry);
+            } else if let Ok(relative) = entry.strip_prefix(directory) {
+                names.push(relative.to_string_lossy().into_owned());
+            }
+        }
+    }
+    names.sort();
+    names
 }
 
 #[test]
@@ -122,19 +171,19 @@ fn the_annotations_are_admitted_once_the_checker_is_stable() {
     assert_like_kotlinc(ANNOTATED, &["-Xreturn-value-checker=disable"]);
 }
 
-const UNNAMED_LOCAL: &str = "fun test() {\n    val _ = \"\"\n}\n";
+const UNNAMED_LOCAL: &str = "fun test(text: String) {\n    val _ = text\n}\n";
 
 /// A checking mode enables the feature a local `val _` needs; before 2.5 nothing else does.
 #[test]
 fn a_checking_mode_enables_unnamed_local_variables() {
-    assert_like_kotlinc(UNNAMED_LOCAL, &["-language-version=2.4"]);
-    assert_like_kotlinc(
+    assert_identical_to_kotlinc(UNNAMED_LOCAL, &["-language-version=2.4"]);
+    assert_identical_to_kotlinc(
         UNNAMED_LOCAL,
         &["-language-version=2.4", "-Xreturn-value-checker=check"],
     );
-    assert_like_kotlinc(
+    assert_identical_to_kotlinc(
         UNNAMED_LOCAL,
         &["-language-version=2.4", "-Xreturn-value-checker=disable"],
     );
-    assert_like_kotlinc(UNNAMED_LOCAL, &[]);
+    assert_identical_to_kotlinc(UNNAMED_LOCAL, &[]);
 }

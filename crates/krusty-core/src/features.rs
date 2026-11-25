@@ -16,6 +16,7 @@ pub mod deprecation_cycle_messages;
 const LANGUAGE_DIRECTIVE: &str = "// LANGUAGE:";
 const ASSERTIONS_MODE_DIRECTIVE: &str = "// ASSERTIONS_MODE:";
 const EXPLICIT_API_MODE_DIRECTIVE: &str = "// EXPLICIT_API_MODE:";
+const RETURN_VALUE_CHECKER_MODE_DIRECTIVE: &str = "// RETURN_VALUE_CHECKER_MODE:";
 const OPT_IN_DIRECTIVE: &str = "// OPT_IN:";
 const RETURN_VALUE_CHECKER_DISABLED: &str = "ReturnValueCheckerModeDisabled";
 const RETURN_VALUE_CHECKER_CHECK: &str = "ReturnValueCheckerModeCheck";
@@ -36,10 +37,11 @@ pub enum ReturnValueCheckerMode {
     Full,
 }
 /// Every line prefix [`LangFeatures::apply_source_directives`] reads.
-const SOURCE_DIRECTIVES: [&str; 4] = [
+const SOURCE_DIRECTIVES: [&str; 5] = [
     LANGUAGE_DIRECTIVE,
     ASSERTIONS_MODE_DIRECTIVE,
     EXPLICIT_API_MODE_DIRECTIVE,
+    RETURN_VALUE_CHECKER_MODE_DIRECTIVE,
     OPT_IN_DIRECTIVE,
 ];
 mod deprecation_migrations;
@@ -475,6 +477,16 @@ impl LangFeatures {
             if let Some(rest) = l.strip_prefix(EXPLICIT_API_MODE_DIRECTIVE) {
                 self.apply_explicit_api_mode(&rest.trim().to_ascii_lowercase());
             }
+            // `// RETURN_VALUE_CHECKER_MODE: FULL|CHECKER|DISABLED` — the test infrastructure's
+            // spelling of `-Xreturn-value-checker`, which names kotlinc's enum constants.
+            if let Some(rest) = l.strip_prefix(RETURN_VALUE_CHECKER_MODE_DIRECTIVE) {
+                match rest.trim() {
+                    "FULL" => self.apply_return_value_checker_mode("full"),
+                    "CHECKER" => self.apply_return_value_checker_mode("check"),
+                    "DISABLED" => self.apply_return_value_checker_mode("disable"),
+                    _ => false,
+                };
+            }
             // `// OPT_IN: a.B, c.D` — the test infrastructure's spelling of `-opt-in` per marker.
             if let Some(rest) = l.strip_prefix(OPT_IN_DIRECTIVE) {
                 for marker in rest.split([' ', ',', '\t']).filter(|s| !s.is_empty()) {
@@ -602,6 +614,22 @@ impl LangFeatures {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_return_value_checker_directive_selects_the_checker_mode() {
+        for (spelling, mode) in [
+            ("FULL", ReturnValueCheckerMode::Full),
+            ("CHECKER", ReturnValueCheckerMode::Checker),
+            ("DISABLED", ReturnValueCheckerMode::Disabled),
+        ] {
+            let features = LangFeatures::new()
+                .for_source(&format!(
+                    "// RETURN_VALUE_CHECKER_MODE: {spelling}\nfun f() {{}}\n"
+                ))
+                .into_owned();
+            assert_eq!(features.return_value_checker_mode(), mode, "{spelling}");
+        }
+    }
 
     #[test]
     fn a_source_without_directives_borrows_the_module_features() {
