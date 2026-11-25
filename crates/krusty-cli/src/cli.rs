@@ -926,6 +926,65 @@ mod tests {
     }
 
     #[test]
+    fn valhalla_value_classes_need_target_28_and_preview() {
+        let message = "Valhalla value classes ('-Xvalhalla-value-classes') require JVM target 28 or later and the '-Xjvm-enable-preview' flag.";
+        for arguments in [
+            &[
+                "-Xkotlin-reference-version=2.5.0-RC",
+                "-Xvalhalla-value-classes",
+                "x.kt",
+            ][..],
+            &[
+                "-Xkotlin-reference-version=2.5.0-RC",
+                "-Xvalhalla-value-classes",
+                "-jvm-target",
+                "27",
+                "-Xjvm-enable-preview",
+                "x.kt",
+            ],
+            &[
+                "-Xkotlin-reference-version=2.5.0-RC",
+                "-Xvalhalla-value-classes",
+                "-jvm-target",
+                "28",
+                "x.kt",
+            ],
+        ] {
+            let parsed = parse_args(arguments);
+            assert_eq!(
+                parsed.configuration_errors,
+                vec![message.replace("Valhalla", "valhalla")],
+                "{arguments:?}"
+            );
+            assert_eq!(parsed.refusals, Vec::<String>::new(), "{arguments:?}");
+        }
+        let named = parse_args(&[
+            "-Xkotlin-reference-version=2.5.0-RC",
+            "-Xvalhalla-value-classes",
+            "-Xrender-internal-diagnostic-names",
+            "x.kt",
+        ]);
+        assert_eq!(
+            named.configuration_errors,
+            vec![format!("[COMPILER_ARGUMENTS_ERROR] {message}")]
+        );
+        // A valid configuration is one krusty cannot emit yet: refused, never compiled without it.
+        let valid = parse_args(&[
+            "-Xkotlin-reference-version=2.5.0-RC",
+            "-Xvalhalla-value-classes",
+            "-jvm-target",
+            "28",
+            "-Xjvm-enable-preview",
+            "x.kt",
+        ]);
+        assert_eq!(valid.configuration_errors, Vec::<String>::new());
+        assert_eq!(
+            valid.refusals,
+            vec!["-Xvalhalla-value-classes selects an output shape krusty does not emit"]
+        );
+    }
+
+    #[test]
     fn inline_scopes_numbers_is_read_not_refused() {
         let parsed = parse_args(&["-Xuse-inline-scopes-numbers", "x.kt"]);
         assert!(parsed.inline_scopes_numbers);

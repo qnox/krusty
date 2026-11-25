@@ -223,8 +223,6 @@ syntheticAccessorSignatureClash.args
 tailrec.args
 twoDiagnosticsOnSingleElement.args
 unknownReleaseVersion.args
-valhallaValueClassesIllegalConfiguration.args
-valhallaValueClassesJvmTarget27.args
 version.args
 warningLevels_correct.args
 warningLevels_duplicated.args
