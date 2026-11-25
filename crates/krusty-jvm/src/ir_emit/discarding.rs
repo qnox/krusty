@@ -269,6 +269,34 @@ impl Emitter<'_> {
 }
 
 impl Emitter<'_> {
+    /// Whether the value of `expression` is, however nested in blocks, branches, and `try`s, that
+    /// of a signature-polymorphic call with an `Object` result.
+    pub(super) fn ends_in_polymorphic_call(&self, expression: u32) -> bool {
+        match self.ir.expr(expression) {
+            IrExpr::Call { .. } => self
+                .default_call_operands
+                .has_polymorphic_object_result(expression),
+            IrExpr::TypeOp {
+                op: krusty::ir::IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => self.ends_in_polymorphic_call(*arg),
+            IrExpr::Block { stmts, value } => value
+                .or_else(|| stmts.last().copied())
+                .is_some_and(|tail| self.ends_in_polymorphic_call(tail)),
+            IrExpr::When { branches } => branches
+                .iter()
+                .any(|(_, body)| self.ends_in_polymorphic_call(*body)),
+            IrExpr::Try { body, catches, .. } => {
+                self.ends_in_polymorphic_call(*body)
+                    || catches
+                        .iter()
+                        .any(|catch| self.ends_in_polymorphic_call(catch.body))
+            }
+            _ => false,
+        }
+    }
+
     /// Emit a discarded signature-polymorphic call, or the cast-free coercion of its `Object`
     /// result, invoked as returning `void`: nothing is left to pop. `false`, having emitted
     /// nothing, for anything else.
