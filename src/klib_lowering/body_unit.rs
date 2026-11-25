@@ -1400,21 +1400,11 @@ impl<'s> CallLinker for Linker<'_, 's> {
         getter: &KlibAccessorIdSignature,
     ) -> Result<Option<KlibAccessorIdSignature>, KlibBodyDeclineReason> {
         let identity = self.indices_getter_identity(getter)?;
-        let Some((_, realization)) = self
-            .sources
-            .declarations
-            .external_callable_by_dependency(&identity)
-        else {
-            return Ok(None);
-        };
-        let Some(selected) = realization.klib_body_callable() else {
-            return Ok(None);
-        };
-        match super::indices_bounds::bound_member(selected, self.sources.bodies)? {
+        match self.sources.callees.indices_bound(&identity) {
             Some(KlibDependencyCallable {
                 declaration: KlibDeclarationSignature::Accessor(bound),
                 ..
-            }) => Ok(Some(bound)),
+            }) => Ok(Some(bound.clone())),
             Some(_) => Err(KlibBodyDeclineReason::SignatureMismatch(
                 "an `indices` bound is not a property accessor".to_owned(),
             )),
