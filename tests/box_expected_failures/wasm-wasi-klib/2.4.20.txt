@@ -221,7 +221,6 @@ collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collections/addCollectionStubWithCovariantOverride.kt
 collections/clashWithInternalMapMethod.kt
-collections/inheritFromAbstractMutableListInt.kt
 collections/internalRemove.kt
 collections/removeClash.kt
 companionBlocksAndExtensions/callableReferences_block.kt
@@ -654,8 +653,6 @@ enum/defaultCtor/constructorWithVararg.kt
 enum/defaultCtor/entryClassConstructorWithVarargs.kt
 enum/defaultCtor/noPrimaryConstructor.kt
 enum/enumCompanionInit.kt
-enum/enumEntriesInCompanion.kt
-enum/enumEntriesMultimoduleNoMappings.kt
 enum/enumEntriesNameClashes.kt
 enum/enumEntryMembers.kt
 enum/enumNestedObjectInit.kt
@@ -686,7 +683,6 @@ escapeAnalysis/test13.kt
 escapeAnalysis/zeroOutObjectOnAlloc.kt
 evaluate/intrinsicConst/charConstructor.kt
 evaluate/intrinsicConst/constTrim.kt
-evaluate/intrinsicConst/lowerAndUpperCase.kt
 evaluate/ubyteOperations.kt
 evaluate/uintOperations.kt
 evaluate/ulongOperations.kt
@@ -791,13 +787,9 @@ inference/builderInferenceLeakingVariable.kt
 inference/integerLiteralTypeInLamdaReturnType.kt
 inference/kt35684.kt
 inference/overrideDefaultProperty.kt
-inference/pcla/builderCallAsReturnTypeInLocalClass.kt
-inference/pcla/callableReferenceAndCoercionToUnit.kt
 inference/pcla/callableReferencesProperCompletion.kt
 inference/pcla/issues/kt42139.kt
-inference/pcla/issues/kt49887.kt
 inference/pcla/issues/kt54400b.kt
-inference/pcla/issues/kt74819e.kt
 inference/pcla/issues/kt76171.kt
 inference/pcla/memberScope.kt
 inference/pcla/nestedNonExhaustiveIf.kt
@@ -1213,7 +1205,6 @@ objects/useAnonymousObjectFunction.kt
 operatorConventions/BoundedGenericValueInRangeCheck.kt
 operatorConventions/kt20387.kt
 operatorConventions/kt44647.kt
-optimizations/kt20844.kt
 package/packageLocalClassNotImportedWithDefaultImport.kt
 platformTypes/primitives/rangeTo.kt
 primitiveTypes/booleanHashCode.kt
@@ -1241,7 +1232,6 @@ properties/complexPropertyInitializer.kt
 properties/eagerInitializationGlobal2.kt
 properties/generalAccess.kt
 properties/genericPropertyMultiModule.kt
-properties/kt1398.kt
 properties/kt4383.kt
 properties/kt78962.kt
 properties/lateinit/accessorException.kt
@@ -1353,7 +1343,6 @@ ranges/forInDownTo/forIntInDownToWithNonConstBounds.kt
 ranges/forInDownTo/forIntInNonOptimizedDownTo.kt
 ranges/forInDownTo/forLongInDownTo.kt
 ranges/forInDownTo/forNullableIntInDownTo.kt
-ranges/forInIndices/forInArrayListIndices.kt
 ranges/forInIndices/forInCollectionImplicitReceiverIndices.kt
 ranges/forInIndices/forInCollectionIndices.kt
 ranges/forInIndices/forInCollectionTypeParameterIndices.kt
@@ -2223,7 +2212,6 @@ when/enumOptimization/manyWhensWithinClass.kt
 when/enumOptimization/nullability.kt
 when/enumOptimization/subjectAny.kt
 when/enumOptimization/withoutElse.kt
-when/is.kt
 when/kt45081.kt
 when/stringOptimization/duplicatingItems.kt
 when/stringOptimization/duplicatingItemsSameHashCode.kt

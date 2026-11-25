@@ -610,6 +610,11 @@ fn delegated_property(
         setter_value: setter.and_then(super::override_plans::setter_value),
         interface: declaration.getter.owner_is_interface,
         depth: 0,
+        getter_has_body: !declaration.getter.is_abstract,
+        setter_has_body: declaration
+            .setter
+            .as_ref()
+            .is_some_and(|setter| !setter.is_abstract),
     }];
     let inherited_class = inherited_class_candidates
         .into_iter()
@@ -639,6 +644,11 @@ fn delegated_property(
                 setter_value: super::override_plans::setter_value(inherited),
                 interface: false,
                 depth: inherited.receiver_rank,
+                getter_has_body: !inherited.getter.is_abstract,
+                setter_has_body: inherited
+                    .setter
+                    .as_ref()
+                    .is_some_and(|setter| !setter.is_abstract),
             });
         }
     }
