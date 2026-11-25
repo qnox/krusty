@@ -373,7 +373,8 @@ pub(super) fn emit_dependencies<B: Backend>(
                 .chain(support_state.materializing_classes.keys())
                 .copied(),
         )
-        .presetting_constant_statics(backend.presets_constant_top_level_initializers());
+        .presetting_constant_statics(backend.presets_constant_top_level_initializers())
+        .adding_members_to_realized_classes(backend.adds_members_to_realized_classes());
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,

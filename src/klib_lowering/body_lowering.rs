@@ -37,7 +37,7 @@ mod string_templates;
 mod try_catch;
 mod type_operators;
 
-pub(super) use blocks::publish_parameter_defaults;
+pub(super) use blocks::{lower_parameter_defaults, publish_parameter_defaults};
 pub(super) use enum_members::ImplicitEnumMember;
 
 use super::decline::KlibBodyDeclineReason;

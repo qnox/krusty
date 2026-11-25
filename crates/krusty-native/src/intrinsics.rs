@@ -262,6 +262,20 @@ pub(super) fn throwable_descriptor(owner: krusty::types::TypeName) -> Option<&'s
     })
 }
 
+/// Whether the runtime's entry point for this `Map` member applies the special bridge itself.
+///
+/// `kt_map_get`, `kt_map_contains_key` and `kt_map_contains_value` reach a program class through
+/// its `KType.map_members` thunks, which answer the bridge's neutral result for an argument that is
+/// not the override's type. A call through `Map` to such an object therefore needs no bridge of its
+/// own at the call site, unlike the other members `has_special_bridge` names.
+pub(super) fn map_thunk_guards_bridge(
+    collection: krusty::types::MappedCollection,
+    name: &str,
+) -> bool {
+    collection.kind == krusty::types::CollectionKind::Map
+        && matches!(name, "get" | "containsKey" | "containsValue")
+}
+
 /// The one member of a functional interface the RUNTIME knows, or `None` for any other.
 ///
 /// A `fun interface` declared in this file becomes an object wearing that interface's table, so a
