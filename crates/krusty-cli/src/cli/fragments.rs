@@ -53,6 +53,9 @@ pub(super) struct FragmentLibrary {
     pub(super) path: String,
     /// Named by `-Xfragment-friend-dependency`: its `internal` declarations are visible.
     pub(super) friend: bool,
+    /// The fragments that list sources but do not refine `fragment`: kotlinc keeps the library
+    /// out of their sessions.
+    pub(super) hidden_from: Vec<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -219,12 +222,26 @@ pub(super) fn check(arguments: &FragmentArguments, free: &[String]) -> FragmentC
         common
             .iter()
             .flat_map(|fragment| {
+                let hidden_from = order
+                    .iter()
+                    .filter(|other| {
+                        *other != fragment
+                            && !refined_closure(&refines, other).contains(fragment)
+                            && listed.iter().any(|(_, owner)| owner == *other)
+                    })
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
                 fragment_libraries(
                     fragment,
                     &dependencies,
                     &friend_dependencies,
                     &refined(&refines, fragment).collect::<Vec<_>>(),
                 )
+                .into_iter()
+                .map(move |library| FragmentLibrary {
+                    hidden_from: hidden_from.clone(),
+                    ..library
+                })
             })
             .collect()
     } else {
@@ -291,6 +308,7 @@ fn fragment_libraries<'a>(
         fragment: fragment.to_string(),
         path: path.to_string(),
         friend,
+        hidden_from: Vec::new(),
     };
     listed(fragment, dependencies)
         .into_iter()
@@ -807,6 +825,7 @@ mod tests {
             fragment: fragment.to_string(),
             path: path.to_string(),
             friend,
+            hidden_from: Vec::new(),
         }
     }
 

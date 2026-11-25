@@ -45,7 +45,16 @@ pub(super) fn load(libraries: &[FragmentLibrary], release: KotlinVersion) -> Fra
                     "KLIB loader: Not a Kotlin library, or a library with invalid format: {}",
                     library.path
                 ));
-                if release >= KotlinVersion::V2_5_0_RC {
+                if release >= KotlinVersion::V2_5_0_RC && !library.hidden_from.is_empty() {
+                    loaded.refusals.push(format!(
+                        "krusty folds the fragments into one compilation, so it cannot keep the \
+                         JVM classpath entry {} of fragment `{}` out of fragment(s) {} that do \
+                         not refine it",
+                        library.path,
+                        library.fragment,
+                        library.hidden_from.join(", ")
+                    ));
+                } else if release >= KotlinVersion::V2_5_0_RC {
                     if !loaded.classpath.iter().any(|seen| seen == path) {
                         loaded.classpath.push(path.to_path_buf());
                     }
@@ -87,6 +96,7 @@ mod tests {
             fragment: fragment.to_string(),
             path: path.display().to_string(),
             friend,
+            hidden_from: Vec::new(),
         }
     }
 
@@ -156,6 +166,30 @@ mod tests {
             load(&libraries, KotlinVersion::V2_4_21),
             FragmentLibraries {
                 notes,
+                ..FragmentLibraries::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_classpath_entry_hidden_from_a_source_fragment_is_refused() {
+        let directory = scratch("hidden");
+        let mut library = dependency("middle", &directory, false);
+        library.hidden_from = vec!["common".to_string()];
+        let loaded = load(&[library], KotlinVersion::V2_5_0_RC);
+        assert_eq!(
+            loaded,
+            FragmentLibraries {
+                notes: vec![format!(
+                    "KLIB loader: Not a Kotlin library, or a library with invalid format: {}",
+                    directory.display()
+                )],
+                refusals: vec![format!(
+                    "krusty folds the fragments into one compilation, so it cannot keep the \
+                     JVM classpath entry {} of fragment `middle` out of fragment(s) common that \
+                     do not refine it",
+                    directory.display()
+                )],
                 ..FragmentLibraries::default()
             }
         );
