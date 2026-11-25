@@ -852,6 +852,7 @@ impl<'a> ModuleSymbols<'a> {
             );
             getter.source_receiver = Some(declaration.receiver_ty());
             getter.context_count = declaration.context_params().len();
+            getter.is_abstract = declaration.is_abstract();
             let mut setter = declaration.is_var().then(|| {
                 let mut params = getter_params;
                 params.push(stored_value_ty(declaration.ret()));
@@ -864,6 +865,7 @@ impl<'a> ModuleSymbols<'a> {
                 );
                 setter.source_receiver = Some(declaration.receiver_ty());
                 setter.context_count = declaration.context_params().len();
+                setter.is_abstract = declaration.is_abstract();
                 setter
             });
             let getter_generic = declaration.generic_signature().or_else(|| {

@@ -2401,6 +2401,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                         })
                                         .collect::<Vec<_>>(),
                                     is_var: property_header.mutable,
+                                    is_abstract: property_header
+                                        .flags
+                                        .has(crate::fir::DeclarationFlags::ABSTRACT),
                                     visibility: property_header.visibility,
                                     setter_visibility: property_header
                                         .mutable
