@@ -25,10 +25,10 @@ impl<'u, 's> Linker<'u, 's> {
         self.materialize_plan(ir, identity, plan)
     }
 
-    /// Materialize the object `class` with its instance, created by its private primary
-    /// constructor, which `identity` names. The unit publishes the object's instance as the
-    /// object's own file would.
-    pub(super) fn materialize_object(
+    /// Materialize `class`, an object or an enum class, with its instances, created by its private
+    /// primary constructor, which `identity` names. The unit publishes the object's instance, or
+    /// the enum's constants, as the class's own file would.
+    pub(super) fn materialize_declared_instances(
         &mut self,
         ir: &mut IrFile,
         identity: &KlibDependencyCallable,
@@ -37,7 +37,7 @@ impl<'u, 's> Linker<'u, 's> {
         if self.classes.contains_key(identity) {
             return Ok(());
         }
-        let Some(plan) = super::super::class_initialization::object_plan(
+        let Some(plan) = super::super::class_initialization::declared_instances_plan(
             class,
             self.sources.bodies,
             self.sources.callees,
@@ -183,6 +183,21 @@ impl<'u, 's> Linker<'u, 's> {
             properties: super::super::class_storage::backed_properties(&plan.header.class.members),
             contract: plan.header.contract,
         };
+        // An enum's constants are its instances: the arguments each passes to the constructor
+        // are lowered in the enum's own initialization frame.
+        if plan.header.contract.kind == crate::libraries::TypeKind::Enum {
+            self.queue_enum_entry_arguments(class, identity, &plan, function);
+            // Its synthetic `entries` body calls the checked `enumEntries` with its `values()`,
+            // an edge the unit lowers as any body's call, so the enum's entries are built by the
+            // unit's own factory.
+            let factory =
+                super::super::class_initialization::entries_factory(&plan, self.sources.callees);
+            if let Some(KlibDeclarationSignature::Public(factory)) =
+                factory.map(|factory| &factory.declaration)
+            {
+                self.link(ir, factory)?;
+            }
+        }
         if existing.is_none() {
             for function in &plan.dispatched {
                 self.declare_dispatched(ir, member.clone(), plan.header.arena, function)?;
@@ -420,6 +435,17 @@ impl<'u, 's> Linker<'u, 's> {
         let mut class = IrClass::synthetic(classifier);
         class.is_source_declared = true;
         class.is_object = plan.header.contract.kind == crate::libraries::TypeKind::Object;
+        if plan.header.contract.kind == crate::libraries::TypeKind::Enum {
+            class.is_enum = true;
+            class.declaration_name = Some(super::super::klib_types::classifier_declaration(
+                &plan.header.contract.signature,
+            )?);
+            class.enum_entries = super::enum_materialization::declared_entries(plan);
+        }
+        if class.is_object {
+            class.applied_annotations =
+                super::super::object_instances::instance_annotations(plan.header.class);
+        }
         class.supertypes.clone_from(&plan.supertypes);
         set_materialized_modality(&mut class, plan.header.contract.modality);
         if let Some(call) = &plan.superclass {
@@ -673,32 +699,31 @@ impl<'u, 's> Linker<'u, 's> {
         header: &super::super::class_headers::ClassMemberHeader<'s, 's>,
     ) -> Result<super::MemberClass<'s>, KlibBodyDeclineReason> {
         let contract = header.contract;
-        let class = if contract.kind == crate::libraries::TypeKind::Enum {
-            // Every constant is an instance of the enum class the unit materializes for them.
-            self.materialize_member_enum(ir, header)?
-        } else if self.adds_members_to_realized_classes
+        let class = if self.adds_members_to_realized_classes
+            && contract.kind != crate::libraries::TypeKind::Enum
             && self.realized_classes.contains(&contract.classifier)
         {
             // The class's one owner is an earlier unit: this unit adds a final member of it, so
             // it declares only the facts that member reads.
             self.declare_earlier_unit_class(ir, header)?
-        } else if contract.kind == crate::libraries::TypeKind::Object {
-            // An object's instance is the one its own private constructor created.
+        } else if contract.declares_instances() {
+            // An object's instance, or an enum's constant, is one its own private constructor
+            // created.
             let primary = contract.primary_constructor.as_ref().ok_or(
                 KlibBodyDeclineReason::UnsupportedDeclaration(
-                    "an object member without a primary constructor",
+                    "an object or enum member without a primary constructor",
                 ),
             )?;
             let identity = KlibDependencyCallable {
                 module: contract.module.clone(),
                 declaration: KlibDeclarationSignature::Public(primary.clone()),
             };
-            self.materialize_object(ir, &identity, contract)?;
+            self.materialize_declared_instances(ir, &identity, contract)?;
             *self
                 .classes
                 .get(&identity)
                 .ok_or(KlibBodyDeclineReason::UnsupportedDeclaration(
-                    "a member of an object without ordinary initialization",
+                    "a member of an object or enum without admitted initialization",
                 ))?
         } else {
             self.materialize_initializing_constructors(ir, contract)?
@@ -829,8 +854,11 @@ impl<'u, 's> Linker<'u, 's> {
         Ok(class.expect("a class has an initializing constructor"))
     }
 
-    /// Whether the program's closure selected the override `function` of a class of `module` and
-    /// every declaration it overrides, each by one exact provider declaration.
+    /// Whether this unit emits the override `function` of a class of `module`: the program's
+    /// closure selected it and every declaration it overrides, each by one exact provider
+    /// declaration, and no earlier unit already exported it. An override an earlier unit emitted
+    /// is a retained export, which the closure does not walk again, so lowering its body here
+    /// would reach declarations this unit never selected.
     fn selects_override(&self, module: &str, function: &KlibIrFunction) -> bool {
         let selected = |identity: &KlibDependencyCallable| {
             matches!(
@@ -848,7 +876,8 @@ impl<'u, 's> Linker<'u, 's> {
         else {
             return false;
         };
-        selected(&identity)
+        !self.sources.externals.contains_key(&identity)
+            && selected(&identity)
             && function.overridden.iter().all(|symbol| {
                 crate::klib_libraries::member_signature(&symbol.signature)
                     .and_then(|signature| {
@@ -903,7 +932,7 @@ impl<'u, 's> Linker<'u, 's> {
                             body,
                             Some(selected),
                             implemented,
-                        );
+                        )?;
                         continue;
                     }
                     let (arena, function) =
@@ -915,7 +944,7 @@ impl<'u, 's> Linker<'u, 's> {
                     self.declare(ir, body, Some(selected), arena, function)?;
                 }
             }
-            self.record_inherited_implementation(ir, owner, body, None, implemented);
+            self.record_inherited_implementation(ir, owner, body, None, implemented)?;
         }
         Ok(())
     }
@@ -933,7 +962,10 @@ impl<'u, 's> Linker<'u, 's> {
             KlibDeclarationSignature::Accessor(signature) => {
                 KlibIrSignature::Accessor(signature.clone())
             }
-            _ => return None,
+            KlibDeclarationSignature::FileLocal { file, slot } => KlibIrSignature::FileLocal {
+                file: *file,
+                slot: *slot,
+            },
         };
         self.local_functions
             .get(&super::super::same_library_class::LocalIdentity {
@@ -945,7 +977,7 @@ impl<'u, 's> Linker<'u, 's> {
 
     /// Record that `owner` implements each interface declaration of `implemented` with the
     /// inherited member `body`, unless an edge already names that declaration. A body this unit
-    /// did not declare, or a declaration outside the program's closure, records nothing.
+    /// did not declare, or a declaration with no registered provider handle, records nothing.
     pub(super) fn record_inherited_implementation(
         &self,
         ir: &mut IrFile,
@@ -953,13 +985,13 @@ impl<'u, 's> Linker<'u, 's> {
         body: &KlibDependencyCallable,
         realized: Option<KlibBodyCallable<'s>>,
         implemented: &[KlibDependencyCallable],
-    ) {
+    ) -> Result<(), KlibBodyDeclineReason> {
         // The implementation's own method when this unit declared it, and otherwise the
         // declaration the earlier unit exported (`realized`), which the edge names by callable.
         let (method, name, params, result) = match realized {
             None => {
                 let Some(method) = self.declared_member(body) else {
-                    return;
+                    return Ok(());
                 };
                 let function = &ir.functions[method as usize];
                 (
@@ -993,8 +1025,17 @@ impl<'u, 's> Linker<'u, 's> {
             else {
                 continue;
             };
-            let Some(target) = self.sources.callees.reference_target(declared) else {
-                continue;
+            // The declaration's provider handle, which a source call of it selects even when no
+            // body of the closure calls it (`ListIterator.next` on a list iterator inheriting
+            // `next` from its superclass), as an own override's edge names it.
+            let target = match super::local_class::registered_override_handle(
+                declared,
+                self.sources.externals,
+                self.sources.declarations,
+            ) {
+                Ok(handle) => handle.target(),
+                Err(KlibBodyDeclineReason::UnsupportedDeclaration(_)) => continue,
+                Err(reason) => return Err(reason),
             };
             // A member of a class private to its library has no provider handle of its own; the
             // edge then names the interface declaration it implements, as an installed class's
@@ -1036,6 +1077,7 @@ impl<'u, 's> Linker<'u, 's> {
                 depth: 0,
             });
         }
+        Ok(())
     }
 
     /// Declare `function`, a member dispatch on an instance of the materialized class `member`

@@ -68,9 +68,6 @@ impl BodyLowering<'_> {
         if let Some(operation) = self.linker.atomic_array_element(callee)? {
             return self.atomic_array_element(operation, access, ty);
         }
-        if let Some((classifier, member)) = self.linker.enum_static_member(self.ir, callee)? {
-            return self.enum_static_member_call(classifier, member, access, ty);
-        }
         if let Some(arity) = suspend_function_invocation_arity(callee) {
             if !access.type_arguments.is_empty() {
                 return Err(mismatch(
@@ -102,6 +99,11 @@ impl BodyLowering<'_> {
             }
             BuiltinCallDisposition::Dependency => {
                 let signature = crate::libraries::KlibDeclarationSignature::Public(callee.clone());
+                if let Some((classifier, member)) =
+                    self.linker.implicit_enum_member(self.ir, &signature)?
+                {
+                    return self.implicit_enum_member(classifier, member, access, ty);
+                }
                 if let Some(suspension) = self.linker.unintercepted_suspension(&signature)? {
                     return self.unintercepted_suspension_call(suspension, access, ty);
                 }
@@ -342,54 +344,6 @@ impl BodyLowering<'_> {
             operand,
             check: crate::ir::NullCheck::Source,
         }))
-    }
-
-    /// `values()` or `valueOf(name)` of a dependency enum class: the common enum operation, which
-    /// the backend realizes as it does for a source enum's call of the same member.
-    fn enum_static_member_call(
-        &mut self,
-        classifier: crate::types::TypeName,
-        member: super::super::enum_classes::EnumStaticMember,
-        access: &KlibIrMemberAccess,
-        ty: Ty,
-    ) -> Lowered<ExprId> {
-        use super::super::enum_classes::EnumStaticMember;
-        if !access.type_arguments.is_empty() {
-            return Err(mismatch(
-                "an enum's compiler-generated member is called with type arguments",
-            ));
-        }
-        let operands = arguments(access);
-        let value = match (member, operands.as_slice()) {
-            (EnumStaticMember::Values, []) => {
-                if ty != Ty::obj_args("kotlin/Array", &[Ty::obj_name(classifier)]) {
-                    return Err(mismatch("an enum's `values()` is typed apart from its array"));
-                }
-                IrExpr::EnumValues { classifier }
-            }
-            (EnumStaticMember::ValueOf, &[Some(name)]) => {
-                if ty != Ty::obj_name(classifier) {
-                    return Err(mismatch("an enum's `valueOf` is typed apart from its enum"));
-                }
-                let arg = self.expression(name)?;
-                if self.lowered_type(arg) != Ty::String {
-                    return Err(mismatch("an enum's `valueOf` is called on a non-String name"));
-                }
-                IrExpr::EnumValueOf {
-                    classifier,
-                    arg,
-                    declaration: crate::ir::EnumValueOfDeclaration::Member,
-                }
-            }
-            _ => {
-                return Err(mismatch(
-                    "an enum's compiler-generated member is called with another shape than its declaration's",
-                ))
-            }
-        };
-        let value = self.ir.add_expr(value);
-        self.ir.set_logical_type(value, ty);
-        Ok(value)
     }
 
     /// A data class array member, as a call of the array's content extension on the operand.
@@ -1193,6 +1147,9 @@ impl BodyLowering<'_> {
         ty: Ty,
     ) -> Lowered<ExprId> {
         let signature = crate::libraries::KlibDeclarationSignature::Accessor(accessor.clone());
+        if let Some((classifier, member)) = self.linker.implicit_enum_member(self.ir, &signature)? {
+            return self.implicit_enum_member(classifier, member, access, ty);
+        }
         if access.type_arguments.is_empty() {
             if let Some(primitive) = self.linker.common_primitive(&signature)? {
                 return self.primitive_call(primitive, access, ty);
