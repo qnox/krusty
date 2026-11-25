@@ -56,6 +56,95 @@ fn dependency_getter_bypasses_the_carrier(
         .is_some_and(|carrier| desc(&physical) != desc(&carrier))
 }
 
+/// The value parameters of a referenced property's accessor, in the order the declaration side
+/// mangles them: the context parameters, then the extension receiver, then a setter's value.
+fn accessor_parameters(
+    reference: &krusty::ir::PropRef,
+    extension_receiver: Option<Ty>,
+    value: Option<Ty>,
+) -> Vec<Ty> {
+    let mut parameters = reference.context_types.clone();
+    parameters.extend(extension_receiver);
+    parameters.extend(value);
+    parameters
+}
+
+/// A context parameter of a value-class type is realized over the class's carrier, as any other
+/// value parameter is: the accessor's name takes the value-class hash and its descriptor names
+/// the carrier (`getDecorated-IQRRRT4(Ljava/lang/String;)`). The reference holds its bound
+/// contexts as boxed objects, so its carrier unboxes each such context before the call.
+///
+/// This step names the accessor from all of its value parameters. The value-class result and
+/// receiver steps below derive the name again from the same declared name and the same
+/// parameter list, so they agree with it.
+fn realize_context_carriers(
+    ir: &mut IrFile,
+    under: &Under,
+    realizations: &mut PropertyReferenceRealizations,
+) {
+    for class in &mut ir.classes {
+        let owner = class.fq_name;
+        let Some(reference) = class.prop_ref.as_mut() else {
+            continue;
+        };
+        let Some(realization) = realizations.get_mut(owner) else {
+            continue;
+        };
+        let carriers = reference
+            .context_types
+            .iter()
+            .map(|context| {
+                let carrier = erase(context, under);
+                (carrier != *context)
+                    .then(|| context.non_null().obj_internal())
+                    .flatten()
+                    .map(|value_class| (value_class, carrier))
+            })
+            .collect::<Vec<_>>();
+        if carriers.iter().all(Option::is_none) {
+            continue;
+        }
+        realization.unboxed_context_value_classes = carriers;
+        if !realization.accessor_names_are_physical {
+            let extension_receiver = match realization.accessor_role {
+                PropertyAccessorRole::Extension => reference.owner_internal.map(Ty::obj_name),
+                PropertyAccessorRole::Member | PropertyAccessorRole::AccessBridge => None,
+            };
+            let file_class = reference.static_dispatch || extension_receiver.is_some();
+            reference.getter_name = vc_mangle(
+                &realization.declared_getter_name,
+                &accessor_parameters(reference, extension_receiver, None),
+                &reference.prop_ty,
+                under,
+                file_class,
+                false,
+            );
+            if let (true, Some(declared_setter)) = (
+                reference.setter_name.is_some(),
+                realization.declared_setter_name.as_deref(),
+            ) {
+                reference.setter_name = Some(vc_mangle(
+                    declared_setter,
+                    &accessor_parameters(reference, extension_receiver, Some(reference.prop_ty)),
+                    &Ty::Unit,
+                    under,
+                    file_class,
+                    false,
+                ));
+            }
+        }
+        for descriptor in [
+            reference.getter_descriptor.as_mut(),
+            reference.setter_descriptor.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *descriptor = erase_descriptor(descriptor, under);
+        }
+    }
+}
+
 /// kotlinc's reference to a value class's underlying property reads it from the box with
 /// `unbox-impl`, whatever the property's visibility, and reports the property's own getter
 /// (`getX()I`) to reflection. The getter is therefore what the reference names and the JVM
@@ -84,6 +173,7 @@ pub(super) fn realize(
     callable_under: &Under,
     realizations: &mut PropertyReferenceRealizations,
 ) -> bool {
+    realize_context_carriers(ir, callable_under, realizations);
     // Property references cross the erased `KProperty` Object boundary. A value-class property accessor
     // itself uses the mangled name and carrier descriptor, but `get` must box that carrier and `set` must
     // unbox the incoming value-class object. Record that JVM realization on the already-selected target;
@@ -127,6 +217,7 @@ pub(super) fn realize(
             // the field behind it holds the carrier. Tying the two together left the reference
             // naming an unmangled setter the facade does not declare.
             if !realization.accessor_names_are_physical {
+                let parameters = accessor_parameters(reference, None, Some(reference.prop_ty));
                 if let (Some(setter), Some(declared_setter)) = (
                     reference.setter_name.as_mut(),
                     realization.declared_setter_name.as_deref(),
@@ -136,7 +227,7 @@ pub(super) fn realize(
                     // same `false`.
                     *setter = vc_mangle(
                         declared_setter,
-                        std::slice::from_ref(&reference.prop_ty),
+                        &parameters,
                         &Ty::Unit,
                         callable_under,
                         false,
@@ -156,7 +247,7 @@ pub(super) fn realize(
         } else {
             vc_mangle(
                 &realization.declared_getter_name,
-                &[],
+                &reference.context_types,
                 &reference.prop_ty,
                 callable_under,
                 top_level,
@@ -205,7 +296,7 @@ pub(super) fn realize(
             ) {
                 let physical_setter_name = vc_mangle(
                     declared_setter,
-                    std::slice::from_ref(&reference.prop_ty),
+                    &accessor_parameters(reference, None, Some(reference.prop_ty)),
                     &Ty::Unit,
                     callable_under,
                     top_level,
@@ -303,11 +394,9 @@ pub(super) fn realize(
             PropertyAccessorRole::AccessBridge => false,
         };
         let boxed_receiver = Ty::obj_name(receiver);
-        let declared_params: &[Ty] = if extension {
-            std::slice::from_ref(&boxed_receiver)
-        } else {
-            &[]
-        };
+        let declared_params =
+            accessor_parameters(reference, extension.then_some(boxed_receiver), None);
+        let declared_params = declared_params.as_slice();
         // The base name is the one the DECLARATION carries, which selection already resolved —
         // `@get:JvmName("readY")` is `readY` there whatever the property is spelled. Rebuilding it
         // from `prop_name` discards that answer and names a method the class does not declare.
@@ -481,6 +570,7 @@ mod tests {
                 accessor_names_are_physical: false,
                 boxed_value_class: None,
                 unboxed_receiver_value_class: None,
+                unboxed_context_value_classes: Vec::new(),
                 getter_bridge_owner: None,
                 setter_bridge_owner: None,
                 reflection_getter: None,

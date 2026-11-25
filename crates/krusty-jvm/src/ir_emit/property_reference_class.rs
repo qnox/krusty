@@ -61,10 +61,19 @@ struct PropertyCallTarget<'a> {
 struct BoundContexts<'a> {
     carrier: &'a str,
     types: &'a [Ty],
+    /// The value class and carrier the accessor takes at each position the realization recorded
+    /// one for; empty when every context is passed as its declared type.
+    value_class_carriers: &'a [Option<(TypeName, Ty)>],
 }
 
 impl BoundContexts<'_> {
-    /// Push each context from `this.boundContextArguments`, cast or unboxed to its declared type.
+    fn value_class_carrier(&self, index: usize) -> Option<(TypeName, Ty)> {
+        self.value_class_carriers.get(index).copied().flatten()
+    }
+
+    /// Push each context from `this.boundContextArguments`, cast or unboxed to the type the
+    /// accessor takes: its declared type, or the carrier of a value class. A nullable value-class
+    /// context's bound `null` reaches its (nullable) carrier unchanged.
     fn emit(&self, cw: &mut ClassWriter, code: &mut CodeBuilder) {
         for (index, ty) in self.types.iter().enumerate() {
             code.aload(0);
@@ -72,14 +81,32 @@ impl BoundContexts<'_> {
             code.getfield(field, 1);
             code.push_int(index as i32, cw);
             code.array_load(0x32, 1);
-            emit_object_as(cw, code, *ty);
+            match self.value_class_carrier(index) {
+                Some((value_class, carrier)) => {
+                    property_reference_values::value_class_boundary_conversion(
+                        cw,
+                        code,
+                        ty.is_nullable(),
+                        |cw, code| {
+                            adapt_property_reference_value(cw, code, Some(value_class), carrier);
+                        },
+                    );
+                }
+                None => emit_object_as(cw, code, *ty),
+            }
         }
     }
 
     fn words(&self) -> i32 {
         self.types
             .iter()
-            .map(|ty| slot_words(ir_ty_to_jvm(ty)) as i32)
+            .enumerate()
+            .map(|(index, ty)| {
+                let physical = self
+                    .value_class_carrier(index)
+                    .map_or(*ty, |(_, carrier)| carrier);
+                slot_words(ir_ty_to_jvm(&physical)) as i32
+            })
             .sum()
     }
 }
@@ -104,6 +131,7 @@ struct PropertyReferenceTarget {
     setter_field: Option<crate::property_references::PropertyFieldAccess>,
     boxed_value_class: Option<TypeName>,
     unboxed_receiver_value_class: Option<TypeName>,
+    context_value_class_carriers: Vec<Option<(TypeName, Ty)>>,
     carrier: String,
 }
 
@@ -168,6 +196,7 @@ impl PropertyReferenceTarget {
             setter_field: realization.setter_field.clone(),
             boxed_value_class: realization.boxed_value_class,
             unboxed_receiver_value_class: realization.unboxed_receiver_value_class,
+            context_value_class_carriers: realization.unboxed_context_value_classes.clone(),
             carrier: carrier.to_owned(),
         }
     }
@@ -191,6 +220,7 @@ impl PropertyReferenceTarget {
             contexts: BoundContexts {
                 carrier: &self.carrier,
                 types: &property.context_types,
+                value_class_carriers: &self.context_value_class_carriers,
             },
         }
     }
@@ -216,6 +246,7 @@ impl PropertyReferenceTarget {
             contexts: BoundContexts {
                 carrier: &self.carrier,
                 types: &property.context_types,
+                value_class_carriers: &self.context_value_class_carriers,
             },
         }
     }
@@ -504,6 +535,7 @@ pub(super) fn emit_prop_ref_class(
                 BoundContexts {
                     carrier: &fq,
                     types: &pr.context_types,
+                    value_class_carriers: &realization.unboxed_context_value_classes,
                 }
                 .emit(&mut cw, &mut get);
             }
@@ -546,6 +578,7 @@ pub(super) fn emit_prop_ref_class(
             BoundContexts {
                 carrier: &fq,
                 types: &pr.context_types,
+                value_class_carriers: &realization.unboxed_context_value_classes,
             }
             .emit(&mut cw, &mut set);
         }
@@ -636,6 +669,7 @@ fn emit_bound_prop_ref_class(
                 BoundContexts {
                     carrier: &fq,
                     types: &pr.context_types,
+                    value_class_carriers: &realization.unboxed_context_value_classes,
                 }
                 .emit(&mut cw, &mut get);
             }
@@ -671,6 +705,7 @@ fn emit_bound_prop_ref_class(
             BoundContexts {
                 carrier: &fq,
                 types: &pr.context_types,
+                value_class_carriers: &realization.unboxed_context_value_classes,
             }
             .emit(&mut cw, &mut set);
         }
@@ -725,6 +760,7 @@ fn emit_toplevel_prop_ref_class(
     let contexts = BoundContexts {
         carrier: &fq,
         types: &pr.context_types,
+        value_class_carriers: &realization.unboxed_context_value_classes,
     };
     let getter_desc = match (&pr.getter_descriptor, explicit_descriptor) {
         (Some(descriptor), true) => descriptor.clone(),

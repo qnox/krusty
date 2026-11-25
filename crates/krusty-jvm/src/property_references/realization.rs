@@ -116,6 +116,10 @@ pub(crate) struct PropertyReferenceRealization {
     /// The reference receiver is this value class's boxed object while the selected static
     /// accessor consumes its erased carrier.
     pub unboxed_receiver_value_class: Option<TypeName>,
+    /// For each bound context argument, in order, the value class whose erased carrier the
+    /// accessor takes in that position, as kotlinc realizes a value-class context parameter. Empty
+    /// when no context parameter is realized over a carrier.
+    pub unboxed_context_value_classes: Vec<Option<(TypeName, Ty)>>,
     /// Per-accessor static call owners selected for cross-package protected bridges. These stay
     /// separate because a public getter may be paired with a protected setter.
     pub getter_bridge_owner: Option<TypeName>,
