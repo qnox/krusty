@@ -492,7 +492,6 @@ fn emit_analyzed_into<B: Backend>(
                 common_ir_coroutines: common_ir_preparation.is_some(),
                 dispatched_classes: &dispatched_classes,
                 appends_char_sequences_by_index: backend.appends_char_sequences_by_index(),
-                collections_through_interfaces: backend.reads_collections_through_interfaces(),
             },
             diags,
         ) else {
