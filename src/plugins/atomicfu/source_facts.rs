@@ -221,22 +221,69 @@ const UPDATER_FUNCTIONS: [&str; 10] = [
     "addAndGet",
 ];
 
+/// The operations an atomic's surface names, by name and argument count.
+const SURFACE_OPERATIONS: [(&str, usize); 11] = [
+    ("value", 0),
+    ("value", 1),
+    ("lazySet", 1),
+    ("compareAndSet", 2),
+    ("getAndSet", 1),
+    ("getAndIncrement", 0),
+    ("getAndDecrement", 0),
+    ("incrementAndGet", 0),
+    ("decrementAndGet", 0),
+    ("getAndAdd", 1),
+    ("addAndGet", 1),
+];
+
+/// `newUpdater(Class, String)` of the updater class for `value`.
+fn new_updater_function(value: AtomicValue) -> RuntimeFunction {
+    let updater = value.updater();
+    RuntimeFunction {
+        declaration: RuntimeDeclaration::Static(updater),
+        name: "newUpdater",
+        params: vec![
+            Ty::platform_nullable(Ty::obj("java/lang/Class")),
+            Ty::platform_nullable(Ty::String),
+        ],
+        ret: Ty::platform_nullable(Ty::obj_name(updater)),
+        appended: Vec::new(),
+    }
+}
+
+/// The updater function an atomic operation of `value` calls, with the instance it applies to.
+fn updater_member_function(
+    value: AtomicValue,
+    name: &str,
+    arguments: usize,
+) -> Option<RuntimeFunction> {
+    let (function, params, ret) = updater_function(name, arguments, value.ty())?;
+    Some(RuntimeFunction {
+        declaration: RuntimeDeclaration::Member(value.updater()),
+        name: function,
+        params: std::iter::once(Ty::platform_nullable(Ty::obj("kotlin/Any")))
+            .chain(params)
+            .collect(),
+        ret,
+        appended: Vec::new(),
+    })
+}
+
 /// Every runtime function the lowering through field updaters may call.
 pub(super) fn requirements() -> Vec<RuntimeRequirement> {
-    [AtomicValue::Int, AtomicValue::Long]
-        .into_iter()
-        .flat_map(|value| {
-            let updater = value.updater();
-            std::iter::once(RuntimeRequirement {
-                declaration: RuntimeDeclaration::Static(updater),
-                name: "newUpdater",
-            })
-            .chain(UPDATER_FUNCTIONS.map(|name| RuntimeRequirement {
-                declaration: RuntimeDeclaration::Member(updater),
-                name,
-            }))
-        })
-        .collect()
+    let mut required = Vec::new();
+    for value in [AtomicValue::Int, AtomicValue::Long] {
+        required.push(new_updater_function(value).requirement());
+        for (name, arguments) in SURFACE_OPERATIONS {
+            let function = updater_member_function(value, name, arguments)
+                .expect("every surface operation names an updater function");
+            let requirement = function.requirement();
+            if !required.contains(&requirement) {
+                required.push(requirement);
+            }
+        }
+    }
+    required
 }
 
 fn unsupported(what: &str) -> String {
@@ -487,17 +534,7 @@ refusal: false,
                 });
                 continue;
             }
-            let updater = value.updater();
-            let Some(new_updater) = self.bind(
-                RuntimeDeclaration::Static(updater),
-                "newUpdater",
-                vec![
-                    Ty::platform_nullable(Ty::obj("java/lang/Class")),
-                    Ty::platform_nullable(Ty::String),
-                ],
-                Ty::platform_nullable(Ty::obj_name(updater)),
-                span,
-            ) else {
+            let Some(new_updater) = self.bind(new_updater_function(value), span) else {
                 continue;
             };
             self.by_property.insert(id, self.updaters.len());
@@ -547,32 +584,22 @@ refusal: false,
 
     fn bind(
         &mut self,
-        declaration: RuntimeDeclaration,
-        name: &'static str,
-        params: Vec<Ty>,
-        ret: Ty,
+        function: RuntimeFunction,
         span: Option<Span>,
     ) -> Option<BoundRuntimeFunction> {
-        let owner = match declaration {
+        let owner = match function.declaration {
             RuntimeDeclaration::Package(owner)
             | RuntimeDeclaration::Member(owner)
             | RuntimeDeclaration::Static(owner) => owner,
         };
-        if let Some(bound) = self.bound.get(&(owner, name)) {
-            if bound.params == params {
+        if let Some(bound) = self.bound.get(&(owner, function.name)) {
+            if bound.params == function.params {
                 return Some(bound.clone());
             }
         }
-        let function = RuntimeFunction {
-            declaration,
-            name,
-            params,
-            ret,
-            appended: Vec::new(),
-        };
         match self.runtime.function(&function) {
             Ok(bound) => {
-                self.bound.insert((owner, name), bound.clone());
+                self.bound.insert((owner, function.name), bound.clone());
                 Some(bound)
             }
             Err(error) => {
@@ -625,12 +652,10 @@ refusal: false,
                 continue;
             };
             receivers.push(receiver);
-            let (class, value_ty) = if self.direct_representation.is_some() {
-                let slot = self.directs[updater];
-                (slot.class, slot.value.ty())
+            let class = if self.direct_representation.is_some() {
+                self.directs[updater].class
             } else {
-                let slot = &self.updaters[updater];
-                (slot.class, slot.value.ty())
+                self.updaters[updater].class
             };
             if owner_of[expression as usize] != Some(class) {
                 self.reject(
@@ -656,25 +681,17 @@ refusal: false,
                 });
                 continue;
             }
-            let Some((function, params, ret)) = updater_function(&name, arguments.len(), value_ty)
+            let updater_value = self.updaters[updater].value;
+            let Some(function) = updater_member_function(updater_value, &name, arguments.len())
             else {
                 self.reject(span, &format!("the atomic operation `{name}`"));
                 continue;
             };
-            if params.len() != arguments.len() {
+            if function.params.len() != arguments.len() + 1 {
                 self.reject(span, &format!("the atomic operation `{name}`"));
                 continue;
             }
-            let updater_class = self.updaters[updater].value.updater();
-            let Some(bound) = self.bind(
-                RuntimeDeclaration::Member(updater_class),
-                function,
-                std::iter::once(Ty::platform_nullable(Ty::obj("kotlin/Any")))
-                    .chain(params)
-                    .collect(),
-                ret,
-                span,
-            ) else {
+            let Some(bound) = self.bind(function, span) else {
                 continue;
             };
             operations.push(UpdaterOperation {

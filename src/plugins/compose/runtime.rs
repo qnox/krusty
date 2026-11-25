@@ -7,7 +7,8 @@ use crate::ir::{
     RetainedAnnotation,
 };
 use crate::plugins::runtime_declarations::{
-    BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction, RuntimeRequirement,
+    record_requirements, BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
+    RuntimeRequirement,
 };
 use crate::types::{type_name, Ty};
 
@@ -68,47 +69,7 @@ pub(super) struct ComposeRuntime {
 
 /// Every runtime function [`ComposeRuntime::bind`] selects, which the pass declares up front.
 pub(super) fn requirements() -> Vec<RuntimeRequirement> {
-    let package = RuntimeDeclaration::Package(type_name(RUNTIME));
-    let internal = RuntimeDeclaration::Package(type_name(INTERNAL));
-    let composer = RuntimeDeclaration::Member(type_name(COMPOSER));
-    let scope = RuntimeDeclaration::Member(type_name(SCOPE_UPDATE_SCOPE));
-    let named = |declaration, names: &[&'static str]| {
-        names
-            .iter()
-            .map(|name| RuntimeRequirement { declaration, name })
-            .collect::<Vec<_>>()
-    };
-    [
-        named(
-            composer,
-            &[
-                "startRestartGroup",
-                "endRestartGroup",
-                "shouldExecute",
-                "skipToGroupEnd",
-                "changed",
-                "changedInstance",
-            ],
-        ),
-        named(scope, &["updateScope"]),
-        named(
-            package,
-            &[
-                "sourceInformation",
-                "sourceInformationMarkerStart",
-                "sourceInformationMarkerEnd",
-                "isTraceInProgress",
-                "traceEventStart",
-                "traceEventEnd",
-                "updateChangedFlags",
-            ],
-        ),
-        named(
-            internal,
-            &["composableLambdaInstance", "rememberComposableLambda"],
-        ),
-    ]
-    .concat()
+    record_requirements(|runtime| ComposeRuntime::bind(runtime).map(drop))
 }
 
 impl ComposeRuntime {
@@ -307,55 +268,5 @@ pub(super) fn function_key_meta(key: i32, (start, end): (i32, i32)) -> RetainedA
             ],
         },
         facts: Default::default(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::plugins::runtime_declarations::PluginClassifier;
-
-    /// A runtime that answers every request and records what was asked.
-    struct Recording(Vec<RuntimeRequirement>);
-
-    impl PluginRuntime for Recording {
-        fn function(&mut self, function: &RuntimeFunction) -> Result<BoundRuntimeFunction, String> {
-            self.0.push(RuntimeRequirement {
-                declaration: function.declaration,
-                name: function.name,
-            });
-            Ok(BoundRuntimeFunction {
-                target: crate::ir::ExternalCallableId::from_raw(0),
-                params: function.params.clone(),
-                ret: function.ret,
-            })
-        }
-
-        fn classifier(&self, _classifier: crate::types::TypeName) -> Option<PluginClassifier> {
-            None
-        }
-
-        fn appended_parameters(
-            &mut self,
-            _target: crate::ir::ExternalCallableId,
-            _appended: Vec<Ty>,
-        ) {
-        }
-    }
-
-    #[test]
-    fn the_declared_requirements_are_every_function_the_pass_binds() {
-        let mut runtime = Recording(Vec::new());
-        ComposeRuntime::bind(&mut runtime).expect("the recording runtime answers every request");
-        let declared = requirements();
-        for requested in &runtime.0 {
-            assert!(declared.contains(requested), "undeclared: {requested:?}");
-        }
-        for requirement in &declared {
-            assert!(
-                runtime.0.contains(requirement),
-                "declared but never requested: {requirement:?}"
-            );
-        }
     }
 }
