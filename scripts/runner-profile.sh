@@ -70,8 +70,29 @@ memory_kills() {
         | grep -iE 'out of memory|oom-kill|killed process' | tail -n 10 || true
 }
 
+# One line of what memory looked like: the memory still available, what tmpfs holds, and the five
+# processes with the most resident memory. RUNNER_PROFILE_PS replaces `ps` for the script's tests.
+memory_sample() {
+    local ps=${RUNNER_PROFILE_PS:-ps}
+    awk -v now="$(date +%T)" -v tops="$("$ps" -eo rss=,comm= --sort=-rss | head -n 5 \
+        | awk '{ printf "%s %dM; ", $2, $1 / 1024 }')" '
+        $1 == "MemAvailable:" { available = int($2 / 1024) }
+        $1 == "Shmem:" { shmem = int($2 / 1024) }
+        END { printf "%d\t%s available %dM, tmpfs %dM | %s\n", available, now, available, shmem, tops }' \
+        "$root/proc/meminfo"
+}
+
+# Samples memory every RUNNER_PROFILE_SAMPLE_SECONDS (15) until the job ends, so a job the kernel
+# killed still says what held its memory just before.
+sample_memory() {
+    while true; do
+        memory_sample >> "$state.memory" || true
+        sleep "${RUNNER_PROFILE_SAMPLE_SECONDS:-15}"
+    done
+}
+
 usage() {
-    echo "usage: $0 start|report <state file>" >&2
+    echo "usage: $0 start|report|sample <state file>" >&2
     exit 2
 }
 
@@ -80,10 +101,24 @@ state=$2
 case $1 in
     start)
         counters > "$state"
+        : > "$state.memory"
+        # A real job samples in the background; the script's own tests read stand-in trees.
+        if [[ -z ${RUNNER_PROFILE_ROOT:-} ]]; then
+            setsid nohup "$0" sample "$state" > /dev/null 2>&1 &
+            echo $! > "$state.sampler"
+        fi
+        ;;
+    sample)
+        sample_memory
         ;;
     report)
         [[ -r $state ]] || { echo "no runner profile was started at $state" >&2; exit 1; }
         machine
+        [[ ! -r $state.sampler ]] || kill "$(cat "$state.sampler")" 2> /dev/null || true
+        if [[ -s $state.memory ]]; then
+            printf 'lowest available memory: %s\nlast memory sample: %s\n' \
+                "$(sort -n "$state.memory" | head -n 1 | cut -f2-)" "$(tail -n 1 "$state.memory" | cut -f2-)"
+        fi
         kills=$(memory_kills)
         [[ -z $kills ]] || printf 'memory kills recorded by the kernel:\n%s\n' "$kills"
         echo "$(cat "$state") $(counters)" | awk '

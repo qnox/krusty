@@ -93,6 +93,36 @@ memory kills recorded by the kernel:
 [ 99.2] Out of memory: Killed process 4242 (java) total-vm:9000000kB, anon-rss:3100000kB
 over 10s: cpu user 50% system 0% iowait 0% steal 0% idle 50% | stalled on cpu 0s, io 0s, memory 0s | throttled n/a"
 
+# Memory samples taken during the job: the report names the lowest and the last, with their top
+# processes. A stand-in `ps` and meminfo make the sampled line reproducible.
+printf 'MemTotal: 8388608 kB\nMemAvailable: 524288 kB\nShmem: 2097152 kB\n' > "$fixture/sampled-meminfo"
+cat > "$fixture/ps" <<'STUB'
+#!/usr/bin/env bash
+echo '3145728 java'
+echo '1048576 conformance'
+STUB
+chmod +x "$fixture/ps"
+mkdir -p "$fixture/sampled/proc"
+cp "$fixture/sampled-meminfo" "$fixture/sampled/proc/meminfo"
+(
+    root=$fixture/sampled
+    RUNNER_PROFILE_ROOT=$root RUNNER_PROFILE_PS=$fixture/ps RUNNER_PROFILE_SAMPLE_SECONDS=0 \
+        bash -c 'source <(sed -n "/^memory_sample()/,/^}/p" "$1"); root=$RUNNER_PROFILE_ROOT; memory_sample' _ \
+        "$repo/scripts/runner-profile.sh"
+) | sed 's/^\([0-9]*\)\t[0-9:]* /\1\t00:00:00 /' > "$fixture/sample.line"
+printf '900\t10:00:00 available 900M, tmpfs 10M | java 1000M; \n512\t10:00:15 available 512M, tmpfs 2048M | java 3072M; \n700\t10:00:30 available 700M, tmpfs 10M | java 2000M; \n' \
+    > "$fixture/memory.state.memory"
+cp "$fixture/root.state" "$fixture/memory.state"
+RUNNER_PROFILE_ROOT=$fixture/root-end "$repo/scripts/runner-profile.sh" report "$fixture/memory.state" > "$fixture/memory.out"
+expect memory "machine: 2 cpus (Stand-in CPU @ 2.00GHz), cpu quota max, memory 8.0 GiB, swap 1.0 of 2.0 GiB used
+lowest available memory: 10:00:15 available 512M, tmpfs 2048M | java 3072M; 
+last memory sample: 10:00:30 available 700M, tmpfs 10M | java 2000M; 
+over 10s: cpu user 50% system 0% iowait 0% steal 0% idle 50% | stalled on cpu 0s, io 0s, memory 0s | throttled n/a"
+if [[ $(cat "$fixture/sample.line") != "512	00:00:00 available 512M, tmpfs 2048M | java 3072M; conformance 1024M; " ]]; then
+    echo "sample line: got $(cat "$fixture/sample.line")" >&2
+    failures=$((failures + 1))
+fi
+
 status=0
 "$repo/scripts/runner-profile.sh" report "$fixture/missing.state" > "$fixture/missing.out" 2>&1 || status=$?
 expect missing "no runner profile was started at $fixture/missing.state"
@@ -105,4 +135,4 @@ if [[ $failures -ne 0 ]]; then
     echo "$failures runner profile case(s) failed" >&2
     exit 1
 fi
-echo "runner profile: 5 cases passed"
+echo "runner profile: 6 cases passed"
