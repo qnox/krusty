@@ -1,5 +1,5 @@
 //! A hand-written JVM class-file writer (the format is well-specified; no external crate).
-//! Targets major version 50 (Java 6). Methods that create lambda objects (new $lambda$N) emit a
+//! Targets major version 52 (Java 8) by default. Methods that create lambda objects (new $lambda$N) emit a
 //! StackMapTable attribute so the type-checking verifier on Java 25+ accepts them.
 
 use crate::fx_hash::{HashMap, HashSet};

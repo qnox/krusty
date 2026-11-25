@@ -347,9 +347,6 @@ pub(crate) struct EmitRun {
     /// emit-run decision: it includes class-owned helpers whose every use was spliced, and is cleared
     /// before the next independent emission of the same IR.
     dead_lambdas: std::cell::RefCell<krusty::fx_hash::HashSet<u32>>,
-    /// Subset of live closures actually realized with `invokedynamic`. A class-strategy closure still
-    /// keeps its implementation method but does not impose the JVM-7 classfile requirement.
-    used_indy_lambdas: std::cell::RefCell<krusty::fx_hash::HashSet<u32>>,
     /// Lambda classes to synthesize for `-Xlambdas=class`, recorded as their `invokedynamic`
     /// replacement is emitted and drained by the class driver. They cannot be written inline: the
     /// emitter is mid-way through the ENCLOSING class's writer when it reaches a lambda.
@@ -1034,10 +1031,8 @@ fn emit_all_with_class_meta_impl(
         value_classes: std::rc::Rc::new(value_class_descriptors::of(ir)),
         ..opts.clone()
     };
-    // Pass 1 (discovery): emit everything, recording live closure implementations and the subset that
-    // actually uses `invokedynamic`. A lambda spliced by the inliner emits neither realization.
+    // Pass 1 (discovery): emit everything, recording live closure implementations. A lambda spliced by the inliner emits neither realization.
     env.run.used_lambdas.borrow_mut().clear();
-    env.run.used_indy_lambdas.borrow_mut().clear();
     env.run.dead_lambdas.borrow_mut().clear();
     let empty = krusty::fx_hash::HashSet::default();
     let first = emit_pass(
@@ -1053,16 +1048,6 @@ fn emit_all_with_class_meta_impl(
         },
     )?;
     let used = env.run.used_lambdas.borrow().clone();
-    let used_indy = env.run.used_indy_lambdas.borrow().clone();
-    // `invokedynamic` was added in class-file version 51 (Java 7). Do not return a version-50 class
-    // containing an opcode that its declared target cannot represent. This check uses the emitter's
-    // discovery result rather than the source/IR lambda count: an inline-only lambda that was fully
-    // spliced emitted no call site and therefore remains valid for the older target.
-    if opts.class_major.is_some_and(|major| major < 51) && !used_indy.is_empty() {
-        env.run
-            .set_emit_error("krusty: invokedynamic requires JVM target 1.7 or newer".to_string());
-        return None;
-    }
     // A MUST-INLINE message lambda whose call-site splice FELL BACK to a real `invokedynamic`
     // (pass 1 recorded the use): its impl was pre-marked `inline_only` on the assumption the splice
     // always succeeds — emitting the reference without the method would be a broken class

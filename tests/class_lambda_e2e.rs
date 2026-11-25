@@ -223,13 +223,63 @@ fn lambda_and_sam_strategies_are_independent() {
     }
 }
 
-/// `-jvm-target 1.6` predates `invokedynamic` (a version-51 opcode), and avoiding it is exactly what
-/// the class strategy is for — refusing the combination with an INDY error would be wrong. Assert
-/// the emitted files really declare major version 50, so a "fix" that accepted the flag but emitted
-/// the default version (or an indy site the old target cannot represent) still fails here.
+/// A `-jvm-target` below 1.8 predates what kotlinc 2.x can emit, so the class strategy has no older
+/// target to serve. Both compilers must refuse every such value (and every other spelling kotlinc
+/// does not know) with the same error, and write nothing.
 #[test]
-fn class_strategy_supports_the_pre_indy_jvm_target() {
-    let work = common::scratch_dir().expect("allocate pre-indy class-lambda fixture");
+fn jvm_targets_kotlinc_refuses_are_refused_in_its_words() {
+    let work = common::scratch_dir().expect("allocate jvm-target fixture");
+    let source = work.join("L.kt");
+    std::fs::write(&source, LAMBDA_SOURCE).expect("write fixture");
+    for target in ["1.6", "1.7", "6", "7", "8", "1.9", "27", "banana"] {
+        let reference_output = work.join("reference");
+        let (code, kotlinc_stderr) = common::kotlinc_compile(&[
+            "-d".to_string(),
+            reference_output.to_string_lossy().into_owned(),
+            "-Xlambdas=class".to_string(),
+            "-Xsam-conversions=class".to_string(),
+            "-jvm-target".to_string(),
+            target.to_string(),
+            source.to_string_lossy().into_owned(),
+        ])
+        .expect("reference compiler unavailable");
+        assert_eq!(code, 1, "kotlinc -jvm-target {target}: {kotlinc_stderr}");
+
+        let output = work.join("out");
+        let result = std::process::Command::new(common::krusty_binary())
+            .args(["-d", output.to_str().expect("UTF-8 output"), "-no-reflect"])
+            .args(["-Xlambdas=class", "-Xsam-conversions=class"])
+            .args(["-jvm-target", target])
+            .arg(&source)
+            .output()
+            .expect("run krusty CLI");
+        assert!(!result.status.success(), "krusty -jvm-target {target}");
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "");
+        let expected = kotlinc_stderr
+            .lines()
+            .map(|line| {
+                if line.starts_with("error: ") {
+                    format!("krusty: {line}\n")
+                } else {
+                    format!("{line}\n")
+                }
+            })
+            .collect::<String>();
+        assert_eq!(
+            String::from_utf8_lossy(&result.stderr),
+            expected,
+            "-jvm-target {target}"
+        );
+        assert!(!output.exists(), "krusty wrote output for {target}");
+    }
+    let _ = std::fs::remove_dir_all(work);
+}
+
+/// `-Xlambdas=class` keeps working on the oldest target kotlinc accepts: the emitted classes
+/// declare class-file version 52.
+#[test]
+fn class_strategy_emits_the_oldest_supported_target() {
+    let work = common::scratch_dir().expect("allocate class-lambda target fixture");
     let source = work.join("L.kt");
     let output = work.join("out");
     std::fs::create_dir_all(&output).expect("create output");
@@ -237,25 +287,25 @@ fn class_strategy_supports_the_pre_indy_jvm_target() {
     let result = std::process::Command::new(common::krusty_binary())
         .args(["-d", output.to_str().expect("UTF-8 output"), "-no-reflect"])
         .args(["-Xlambdas=class", "-Xsam-conversions=class"])
-        .args(["-jvm-target", "1.6"])
+        .args(["-jvm-target", "1.8"])
         .arg(&source)
         .output()
         .expect("run krusty CLI");
     assert!(
         result.status.success(),
-        "class-strategy lambdas do not require invokedynamic or JVM 1.7: {}",
+        "{}",
         String::from_utf8_lossy(&result.stderr)
     );
     let mut classes = Vec::new();
     collect_classes(&output, &output, &mut classes);
     assert!(
         !classes.is_empty(),
-        "no classes emitted for -jvm-target 1.6"
+        "no classes emitted for -jvm-target 1.8"
     );
     for name in &classes {
         let bytes = std::fs::read(output.join(format!("{name}.class"))).expect("read class");
         let major = u16::from_be_bytes([bytes[6], bytes[7]]);
-        assert_eq!(major, 50, "{name} must declare class-file version 50 (1.6)");
+        assert_eq!(major, 52, "{name} must declare class-file version 52 (1.8)");
     }
     let _ = std::fs::remove_dir_all(work);
 }
