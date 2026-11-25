@@ -10,7 +10,7 @@
 mod member_keys;
 mod most_specific;
 
-use super::{KlibCalleeOrigin, KlibDeclarationBodies};
+use super::{ir_signature, KlibCalleeOrigin, KlibDeclarationBodies};
 use crate::fx_hash::HashSet;
 use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
