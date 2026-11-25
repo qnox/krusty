@@ -2491,7 +2491,7 @@ exit "$status"
             return bin;
         }
         let version =
-            std::env::var("KRUSTY_GRADLE_VERSION").unwrap_or_else(|_| "8.14.3".to_owned());
+            std::env::var("KRUSTY_GRADLE_VERSION").unwrap_or_else(|_| "8.14.8".to_owned());
         let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/cache");
         let bin = cache.join(format!("gradle-{version}/bin/gradle"));
         if bin.is_file() {
