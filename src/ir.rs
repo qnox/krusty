@@ -1497,6 +1497,15 @@ pub enum InlineLambdaPlacement {
     Retained,
 }
 
+/// How a library function is bound to the Native runtime's C symbols.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuntimeBinding {
+    /// The function has no body: it calls this runtime symbol, the receiver first.
+    Entry(String),
+    /// The runtime calls the function through this exported symbol, the receiver first.
+    Export(String),
+}
+
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -2001,6 +2010,9 @@ pub struct IrFile {
     /// Each exported overridable member's dispatching entry, by the member's `FunId`: the function
     /// another module's call reaches it through, which dispatches on the receiver.
     pub(crate) dispatch_entries: crate::fx_hash::HashMap<FunId, FunId>,
+    /// Each function a library binds to the Native runtime: a bodyless one to the runtime symbol
+    /// it calls, one with a body to the symbol the runtime calls it back through.
+    pub runtime_bindings: crate::fx_hash::HashMap<FunId, RuntimeBinding>,
     /// Each enum class's initializer, which builds its constants and then its companion, once a
     /// target's shared enum lowering ([`crate::backend::enums`]) has realized it as an ordinary
     /// function of this file. A target whose companion getter runs first calls it before building

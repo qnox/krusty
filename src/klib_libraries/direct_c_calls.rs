@@ -4,13 +4,15 @@
 //! The provider joins those facts once and publishes a physical target with the selected callable
 //! identity. Neither common lowering nor a backend searches annotations or declaration spellings.
 
-use crate::libraries::{CallablePlacement, DirectCFunction};
+use crate::libraries::{CFunctionAbi, CallablePlacement, DirectCFunction};
 use crate::metadata::semantic::{AnnotationApplication, AnnotationArgument, KotlinFunction};
 use crate::types::type_name;
 
 use super::declaration_signatures::{unsignable, KlibLibraryError};
+use super::target_intrinsics::TargetIntrinsicPlatform;
 
 const CCALL_DIRECT: &str = "kotlinx/cinterop/internal/CCall$Direct";
+const GC_UNSAFE_CALL: &str = "kotlin/native/internal/GCUnsafeCall";
 
 pub(super) fn authenticate(
     package: &[String],
@@ -61,6 +63,45 @@ pub(super) fn authenticate(
     let symbol = exact_name(annotation)
         .ok_or_else(|| fail("`@CCall.Direct` has no single string `name` argument"))?;
     Ok(Some(DirectCFunction::new(symbol)))
+}
+
+/// The Kotlin/Native runtime entry a Native standard library declaration is bound to by its
+/// `@GCUnsafeCall("callee")`. The caller offers only a declaration no compiler intrinsic realizes,
+/// so what remains is a call of the runtime's own C function; whether the runtime defines it is the
+/// backend's check, against the runtime it links.
+pub(super) fn runtime_entry(
+    platform: Option<TargetIntrinsicPlatform>,
+    declaration: &KotlinFunction,
+) -> Option<DirectCFunction> {
+    if platform != Some(TargetIntrinsicPlatform::Native)
+        || !declaration.is_external
+        || declaration.is_suspend
+        || declaration.is_inline
+        || declaration.is_expect
+        || declaration.vararg.is_some()
+        || declaration.context_count != 0
+        || !declaration.context_kinds.is_empty()
+        || !declaration.formals.is_empty()
+        || declaration
+            .param_defaults
+            .iter()
+            .any(|defaulted| *defaulted)
+    {
+        return None;
+    }
+    let identity = type_name(GC_UNSAFE_CALL);
+    let mut matches = declaration
+        .annotation_applications
+        .iter()
+        .filter(|annotation| annotation.identity == identity);
+    let annotation = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    let [(parameter, AnnotationArgument::String(symbol))] = annotation.arguments.as_slice() else {
+        return None;
+    };
+    (parameter == "callee").then(|| DirectCFunction::with_abi(symbol, CFunctionAbi::Runtime))
 }
 
 fn exact_name(annotation: &AnnotationApplication) -> Option<&str> {
@@ -176,6 +217,45 @@ mod tests {
                 .detail(),
             "`@CCall.Direct` is present outside a Native interop KLIB"
         );
+    }
+
+    fn runtime_declaration(arguments: Vec<(String, AnnotationArgument)>) -> KotlinFunction {
+        declaration(type_name(GC_UNSAFE_CALL), arguments)
+    }
+
+    fn callee(symbol: &str) -> Vec<(String, AnnotationArgument)> {
+        vec![(
+            "callee".to_owned(),
+            AnnotationArgument::String(symbol.to_owned()),
+        )]
+    }
+
+    #[test]
+    fn a_native_external_publishes_the_runtime_entry_its_gc_unsafe_call_names() {
+        let entry = runtime_entry(
+            Some(TargetIntrinsicPlatform::Native),
+            &runtime_declaration(callee("Kotlin_native_internal_GC_collect")),
+        )
+        .expect("the exact application names a runtime entry");
+        assert_eq!(entry.symbol(), "Kotlin_native_internal_GC_collect");
+        assert_eq!(entry.abi(), CFunctionAbi::Runtime);
+    }
+
+    #[test]
+    fn a_runtime_entry_needs_the_native_platform_an_external_and_one_exact_callee() {
+        let exact = runtime_declaration(callee("Kotlin_native_internal_GC_collect"));
+        assert!(runtime_entry(Some(TargetIntrinsicPlatform::Wasm), &exact).is_none());
+        assert!(runtime_entry(None, &exact).is_none());
+        let mut bodied = runtime_declaration(callee("Kotlin_native_internal_GC_collect"));
+        bodied.is_external = false;
+        assert!(runtime_entry(Some(TargetIntrinsicPlatform::Native), &bodied).is_none());
+        let renamed = runtime_declaration(vec![(
+            "name".to_owned(),
+            AnnotationArgument::String("Kotlin_native_internal_GC_collect".to_owned()),
+        )]);
+        assert!(runtime_entry(Some(TargetIntrinsicPlatform::Native), &renamed).is_none());
+        let unrelated = declaration(type_name("other/GCUnsafeCall"), callee("Kotlin_x"));
+        assert!(runtime_entry(Some(TargetIntrinsicPlatform::Native), &unrelated).is_none());
     }
 
     #[test]
