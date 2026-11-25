@@ -212,6 +212,7 @@ fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, action: Exp
         source_line_count: _,
         source_debug: _,
         recursive_type_of: _,
+        companion_blocks_enabled: _,
         file_annotations: _,
         file_annotations_attached: _,
         functions: _,

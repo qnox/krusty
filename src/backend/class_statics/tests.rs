@@ -235,3 +235,33 @@ fn a_class_initializes_its_superinterfaces_with_statics_and_default_members_firs
         "an interface does not initialize its superinterfaces"
     );
 }
+
+#[test]
+fn a_superinterface_with_only_a_companion_object_and_a_default_member_is_initialized_first() {
+    let mut ir = IrFile::default();
+    let with_companion = interface(&mut ir, "p/WithCompanion", &[], true);
+    ir.classes[with_companion as usize].companion_class =
+        Some(type_name("p/WithCompanion$Companion"));
+    let abstract_only = interface(&mut ir, "p/AbstractOnly", &[], false);
+    ir.classes[abstract_only as usize].companion_class =
+        Some(type_name("p/AbstractOnly$Companion"));
+    let bare = interface(&mut ir, "p/Bare", &[], true);
+    let mut declaration = crate::ir::test_support::blank_class("p/Impl");
+    for name in ["p/WithCompanion", "p/AbstractOnly", "p/Bare"] {
+        declaration.interfaces.push(name);
+    }
+    let implementation = ir.add_class(declaration);
+
+    let plan = ClassStaticPlan::new(&ir).expect("no statics to order");
+
+    assert!(!plan.has_statics(with_companion));
+    assert!(!plan.has_statics(bare));
+    assert_eq!(
+        plan.activation_steps(implementation).collect::<Vec<_>>(),
+        vec![
+            ClassActivationStep::Companion(with_companion),
+            ClassActivationStep::Companion(implementation),
+        ],
+        "only a default member makes a companion object an initialization dependency"
+    );
+}

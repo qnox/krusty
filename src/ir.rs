@@ -1490,6 +1490,11 @@ pub struct IrFile {
     /// Finalized source-language decision for recursive non-reified `typeOf` bounds. The JVM
     /// realizes this checked per-file fact; it does not select the policy itself.
     pub recursive_type_of: bool,
+    /// The file compiles under `CompanionBlocks`. A target with no class initialization of its own
+    /// then initializes a class as the JVM does: its superclass chain and superinterfaces first,
+    /// and the class whenever its companion is reached. Without the feature only a construction
+    /// or an access initializes the companion it names.
+    pub companion_blocks_enabled: bool,
     /// Checked file-level annotation applications. These are declaration metadata, not syntax;
     /// backend plugins consume their folded values without retaining or reopening the source AST.
     pub file_annotations: DeclarationAnnotations,

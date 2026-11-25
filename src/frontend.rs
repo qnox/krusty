@@ -302,6 +302,14 @@ impl ReparseSource {
             .has("JvmSupportRecursiveTypeOf")
     }
 
+    /// Whether the file compiles under `CompanionBlocks`, the feature that gives a class the JVM's
+    /// initialization order on a target with no class initialization of its own.
+    pub(crate) fn companion_blocks(&self, module_features: &LangFeatures) -> bool {
+        module_features
+            .for_source(&self.text)
+            .has("CompanionBlocks")
+    }
+
     pub(crate) fn source_line_count(&self) -> u32 {
         let newlines = u32::try_from(self.text.bytes().filter(|byte| *byte == b'\n').count())
             .expect("a source file cannot contain more than u32::MAX physical newlines");
