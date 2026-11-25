@@ -27,6 +27,9 @@ pub(super) struct NestedObjects<'r, 'a> {
     pub descriptor: &'r str,
     /// Each nested original with its copy, in the order they were regenerated.
     pub renamed: Vec<(String, String)>,
+    /// The nested originals whose copy took a lambda the call passes: such a copy is named where
+    /// the outer copy's field of its type is declared, so the field takes the copy's type.
+    pub lambda_taking: Vec<(String, String)>,
     /// The nested copies, and the classes they regenerated in turn.
     pub classes: Vec<(String, Vec<u8>)>,
     /// The SAM wrappers the method and the nested copies construct.
@@ -144,6 +147,10 @@ impl AnonymousObjects for NestedObjects<'_, '_> {
         )
         .map_err(InlineError::Regeneration)?;
         self.renamed.push((class.to_string(), new_class.clone()));
+        if !lambdas.is_empty() {
+            self.lambda_taking
+                .push((class.to_string(), new_class.clone()));
+        }
         self.classes.extend(regenerated.nested);
         self.sam_wrappers.extend(regenerated.sam_wrappers);
         self.classes.push((new_class.clone(), regenerated.bytes));

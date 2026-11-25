@@ -305,6 +305,7 @@ pub fn regenerate(
             }
         }
     }
+    let mut declared_fields: Vec<(String, Option<String>)> = Vec::new();
     for field in &original.fields {
         if is_captured_field_name(&field.name) {
             continue;
@@ -322,6 +323,7 @@ pub fn regenerate(
         {
             remapper.remap_annotation(annotation)?;
         }
+        declared_fields.push((field.desc.clone(), field.signature.clone()));
         cw.add_copied_field(&field)
             .map_err(RegenerationError::Copy)?;
     }
@@ -388,6 +390,7 @@ pub fn regenerate(
     // the copy's first ones, enclosed by the new constructor, and a lambda it invokes while the
     // object is initialized is inlined there.
     let mut nested = Vec::new();
+    let mut field_retypes: Vec<(String, String)> = Vec::new();
     let mut sam_wrappers = Vec::new();
     let regenerates_objects = plan.body.instructions().any(|insn| {
         references_other_regenerated_class(insn, regeneration.classes, old, &continuations)
@@ -402,6 +405,7 @@ pub fn regenerate(
             method: "<init>",
             descriptor: &plan.desc,
             renamed: Vec::new(),
+            lambda_taking: Vec::new(),
             classes: Vec::new(),
             sam_wrappers: Vec::new(),
             reified_parameters_remain: false,
@@ -415,6 +419,7 @@ pub fn regenerate(
             &mut lines,
             &mut objects,
         )?;
+        field_retypes.extend(objects.lambda_taking);
         nested.extend(objects.classes);
         sam_wrappers.extend(objects.sam_wrappers);
         reified_parameters_remain |= objects.reified_parameters_remain;
@@ -507,6 +512,7 @@ pub fn regenerate(
                         .unwrap_or(&method.name),
                     descriptor: &method.desc,
                     renamed: Vec::new(),
+                    lambda_taking: Vec::new(),
                     classes: Vec::new(),
                     sam_wrappers: Vec::new(),
                     reified_parameters_remain: false,
@@ -520,6 +526,7 @@ pub fn regenerate(
                     &mut lines,
                     &mut objects,
                 )?;
+                field_retypes.extend(objects.lambda_taking);
                 nested.extend(objects.classes);
                 sam_wrappers.extend(objects.sam_wrappers);
                 reified_parameters_remain |= objects.reified_parameters_remain;
@@ -628,6 +635,22 @@ pub fn regenerate(
         nested.extend(regenerated.nested);
         sam_wrappers.extend(regenerated.sam_wrappers);
         nested.push((continuation, regenerated.bytes));
+    }
+
+    // A field of a nested object's type that took a lambda is declared with the copy's type.
+    for (index, (desc, signature)) in declared_fields.iter().enumerate() {
+        let retype = |text: &str| {
+            field_retypes
+                .iter()
+                .fold(text.to_string(), |text, (from, to)| {
+                    text.replace(&format!("L{from};"), &format!("L{to};"))
+                })
+        };
+        let retyped = retype(desc);
+        let retyped_signature = signature.as_deref().map(retype);
+        if retyped != *desc || retyped_signature != *signature {
+            cw.retype_copied_field(index, &retyped, retyped_signature.as_deref());
+        }
     }
 
     if !lines.lineless {

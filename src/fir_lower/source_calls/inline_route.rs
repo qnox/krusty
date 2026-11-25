@@ -11,7 +11,7 @@ use crate::fir::{
 };
 use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, FunId, IrExpr, SameModuleInlining};
-use crate::types::{Ty, TyKind};
+use crate::types::{InlineParameterModifier, Ty, TyKind};
 
 #[cfg(test)]
 mod tests;
@@ -40,8 +40,9 @@ pub(in super::super) enum ExpansionReason {
     SuspendCallee,
     /// The call omits an argument that has a default.
     DefaultArguments,
-    /// A parameter (or the receiver) of the callee has a suspend function type, whose lambdas
-    /// suspend inside the caller's state machine.
+    /// A parameter (or the receiver) of the callee that is itself inlined has a suspend function
+    /// type, whose lambdas suspend inside the caller's state machine. A `noinline` one is only
+    /// passed on as a value, so its call keeps to the compiled body.
     SuspendFunctionParameter,
     /// The callee has no body of its own in this file's IR.
     NoTemplate,
@@ -121,10 +122,18 @@ impl BodyLowering<'_> {
         let Some(signature) = self.index.signature(declaration) else {
             return Some(ExpansionReason::NoTemplate);
         };
+        let Some(function) = function else {
+            return Some(ExpansionReason::NoTemplate);
+        };
+        let modifiers = self.ir.declared_inline_modifiers(function);
         if signature
             .parameters
             .iter()
-            .any(|parameter| suspend_function(parameter.get()))
+            .enumerate()
+            .any(|(index, parameter)| {
+                suspend_function(parameter.get())
+                    && modifiers.get(index) != Some(&InlineParameterModifier::Noinline)
+            })
             || callable
                 .shape
                 .extension_receiver
@@ -132,9 +141,6 @@ impl BodyLowering<'_> {
         {
             return Some(ExpansionReason::SuspendFunctionParameter);
         }
-        let Some(function) = function else {
-            return Some(ExpansionReason::NoTemplate);
-        };
         let Some(body) = self
             .ir
             .functions
