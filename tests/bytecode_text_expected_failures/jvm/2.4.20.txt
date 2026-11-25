@@ -65,8 +65,6 @@ inaccessibleTypeInArray.kt
 inline/noFakeVariableForInlineOnlyFun.kt
 inline/reifiedSafeAsWithMutable.kt
 inline/syntheticPropertyReference.kt
-inlineClasses/boxUnboxInlineClassFromMethodReturnType.kt
-inlineClasses/boxUnboxOnInlinedParameters.kt
 inlineClasses/boxingForNonLocalAndLabeledReturnsOfInlineClasses.kt
 inlineClasses/defaultParametersDontBox.kt
 inlineClasses/equalsIsCalledByInlineClass.kt
@@ -76,7 +74,6 @@ inlineClasses/passInlineClassesWithSpreadOperatorToVarargs.kt
 inlineClasses/resultApiDoesntCallSpecializedEquals.kt
 inlineClasses/toStringOfInlineClassValue.kt
 inlineClasses/toStringOfReferenceInlineClassValue.kt
-inlineClasses/unboxInlineClassFromParameterizedType.kt
 innerClasses/kt27936.kt
 interfaces/addedInterfaceBridge.kt
 interfaces/noPrivateMemberInJavaInterface.kt
