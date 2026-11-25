@@ -9,7 +9,6 @@ on:
         description: Exact Kotlin release to capture, such as 2.5.0-RC
         type: string
         required: true
-        default: 2.5.0-RC
 
 permissions:
   contents: read
