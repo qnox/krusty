@@ -27,9 +27,6 @@ pub(super) struct BuiltinInstances {
 #[derive(Clone, Copy)]
 pub(super) struct RuntimeLayouts {
     pub(super) string_builder: bool,
-    pub(super) array_list: bool,
-    /// The runtime's iterator over a list, which `iterator()` and `listIterator()` answer.
-    pub(super) array_list_iterator: bool,
 }
 
 impl Runtime {
@@ -59,18 +56,6 @@ impl Runtime {
             self.objects
                 .interfaces
                 .instance_of(self.string_builders.class, interface);
-        }
-        // The list is an instance by its struct, as a string is, so the interface's members are
-        // not obligations of the list: its class implements only the members the runtime realizes.
-        if laid_out.array_list {
-            self.objects
-                .interfaces
-                .representation_instance_of(self.array_lists.list, interface);
-        }
-        if laid_out.array_list_iterator {
-            self.objects
-                .interfaces
-                .representation_instance_of(self.array_lists.iterator, interface);
         }
         for form in self.box_forms() {
             if subtypes.contains(&form.boxed) {
