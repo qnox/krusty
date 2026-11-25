@@ -6,6 +6,9 @@
 
 use super::common::{expect_box_ok_with_stdlib, expect_native_box, kotlinc_box_result};
 
+const OWN_WIDTH: &str = include_str!("box_regressions/integralEqualsOwnWidth.kt");
+const SMART_CAST: &str = include_str!("box_regressions/smartCastOperandEquals.kt");
+
 fn every_backend_agrees_with_kotlinc(stem: &str, source: &str) {
     assert_eq!(
         kotlinc_box_result(source),
@@ -20,28 +23,11 @@ fn every_backend_agrees_with_kotlinc(stem: &str, source: &str) {
 /// statically of that width.
 #[test]
 fn an_integral_value_equals_an_operand_of_its_own_width_by_value() {
-    let source = "fun box(): String {\n\
-         \x20   val b: Byte = 7\n\
-         \x20   val s: Short = 300\n\
-         \x20   val i = 70000\n\
-         \x20   val l = 5000000000L\n\
-         \x20   if (!b.equals(7.toByte()) || b.equals(8.toByte())) return \"fail byte\"\n\
-         \x20   if (!s.equals(300.toShort()) || s.equals(301.toShort())) return \"fail short\"\n\
-         \x20   if (!i.equals(70000) || i.equals(70001)) return \"fail int\"\n\
-         \x20   if (!l.equals(5000000000L) || l.equals(5000000001L)) return \"fail long\"\n\
-         \x20   return \"OK\"\n\
-         }\n";
-    every_backend_agrees_with_kotlinc("IntegralEqualsOwnWidth", source);
+    every_backend_agrees_with_kotlinc("IntegralEqualsOwnWidth", OWN_WIDTH);
 }
 
 /// A nullable operand narrowed by a safe-call chain reaches the same-width overload.
 #[test]
 fn a_smart_cast_operand_equals_by_value() {
-    let source = "fun same(x: Int?) = x?.toByte()?.hashCode()?.equals(x)\n\
-         fun box(): String {\n\
-         \x20   if (same(42) != true) return \"fail present\"\n\
-         \x20   if (same(null) != null) return \"fail absent\"\n\
-         \x20   return \"OK\"\n\
-         }\n";
-    every_backend_agrees_with_kotlinc("SmartCastOperandEquals", source);
+    every_backend_agrees_with_kotlinc("SmartCastOperandEquals", SMART_CAST);
 }
