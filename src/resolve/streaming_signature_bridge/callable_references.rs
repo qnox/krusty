@@ -236,7 +236,7 @@ impl ProductionSignatureSemantics<'_> {
         if alias.explicit_arguments.is_empty() {
             self.selected_calls.record_inferred_abbreviation(
                 origin,
-                super::selected_call_facts::InferredAbbreviation {
+                crate::resolve::selected_result_aliases::InferredAbbreviation {
                     formals: alias.formals.into_boxed_slice(),
                     expansion: alias.expansion,
                 },
