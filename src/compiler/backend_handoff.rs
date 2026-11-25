@@ -32,9 +32,6 @@ pub(super) struct ModuleEmission<'a> {
     /// The backend appends a `CharSequence` to a `StringBuilder` through its `length` and `get`
     /// ([`crate::backend::Backend::appends_char_sequences_by_index`]).
     pub appends_char_sequences_by_index: bool,
-    /// The backend's own list reads another collection through its interface members
-    /// ([`crate::backend::Backend::reads_collections_through_interfaces`]).
-    pub collections_through_interfaces: bool,
 }
 
 /// Freeze `ir`'s backend view, or report an internal error when a dependency identity the IR holds
@@ -87,16 +84,6 @@ pub(super) fn checked_ir_file<'a>(
                 );
                 return None;
             }
-        }
-    }
-    if module.collections_through_interfaces {
-        if let Err(error) = freeze_collection_protocol(&mut callables, symbols.semantic_platform())
-        {
-            diags.error(
-                Span::new(0, 0),
-                format!("internal error: cannot freeze the collection members: {error:?}"),
-            );
-            return None;
         }
     }
     if let Err(error) = record_checked_klib_dependency_facts(
@@ -269,7 +256,6 @@ pub(super) fn prepare_common_ir(
 
     let plugin_runtime = file.callables.plugin_runtime_bindings();
     let char_sequence_protocol = file.callables.char_sequence_protocol();
-    let collection_protocol = file.callables.collection_protocol();
     // The refreeze keeps the declarations of the module's classes, as the handoff froze them:
     // the slot plan binds a dependency superclass's published layout by those declarations.
     let mut callables = CheckedBackendCallables::freeze_with_class_declarations(
@@ -290,15 +276,6 @@ pub(super) fn prepare_common_ir(
             .map_err(|error| {
                 crate::backend::CommonIrPreparationError::Invariant(format!(
                     "cannot refreeze the CharSequence members: {error:?}"
-                ))
-            })?;
-    }
-    if let Some(protocol) = collection_protocol {
-        callables
-            .freeze_collection_protocol(protocol, provider)
-            .map_err(|error| {
-                crate::backend::CommonIrPreparationError::Invariant(format!(
-                    "cannot refreeze the collection members: {error:?}"
                 ))
             })?;
     }
@@ -325,16 +302,4 @@ pub(super) fn prepare_common_ir(
         })?;
     file.callables = callables;
     Ok(())
-}
-
-/// Select and freeze the collection members a target's own list reads another collection through.
-/// A provider declaring no single one of them freezes nothing, and a list that needs them declines.
-pub(super) fn freeze_collection_protocol(
-    callables: &mut CheckedBackendCallables,
-    provider: &dyn crate::symbol_source::SymbolSource,
-) -> Result<(), crate::backend::DependencyFactError> {
-    match crate::resolve::collection_protocol::selected(provider) {
-        Some(protocol) => callables.freeze_collection_protocol(protocol, provider),
-        None => Ok(()),
-    }
 }
