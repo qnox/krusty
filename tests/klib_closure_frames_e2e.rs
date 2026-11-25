@@ -26,6 +26,8 @@ mod file_private_function_receivers;
 #[path = "klib_closure_frames_e2e/local_superclass_arguments.rs"]
 mod local_superclass_arguments;
 
+#[path = "klib_closure_frames_e2e/file_private_inherited_members.rs"]
+mod file_private_inherited_members;
 #[path = "klib_closure_frames_e2e/thread_local_objects.rs"]
 mod thread_local_objects;
 

@@ -358,6 +358,16 @@ pub(super) trait CallLinker {
         unsupported("a call of a file-private constructor")
     }
 
+    /// The member a call of the file-local `callee` inherits when `callee` is a fake override of
+    /// a class private to its file, which no declaration defines: the call is one of that member,
+    /// dispatched on its receiver. `None` for any other callee; template linkers find none.
+    fn inherited_member(
+        &self,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Option<crate::metadata::klib_ir::KlibIrSignature> {
+        None
+    }
+
     /// The function a file-local call invokes: a top-level function private to the lowered
     /// body's file, or a member of a file-local class. Template linkers keep the refusal.
     /// The getter of an inherited property that a call of the fake override `callee` of a local

@@ -12,7 +12,7 @@ categories = ["compilers", "development-tools"]
 autotests = false
 
 [workspace]
-members = ["crates/krusty-build", "crates/krusty-jvm", "crates/krusty-native", "crates/krusty-wasm", "crates/krusty-cli", "crates/krusty-lsp", "crates/krusty-core", "crates/krusty-plugin-allopen", "crates/krusty-plugin-assignment", "crates/krusty-plugin-noarg", "crates/krusty-plugin-sam-with-receiver", "crates/krusty-plugin-api", "crates/krusty-plugin-host", "crates/krusty-test-modules", "crates/krusty-test-support", "crates/krusty-toolchain"]
+members = ["crates/krusty-build", "crates/krusty-jvm", "crates/krusty-native", "crates/krusty-wasm", "crates/krusty-cli", "crates/krusty-lsp", "crates/krusty-core", "crates/krusty-download", "crates/krusty-plugin-allopen", "crates/krusty-plugin-assignment", "crates/krusty-plugin-noarg", "crates/krusty-plugin-sam-with-receiver", "crates/krusty-plugin-api", "crates/krusty-plugin-host", "crates/krusty-test-modules", "crates/krusty-test-support", "crates/krusty-toolchain"]
 default-members = [".", "crates/krusty-cli"]
 resolver = "2"
 
@@ -22,6 +22,8 @@ krusty-core = { path = "crates/krusty-core" }
 # The contract compiler plugins are written against (conventions, the module IR, KSP rounds),
 # and the plugins already extracted.
 krusty-plugin-api = { path = "crates/krusty-plugin-api" }
+# One paced, bounded curl download shared by the test support and the plugin host.
+krusty-download = { path = "crates/krusty-download" }
 krusty-plugin-allopen = { path = "crates/krusty-plugin-allopen" }
 krusty-plugin-assignment = { path = "crates/krusty-plugin-assignment" }
 krusty-plugin-noarg = { path = "crates/krusty-plugin-noarg" }
