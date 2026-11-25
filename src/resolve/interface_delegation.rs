@@ -450,6 +450,14 @@ fn delegated_function_declaration(
         applied_result: ResolvedTy::new(applied_result).ok()?,
         interface: function.callable.owner_is_interface,
         has_kotlin_superclass_override: false,
+        return_value_status: match target {
+            ResolvedFunctionOverrideTarget::Module(callable) => {
+                Some(index.callable_inherited_status(callable).return_value)
+            }
+            ResolvedFunctionOverrideTarget::External(_) => function.flags.return_value_status,
+        },
+        operator: function.flags.operator,
+        infix: function.flags.infix,
     })
 }
 
@@ -575,6 +583,21 @@ fn property_slot(property: &PropertyInfo) -> Option<PropertySlot> {
     }
 }
 
+/// The status a delegated property's overridden declaration has: the module declaration's
+/// inherited status, or the one its provider recorded (`None` for a Java declaration).
+fn property_return_value_status(
+    index: &ResolvedModuleIndex,
+    target: crate::fir::ResolvedPropertyOverrideTarget,
+    declaration: &PropertyInfo,
+) -> Option<crate::types::ReturnValueStatus> {
+    match target {
+        crate::fir::ResolvedPropertyOverrideTarget::Module(property) => {
+            Some(index.property_return_value_status(property))
+        }
+        crate::fir::ResolvedPropertyOverrideTarget::External(_) => declaration.return_value_status,
+    }
+}
+
 fn delegated_property(
     source: &dyn SymbolSource,
     index: &ResolvedModuleIndex,
@@ -615,6 +638,7 @@ fn delegated_property(
             .setter
             .as_ref()
             .is_some_and(|setter| !setter.is_abstract),
+        return_value_status: property_return_value_status(index, declared.target, declaration),
     }];
     let inherited_class = inherited_class_candidates
         .into_iter()
@@ -649,6 +673,11 @@ fn delegated_property(
                     .setter
                     .as_ref()
                     .is_some_and(|setter| !setter.is_abstract),
+                return_value_status: property_return_value_status(
+                    index,
+                    declared.target,
+                    inherited,
+                ),
             });
         }
     }

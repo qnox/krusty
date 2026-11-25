@@ -114,6 +114,13 @@ pub struct ResolvedDelegatedFunctionDeclaration {
     pub applied_result: ResolvedTy,
     pub interface: bool,
     pub has_kotlin_superclass_override: bool,
+    /// Return-value status the overridden declaration has: its provider's record, or the status a
+    /// current-module declaration inherited. `None` for a Java declaration, which records none.
+    pub return_value_status: Option<crate::types::ReturnValueStatus>,
+    /// Whether the overridden declaration is `operator` / `infix`; an override has either modifier
+    /// when any declaration it overrides does.
+    pub operator: bool,
+    pub infix: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -156,6 +163,8 @@ pub struct ResolvedDelegatedPropertyDeclaration {
     pub getter_has_body: bool,
     /// As [`Self::getter_has_body`], for the overridden setter of a `var`.
     pub setter_has_body: bool,
+    /// As on [`ResolvedDelegatedFunctionDeclaration::return_value_status`].
+    pub return_value_status: Option<crate::types::ReturnValueStatus>,
 }
 
 /// The call one generated forwarder makes on the delegate value's own static type.

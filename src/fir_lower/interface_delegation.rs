@@ -272,6 +272,30 @@ fn materialize_delegation(
                     result,
                 );
                 ir.fn_source_names.insert(function, member.name.to_string());
+                // The forwarder takes the status of the first overridden declaration that
+                // records one, as any override does.
+                if let Some(status) = member
+                    .overridden
+                    .iter()
+                    .find_map(|declaration| declaration.return_value_status)
+                    .filter(|status| *status != crate::types::ReturnValueStatus::Unspecified)
+                {
+                    ir.fn_return_value_statuses.insert(function, status);
+                }
+                if member
+                    .overridden
+                    .iter()
+                    .any(|declaration| declaration.operator)
+                {
+                    ir.operator_fns.insert(function);
+                }
+                if member
+                    .overridden
+                    .iter()
+                    .any(|declaration| declaration.infix)
+                {
+                    ir.infix_fns.insert(function);
+                }
                 let parameter_identities = member
                     .parameter_identities
                     .iter()
@@ -525,6 +549,11 @@ fn materialize_delegation(
                             setter,
                             visibility: crate::types::Visibility::Public,
                             type_params,
+                            return_value_status: property
+                                .overridden
+                                .iter()
+                                .find_map(|declaration| declaration.return_value_status)
+                                .unwrap_or_default(),
                             accessor_annotations: Default::default(),
                         });
                     continue;
@@ -542,7 +571,11 @@ fn materialize_delegation(
                     ty,
                     type_params,
                     visibility: crate::types::Visibility::Public,
-                    return_value_status: Default::default(),
+                    return_value_status: property
+                        .overridden
+                        .iter()
+                        .find_map(|declaration| declaration.return_value_status)
+                        .unwrap_or_default(),
                     annotations: Box::new([]),
                     initializer: None,
                     storage_ty: None,

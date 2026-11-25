@@ -268,6 +268,8 @@ pub struct MemberExtProp {
     pub type_params: Vec<IrTypeParameter>,
     /// Annotations written on this property's accessor declarations.
     pub accessor_annotations: super::AccessorAnnotations,
+    /// Return-value status the property records in class metadata.
+    pub return_value_status: crate::types::ReturnValueStatus,
 }
 
 /// How a member property is declared, as Kotlin metadata records it; no JVM shape encodes these.
