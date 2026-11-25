@@ -3545,7 +3545,6 @@ fn emit_enum_class(
         &mut cw,
         env,
     );
-    cw.reserve_method_name("$values");
     emit_members(&mut cw, &schedule.local_functions);
     cw.reserve_method_name("$values");
     // $values(): build the backing array — `new E[n]` filled with each entry constant (kotlinc factors
