@@ -180,6 +180,9 @@ pub struct Options {
     /// `-Xexplicit-api=strict|warning|disable`: kotlinc's explicit API mode, applied to the
     /// language settings once they are built.
     pub explicit_api: Option<String>,
+    /// `-XXexplicit-return-types=strict|warning|disable`: only the return-type checks of explicit
+    /// API mode.
+    pub explicit_return_types: Option<String>,
     /// `-Xassertions=always-enable|always-disable|legacy`: the `assert(...)` mode, applied to the
     /// language settings once they are built.
     pub assertions: Option<String>,
@@ -251,6 +254,7 @@ impl Default for Options {
             no_receiver_assertions: false,
             plugins: PluginConfig::default(),
             explicit_api: None,
+            explicit_return_types: None,
             assertions: None,
             inline_string_concat: false,
             inline_scopes_numbers: false,
@@ -647,6 +651,9 @@ impl Options {
     pub(super) fn install_language_settings(&mut self, mut settings: LanguageSettings) {
         if let Some(mode) = &self.explicit_api {
             settings.features.apply_explicit_api_mode(mode);
+        }
+        if let Some(mode) = &self.explicit_return_types {
+            settings.features.apply_explicit_return_types_mode(mode);
         }
         if let Some(mode) = &self.assertions {
             settings.features.apply_assertions_mode(mode);
