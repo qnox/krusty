@@ -1334,8 +1334,10 @@ fn wasm_stdlib_data_class_array_member_calls_are_the_operator() {
         crate::compilation_target::CompilationTarget::WasmJs,
         crate::compilation_target::CompilationTarget::WasmWasi,
     ] {
-        let path = crate::toolchain::kotlin_stdlib_klib(target)
-            .expect("the exact target stdlib must be provisioned");
+        let path =
+            crate::toolchain::kotlin_stdlib_klib_or_reason(target).unwrap_or_else(|reason| {
+                panic!("the exact target stdlib must be provisioned: {reason}")
+            });
         let archive = crate::klib::KlibArchive::open(&path).expect("the stdlib opens");
         let trees = read_declaration_trees(&archive).expect("the stdlib IR decodes");
         let builtins = super::super::ir_builtins::IrBuiltinOperators::new();

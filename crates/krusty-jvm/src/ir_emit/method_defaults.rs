@@ -240,6 +240,7 @@ pub(super) fn emit_default_stub(
         default_stub_access(ir, fid)
     };
     emitter.cw.add_method(access, &stub_name, &stub_desc, &code);
+    mark_stub_deprecated(ir, fid, emitter.cw, &stub_name, &stub_desc);
     drop(emitter);
     emit_published_default_accessor(
         ir,
@@ -253,6 +254,18 @@ pub(super) fn emit_default_stub(
             is_interface,
         },
     );
+}
+
+/// kotlinc repeats the classic `Deprecated` attribute of a `@Deprecated` function on its
+/// `$default` synthetic.
+fn mark_stub_deprecated(ir: &IrFile, fid: u32, cw: &mut ClassWriter, name: &str, descriptor: &str) {
+    if ir
+        .function_annotations
+        .get(&fid)
+        .is_some_and(|annotations| annotations.deprecated())
+    {
+        cw.mark_method_deprecated(name, descriptor);
+    }
 }
 
 /// Physical parameters of an instance method's `$default` synthetic.
@@ -714,6 +727,7 @@ pub(super) fn emit_facade_default_stub(
     emitter
         .cw
         .add_method(default_stub_access(ir, fid), &stub_name, &descriptor, &code);
+    mark_stub_deprecated(ir, fid, emitter.cw, &stub_name, &descriptor);
     drop(emitter);
     emit_published_default_accessor(
         ir,

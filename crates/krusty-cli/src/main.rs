@@ -660,6 +660,9 @@ fn configuration_report(opts: &cli::Options) -> Result<String, String> {
 pub fn compile(opts: &cli::Options) -> Result<usize, CompileError> {
     let report = configuration_report(opts)?;
     eprint!("{report}");
+    for note in &opts.fragment_library_notes {
+        eprintln!("info: {note}");
+    }
 
     let version = match opts.kotlin_reference_version {
         Some(version) => version,

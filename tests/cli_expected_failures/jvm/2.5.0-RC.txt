@@ -6,7 +6,6 @@ XXmultiPlatformProject/firMultiplatformCompilationWithoutErrors.args
 XeagerLambdaAnalysis/executorSubmitDefault.args
 XeagerLambdaAnalysis/executorSubmitEnabled.args
 XeagerLambdaAnalysis/unitConversionWithEla.args
-XexplicitApi/explicitApiAndExplicitReturnTypesAtTheSameTime.args
 XjdkRelease/jdkRelease20WithCorruptedClass.args
 XjdkRelease/jdkRelease6WithJvmTarget8Jdk11.args
 XjdkRelease/jdkRelease6WithJvmTarget8Jdk8.args
@@ -111,7 +110,6 @@ diagnosticTests/suspensionPointInMonitor.args
 diagnosticTests/wrongAnnotationArgumentInCtor.args
 errorSuppressionWarning.args
 explicitContextArguments.args
-explicitReturnTypesEnabled.args
 expression1.args
 extraArgCommonChecks/extraArgumentEmpty.args
 extraArgCommonChecks/extraArgumentInvalidValue.args
@@ -129,10 +127,6 @@ globalWarningSuppression_correct.args
 globalWarningSuppression_incorrect.args
 headerMode.args
 help.args
-hmpp/commaInFragmentDependency.args
-hmpp/jvmDependenciesInCommonClasspath_dir.args
-hmpp/jvmDependenciesInCommonClasspath_friends.args
-hmpp/jvmDependenciesInCommonClasspath_jar.args
 hmpp/successfulCompilation.args
 hmpp/successfulCompilation2.args
 internalArgCommonChecks/internalArgDisableLanguageFeature.args

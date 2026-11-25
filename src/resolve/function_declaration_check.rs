@@ -317,17 +317,19 @@ impl Checker<'_> {
                     .zip(parameters.iter().copied())
                     .enumerate()
                     .map(|(index, (parameter, semantic))| {
-                        self.record_or_bind_deferred_parameter_type(
-                            scope,
-                            stable_declaration
-                                .expect("a finalized local method retains its declaration"),
-                            &parameter.ty,
-                            parameter.is_vararg,
-                            semantic,
-                            spellings
-                                .as_ref()
-                                .and_then(|spellings| spellings.param(index)),
-                        )
+                        self.with_parameter_policies(scope, parameter.into(), |checker| {
+                            checker.record_or_bind_deferred_parameter_type(
+                                scope,
+                                stable_declaration
+                                    .expect("a finalized local method retains its declaration"),
+                                &parameter.ty,
+                                parameter.is_vararg,
+                                semantic,
+                                spellings
+                                    .as_ref()
+                                    .and_then(|spellings| spellings.param(index)),
+                            )
+                        })
                     })
                     .collect::<Vec<_>>(),
                 None if finalized_local_header => vec![Ty::Error; f.params.len()],
@@ -336,26 +338,30 @@ impl Checker<'_> {
                     .iter()
                     .enumerate()
                     .map(|(index, parameter)| {
-                        self.bind_active_deferred_parameter_type(
-                            scope,
-                            stable_declaration
-                                .expect("a deferred local method retains its declaration"),
-                            &parameter.ty,
-                            parameter.is_vararg,
-                            spellings
-                                .as_ref()
-                                .and_then(|spellings| spellings.param(index)),
-                        )
+                        self.with_parameter_policies(scope, parameter.into(), |checker| {
+                            checker.bind_active_deferred_parameter_type(
+                                scope,
+                                stable_declaration
+                                    .expect("a deferred local method retains its declaration"),
+                                &parameter.ty,
+                                parameter.is_vararg,
+                                spellings
+                                    .as_ref()
+                                    .and_then(|spellings| spellings.param(index)),
+                            )
+                        })
                     })
                     .collect::<Vec<_>>(),
                 None => f
                     .params
                     .iter()
                     .map(|parameter| {
-                        semantic_value_parameter_ty(
-                            self.check_declaration_type(scope, &parameter.ty),
-                            parameter.is_vararg,
-                        )
+                        self.with_parameter_policies(scope, parameter.into(), |checker| {
+                            semantic_value_parameter_ty(
+                                checker.check_declaration_type(scope, &parameter.ty),
+                                parameter.is_vararg,
+                            )
+                        })
                     })
                     .collect::<Vec<_>>(),
             };
@@ -435,9 +441,7 @@ impl Checker<'_> {
             let defaults_scope = scope.parameter_child();
             self.check_parameter_defaults(
                 &defaults_scope,
-                f.params
-                    .iter()
-                    .map(|parameter| (parameter.name.as_str(), parameter.default, parameter.span)),
+                f.params.iter().map(DeclaredParameter::from),
                 &parameter_types,
                 ParameterDefaultFlow::Function,
             );
@@ -732,16 +736,19 @@ impl Checker<'_> {
                 .zip(parameters.iter().copied())
                 .enumerate()
                 .map(|(index, (parameter, semantic))| {
-                    self.record_or_bind_deferred_parameter_type(
-                        scope,
-                        stable_declaration.expect("a finalized function retains its declaration"),
-                        &parameter.ty,
-                        parameter.is_vararg,
-                        semantic,
-                        spellings
-                            .as_ref()
-                            .and_then(|spellings| spellings.param(index)),
-                    )
+                    self.with_parameter_policies(scope, parameter.into(), |checker| {
+                        checker.record_or_bind_deferred_parameter_type(
+                            scope,
+                            stable_declaration
+                                .expect("a finalized function retains its declaration"),
+                            &parameter.ty,
+                            parameter.is_vararg,
+                            semantic,
+                            spellings
+                                .as_ref()
+                                .and_then(|spellings| spellings.param(index)),
+                        )
+                    })
                 })
                 .collect::<Vec<_>>(),
             None if finalized_local_header => vec![Ty::Error; f.params.len()],
@@ -750,26 +757,30 @@ impl Checker<'_> {
                 .iter()
                 .enumerate()
                 .map(|(index, parameter)| {
-                    self.bind_active_deferred_parameter_type(
-                        scope,
-                        stable_declaration
-                            .expect("a deferred local function retains its declaration"),
-                        &parameter.ty,
-                        parameter.is_vararg,
-                        spellings
-                            .as_ref()
-                            .and_then(|spellings| spellings.param(index)),
-                    )
+                    self.with_parameter_policies(scope, parameter.into(), |checker| {
+                        checker.bind_active_deferred_parameter_type(
+                            scope,
+                            stable_declaration
+                                .expect("a deferred local function retains its declaration"),
+                            &parameter.ty,
+                            parameter.is_vararg,
+                            spellings
+                                .as_ref()
+                                .and_then(|spellings| spellings.param(index)),
+                        )
+                    })
                 })
                 .collect::<Vec<_>>(),
             None => f
                 .params
                 .iter()
                 .map(|parameter| {
-                    semantic_value_parameter_ty(
-                        self.check_declaration_type(scope, &parameter.ty),
-                        parameter.is_vararg,
-                    )
+                    self.with_parameter_policies(scope, parameter.into(), |checker| {
+                        semantic_value_parameter_ty(
+                            checker.check_declaration_type(scope, &parameter.ty),
+                            parameter.is_vararg,
+                        )
+                    })
                 })
                 .collect::<Vec<_>>(),
         };
@@ -993,9 +1004,7 @@ impl Checker<'_> {
             let scope = &defaults_scope;
             self.check_parameter_defaults(
                 scope,
-                f.params
-                    .iter()
-                    .map(|parameter| (parameter.name.as_str(), parameter.default, parameter.span)),
+                f.params.iter().map(DeclaredParameter::from),
                 &parameter_types,
                 ParameterDefaultFlow::Function,
             );
