@@ -2740,6 +2740,11 @@ kt_boolean kt_range_iterator_has_next(KRef iterator) {
         return kt_walk_has_next(iterator);
     }
     if (!kt_is_range_iterator(iterator)) {
+        /* An iterator a LIBRARY body materialized, whose static type is the narrow `IntIterator`
+           or `CharIterator`: its descriptor carries the members the walk contract dispatches. */
+        if (iterator->header.type->walk_has_next != NULL) {
+            return iterator->header.type->walk_has_next(iterator);
+        }
         KT_FAIL("krusty: this value is no iterator\n");
     }
     return ((const KRangeIterator *)iterator)->has_next;
@@ -2754,6 +2759,22 @@ kt_long kt_range_iterator_next(KRef iterator) {
         return kt_walk_next_long(iterator);
     }
     if (!kt_is_range_iterator(iterator)) {
+        if (iterator->header.type->walk_next != NULL) {
+            KRef element = iterator->header.type->walk_next(iterator);
+            if (kt_pending_exception() != NULL || element == NULL) {
+                return 0;
+            }
+            const KType *boxed = element->header.type;
+            if (boxed == &kt_type_char) {
+                return kt_unbox_char(element);
+            }
+            if (boxed == &kt_type_long) {
+                return kt_unbox_long(element);
+            }
+            if (boxed == &kt_type_int) {
+                return kt_unbox_int(element);
+            }
+        }
         KT_FAIL("krusty: this value is no iterator\n");
     }
     KRangeIterator *self = (KRangeIterator *)iterator;
