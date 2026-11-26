@@ -4,21 +4,19 @@
 
 use super::common::{expect_box_ok_files_with_stdlib, expect_native_sources};
 
-/// The files of a shared regression, `(stem, text)`, split at its `// FILE:` markers.
-fn files(program: &'static str) -> Vec<(&'static str, &'static str)> {
-    program
-        .split("// FILE: ")
-        .skip(1)
-        .map(|file| {
-            let (name, body) = file.split_once('\n').unwrap();
-            (name.trim_end_matches(".kt"), body)
-        })
-        .collect()
-}
-
-/// The JVM/kotlinc run establishes the expected result before Native is held to it.
-fn expect_ok_on_jvm_and_native(program: &'static str, stem: &str) {
-    let sources = files(program);
+/// The JVM/kotlinc run establishes the expected result before Native is held to it. Both runs see
+/// every input of the shared regression: the preamble (`// WITH_STDLIB`, `// LANGUAGE:`) stays on
+/// the first file.
+fn expect_ok_on_jvm_and_native(program: &str, stem: &str) {
+    let (kotlin, java) = krusty::conformance::split_files(program).unwrap();
+    assert!(
+        java.is_empty(),
+        "{stem}: the regression declares no Java files"
+    );
+    let sources: Vec<(&str, &str)> = kotlin
+        .iter()
+        .map(|(name, text)| (name.trim_end_matches(".kt"), text.as_str()))
+        .collect();
     expect_box_ok_files_with_stdlib(&sources, stem);
     expect_native_sources(&sources, "OK");
 }
