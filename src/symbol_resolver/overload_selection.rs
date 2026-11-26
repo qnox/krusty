@@ -1555,7 +1555,7 @@ fn fewest_omitted_defaults_per_supplied_shape<'a>(
         .collect()
 }
 
-fn declaration_specificity_params(candidate: &FunctionInfo) -> Vec<Ty> {
+pub(super) fn declaration_specificity_params(candidate: &FunctionInfo) -> Vec<Ty> {
     let signature = candidate.semantic_signature();
     let mut params = signature
         .params
@@ -1715,6 +1715,16 @@ fn best_by_args_at_priority_with_ties<'a>(
     cands: &[(&'a FunctionInfo, Vec<Ty>)],
     args: &[CallArgKind],
 ) -> CandidateSelectionWithTies<&'a FunctionInfo> {
+    let declaration_specific =
+        declaration_specificity::retain_declaration_specific_among_equivalent(
+            src,
+            cands,
+            args,
+            |left, right| {
+                parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
+            },
+        );
+    let cands = declaration_specific.as_slice();
     // Exact passes see runtime types; literal provenance only drives the adaptation passes.
     let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
     let adapts = |p: &Ty, arg: &CallArgKind, _i: usize| arg.adapts_integer_literal_to(*p);

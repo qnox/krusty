@@ -243,3 +243,78 @@ pub(super) fn discriminate_generics<T: Copy>(
         _ => CandidateSelectionWithTies::Ambiguous(non_generic),
     }
 }
+
+/// Candidates whose instantiated parameter shapes coincide are not distinguished by them: a
+/// receiver that fixes `T` to `Iterable<Item>` makes `minus(element: T)` and
+/// `minus(elements: Iterable<T>)` the same shape. kotlinc decides such a tie on the declarations,
+/// with each side's type parameters open, so the declaration whose own parameters the other's accept
+/// wins. Candidates are compared only within a group of mutually equivalent instantiated shapes;
+/// every other pair is left to the argument-driven specificity that follows. Only the parameters
+/// the supplied arguments map to are compared: a parameter left to its default takes no part.
+pub(super) fn retain_declaration_specific_among_equivalent<'a>(
+    src: &dyn SymbolSource,
+    candidates: &[(&'a crate::libraries::FunctionInfo, Vec<Ty>)],
+    args: &[super::CallArgKind],
+    equivalent: impl Fn(Ty, Ty) -> bool,
+) -> Vec<(&'a crate::libraries::FunctionInfo, Vec<Ty>)> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (index, (_, shape)) in candidates.iter().enumerate() {
+        let group = groups.iter_mut().find(|group| {
+            let (_, other) = &candidates[group[0]];
+            other.len() == shape.len()
+                && other
+                    .iter()
+                    .zip(shape)
+                    .all(|(&left, &right)| equivalent(left, right) && equivalent(right, left))
+        });
+        match group {
+            Some(group) => group.push(index),
+            None => groups.push(vec![index]),
+        }
+    }
+    let mut keep = vec![true; candidates.len()];
+    for group in groups.iter().filter(|group| group.len() > 1) {
+        let declarations = group
+            .iter()
+            .map(|&index| {
+                let candidate = candidates[index].0;
+                let receiver = candidate.is_extension().then(|| {
+                    candidate.semantic_receiver().map(|receiver| {
+                        crate::types::ty_subst(receiver, &crate::types::TyParamBindings::default())
+                    })
+                });
+                let generic = candidate
+                    .generic_sig
+                    .as_ref()
+                    .is_some_and(|signature| !signature.formals.is_empty());
+                (
+                    index,
+                    receiver.flatten(),
+                    super::overload_selection::declaration_specificity_params(candidate)
+                        .into_iter()
+                        .zip(args)
+                        .filter(|(_, argument)| !argument.is_omitted_default())
+                        .map(|(parameter, _)| parameter)
+                        .collect::<Vec<_>>(),
+                    generic,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut retained = declarations.iter().collect::<Vec<_>>();
+        retain_most_specific_declarations(
+            src,
+            None,
+            &mut retained,
+            |(_, receiver, params, generic)| (*receiver, params.as_slice(), *generic, None),
+        );
+        for (index, ..) in &declarations {
+            keep[*index] = retained.iter().any(|(kept, ..)| kept == index);
+        }
+    }
+    candidates
+        .iter()
+        .zip(keep)
+        .filter(|&(_, keep)| keep)
+        .map(|(candidate, _)| candidate.clone())
+        .collect()
+}
