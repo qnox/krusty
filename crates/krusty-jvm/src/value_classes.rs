@@ -1104,7 +1104,7 @@ pub(crate) fn lower_value_classes(
             if let IrExpr::Call {
                 callee: call_callee,
                 dispatch_receiver,
-                ..
+                args,
             } = e
             {
                 if let Callee::Virtual {
@@ -1121,9 +1121,9 @@ pub(crate) fn lower_value_classes(
                     if dispatch_receiver.is_some()
                         && module_value_classes.contains_key(owner)
                         && !cls_by_name.contains_key(owner)
-                        && !vc_getters
-                            .get(owner)
-                            .is_some_and(|getter| is_underlying_getter(getter, name, *target))
+                        && !vc_getters.get(owner).is_some_and(|getter| {
+                            is_underlying_getter(getter, name, *target, args.is_empty())
+                        })
                     {
                         let impl_name =
                             vc_member_impl_name(name, params, ret, &callable_under, is_suspend);
@@ -1929,7 +1929,7 @@ pub(crate) fn lower_value_classes(
             IrExpr::Call {
                 callee: call_callee,
                 dispatch_receiver: Some(receiver),
-                ..
+                args,
             } if let Callee::Virtual {
                 owner,
                 name,
@@ -1937,9 +1937,9 @@ pub(crate) fn lower_value_classes(
                 target,
                 ..
             } = &**call_callee
-                && (vc_getters
-                    .get(owner)
-                    .is_some_and(|getter| is_underlying_getter(getter, name, *target))) =>
+                && (vc_getters.get(owner).is_some_and(|getter| {
+                    is_underlying_getter(getter, name, *target, args.is_empty())
+                })) =>
             {
                 value_class_name(*owner, &under).map(|owner| Rw::Prop {
                     receiver: *receiver,
@@ -3888,16 +3888,18 @@ impl ReprCtx<'_> {
 /// Whether the JVM method `name` is the getter of a value class's underlying property, whose
 /// plain spelling is `getter`. A property typed as another value class has its getter mangled
 /// with the hash of that type (`getId-eEFUqEU`); that spelling is the getter only when the
-/// checker selected a property getter, because an ordinary `fun getId(other: Id)` mangles to the
-/// same prefix.
+/// checker selected a property getter and the call passes no arguments, because an ordinary
+/// `fun getId(other: Id)` and a context-parameter property's getter mangle to the same prefix.
 fn is_underlying_getter(
     getter: &str,
     name: &str,
     target: Option<krusty::ir::IrVirtualTarget>,
+    no_arguments: bool,
 ) -> bool {
     name == getter
         || name.strip_prefix(getter).is_some_and(|rest| {
             rest.starts_with('-')
+                && no_arguments
                 && matches!(target, Some(krusty::ir::IrVirtualTarget::PropertyGetter(_)))
         })
 }
