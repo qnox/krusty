@@ -225,16 +225,6 @@ pub(crate) fn native_library_inputs(
     )
 }
 
-/// `src` as kotlinc-native sees a program written for the JVM oracle too: Native's stdlib declares
-/// no `kotlin.jvm.JvmInline`, so the annotation is an unresolved reference there, and a `value
-/// class` is inline without it (`krusty::conformance::prepare_test_source` expands the corpus
-/// placeholder to nothing for Native the same way).
-fn without_jvm_inline(src: &str) -> String {
-    src.replace("import kotlin.jvm.JvmInline", "")
-        .replace("@kotlin.jvm.JvmInline", "")
-        .replace("@JvmInline", "")
-}
-
 pub(crate) fn analyze_with_native_libraries(
     sources: &[(&str, &str)],
     libraries: KlibLibraries,
@@ -245,7 +235,9 @@ pub(crate) fn analyze_with_native_libraries(
 
     let prepared: Vec<String> = sources
         .iter()
-        .map(|(_, src)| without_jvm_inline(src))
+        .map(|(_, src)| {
+            krusty::conformance::prepare_test_source(src, krusty::conformance::TestTarget::Native)
+        })
         .collect();
     let inputs: Vec<_> = sources
         .iter()

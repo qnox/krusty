@@ -28,10 +28,10 @@ fn every_backend_agrees_with_kotlinc(stem: &str, source: &str) {
 /// `equals`, `hashCode` and `toString` are the value's, and a member sees the value as `this`.
 #[test]
 fn a_value_class_answers_by_the_value_it_wraps() {
-    let source = "@JvmInline value class Count(val n: Int) {\n\
+    let source = "OPTIONAL_JVM_INLINE_ANNOTATION value class Count(val n: Int) {\n\
          \x20   fun doubled(): Int = n * 2\n\
          }\n\
-         @JvmInline value class Label(val text: String)\n\
+         OPTIONAL_JVM_INLINE_ANNOTATION value class Label(val text: String)\n\
          fun box(): String {\n\
          \x20   if (Count(1) != Count(1)) return \"fail 1\"\n\
          \x20   if (Count(1) == Count(2)) return \"fail 2\"\n\
@@ -49,7 +49,7 @@ fn a_value_class_answers_by_the_value_it_wraps() {
 /// hash follows the elements, while equality stays the array's identity.
 #[test]
 fn a_value_class_over_an_array_hashes_its_contents() {
-    let source = "@JvmInline value class Bits(val raw: IntArray)\n\
+    let source = "OPTIONAL_JVM_INLINE_ANNOTATION value class Bits(val raw: IntArray)\n\
          fun box(): String {\n\
          \x20   val shared = intArrayOf(1, -2)\n\
          \x20   val before = Bits(shared).hashCode()\n\
@@ -64,9 +64,9 @@ fn a_value_class_over_an_array_hashes_its_contents() {
 /// does, through a primitive, a reference and a nullable array.
 #[test]
 fn a_value_class_renders_its_array_by_content() {
-    let source = "@JvmInline value class Bits(val raw: IntArray)\n\
-         @JvmInline value class Names(val raw: Array<String>)\n\
-         @JvmInline value class NBits(val raw: IntArray?)\n\
+    let source = "OPTIONAL_JVM_INLINE_ANNOTATION value class Bits(val raw: IntArray)\n\
+         OPTIONAL_JVM_INLINE_ANNOTATION value class Names(val raw: Array<String>)\n\
+         OPTIONAL_JVM_INLINE_ANNOTATION value class NBits(val raw: IntArray?)\n\
          fun box(): String {\n\
          \x20   if (Bits(intArrayOf(1, 2)).toString() != \"Bits(raw=[1, 2])\") return \"fail 1\"\n\
          \x20   if (Names(arrayOf(\"a\")).toString() != \"Names(raw=[a])\") return \"fail 2\"\n\
@@ -93,8 +93,8 @@ fn an_unsigned_array_property_renders_through_its_own_to_string() {
         "kotlinc's rendering of an unsigned array"
     );
     let source = "@file:OptIn(ExperimentalUnsignedTypes::class)\n\
-         @JvmInline value class UBits(val raw: UIntArray)\n\
-         @JvmInline value class Longs(val raw: ULongArray)\n\
+         OPTIONAL_JVM_INLINE_ANNOTATION value class UBits(val raw: UIntArray)\n\
+         OPTIONAL_JVM_INLINE_ANNOTATION value class Longs(val raw: ULongArray)\n\
          data class Holder(val raw: UByteArray, val other: UShortArray?)\n\
          fun box(): String {\n\
          \x20   val raw = uintArrayOf(1u, 4000000000u)\n\
@@ -116,7 +116,7 @@ fn an_unsigned_array_property_renders_through_its_own_to_string() {
 /// reach this target's collection paths instead.
 #[test]
 fn a_value_class_is_boxed_as_itself_where_its_type_is_not_known() {
-    let source = "@JvmInline value class Count(val n: Int)\n\
+    let source = "OPTIONAL_JVM_INLINE_ANNOTATION value class Count(val n: Int)\n\
          class Cell<T>(val value: T)\n\
          data class Two<T>(val first: T, val second: T)\n\
          fun <T> identity(value: T): T = value\n\
@@ -148,8 +148,8 @@ fn a_value_class_is_boxed_as_itself_where_its_type_is_not_known() {
 /// as a box where it is not (an `Int`, which has no `null`).
 #[test]
 fn a_nullable_value_class_keeps_its_null_apart() {
-    let source = "@JvmInline value class Name(val text: String)\n\
-         @JvmInline value class Count(val n: Int)\n\
+    let source = "OPTIONAL_JVM_INLINE_ANNOTATION value class Name(val text: String)\n\
+         OPTIONAL_JVM_INLINE_ANNOTATION value class Count(val n: Int)\n\
          fun name(present: Boolean): Name? = if (present) Name(\"n\") else null\n\
          fun count(present: Boolean): Count? = if (present) Count(7) else null\n\
          fun box(): String {\n\
@@ -171,7 +171,7 @@ fn a_nullable_value_class_keeps_its_null_apart() {
 #[test]
 fn a_value_class_implements_an_interface_through_its_box() {
     let source = "interface Shape { fun area(): Int }\n\
-         @JvmInline value class Square(val side: Int) : Shape {\n\
+         OPTIONAL_JVM_INLINE_ANNOTATION value class Square(val side: Int) : Shape {\n\
          \x20   override fun area(): Int = side * side\n\
          \x20   override fun toString(): String = \"Square $side\"\n\
          }\n\
@@ -192,7 +192,7 @@ fn a_value_class_implements_an_interface_through_its_box() {
 #[test]
 fn a_value_class_init_block_runs_when_the_value_is_made() {
     let source = "var made = 0\n\
-         @JvmInline value class Positive(val n: Int) {\n\
+         OPTIONAL_JVM_INLINE_ANNOTATION value class Positive(val n: Int) {\n\
          \x20   init {\n\
          \x20       require(n > 0) { \"not positive: $n\" }\n\
          \x20       made++\n\
@@ -216,8 +216,8 @@ fn a_value_class_init_block_runs_when_the_value_is_made() {
 /// as `Distance(meters=2.5)`, a divergence of that backend's own.
 #[test]
 fn a_nested_value_class_is_its_innermost_value() {
-    let source = "@JvmInline value class Meters(val value: Double)\n\
-         @JvmInline value class Distance(val meters: Meters)\n\
+    let source = "OPTIONAL_JVM_INLINE_ANNOTATION value class Meters(val value: Double)\n\
+         OPTIONAL_JVM_INLINE_ANNOTATION value class Distance(val meters: Meters)\n\
          fun box(): String {\n\
          \x20   val d = Distance(Meters(2.5))\n\
          \x20   if (d.meters.value != 2.5) return \"fail 1\"\n\
@@ -244,7 +244,7 @@ fn an_operand_of_a_bounded_type_parameter_is_unboxed() {
          class Holder<T : Int>(val v: T) {\n\
          \x20   fun twice(): Int = v + v\n\
          }\n\
-         @JvmInline value class Wrapped<T : Int>(val v: T) {\n\
+         OPTIONAL_JVM_INLINE_ANNOTATION value class Wrapped<T : Int>(val v: T) {\n\
          \x20   fun plus(other: Wrapped<T>) = Wrapped(v + other.v)\n\
          }\n\
          fun box(): String {\n\
@@ -264,7 +264,7 @@ fn an_operand_of_a_bounded_type_parameter_is_unboxed() {
 /// `UShort` hash as `data.toInt()` on the signed type they wrap, which SIGN-extends.
 #[test]
 fn an_unsigned_field_hashes_as_the_signed_value_it_wraps() {
-    let source = "@JvmInline value class Wrapped(val value: UInt)\n\
+    let source = "OPTIONAL_JVM_INLINE_ANNOTATION value class Wrapped(val value: UInt)\n\
          data class Row(val a: UByte, val b: UShort, val c: UInt, val d: ULong)\n\
          fun box(): String {\n\
          \x20   if (Wrapped(0u) != Wrapped(0u)) return \"fail 1\"\n\
@@ -304,7 +304,7 @@ fn a_multi_field_value_class_keeps_every_field() {
 }
 
 /// Kotlin/Native reads a single-field `value class` as inline from the keyword alone. Without
-/// `@JvmInline` it answers exactly as an annotated one does, through the value and through a box.
+/// `OPTIONAL_JVM_INLINE_ANNOTATION` it answers exactly as an annotated one does, through the value and through a box.
 /// kotlinc-native compiles this program and answers "OK" (recorded, or run live where
 /// kotlin-native is provisioned); the JVM rejects it.
 #[test]
@@ -340,7 +340,7 @@ fn a_value_class_needs_no_jvm_inline_on_native() {
 /// argument stub carries the override's own representation.
 #[test]
 fn a_value_class_result_reaches_a_generic_caller_through_a_default_argument() {
-    let source = "@JvmInline value class Ucn(private val i: UInt)\n\
+    let source = "OPTIONAL_JVM_INLINE_ANNOTATION value class Ucn(private val i: UInt)\n\
          interface Input<T> {\n\
          \x20   fun foo(n: Int = 0): T\n\
          }\n\
@@ -359,10 +359,10 @@ fn a_value_class_result_reaches_a_generic_caller_through_a_default_argument() {
 /// member takes the value as `this` and is called directly: a value class is final.
 #[test]
 fn a_value_class_fills_its_defaulted_arguments() {
-    let source = "@JvmInline value class Z(val x: Int = 1234) {\n\
+    let source = "OPTIONAL_JVM_INLINE_ANNOTATION value class Z(val x: Int = 1234) {\n\
          \x20   fun test(y: Int = 42) = x + y\n\
          }\n\
-         @JvmInline value class S(val x: String = \"foobar\")\n\
+         OPTIONAL_JVM_INLINE_ANNOTATION value class S(val x: String = \"foobar\")\n\
          fun box(): String {\n\
          \x20   if (Z().x != 1234) return \"fail 1\"\n\
          \x20   if (S().x != \"foobar\") return \"fail 2\"\n\
@@ -379,7 +379,7 @@ fn a_value_class_fills_its_defaulted_arguments() {
 fn an_explicit_backing_field_of_a_value_class_answers_the_public_type() {
     let source = "// LANGUAGE: +ExplicitBackingFields\n\
          interface I { fun call(): Int }\n\
-         @JvmInline value class V(val x: Int) : I { override fun call(): Int = x }\n\
+         OPTIONAL_JVM_INLINE_ANNOTATION value class V(val x: Int) : I { override fun call(): Int = x }\n\
          class A {\n\
          \x20   val a: Any\n\
          \x20       field = V(1)\n\
@@ -401,10 +401,10 @@ fn an_explicit_backing_field_of_a_value_class_answers_the_public_type() {
 /// the site types otherwise reaches it as the reference the interface carries.
 #[test]
 fn a_value_class_comparable_does_not_capture_another_comparable_call() {
-    let source = "@JvmInline value class II(val i: Int) : Comparable<II> {\n\
+    let source = "OPTIONAL_JVM_INLINE_ANNOTATION value class II(val i: Int) : Comparable<II> {\n\
          \x20   override fun compareTo(other: II): Int = i.compareTo(other.i)\n\
          }\n\
-         @JvmInline value class ICmp(val intc: Comparable<Int>)\n\
+         OPTIONAL_JVM_INLINE_ANNOTATION value class ICmp(val intc: Comparable<Int>)\n\
          fun test(x: ICmp): Int = x.intc.compareTo(42)\n\
          fun box(): String {\n\
          \x20   if (test(ICmp(42)) != 0) return \"fail 1\"\n\
@@ -421,7 +421,8 @@ fn a_value_class_comparable_does_not_capture_another_comparable_call() {
 /// exact differences catch a box read as the `Long`, and a value read as a box.
 #[test]
 fn a_comparable_call_selecting_a_value_class_arm_crosses_the_declared_parameter() {
-    let source = "@JvmInline value class Rank(val r: Long) : Comparable<Rank> {\n\
+    let source =
+        "OPTIONAL_JVM_INLINE_ANNOTATION value class Rank(val r: Long) : Comparable<Rank> {\n\
          \x20   override fun compareTo(other: Rank): Int = (r - other.r).toInt()\n\
          }\n\
          fun <T : Comparable<T>> order(a: T, b: T): Int = a.compareTo(b)\n\
@@ -440,7 +441,7 @@ fn a_comparable_call_selecting_a_value_class_arm_crosses_the_declared_parameter(
 /// own: the implementor fills both interfaces' numbers, each at its own representation.
 #[test]
 fn an_abstract_covariant_redeclaration_is_filled_by_the_implementor() {
-    let source = "@JvmInline value class X(val x: Any)\n\
+    let source = "OPTIONAL_JVM_INLINE_ANNOTATION value class X(val x: Any)\n\
          interface IBar { fun bar(): Any }\n\
          interface IFoo : IBar { override fun bar(): X }\n\
          class TestX : IFoo { override fun bar(): X = X(\"K\") }\n\
@@ -461,7 +462,7 @@ fn an_abstract_covariant_redeclaration_is_filled_by_the_implementor() {
 /// implementation as the value.
 #[test]
 fn a_member_extension_receiver_crosses_a_generic_interface_as_the_value() {
-    let source = "@JvmInline value class S(val x: String)\n\
+    let source = "OPTIONAL_JVM_INLINE_ANNOTATION value class S(val x: String)\n\
          interface GFoo<T> { val T.extVal: String }\n\
          object GFooImpl : GFoo<S> { override val S.extVal: String get() = x }\n\
          class TestGFoo : GFoo<S> by GFooImpl\n\
@@ -478,7 +479,7 @@ fn a_member_extension_receiver_crosses_a_generic_interface_as_the_value() {
 #[test]
 fn a_local_delegate_of_a_value_class_reads_as_the_value() {
     let source = "import kotlin.reflect.KProperty\n\
-         @JvmInline value class ICInt(val i: Int)\n\
+         OPTIONAL_JVM_INLINE_ANNOTATION value class ICInt(val i: Int)\n\
          class Delegate<T>(val f: () -> T) {\n\
          \x20   operator fun getValue(thisRef: Any?, property: KProperty<*>): T = f()\n\
          }\n\
@@ -493,7 +494,7 @@ fn a_local_delegate_of_a_value_class_reads_as_the_value() {
 /// An `inner` class of a value class holds the outer value, and `this@Outer` reads it back.
 #[test]
 fn an_inner_class_of_a_value_class_holds_the_outer_value() {
-    let source = "@JvmInline value class Z(val x: Int) {\n\
+    let source = "OPTIONAL_JVM_INLINE_ANNOTATION value class Z(val x: Int) {\n\
          \x20   @Suppress(\"INNER_CLASS_INSIDE_VALUE_CLASS\")\n\
          \x20   inner class Inner(val y: Int) {\n\
          \x20       val xx = x\n\
@@ -514,7 +515,7 @@ fn an_inner_class_of_a_value_class_holds_the_outer_value() {
 /// its box reaches through the bridge that unboxes it.
 #[test]
 fn a_value_class_collection_is_walked_through_its_own_members() {
-    let source = "@JvmInline value class Wrapped(val items: List<Int>) : Iterable<Int> {\n\
+    let source = "OPTIONAL_JVM_INLINE_ANNOTATION value class Wrapped(val items: List<Int>) : Iterable<Int> {\n\
          \x20   override fun iterator(): Iterator<Int> = items.iterator()\n\
          }\n\
          fun box(): String {\n\
@@ -549,7 +550,7 @@ fn a_value_class_from_another_file_is_boxed_and_unboxed() {
         ),
         (
             "ValueClassAcrossFilesLib",
-            "@JvmInline\n\
+            "OPTIONAL_JVM_INLINE_ANNOTATION\n\
              value class Z(val value: Int)\n\
              fun made(): Z = (Z(7) as Any) as Z\n",
         ),
