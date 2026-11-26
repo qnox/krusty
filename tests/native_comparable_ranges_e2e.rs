@@ -55,18 +55,11 @@ fn two_comparable_ranges_are_equal_by_their_bounds_or_by_being_empty() {
 }
 
 /// The runtime's comparable range is a `ClosedRange` to an erased test too, as every other closed
-/// range it builds is, and nothing else it holds is.
+/// range it builds is, and nothing else it holds is. The whole program is shared with every other
+/// lane in `tests/box_regressions`.
 #[test]
 fn a_comparable_range_is_a_closed_range_to_an_erased_test() {
-    let source = "fun isClosedRange(value: Any?): Boolean = value is ClosedRange<*>\n\
-         fun box(): String {\n\
-         \x20   val range = \"a\"..\"c\"\n\
-         \x20   if (!isClosedRange(range)) return \"fail range\"\n\
-         \x20   if (!isClosedRange(\"a\"..\"c\")) return \"fail literal\"\n\
-         \x20   if (isClosedRange(\"a\")) return \"fail String\"\n\
-         \x20   if (isClosedRange(null)) return \"fail null\"\n\
-         \x20   return \"OK\"\n\
-         }\n";
+    let source = include_str!("box_regressions/comparableRangeIsClosedRange.kt");
     expect_box_ok_with_stdlib(source, "ComparableRangeIsClosedRange");
     expect_native_box(source, "ComparableRangeIsClosedRange", "OK");
 }
