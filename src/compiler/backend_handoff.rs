@@ -115,8 +115,7 @@ pub(super) fn checked_ir_file<'a>(
         .get(source.raw() as usize)
         .map(|stem| format!("{}.kt", stem.rsplit(['/', '\\']).next().unwrap_or(stem)))
         .unwrap_or_default();
-    let mut runtime =
-        plugin_handoff::HandoffRuntime::new(symbols.semantic_platform(), &classifiers);
+    let mut runtime = plugin_handoff::HandoffRuntime::new(symbols.plugin_runtime(), &classifiers);
     let rejections = crate::plugins::record_enabled_source_facts(
         &mut ir,
         symbols.native_plugins(),
@@ -219,6 +218,7 @@ pub(super) fn prepare_common_ir(
     provider: &dyn crate::libraries::SemanticPlatform,
     preparation: crate::backend::CommonIrPreparation,
     coroutine_runtime: Option<crate::ir::IrCoroutineRuntime>,
+    enum_entries_factory: Option<crate::fir::EnumEntriesFactory>,
     represented: &[crate::types::TypeName],
 ) -> Result<(), crate::backend::CommonIrPreparationError> {
     // Resolution selected the coroutine runtime declarations once; a unit whose preparation
@@ -231,11 +231,23 @@ pub(super) fn prepare_common_ir(
     }
     crate::backend::counted_loops::realize(&mut file.ir, preparation.counted_loops);
     crate::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
+    let entries_factory = enum_entries_factory.map(|factory| {
+        let identity = provider
+            .external_callable(factory.function)
+            .and_then(|realization| realization.dependency_callable);
+        crate::backend::enums::EntriesFactory::bind(
+            factory,
+            identity.as_ref(),
+            &file.dependency_exports,
+        )
+    });
     crate::backend::enums::realize(
         &mut file.ir,
         preparation.enums,
+        entries_factory,
         &mut file.dependency_exports,
-    );
+    )
+    .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
     let classifiers = file.classifiers.module();
     let module_name = file.module_name;
     crate::backend::default_arguments::realize(

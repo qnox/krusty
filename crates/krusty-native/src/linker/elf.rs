@@ -15,6 +15,8 @@
 //! some of them, and a bug there must surface as an error naming the object, never as a panic or a
 //! write outside the section a relocation belongs to.
 
+mod symbol_table;
+
 use krusty::fx_hash::{HashMap, HashSet};
 
 use object::read::elf::{ElfFile64, SectionHeader};
@@ -595,6 +597,16 @@ pub(super) fn link(
     libraries: &[ImportLibrary],
     target: NativeTarget,
 ) -> Result<Vec<u8>, ProgramLinkError> {
+    link_with(inputs, libraries, target, symbol_table::requested())
+}
+
+/// [`link`], with the choice of appending a symbol table made by the caller.
+fn link_with(
+    inputs: &[&[u8]],
+    libraries: &[ImportLibrary],
+    target: NativeTarget,
+    symbol_table: bool,
+) -> Result<Vec<u8>, ProgramLinkError> {
     let files = inputs
         .iter()
         .enumerate()
@@ -801,6 +813,9 @@ pub(super) fn link(
         _ => program_headers.extend([text, data]),
     }
     write_headers(&mut image, target.arch, e_flags, entry, &program_headers);
+    if symbol_table {
+        symbol_table::append(&mut image, &files, &layout, &program_headers)?;
+    }
     Ok(image)
 }
 
@@ -989,6 +1004,67 @@ mod tests {
                     .to_string(),
             ),
         );
+    }
+
+    /// A requested symbol table names every function at the address the program was linked to,
+    /// and leaves the loaded image exactly as the one linked without it.
+    #[test]
+    fn a_requested_symbol_table_names_functions_without_moving_the_image() {
+        use object::read::{Object as _, ObjectSection as _, ObjectSymbol as _};
+        let (mut object, text) = x86_64_start(&[0x90, 0xc3]);
+        object.define("helper", text, 1);
+        object.local("private_helper", text, 1);
+        let target = linux(Arch::X86_64);
+        let plain = link_static(&[&object.bytes()], target).unwrap();
+        let with_table = link_with(&[&object.bytes()], &[], target, true).unwrap();
+
+        let loaded = plain.len();
+        // Only the ELF header's section-header fields differ; every loaded byte after it is the same.
+        assert!(
+            with_table[EHDR_SIZE as usize..loaded] == plain[EHDR_SIZE as usize..],
+            "the loaded image moved"
+        );
+        let file = object::File::parse(&*with_table).unwrap();
+        let address_of = |name: &str| {
+            file.symbols()
+                .find(|symbol| symbol.name() == Ok(name))
+                .unwrap_or_else(|| panic!("`{name}` is in the table"))
+                .address()
+        };
+        let start = address_of("_start");
+        assert_eq!(address_of("helper"), start + 1);
+        assert_eq!(address_of("private_helper"), start + 1);
+        // A function belongs to the executable segment's section, which is what lets a debugger
+        // treat it as code rather than as an absolute address.
+        let helper = file
+            .symbols()
+            .find(|symbol| symbol.name() == Ok("helper"))
+            .unwrap();
+        let section = file
+            .section_by_index(helper.section_index().unwrap())
+            .unwrap();
+        assert_eq!(section.name(), Ok(".text"));
+    }
+
+    /// A symbol in the writable segment's memory past its file contents belongs to a `.bss` section
+    /// that is large enough to hold it.
+    #[test]
+    fn a_requested_symbol_table_puts_a_bss_symbol_in_a_bss_section() {
+        use object::read::{Object as _, ObjectSection as _, ObjectSymbol as _};
+        let (mut object, _) = x86_64_start(&[0xc3]);
+        let bss = object.uninitialized(".bss", SectionKind::UninitializedData, 16, 8);
+        object.define("counter", bss, 8);
+        let bytes = link_with(&[&object.bytes()], &[], linux(Arch::X86_64), true).unwrap();
+        let file = object::File::parse(&*bytes).unwrap();
+        let counter = file
+            .symbols()
+            .find(|symbol| symbol.name() == Ok("counter"))
+            .expect("`counter` is in the table");
+        let section = file
+            .section_by_index(counter.section_index().unwrap())
+            .unwrap();
+        assert_eq!(section.name(), Ok(".bss"));
+        assert!(counter.address() < section.address() + section.size());
     }
 
     // ---- malformed input is an error, never a panic or a stray write -----------------------------

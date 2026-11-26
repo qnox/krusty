@@ -14,11 +14,10 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use krusty::compilation_target::CompilationTarget;
 
-use super::reference_recording_support::recorded;
+use super::reference_recording_support::{recorded, run_program_bounded};
 
 /// What a compiler did with a source set: whether it accepted it, and every error it reported in
 /// emission order. Each error is one complete block, `file:line:column: message`, with any further
@@ -154,9 +153,7 @@ pub fn kotlin_native_box(source: &str) -> Option<String> {
                 "kotlinc-native rejected a box program:\n{}",
                 built.stderr
             );
-            let run = Command::new(work.join("program.kexe"))
-                .output()
-                .expect("run the kotlinc-native program");
+            let run = run_program_bounded(&work.join("program.kexe"));
             assert!(
                 run.status.success(),
                 "the kotlinc-native program exited with {}:\n{}",

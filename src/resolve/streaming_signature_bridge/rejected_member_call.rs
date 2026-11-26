@@ -90,7 +90,9 @@ impl ProductionSignatureSemantics<'_> {
         // rejected member; all versions fall through to member extensions when no direct shape
         // maps. Signature recovery follows the same policy as body diagnostics.
         let direct_maps = direct_rank.is_some();
-        if crate::diagnostic_wording::inapplicable_member_joins_extensions() || !direct_maps {
+        if crate::diagnostic_wording::inapplicable_member_joins_extensions(self.table.reference)
+            || !direct_maps
+        {
             let member_extensions =
                 self.implicit_member_extension_candidate_sources(scope, receiver, spelling);
             let unprojected = member_extensions
@@ -423,10 +425,7 @@ impl ProductionSignatureSemantics<'_> {
             })
             .collect::<Vec<_>>();
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         let maximal = super::super::member_extension_selection::maximal_member_extensions(
             &oracle,
@@ -548,10 +547,7 @@ impl ProductionSignatureSemantics<'_> {
                 .collect();
         }
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         crate::symbol_resolver::retain_most_specific_declarations(
             &source,
             Some(receiver),
@@ -624,10 +620,7 @@ impl ProductionSignatureSemantics<'_> {
             };
         }
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let mut bindings = crate::symbol_resolver::seeded_gsig_binds(&signature, type_arguments);
         if candidate.is_extension() {
             if let Some(declared_receiver) = signature.receiver {
@@ -739,10 +732,7 @@ impl ProductionSignatureSemantics<'_> {
         let signature = candidate.semantic_signature();
         let context_count = candidate.context_count.min(signature.params.len());
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let receivers = self.implicit_receivers(scope);
         let missing =
             signature.params[..context_count]

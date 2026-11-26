@@ -922,7 +922,28 @@ pub(super) fn demo_inlining(
     inline: &[&str],
     build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
 ) -> Demo {
-    let (facts, trees) = demo_module("demo", shapes, Vec::new(), |_| true, inline, build);
+    let (facts, trees) = demo_module("demo", shapes, Vec::new(), |_| true, inline, &[], build);
+    let bodies = KlibDeclarationBodies::from_libraries(vec![("demo".to_owned(), trees)])
+        .expect("one library");
+    Demo { facts, bodies }
+}
+
+/// [`demo_inlining`], declaring the functions `suspend_inline` names `suspend inline` and
+/// serializing them without a prepared expansion copy.
+pub(super) fn demo_suspend_inlining(
+    shapes: &[Shape],
+    suspend_inline: &[&str],
+    build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
+) -> Demo {
+    let (facts, trees) = demo_module(
+        "demo",
+        shapes,
+        Vec::new(),
+        |_| true,
+        suspend_inline,
+        suspend_inline,
+        build,
+    );
     let bodies = KlibDeclarationBodies::from_libraries(vec![("demo".to_owned(), trees)])
         .expect("one library");
     Demo { facts, bodies }
@@ -956,7 +977,7 @@ pub(super) fn module_trees(
     HashMap<&'static str, BackendCallableFact>,
     KlibIrModuleTrees,
 ) {
-    demo_module(module, shapes, extra, |_| true, &[], build)
+    demo_module(module, shapes, extra, |_| true, &[], &[], build)
 }
 
 fn demo_with_module(
@@ -965,7 +986,7 @@ fn demo_with_module(
     extra: Vec<KlibIrDeclarationTree>,
     build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
 ) -> Demo {
-    let (facts, trees) = demo_module(module, shapes, extra, |_| true, &[], build);
+    let (facts, trees) = demo_module(module, shapes, extra, |_| true, &[], &[], build);
     let bodies = KlibDeclarationBodies::from_libraries(vec![(module.to_owned(), trees)])
         .expect("one library");
     Demo { facts, bodies }
@@ -988,6 +1009,7 @@ pub(super) fn selected_demo_module(
         Vec::new(),
         |name| declarations.contains(&name),
         &[],
+        &[],
         build,
     )
 }
@@ -998,6 +1020,7 @@ fn demo_module(
     extra: Vec<KlibIrDeclarationTree>,
     serialize: impl Fn(&str) -> bool,
     inline: &[&str],
+    suspend: &[&str],
     build: impl Fn(&str, &mut Body) -> Option<Vec<KlibIrStatement>>,
 ) -> (
     HashMap<&'static str, BackendCallableFact>,
@@ -1012,6 +1035,7 @@ fn demo_module(
                     .iter()
                     .map(|&shape| KotlinFunction {
                         is_inline: inline.contains(&shape.0),
+                        is_suspend: suspend.contains(&shape.0),
                         ..declaration(shape)
                     })
                     .collect(),
@@ -1102,11 +1126,13 @@ fn demo_module(
                 })
                 .collect();
             let mut arena = body.arena;
-            let flags = if inline.contains(&name) {
-                crate::metadata::function_flags::IS_INLINE
-            } else {
-                0
-            };
+            let mut flags = 0;
+            if inline.contains(&name) {
+                flags |= crate::metadata::function_flags::IS_INLINE;
+            }
+            if suspend.contains(&name) {
+                flags |= crate::metadata::function_flags::IS_SUSPEND;
+            }
             let function = arena.push_function(KlibIrFunction {
                 base: crate::metadata::klib_ir::tree::KlibIrDeclarationBase {
                     flags,

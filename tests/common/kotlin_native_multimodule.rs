@@ -10,7 +10,7 @@ use krusty::fx_hash::{HashMap, HashSet};
 use krusty::kotlin_version::KotlinVersion;
 
 use super::reference_recording_support::{
-    kotlin_native_program_arguments, kotlin_native_root, recorded,
+    kotlin_native_program_arguments, kotlin_native_root, recorded, run_program_bounded,
 };
 
 /// What `box()` answers when kotlinc-native builds an exact `// MODULE:` graph as KLIB
@@ -163,7 +163,7 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         order_libraries_for_native_linker(
             &mut libraries,
             &friend_paths,
-            krusty::kotlin_version::target(),
+            krusty::kotlin_version::environment_release(),
         );
 
         // Only the arguments are used: the persistent server runs the compiler.
@@ -235,9 +235,7 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
     }
 
     let executable = work.join("program.kexe");
-    let run = Command::new(&executable)
-        .output()
-        .expect("run the kotlinc-native multimodule program");
+    let run = run_program_bounded(&executable);
     assert!(
         run.status.success(),
         "the kotlinc-native multimodule program exited with {}:\n{}",
@@ -480,9 +478,11 @@ mod tests {
             },
         ];
         assert_eq!(modules, expected);
-        let flag = krusty::features::FeatureTable::for_version(krusty::kotlin_version::target())
-            .expect("the pinned feature table")
-            .language_argument("+CompanionBlocksAndExtensions");
+        let flag = krusty::features::FeatureTable::for_version(
+            krusty::kotlin_version::environment_release(),
+        )
+        .expect("the pinned feature table")
+        .language_argument("+CompanionBlocksAndExtensions");
         assert_eq!(arguments, vec![flag]);
     }
 

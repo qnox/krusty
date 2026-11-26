@@ -40,7 +40,7 @@ phase_end provision
 phase_begin build
 stream="$(mktemp)"
 if ! cargo build --profile gate --message-format=json \
-    -p krusty -p krusty-jvm -p krusty-native -p krusty-wasm -p krusty-cli -p krusty-lsp -p krusty-toolchain \
+    -p krusty -p krusty-jvm -p krusty-native -p krusty-wasm -p krusty-cli -p krusty-lsp -p krusty-toolchain -p krusty-download \
     --lib --bins --tests >"$stream"; then
   jq -r 'select(.reason == "compiler-message") | .message.rendered // empty' "$stream" >&2 || true
   exit 1

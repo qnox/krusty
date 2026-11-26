@@ -8,7 +8,7 @@
 
 use super::{mismatch, unsupported, BodyLowering, Lowered};
 use crate::ir::{ExprId, IrExpr};
-use crate::metadata::klib_ir::tree::{KlibIrArguments, KlibIrMemberAccess};
+use crate::metadata::klib_ir::tree::KlibIrMemberAccess;
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::Ty;
 
@@ -22,32 +22,6 @@ pub(super) struct ConstructorOperands {
     pub(super) params: Vec<Ty>,
     pub(super) args: Vec<ExprId>,
     pub(super) defaults: Vec<u32>,
-}
-
-/// A constructor call's arguments in its constructor's parameter order: an inner class's outer
-/// instance, its dispatch receiver, comes first, as a flat argument list already orders it.
-fn constructor_arguments(
-    access: &KlibIrMemberAccess,
-    enclosing_instance: bool,
-) -> Lowered<Vec<Option<crate::metadata::klib_ir::tree::KlibIrExprId>>> {
-    match &access.arguments {
-        KlibIrArguments::Flat(values) => Ok(values.clone()),
-        KlibIrArguments::Split {
-            dispatch_receiver: None,
-            extension_receiver: None,
-            values,
-        } if !enclosing_instance => Ok(values.clone()),
-        KlibIrArguments::Split {
-            dispatch_receiver: Some(outer),
-            extension_receiver: None,
-            values,
-        } if enclosing_instance => Ok(std::iter::once(Some(*outer))
-            .chain(values.iter().copied())
-            .collect()),
-        _ => Err(mismatch(
-            "a constructor call supplies a dispatch or extension receiver",
-        )),
-    }
 }
 
 impl BodyLowering<'_> {
@@ -164,7 +138,10 @@ impl BodyLowering<'_> {
             self.linker
                 .constructor_bound(self.header.type_parameters(), argument, bound)
         })?;
-        let arguments = constructor_arguments(access, declaration.enclosing_instance)?;
+        let arguments = super::super::constructor_calls::constructor_arguments(
+            access,
+            declaration.enclosing_instance,
+        )?;
         if arguments.len() != params.len() {
             return Err(mismatch(
                 "a constructor call passes another number of arguments than its constructor declares",
@@ -299,7 +276,7 @@ mod tests {
             };
             assert!(
                 matches!(
-                    constructor_arguments(&access, false),
+                    crate::klib_lowering::constructor_calls::constructor_arguments(&access, false),
                     Err(super::super::super::decline::KlibBodyDeclineReason::SignatureMismatch(_))
                 ),
                 "a constructor cannot reinterpret a receiver as a value argument"
@@ -320,7 +297,8 @@ mod tests {
                 origin: None,
             };
             assert_eq!(
-                constructor_arguments(&access, false).unwrap(),
+                crate::klib_lowering::constructor_calls::constructor_arguments(&access, false)
+                    .unwrap(),
                 [Some(value), None]
             );
         }

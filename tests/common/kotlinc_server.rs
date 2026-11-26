@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use super::server_pool::{self, server_pool_cap};
+use super::server_pool::{self, kotlinc_pool_cap};
 use super::{
     byte_dump, die_with_parent, java_home, kotlinc_lib_dir, protocol_jvm_log_args,
     read_exact_deadline, spawn_owned, ProfGuard,
@@ -303,11 +303,22 @@ const KOTLINC_SERVER_JVM_OPTIONS: [&str; 5] = [
     "-Xmn256m",
 ];
 
+/// What one reference-compiler server holds once warm, for [`server_pool::Budget`]: its 1 GiB heap
+/// and 256 MiB code cache, plus metaspace and thread stacks.
+const KOTLINC_SERVER_RESIDENT_MIB: u64 = 1536;
+
 /// A persistent JVM running the in-process `KotlincServer` compiler, fed compiler arg-lists over a pipe.
 struct KotlincServer {
-    _child: Child,
+    child: Child,
     stdin: ChildStdin,
     stdout: ChildStdout,
+}
+
+impl Drop for KotlincServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl KotlincServer {
@@ -352,7 +363,7 @@ impl KotlincServer {
         let stdin = child.stdin.take()?;
         let stdout = child.stdout.take()?;
         Some(KotlincServer {
-            _child: child,
+            child,
             stdin,
             stdout,
         })
@@ -391,7 +402,7 @@ impl KotlincServer {
 
 /// Pools of persistent compiler servers, one per classpath and JVM-property set. Callers claim a
 /// server, then compile outside the pool lock, so overlapping compiles use distinct JVMs up to
-/// [`server_pool_cap`].
+/// [`kotlinc_pool_cap`].
 type KotlincPools = Mutex<HashMap<String, Arc<server_pool::Pool<KotlincServer>>>>;
 
 /// Compile with the reference compiler via the persistent server. `args` are ordinary `kotlinc` CLI
@@ -571,13 +582,18 @@ pub fn kotlinc_compile_for_target(
         let mut pools = pools.lock().unwrap_or_else(|err| err.into_inner());
         pools
             .entry(pool_key)
-            .or_insert_with(|| Arc::new(server_pool::Pool::new()))
+            .or_insert_with(|| {
+                Arc::new(server_pool::Pool::resident(
+                    server_pool::Budget::process(),
+                    KOTLINC_SERVER_RESIDENT_MIB,
+                ))
+            })
             .clone()
     };
     let admission = Instant::now();
     let spawning = Cell::new(Duration::ZERO);
     pool.with_server(
-        server_pool_cap(),
+        kotlinc_pool_cap(),
         || {
             let started = Instant::now();
             let server = KotlincServer::new(&java, &cp, &compiler, &properties);

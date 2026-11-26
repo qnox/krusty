@@ -122,10 +122,13 @@ pub(super) struct FrozenClosure {
     pub(super) authorized_member_edges:
         HashMap<KlibDependencyCallable, crate::klib_lowering::CallEdge>,
     /// The library objects whose values the closure's bodies read, which the unit materializes.
-    pub(super) read_objects: Vec<crate::libraries::KlibBodyClassContract>,
+    pub(super) read_classes: Vec<crate::libraries::KlibBodyClassContract>,
     /// Members of a materialized class or object that dispatch reaches, whose bodies the unit
     /// emits although no walked body calls them directly.
     pub(super) dispatched: Vec<KlibDependencyCallable>,
+    /// The classes declaring a private member a class nested in them calls, which the unit
+    /// materializes to emit that member.
+    pub(super) private_member_classes: Vec<crate::libraries::KlibBodyClassContract>,
 }
 
 /// Where a unit's closure starts: the callables the emitted source selects, and the library
@@ -160,8 +163,9 @@ pub(super) fn declarations(
         declarations: Vec::new(),
         declared: HashSet::default(),
         objects: HashSet::default(),
-        read_objects: root_objects.to_vec(),
+        read_classes: root_objects.to_vec(),
         dispatched: HashSet::default(),
+        private_member_classes: Vec::new(),
         emitted_defaults: roots
             .callables
             .iter()
@@ -177,7 +181,7 @@ pub(super) fn declarations(
     };
     // An object the emitted source reads as a value is materialized as one a body reads.
     for class in root_objects {
-        walk_object(
+        walk_declared_instances(
             platform,
             bodies,
             capabilities.callees,
@@ -189,12 +193,6 @@ pub(super) fn declarations(
         if !visited.insert(identity.clone()) {
             continue;
         }
-        // `values()` and `valueOf` of a library enum are the common enum operation, which the
-        // backend realizes for the enum's class as for a source enum; no body or provider links
-        // them. Lowering the call makes the same decision.
-        if bodies.enum_static_member(&identity).is_some() {
-            continue;
-        }
         // A private member of a materialized class has no provider declaration; the member calling it
         // authenticates its class, and it is emitted as that member is.
         if let Some(class) = member_class
@@ -204,7 +202,18 @@ pub(super) fn declarations(
                     .is_none()
                     && !externals.contains_key(&identity)
             })
-            .and_then(|caller| private_member_class(platform, bodies, &identity, caller))
+            .and_then(|caller| {
+                let declaring = private_member_class(platform, bodies, &identity, caller.clone())?;
+                if declaring.classifier != caller.classifier
+                    && !state
+                        .private_member_classes
+                        .iter()
+                        .any(|known| known.classifier == declaring.classifier)
+                {
+                    state.private_member_classes.push(declaring.clone());
+                }
+                Some(declaring)
+            })
         {
             let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
             state.pending.extend(
@@ -289,6 +298,17 @@ pub(super) fn declarations(
         let selected = realization
             .klib_body_callable()
             .ok_or("a dependency provider has no KLIB body contract")?;
+        // An enum class's implicit `values`, `valueOf` or `entries` is realized by the common
+        // enum realization of its class, which the unit builds from the class's initialization.
+        if let Some(class) = implicit_enum_member_class(platform, selected) {
+            if !(state.capabilities.target_represents_classifier)(class.classifier)
+                && !state.capabilities.unit.reads_realized(class.classifier)
+            {
+                read_class(platform, bodies, capabilities.callees, class, &mut state)?;
+            }
+            state.declarations.push((declaration_target, realization));
+            continue;
+        }
         let superclasses = superclass_realizations(platform, bodies, &identity);
         let facts = with_realized_declarations(
             capabilities.callees.with_declaration(selected),
@@ -455,7 +475,7 @@ pub(super) fn declarations(
             // that initialize the class created, which materializes the class.
             if let Some(class) = selected.class_contract().filter(|class| {
                 !class.is_value
-                    && class.kind != crate::libraries::TypeKind::Object
+                    && !class.declares_instances()
                     && selected.kind() == ExternalCallableKind::Member
             }) {
                 state.pending.extend(
@@ -477,7 +497,7 @@ pub(super) fn declarations(
             // which materializes the object once with every member dispatch reaches. So does a
             // body reading an object's value, unless the target represents that object itself.
             if let Some(class) = member_object(platform, &identity) {
-                walk_object(platform, bodies, &facts, class, &mut state)?;
+                walk_declared_instances(platform, bodies, &facts, class, &mut state)?;
             }
             let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
             read_values(platform, bodies, &facts, &emitted.objects, &mut state)?;
@@ -497,8 +517,9 @@ pub(super) fn declarations(
     Ok(FrozenClosure {
         declarations: state.declarations,
         authorized_member_edges,
-        read_objects: state.read_objects,
+        read_classes: state.read_classes,
         dispatched: state.dispatched.into_iter().collect(),
+        private_member_classes: state.private_member_classes,
     })
 }
 
@@ -522,10 +543,12 @@ struct ClosureState<'c, 'u> {
     /// The objects whose initialization the closure already walks.
     objects: HashSet<crate::types::TypeName>,
     /// The library objects whose values the walked bodies read, which the unit materializes.
-    read_objects: Vec<crate::libraries::KlibBodyClassContract>,
+    read_classes: Vec<crate::libraries::KlibBodyClassContract>,
     /// Members of a materialized class that dispatch reaches: their bodies are emitted even where
     /// a call of one folds to a common operation, as a virtual call runs the body.
     dispatched: HashSet<KlibDependencyCallable>,
+    /// The classes declaring a private member a class nested in them calls.
+    private_member_classes: Vec<crate::libraries::KlibBodyClassContract>,
     /// Interface default bodies a class of the file inherits, emitted for its dispatch record
     /// though no support unit materializes the interface.
     emitted_defaults: HashSet<KlibDependencyCallable>,
@@ -553,27 +576,36 @@ fn read_values(
         }
         let Some(class) = platform
             .klib_body_class_contract(classifier)
-            .filter(|class| {
-                class.kind == crate::libraries::TypeKind::Object && class.emits_members()
-            })
+            .filter(|class| class.declares_instances() && class.emits_members())
         else {
             continue;
         };
-        // An object whose initialization no unit admits is realized where its own module exports
-        // its instance, as a call of its member is.
-        if object_initialization(platform, bodies, facts, &class)?.is_none() {
-            continue;
-        }
-        if !state
-            .read_objects
-            .iter()
-            .any(|object| object.classifier == class.classifier)
-        {
-            state.read_objects.push(class.clone());
-        }
-        walk_object(platform, bodies, facts, class, state)?;
+        read_class(platform, bodies, facts, class, state)?;
     }
     Ok(())
+}
+
+/// Record that a walked body reads an instance of `class`, an object or an enum class, and walk
+/// its initialization. A class whose initialization no unit admits is realized where its own
+/// module exports its instances, as a call of its member is.
+fn read_class(
+    platform: &dyn SemanticPlatform,
+    bodies: &KlibDeclarationBodies,
+    facts: &crate::klib_lowering::KlibCalleeFacts<'_>,
+    class: crate::libraries::KlibBodyClassContract,
+    state: &mut ClosureState<'_, '_>,
+) -> Result<(), String> {
+    if declared_instances_initialization(platform, bodies, facts, &class)?.is_none() {
+        return Ok(());
+    }
+    if !state
+        .read_classes
+        .iter()
+        .any(|read| read.classifier == class.classifier)
+    {
+        state.read_classes.push(class.clone());
+    }
+    walk_declared_instances(platform, bodies, facts, class, state)
 }
 
 /// Walk the initialization of the object `class` once: the object is materialized with every
@@ -612,7 +644,7 @@ fn private_member_class(
         .filter(|class| crate::klib_lowering::is_private_class_member(bodies, identity, class))
 }
 
-fn walk_object(
+fn walk_declared_instances(
     platform: &dyn SemanticPlatform,
     bodies: &KlibDeclarationBodies,
     facts: &crate::klib_lowering::KlibCalleeFacts<'_>,
@@ -622,7 +654,8 @@ fn walk_object(
     if !walk.objects.insert(class.classifier) {
         return Ok(());
     }
-    let Some(initialization) = object_initialization(platform, bodies, facts, &class)? else {
+    let Some(initialization) = declared_instances_initialization(platform, bodies, facts, &class)?
+    else {
         return Ok(());
     };
     walk.pending.extend(
@@ -633,11 +666,11 @@ fn walk_object(
     );
     walk.dispatched.extend(
         facts
-            .object_dispatched_members(&class, bodies)
+            .declared_instances_dispatched_members(&class, bodies)
             .map_err(|reason| format!("an invalid object member: {reason:?}"))?,
     );
     for overridden in facts
-        .object_overridden_declarations(&class, bodies)
+        .declared_instances_overridden_declarations(&class, bodies)
         .map_err(|reason| format!("an invalid object override: {reason:?}"))?
     {
         if walk.declared.insert(overridden.clone()) {
@@ -682,13 +715,11 @@ pub(super) fn ordinary_root_objects(
         }
         let Some(class) = platform
             .klib_body_class_contract(classifier)
-            .filter(|class| {
-                class.kind == crate::libraries::TypeKind::Object && class.emits_members()
-            })
+            .filter(|class| class.declares_instances() && class.emits_members())
         else {
             continue;
         };
-        if object_initialization(platform, bodies, callees, &class)?.is_some() {
+        if declared_instances_initialization(platform, bodies, callees, &class)?.is_some() {
             objects.push(class);
         }
     }
@@ -902,11 +933,8 @@ fn is_materialized_class_member(
     if class.is_value {
         return Ok(true);
     }
-    if class.kind == crate::libraries::TypeKind::Enum {
-        return Ok(crate::klib_lowering::materializes_enum_class(bodies, class));
-    }
-    if class.kind == crate::libraries::TypeKind::Object {
-        return Ok(object_initialization(platform, bodies, callees, class)?.is_some());
+    if class.declares_instances() {
+        return Ok(declared_instances_initialization(platform, bodies, callees, class)?.is_some());
     }
     Ok(!ordinary_class_constructors(platform, bodies, callees, class)?.is_empty())
 }
@@ -914,12 +942,12 @@ fn is_materialized_class_member(
 /// The initialization edges of the object `class`, when its admitted initialization materializes
 /// it. Its private primary constructor has no provider declaration: the object's own members
 /// carry its class, and only its declaration creates its instance.
-fn object_initialization(
+fn declared_instances_initialization(
     platform: &dyn SemanticPlatform,
     bodies: &KlibDeclarationBodies,
     callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
     class: &crate::libraries::KlibBodyClassContract,
-) -> Result<Option<ObjectInitialization>, String> {
+) -> Result<Option<DeclaredInstancesInitialization>, String> {
     let Some(primary) = class.primary_constructor.clone() else {
         return Ok(None);
     };
@@ -930,22 +958,66 @@ fn object_initialization(
     let superclasses = superclass_realizations(platform, bodies, &identity);
     let facts = with_realized_declarations(callees.clone(), &superclasses);
     let Some(callees) = facts
-        .object_initialization_callees(class, bodies)
+        .declared_instances_callees(class, bodies)
         .map_err(|reason| format!("an invalid object initialization: {reason:?}"))?
     else {
         return Ok(None);
     };
     let objects = facts
-        .object_initialization_objects(class, bodies)
+        .declared_instances_objects(class, bodies)
         .map_err(|reason| format!("an invalid object initialization: {reason:?}"))?;
-    Ok(Some(ObjectInitialization { callees, objects }))
+    Ok(Some(DeclaredInstancesInitialization { callees, objects }))
 }
 
 /// The exact edges an object's admitted initialization executes, and the library objects it
 /// reads as values.
-struct ObjectInitialization {
+struct DeclaredInstancesInitialization {
     callees: Vec<KlibDependencyCallable>,
     objects: Vec<crate::metadata::id_signature::KlibPublicIdSignature>,
+}
+
+/// The initialization edges of each object the closed bodies read, which the unit materializes
+/// with every member dispatch reaches, as it materializes the object of a member it calls.
+pub(super) fn read_class_initializations(
+    platform: &dyn SemanticPlatform,
+    bodies: &KlibDeclarationBodies,
+    callees: &crate::klib_lowering::KlibCalleeFacts<'_>,
+) -> Result<Vec<KlibDependencyCallable>, String> {
+    let mut edges = Vec::new();
+    for class in callees.read_classes() {
+        if let Some(initialization) =
+            declared_instances_initialization(platform, bodies, callees, class)?
+        {
+            edges.extend(initialization.callees);
+        }
+    }
+    Ok(edges)
+}
+
+/// The enum class whose implicit `values`, `valueOf` or `entries` getter `selected` is.
+fn implicit_enum_member_class(
+    platform: &dyn SemanticPlatform,
+    selected: KlibBodyCallable<'_>,
+) -> Option<crate::libraries::KlibBodyClassContract> {
+    use crate::types::SemanticCallRole;
+    if !matches!(
+        selected.semantic_role(),
+        Some(
+            SemanticCallRole::KotlinEnumValues
+                | SemanticCallRole::KotlinEnumValueOf
+                | SemanticCallRole::KotlinEnumEntries
+        )
+    ) {
+        return None;
+    }
+    let Some(crate::types::SemanticCallableOwner::Classifier(classifier)) =
+        selected.declaration_owner()
+    else {
+        return None;
+    };
+    platform
+        .klib_body_class_contract(classifier)
+        .filter(|class| class.kind == crate::libraries::TypeKind::Enum)
 }
 
 /// The object declaring the member `identity`, when a support unit materializes it.
@@ -958,7 +1030,7 @@ pub(super) fn member_object(
     selected
         .class_contract()
         .filter(|class| {
-            class.kind == crate::libraries::TypeKind::Object
+            class.declares_instances()
                 && class.emits_members()
                 && selected.kind() == ExternalCallableKind::Member
         })
@@ -974,8 +1046,10 @@ pub(super) fn member_object_initialization(
     identity: &KlibDependencyCallable,
 ) -> Result<Option<Vec<KlibDependencyCallable>>, String> {
     match member_object(platform, identity) {
-        Some(class) => Ok(object_initialization(platform, bodies, callees, &class)?
-            .map(|initialization| initialization.callees)),
+        Some(class) => Ok(
+            declared_instances_initialization(platform, bodies, callees, &class)?
+                .map(|initialization| initialization.callees),
+        ),
         None => Ok(None),
     }
 }
@@ -1000,9 +1074,11 @@ pub(super) fn read_object_initializations(
     for class in objects
         .iter()
         .filter_map(crate::klib_lowering::object_classifier)
-        .filter_map(|classifier| callees.read_object(classifier))
+        .filter_map(|classifier| callees.read_class(classifier))
     {
-        if let Some(initialization) = object_initialization(platform, bodies, callees, class)? {
+        if let Some(initialization) =
+            declared_instances_initialization(platform, bodies, callees, class)?
+        {
             edges.extend(initialization.callees);
         }
     }

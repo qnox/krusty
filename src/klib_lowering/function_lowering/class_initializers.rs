@@ -22,8 +22,31 @@ pub(in super::super) fn initializer_header(
     );
     let mut params = Vec::new();
     let mut identities = Vec::new();
+    let mut defaults = Vec::new();
+    // An inner class's initializer takes the outer instance its constructor receives first, so
+    // that it numbers every value as the constructor does.
+    if let Some(outer) = header.outer {
+        let receiver = header.function.dispatch_receiver.as_ref().ok_or_else(|| {
+            mismatch("an inner class constructor has no outer instance".to_owned())
+        })?;
+        values.insert(
+            receiver.base.symbol.clone(),
+            ParameterValue {
+                index: 1,
+                stable_read: true,
+                erased: None,
+            },
+        );
+        params.push(outer.ty);
+        identities.push(IrParameterIdentity::generated(
+            crate::ir::IrGeneratedParameterRole::OuterInstance,
+            None,
+        ));
+        defaults.push(None);
+    }
+    let prefix = params.len();
     for (ordinal, parameter) in header.function.regular_parameters.iter().enumerate() {
-        let index = u32::try_from(ordinal + 1).expect("constructor parameters fit u32");
+        let index = u32::try_from(ordinal + 1 + prefix).expect("constructor parameters fit u32");
         if values
             .insert(
                 parameter.base.symbol.clone(),
@@ -42,6 +65,7 @@ pub(in super::super) fn initializer_header(
         }
         params.push(semantic_type(header.arena, &header.types, parameter.ty)?);
         identities.push(IrParameterIdentity::source(parameter.name.clone()));
+        defaults.push(parameter.default_value);
     }
     Ok(FunctionHeader {
         name: header.function.name.clone(),
@@ -57,12 +81,7 @@ pub(in super::super) fn initializer_header(
         values,
         // Each parameter's default, lowered in this frame for the constructor's default-argument
         // entry, whose frame lays out the instance and the parameters as this one does.
-        defaults: header
-            .function
-            .regular_parameters
-            .iter()
-            .map(|parameter| parameter.default_value)
-            .collect(),
+        defaults,
         type_parameters: header.types.clone(),
         erasures: HashMap::default(),
         erased_result: None,

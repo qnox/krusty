@@ -905,6 +905,8 @@ mod tests {
             "inline_expansion",
             "ir",
             "klib_libraries",
+            // The unit lowers under the reference profile its compilation was checked against.
+            "kotlin_version",
             "libraries",
             "metadata",
             "symbol_source",

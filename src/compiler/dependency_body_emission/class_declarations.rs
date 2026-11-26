@@ -37,7 +37,7 @@ pub(super) fn record(
             // No provider records an object's private constructor: the object's instance is created
             // by its own declaration, which the closure authenticated as a read object.
             let contract = callees
-                .read_object(classifier)
+                .read_class(classifier)
                 .ok_or("a materialized object lost its authenticated class declaration")?;
             if !contract.matches_owner(&constructor.module, classifier)
                 || contract.kind != TypeKind::Object

@@ -109,6 +109,34 @@ fn the_cli_version_flag_overrides_the_environment_before_compilation() {
     );
 }
 
+/// The compilation's own profile positions a body-check diagnostic, not the newest release's.
+#[test]
+fn the_cli_version_flag_positions_a_missing_argument_before_compilation() {
+    let work = common::scratch_dir().expect("scratch dir");
+    let source = work.join("Missing.kt");
+    std::fs::write(&source, "fun h(x: Int): Int = x\nfun g(): Int = h()\n").expect("write source");
+    let output = std::process::Command::new(common::krusty_binary())
+        .args([
+            "-Xkotlin-reference-version=2.4.10",
+            "-no-stdlib",
+            "-no-reflect",
+            "-no-jdk",
+            "-d",
+        ])
+        .arg(work.join("out"))
+        .arg(&source)
+        .env("KRUSTY_LANGUAGE_VERSION", "2.4.20")
+        .output()
+        .expect("run krusty");
+    assert!(!output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        common::ledger(&stderr),
+        ["Missing.kt:2:17: no value passed for parameter 'x'."]
+    );
+}
+
 #[test]
 fn an_invalid_environment_version_is_a_clean_configuration_error() {
     let work = common::scratch_dir().expect("scratch dir");
