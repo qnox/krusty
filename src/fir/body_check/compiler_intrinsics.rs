@@ -55,6 +55,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::PrimitiveBitNot
         | CompilerIntrinsic::Assert { .. }
         | CompilerIntrinsic::AssertFailsWith
+        | CompilerIntrinsic::AssertionSwitch
         | CompilerIntrinsic::Print
         | CompilerIntrinsic::Println
         | CompilerIntrinsic::StartCoroutine
