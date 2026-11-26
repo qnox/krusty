@@ -234,10 +234,13 @@ fn kotlin_wasm_wasi_stdlib_klib() -> Result<PathBuf, String> {
 
 /// The common stdlib KLIB of the reference Kotlin/Native distribution. `KRUSTY_KOTLIN_NATIVE`
 /// names a distribution root; otherwise `just kotlin-native` provisions this host's distribution
-/// under `target/cache/kotlin-native/<version>/`.
+/// under `target/cache/kotlin-native/<version>/`. The KLIB is the target-independent
+/// `klib/common/stdlib`, so a host JetBrains publishes no distribution for (riscv64 Linux) reads
+/// the Linux x86_64 archive's copy: krusty links Native programs itself and uses nothing else
+/// from the distribution. `scripts/kotlin-native.sh` provisions the same archive.
 fn kotlin_native_stdlib_klib() -> Option<PathBuf> {
     let host = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => "linux-x86_64",
+        ("linux", "x86_64" | "riscv64") => "linux-x86_64",
         ("linux", "aarch64") => "linux-aarch64",
         ("macos", "x86_64") => "macos-x86_64",
         ("macos", "aarch64") => "macos-aarch64",

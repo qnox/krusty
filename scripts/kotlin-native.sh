@@ -16,7 +16,9 @@ fi
 ver="$1"
 cache="$2"
 case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) host=linux-x86_64 ;;
+  # JetBrains publishes no riscv64 distribution. krusty reads only the target-independent common
+  # stdlib KLIB from it, which every archive carries alike, so riscv64 uses the x86_64 archive.
+  Linux-x86_64|Linux-riscv64) host=linux-x86_64 ;;
   Linux-aarch64|Linux-arm64) host=linux-aarch64 ;;
   Darwin-x86_64) host=macos-x86_64 ;;
   Darwin-arm64|Darwin-aarch64) host=macos-aarch64 ;;
