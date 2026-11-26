@@ -311,9 +311,9 @@ impl Checker<'_> {
         identity: (usize, usize),
         extension: Option<Span>,
         class_receiver: Option<Ty>,
-    ) -> FirCapturedReceiver {
+    ) -> Option<FirCapturedReceiver> {
         if let Some(ty) = class_receiver {
-            return enclosing_instance(ty);
+            return Some(enclosing_instance(ty));
         }
         if let Some(context) = scope.implicit_receiver_context(identity) {
             let kind = match context.kind {
@@ -322,18 +322,13 @@ impl Checker<'_> {
                 ContextReceiverKind::LegacyReceiver => CapturedContextKind::LegacyReceiver,
                 ContextReceiverKind::Named => unreachable!("a named context value is no receiver"),
             };
-            let types = context.types.into_iter().map(|ty| {
-                crate::fir::ResolvedTy::new(ty).expect("a context parameter's type is published")
-            });
-            return FirCapturedReceiver::Context {
-                kind,
-                types: types.collect(),
-                index: u32::try_from(context.index).expect("too many context parameters"),
-            };
+            return published_context_receiver(kind, context.types, context.index);
         }
         let Some(declaration) = extension else {
             let label = scope.implicit_receiver_lambda_label(identity);
-            return FirCapturedReceiver::Lambda(label.map(String::into_boxed_str));
+            return Some(FirCapturedReceiver::Lambda(
+                label.map(String::into_boxed_str),
+            ));
         };
         let (index, _) = self
             .extension_receiver_labels
@@ -347,10 +342,10 @@ impl Checker<'_> {
         } else {
             CapturedCallableOwner::Declaration
         };
-        FirCapturedReceiver::Callable {
+        Some(FirCapturedReceiver::Callable {
             label: label.clone().into_boxed_str(),
             owner,
-        }
+        })
     }
 }
 
@@ -609,7 +604,7 @@ impl Checker<'_> {
             // singleton identity and deliberately use `usize::MAX` instead of a scoped
             // receiver coordinate. They are not closure captures.
             .filter(|receiver| receiver.receiver_depth != usize::MAX)
-            .map(|receiver| {
+            .filter_map(|receiver| {
                 let class_label_identity = receiver
                     .class_receiver
                     .then(|| {
@@ -639,6 +634,12 @@ impl Checker<'_> {
                 );
                 let receiver_capture = self
                     .implicit_receiver_capture_id(receiver.class_receiver, receiver.receiver_role);
+                let published = self.captured_receiver(
+                    scope,
+                    receiver.identity,
+                    receiver.extension_receiver,
+                    receiver.class_receiver.then_some(receiver.ty),
+                )?;
                 let capture = AnonymousObjectCapture {
                     enum_entry_storage: None,
                     name: if matches!(
@@ -656,12 +657,7 @@ impl Checker<'_> {
                     storage_ty: None,
                     source,
                     receiver_label: label,
-                    receiver: Some(self.captured_receiver(
-                        scope,
-                        receiver.identity,
-                        receiver.extension_receiver,
-                        receiver.class_receiver.then_some(receiver.ty),
-                    )),
+                    receiver: Some(published),
                     semantic_receiver: Some(
                         if matches!(
                             source,
@@ -703,10 +699,10 @@ impl Checker<'_> {
                         )
                     })
                     .collect();
-                ObservedReceiverCapture {
+                Some(ObservedReceiverCapture {
                     capture,
                     uses_before,
-                }
+                })
             })
             .collect()
     }
@@ -1547,6 +1543,27 @@ pub(super) fn record_anonymous_construction_captures(
     field_remap
 }
 
+/// A context-parameter receiver whose types can be published. An unresolved type is already
+/// diagnosed; absence omits that capture instead of labeling it as another receiver kind.
+fn published_context_receiver(
+    kind: CapturedContextKind,
+    types: impl IntoIterator<Item = Ty>,
+    index: usize,
+) -> Option<FirCapturedReceiver> {
+    let Ok(types) = types
+        .into_iter()
+        .map(crate::fir::ResolvedTy::new)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return None;
+    };
+    Some(FirCapturedReceiver::Context {
+        kind,
+        types: types.into_boxed_slice(),
+        index: u32::try_from(index).expect("too many context parameters"),
+    })
+}
+
 /// The captured instance of the enclosing class whose receiver type is `ty`: a class scope's or a
 /// member's dispatch receiver is that class's instance type.
 pub(super) fn enclosing_instance(ty: Ty) -> FirCapturedReceiver {
@@ -1633,4 +1650,76 @@ impl Checker<'_> {
         }
         true
     }
+}
+
+/// Walk every file for anonymous-object captures. A syntax error keeps the file out of the header
+/// inventory, and the later body check skips it. Checking it here looks up a class signature that
+/// was never collected.
+pub fn discover_anonymous_object_captures(
+    files: &[File],
+    syntax_errors: &[bool],
+    syms: &mut super::SymbolTable,
+) -> Vec<HashMap<DeclId, Vec<AnonymousObjectCapture>>> {
+    assert_eq!(files.len(), syntax_errors.len());
+    // Bracketed as a module mutation: installing capture fields and constructor parameters changes
+    // the synthesized classes, and the table's derived indexes are rebuilt on `finish`. Without the
+    // bracket the members are written but nothing rebuilds, so an anonymous object that captures a
+    // local loses its methods entirely — `resumeWith` is absent from the emitted class and the JVM
+    // raises `AbstractMethodError` at the first call.
+    syms.begin_module_mutation();
+    // On the CHECKER's own stack: this walks whole files through the checker, and the depth guard
+    // that stops a deeply nested expression fires far later than a small caller stack runs out.
+    // Every other entry into a file-wide check is reserved the same way.
+    let discovered = crate::wide_stack::on_wide_stack(|| {
+        let mut discovered = Vec::with_capacity(files.len());
+        for (file_index, file) in files.iter().enumerate() {
+            if syntax_errors[file_index] {
+                discovered.push(HashMap::default());
+                continue;
+            }
+            discovered.push(super::discover_anonymous_object_captures_at(
+                file,
+                file_index as u32,
+                syms,
+                None,
+                None,
+            ));
+        }
+        discovered
+    });
+    syms.finish_module_mutation();
+    discovered
+}
+
+/// Prepare only anonymous objects owned by retained inline body units. The root/body selections
+/// come from compact stable headers, so an inline declaration does not pull neighboring ordinary
+/// bodies into Pass 1. A syntax-error file has no inventoried inline root to prepare.
+pub(crate) fn discover_inline_anonymous_object_captures(
+    files: &[File],
+    syntax_errors: &[bool],
+    selected_declarations: &[crate::fx_hash::HashSet<Span>],
+    selected_body_declarations: &[crate::fx_hash::HashSet<Span>],
+    syms: &mut super::SymbolTable,
+) {
+    assert_eq!(files.len(), syntax_errors.len());
+    assert_eq!(files.len(), selected_declarations.len());
+    assert_eq!(files.len(), selected_body_declarations.len());
+    syms.begin_module_mutation();
+    crate::wide_stack::on_wide_stack(|| {
+        for (file_index, file) in files.iter().enumerate() {
+            let declarations = &selected_declarations[file_index];
+            let bodies = &selected_body_declarations[file_index];
+            if syntax_errors[file_index] || declarations.is_empty() {
+                continue;
+            }
+            super::discover_anonymous_object_captures_at(
+                file,
+                file_index as u32,
+                syms,
+                Some(declarations),
+                Some(bodies),
+            );
+        }
+    });
+    syms.finish_module_mutation();
 }

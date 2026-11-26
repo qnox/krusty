@@ -7,21 +7,11 @@
 use super::*;
 
 /// Add the selected virtual unbox operation and record its exact type-operation receiver edge.
-pub(super) fn unbox_call(
-    ir: &mut IrFile,
-    receiver: ExprId,
-    owner: TypeName,
-    carrier: &Ty,
-) -> ExprId {
+pub(super) fn unbox_call(ir: &mut IrFile, receiver: ExprId, owner: TypeName) -> ExprId {
     let call = ir.add_expr(IrExpr::Call {
-        callee: Box::new(Callee::Virtual {
+        callee: Box::new(Callee::ValueClassAdapter {
+            adapter: ValueClassAdapter::Unbox,
             owner,
-            name: "unbox-impl".to_string(),
-            descriptor: format!("(){}", desc(carrier)),
-            params: None,
-            interface: false,
-            module_target: None,
-            target: None,
         }),
         dispatch_receiver: Some(receiver),
         args: vec![],
@@ -48,16 +38,10 @@ pub(super) fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under
         })
     };
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
-    let d = desc(&u);
     ir.exprs[id as usize] = IrExpr::Call {
-        callee: Box::new(Callee::Virtual {
+        callee: Box::new(Callee::ValueClassAdapter {
+            adapter: ValueClassAdapter::Unbox,
             owner: x,
-            name: "unbox-impl".to_string(),
-            descriptor: format!("(){d}"),
-            params: None,
-            interface: false,
-            module_target: None,
-            target: None,
         }),
         dispatch_receiver: Some(cast),
         args: vec![],
@@ -164,17 +148,11 @@ pub(super) fn unbox_wrap_nullable(
     let get_for_unbox = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::GetValue(slot));
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
-    let d = desc(&u);
     let unboxed = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::Call {
-        callee: Box::new(Callee::Virtual {
+        callee: Box::new(Callee::ValueClassAdapter {
+            adapter: ValueClassAdapter::Unbox,
             owner: x,
-            name: "unbox-impl".to_string(),
-            descriptor: format!("(){d}"),
-            params: None,
-            interface: false,
-            module_target: None,
-            target: None,
         }),
         dispatch_receiver: Some(get_for_unbox),
         args: vec![],

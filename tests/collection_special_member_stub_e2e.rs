@@ -42,6 +42,85 @@ fn mapped_builtin_property_and_function_calls_match_kotlinc_bytes() {
 }
 
 #[test]
+fn a_source_superclass_suspend_member_leaves_the_mutable_declaration_its_stub_byte_for_byte() {
+    // The suspend `clear()` sits on a source superclass of the `Map` implementer, abstract in one
+    // class and with a body in the other: neither implements `MutableMap.clear()`, so kotlinc
+    // writes the throwing `clear()` stub on the subclass beside the inherited suspend member.
+    for (tag, member) in [
+        (
+            "SuspendSuperAbstractClearStubBytes",
+            "abstract suspend fun clear()",
+        ),
+        (
+            "SuspendSuperBodiedClearStubBytes",
+            "open suspend fun clear() {}",
+        ),
+    ] {
+        let source = format!(
+            "abstract class {tag}Base {{\n\
+            \x20   {member}\n\
+            }}\n\
+            abstract class {tag}<K : Any, V : Any> : {tag}Base(), Map<K, V> {{\n\
+            \x20   override val entries: Set<Map.Entry<K, V>> get() = TODO()\n\
+            \x20   override val keys: Set<K> get() = TODO()\n\
+            \x20   override val size: Int get() = TODO()\n\
+            \x20   override val values: Collection<V> get() = TODO()\n\
+            \x20   override fun isEmpty(): Boolean = TODO()\n\
+            \x20   override fun get(key: K): V? = TODO()\n\
+            \x20   override fun containsValue(value: V): Boolean = TODO()\n\
+            \x20   override fun containsKey(key: K): Boolean = TODO()\n\
+            }}\n"
+        );
+        assert_byte_equal(tag, &source, tag);
+    }
+}
+
+#[test]
+fn a_suspend_interface_default_leaves_the_mutable_declaration_its_stub_byte_for_byte() {
+    // A suspend `clear()` with a body on a source interface is a default member, not an
+    // implementation of `MutableMap.clear()`: kotlinc still writes the throwing stub.
+    assert_byte_equal(
+        "SuspendInterfaceDefaultClearStubBytes",
+        "interface SuspendInterfaceDefaultClearHolder {\n\
+        \x20   suspend fun clear() {}\n\
+        }\n\
+        abstract class SuspendInterfaceDefaultClearStubBytes<K : Any, V : Any> :\n\
+        \x20   SuspendInterfaceDefaultClearHolder, Map<K, V> {\n\
+        \x20   override val entries: Set<Map.Entry<K, V>> get() = TODO()\n\
+        \x20   override val keys: Set<K> get() = TODO()\n\
+        \x20   override val size: Int get() = TODO()\n\
+        \x20   override val values: Collection<V> get() = TODO()\n\
+        \x20   override fun isEmpty(): Boolean = TODO()\n\
+        \x20   override fun get(key: K): V? = TODO()\n\
+        \x20   override fun containsValue(value: V): Boolean = TODO()\n\
+        \x20   override fun containsKey(key: K): Boolean = TODO()\n\
+        }\n",
+        "SuspendInterfaceDefaultClearStubBytes",
+    );
+}
+
+#[test]
+fn suspend_member_leaves_the_mutable_declaration_its_stub_byte_for_byte() {
+    // `suspend fun clear()` takes a continuation, so it does not implement `MutableMap.clear()`:
+    // kotlinc still writes the throwing `clear()` stub beside it.
+    assert_byte_equal(
+        "SuspendClearStubBytes",
+        "abstract class SuspendClearStubBytes<K : Any, V : Any> : Map<K, V> {\n\
+        \x20   abstract suspend fun clear()\n\
+        \x20   override val entries: Set<Map.Entry<K, V>> get() = TODO()\n\
+        \x20   override val keys: Set<K> get() = TODO()\n\
+        \x20   override val size: Int get() = TODO()\n\
+        \x20   override val values: Collection<V> get() = TODO()\n\
+        \x20   override fun isEmpty(): Boolean = TODO()\n\
+        \x20   override fun get(key: K): V? = TODO()\n\
+        \x20   override fun containsValue(value: V): Boolean = TODO()\n\
+        \x20   override fun containsKey(key: K): Boolean = TODO()\n\
+        }\n",
+        "SuspendClearStubBytes",
+    );
+}
+
+#[test]
 fn collection_size_reachable_through_interface() {
     const SRC: &str = "class C : Collection<String> {\n\
         \x20   override val size: Int get() = 3\n\
@@ -607,5 +686,24 @@ fn an_ordinary_any_add_keeps_its_parameter_assertion() {
             .iter()
             .all(|line| !line.contains("ireturn")),
         "add does not return before the parameter assertion: {code:?}"
+    );
+}
+
+#[test]
+fn internal_member_of_read_only_collection_keeps_its_special_bridge_byte_for_byte() {
+    // An `internal` member has the JVM name `remove$main`, so the mutable declaration's
+    // `remove(Object)` is not written as a throwing stub: kotlinc gives it the final special bridge
+    // to the mangled member.
+    assert_byte_equal(
+        "InternalRemoveBridgeBytes",
+        "class InternalRemoveBridgeBytes<T> : Collection<T> {\n\
+        \x20   override val size: Int get() = TODO()\n\
+        \x20   override fun contains(element: T): Boolean = TODO()\n\
+        \x20   override fun containsAll(elements: Collection<T>): Boolean = TODO()\n\
+        \x20   override fun isEmpty(): Boolean = TODO()\n\
+        \x20   override fun iterator(): Iterator<T> = TODO()\n\
+        \x20   internal fun remove(x: T): Boolean = false\n\
+        }\n",
+        "InternalRemoveBridgeBytes",
     );
 }

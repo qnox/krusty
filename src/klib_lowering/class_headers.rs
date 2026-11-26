@@ -108,8 +108,7 @@ pub(super) fn authenticate<'a, 'b>(
                 "the serialized class header has a non-class symbol",
             ));
         }
-        let (types, formals) =
-            bind_class_parameters(&class.parameters, member.arena, member.class)?;
+        let (types, formals) = bind_class_parameters(class, bodies, member.arena, member.class)?;
         return Ok(ClassMemberHeader {
             contract: class,
             arena: member.arena,
@@ -202,7 +201,14 @@ pub(super) fn authenticate_private_member<'a, 'b>(
         ));
     }
     authenticate_receiver(class, member.arena, member.function)?;
-    let (types, formals) = bind_class_parameters(&class.parameters, member.arena, member.class)?;
+    let (mut types, formals) = bind_class_parameters(class, bodies, member.arena, member.class)?;
+    super::private_signature_classes::bind(
+        &mut types,
+        bodies,
+        &class.module,
+        member.arena,
+        member.function,
+    )?;
     Ok(ClassMemberHeader {
         contract: class,
         arena: member.arena,
@@ -213,50 +219,50 @@ pub(super) fn authenticate_private_member<'a, 'b>(
     })
 }
 
-/// The raw header of the private primary constructor of the object `class`, which no provider
-/// records: an object's instance is created only by its own declaration. The constructor must be
-/// a direct member of that exact class header, private, and take no value.
-pub(super) fn authenticate_object_constructor<'a, 'b>(
+/// The raw header of the private primary constructor of `class`, an object or an enum class,
+/// which no provider records: the class's own declaration creates every instance of it. The
+/// constructor must be a direct member of that exact class header and private; an object's takes
+/// no value.
+pub(super) fn authenticate_declared_instances_constructor<'a, 'b>(
     class: &'a KlibBodyClassContract,
     bodies: &'b KlibDeclarationBodies,
 ) -> Result<Option<ClassMemberHeader<'a, 'b>>, KlibBodyDeclineReason> {
     let Some(primary) = class
         .primary_constructor
         .as_ref()
-        .filter(|_| class.kind == crate::libraries::TypeKind::Object)
+        .filter(|_| class.declares_instances())
     else {
         return Ok(None);
     };
     if class.signature.member_id().is_some()
         || classifier_name(&class.signature)? != class.classifier
     {
-        return Err(mismatch(
-            "an object's identity disagrees with its classifier",
-        ));
+        return Err(mismatch("a class's identity disagrees with its classifier"));
     }
     let identity = crate::libraries::KlibDependencyCallable {
         module: class.module.clone(),
         declaration: crate::libraries::KlibDeclarationSignature::Public(primary.clone()),
     };
-    // An object of a module compiled from source alongside has no serialized declaration: its
-    // own file lays it out, never a support unit.
+    // A class of a module compiled from source alongside has no serialized declaration: its own
+    // file lays it out, never a support unit.
     let Some(member) = bodies
         .class_member_header(&identity, &class.signature, Some(KlibAccessorRole::Getter))
         .map_err(mismatch)?
     else {
         return Ok(None);
     };
+    let object = class.kind == crate::libraries::TypeKind::Object;
     if member.class.base.symbol.kind != KlibIrSymbolKind::Class
         || !member.function.constructor
         || crate::metadata::semantic::declaration_visibility(member.function.base.flags)
             != crate::types::Visibility::Private
-        || !member.function.regular_parameters.is_empty()
+        || (object && !member.function.regular_parameters.is_empty())
     {
         return Err(mismatch(
-            "an object's primary constructor is not its private constructor taking no value",
+            "a primary constructor is not its class's private constructor, taking no value for an object",
         ));
     }
-    let (types, formals) = bind_class_parameters(&class.parameters, member.arena, member.class)?;
+    let (types, formals) = bind_class_parameters(class, bodies, member.arena, member.class)?;
     Ok(Some(ClassMemberHeader {
         contract: class,
         arena: member.arena,
@@ -268,10 +274,12 @@ pub(super) fn authenticate_object_constructor<'a, 'b>(
 }
 
 fn bind_class_parameters(
-    parameters: &KlibBodyClassParameters,
+    class: &KlibBodyClassContract,
+    bodies: &KlibDeclarationBodies,
     arena: &KlibIrArena,
     raw_class: &KlibIrClass,
 ) -> Result<(KlibTypeParameters, Vec<String>), KlibBodyDeclineReason> {
+    let parameters = &class.parameters;
     let formals = class_parameter_identities(parameters)?;
     let count = formals.len();
     if raw_class.type_parameters.len() != count {
@@ -311,6 +319,7 @@ fn bind_class_parameters(
             return Err(mismatch("a class repeats a semantic formal identity"));
         }
     }
+    super::foreign_type_parameters::bind(&mut types, arena, bodies, &class.module)?;
     Ok((types, formals))
 }
 

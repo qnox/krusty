@@ -1061,3 +1061,37 @@ fn kotlin_property_accessors_publish_their_exact_method_annotations() {
     );
     std::fs::remove_dir_all(directory).expect("remove accessor fixture");
 }
+
+/// The range helpers a range construction realizes to are Kotlin declarations
+/// (`infix fun Int.until(to: Int)`, `operator fun Double.rangeTo(that: Double)`), so they declare
+/// the parameters they are built from.
+#[test]
+fn range_construction_helpers_declare_their_kotlin_parameters() {
+    let stdlib = crate::toolchain::stdlib_jar().expect("selected reference stdlib");
+    let jdk = crate::toolchain::jdk_modules().expect("selected reference JDK modules");
+    let libraries =
+        initialized_libraries(std::rc::Rc::new(super::Classpath::new(vec![stdlib, jdk])));
+    let declared = |callable: Option<crate::libraries::LibraryCallable>| {
+        callable
+            .expect("a range helper")
+            .declared_params
+            .map(Vec::from)
+    };
+    for element in [Ty::Int, Ty::Long, Ty::Char, Ty::UInt, Ty::ULong] {
+        let construction = libraries
+            .range_construction(element, element)
+            .expect("a range construction");
+        assert_eq!(declared(construction.until), Some(vec![element, element]));
+        assert!(construction.through_static.is_none());
+    }
+    for element in [Ty::Double, Ty::Float] {
+        let construction = libraries
+            .range_construction(element, element)
+            .expect("a floating range construction");
+        assert!(construction.until.is_none());
+        assert_eq!(
+            declared(construction.through_static),
+            Some(vec![element, element])
+        );
+    }
+}

@@ -9,6 +9,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.gradle.tooling.BuildException;
+import org.gradle.tooling.BuildLauncher;
 import org.gradle.tooling.GradleConnectionException;
 import org.gradle.tooling.GradleConnector;
 import org.gradle.tooling.ProjectConnection;
@@ -51,13 +52,19 @@ public final class GradleToolingClient {
             // Same entry IntelliJ uses: GradleConnector.newConnector(), then a ProjectConnection
             // whose build action runs on the long-lived daemon located by the wrapper.
             ProjectConnection connection = connection(projectDir);
-            connection
+            BuildLauncher build = connection
                 .newBuild()
                 .forTasks(tasks.toArray(String[]::new))
                 .withArguments(arguments.toArray(String[]::new))
                 .setStandardOutput(stdout)
-                .setStandardError(stderr)
-                .run();
+                .setStandardError(stderr);
+            // The client JVM may be newer than the project's Gradle. This is the daemon JVM for
+            // this build, so the init script is compiled by a JVM that Gradle can read.
+            String javaHome = Protocol.text(request, "javaHome");
+            if (!javaHome.isEmpty()) {
+                build.setJavaHome(new File(javaHome));
+            }
+            build.run();
             Protocol.respond(0, stdout.toString(StandardCharsets.UTF_8), stderr.toString(StandardCharsets.UTF_8));
         } catch (BuildException failure) {
             Protocol.respond(1, stdout.toString(StandardCharsets.UTF_8), detail(stderr, failure));

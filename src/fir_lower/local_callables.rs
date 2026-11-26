@@ -252,7 +252,9 @@ impl BodyLowering<'_> {
                     conversion,
                     ..
                 },
-                crate::ir::IrCheckedArgument::Expression { parameter, value },
+                crate::ir::IrCheckedArgument::Expression {
+                    parameter, value, ..
+                },
             ) = (argument, lowered)
             else {
                 continue;
@@ -556,10 +558,14 @@ impl BodyLowering<'_> {
     pub(super) fn checked_local_callable_reference(
         &mut self,
         target: FirLocalCallableRef,
-        extension_receiver: Option<crate::fir::FirReceiver>,
+        bindings: LocalReferenceBindings<'_>,
         adaptation: Option<&crate::fir::FirReferenceAdaptation>,
         reference_ty: Ty,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let LocalReferenceBindings {
+            extension_receiver,
+            context_arguments,
+        } = bindings;
         let (realization, external) = self.local_function(&target)?;
         let captures = if external {
             target
@@ -577,11 +583,20 @@ impl BodyLowering<'_> {
         let extension_receiver = extension_receiver
             .map(|receiver| self.expression_with_conversion(receiver.value, receiver.conversion))
             .transpose()?;
+        // The reference site's context arguments are evaluated once, when the reference is
+        // created, and bound ahead of the local function's own captures.
+        let contexts = context_arguments
+            .iter()
+            .map(|argument| self.expression_with_conversion(argument.value, argument.conversion))
+            .collect::<Result<Vec<_>, _>>()?;
         if let Some(reference) = self.materialize_local_reference(
             &target,
             &realization,
-            &captures,
-            extension_receiver,
+            LocalReferenceValues {
+                contexts: &contexts,
+                captures: &captures,
+                extension_receiver,
+            },
             adaptation,
             reference_ty,
         )? {
@@ -596,11 +611,18 @@ impl BodyLowering<'_> {
         &mut self,
         target: &FirLocalCallableRef,
         realization: &LocalCallableRealization,
-        bound_captures: &[ExprId],
-        bound_extension_receiver: Option<ExprId>,
+        bound: LocalReferenceValues<'_>,
         adaptation: Option<&crate::fir::FirReferenceAdaptation>,
         reference_ty: Ty,
     ) -> Result<Option<ExprId>, FirLoweringFailure> {
+        let LocalReferenceValues {
+            contexts: bound_contexts,
+            captures: bound_captures,
+            extension_receiver: bound_extension_receiver,
+        } = bound;
+        // The adapter takes the bound context arguments first, then the local function's
+        // captures, then a bound extension receiver, then its own parameters.
+        let context_count = bound_contexts.len();
         let TyKind::Fun(reference) = reference_ty.non_null().kind() else {
             return Ok(None);
         };
@@ -631,7 +653,7 @@ impl BodyLowering<'_> {
         if unbound_receiver_count != 0 && reference.params.is_empty() {
             return Ok(None);
         }
-        let own_start = u32::try_from(capture_count + bound_receiver_count)
+        let own_start = u32::try_from(context_count + capture_count + bound_receiver_count)
             .map_err(|_| FirLoweringFailure::MissingLocalCallable(target.clone()))?;
         let identity_arguments;
         let adapted_arguments = if let Some(adaptation) = adaptation {
@@ -683,9 +705,19 @@ impl BodyLowering<'_> {
                     crate::ir::IrCheckedArgument::Expression {
                         parameter,
                         value: self.coerce_to_declared(value, actual, declared),
+                        context: Default::default(),
                     }
                 }
-                crate::fir::FirAdaptedReferenceArgument::Context => return Ok(None),
+                crate::fir::FirAdaptedReferenceArgument::Context => {
+                    if parameter as usize >= context_count {
+                        return Ok(None);
+                    }
+                    crate::ir::IrCheckedArgument::Expression {
+                        parameter,
+                        value: self.ir.add_expr(IrExpr::GetValue(parameter)),
+                        context: Default::default(),
+                    }
+                }
                 crate::fir::FirAdaptedReferenceArgument::Default => {
                     crate::ir::IrCheckedArgument::Default { parameter }
                 }
@@ -736,7 +768,7 @@ impl BodyLowering<'_> {
                 }
             });
         }
-        let wrapper_captures = (0..capture_count)
+        let wrapper_captures = (context_count..context_count + capture_count)
             .map(|slot| {
                 self.ir.add_expr(IrExpr::GetValue(
                     u32::try_from(slot).expect("too many local captures"),
@@ -744,11 +776,14 @@ impl BodyLowering<'_> {
             })
             .collect::<Vec<_>>();
         let wrapper_extension_receiver = if realization.has_extension_receiver {
-            let receiver = capture_count
+            // A bound receiver follows the captures; an unbound one follows the context
+            // parameters the reference still takes as its own inputs.
+            let receiver = context_count
+                + capture_count
                 + if bound_extension_receiver.is_some() {
                     0
                 } else {
-                    realization.context_parameter_count as usize
+                    (realization.context_parameter_count as usize).saturating_sub(context_count)
                 };
             Some(self.ir.add_expr(IrExpr::GetValue(
                 u32::try_from(receiver).expect("too many local reference parameters"),
@@ -764,19 +799,28 @@ impl BodyLowering<'_> {
             &arguments,
         )?;
         let selected_result = self.ir.functions[realization.function as usize].ret;
-        let body = self.callable_reference_adapter_body(call, selected_result, reference.ret);
-        let mut parameters = realization.in_capture_order(
-            realization
-                .captures
-                .iter()
-                .map(|capture| capture.ty.get())
-                .chain(
-                    realization
-                        .implicit_receiver_captures
-                        .iter()
-                        .map(|capture| capture.ty.get()),
-                )
-                .collect(),
+        let body = self
+            .ir
+            .callable_reference_adapter_body(call, selected_result, reference.ret);
+        let mut parameters = (0..context_count)
+            .map(|context| {
+                self.ir.functions[realization.function as usize].params[capture_count + context]
+            })
+            .collect::<Vec<_>>();
+        parameters.extend(
+            realization.in_capture_order(
+                realization
+                    .captures
+                    .iter()
+                    .map(|capture| capture.ty.get())
+                    .chain(
+                        realization
+                            .implicit_receiver_captures
+                            .iter()
+                            .map(|capture| capture.ty.get()),
+                    )
+                    .collect(),
+            ),
         );
         if bound_extension_receiver.is_some() {
             parameters.push(
@@ -809,7 +853,8 @@ impl BodyLowering<'_> {
                 self.ir.shared_capture_parameters.insert(
                     (
                         wrapper,
-                        u32::try_from(position).expect("too many local reference captures"),
+                        u32::try_from(context_count + position)
+                            .expect("too many local reference captures"),
                     ),
                     captured.ty.get(),
                 );
@@ -826,25 +871,32 @@ impl BodyLowering<'_> {
             u32::try_from(adapter_parameter_count)
                 .expect("too many local reference adapter parameters"),
         );
-        Ok(Some(self.ir.add_expr(IrExpr::CallableReference(Box::new(
-            crate::ir::IrCallableReference {
-                target: crate::ir::IrCallableReferenceTarget::Local {
-                    owner: realization.owner,
-                    name: realization.source_name.clone(),
-                    function: realization.function,
+        Ok(Some(
+            self.ir.add_expr(IrExpr::CallableReference(Box::new(
+                crate::ir::IrCallableReference {
+                    target: crate::ir::IrCallableReferenceTarget::Local {
+                        owner: realization.owner,
+                        name: realization.source_name.clone(),
+                        function: realization.function,
+                    },
+                    adapter: wrapper,
+                    captures: bound_contexts
+                        .iter()
+                        .chain(bound_captures)
+                        .copied()
+                        .collect(),
+                    bound_receiver: bound_extension_receiver,
+                    bound_contexts: u32::try_from(context_count)
+                        .expect("too many bound context arguments"),
+                    function_type: reference_ty,
+                    declaration_parameters: reference.params.clone().into_boxed_slice(),
+                    declaration_result: selected_result,
+                    declaration_suspend: realization.suspend,
+                    adaptation: adaptation.cloned().map(Box::new),
+                    reflection_owner: None,
                 },
-                adapter: wrapper,
-                captures: bound_captures.to_vec(),
-                bound_receiver: bound_extension_receiver,
-                bound_contexts: 0,
-                function_type: reference_ty,
-                declaration_parameters: reference.params.clone().into_boxed_slice(),
-                declaration_result: selected_result,
-                declaration_suspend: realization.suspend,
-                adaptation: adaptation.cloned().map(Box::new),
-                reflection_owner: None,
-            },
-        )))))
+            ))),
+        ))
     }
 
     pub(super) fn local_function(
@@ -1920,4 +1972,18 @@ pub(super) fn record_lifting_sites(
             },
         );
     }
+}
+
+/// What a checked local callable reference binds at its own site.
+pub(super) struct LocalReferenceBindings<'a> {
+    pub(super) extension_receiver: Option<crate::fir::FirReceiver>,
+    pub(super) context_arguments: &'a [crate::fir::FirReceiver],
+}
+
+/// The lowered values a local callable reference captures: the reference site's context
+/// arguments, the local function's own captures, and a bound extension receiver.
+struct LocalReferenceValues<'a> {
+    contexts: &'a [ExprId],
+    captures: &'a [ExprId],
+    extension_receiver: Option<ExprId>,
 }

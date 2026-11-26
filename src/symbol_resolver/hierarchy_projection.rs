@@ -180,8 +180,6 @@ pub(crate) fn applied_hierarchy(source: &dyn SymbolSource, root: Ty) -> Vec<(Typ
     })
 }
 
-pub(crate) use crate::assignable::with_implicit_any;
-
 /// Apply a runtime subtype named without source arguments to the generic arguments already known on
 /// one of its supertypes. A typealias can expand that bare spelling to a star-applied semantic type,
 /// so callers decide from syntax whether contextual recovery is allowed; this operation derives the

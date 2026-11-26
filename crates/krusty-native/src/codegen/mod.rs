@@ -147,8 +147,13 @@ pub struct CodegenModule {
     dependency_symbols:
         krusty::fx_hash::HashMap<krusty::backend::KlibDependencyCallable, DependencyExport>,
     /// Stable imported-interface member numbers, shared by every file in each source module.
-    dependency_interface_numbers:
-        krusty::fx_hash::HashMap<String, krusty::fx_hash::HashMap<Vec<u8>, u32>>,
+    dependency_interface_numbers: krusty::fx_hash::HashMap<String, lower::ModuleInterfaceNumbers>,
+    /// The dependency interface members, by cross-module identity, that a class implements with a
+    /// library default whose body lowering does not model: a call through one declines with the
+    /// reason, rather than reaching an instance nothing implements it on.
+    unimplementable_interface_members: krusty::fx_hash::HashMap<Vec<u8>, String>,
+    /// What the files lowered so far declare; see [`lower::ProgramDeclarations`].
+    program_declarations: lower::ProgramDeclarations,
     /// The exported entry answering each object instance and enum constant another file reads,
     /// linked by the instance (see `krusty::backend::instance_links`).
     instances: krusty::backend::module_links::ModuleLinks<
@@ -222,10 +227,17 @@ impl Backend for CraneliftBackend {
         format!("krusty: the native backend does not support {construct} yet")
     }
 
+    fn observe_program_sources(&self, state: &mut Self::State, sources: &[&CheckedIrFile<'_>]) {
+        for file in sources {
+            state.program_declarations.absorb_comparable(&file.ir);
+        }
+    }
+
     fn common_ir_preparation(&self) -> Option<krusty::backend::CommonIrPreparation> {
         Some(krusty::backend::CommonIrPreparation {
             counted_loops: COUNTED_LOOPS,
             enums: krusty::backend::enums::Contract::KotlinNative,
+            property_reference_values: false,
         })
     }
 
@@ -573,6 +585,8 @@ impl Backend for CraneliftBackend {
                 dependency_symbols: &state.dependency_symbols,
                 dependency_instances: &instance_reads,
                 dependency_interface_numbers: &mut dependency_interface_numbers,
+                unimplementable_interface_members: &mut state.unimplementable_interface_members,
+                program_declarations: &mut state.program_declarations,
                 laid_out: &state.laid_out,
                 #[cfg(feature = "test-support")]
                 driver_entries: self
@@ -610,6 +624,20 @@ impl Backend for CraneliftBackend {
             state.entry_file = Some(source_stem);
         }
         for (identity, symbol) in lowered.class_descriptors {
+            match state.laid_out.published_descriptor(&identity) {
+                Ok(Some(previous)) if previous != symbol => {
+                    diags.error(
+                        krusty::diag::Span::new(0, 0),
+                        "krusty: conflicting physical descriptors for one selected KLIB classifier",
+                    );
+                    return Vec::new();
+                }
+                Err(error) => {
+                    diags.error(krusty::diag::Span::new(0, 0), error);
+                    return Vec::new();
+                }
+                _ => {}
+            }
             state.laid_out.publish_descriptor(identity, symbol);
         }
         for (identity, entries) in lowered.value_boxes {
@@ -690,6 +718,12 @@ impl Backend for CraneliftBackend {
                 }
                 krusty::backend::instance_links::InstanceEntry::ConstructorDefaults { .. } => {
                     "a constructor's default-argument entry".to_owned()
+                }
+                krusty::backend::instance_links::InstanceEntry::TypeTest(classifier) => {
+                    format!(
+                        "a type test against `{}`",
+                        classifier.render().replace('/', ".")
+                    )
                 }
                 krusty::backend::instance_links::InstanceEntry::EnumMember {
                     classifier,

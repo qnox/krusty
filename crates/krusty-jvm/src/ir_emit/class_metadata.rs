@@ -2,6 +2,7 @@
 //! with how the JVM realizes each declaration ([`JvmClassSignatures`]) beside it.
 
 use super::*;
+use crate::coroutine_classes::{is_continuation_class, is_coroutine_state_machine};
 use krusty::metadata::class_builder::{
     FnMeta, JvmClassSignatures, JvmConstructorSignature, JvmFieldSignature, JvmFunctionSignature,
     JvmPropertySignature, PropMeta,
@@ -81,7 +82,7 @@ pub(super) fn build_class_metadata_with_facts(
             xi: if is_continuation_class(c) {
                 continuation_class_xi(ir, c)
             } else {
-                synthetic_class_xi(SYNTHETIC_LOCAL)
+                synthetic_class_xi(ir.reference.quirks(), SYNTHETIC_LOCAL)
             },
             d1: vec![],
             d2: vec![],
@@ -100,7 +101,8 @@ pub(super) fn build_class_metadata_with_facts(
         return Some(KotlinMetadata {
             k: 3,
             stamp: opts.metadata_stamp(),
-            xi: super::metadata_policy::class_xi(ir, c) | synthetic_class_xi(visibility),
+            xi: super::metadata_policy::class_xi(ir, c)
+                | synthetic_class_xi(ir.reference.quirks(), visibility),
             d1: vec![],
             d2: vec![],
         });

@@ -46,19 +46,35 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: versioning-tests runner-profile-tests release-tests legacy-ratchet-tests reference-cache-tests outcome-set-merge-tests fmt-check legacy-baseline-check clippy-baseline-check
+lint: attribution-tests smoke-selection-tests versioning-tests runner-profile-tests memory-workers-tests release-tests legacy-ratchet-tests reference-cache-tests outcome-set-merge-tests fmt-check legacy-baseline-check clippy-baseline-check
 
 # The CI step that drops kotlinc reference inventories no recent run read, before master saves them.
 reference-cache-tests:
     bash scripts/test-prune-reference-cache.sh
 
+# The attribution check's removal of the footer an integration appends to pull request text.
+attribution-tests:
+    bash scripts/test-check-attribution.sh
+
+# The smoke check's lane selection, against a disposable repository with deleted and renamed paths.
+smoke-selection-tests:
+    bash scripts/test-smoke-selection.sh
+
 # Cheap release-version contracts, without a compiler build or reference-toolchain download.
 versioning-tests:
     bash scripts/test-versioning.sh
+    bash scripts/test-sort-kotlin-versions.sh
+    bash scripts/test-install-maven.sh
+    bash scripts/test-check-intellij-patch.sh
+    bash scripts/test-provision-jdks.sh
 
 # The CI runner profile's machine and contention report, against stand-in /proc and /sys trees.
 runner-profile-tests:
     bash scripts/test-runner-profile.sh
+
+# The test worker count bounded by memory, against stand-in /proc trees.
+memory-workers-tests:
+    bash scripts/test-memory-workers.sh
 
 # The release job's signing key id selection, against keys generated in a throwaway keyring, its
 # Maven Central upload, against a stand-in Gradle build and Central Portal, and the Gradle wrapper
@@ -186,8 +202,9 @@ test-fast:
     ./run-tests.sh
 
 # Pre-push smoke check (scripts/smoke.sh): attribution and outcome lists, rustfmt and the baselines,
-# lib tests, the changed e2e modules, and a sampled box slice plus the owned regressions on JVM,
-# Native, wasm-js and wasm-wasi. BASE is the PR's base: master, or the parent PR's branch.
+# one build of the test binaries, lib tests, the changed e2e modules, and a sampled box slice plus
+# the owned regressions on the lanes the change can affect. BASE is the PR's base: master, the parent
+# PR's branch, or the branch's own remote head to check only unpushed commits.
 smoke BASE="origin/master":
     bash scripts/smoke.sh "{{BASE}}"
 
@@ -225,7 +242,7 @@ conformance-one VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
     v="{{VERSION}}"
-    kc_var="KRUSTY_KOTLINC_${v//./_}"
+    kc_var="KRUSTY_KOTLINC_${v//[.-]/_}"
     kc="${!kc_var:-}"
     vendored="$PWD/target/cache/kotlinc/$v/kotlinc/bin/kotlinc"
     [ -z "$kc" ] && [ -x "$vendored" ] && kc="$vendored"
@@ -314,7 +331,7 @@ kotlinc VERSION=`just max-version`:
 
 # Regenerate krusty's copy of one kotlinc release's argument table, language feature table and
 # diagnostic names from that release's distribution (crates/krusty-cli/src/kotlinc_arguments/releases/<ver>.tsv,
-# src/features/releases/<ver>.{features,language-versions}.tsv and src/diag/releases/<ver>.diagnostics.tsv). The conformance e2e test fails
+# crates/krusty-core/src/features/releases/<ver>.{features,language-versions}.tsv and src/diag/releases/<ver>.diagnostics.tsv). The conformance e2e test fails
 # until the table each release reads equals what the provisioned compiler declares. A release keeps a
 # file only where it differs from the newest recorded release below it, which it otherwise reads.
 kotlinc-arguments VERSION=`just max-version`:
@@ -336,8 +353,8 @@ kotlinc-arguments VERSION=`just max-version`:
         fi
     }
     dump DumpKotlincArguments crates/krusty-cli/src/kotlinc_arguments/releases .tsv
-    dump DumpLanguageFeatures src/features/releases .features.tsv
-    dump DumpLanguageVersions src/features/releases .language-versions.tsv
+    dump DumpLanguageFeatures crates/krusty-core/src/features/releases .features.tsv
+    dump DumpLanguageVersions crates/krusty-core/src/features/releases .language-versions.tsv
     dump DumpDiagnosticNames src/diag/releases .diagnostics.tsv
 
 # Provision the Kotlin/Native distribution whose stdlib KLIB supplies the real metadata format.
@@ -494,26 +511,39 @@ box-corpus VERSION=`just max-version`:
     done
     echo "$box"
 
-# Provision the kotlinx.serialization compiler-plugin box corpus (plugins/kotlinx-serialization/
-# testData/boxIr) from JetBrains/kotlin at the matching tag — blobless+sparse, idempotent. The
-# reference suite our own serialization conformance tests mirror (and must meet-or-exceed). Point
-# KRUSTY_SER_BOXIR_DIR at the printed path.
-ser-corpus VERSION=`just max-version`:
+# The compiler plugins whose descriptor names an upstream box corpus, one per line.
+plugin-corpora:
+    @grep -l '^upstream' src/plugins/*/boxes/corpus.txt | sed 's|src/plugins/\([^/]*\)/boxes/corpus.txt|\1|'
+
+# Provision a compiler plugin's upstream box corpus: the `upstream` and `support` paths its descriptor
+# (src/plugins/<name>/boxes/corpus.txt) names, from JetBrains/kotlin at the matching tag —
+# blobless+sparse, idempotent. These are the reference suites our own plugin conformance tests mirror
+# (and must meet-or-exceed). Prints the checkout root; each `upstream` path is below it.
+plugin-corpus PLUGIN VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
+    plugin="{{PLUGIN}}"
     ver="{{VERSION}}"
-    root="$PWD/target/cache/ser-corpus/$ver"
-    box="$root/plugins/kotlinx-serialization/testData/boxIr"
-    if [ -d "$box" ]; then echo "$box"; exit 0; fi
-    echo "cloning kotlinx.serialization boxIr corpus (v${ver})…" >&2
+    descriptor="$(ls src/plugins/"$plugin"/boxes/corpus.txt 2>/dev/null || true)"
+    [ -n "$descriptor" ] || { echo "no plugin corpus descriptor for $plugin" >&2; exit 1; }
+    mapfile -t upstream < <(sed -n 's/^\(upstream\|support\)[[:space:]]*=[[:space:]]*//p' "$descriptor")
+    [ "${#upstream[@]}" -gt 0 ] || { echo "plugin $plugin names no upstream corpus" >&2; exit 1; }
+    root="$PWD/target/cache/plugin-corpus/$plugin/$ver"
+    complete=1
+    for dir in "${upstream[@]}"; do [ -e "$root/$dir" ] || complete=0; done
+    if [ "$complete" = 1 ]; then echo "$root"; exit 0; fi
+    echo "cloning the $plugin box corpus (v${ver})…" >&2
     rm -rf "$root"
     while read -r name; do unset "$name"; done < <(git rev-parse --local-env-vars)
     git clone --depth 1 --filter=blob:none --sparse --branch "v${ver}" \
         https://github.com/JetBrains/kotlin.git "$root" >&2 \
         || { echo "failed to clone JetBrains/kotlin v${ver}" >&2; rm -rf "$root"; exit 1; }
-    git -C "$root" sparse-checkout set plugins/kotlinx-serialization/testData >&2
-    [ -d "$box" ] || { echo "serialization boxIr dir missing after sparse checkout: $box" >&2; exit 1; }
-    echo "$box"
+    # Non-cone patterns: an `upstream` entry is a directory but a `support` entry is one file.
+    git -C "$root" sparse-checkout set --no-cone "${upstream[@]/#//}" >&2
+    for dir in "${upstream[@]}"; do
+        [ -e "$root/$dir" ] || { echo "$plugin corpus path missing after sparse checkout: $dir" >&2; exit 1; }
+    done
+    echo "$root"
 
 # Provision the KSP reference test corpus (google/ksp kotlin-analysis-api/testData + its test-utils
 # processors) — shallow+sparse, idempotent. The authoritative KSP capability suite our own KSP
@@ -563,7 +593,7 @@ test-all *ARGS:
     declare -a pids=() tags=()
     while read -r v; do
         [ -z "$v" ] && continue
-        kc_var="KRUSTY_KOTLINC_${v//./_}"
+        kc_var="KRUSTY_KOTLINC_${v//[.-]/_}"
         kc="${!kc_var:-}"
         vendored="$PWD/target/cache/kotlinc/$v/kotlinc/bin/kotlinc"
         [ -z "$kc" ] && [ -x "$vendored" ] && kc="$vendored"
@@ -595,14 +625,13 @@ test-all *ARGS:
 # binary; they do not compile krusty again.
 #
 # CI builds this right after `just tool-test-bin`, and must reuse that build's krusty.
-# Selecting krusty-cli's binary here keeps the Native backend in the graph: without it bumpalo
-# (under zopfli) loses Cranelift's `allocator-api2` feature and krusty, which links zopfli,
-# compiled a second time (484 s of a 1157 s build). krusty-build's own dev-dependencies add the
-# libc, object and once_cell features that the root package's dev-dependencies add there.
+# krusty-build's own dev-dependencies add the features the root package's dev-dependencies add
+# there; when they drift, krusty compiles a second time (270-400 s on a 4-core runner), so CI
+# names the compiler crates in CARGO_TEST_BINARY_REUSE and this build fails instead.
 krusty-build-tests:
     #!/usr/bin/env bash
     set -euo pipefail
-    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib -p krusty-cli --bin krusty
+    scripts/cargo-test-binary.sh krusty_build -p krusty-build --lib
 
 # The normal compiler unit suite, which exact-version CI rows run without rebuilding Rust.
 compiler-unit-tests:
@@ -797,11 +826,11 @@ kotlin-versions:
 
 # Comma-separated list of supported Kotlin reference versions (advertised by `krusty -version`).
 supported-kotlin:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | sort -V | paste -sd, -
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | bash scripts/sort-kotlin-versions.sh | paste -sd, -
 
 # Highest supported Kotlin reference version — krusty's release version (without the build suffix).
 max-version:
-    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | sort -V | tail -1
+    @grep -vE '^\s*(#|$)' {{manifest}} | awk '{print $1}' | bash scripts/sort-kotlin-versions.sh | tail -1
 
 # JSON array of supported Kotlin reference versions, for the GitHub Actions test matrix.
 matrix-json:

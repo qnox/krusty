@@ -9,13 +9,13 @@
 
 use super::scope::{ContextValue, Ns};
 use super::{
-    arg_assignable_simple, selected_context_values, CheckerScope, ImplicitReceiverSelection, Local,
+    selected_context_values, CheckerScope, ImplicitReceiverSelection, Local,
     MissingContextParameter, ReceiverDeclarationRole, ReceiverFnValueOrigin,
     SelectedContextSources,
 };
 use crate::ast::ExprId;
 use crate::fx_hash::HashSet;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 use crate::context_parameters::ContextBindingSource;
 
@@ -37,6 +37,45 @@ pub enum ResolvedContextArgument {
         flow_identity: Option<u32>,
     },
     ImplicitReceiver(ImplicitReceiverSelection),
+}
+
+/// Whether a scope value of type `have` may fill a context parameter whose type is a type variable
+/// bounded by `bound`. Context selection and signature evaluation share this one rule.
+///
+/// A bound that mentions one of the call's own type variables (`C : Slot<T>`, `C : () -> T`) is
+/// open: the value is checked against the bound's classifier (or, for a function type, its shape)
+/// and the call's inference then relates the arguments. An enclosing declaration's type parameter
+/// is rigid, so its bound goes through the ordinary assignability relation.
+pub(super) fn value_within_bound(
+    have: Ty,
+    bound: Ty,
+    oracle: &dyn crate::assignable::TypeOracle,
+) -> bool {
+    if !bound.mentions_type_variable() {
+        return bound.is_erased_top()
+            || crate::assignable::is_assignable(
+                &crate::assignable::TyCtx::new(),
+                oracle,
+                have,
+                bound,
+            );
+    }
+    match (have.kind(), bound.kind()) {
+        (TyKind::Fun(have), TyKind::Fun(bound)) => {
+            have.params.len() == bound.params.len()
+                && have.has_receiver == bound.has_receiver
+                && have.suspend == bound.suspend
+        }
+        _ => match (have.obj_internal(), bound.obj_internal()) {
+            (Some(h), Some(b)) => crate::assignable::is_subtype(
+                &crate::assignable::TyCtx::new(),
+                oracle,
+                Ty::obj_name(h),
+                Ty::obj_name(b),
+            ),
+            _ => false,
+        },
+    }
 }
 
 impl super::Checker<'_> {
@@ -67,8 +106,10 @@ impl super::Checker<'_> {
             if have == want {
                 return true;
             }
+            // A context parameter whose type is a type variable admits a value within the
+            // variable's bound, not merely any reference.
             if let Some(bound) = want.ty_param_bound() {
-                return bound.is_erased_top() || arg_assignable_simple(bound, have);
+                return value_within_bound(have, bound, self);
             }
             match (have.obj_internal(), want.obj_internal()) {
                 (Some(h), Some(w)) => self.obj_name_is_subtype(h, w),
@@ -80,7 +121,7 @@ impl super::Checker<'_> {
             // A narrowed receiver keeps its actual receiver-path identity. A lexical context
             // parameter with an escaped `this` name must not become that receiver's flow proof.
             let narrowed_receiver = self
-                .this_narrow
+                .current_receiver_narrowing(scope)
                 .or_else(|| self.lookup_path_narrowing(scope, &self.current_receiver_path(scope)?));
             if let Some(actual) = narrowed_receiver.filter(|actual| matches(*actual, want)) {
                 let receiver = self

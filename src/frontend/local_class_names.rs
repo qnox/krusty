@@ -485,6 +485,16 @@ impl Inventor<'_> {
         for constructor in constructors {
             self.secondary_constructor(constructor, chain);
         }
+        // An interface member property initializes nothing, so it takes no place in the
+        // initialization order, but its accessor bodies still declare what they declare.
+        for (index, property) in class.body_props.iter().enumerate() {
+            let initialized = class.init_order.iter().any(
+                |step| matches!(step, ClassInit::PropInit(initialized) if *initialized == index),
+            );
+            if !initialized {
+                self.property(property, chain, initializer.clone());
+            }
+        }
         for (index, method) in class.methods.iter().enumerate() {
             let identity = AnonymousEnclosingFunction::Member {
                 class: declaration,

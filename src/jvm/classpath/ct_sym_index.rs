@@ -20,12 +20,16 @@ pub(super) struct CtSymIndex {
     pub(super) by_name: HashMap<NameId, String>,
 }
 
-fn release_symbol(release: u8) -> Option<u8> {
-    match release {
-        8 | 9 => Some(b'0' + release),
-        10..=35 => Some(b'A' + (release - 10)),
-        _ => None,
-    }
+/// The releases a top-level `ct.sym` folder serves: one base-36 digit per release (`7`, `8`, `A`
+/// for 10, ...). A `-modules` suffix marks the folder holding those releases' module descriptors in
+/// the layout of JDKs before 12.
+fn folder_releases(folder: &str) -> impl Iterator<Item = u8> + '_ {
+    let set = folder
+        .rsplit_once("-modules")
+        .map_or(folder, |(set, _)| set);
+    set.chars()
+        .filter_map(|digit| digit.to_digit(36))
+        .filter_map(|release| u8::try_from(release).ok())
 }
 
 fn global_cache() -> &'static Mutex<HashMap<EntryKey, Arc<CtSymIndex>>> {
@@ -67,9 +71,6 @@ fn build_ct_sym_index(
     path: &Path,
     release: u8,
 ) -> Result<Option<CtSymIndex>, ClassMetadataLoadError> {
-    let Some(release) = release_symbol(release) else {
-        return Ok(None);
-    };
     let Some(mut archive) = File::open(path)
         .ok()
         .and_then(|file| crate::archive::open_file(file).ok())
@@ -79,30 +80,76 @@ fn build_ct_sym_index(
     index_archive(&mut archive, path, release)
 }
 
+/// The JDK releases whose API the `ct.sym` at `path` describes, ascending, or `None` when it does
+/// not open as an archive. The newest of them is the release of the JDK that ships the file, whose
+/// own API is its module image.
+pub(crate) fn ct_sym_releases(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    let Some(archive) = File::open(path)
+        .ok()
+        .and_then(|file| crate::archive::open_file(file).ok())
+    else {
+        return Ok(None);
+    };
+    archive_releases(&archive, path)
+        .map(Some)
+        .map_err(|error| error.diagnostic())
+}
+
+/// The releases the archive's top-level folders name, ascending.
+fn archive_releases(
+    archive: &impl ArchiveEntries,
+    path: &Path,
+) -> Result<Vec<u8>, ClassMetadataLoadError> {
+    let mut releases = Vec::new();
+    for ordinal in 0..archive.entry_count() {
+        let name = archive_entry_name(archive, path, ordinal)?;
+        let folder = name.split('/').next().unwrap_or_default();
+        if folder != "META-INF" {
+            releases.extend(folder_releases(folder));
+        }
+    }
+    releases.sort_unstable();
+    releases.dedup();
+    Ok(releases)
+}
+
 /// Build one release's public-class index. Entries are classfiles stored with a `.sig` suffix under
-/// `<release-set>/<module>/<internal>.sig`; the release-set contains every release for which those
-/// exact bytes apply. A name that does not decode fails the build: the entry cannot be classified,
-/// so the view would lack its class.
+/// a release-set folder, which names every release for which those exact bytes apply. A JDK from 12
+/// on (the newest release the archive names) stores them as `<release-set>/<module>/<internal>.sig`;
+/// an older one as `<release-set>/<internal>.sig`, with its module descriptors apart in
+/// `<release-set>-modules/` folders. kotlinc reads the archive the same way. A name that does not
+/// decode fails the build: the entry cannot be classified, so the view would lack its class.
 fn index_archive(
     archive: &mut impl ArchiveEntries,
     path: &Path,
     release: u8,
 ) -> Result<Option<CtSymIndex>, ClassMetadataLoadError> {
+    let module_folders = archive_releases(archive, path)?
+        .last()
+        .is_some_and(|&newest| newest >= 12);
     let mut index = CtSymIndex::default();
     for ordinal in 0..archive.entry_count() {
         let name = archive_entry_name(archive, path, ordinal)?;
-        // A central-directory name with no module segment is not a class (`L/`,
-        // `L/system-modules`). Skip it. Returning from the loop on that name discarded every
-        // class already recorded, so the selected JDK release view was empty.
-        let mut segments = name.splitn(3, '/');
-        let (Some(releases), Some(_module), Some(resource)) =
-            (segments.next(), segments.next(), segments.next())
-        else {
+        let Some((folder, rest)) = name.split_once('/') else {
             continue;
         };
-        if !releases.as_bytes().contains(&release) {
+        if folder == "META-INF"
+            || folder.ends_with("-modules")
+            || !folder_releases(folder).any(|served| served == release)
+        {
             continue;
         }
+        // A name with no module segment in the module layout is not a class (`L/`,
+        // `L/system-modules`). Skip it. Returning from the loop on that name discarded every
+        // class already recorded, so the selected JDK release view was empty.
+        let resource = if module_folders {
+            let Some((_module, resource)) = rest.split_once('/') else {
+                continue;
+            };
+            resource
+        } else {
+            rest
+        };
         let Some(internal) = resource.strip_suffix(".sig") else {
             continue;
         };
@@ -113,7 +160,7 @@ fn index_archive(
         index
             .by_name
             .entry(internal)
-            .or_insert_with(|| name.into_owned());
+            .or_insert_with(|| name.to_string());
     }
     Ok((!index.by_name.is_empty()).then_some(index))
 }
@@ -163,7 +210,7 @@ mod tests {
                 ]),
                 index: 1,
             };
-            index_archive(&mut symbols, path, b'8')
+            index_archive(&mut symbols, path, 8)
         });
 
         let Err(failure) = built else {
@@ -175,5 +222,92 @@ mod tests {
              i/o error: undecodable entry name"
         );
         assert!(!global_cache().lock().unwrap().contains_key(&key));
+    }
+
+    fn indexed(index: &CtSymIndex) -> Vec<(String, String)> {
+        let mut names = index
+            .by_name
+            .iter()
+            .map(|(&name, entry)| (index.names.render(name), entry.clone()))
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    /// From JDK 12 on, each release-set folder holds module folders; release 7 and older are
+    /// base-36 digits like any other.
+    #[test]
+    fn the_module_layout_indexes_each_release_below_its_module() {
+        use super::super::archive_entries::test_archives::archive;
+        let path = Path::new("/jdk17/lib/ct.sym");
+        let mut symbols = archive(&[
+            ("789ABCDEFGH/java.base/java/lang/Object.sig", b""),
+            ("7/java.base/java/nio/ByteBuffer.sig", b""),
+            ("89/java.base/java/nio/ByteBuffer.sig", b""),
+            ("ABCDEFGH/java.base/module-info.sig", b""),
+            ("H/system-modules", b""),
+        ]);
+        let index = index_archive(&mut symbols, path, 7)
+            .expect("index")
+            .expect("release 7 view");
+        assert_eq!(
+            indexed(&index),
+            [
+                (
+                    "java/lang/Object".to_string(),
+                    "789ABCDEFGH/java.base/java/lang/Object.sig".to_string()
+                ),
+                (
+                    "java/nio/ByteBuffer".to_string(),
+                    "7/java.base/java/nio/ByteBuffer.sig".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// Before JDK 12, classes sit directly under the release-set folder, and the module
+    /// descriptors sit apart under `<release-set>-modules`.
+    #[test]
+    fn the_layout_before_jdk_12_indexes_classes_directly_below_the_release_set() {
+        use super::super::archive_entries::test_archives::archive;
+        let path = Path::new("/jdk11/lib/ct.sym");
+        let mut symbols = archive(&[
+            ("6789AB/java/lang/Object.sig", b""),
+            ("876/java/nio/ByteBuffer.sig", b""),
+            ("9AB/java/nio/ByteBuffer.sig", b""),
+            ("9AB-modules/java.base/module-info.sig", b""),
+        ]);
+        let index = index_archive(&mut symbols, path, 8)
+            .expect("index")
+            .expect("release 8 view");
+        assert_eq!(
+            indexed(&index),
+            [
+                (
+                    "java/lang/Object".to_string(),
+                    "6789AB/java/lang/Object.sig".to_string()
+                ),
+                (
+                    "java/nio/ByteBuffer".to_string(),
+                    "876/java/nio/ByteBuffer.sig".to_string()
+                ),
+            ]
+        );
+        let index = index_archive(&mut symbols, path, 10)
+            .expect("index")
+            .expect("release 10 view");
+        assert_eq!(
+            indexed(&index),
+            [
+                (
+                    "java/lang/Object".to_string(),
+                    "6789AB/java/lang/Object.sig".to_string()
+                ),
+                (
+                    "java/nio/ByteBuffer".to_string(),
+                    "9AB/java/nio/ByteBuffer.sig".to_string()
+                ),
+            ]
+        );
     }
 }

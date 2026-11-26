@@ -7,7 +7,8 @@
 //! target at all. Which of those a given test treats as a failure is the test's business, which is
 //! why each helper below is a different answer to that one question.
 
-use super::jdk_modules;
+use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
+use krusty_native::ImportLibrary;
 
 /// The prefix every native decline carries, so a decline can be told from a wrong answer.
 const NATIVE_DECLINE: &str = "krusty: the native backend does not support ";
@@ -200,53 +201,62 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty_native::NativeTarget
     native_sources_outcome(&[(stem, src)], target, None)
 }
 
-/// The analysis a Native compilation of `sources` (`(stem, text)`) starts from: the semantic
-/// platform and language settings every Native test compiles with, and the file stems in order.
-/// `None` when this build has no stdlib to analyze against.
-pub fn native_analysis(
-    sources: &[(&str, &str)],
-    diags: &mut krusty::diag::DiagSink,
-) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
-    analyze_natively(sources, &[], false, diags)
+/// Native's stdlib includes its `kotlin.test` declarations and bodies. Extra dependencies are
+/// selected KLIBs too; JVM jars and the JDK cannot authenticate Native declaration identities.
+pub(crate) fn native_library_inputs(
+    libraries: &[std::path::PathBuf],
+) -> Option<Vec<KlibLibraryInput>> {
+    let stdlib = krusty::toolchain::kotlin_stdlib_klib(
+        krusty::compilation_target::CompilationTarget::Native,
+    );
+    if stdlib.is_none()
+        && (std::env::var_os("KRUSTY_REQUIRE_KLIB").is_some()
+            || std::env::var_os("KRUSTY_REQUIRE_KOTLIN_NATIVE").is_some())
+    {
+        panic!("Native tests require the selected Native stdlib KLIB");
+    }
+    Some(
+        std::iter::once(KlibLibraryInput::platform_stdlib(
+            stdlib?,
+            KlibStdlibSemantics::Native,
+        ))
+        .chain(libraries.iter().cloned().map(KlibLibraryInput::dependency))
+        .collect(),
+    )
 }
 
-pub(crate) fn analyze_natively(
+/// `src` as kotlinc-native sees a program written for the JVM oracle too: Native's stdlib declares
+/// no `kotlin.jvm.JvmInline`, so the annotation is an unresolved reference there, and a `value
+/// class` is inline without it (`krusty::conformance::prepare_test_source` expands the corpus
+/// placeholder to nothing for Native the same way).
+fn without_jvm_inline(src: &str) -> String {
+    src.replace("import kotlin.jvm.JvmInline", "")
+        .replace("@kotlin.jvm.JvmInline", "")
+        .replace("@JvmInline", "")
+}
+
+pub(crate) fn analyze_with_native_libraries(
     sources: &[(&str, &str)],
-    libraries: &[std::path::PathBuf],
+    libraries: KlibLibraries,
     plugins: bool,
     diags: &mut krusty::diag::DiagSink,
-) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
+) -> (krusty::frontend::StreamingSourceSetAnalysis, Vec<String>) {
     use krusty::source::SourceInput;
 
-    let jar = krusty::toolchain::stdlib_jar()?;
-    // Stdlib AND JDK, the same pair the JVM helpers compile against. The bridge `native/intrinsics`
-    // describes runs through here: signatures are read out of JVM artifacts until the provider is
-    // klib-based, and `kotlin.RuntimeException` is a typealias for `java.lang.RuntimeException`, so
-    // without the jimage the exception hierarchy has no declaration to resolve to. Nothing about
-    // the EMITTED program changes — it still links only against the runtime — but a cross-check
-    // whose native half cannot name what its JVM half named is a skip dressed as agreement.
-    // Stdlib, the JDK jimage AND `kotlin-test`: the three the JVM lanes compile against. Each was
-    // missing here at some point and each cost the same way — a program that cannot NAME what it
-    // uses is reported as unresolvable, which reads as the frontend's problem rather than as a
-    // gap in what this helper was given.
-    let jars = std::iter::once(jar)
-        .chain(krusty::toolchain::kotlin_test_jar())
-        .chain(libraries.iter().cloned())
-        .collect::<Vec<_>>();
-    let classpath = super::cached_classpath(&jars, Some(&jdk_modules()));
-    let platform = Box::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
-            .expect("JVM provider initialization"),
-    );
+    let prepared: Vec<String> = sources
+        .iter()
+        .map(|(_, src)| without_jvm_inline(src))
+        .collect();
     let inputs: Vec<_> = sources
         .iter()
-        .map(|(stem, src)| SourceInput::kotlin(src).with_file_stem(stem))
+        .zip(&prepared)
+        .map(|((stem, _), src)| SourceInput::kotlin(src).with_file_stem(stem))
         .collect();
     let stems: Vec<String> = sources
         .iter()
         .map(|(stem, _)| (*stem).to_string())
         .collect();
-    let mut features = krusty::features::LangFeatures::new();
+    let mut features = krusty::features::LangFeatures::from_environment();
     for (_, src) in sources {
         features.apply_source_directives(src);
     }
@@ -254,14 +264,14 @@ pub(crate) fn analyze_natively(
     // helper can get wrong.
     let target = krusty::compilation_target::CompilationTarget::Native;
     let platform = if plugins {
-        super::with_native_plugins(target, platform)
+        super::with_native_plugins(target, Box::new(libraries))
     } else {
-        krusty::frontend::PlatformProvider::new(target, platform)
+        krusty::frontend::PlatformProvider::new(target, Box::new(libraries))
     };
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, diags,
     );
-    Some((analysis, stems))
+    (analysis, stems)
 }
 
 /// Compile `sources` with the native code generator and link them into an executable image, or say
@@ -270,25 +280,38 @@ pub fn native_image(
     sources: &[(&str, &str)],
     target: krusty_native::NativeTarget,
 ) -> Result<Vec<u8>, NativeBox> {
-    let objects = native_objects(sources, target)?;
+    let (objects, imports) = compile_native_sources(sources, target)?.into_parts();
     let object_refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
-    krusty_native::link_program(&object_refs, target)
+    krusty_native::link_program_with_libraries(&object_refs, &imports, target)
         .map_err(|error| NativeBox::Failed(format!("link: {error}")))
 }
 
-/// Compile `sources` with the native code generator into one object per file, or say why there
-/// are none.
-pub fn native_objects(
+pub(crate) struct NativeCompilation {
+    objects: Vec<Vec<u8>>,
+    imports: Vec<ImportLibrary>,
+}
+
+impl NativeCompilation {
+    /// Consume the objects and imports emitted from one selected Native KLIB snapshot together.
+    pub(crate) fn into_parts(self) -> (Vec<Vec<u8>>, Vec<ImportLibrary>) {
+        (self.objects, self.imports)
+    }
+}
+
+/// Keep link facts beside emitted objects from the same selected KLIB snapshot.
+pub(crate) fn compile_native_sources(
     sources: &[(&str, &str)],
     target: krusty_native::NativeTarget,
-) -> Result<Vec<Vec<u8>>, NativeBox> {
+) -> Result<NativeCompilation, NativeBox> {
     use krusty::diag::DiagSink;
-    use krusty_native::{CraneliftBackend, Entry};
+    use krusty_native::{CraneliftBackend, Entry, NativeKlibInputs};
 
+    let inputs = native_library_inputs(&[]).ok_or(NativeBox::Unavailable)?;
+    let (libraries, imports) = NativeKlibInputs::open(&inputs, target)
+        .map_err(|error| NativeBox::Failed(format!("Native KLIB inputs: {error}")))?
+        .into_parts();
     let mut diags = DiagSink::new();
-    let Some((analysis, stems)) = native_analysis(sources, &mut diags) else {
-        return Err(NativeBox::Unavailable);
-    };
+    let (analysis, stems) = analyze_with_native_libraries(sources, libraries, false, &mut diags);
     if let Some(refusal) = diags.diags.first() {
         return Err(NativeBox::Declined(format!(
             "the frontend refused it: {}",
@@ -326,11 +349,14 @@ pub fn native_objects(
             "the backend emitted nothing".to_string(),
         ));
     }
-    Ok(artifacts
-        .into_iter()
-        .filter(|(name, _)| name.ends_with(".o"))
-        .map(|(_, object)| object)
-        .collect())
+    Ok(NativeCompilation {
+        objects: artifacts
+            .into_iter()
+            .filter(|(name, _)| name.ends_with(".o"))
+            .map(|(_, object)| object)
+            .collect(),
+        imports,
+    })
 }
 
 /// Run a linked image with `arguments` and `input` on standard input, and an empty environment.

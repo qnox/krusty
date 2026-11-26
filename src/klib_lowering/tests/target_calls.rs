@@ -199,6 +199,14 @@ pub(super) fn member_target_tree(
     if let Some(this) = &mut class.this_receiver {
         this.ty = copy_type(raw.arena, &mut arena, this.ty);
     }
+    // A generic class's header is authenticated against its declared bounds.
+    for parameter in &mut class.type_parameters {
+        parameter.supertypes = parameter
+            .supertypes
+            .iter()
+            .map(|ty| copy_type(raw.arena, &mut arena, *ty))
+            .collect();
+    }
     let class = arena.push_class(class);
     KlibIrDeclarationTree {
         arena,

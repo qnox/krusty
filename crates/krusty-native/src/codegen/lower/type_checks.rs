@@ -45,6 +45,7 @@ pub(super) fn is_runtime_constructed(file: &FileLowering<'_>, internal: TypeName
     super::super::super::intrinsics::throwable_descriptor(internal).is_some()
         || super::classifier_shapes::is_string_builder(internal)
         || super::classifier_shapes::is_pair(internal)
+        || super::classifier_shapes::is_indexed_value(internal)
         || file.standard_collection_implementation(internal).is_some()
 }
 
@@ -78,15 +79,17 @@ impl<'a> FileLowering<'a> {
         class: ClassId,
         base: &str,
     ) -> Result<(DataId, Option<String>), Unsupported> {
-        // A support unit names the descriptors of the dependency classes a source file extends,
-        // which that file's descriptors point at as their superclass's, and of the objects whose
-        // single instance it hands to other files, which may ask that instance its class.
+        // A support unit names the descriptor of every dependency class it materializes under its
+        // KLIB identity: a source file's descriptors point at it as their superclass's, and a
+        // source file asks an instance this unit made (an object's single instance, a library
+        // `Result.Failure`) its class against it.
         let named = match self.unit_kind {
             krusty::backend::CheckedIrUnitKind::Source => {
                 !self.ir.local_class_name_provenance.contains_key(&class)
             }
             krusty::backend::CheckedIrUnitKind::DependencySupport => {
-                self.exported.contains(&class) || self.exports_singleton(class)
+                self.exported.contains(&class)
+                    || self.dependency_signatures.classifier(class).is_some()
             }
         };
         if !named {
@@ -102,17 +105,6 @@ impl<'a> FileLowering<'a> {
             .declare_data(&symbol, Linkage::Hidden, false, false)
             .map_err(|error| declined!("declaring `{symbol}` ({error})"))?;
         Ok((descriptor, Some(symbol)))
-    }
-
-    /// Whether this unit exports the entry answering `class`'s single instance.
-    fn exports_singleton(&self, class: ClassId) -> bool {
-        let object = krusty::backend::instance_links::InstanceEntry::Object(
-            self.ir.classes[class as usize].fq_name_id(),
-        );
-        self.dependency_signatures
-            .instance_entries()
-            .iter()
-            .any(|(instance, _)| *instance == object)
     }
 
     /// The runtime descriptor for a represented type: a class of this file or of another file of
@@ -194,6 +186,36 @@ impl<'a> FileLowering<'a> {
                 .is_some_and(super::classifier_shapes::is_char_sequence) =>
             {
                 "kt_type_char_sequence"
+            }
+            // `Appendable` likewise: the runtime's builder points at it, so a check of a builder
+            // and of a program class that implements it asks about the one marker.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_appendable) =>
+            {
+                "kt_type_appendable"
+            }
+            // `ClosedRange` is worn by the runtime's ranges, which name this marker among their
+            // interfaces.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_closed_range) =>
+            {
+                "kt_type_closed_range"
+            }
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_closed_floating_range) =>
+            {
+                "kt_type_closed_floating_point_range"
+            }
+            // A `KClass` is the runtime's own object over `kt_type_kclass`, so a check of it asks
+            // about that descriptor rather than the dependency interface's KLIB one.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_kclass) =>
+            {
+                "kt_type_kclass"
             }
             // `EnumEntries` is sealed, so the runtime's `EnumEntriesList` is every instance there
             // is, and it names this descriptor among its interfaces.
@@ -277,7 +299,7 @@ impl<'a> FileLowering<'a> {
                     .and_then(super::super::super::intrinsics::reflection_type_descriptor)
                     .expect("just matched")
             }
-            _ => return Ok(None),
+            _ => return self.dependency_interface_descriptor(target),
         };
         self.import_data(symbol).map(Some)
     }
@@ -359,6 +381,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
     }
 
+    /// What a cast to `ty` is checked against: a type parameter is only its bound at run time.
+    fn cast_bound(ty: Ty) -> Ty {
+        match ty.non_null().kind() {
+            TyKind::TyParam(_, bound) => bound,
+            _ => ty,
+        }
+    }
+
     /// The descriptor a CAST to `ty` must be checked against, or `None` when the cast is a
     /// representation change rather than a question about an object.
     ///
@@ -373,10 +403,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // run time and exactly what kotlinc checks: `fun <T : CharSequence> f(x: Any?) = x as T`
         // rejects a non-`CharSequence` inside `f`, before the call site's own cast to the argument
         // it was given. An unbounded parameter bounds at `Any?`, where there is nothing to check.
-        let ty = match ty.non_null().kind() {
-            TyKind::TyParam(_, bound) => bound,
-            _ => ty,
-        };
+        let ty = Self::cast_bound(ty);
         let target = ty.non_null();
         if let Some(class) = target
             .obj_internal()
@@ -388,6 +415,31 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         }
         self.file.type_descriptor(target)
+    }
+
+    /// Check the erased `value` against `ty` as a cast to `ty` does, answering the value itself.
+    ///
+    /// A reference-held target the runtime names is a question about the object, so a value of
+    /// another class raises `ClassCastException` before the caller writes it. Any other target is a
+    /// representation change that the caller's own coercion realizes.
+    pub(super) fn check_erased_value(
+        &mut self,
+        value: Value,
+        ty: Ty,
+    ) -> Result<Value, Unsupported> {
+        let Some(descriptor) = self.checked_cast_target(ty)? else {
+            return Ok(value);
+        };
+        // The bound of a type parameter keeps its own nullability: `T : CharSequence?` admits null
+        // although the bare `T` does not say so.
+        let helper = if ty.is_nullable() || Self::cast_bound(ty).is_nullable() {
+            "kt_cast"
+        } else {
+            "kt_cast_non_null"
+        };
+        let descriptor = self.data_address(descriptor);
+        let checked = self.runtime_call(helper, &[any(), any()], any(), &[value, descriptor])?;
+        checked.ok_or_else(|| declined!("a `{helper}` that answers no value"))
     }
 
     /// The descriptor an `is`/`!is` operation asks the runtime about.
@@ -861,11 +913,36 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 _ => Err(declined!("this constructor of `{name}`")),
             };
         }
+        // `IndexedValue(index, value)`, the carrier the runtime builds for each step of a
+        // `withIndex` walk: a library body that constructs one reaches the same object.
+        if super::classifier_shapes::is_indexed_value(internal) {
+            return match args {
+                [index, value] => {
+                    let Some(index) = self.coerce(*index, Ty::Int)? else {
+                        return Ok(None);
+                    };
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    let value = self.reference(*value)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call(
+                        "kt_indexed_value",
+                        &[Ty::Int, any()],
+                        any(),
+                        &[index, value],
+                    )
+                }
+                _ => Err(declined!("this constructor of `{name}`")),
+            };
+        }
         // `ArrayList()`, the runtime's growable list. Declared in no file either, like `Any` and
         // the throwables above, so the runtime allocates it rather than the generator laying one
-        // out. The capacity overload is a HINT with nothing observable depending on it; a copy
-        // constructor takes a collection and declines, because sharing that collection's storage
-        // would let a write through the new list reach it.
+        // out. The capacity overload is a HINT with nothing observable depending on it. The copy
+        // constructor takes any collection and walks it into storage of the new list's own, so a
+        // later write to either list is not seen by the other.
         if self.file.standard_collection_implementation(internal)
             == Some(super::classifier_shapes::StandardCollectionImplementation::List)
         {
@@ -884,6 +961,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         any(),
                         &[capacity],
                     )
+                }
+                ([argument], Some([only])) if only.is_reference() => {
+                    let elements = self.reference(*argument)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call("kt_mutable_list_copy_of", &[any()], any(), &[elements])
                 }
                 _ => Err(declined!("this constructor of `{name}`")),
             };

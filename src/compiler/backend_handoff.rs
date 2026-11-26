@@ -31,7 +31,7 @@ pub(super) struct ModuleEmission<'a> {
     pub dispatched_classes: &'a [crate::types::TypeName],
     /// The backend appends a `CharSequence` to a `StringBuilder` through its `length` and `get`
     /// ([`crate::backend::Backend::appends_char_sequences_by_index`]).
-    pub char_sequences_by_index: bool,
+    pub appends_char_sequences_by_index: bool,
 }
 
 /// Freeze `ir`'s backend view, or report an internal error when a dependency identity the IR holds
@@ -73,7 +73,7 @@ pub(super) fn checked_ir_file<'a>(
             return None;
         }
     };
-    if module.char_sequences_by_index {
+    if module.appends_char_sequences_by_index {
         if let Some(protocol) = symbols.char_sequence_protocol() {
             if let Err(error) =
                 callables.freeze_char_sequence_protocol(protocol, symbols.semantic_platform())
@@ -219,6 +219,7 @@ pub(super) fn prepare_common_ir(
     provider: &dyn crate::libraries::SemanticPlatform,
     preparation: crate::backend::CommonIrPreparation,
     coroutine_runtime: Option<crate::ir::IrCoroutineRuntime>,
+    enum_entries_factory: Option<crate::fir::EnumEntriesFactory>,
     represented: &[crate::types::TypeName],
 ) -> Result<(), crate::backend::CommonIrPreparationError> {
     // Resolution selected the coroutine runtime declarations once; a unit whose preparation
@@ -226,13 +227,28 @@ pub(super) fn prepare_common_ir(
     if !file.ir.suspend_funs.is_empty() && file.ir.coroutine_runtime.is_none() {
         file.ir.coroutine_runtime = coroutine_runtime;
     }
+    if preparation.property_reference_values {
+        crate::backend::property_reference_values::realize(&mut file.ir);
+    }
     crate::backend::counted_loops::realize(&mut file.ir, preparation.counted_loops);
     crate::backend::enums::publish_constants(&mut file.ir, &mut file.dependency_exports);
+    let entries_factory = enum_entries_factory.map(|factory| {
+        let identity = provider
+            .external_callable(factory.function)
+            .and_then(|realization| realization.dependency_callable);
+        crate::backend::enums::EntriesFactory::bind(
+            factory,
+            identity.as_ref(),
+            &file.dependency_exports,
+        )
+    });
     crate::backend::enums::realize(
         &mut file.ir,
         preparation.enums,
+        entries_factory,
         &mut file.dependency_exports,
-    );
+    )
+    .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
     let classifiers = file.classifiers.module();
     let module_name = file.module_name;
     crate::backend::default_arguments::realize(

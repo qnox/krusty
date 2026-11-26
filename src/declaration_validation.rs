@@ -76,6 +76,29 @@ pub(crate) fn interface_property_diagnostics(property: &PropDecl) -> Vec<Declara
     }]
 }
 
+/// Declaration status that decides whether a function must have a body.
+///
+/// Abstract, external, and expect declarations are headers. A member of an expect classifier is
+/// an expect declaration too: the parser records the class in `expect_decls` and does not mark
+/// each member abstract, so the caller passes that owner status as `is_expect` before the
+/// diagnostic. FirMemberFunctionsChecker excludes the enclosing expect class the same way.
+#[derive(Clone, Copy)]
+pub(crate) struct FunctionBodyStatus {
+    pub has_body: bool,
+    pub is_abstract: bool,
+    pub is_external: bool,
+    pub is_expect: bool,
+    pub is_companion_block_member: bool,
+}
+
+pub(crate) fn function_requires_body(status: FunctionBodyStatus) -> bool {
+    !status.has_body
+        && !status.is_abstract
+        && !status.is_external
+        && !status.is_expect
+        && !status.is_companion_block_member
+}
+
 /// A `companion { … }` block member of an interface is an interface member to kotlinc: a property
 /// without a getter body is abstract there, whatever its initializer, and an abstract interface
 /// property cannot be private. Reported at the member's own `private` modifier.

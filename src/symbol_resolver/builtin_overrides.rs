@@ -155,11 +155,17 @@ pub(crate) fn represented_implementation_facts(
     name: &str,
     identity: ExternalCallableId,
 ) -> Vec<crate::fir::BuiltinImplementation> {
+    // Each class applied to its own formals, so that the member it overrides is read against
+    // them: `ArrayList<E>.get` overrides `List<E>.get`, not a `List.get` answering `Any`.
     let subtypes = classes
         .iter()
         .copied()
         .filter(|&class| is_proper_subclassifier(source, class, owner))
-        .map(Ty::obj_name)
+        .filter_map(|class| {
+            source
+                .classifier(class)
+                .map(|declaration| declaration.declared_self_type(class))
+        })
         .collect();
     implementation_facts(overrides_by(source, subtypes, owner, name, identity)).into_vec()
 }

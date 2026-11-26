@@ -280,3 +280,67 @@ fn a_companion_extension_names_its_class_and_a_companion_block_member_is_static(
         "a companion extension has no extension receiver of its own"
     );
 }
+
+#[test]
+fn a_declaration_of_a_local_class_is_mangled_after_its_enclosing_function() {
+    // The 2.4 wasm-js stdlib KLIB's `internal fun <T> createSimpleCoroutineFromSuspendFunction(
+    // completion: Continuation<T>): CoroutineImpl = object : CoroutineImpl(…) { … exception … }`
+    // reads the `protected var exception` its object inherits. kotlinc names that fake override by
+    // the hash of its mangle, which starts with the enclosing function's: the function is the third
+    // type-parameter container it meets (the property, the object, then the function).
+    let completion = Model::Class("kotlin.coroutines.Continuation", vec![Model::Parameter(0)]);
+    let create = function(
+        "createSimpleCoroutineFromSuspendFunction",
+        vec![&completion],
+        vec![unbounded(0)],
+    );
+    let package = [
+        "kotlin".to_owned(),
+        "coroutines".to_owned(),
+        "intrinsics".to_owned(),
+    ];
+    assert_eq!(
+        callable_signature(top_level(&package), &create)
+            .unwrap()
+            .member_id(),
+        Some(9_877_616_111_513_530_939)
+    );
+    let enclosing = enclosing_callable_mangled(&create, 2).unwrap();
+    assert_eq!(
+        enclosing,
+        "createSimpleCoroutineFromSuspendFunction(kotlin.coroutines.Continuation<2:0>){0§<kotlin.Any?>}"
+    );
+
+    let exception = PropertyShape {
+        name: "exception",
+        contexts: Vec::new(),
+        receiver: None,
+        type_parameters: Vec::new(),
+        expect: false,
+        placement: Placement::Ordinary,
+    };
+    let property = property_mangled(top_level(&package), &exception).unwrap();
+    let (_, getter) = accessor_mangled(top_level(&package), &exception, Accessor::Getter).unwrap();
+    assert_eq!(
+        mangled_id(&format!("{enclosing}{property}")),
+        10_674_149_335_560_932_065
+    );
+    assert_eq!(
+        mangled_id(&format!("{enclosing}{getter}")),
+        12_584_602_556_936_782_361
+    );
+    let result = PropertyShape {
+        name: "result",
+        ..exception
+    };
+    let property = property_mangled(top_level(&package), &result).unwrap();
+    let (_, getter) = accessor_mangled(top_level(&package), &result, Accessor::Getter).unwrap();
+    assert_eq!(
+        mangled_id(&format!("{enclosing}{property}")),
+        7_196_426_295_780_657_864
+    );
+    assert_eq!(
+        mangled_id(&format!("{enclosing}{getter}")),
+        10_815_387_604_584_279_588
+    );
+}

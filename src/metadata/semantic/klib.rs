@@ -69,10 +69,12 @@ fn semantic_constant(
     let mut float = None;
     let mut double = None;
     let mut string = None;
+    let mut flags = 0;
     while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "constant value")?;
         match (number, wire) {
             (1, 0) => kind = Some(cursor.varint("constant value kind")?),
+            (10, 0) => flags = cursor.varint("constant value flags")?,
             (2, 0) => {
                 let raw = cursor.varint("constant integral value")?;
                 integral = Some(((raw >> 1) as i64) ^ -((raw & 1) as i64));
@@ -87,7 +89,13 @@ fn semantic_constant(
         }
     }
     use crate::libraries::LibConst;
+    // `IS_UNSIGNED`: the value is an unsigned number of the kind's width. The producer writes it
+    // widened either way (`UInt` 2147483648 as itself, `UInt.MAX_VALUE` as -1), so only its bits
+    // of that width are the value, which `Int` carries as the JVM's constant pool would.
+    const IS_UNSIGNED: u64 = 1;
+    let unsigned = flags & IS_UNSIGNED != 0;
     Ok(match kind {
+        Some(0 | 2 | 3) if unsigned => integral.map(|value| LibConst::Int(value as i32)),
         Some(0 | 1 | 2 | 3 | 7) => integral
             .and_then(|value| i32::try_from(value).ok())
             .map(LibConst::Int),

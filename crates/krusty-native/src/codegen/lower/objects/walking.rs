@@ -19,6 +19,8 @@ pub(in super::super) struct WalkMembers {
     pub(in super::super) char_at: Option<FuncId>,
     /// Selected Collection.size getter, independent of iterator inheritance.
     pub(in super::super) collection_size: Option<FuncId>,
+    /// The table of `Map` member thunks of a class implementing `kotlin.collections.Map`.
+    pub(in super::super) map_members: Option<DataId>,
 }
 
 /// The same, as the SLOTS the declaration pass reads out of the override edges, before the thunks
@@ -65,6 +67,9 @@ impl FileLowering<'_> {
                 continue;
             }
             let slot = biased - 1;
+            if self.is_unreachable_abstract_entry(class, slot) {
+                continue;
+            }
             // What the SLOT answers, which is not what the thunk does: `next` on an
             // `Iterator<Int>` answers an unboxed machine integer and the runtime reads a
             // reference, so the conversion is the ordinary boundary one. Read from the slot
@@ -96,7 +101,7 @@ impl FileLowering<'_> {
         }
         // The indexed read takes an ARGUMENT, which is the whole of what separates it from the
         // four above: the index crosses unboxed, at the width the declaration states.
-        if slots.char_at != 0 {
+        if slots.char_at != 0 && !self.is_unreachable_abstract_entry(class, slots.char_at - 1) {
             let slot = slots.char_at - 1;
             let declared = self.walk_slot_result(class, slot)?;
             let name = format!("{base}_walk_get");
@@ -122,7 +127,18 @@ impl FileLowering<'_> {
             members.char_at = Some(thunk);
         }
         members.collection_size = self.define_collection_size(class, base)?;
+        members.map_members = self.define_map_members(class, base)?;
         Ok(members)
+    }
+
+    /// Whether the entry in `slot` of an abstract class's table is still abstract: no instance
+    /// of the class reaches it, and a concrete subclass walks its own table's entry instead.
+    fn is_unreachable_abstract_entry(&self, class: ClassId, slot: u32) -> bool {
+        self.ir.classes[class as usize].is_abstract
+            && matches!(
+                self.model.layout(class).vtable.get(slot as usize),
+                Some(Slot::Abstract)
+            )
     }
 
     /// The type the entry in `slot` takes as its ONE parameter, for the thunk that dispatches
@@ -332,8 +348,6 @@ impl FileLowering<'_> {
     /// A Collection's selected property identity, never an Iterable shape or a getter spelling.
     /// Lookup stays on the original class's table so inherited getters still dispatch virtually.
     fn collection_size_slot(&self, class: ClassId) -> Result<Option<u32>, Unsupported> {
-        use krusty::types::{ClassifierRole, CollectionKind};
-
         let mut at = Some(class);
         while let Some(owner) = at {
             let mut selected = None;
@@ -348,12 +362,7 @@ impl FileLowering<'_> {
                     edge.overridden,
                     krusty::fir::ResolvedPropertyOverrideTarget::External(_)
                 ) || edge.name != "size"
-                    || !matches!(
-                        self.classifiers.classifier(edge.overridden_owner).and_then(|fact| fact.role),
-                        Some(ClassifierRole::MappedCollection(collection))
-                            if matches!(collection.kind,
-                                CollectionKind::Collection | CollectionKind::List | CollectionKind::Set)
-                    )
+                    || !self.is_sized_collection(edge.overridden_owner)
                 {
                     continue;
                 }
@@ -375,12 +384,70 @@ impl FileLowering<'_> {
                 }
                 selected = Some(slot);
             }
+            // A class lowered from a library's serialized body overrides the property by its
+            // getter function.
+            for edge in self
+                .ir
+                .function_overrides
+                .get(&self.ir.classes[owner as usize].fq_name)
+                .into_iter()
+                .flatten()
+            {
+                let krusty::fir::ResolvedFunctionOverrideTarget::External(overridden) =
+                    edge.overridden
+                else {
+                    continue;
+                };
+                if self
+                    .callables
+                    .callable(overridden)
+                    .and_then(|fact| fact.getter_of())
+                    != Some("size")
+                    || !self.is_sized_collection(edge.overridden_owner)
+                {
+                    continue;
+                }
+                let function = edge.implementation_function.ok_or_else(|| {
+                    declined!("a Collection.size getter override without a function")
+                })?;
+                let declaration = &self.ir.functions[function as usize];
+                if edge.declared_result != Ty::Int
+                    || !declaration.params.is_empty()
+                    || declaration.ret != Ty::Int
+                {
+                    return Err("a Collection.size override with a malformed signature".into());
+                }
+                let implementation_owner = self
+                    .ir
+                    .class_id_by_name(edge.implementation_owner)
+                    .ok_or_else(|| declined!("a Collection.size getter of an unknown class"))?;
+                let key = crate::classes::function_key(self.ir, implementation_owner, function);
+                let slot = self
+                    .model
+                    .slot(class, &key)
+                    .ok_or_else(|| declined!("a selected Collection.size getter without a slot"))?;
+                if selected.is_some_and(|previous| previous != slot) {
+                    return Err("conflicting selected Collection.size getter slots".into());
+                }
+                selected = Some(slot);
+            }
             if selected.is_some() {
                 return Ok(selected);
             }
             at = self.model.layout(owner).superclass;
         }
         Ok(None)
+    }
+
+    /// Whether `owner` is `Collection`, `List` or `Set`, whose `size` the runtime reads.
+    fn is_sized_collection(&self, owner: krusty::types::TypeName) -> bool {
+        use krusty::types::{ClassifierRole, CollectionKind};
+        matches!(
+            self.classifiers.classifier(owner).and_then(|fact| fact.role),
+            Some(ClassifierRole::MappedCollection(collection))
+                if matches!(collection.kind,
+                    CollectionKind::Collection | CollectionKind::List | CollectionKind::Set)
+        )
     }
 
     fn define_collection_size(

@@ -518,6 +518,9 @@ fn instantiate_slot_with_input_projection(
     unbound: UnboundSpecialization,
     input_projection: &mut Option<InputProjection>,
 ) -> Ty {
+    let bindings = &*signature.map_or(std::borrow::Cow::Borrowed(bindings), |signature| {
+        super::with_intersection_upper_types(source, signature, bindings)
+    });
     if !bindings
         .values()
         .any(|binding| binding.projection_inner().is_some())
@@ -642,9 +645,8 @@ fn contains_flexible_variable(ty: Ty) -> bool {
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
         | TyKind::StarProjection(inner) => contains_flexible_variable(inner),
-        TyKind::Obj(_, arguments) | TyKind::Intersection(arguments) => {
-            arguments.iter().copied().any(contains_flexible_variable)
-        }
+        TyKind::Obj(_, arguments) => arguments.iter().copied().any(contains_flexible_variable),
+        TyKind::Intersection(parts) => parts.iter().copied().any(contains_flexible_variable),
         TyKind::Fun(signature) => {
             signature
                 .params

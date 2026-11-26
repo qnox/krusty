@@ -5,7 +5,7 @@ of every process the build started, summed and by kind.
 usage: measure.py <metrics.json> <command>...
 
 The build's processes include the daemons it starts: Gradle's, the Kotlin compile daemon, and every
-krusty process. A daemon outlives the build that started it, so this process becomes the child
+krusty process, or Bazel's server and its workers. A daemon outlives the build that started it, so this process becomes the child
 subreaper of the build: an orphaned daemon stays a descendant, is sampled with the rest, and is
 stopped when the command exits, so the next build starts and pays for its own. Memory is the sum of
 the descendants' resident sets, sampled every 100 ms; CPU time is that of every descendant reaped.
@@ -57,9 +57,13 @@ def kind(pid):
     if not argv:
         return None
     line = ' '.join(argv)
-    if 'KotlinCompileDaemon' in line:
+    # kotlinc's compile process: Gradle's Kotlin daemon, or the worker of intellij-community's own
+    # Bazel builder (`jvm-inc-builder_deploy.jar`), which compiles its Kotlin with the embedded
+    # compiler (and its Java with javac, in the same process).
+    if 'KotlinCompileDaemon' in line or 'jvm-inc-builder' in line:
         return 'kotlin_daemon'
-    if os.path.basename(argv[0]) == 'krusty':
+    # The Bazel integration runs a copy of the binary named `krusty.bin`.
+    if os.path.basename(argv[0]) in ('krusty', 'krusty.bin'):
         return 'krusty'
     # The wrapper, the launcher, the daemon and its workers.
     if any(m in line for m in ('org.gradle.', 'gradle-wrapper', 'gradle-cli-main')):

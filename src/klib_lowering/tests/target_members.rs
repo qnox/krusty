@@ -229,3 +229,127 @@ fn klib_object_value_of_a_library_laid_out_object_declines() {
         assert_unit_is_empty(&unit);
     }
 }
+
+/// `fun a(x: List<String>): Boolean = x.isEmpty()`, where the target lays out `List` and the
+/// closure froze `List.isEmpty` as a member realized outside the unit. The member of the generic
+/// interface is read at the interface's type arguments, as a call through an emitted handle is.
+#[test]
+fn klib_target_member_of_a_generic_class_links_at_its_class_arguments() {
+    use super::demo_package::{selected_demo_module, T};
+    use crate::klib_libraries::{KlibBodyLibrary, KlibIntrinsicFacts};
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let list = libraries
+        .classifier(type_name("kotlin/collections/List"))
+        .unwrap();
+    let candidate = &list.declared_callables["isEmpty"].functions()[0];
+    let provider = libraries
+        .external_callable(candidate.callable.external_identity.unwrap())
+        .unwrap();
+    let selected = provider.klib_body_callable().unwrap();
+    assert!(
+        selected
+            .class_contract()
+            .is_some_and(|class| !class.parameters.formals.is_empty()),
+        "List is generic"
+    );
+    let (arena, function) = libraries
+        .declaration_bodies()
+        .function(selected.identity())
+        .unwrap();
+    let KlibDeclarationSignature::Public(signature) = selected.signature() else {
+        panic!("function")
+    };
+    let (records, caller_trees) = selected_demo_module(
+        "caller",
+        &[("a", &[T::ListString], T::Boolean)],
+        &["a"],
+        |_, body| {
+            let receiver = body.param(0);
+            let call = body.expr(
+                T::Boolean,
+                KlibIrExprKind::Call {
+                    access: KlibIrMemberAccess {
+                        symbol: public_symbol(KlibIrSymbolKind::Function, signature.clone()),
+                        arguments: KlibIrArguments::Flat(vec![Some(receiver)]),
+                        type_arguments: Vec::new(),
+                        origin: None,
+                    },
+                    super_qualifier: None,
+                },
+            );
+            Some(vec![body.ret(call)])
+        },
+    );
+    let bodies = KlibDeclarationBodies::from_body_libraries(vec![
+        KlibBodyLibrary::new(
+            "caller".to_owned(),
+            [selected.identity().module.clone()],
+            caller_trees,
+        ),
+        KlibBodyLibrary::new(
+            selected.identity().module.clone(),
+            [],
+            KlibIrModuleTrees::from_trees(vec![super::target_calls::member_target_tree(
+                &libraries, selected, arena, function,
+            )])
+            .unwrap(),
+        ),
+    ])
+    .unwrap();
+    let root = records["a"].klib_body_callable().unwrap();
+    let external = crate::fir::ExternalCallableId::from_raw(74);
+    let checked = super::checked_backend_klib_facts(crate::ir::CheckedKlibDependencyFacts::new(
+        crate::fx_hash::HashMap::default(),
+        super::non_overriding_edges([selected]),
+        None,
+    ));
+    let facts = KlibCalleeFacts::with_reference_declarations([root], [(external, selected)])
+        .with_checked_dependency_facts(checked.klib_dependency_facts());
+    let mut unit = DependencyBodyUnit::default();
+    unit.lower_function_with_intrinsics_and_externals(
+        root,
+        &bodies,
+        &facts,
+        KlibIntrinsicFacts::empty(),
+        &Default::default(),
+    )
+    .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    assert_eq!(
+        unit.ir().functions.len(),
+        1,
+        "the member's library body is not lowered"
+    );
+    let calls = unit
+        .ir()
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Call {
+                callee,
+                dispatch_receiver,
+                args,
+            } => Some((&**callee, *dispatch_receiver, args.len())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(
+        Callee::External {
+            target,
+            params,
+            ret,
+            ..
+        },
+        Some(_),
+        0,
+    )] = calls.as_slice()
+    else {
+        panic!("one call of the exact member at its dispatch receiver: {calls:?}")
+    };
+    assert_eq!(*target, external);
+    assert!(params.is_empty());
+    assert_eq!(*ret, Ty::Boolean);
+}

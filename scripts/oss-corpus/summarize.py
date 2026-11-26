@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Aggregates the corpus projects' results into one Markdown report and one JSON document.
 
-usage: summarize.py [--stars <stars.tsv>] [--plugins <dir>] [--json <out.json>] [--title <text>]
-                    [--previous <summary.json>] <compare.json>...
+usage: summarize.py [--stars <stars.tsv>] [--expected <names.tsv>] [--results <dir>] [--plugins <dir>]
+                    [--json <out.json>] [--title <text>] [--previous <summary.json>] <compare.json>...
 
-`--stars` lists `<name>\t<stars>` per project. `--plugins` is searched for the `<name>.plugins.tsv`
+`--stars` lists `<name>\t<stars>` per project. `--expected` lists the projects the run should measure
+(`<name>\t...`); one with no comparison is reported as not measured, with the reason read from the
+logs its job uploaded under `--results` (`corpus-<name>/logs`). `--plugins` is searched for the `<name>.plugins.tsv`
 plugin surveys the reference builds wrote. `--previous` is an earlier run's summary.json, which the
 report compares this run with. The report has the per-project table, the failed tasks ranked by the
 compilations they kept from running, the reasons for every missed compilation, every error krusty's
@@ -18,6 +20,69 @@ import glob
 import json
 import os
 import re
+
+
+def read_names(path):
+    """The project names of a `<name>\t...` listing, in file order; none without a listing."""
+    if not path:
+        return []
+    with open(path) as f:
+        return [line.rstrip('\n').split('\t')[0] for line in f if line.strip()]
+
+
+def failure_reason(results, name):
+    """Why a project has no result: the first build of its job that failed, with the first line Gradle
+    gave as the cause and the HTTP status a failed download answered with, read from the logs the
+    job uploaded; or that it uploaded none."""
+    logs = os.path.join(results, f'corpus-{name}', 'logs')
+    try:
+        with open(os.path.join(logs, 'STATUS')) as f:
+            text = f.read()
+    except OSError:
+        return 'its job uploaded no logs: it stopped before a build ran, or the artifact is missing'
+    # `<name> <mode> exit <code> seconds <n>` of a build, `<name> <mode> tests exit ...` of its test
+    # build, whose log is `<name>.<mode>.tests.log`.
+    records = re.findall(r'^\S+ (\S+)( tests)? exit (\d+) seconds (\d+)$', text, re.MULTILINE)
+    failed = next(((mode, tests, code_, secs) for mode, tests, code_, secs in records if code_ != '0'), None)
+    if failed is None:
+        return 'every build exited 0 but the job wrote no comparison'
+    mode, tests, code_, secs = failed
+    reason = f"the {mode}{tests} build exited {code_} after {secs} s"
+    try:
+        with open(os.path.join(logs, f'{name}.{mode}{tests.replace(" ", ".")}.log'), errors='replace') as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return reason + ' and left no log'
+    for i, line in enumerate(lines):
+        if line.startswith('* What went wrong:'):
+            cause = next((l.strip() for l in lines[i + 1:] if l.strip()), '')
+            if cause:
+                reason += f': {cause}'
+            break
+    status = next((m.group(1) for l in lines for m in [re.search(r'Received status code (\d+)', l)] if m), None)
+    if status:
+        reason += f' (a download answered HTTP {status})'
+    return reason
+
+
+def not_measured(expected, projects, results):
+    """Every project the corpus lists that produced no comparison, with why."""
+    measured = {p['name'] for p in projects}
+    return [dict(name=name, reason=failure_reason(results, name))
+            for name in sorted(set(expected) - measured, key=str.lower)]
+
+
+def not_measured_section(missing):
+    """The projects with no result, so none is absent without a reason."""
+    if not missing:
+        return []
+    out = ['', '## Not measured', '',
+           'These projects are in the corpus but produced no comparison in this run, so they have no row above:',
+           '', '| Project | Why |', '| --- | --- |']
+    for entry in missing:
+        reason = entry['reason'].replace('|', '\\|')
+        out.append(f"| {entry['name']} | {reason} |")
+    return out
 
 
 def read_stars(path):
@@ -157,8 +222,8 @@ def roots_section(projects):
            '| Project | Failed task | First error | Compilations it kept from running |',
            '| --- | --- | --- | ---: |']
     for name, root in ranked:
-        error = code(root['error']).replace('|', '\\|') + ' ' if root['error'] else ''
-        out.append(f"| {name} | {code(root['task'])} | {error}| {root['blocked']} |")
+        error = code(root['error']).replace('|', '\\|') if root['error'] else 'no error recorded'
+        out.append(f"| {name} | {code(root['task'])} | {error} | {root['blocked']} |")
     return out
 
 
@@ -289,7 +354,7 @@ def measured_cell(project):
     """`2026-10-25, krusty 4dd7475` linked to the run, from the `measured` record publishing adds."""
     m = project.get('measured')
     if not m:
-        return ''
+        return 'not recorded'
     text = f"{m['date']}, krusty {m['commit'][:7]}"
     return f"[{text}]({m['run']})" if m.get('run') else text
 
@@ -341,8 +406,9 @@ def cost_section(projects):
             totals['krusty', key] += r[key]
     total = {key: pair(totals['kotlinc', key], totals['krusty', key], seconds, key == 'built_compile_seconds')
              for key in ('built_compile_seconds', 'compile_seconds', 'wall_seconds', 'cpu_seconds')}
-    out.append(f"| **Total** | **{total['built_compile_seconds']}** | **{total['compile_seconds']}** | | | "
-               f"**{total['wall_seconds']}** | **{total['cpu_seconds']}** |")
+    out += ['', f"**Total** over {counted(len(measured), 'project')}: compile time of the compilations krusty built "
+                f"{total['built_compile_seconds']}, of all compilations {total['compile_seconds']}, "
+                f"build wall time {total['wall_seconds']}, build CPU time {total['cpu_seconds']}."]
     return out
 
 
@@ -373,11 +439,12 @@ def test_section(projects):
            'Each project\'s own JVM tests run after each build, on the classes it compiled. Only a test that passed on',
            'kotlinc\'s classes is compared. A test task runs on *krusty\'s classes only* when krusty built every',
            'compilation it runs; the other tasks also run classes kotlinc compiled.',
-           '',
-           '| Project | Test builds (kotlinc / krusty exit) | Passing on krusty\'s classes, all tasks | Fail | Skipped |'
-           ' Not run | Passing, tasks on krusty\'s classes only |',
-           '| --- | --- | ---: | ---: | ---: | ---: | ---: |']
+           '']
     totals = {scope: collections.Counter() for scope in ('total', 'krusty_classes')}
+    if tested:
+        out += ['| Project | Test builds (kotlinc / krusty exit) | Passing on krusty\'s classes, all tasks | Fail | Skipped |'
+                ' Not run | Passing, tasks on krusty\'s classes only |',
+                '| --- | --- | ---: | ---: | ---: | ---: | ---: |']
     for p in tested:
         t, own = p['tests']['total'], p['tests']['krusty_classes']
         exits = p['tests']['exit']
@@ -386,14 +453,19 @@ def test_section(projects):
                    f"{passing(own)} in {own['tasks']} / {t['tasks']} tasks |")
         for scope in totals:
             totals[scope].update(p['tests'][scope])
-    for p in unavailable:
-        reasons = '; '.join(f'the {mode} test build {why}' for mode, entry in p['tests']['unavailable'].items()
-                            for why in unavailable_reasons(entry))
-        out.append(f"| {p['name']} | {p['tests']['exit'].get('kotlinc')} / {p['tests']['exit'].get('krusty')} | "
-                   f"unavailable: {reasons} | | | | |")
     t, own = totals['total'], totals['krusty_classes']
-    out.append(f"| **Total** | | **{passing(t)}** | **{t['failed']:,}** | **{t['skipped']:,}** | "
-               f"**{t['not_run']:,}** | **{passing(own)} in {own['tasks']} / {t['tasks']} tasks** |")
+    if tested:
+        out += ['', f"**Total** over {counted(len(tested), 'project')}: {passing(t)} passing on krusty's classes, "
+                    f"{t['failed']:,} failing, {t['skipped']:,} skipped, {t['not_run']:,} not run; "
+                    f"{passing(own)} in {own['tasks']} / {t['tasks']} tasks on krusty's classes only."]
+    if unavailable:
+        out += ([''] if tested else []) + [
+            'Tests not compared, each with the reason its test builds cannot be compared:', '']
+        for p in unavailable:
+            reasons = '; '.join(f'the {mode} test build {why}' for mode, entry in p['tests']['unavailable'].items()
+                                for why in unavailable_reasons(entry))
+            exits = p['tests']['exit']
+            out.append(f"- **{p['name']}** (test builds {exits.get('kotlinc')} / {exits.get('krusty')}): {reasons}")
     lost = [(p['name'], task) for p in tested for task in p['tests']['tasks'] if task['not_passing']]
     if lost:
         out += ['', 'First tests that pass on kotlinc\'s classes and not on krusty\'s:', '']
@@ -430,7 +502,7 @@ def hotspot_section(projects):
     return out
 
 
-def report(projects, stars, surveys, title, previous=None):
+def report(projects, stars, surveys, title, previous=None, not_measured=()):
     out = []
     if title:
         out += [f'# {title}', '']
@@ -443,7 +515,7 @@ def report(projects, stars, surveys, title, previous=None):
     for p in projects:
         measured = p['reference_exit'] == 0
         reference = 'ok' if measured else f"failed (exit {p['reference_exit']})"
-        star = f"{stars[p['name']]:,}" if p['name'] in stars else ''
+        star = f"{stars[p['name']]:,}" if p['name'] in stars else 'not fetched'
         out.append(f"| {p['name']} | {star} | {p['loc']['kotlin']:,} | {p['loc']['java']:,} | {reference} | "
                    f"{p['built']} / {p['compilations']} | {p['identical']:,} / {p['classes']:,}"
                    f"{share(p['identical'], p['classes'])} |" + (f" {measured_cell(p)} |" if dated else ''))
@@ -452,8 +524,9 @@ def report(projects, stars, surveys, title, previous=None):
             compilations += p['compilations']
             identical += p['identical']
             classes += p['classes']
-    out.append(f'| **Measured total** | | | | | **{built} / {compilations}** | '
-               f'**{identical:,} / {classes:,}{share(identical, classes)}** |' + (' |' if dated else ''))
+    out += ['', f'**Measured total:** {built} / {compilations} compilations built by krusty, '
+                f'{identical:,} / {classes:,} identical classes{share(identical, classes)}.']
+    out += not_measured_section(not_measured)
 
     out += roots_section(projects)
     out += changes_section(projects, previous)
@@ -493,13 +566,42 @@ def report(projects, stars, surveys, title, previous=None):
     return '\n'.join(out) + '\n'
 
 
+DETAILS = re.compile(r'<details><summary><b>(.*?)</b>: (.*?)</summary>.*?</details>', re.S)
+LISTED_IN_ARTIFACT = 'listed in summary.md of the summary artifact'
+
+
+def fit_to_limit(markdown, limit):
+    """The job summary page refuses more than its size limit, so the per-project listings, largest
+    first, give way to one line each that points at the complete report; whatever still does not fit
+    is cut at a section boundary."""
+    while len(markdown.encode()) > limit:
+        listings = list(DETAILS.finditer(markdown))
+        if not listings:
+            break
+        biggest = max(listings, key=lambda m: len(m.group(0).encode()))
+        line = f'- **{biggest.group(1)}**: {biggest.group(2)}; {LISTED_IN_ARTIFACT}'
+        markdown = markdown[:biggest.start()] + line + markdown[biggest.end():]
+    note = '\n\nThe rest of the report is cut here to fit the page; the complete report is in summary.md of the summary artifact.\n'
+    while len(markdown.encode()) > limit:
+        cut = markdown.rfind('\n## ', 0, len(markdown) - 1)
+        if cut < 0:
+            break
+        markdown = markdown[:cut].rstrip('\n') + note
+    return markdown
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--stars')
+    parser.add_argument('--expected', help='a `<name>\\t...` listing of every project the run should measure')
+    parser.add_argument('--results', help='the directory of the jobs\' corpus-<name> artifacts')
     parser.add_argument('--plugins')
     parser.add_argument('--json')
     parser.add_argument('--title')
     parser.add_argument('--previous', help="the previous run's summary.json")
+    parser.add_argument('--step-summary', help="also append the report, cut to fit the job summary page's size limit, to this file")
+    parser.add_argument('--step-summary-limit', type=int, default=1_000_000,
+                        help='the most bytes --step-summary receives (the page accepts 1,048,576)')
     parser.add_argument('reports', nargs='+')
     args = parser.parse_args()
     projects = []
@@ -513,10 +615,15 @@ def main():
     if args.previous:
         with open(args.previous) as f:
             previous = json.load(f)['projects']
-    print(report(projects, stars, surveys, args.title, previous), end='')
+    missing = not_measured(read_names(args.expected), projects, args.results or '')
+    text = report(projects, stars, surveys, args.title, previous, missing)
+    print(text, end='')
+    if args.step_summary:
+        with open(args.step_summary, 'a') as f:
+            f.write(fit_to_limit(text, args.step_summary_limit))
     if args.json:
         with open(args.json, 'w') as f:
-            json.dump(dict(projects=[dict(p, stars=stars.get(p['name']), misses=misses(p),
+            json.dump(dict(not_measured=missing, projects=[dict(p, stars=stars.get(p['name']), misses=misses(p),
                                           errors=[dict(cause=c, errors=[dict(error=e, compilations=t) for e, t in errors])
                                                   for c, errors in error_causes(p)],
                                           verification=verification(p), roots=roots(p),

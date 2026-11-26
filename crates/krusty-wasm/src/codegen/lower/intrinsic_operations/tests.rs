@@ -38,3 +38,11 @@ fn a_string_read_rejects_changed_parameter_result_default_or_extension_roles() {
         );
     }
 }
+
+#[test]
+fn string_plus_is_a_wasm_dependency_capability() {
+    for target in crate::WasmTarget::ALL {
+        assert!(crate::WasmBackend::new(target)
+            .realizes_dependency_intrinsic(CompilerIntrinsic::StringPlus));
+    }
+}

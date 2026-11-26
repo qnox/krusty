@@ -47,6 +47,10 @@ pub(super) struct SignedClassifier {
     /// Whether this classifier's KLIB is a friend of the current compilation.
     pub(super) internal_friend: bool,
     pub(super) constructors: Vec<SignedConstructor>,
+    /// The constructors private to the class, which its library's own bodies reach by their
+    /// serialized identity (a delegation to a private primary constructor). They name nothing in
+    /// source: only an exact dependency-identity join finds one.
+    pub(super) private_constructors: Vec<SignedConstructor>,
     /// Instance members and member extensions.
     pub(super) functions: Vec<SignedFunction>,
     pub(super) properties: Vec<SignedProperty>,
@@ -57,6 +61,14 @@ pub(super) struct SignedClassifier {
     pub(super) associated_properties: Vec<SignedProperty>,
     /// The members every enum class declares implicitly; `None` for any other class.
     pub(super) enum_members: Option<EnumClassMemberSignatures>,
+}
+
+impl SignedClassifier {
+    /// Every constructor the class declares: the published ones, then the private ones. A
+    /// position in this order names one constructor for an exact dependency-identity join.
+    pub(super) fn declared_constructors(&self) -> impl Iterator<Item = &SignedConstructor> {
+        self.constructors.iter().chain(&self.private_constructors)
+    }
 }
 
 /// Sign every class of one package fragment whose package has exactly these segments.
@@ -202,23 +214,28 @@ pub(super) fn sign_package_classes(
         // The class itself stays in place: a class nested in it still reads it as its container.
         let class = classes.get_mut(&name).expect("the class was just read");
         let mut constructors = Vec::new();
+        let mut private_constructors = Vec::new();
         for (declaration, signature) in std::mem::take(&mut class.constructors)
             .into_iter()
             .zip(constructor_signatures)
         {
-            if declaration.visibility == Visibility::Private
-                || !declared.insert((module.map(str::to_owned), signature.clone()))
-            {
+            if !declared.insert((module.map(str::to_owned), signature.clone())) {
                 continue;
             }
             let parameters = constructor_parameter_identities(&declaration)
                 .map_err(|error| unsignable(package, &format!("{local}.<init>"), error))?;
-            constructors.push(SignedConstructor {
+            let private = declaration.visibility == Visibility::Private;
+            let signed = SignedConstructor {
                 declaration,
                 signature,
                 parameters,
                 defaults: Vec::new(),
-            });
+            };
+            if private {
+                private_constructors.push(signed);
+            } else {
+                constructors.push(signed);
+            }
         }
         let mut functions = Vec::new();
         let mut associated_functions = Vec::new();
@@ -293,6 +310,7 @@ pub(super) fn sign_package_classes(
                 type_parameters,
                 internal_friend,
                 constructors,
+                private_constructors,
                 functions,
                 properties,
                 type_aliases,

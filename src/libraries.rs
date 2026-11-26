@@ -22,6 +22,7 @@ mod core_builtins;
 mod core_identities;
 mod declaration_header;
 mod declared_members;
+mod declared_result_alias;
 mod default_value;
 mod dependency_access_policy;
 mod dependency_body_contract;
@@ -41,6 +42,7 @@ mod param_flags;
 pub mod physical_parameter_plan;
 mod platform_abi;
 mod platform_contract;
+mod property_accessor_role;
 mod property_producer;
 mod provider_override;
 mod result_nullability;
@@ -67,7 +69,10 @@ pub use call_realization::{
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
 pub use class_identity::KlibClassIdentity;
-pub(crate) use classifier_application::{classifier_bindings, classifier_type_parameter_bounds};
+pub(crate) use classifier_application::{
+    application_arguments_with_star_bounds, classifier_bindings, classifier_type_parameter_bounds,
+    has_placeholder_star,
+};
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
     ConstructorCallConstraints,
@@ -85,6 +90,7 @@ pub use declared_members::{
     DeclaredConstructor, DeclaredFunction, DeclaredMembers, DeclaredParameter, DeclaredProperty,
     KotlinModality,
 };
+pub use declared_result_alias::DeclaredResultAlias;
 pub use default_value::DefaultValue;
 pub use dependency_access_policy::DependencyAccessPolicy;
 pub use dependency_body_contract::DependencyBodyFacts;
@@ -102,6 +108,7 @@ pub use platform_abi::PlatformAbi;
 pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
 };
+pub use property_accessor_role::{PropertyAccessorCandidate, PropertyAccessorRole};
 pub use property_producer::PropertyProducer;
 pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
@@ -118,8 +125,8 @@ use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName
 pub(crate) use array_factories::kotlin_array_factory_kind;
 pub(crate) use class_name_property::realize_class_name_property;
 pub use compiler_intrinsic::{
-    AtomicOperation, ClassNameKind, CompilerIntrinsic, IndicesReceiver, ListStorageConstruction,
-    ResultFailureIntrinsic,
+    AdjacentDirection, AtomicOperation, ClassNameKind, CompilerIntrinsic, IndicesReceiver,
+    ListStorageConstruction, ResultFailureIntrinsic, SurrogateHalf,
 };
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
@@ -352,6 +359,8 @@ pub struct LibraryMember {
     /// value-class pass reads this to decide the result's representation. `None` when the provider
     /// records no metadata return classifier.
     pub declared_ret: Option<Ty>,
+    /// See [`LibraryCallable::result_alias`].
+    pub result_alias: Option<DeclaredResultAlias>,
     /// See [`LibraryCallable::overridden_results`].
     pub overridden_results: Box<[Ty]>,
     /// See [`LibraryCallable::enhanced_result`].
@@ -585,6 +594,12 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
+    /// Whether a suspension point inside a `synchronized` or `withLock` block is an error on this
+    /// platform: the JVM releases a monitor only on the thread that acquired it.
+    fn rejects_suspension_in_critical_sections(&self) -> bool {
+        false
+    }
+
     /// Normalize a semantic type to the identity used when comparing source call arguments against
     /// compiled-library signatures. This is not an emit descriptor; it is a semantic compatibility key.
     /// Implementations that do not need library-name normalization return the type unchanged.
@@ -804,6 +819,7 @@ impl LibraryMember {
             default_realization: None,
             nonvirtual_realization: None,
             declared_ret: None,
+            result_alias: None,
             overridden_results: Box::new([]),
             enhanced_result: EnhancedResult::NONE,
             implicit_classifier_callable: None,
@@ -972,6 +988,10 @@ pub struct LibraryCallable {
     /// Exact language-level role of this declaration, when target realization needs more than its
     /// stable callable identity. Providers assign it at the declaration boundary.
     pub semantic_role: Option<SemanticCallRole>,
+    /// The property accessor a Java method is, when it overrides an inherited Kotlin property's
+    /// accessor. The Java provider derives the candidate properties from the method's platform
+    /// spelling; the hierarchy confirms one with a Kotlin property declaration.
+    pub property_accessor_role: Option<Box<PropertyAccessorRole>>,
     /// Exact identities of the declarations this callable overrides, as the core member hierarchy
     /// proved them while normalizing the selected family; empty for a declaration that overrides
     /// nothing or was not reached through a hierarchy walk.
@@ -1099,6 +1119,8 @@ pub struct LibraryCallable {
     /// a BOX out of the generic slot `E` and `create` the erased carrier. Only non-null declared
     /// returns are recorded; a nullable value class really is boxed.
     pub declared_ret: Option<Ty>,
+    /// The typealias the declared return type was spelled through (`fun f(): Names`).
+    pub result_alias: Option<DeclaredResultAlias>,
     /// The declared results of the declarations this suspend callable overrides, as the core member
     /// hierarchy found them, nearest first; empty for a non-suspend one. A backend decides from them
     /// how the callable's own result crosses its continuation boundary.
@@ -1779,6 +1801,7 @@ impl FunctionInfo {
         // declarations say the former hands back an unboxed carrier. Without them every consumer,
         // the operator-invoke path included, would unbox a real carrier as though it were a box.
         member.declared_ret = self.callable.declared_ret;
+        member.result_alias = self.callable.result_alias;
         member.overridden_results = self.callable.overridden_results.clone();
         member.enhanced_result = self.callable.enhanced_result.clone();
         member.signature = self.callable.signature.clone();
@@ -2085,6 +2108,16 @@ pub struct PropertyInfo {
 }
 
 impl PropertyInfo {
+    /// The getter's selected parameters in the coordinates of its generic signature: the
+    /// extension receiver removed, the context prefix kept.
+    pub fn semantic_getter_params(&self) -> Cow<'_, [Ty]> {
+        drop_extension_receiver(
+            &self.getter.params,
+            self.kind == PropKind::Extension,
+            self.context_count,
+        )
+    }
+
     /// Whether this declaration participates in property-read selection.
     pub fn readable(&self) -> bool {
         !self.deprecated_hidden && self.accessor_availability.getter

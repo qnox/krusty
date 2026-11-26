@@ -205,8 +205,10 @@ impl BodyLowering<'_> {
     }
 
     /// `read`, already lowered as `lowered` of the nullable `actual`, as a value of the non-null
-    /// `expected`, when a generated `when` proved this exact field read non-null: the conversion
-    /// checked FIR lowering places on a smart cast.
+    /// `expected`, when a generated `when` proved this exact field read non-null: the smart cast
+    /// checked FIR lowering places, to the definitely-non-null form of `actual` (`String` for
+    /// `String?`, `T & Any` for a `T` whose bound admits `null`), which is then a value of each
+    /// non-null supertype `expected` of that form.
     pub(super) fn null_proven_field(
         &mut self,
         read: KlibIrExprId,
@@ -214,18 +216,26 @@ impl BodyLowering<'_> {
         actual: Ty,
         expected: Ty,
     ) -> Option<ExprId> {
-        if expected.is_nullable() || Ty::nullable(expected) != actual {
+        let non_null = actual.definitely_non_null();
+        if expected.is_nullable() || non_null == actual {
             return None;
         }
+        let proven = non_null.canonical_semantic();
         let proof = NullProvenRead::field_read(self.arena, read)?;
-        if !self.null_proven.contains(&proof) {
+        if !self.null_proven.contains(&proof)
+            || !(super::is_value_of(proven, expected) || self.is_supertype_of(expected, proven))
+        {
             return None;
         }
         let cast = self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
             arg: lowered,
-            type_operand: expected.canonical_semantic(),
+            type_operand: proven,
         });
-        Some(self.typed(cast, expected))
+        let cast = self.typed(cast, proven);
+        if super::is_value_of(proven, expected) {
+            return Some(cast);
+        }
+        self.upcast(cast, proven, expected)
     }
 }

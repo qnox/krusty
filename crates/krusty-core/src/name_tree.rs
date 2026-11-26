@@ -1,0 +1,1314 @@
+use crate::fx_hash::FxHasher;
+
+use std::cell::UnsafeCell;
+use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+pub struct NameId(pub(crate) u32);
+
+impl NameId {
+    /// Read-only position of this node in its tree. Turning an index back into an id goes through
+    /// [`NameTree::id_at`], which checks it against the nodes the tree has published.
+    pub fn index(self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Debug)]
+struct NameNode {
+    parent: Option<NameId>,
+    sep: u8,
+    segment: std::sync::Arc<str>,
+    /// Exact classifier owner supplied by [`NameTree::nested_child_of`], encoded as `id + 1` (zero
+    /// means the node was not created through an explicit nested relation). Kept separate from the
+    /// textual cache below: a flattened spelling such as `Outer$$serializer` is ambiguous, while the
+    /// construction operation is not.
+    exact_nested_owner: AtomicU32,
+    /// Lookup of a classifier owner inferred from this node's final segment. A successful lookup is
+    /// stored as `id + 1`, zero means not yet resolved, and [`NO_NESTED_OWNER`] means the segment has
+    /// no known textual relation. A separator whose owner is not interned remains uncached: another
+    /// thread may intern it later.
+    nested_owner: AtomicU32,
+}
+
+const NO_NESTED_OWNER: u32 = u32::MAX;
+
+impl Clone for NameNode {
+    fn clone(&self) -> Self {
+        Self {
+            parent: self.parent,
+            sep: self.sep,
+            segment: self.segment.clone(),
+            exact_nested_owner: AtomicU32::new(self.exact_nested_owner.load(Ordering::Relaxed)),
+            nested_owner: AtomicU32::new(self.nested_owner.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+/// Chunked append-only node storage. A node is written exactly once (by the single writer, before its
+/// id is published through a child-table slot or returned to the caller) and never moves — chunks are
+/// allocated up front per size class, so readers index without any lock or reallocation hazard.
+const BASE_LOG2: u32 = 6;
+const BASE: u32 = 1 << BASE_LOG2; // chunk 0 holds 64 nodes; chunk k holds 64 << k
+const CHUNKS: usize = 26; // total capacity 64 * (2^26 - 1) > u32::MAX
+
+struct Chunk(Box<[UnsafeCell<MaybeUninit<NameNode>>]>);
+
+// The per-slot data is only written before the slot's id is published (release/acquire via the child
+// table or the arena len) and is immutable afterwards.
+unsafe impl Sync for Chunk {}
+unsafe impl Send for Chunk {}
+
+struct Arena {
+    chunks: [OnceLock<Chunk>; CHUNKS],
+    /// Number of initialized nodes. `Release`-published after the node is written; readers that index
+    /// by an id obtained from a published slot need no check at all.
+    len: AtomicU32,
+}
+
+/// chunk index + offset within the chunk for a node id.
+#[inline]
+fn locate(id: u32) -> (usize, usize) {
+    let n = (id >> BASE_LOG2) + 1;
+    let k = 31 - n.leading_zeros();
+    let start = (BASE << k) - BASE;
+    (k as usize, (id - start) as usize)
+}
+
+impl Arena {
+    fn new() -> Self {
+        Arena {
+            chunks: std::array::from_fn(|_| OnceLock::new()),
+            len: AtomicU32::new(0),
+        }
+    }
+
+    #[inline]
+    fn get(&self, id: u32) -> &NameNode {
+        let (k, off) = locate(id);
+        let chunk = self.chunks[k].get().expect("published node id has a chunk");
+        // SAFETY: `id` was published (returned from `push` / read from a table slot), so the slot was
+        // fully initialized before the publishing release store, and node slots are never mutated.
+        unsafe { (*chunk.0[off].get()).assume_init_ref() }
+    }
+
+    /// Caller must be the unique writer (holds the tree's writer lock, or has exclusive access during
+    /// construction).
+    fn push(&self, node: NameNode) -> u32 {
+        let id = self.len.load(Ordering::Relaxed);
+        assert!(id < u32::MAX, "name tree node count exceeded u32 capacity");
+        let (k, off) = locate(id);
+        let chunk = self.chunks[k].get_or_init(|| {
+            Chunk(
+                (0..(BASE << k) as usize)
+                    .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
+                    .collect(),
+            )
+        });
+        // SAFETY: single writer; slot `off` in chunk `k` is uninitialized (len == id) and unaliased.
+        unsafe { (*chunk.0[off].get()).write(node) };
+        self.len.store(id + 1, Ordering::Release);
+        id
+    }
+
+    fn len(&self) -> u32 {
+        self.len.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for Arena {
+    fn drop(&mut self) {
+        for id in 0..self.len.load(Ordering::Acquire) {
+            let (k, off) = locate(id);
+            let chunk = self.chunks[k]
+                .get_mut()
+                .expect("initialized node has a chunk");
+            // SAFETY: ids below len are initialized, dropped exactly once here.
+            unsafe { (*chunk.0[off].get()).assume_init_drop() };
+        }
+    }
+}
+
+/// Open-addressing child index: `(parent, segment) → child id`. A slot packs `(child id + 1) << 32 |
+/// hash tag` in one atomic word — zero means empty. Readers probe lock-free; the single writer (under
+/// the tree's writer lock) installs entries with a release store and grows by publishing a rehashed
+/// copy through the tree's `current` pointer (retired tables stay alive, so a reader holding the old
+/// pointer sees a valid — merely stale — subset and falls into the writer path on a miss).
+struct Table {
+    mask: usize,
+    slots: Box<[AtomicU64]>,
+}
+
+impl Table {
+    fn new(cap: usize) -> Self {
+        debug_assert!(cap.is_power_of_two());
+        Table {
+            mask: cap - 1,
+            slots: (0..cap).map(|_| AtomicU64::new(0)).collect(),
+        }
+    }
+
+    #[inline]
+    fn probe(&self, arena: &Arena, parent: NameId, segment: &str, h: u64) -> Option<NameId> {
+        let tag = h as u32;
+        let mut i = (h >> 32) as usize & self.mask;
+        loop {
+            let slot = self.slots[i].load(Ordering::Acquire);
+            if slot == 0 {
+                return None;
+            }
+            if slot as u32 == tag {
+                let id = ((slot >> 32) - 1) as u32;
+                let node = arena.get(id);
+                if node.parent == Some(parent) && &*node.segment == segment {
+                    return Some(NameId(id));
+                }
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
+
+    #[inline]
+    fn probe_nested(
+        &self,
+        arena: &Arena,
+        parent: NameId,
+        owner: &str,
+        nested: &str,
+        h: u64,
+    ) -> Option<NameId> {
+        let tag = h as u32;
+        let mut i = (h >> 32) as usize & self.mask;
+        loop {
+            let slot = self.slots[i].load(Ordering::Acquire);
+            if slot == 0 {
+                return None;
+            }
+            if slot as u32 == tag {
+                let id = ((slot >> 32) - 1) as u32;
+                let node = arena.get(id);
+                if node.parent == Some(parent) {
+                    let candidate = node.segment.as_bytes();
+                    if candidate.len() == owner.len() + nested.len() + 1
+                        && candidate.get(owner.len()) == Some(&b'$')
+                        && candidate[..owner.len()] == *owner.as_bytes()
+                        && candidate[owner.len() + 1..] == *nested.as_bytes()
+                    {
+                        return Some(NameId(id));
+                    }
+                }
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
+
+    /// Writer-only: install `child` at the first empty slot of its probe chain.
+    fn install(&self, h: u64, child: u32) {
+        let value = (u64::from(child) + 1) << 32 | u64::from(h as u32);
+        let mut i = (h >> 32) as usize & self.mask;
+        loop {
+            if self.slots[i].load(Ordering::Relaxed) == 0 {
+                self.slots[i].store(value, Ordering::Release);
+                return;
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
+}
+
+#[inline]
+fn child_hash(parent: NameId, segment: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut h = FxHasher::default();
+    h.write_u32(parent.0);
+    h.write(segment.as_bytes());
+    h.finish()
+}
+
+#[inline]
+fn child_hash_parts(parent: NameId, parts: &[&[u8]]) -> u64 {
+    use std::hash::Hasher;
+    let len = parts.iter().map(|part| part.len()).sum::<usize>();
+    let byte_at = |mut index: usize| {
+        for part in parts {
+            if index < part.len() {
+                return part[index];
+            }
+            index -= part.len();
+        }
+        unreachable!("virtual concatenation index is in bounds")
+    };
+    let mut h = FxHasher::default();
+    h.write_u32(parent.0);
+    let mut offset = 0usize;
+    while offset + 8 <= len {
+        h.write_u64(u64::from_le_bytes(std::array::from_fn(|index| {
+            byte_at(offset + index)
+        })));
+        offset += 8;
+    }
+    if offset + 4 <= len {
+        h.write_u32(u32::from_le_bytes(std::array::from_fn(|index| {
+            byte_at(offset + index)
+        })));
+        offset += 4;
+    }
+    while offset < len {
+        h.write_u8(byte_at(offset));
+        offset += 1;
+    }
+    h.finish()
+}
+
+struct WriterState {
+    /// Every table ever published, oldest first; the last is the live one. Retired tables are kept so
+    /// readers holding a stale `current` pointer stay valid. The boxes are required, not an
+    /// indirection nicety: `current` aliases a table by raw pointer, so a table must never move when
+    /// this vector reallocates.
+    #[allow(clippy::vec_box)]
+    tables: Vec<Box<Table>>,
+    /// Number of installed children (across live entries; retirement never removes entries).
+    count: usize,
+}
+
+/// A compact internal-name tree. Names are inserted as slash-separated segments and retained structures
+/// store `NameId` (`u32`) handles instead of cloning full internal-name strings. All reads — id walks
+/// (`render`, `starts_with`, …) and child probes (`get`, `existing_child_of`) — are lock-free; only a
+/// genuinely new insertion takes the writer lock.
+pub struct NameTree {
+    arena: Arena,
+    current: AtomicPtr<Table>,
+    writer: Mutex<WriterState>,
+}
+
+// SAFETY: readers only follow published data (acquire loads of table slots / the table pointer pairing
+// with the writer's release stores); all mutation is serialized by the writer lock.
+unsafe impl Sync for NameTree {}
+unsafe impl Send for NameTree {}
+
+impl Default for NameTree {
+    fn default() -> Self {
+        let arena = Arena::new();
+        arena.push(NameNode {
+            parent: None,
+            sep: 0,
+            segment: std::sync::Arc::from(""),
+            exact_nested_owner: AtomicU32::new(0),
+            nested_owner: AtomicU32::new(0),
+        });
+        let table = Box::new(Table::new(BASE as usize));
+        let current = AtomicPtr::new(&*table as *const Table as *mut Table);
+        NameTree {
+            arena,
+            current,
+            writer: Mutex::new(WriterState {
+                tables: vec![table],
+                count: 0,
+            }),
+        }
+    }
+}
+
+impl Clone for NameTree {
+    fn clone(&self) -> Self {
+        // Take one writer-consistent snapshot. Replaying every node through `child_or_insert` used
+        // to re-hash and re-probe the whole tree (and repeatedly grow its table), even though ids and
+        // table slots are already final. Package-tree base+delta composition clones a large stable
+        // name tree per source module, so that replay was a measured frontend hotspot.
+        let writer = self.writer.lock().unwrap();
+        let arena = Arena::new();
+        for id in 0..self.arena.len() {
+            arena.push(self.arena.get(id).clone());
+        }
+        // The writer lock keeps `current` and its slots stable. Only the live table is needed in the
+        // independent clone; retired tables exist solely for readers of THIS tree that may still hold
+        // their pointers.
+        let live = unsafe { &*self.current.load(Ordering::Acquire) };
+        let table = Box::new(Table {
+            mask: live.mask,
+            slots: live
+                .slots
+                .iter()
+                .map(|slot| AtomicU64::new(slot.load(Ordering::Acquire)))
+                .collect(),
+        });
+        let current = AtomicPtr::new(&*table as *const Table as *mut Table);
+        NameTree {
+            arena,
+            current,
+            writer: Mutex::new(WriterState {
+                tables: vec![table],
+                count: writer.count,
+            }),
+        }
+    }
+}
+
+impl std::fmt::Debug for NameTree {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NameTree")
+            .field("len", &self.arena.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl NameTree {
+    pub const ROOT: NameId = NameId(0);
+
+    pub fn insert(&self, internal: &str) -> NameId {
+        if internal.is_empty() {
+            return Self::ROOT;
+        }
+        let mut parent = Self::ROOT;
+        let mut sep = 0;
+        for segment in internal.split('/') {
+            parent = self.child_or_insert(parent, sep, segment);
+            sep = b'/';
+        }
+        parent
+    }
+
+    pub fn get(&self, internal: &str) -> Option<NameId> {
+        if internal.is_empty() {
+            return Some(Self::ROOT);
+        }
+        let mut parent = Self::ROOT;
+        for segment in internal.split('/') {
+            parent = self.child(parent, segment)?;
+        }
+        Some(parent)
+    }
+
+    /// One child step below `parent`; `segment` must not contain `/`.
+    pub fn child_of(&self, parent: NameId, segment: &str) -> NameId {
+        let sep = if parent == Self::ROOT { 0 } else { b'/' };
+        self.child_or_insert(parent, sep, segment)
+    }
+
+    /// Append a Kotlin/JVM nested-class segment to the current final path segment (`Outer` + `Inner`
+    /// → `Outer$Inner`) without rendering the qualified parent.
+    pub fn nested_child_of(&self, owner: NameId, nested: &str) -> NameId {
+        let owner_node = self.node(owner);
+        let parent = owner_node.parent.unwrap_or(Self::ROOT);
+        let mut segment = String::with_capacity(owner_node.segment.len() + nested.len() + 1);
+        segment.push_str(&owner_node.segment);
+        segment.push('$');
+        segment.push_str(nested);
+        let child = self.child_or_insert(parent, owner_node.sep, &segment);
+        // This call carries an exact semantic relation that the flattened JVM segment alone cannot
+        // always recover: `Outer` + `$serializer` becomes `Outer$$serializer`, whose last `$` is
+        // part of the nested simple name. Publish that relation separately from the heuristic cache.
+        let encoded = owner.0 + 1;
+        let exact = &self.node(child).exact_nested_owner;
+        let _ = exact.compare_exchange(0, encoded, Ordering::Release, Ordering::Acquire);
+        child
+    }
+
+    /// Read-only counterpart of [`Self::nested_child_of`].
+    pub fn existing_nested_child_of(&self, owner: NameId, nested: &str) -> Option<NameId> {
+        let owner_node = self.node(owner);
+        let parent = owner_node.parent?;
+        self.existing_nested_under(parent, &owner_node.segment, nested)
+    }
+
+    /// The classfile sibling `owner_segment$nested` under `parent`, without inserting it or
+    /// requiring the owner class itself to be present. `owner_segment` is the owner's final path
+    /// segment (`Outer`, `Outer$Inner`), so a flat `insert("pkg/Outer$Companion")` is found even
+    /// when `pkg/Outer` itself was never inserted.
+    pub fn existing_nested_under(
+        &self,
+        parent: NameId,
+        owner_segment: &str,
+        nested: &str,
+    ) -> Option<NameId> {
+        let h = child_hash_parts(parent, &[owner_segment.as_bytes(), b"$", nested.as_bytes()]);
+        // SAFETY: see `child_or_insert`.
+        let table = unsafe { &*self.current.load(Ordering::Acquire) };
+        table.probe_nested(&self.arena, parent, owner_segment, nested, h)
+    }
+
+    /// The already-interned child of `parent` for `segment`, without inserting.
+    pub fn existing_child_of(&self, parent: NameId, segment: &str) -> Option<NameId> {
+        self.child(parent, segment)
+    }
+
+    pub fn insert_from(&self, other: &NameTree, id: NameId) -> NameId {
+        let mut parts = Vec::new();
+        let mut cur = id;
+        while cur != Self::ROOT {
+            let node = other.node(cur);
+            parts.push((node.sep, &*node.segment));
+            cur = node.parent.expect("non-root name node has a parent");
+        }
+        let mut parent = Self::ROOT;
+        for (sep, segment) in parts.into_iter().rev() {
+            parent = self.child_or_insert(parent, sep, segment);
+        }
+        let exact = other.node(id).exact_nested_owner.load(Ordering::Acquire);
+        if exact != 0 {
+            let owner = self.insert_from(other, NameId(exact - 1));
+            let cache = &self.node(parent).exact_nested_owner;
+            let _ = cache.compare_exchange(0, owner.0 + 1, Ordering::Release, Ordering::Acquire);
+        }
+        parent
+    }
+
+    /// Map an identity from another tree when every segment already exists here. Unlike
+    /// [`Self::insert_from`], a miss returns `None` and does not mutate this tree.
+    pub fn existing_from(&self, other: &NameTree, id: NameId) -> Option<NameId> {
+        let mut parts = Vec::new();
+        let mut cur = id;
+        while cur != Self::ROOT {
+            let node = other.node(cur);
+            parts.push(&*node.segment);
+            cur = node.parent.expect("non-root name node has a parent");
+        }
+        let mut parent = Self::ROOT;
+        for segment in parts.into_iter().rev() {
+            parent = self.existing_child_of(parent, segment)?;
+        }
+        let exact = other.node(id).exact_nested_owner.load(Ordering::Acquire);
+        if exact != 0 {
+            let existing = self.node(parent).exact_nested_owner.load(Ordering::Acquire);
+            // A read-only path lookup cannot attach semantic nesting metadata to the destination.
+            // A tree populated from classfile paths may therefore have the same identity with no
+            // recorded relation. Accept that path; reject only a relation that is explicitly known
+            // to name a different owner.
+            if existing != 0 {
+                let owner = self.existing_from(other, NameId(exact - 1))?;
+                if existing != owner.0 + 1 {
+                    return None;
+                }
+            }
+        }
+        Some(parent)
+    }
+
+    pub fn render(&self, id: NameId) -> String {
+        if id == Self::ROOT {
+            return String::new();
+        }
+        let mut parts = Vec::new();
+        let mut len = 0usize;
+        let mut cur = id;
+        while cur != Self::ROOT {
+            let node = self.node(cur);
+            len += node.segment.len() + usize::from(node.sep != 0);
+            parts.push((node.sep, &*node.segment));
+            cur = node.parent.expect("non-root name node has a parent");
+        }
+        let mut out = String::with_capacity(len);
+        for (sep, segment) in parts.into_iter().rev() {
+            if sep != 0 {
+                out.push(sep as char);
+            }
+            out.push_str(segment);
+        }
+        out
+    }
+
+    /// Render a classifier for a JVM classfile constant, translating source/metadata dots only in
+    /// the classifier's final segment into JVM nested-class separators. Keeping the split here
+    /// prevents backend callers from rendering an identity and then rediscovering its name-tree
+    /// structure with string scans.
+    pub fn jvm_binary_name(&self, id: NameId) -> String {
+        if id == Self::ROOT {
+            return String::new();
+        }
+        let node = self.node(id);
+        if !node.segment.contains('.') {
+            return self.render(id);
+        }
+
+        let mut out = match node.parent {
+            Some(parent) if parent != Self::ROOT => {
+                let mut prefix = self.render(parent);
+                prefix.push(node.sep as char);
+                prefix
+            }
+            _ => String::new(),
+        };
+        out.reserve(node.segment.len());
+        out.extend(
+            node.segment
+                .chars()
+                .map(|ch| if ch == '.' { '$' } else { ch }),
+        );
+        out
+    }
+
+    /// JVM classfile spelling of a nested classifier below `owner`, without interning the child.
+    pub fn jvm_nested_binary_name(&self, owner: NameId, nested: &str) -> String {
+        let mut out = self.jvm_binary_name(owner);
+        out.reserve(nested.len() + 1);
+        out.push('$');
+        out.push_str(nested);
+        out
+    }
+
+    pub fn starts_with(&self, id: NameId, prefix: &str) -> bool {
+        if prefix.is_empty() {
+            return true;
+        }
+        let mut matched = 0usize;
+        for b in self.path_bytes(id) {
+            if matched == prefix.len() {
+                return true;
+            }
+            if prefix.as_bytes()[matched] != b {
+                return false;
+            }
+            matched += 1;
+        }
+        matched == prefix.len()
+    }
+
+    pub fn strip_prefix(&self, id: NameId, prefix: &str) -> Option<String> {
+        let prefix = prefix.as_bytes();
+        let mut matched = 0usize;
+        let mut suffix = Vec::new();
+        for b in self.path_bytes(id) {
+            if matched < prefix.len() {
+                if prefix[matched] != b {
+                    return None;
+                }
+                matched += 1;
+            } else {
+                suffix.push(b);
+            }
+        }
+        (matched == prefix.len()).then(|| {
+            String::from_utf8(suffix).expect("name-tree segments are inserted from UTF-8 strings")
+        })
+    }
+
+    pub fn unsigned_suffix_after_prefix(&self, id: NameId, prefix: &str) -> Option<usize> {
+        let prefix = prefix.as_bytes();
+        let mut matched = 0usize;
+        let mut value = None;
+        for b in self.path_bytes(id) {
+            if matched < prefix.len() {
+                if prefix[matched] != b {
+                    return None;
+                }
+                matched += 1;
+            } else if b.is_ascii_digit() {
+                let digit = usize::from(b - b'0');
+                value = Some(
+                    value
+                        .unwrap_or(0usize)
+                        .checked_mul(10)?
+                        .checked_add(digit)?,
+                );
+            } else {
+                return None;
+            }
+        }
+        (matched == prefix.len()).then_some(value).flatten()
+    }
+
+    pub fn contains(&self, id: NameId, needle: &str) -> bool {
+        if needle.is_empty() {
+            return true;
+        }
+        let n = needle.as_bytes();
+        let mut pi = vec![0usize; n.len()];
+        for i in 1..n.len() {
+            let mut j = pi[i - 1];
+            while j > 0 && n[i] != n[j] {
+                j = pi[j - 1];
+            }
+            if n[i] == n[j] {
+                j += 1;
+            }
+            pi[i] = j;
+        }
+        let mut j = 0usize;
+        for b in self.path_bytes(id) {
+            while j > 0 && b != n[j] {
+                j = pi[j - 1];
+            }
+            if b == n[j] {
+                j += 1;
+            }
+            if j == n.len() {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn qualifier_matches(&self, id: NameId, qualifier: &str) -> bool {
+        self.get(qualifier) == Some(id) || &*self.node(id).segment == qualifier
+    }
+
+    pub fn package_matches(&self, id: NameId, package: &str) -> bool {
+        let Some(parent) = self.parent(id) else {
+            return package.is_empty();
+        };
+        self.path_eq(parent, package)
+    }
+
+    pub fn package(&self, id: NameId) -> String {
+        self.parent(id)
+            .map_or_else(String::new, |parent| self.render(parent))
+    }
+
+    pub fn nested_separator_matches(&self, left: NameId, right: NameId) -> bool {
+        let (left_len, left_nested_start) = self.path_len_and_nested_start(left);
+        let (right_len, right_nested_start) = self.path_len_and_nested_start(right);
+        if left_len != right_len || left_nested_start != right_nested_start {
+            return false;
+        }
+        self.path_bytes(left)
+            .zip(self.path_bytes(right))
+            .enumerate()
+            .all(|(idx, (a, b))| {
+                a == b || (idx >= left_nested_start && matches!((a, b), (b'.' | b'$', b'.' | b'$')))
+            })
+    }
+
+    /// Compare one interned identity with a boundary spelling by walking its stored path. This does
+    /// not depend on the reverse lookup table already containing that spelling.
+    pub fn matches_path(&self, id: NameId, path: &str) -> bool {
+        if path.is_empty() {
+            return id == Self::ROOT;
+        }
+        let mut expected = path.rsplit('/');
+        let mut current = id;
+        while current != Self::ROOT {
+            let node = self.node(current);
+            if expected.next() != Some(node.segment.as_ref()) {
+                return false;
+            }
+            current = node.parent.expect("non-root name node has a parent");
+        }
+        expected.next().is_none()
+    }
+
+    /// Whether `path` is the JVM classfile spelling of `owner`'s direct nested classifier. The
+    /// comparison walks the stored namespace and final segment without rendering or interning the
+    /// candidate; source/metadata dots in the class tail compare as JVM `$` separators.
+    pub fn nested_child_matches_path(&self, owner: NameId, nested: &str, path: &str) -> bool {
+        let (namespace, candidate) = path.rsplit_once('/').unwrap_or(("", path));
+        let owner = self.node(owner);
+        let Some(parent) = owner.parent else {
+            return false;
+        };
+        if !self.matches_path(parent, namespace) {
+            return false;
+        }
+        let expected_len = owner.segment.len() + 1 + nested.len();
+        if candidate.len() != expected_len {
+            return false;
+        }
+        candidate
+            .bytes()
+            .zip(
+                owner
+                    .segment
+                    .bytes()
+                    .map(|byte| if byte == b'.' { b'$' } else { byte })
+                    .chain(std::iter::once(b'$'))
+                    .chain(
+                        nested
+                            .bytes()
+                            .map(|byte| if byte == b'.' { b'$' } else { byte }),
+                    ),
+            )
+            .all(|(actual, expected)| actual == expected)
+    }
+
+    /// Whether `candidate` is `owner` itself or a classifier nested directly or transitively in
+    /// `owner`. Nested classifier segments are flattened (`Outer$Inner$Deep`) in the final path
+    /// component, so this compares interned package and segment nodes without rendering either id.
+    pub fn same_or_nested_within(&self, candidate: NameId, owner: NameId) -> bool {
+        if candidate == owner {
+            return true;
+        }
+        let candidate = self.node(candidate);
+        let owner = self.node(owner);
+        candidate.parent == owner.parent
+            && candidate
+                .segment
+                .strip_prefix(&*owner.segment)
+                .is_some_and(|suffix| suffix.starts_with('$'))
+    }
+
+    /// The exact nesting edge published by nested-child construction, without decoding spelling.
+    pub fn exact_nested_owner(&self, nested: NameId) -> Option<NameId> {
+        let exact = self.node(nested).exact_nested_owner.load(Ordering::Acquire);
+        exact.checked_sub(1).map(NameId)
+    }
+
+    /// The immediate classifier owner encoded in the final segment (`Outer$Inner` or
+    /// `Outer.Inner` -> `Outer`). Returns an already-interned identity and never creates a spelling.
+    #[inline]
+    pub fn nested_owner(&self, nested: NameId) -> Option<NameId> {
+        let node = self.node(nested);
+        let exact = node.exact_nested_owner.load(Ordering::Acquire);
+        if exact != 0 {
+            return Some(NameId(exact - 1));
+        }
+        let cached = node.nested_owner.load(Ordering::Acquire);
+        if cached == NO_NESTED_OWNER {
+            return None;
+        }
+        if cached != 0 {
+            return Some(NameId(cached - 1));
+        }
+        let Some(split) = node.segment.rfind(['$', '.']) else {
+            // No future interning can turn this immutable segment into a nested spelling.
+            let _ = node.nested_owner.compare_exchange(
+                0,
+                NO_NESTED_OWNER,
+                Ordering::Release,
+                Ordering::Relaxed,
+            );
+            return None;
+        };
+        let owner = self.child(node.parent?, &node.segment[..split])?;
+        // `u32::MAX` is reserved for the definitive-negative sentinel. Reaching the one owner id
+        // whose +1 encoding collides with it would require more than four billion interned names;
+        // return it correctly but leave that singular result uncached.
+        if owner.0 != u32::MAX - 1 {
+            let _ = node.nested_owner.compare_exchange(
+                0,
+                owner.0 + 1,
+                Ordering::Release,
+                Ordering::Relaxed,
+            );
+        }
+        Some(owner)
+    }
+
+    /// Every already-interned classifier that could be an encoded owner of `nested`, from the
+    /// deepest textual boundary to the shallowest. This is deliberately separate from
+    /// [`Self::nested_owner`]: a generated local name such as `Outer$build$1` has no semantic owner
+    /// encoded by its last boundary, while the JVM `InnerClasses` backend may still need to compare
+    /// all textual boundaries against the exact declarations of the current file.
+    pub fn existing_nested_owners(&self, nested: NameId) -> Vec<NameId> {
+        let node = self.node(nested);
+        let Some(parent) = node.parent else {
+            return Vec::new();
+        };
+        node.segment
+            .rmatch_indices(['$', '.'])
+            .filter_map(|(split, _)| self.child(parent, &node.segment[..split]))
+            .collect()
+    }
+
+    /// The classifier segment of `candidate` relative to an already-resolved enclosing classifier.
+    /// Nested JVM segments are flattened (`Outer$Nested$Deep`), so this preserves every `$` that is
+    /// part of the source nested name without rendering either identity.
+    pub fn nested_segment_within(&self, candidate: NameId, owner: NameId) -> Option<&str> {
+        let candidate = self.node(candidate);
+        let owner = self.node(owner);
+        (candidate.parent == owner.parent)
+            .then(|| candidate.segment.strip_prefix(&*owner.segment))
+            .flatten()?
+            .strip_prefix('$')
+    }
+
+    /// Split the last JVM nesting boundary for backend emission when no enclosing classifier is
+    /// declared in the current file. The split stays in the name tree; callers receive the final
+    /// external strings rather than rendering a name and interpreting it themselves.
+    pub fn jvm_nested_parts(&self, nested: NameId) -> Option<(String, String)> {
+        let node = self.node(nested);
+        let split = node.segment.rfind('$')?;
+        let parent = node.parent?;
+        let mut outer = self.render(parent);
+        if parent != Self::ROOT {
+            outer.push('/');
+        }
+        outer.push_str(&node.segment[..split]);
+        Some((outer, node.segment[split + 1..].to_string()))
+    }
+
+    /// Lexicographic ordering of two stored paths without allocating their rendered forms.
+    pub fn path_cmp(&self, left: NameId, right: NameId) -> std::cmp::Ordering {
+        self.path_bytes(left).cmp(self.path_bytes(right))
+    }
+
+    pub fn parent(&self, id: NameId) -> Option<NameId> {
+        self.node(id).parent
+    }
+
+    pub fn segment(&self, id: NameId) -> &str {
+        &self.node(id).segment
+    }
+
+    /// Slots across every child table still retained, including ones superseded by a growth.
+    #[cfg(test)]
+    fn retained_table_slots(&self) -> usize {
+        let writer = self.writer.lock().unwrap();
+        writer.tables.iter().map(|table| table.mask + 1).sum()
+    }
+
+    /// Free child tables that growth has replaced. The live table stays.
+    ///
+    /// Requiring exclusive access prevents a probe from holding a previous table pointer while
+    /// this drops it. The jimage index calls this at the end of its single-threaded build, before
+    /// the tree is published.
+    pub fn reclaim_retired_tables(&mut self) {
+        let writer = self.writer.get_mut().unwrap();
+        if writer.tables.len() <= 1 {
+            return;
+        }
+        let live = writer.tables.pop().unwrap();
+        assert!(
+            std::ptr::eq(&*live, self.current.load(Ordering::Acquire)),
+            "the retained final table must be the published live table"
+        );
+        writer.tables.clear();
+        writer.tables.push(live);
+    }
+
+    pub fn len(&self) -> usize {
+        self.arena.len() as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.arena.len() == 0
+    }
+
+    /// The id of the node at `index`, or `None` when the tree has not published that many nodes.
+    pub fn id_at(&self, index: u32) -> Option<NameId> {
+        (index < self.arena.len()).then_some(NameId(index))
+    }
+
+    #[inline]
+    fn node(&self, id: NameId) -> &NameNode {
+        self.arena.get(id.0)
+    }
+
+    fn child_or_insert(&self, parent: NameId, sep: u8, segment: &str) -> NameId {
+        let h = child_hash(parent, segment);
+        // Lock-free fast path: probe the live table.
+        // SAFETY: `current` always points at a table owned by `writer.tables`, which never drops one
+        // while the tree is alive.
+        let table = unsafe { &*self.current.load(Ordering::Acquire) };
+        if let Some(id) = table.probe(&self.arena, parent, segment, h) {
+            return id;
+        }
+        let mut w = self.writer.lock().unwrap();
+        // Re-probe the (possibly newer) live table: another writer may have inserted this child, or
+        // grown the table, between the fast-path probe and taking the lock.
+        let mut table = unsafe { &*self.current.load(Ordering::Relaxed) };
+        if let Some(id) = table.probe(&self.arena, parent, segment, h) {
+            return id;
+        }
+        // Grow at 7/8 load, BEFORE installing, so the probe chains stay short and an empty slot always
+        // exists. The rehashed copy is fully built and then published; retired tables stay alive for
+        // readers still holding the old pointer.
+        if (w.count + 1) * 8 > (table.mask + 1) * 7 {
+            let grown = Box::new(Table::new((table.mask + 1) * 2));
+            for slot in table.slots.iter() {
+                let s = slot.load(Ordering::Relaxed);
+                if s != 0 {
+                    let id = ((s >> 32) - 1) as u32;
+                    let node = self.arena.get(id);
+                    let parent = node.parent.expect("child entries have a parent");
+                    grown.install(child_hash(parent, &node.segment), id);
+                }
+            }
+            self.current
+                .store(&*grown as *const Table as *mut Table, Ordering::Release);
+            w.tables.push(grown);
+            table = unsafe { &*self.current.load(Ordering::Relaxed) };
+        }
+        let segment: std::sync::Arc<str> = std::sync::Arc::from(segment);
+        let id = self.arena.push(NameNode {
+            parent: Some(parent),
+            sep,
+            segment,
+            exact_nested_owner: AtomicU32::new(0),
+            nested_owner: AtomicU32::new(0),
+        });
+        table.install(h, id);
+        w.count += 1;
+        NameId(id)
+    }
+
+    fn child(&self, parent: NameId, segment: &str) -> Option<NameId> {
+        let h = child_hash(parent, segment);
+        // SAFETY: see `child_or_insert`.
+        let table = unsafe { &*self.current.load(Ordering::Acquire) };
+        table.probe(&self.arena, parent, segment, h)
+    }
+
+    fn path_eq(&self, id: NameId, path: &str) -> bool {
+        let mut matched = 0usize;
+        for b in self.path_bytes(id) {
+            if matched == path.len() || path.as_bytes()[matched] != b {
+                return false;
+            }
+            matched += 1;
+        }
+        matched == path.len()
+    }
+
+    fn path_len_and_nested_start(&self, id: NameId) -> (usize, usize) {
+        let mut len = 0usize;
+        let mut nested_start = 0usize;
+        for b in self.path_bytes(id) {
+            len += 1;
+            if b == b'/' {
+                nested_start = len;
+            }
+        }
+        (len, nested_start)
+    }
+
+    fn path_bytes(&self, id: NameId) -> impl Iterator<Item = u8> + '_ {
+        let mut parts = Vec::new();
+        let mut cur = id;
+        while cur != Self::ROOT {
+            let node = self.node(cur);
+            parts.push((node.sep, node.segment.as_bytes()));
+            cur = node.parent.expect("non-root name node has a parent");
+        }
+        parts
+            .into_iter()
+            .rev()
+            .flat_map(|(sep, segment)| std::iter::once(sep).chain(segment.iter().copied()))
+            .filter(|b| *b != 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NameTree, NO_NESTED_OWNER};
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn reclaim_drops_superseded_child_tables() {
+        let mut names = NameTree::default();
+        for index in 0..200 {
+            names.insert(&format!("pkg/Class{index}"));
+        }
+        let grown = names.retained_table_slots();
+        let class0 = names.get("pkg/Class0").expect("inserted class");
+        names.reclaim_retired_tables();
+        let live = names.retained_table_slots();
+        assert!(grown > live, "superseded tables stay until reclaim");
+        assert_eq!(live.count_ones(), 1, "one live power-of-two table");
+        assert_eq!(names.get("pkg/Class0"), Some(class0));
+        assert_eq!(
+            names
+                .get("pkg/Class199")
+                .map(|id| names.render(id))
+                .as_deref(),
+            Some("pkg/Class199")
+        );
+        let extra = names.insert("pkg/Extra");
+        assert_eq!(names.render(extra), "pkg/Extra");
+        assert_eq!(names.retained_table_slots(), live);
+    }
+
+    #[test]
+    fn compares_paths_without_rendering() {
+        let names = NameTree::default();
+        let map = names.insert("kotlin/collections/Map");
+        let entry = names.insert("kotlin/collections/Map$Entry");
+
+        assert!(names.starts_with(map, "kotlin/collections/"));
+        assert!(names.starts_with(map, "kotlin/collections/Ma"));
+        assert_eq!(
+            names.strip_prefix(map, "kotlin/collections/"),
+            Some("Map".to_string())
+        );
+        assert_eq!(names.strip_prefix(map, "kotlin/List"), None);
+        let function = names.insert("kotlin/jvm/functions/Function12");
+        assert_eq!(
+            names.unsigned_suffix_after_prefix(function, "kotlin/jvm/functions/Function"),
+            Some(12)
+        );
+        assert_eq!(
+            names.unsigned_suffix_after_prefix(function, "kotlin/jvm/functions/Function12"),
+            None
+        );
+        assert_eq!(
+            names.unsigned_suffix_after_prefix(map, "kotlin/jvm/functions/Function"),
+            None
+        );
+        assert!(names.contains(map, "collections/Map"));
+        assert!(names.qualifier_matches(map, "Map"));
+        assert!(names.qualifier_matches(map, "kotlin/collections/Map"));
+        assert!(!names.qualifier_matches(map, "Entry"));
+        assert!(names.package_matches(map, "kotlin/collections"));
+        assert!(!names.package_matches(entry, "kotlin"));
+        assert_eq!(names.package(entry), "kotlin/collections");
+
+        let nested = names.insert("kotlin/collections/Map$Entry$Key");
+        let sibling = names.insert("kotlin/collections/Mapper");
+        let other_package = names.insert("other/Map$Entry");
+        let dotted = names.insert("kotlin/collections/Map.Entry");
+        assert_eq!(
+            names.path_cmp(entry, sibling),
+            std::cmp::Ordering::Less,
+            "the nested separator participates in full-path ordering"
+        );
+        assert_eq!(
+            names.path_cmp(map, other_package),
+            std::cmp::Ordering::Less,
+            "ordering compares the complete qualified path"
+        );
+        assert_eq!(names.path_cmp(nested, nested), std::cmp::Ordering::Equal);
+        let sample = [map, entry, nested, sibling, other_package, dotted];
+        for &left in &sample {
+            for &right in &sample {
+                assert_eq!(
+                    names.path_cmp(left, right),
+                    names.render(left).cmp(&names.render(right)),
+                    "tree-path ordering must preserve the deterministic rendered order"
+                );
+            }
+        }
+        assert!(names.same_or_nested_within(map, map));
+        assert!(names.same_or_nested_within(entry, map));
+        assert!(names.same_or_nested_within(nested, map));
+        assert!(!names.same_or_nested_within(sibling, map));
+        assert!(!names.same_or_nested_within(other_package, map));
+        assert_eq!(names.nested_owner(entry), Some(map));
+        assert_eq!(names.nested_owner(nested), Some(entry));
+        assert_eq!(names.nested_owner(map), None);
+        assert_eq!(
+            names.node(map).nested_owner.load(Ordering::Relaxed),
+            NO_NESTED_OWNER,
+            "a separator-free immutable segment records a definitive miss"
+        );
+
+        assert_eq!(names.nested_owner(dotted), Some(map));
+
+        let dollar_name = names.insert("kotlin/collections/Map$Nested$With$Dollars");
+        assert_eq!(names.nested_owner(dollar_name), None);
+        assert_eq!(names.existing_nested_owners(dollar_name), vec![map]);
+        assert_eq!(
+            names.nested_segment_within(dollar_name, map),
+            Some("Nested$With$Dollars")
+        );
+
+        let generated = names.nested_child_of(map, "$serializer");
+        assert_eq!(
+            names.render(generated),
+            "kotlin/collections/Map$$serializer"
+        );
+        assert_eq!(names.nested_owner(generated), Some(map));
+        assert_eq!(
+            names.nested_segment_within(generated, map),
+            Some("$serializer")
+        );
+
+        let external_nested = names.insert("external/Outer$Inner");
+        assert_eq!(
+            names.jvm_nested_parts(external_nested),
+            Some(("external/Outer".to_string(), "Inner".to_string()))
+        );
+        let metadata_nested = names.insert("metadata/Outer.Middle.Inner");
+        assert_eq!(
+            names.jvm_binary_name(metadata_nested),
+            "metadata/Outer$Middle$Inner"
+        );
+        let metadata_child = names.nested_child_of(metadata_nested, "Generated");
+        assert_eq!(
+            names.jvm_binary_name(metadata_child),
+            "metadata/Outer$Middle$Inner$Generated"
+        );
+        assert_eq!(names.jvm_binary_name(map), "kotlin/collections/Map");
+        assert_eq!(
+            names.jvm_nested_binary_name(metadata_nested, "Companion"),
+            "metadata/Outer$Middle$Inner$Companion"
+        );
+        assert!(names.nested_child_matches_path(
+            metadata_nested,
+            "Companion",
+            "metadata/Outer$Middle$Inner$Companion"
+        ));
+        assert!(!names.nested_child_matches_path(
+            metadata_nested,
+            "Other",
+            "metadata/Outer$Middle$Inner$Companion"
+        ));
+
+        let late_nested = names.insert("late/Outer$Inner");
+        assert_eq!(names.nested_owner(late_nested), None);
+        let late_owner = names.insert("late/Outer");
+        assert_eq!(names.nested_owner(late_nested), Some(late_owner));
+        assert_eq!(names.nested_owner(late_nested), Some(late_owner));
+    }
+
+    #[test]
+    fn grows_past_the_initial_table_and_chunks() {
+        let names = NameTree::default();
+        let ids: Vec<_> = (0..3000)
+            .map(|i| names.insert(&format!("pkg{}/Class{}", i % 7, i)))
+            .collect();
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(names.render(*id), format!("pkg{}/Class{}", i % 7, i));
+        }
+        let again = names.insert("pkg3/Class10");
+        assert_eq!(ids[10], again);
+    }
+
+    #[test]
+    fn clone_snapshots_identical_ids_and_isolates_growth() {
+        let names = NameTree::default();
+        let map = names.insert("kotlin/collections/Map");
+        let entry = names.insert("kotlin/collections/Map$Entry");
+        // Past a table growth, so the clone replays a grown tree.
+        let ids: Vec<_> = (0..200).map(|i| names.insert(&format!("p/C{i}"))).collect();
+
+        let copy = names.clone();
+        assert_eq!(copy.len(), names.len());
+        assert_eq!(copy.get("kotlin/collections/Map"), Some(map));
+        assert_eq!(copy.render(entry), "kotlin/collections/Map$Entry");
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(copy.render(*id), format!("p/C{i}"));
+        }
+        // The copy grows independently of the original.
+        let only_in_copy = copy.insert("copy/Only");
+        assert_eq!(copy.render(only_in_copy), "copy/Only");
+        assert_eq!(names.get("copy/Only"), None);
+    }
+
+    #[test]
+    fn insert_from_maps_ids_across_trees() {
+        let src = NameTree::default();
+        let id = src.insert("a/b/C");
+        let generated = src.nested_child_of(id, "$serializer");
+        let dst = NameTree::default();
+        dst.insert("unrelated/Name");
+        let moved = dst.insert_from(&src, id);
+        let moved_generated = dst.insert_from(&src, generated);
+        assert_eq!(dst.render(moved), "a/b/C");
+        assert_eq!(dst.render(moved_generated), "a/b/C$$serializer");
+        assert_eq!(dst.nested_owner(moved_generated), Some(moved));
+        assert_eq!(
+            dst.nested_segment_within(moved_generated, moved),
+            Some("$serializer")
+        );
+        assert_eq!(dst.existing_from(&src, generated), Some(moved_generated));
+
+        // A provider tree may index only the physical classfile path. Read-only identity mapping
+        // must not require it to have copied the global tree's supplemental nesting relation first.
+        let provider = NameTree::default();
+        let provider_generated = provider.insert("a/b/C$$serializer");
+        assert_eq!(
+            provider.existing_from(&src, generated),
+            Some(provider_generated)
+        );
+        assert_eq!(dst.insert_from(&src, NameTree::ROOT), NameTree::ROOT);
+        // Re-inserting the same source id is idempotent in the destination.
+        assert_eq!(dst.insert_from(&src, id), moved);
+    }
+
+    #[test]
+    fn existing_from_maps_only_preexisting_paths() {
+        let src = NameTree::default();
+        let present = src.insert("a/b");
+        let missing = src.insert("a/c");
+        let dst = NameTree::default();
+        let expected = dst.insert("a/b");
+        let before = dst.len();
+
+        assert_eq!(dst.existing_from(&src, present), Some(expected));
+        assert_eq!(dst.existing_from(&src, missing), None);
+        assert_eq!(
+            dst.existing_from(&src, NameTree::ROOT),
+            Some(NameTree::ROOT)
+        );
+        assert_eq!(
+            dst.len(),
+            before,
+            "read-only transfer must not insert a miss"
+        );
+    }
+
+    #[test]
+    fn flat_classfile_nested_child_matches_inserted_sibling() {
+        let names = NameTree::default();
+        let companion = names.insert("pkg/Outer$Companion");
+        let inner = names.insert("pkg/Outer$Inner$Companion");
+        let short = names.insert("A$B");
+        let long = names.insert("pkg/Abcdefghij$Companion");
+        let package = names.get("pkg").expect("package");
+        let before = names.len();
+
+        assert_eq!(
+            names.existing_nested_under(package, "Outer", "Companion"),
+            Some(companion)
+        );
+        assert_eq!(
+            names.existing_nested_under(package, "Outer$Inner", "Companion"),
+            Some(inner)
+        );
+        assert_eq!(
+            names.existing_nested_under(NameTree::ROOT, "A", "B"),
+            Some(short)
+        );
+        assert_eq!(
+            names.existing_nested_under(package, "Abcdefghij", "Companion"),
+            Some(long)
+        );
+        assert_eq!(
+            names.existing_nested_under(package, "Outer", "Missing"),
+            None
+        );
+        assert_eq!(names.len(), before, "a nested miss must not insert");
+
+        let owner = names.insert("pkg/Outer");
+        assert_eq!(
+            names.existing_nested_child_of(owner, "Companion"),
+            Some(companion)
+        );
+    }
+
+    #[test]
+    fn debug_reports_len_without_walking() {
+        let names = NameTree::default();
+        names.insert("a/b");
+        let dbg = format!("{names:?}");
+        assert!(dbg.contains("NameTree"), "{dbg}");
+        assert!(dbg.contains("len"), "{dbg}");
+    }
+
+    #[test]
+    fn concurrent_insert_and_read() {
+        let names = std::sync::Arc::new(NameTree::default());
+        let mut handles = Vec::new();
+        for t in 0..8 {
+            let names = names.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..2000 {
+                    // Half the names are shared across threads, half unique — exercises racing
+                    // insert-vs-probe on the same (parent, segment) pairs and table growth.
+                    let name = if i % 2 == 0 {
+                        format!("shared/pkg{}/Class{}", i % 5, i)
+                    } else {
+                        format!("thread{t}/pkg/Class{i}")
+                    };
+                    let id = names.insert(&name);
+                    assert_eq!(names.render(id), name);
+                    assert_eq!(names.get(&name), Some(id));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn id_at_only_yields_published_nodes() {
+        let tree = NameTree::default();
+        let published = tree.len() as u32;
+        assert_eq!(tree.id_at(published), None);
+        let a = tree.insert("p/A");
+        assert_eq!(tree.id_at(a.index()), Some(a));
+        assert_eq!(tree.id_at(tree.len() as u32), None);
+        assert_eq!(tree.id_at(u32::MAX), None);
+    }
+}

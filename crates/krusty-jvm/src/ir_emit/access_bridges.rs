@@ -94,31 +94,8 @@ fn set_bridge_locals(
     descriptor: &str,
     cw: &mut ClassWriter,
 ) {
-    let extension_receivers = ir
-        .function_parameter_identities(fid)
-        .expect("an access bridge target carries exact parameter identities")
-        .iter()
-        .map(|identity| {
-            matches!(
-                identity.role,
-                krusty::ir::IrParameterRole::ExtensionReceiver
-            )
-        })
-        .collect::<Vec<_>>();
-    let names = crate::parameter_names::function_locals(ir, fid, parameters)
+    let names = crate::parameter_names::access_bridge_locals(ir, fid, parameters)
         .expect("an access bridge target carries exact parameter identities");
-    // The accessor's own table spells an extension receiver `$this$<name>`. The bridge that
-    // forwards to it spells that same slot `$receiver`, as kotlinc's `access$` local table does.
-    let names = names
-        .into_iter()
-        .zip(extension_receivers)
-        .map(|(name, extension)| {
-            if extension {
-                Some("$receiver".to_string())
-            } else {
-                name
-            }
-        });
     let mut locals = Vec::with_capacity(parameters.len() + 1);
     let mut slot = 0u16;
     if let Some(owner) = receiver {
@@ -391,6 +368,7 @@ fn extends_target(
 /// The local-variable names of a protected property accessor's parameters: the setter's value is
 /// named as its declaration names it.
 fn protected_property_parameter_names(
+    quirks: krusty::kotlin_version::Quirks,
     property: &krusty::ir::IrModuleProperty,
     write: bool,
     accessor: &str,
@@ -400,9 +378,14 @@ fn protected_property_parameter_names(
     if write {
         let setter = property.setter_parameter.as_ref().map(std::slice::from_ref);
         names.push(setter.and_then(|identity| {
-            crate::parameter_names::resolved_local_variables(identity, &[property.ty], accessor)
-                .pop()
-                .flatten()
+            crate::parameter_names::resolved_local_variables(
+                quirks,
+                identity,
+                &[property.ty],
+                accessor,
+            )
+            .pop()
+            .flatten()
         }));
     }
     names
@@ -426,14 +409,16 @@ pub(super) fn cross_owner_member_calls(
     let mut protected = krusty::fx_hash::HashMap::default();
     let mut scan = |owner: &str,
                     caller: Option<krusty::ir::ClassId>,
-                    roots: Vec<krusty::ir::ExprId>,
+                    root: krusty::ir::ExprId,
                     export_private: bool| {
         let mut seen = krusty::fx_hash::HashSet::default();
-        let mut stack = roots;
-        while let Some(expression) = stack.pop() {
+        let mut crossinline = crate::inline_parameters::CrossinlineBodies::default();
+        let mut stack = vec![(root, export_private)];
+        while let Some((expression, export_private)) = stack.pop() {
             if !seen.insert(expression) {
                 continue;
             }
+            stack.extend(crossinline.children(ir, expression, export_private));
             // Local members carry a `FunId`; sibling-source members carry the exact stable module
             // declaration selected by FIR. Neither path reconstructs identity from owner/name. A
             // call inlined from its callee's compiled body never invokes that member, so it needs
@@ -587,15 +572,9 @@ pub(super) fn cross_owner_member_calls(
                 );
                 if local_target.is_none() {
                     let Some(callable) = ir.referenced_module_callables.get(target) else {
-                        krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                            stack.push(child)
-                        });
                         continue;
                     };
                     let Some(target_owner) = callable.owner else {
-                        krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                            stack.push(child)
-                        });
                         continue;
                     };
                     krusty::trace_compiler!(
@@ -623,9 +602,6 @@ pub(super) fn cross_owner_member_calls(
                             )
                         }
                         _ => {
-                            krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                                stack.push(child)
-                            });
                             continue;
                         }
                     };
@@ -669,15 +645,9 @@ pub(super) fn cross_owner_member_calls(
             }) = ir.module_member_accesses.get(&expression)
             {
                 let Some(property) = ir.referenced_module_properties.get(target) else {
-                    krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                        stack.push(child)
-                    });
                     continue;
                 };
                 let Some(target_owner) = property.owner else {
-                    krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                        stack.push(child)
-                    });
                     continue;
                 };
                 let visibility = if *write {
@@ -707,9 +677,6 @@ pub(super) fn cross_owner_member_calls(
                             *receiver,
                         ),
                         _ => {
-                            krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                                stack.push(child)
-                            });
                             continue;
                         }
                     };
@@ -723,8 +690,12 @@ pub(super) fn cross_owner_member_calls(
                         if *write {
                             target_parameters.push(property.ty);
                         }
-                        let parameter_names =
-                            protected_property_parameter_names(property, *write, &name);
+                        let parameter_names = protected_property_parameter_names(
+                            ir.reference.quirks(),
+                            property,
+                            *write,
+                            &name,
+                        );
                         // A `@JvmField` property has no accessor: kotlinc's bridge reads or writes
                         // the field itself and is named after the accessor with a `$p` suffix.
                         let field = crate::module_calls::instance_jvm_field_owner(property)
@@ -798,7 +769,6 @@ pub(super) fn cross_owner_member_calls(
                     }
                 }
             }
-            krusty::ir::for_each_child(&ir.exprs, expression, &mut |child| stack.push(child));
         }
     };
 
@@ -808,7 +778,7 @@ pub(super) fn cross_owner_member_calls(
             scan(
                 &owner,
                 context.class.map(|class| class as krusty::ir::ClassId),
-                vec![root],
+                root,
                 static_accessors::body_exports_private_access(ir, &exporting, root),
             );
         }

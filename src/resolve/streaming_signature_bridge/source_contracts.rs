@@ -21,7 +21,7 @@ use super::ProductionSignatureSemantics;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SourceContractCandidate {
-    declaration: crate::fir::DeclarationId,
+    pub(super) declaration: crate::fir::DeclarationId,
     source: crate::fir::SourceFileId,
     /// The first statement's callee: `contract` or a package-qualified `kotlin.contracts.contract`.
     callee: Vec<String>,

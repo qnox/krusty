@@ -4,18 +4,14 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
-use crate::fir::{
-    FirPropertyReferenceTarget, FirPropertyTarget, FirReferenceAdaptation, FirTypeSubstitution,
-    ResolvedTy,
-};
-use crate::ir::{
-    Callee, ExprId, IrCheckedArgument, IrCheckedOperation, IrCheckedSubstitution, IrConst,
-    IrDebugLocalProvenance, IrExpr, IrInlineLocalRole, IrIntrinsic, IrSamTarget,
-    IrValueClassSuspendResult,
-};
-use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty, TyKind};
+use crate::fir::FirTypeSubstitution;
+use crate::ir::{ExprId, IrConst, IrDebugLocalProvenance, IrExpr, IrInlineLocalRole};
+use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
 
 use super::BodyLowering;
+use crate::inline_expansion::{
+    mark_subtree, produce_sole_tail_return, rebase_values, specialize_inline_copy, InlineReturn,
+};
 
 mod caller_sites;
 mod converted_inline_lambda;
@@ -47,55 +43,6 @@ pub(super) fn publish_reified_anonymous_accessors(
     ir: &mut crate::ir::IrFile,
 ) -> Result<(), super::FirFileLoweringFailure> {
     escaping_anonymous::publish_accessors(ir).map_err(super::FirFileLoweringFailure::Body)
-}
-
-/// Specialize one expression copied across an inline boundary. A local delegated-property access
-/// keeps the checker-selected declaration plan: kotlinc's local-delegate helper remains the erased
-/// declaration helper and is reused (or rehomed by the JVM) across call-site substitutions.
-pub(super) fn specialize_inline_copy(
-    ir: &mut crate::ir::IrFile,
-    expression: ExprId,
-    bindings: &HashMap<String, Ty>,
-    runtime: &HashMap<String, Ty>,
-) -> Option<()> {
-    // Keep the declaration type of an unnamed, non-reified generic temporary as provenance. The
-    // copied expression itself is still specialized semantically; a backend can use the retained
-    // declaration type when choosing the temporary's physical representation.
-    let declared_temporary = match ir.expr(expression) {
-        IrExpr::Variable {
-            ty, named: false, ..
-        } => match ty.non_null().kind() {
-            TyKind::TyParam(name, _) if !runtime.contains_key(name.as_str()) => Some(*ty),
-            TyKind::DefinitelyNotNull(inner)
-                if inner
-                    .ty_param_name()
-                    .is_some_and(|name| !runtime.contains_key(name)) =>
-            {
-                Some(*ty)
-            }
-            _ => None,
-        },
-        _ => None,
-    };
-    if let Some(declared) = declared_temporary {
-        ir.record_inline_declared_type(expression, declared);
-    }
-    specialize_recorded_facts(ir, expression, bindings, runtime);
-    {
-        let expression = ir.exprs.get_mut(expression as usize)?;
-        specialize_typed_expression(expression, bindings, runtime);
-        specialize_dependency_substitutions(expression, runtime);
-    }
-    Some(())
-}
-
-/// A return an inline expansion leaves through: the `return` node, its value, and whether a nested
-/// lambda's template holds it.
-#[derive(Clone, Copy)]
-struct InlineReturn {
-    returned: ExprId,
-    value: Option<ExprId>,
-    nested: bool,
 }
 
 /// What one physical operand position of an inline expansion fills.
@@ -233,7 +180,7 @@ impl BodyLowering<'_> {
         )?;
         self.next_temporary = self.next_temporary.checked_add(locals)?;
         if cloned.values().any(|copied| {
-            lambda_splice_contract::value_indices(self.ir.expr(*copied)).contains(&SPLICED)
+            crate::inline_expansion::value_indices(self.ir.expr(*copied)).contains(&SPLICED)
         }) {
             return None;
         }
@@ -275,7 +222,7 @@ impl BodyLowering<'_> {
             {
                 return None;
             }
-            if lambda_splice_contract::value_indices(self.ir.expr(capture)).contains(&SPLICED) {
+            if crate::inline_expansion::value_indices(self.ir.expr(capture)).contains(&SPLICED) {
                 return None;
             }
         }
@@ -697,7 +644,7 @@ impl BodyLowering<'_> {
             .keys()
             .filter(|source| !protected.contains(source))
             .filter_map(|source| {
-                lambda_splice_contract::value_indices(self.ir.expr(*source))
+                crate::inline_expansion::value_indices(self.ir.expr(*source))
                     .into_iter()
                     .max()
             })
@@ -719,6 +666,32 @@ impl BodyLowering<'_> {
         // A capture temporary initialized from one of these is the lambda, even though the
         // invocation still reads the temporary.
         let mut substituted_inline_lambdas = HashSet::default();
+        // The substituted lambdas a `crossinline` parameter received. Their bodies keep that
+        // origin once spliced: kotlinc exports such a body's private access wherever it runs.
+        let crossinline_operands = {
+            let dispatch = usize::from(
+                self.ir
+                    .functions
+                    .get(function as usize)?
+                    .dispatch_receiver
+                    .is_some(),
+            );
+            let modifiers = self
+                .ir
+                .fn_params
+                .get(&function)
+                .map(|info| info.inline_modifiers.clone())
+                .unwrap_or_default();
+            (0..operands.len())
+                .map(|operand| {
+                    operand.checked_sub(dispatch).is_some_and(|parameter| {
+                        modifiers.get(parameter)
+                            == Some(&crate::types::InlineParameterModifier::Crossinline)
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut crossinline_literals = HashSet::default();
 
         // Clone order, not map order: rewriting the copies allocates locals and records returns,
         // and both orders reach the emitted code.
@@ -789,8 +762,8 @@ impl BodyLowering<'_> {
                 }
                 continue;
             }
-            if let IrExpr::GetValue(parameter) = self.ir.expr(source) {
-                if let Some(Some(lambda)) = inline_lambdas.get(*parameter as usize) {
+            if let IrExpr::GetValue(parameter) = *self.ir.expr(source) {
+                if let Some(Some(lambda)) = inline_lambdas.get(parameter as usize) {
                     let lambda = *lambda;
                     self.ir.exprs[copy as usize] = self.ir.expr(lambda).clone();
                     // The parameter read's end line is the callee's `block(this)`. The splice's
@@ -814,6 +787,9 @@ impl BodyLowering<'_> {
                         }
                     }
                     substituted_inline_lambdas.insert(copy);
+                    if crossinline_operands.get(parameter as usize) == Some(&true) {
+                        crossinline_literals.insert(copy);
+                    }
                     self.ir.unmark_inline_copy(copy);
                     self.ir.binding_read_stability.remove(&copy);
                     if let Some(ty) = self.ir.logical_type(lambda) {
@@ -987,6 +963,10 @@ impl BodyLowering<'_> {
         }
         let mut directly_spliced_implementations = HashSet::default();
         for invocation in inline_invocations {
+            let crossinline = matches!(
+                self.ir.expr(invocation),
+                IrExpr::InvokeFunction { func, .. } if crossinline_literals.contains(func)
+            );
             let consumed = match self.ir.expr(invocation) {
                 IrExpr::InvokeFunction { func, .. } => match self.ir.expr(*func) {
                     IrExpr::Lambda { impl_fn, .. } => Some((
@@ -1006,6 +986,17 @@ impl BodyLowering<'_> {
                 },
             )
             .expect("the complete declared-lambda splice list was preflighted before commit");
+            if crossinline {
+                if let IrExpr::Block {
+                    value: Some(body), ..
+                } = *self.ir.expr(invocation)
+                {
+                    let wrapper = self.ir.wrap_crossinline_body(body);
+                    if let IrExpr::Block { value, .. } = &mut self.ir.exprs[invocation as usize] {
+                        *value = Some(wrapper);
+                    }
+                }
+            }
             if let Some((implementation, body, inline_only)) = consumed {
                 // Body suppression is a commit action, not part of the splice. Restore it after
                 // each successful splice so a later decline leaves the original call executable.
@@ -1094,7 +1085,7 @@ impl BodyLowering<'_> {
         });
         let label = frame.return_label(self.next_temporary);
         for found in returns {
-            self.ir.exprs[found.returned as usize] = super::inline_returns::frame_exit(
+            self.ir.exprs[found.returned as usize] = crate::inline_expansion::frame_exit(
                 self.ir,
                 &label,
                 result_slot,
@@ -1509,60 +1500,6 @@ impl BodyLowering<'_> {
     }
 }
 
-fn mark_subtree(ir: &crate::ir::IrFile, root: ExprId, marked: &mut HashSet<ExprId>) {
-    let mut pending = vec![root];
-    while let Some(expression) = pending.pop() {
-        if !marked.insert(expression) {
-            continue;
-        }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-    }
-}
-
-fn rebase_index(
-    index: &mut u32,
-    parameter_count: u32,
-    operands: &[Option<u32>],
-    local_base: u32,
-) -> Option<()> {
-    *index = if *index < parameter_count {
-        // A parameter with no slot is one an inline lambda supplies. Every reference to it was
-        // replaced by that lambda before rebasing, so reaching one here is a reference the
-        // replacement did not see and the expansion cannot be completed.
-        operands.get(*index as usize).copied().flatten()?
-    } else {
-        local_base.checked_add(*index - parameter_count)?
-    };
-    Some(())
-}
-
-fn rebase_values(
-    expression: &mut IrExpr,
-    parameter_count: u32,
-    operands: &[Option<u32>],
-    local_base: u32,
-) -> Option<()> {
-    match expression {
-        IrExpr::GetValue(index)
-        | IrExpr::SetValue { var: index, .. }
-        | IrExpr::Variable { index, .. } => {
-            rebase_index(index, parameter_count, operands, local_base)?
-        }
-        IrExpr::Try { catches, .. } => {
-            for catch in catches {
-                rebase_index(&mut catch.var, parameter_count, operands, local_base)?;
-            }
-        }
-        IrExpr::Checked(checked_op) => {
-            if let IrCheckedOperation::RangeLoop { variable, .. } = &mut **checked_op {
-                rebase_index(variable, parameter_count, operands, local_base)?;
-            }
-        }
-        _ => {}
-    }
-    Some(())
-}
-
 /// The synthetic zero of a compiler temporary. Deferred source locals carry an explicit
 /// declaration fact in common IR instead of being recognized from their constant's shape.
 fn synthetic_temporary_default(ir: &crate::ir::IrFile, source: ExprId) -> Option<IrConst> {
@@ -1587,572 +1524,6 @@ fn synthetic_temporary_default(ir: &crate::ir::IrFile, source: ExprId) -> Option
     Some(value.clone())
 }
 
-/// `bindings` substitutes static signatures. `runtime` substitutes operations that execute at run
-/// time (`is`, `as`, `as?`, `typeOf`, `T::class`). An ordinary type parameter is in `bindings` and
-/// not in `runtime`, so a lambda copied for a reified sibling does not reify the erased parameter.
-pub(super) fn specialize_typed_expression(
-    expression: &mut IrExpr,
-    bindings: &HashMap<String, Ty>,
-    runtime: &HashMap<String, Ty>,
-) {
-    match expression {
-        IrExpr::Checked(operation) => specialize_checked_operation(operation, bindings),
-        IrExpr::CallableReference(reference) => {
-            if let crate::ir::IrCallableReferenceTarget::External {
-                receiver: Some(receiver),
-                ..
-            } = &mut reference.target
-            {
-                specialize_ty(receiver, bindings);
-            }
-            specialize_ty(&mut reference.function_type, bindings);
-            specialize_tys(&mut reference.declaration_parameters, bindings);
-            specialize_ty(&mut reference.declaration_result, bindings);
-            specialize_reference_adaptation(&mut reference.adaptation, bindings);
-        }
-        IrExpr::KClassLiteral { classifier, .. } => specialize_optional_ty(classifier, runtime),
-        IrExpr::LocalPropertyReference(reference) => {
-            specialize_ty(&mut reference.property_type, bindings)
-        }
-        IrExpr::LocalDelegateAccess(_) => {}
-        IrExpr::Call { callee, .. } => specialize_callee(callee, bindings, runtime),
-        IrExpr::TypeOp {
-            op, type_operand, ..
-        } => {
-            let declaration_generic_target = type_operand.non_null().is_ty_param();
-            specialize_ty(type_operand, runtime);
-            // `as T` is checked against T's declaration bound, so an unconstrained T initially
-            // admits null. Once an inline call fixes a reified T to a concrete non-null type, the
-            // checked operation has non-null cast semantics at that use site. An ordinary type
-            // parameter stays a type parameter: the cast remains erased.
-            if declaration_generic_target
-                && *op == crate::ir::IrTypeOp::Cast
-                && !type_operand.non_null().is_ty_param()
-                && !type_operand.is_nullable()
-            {
-                *op = crate::ir::IrTypeOp::CastNonNull;
-            }
-        }
-        IrExpr::Variable {
-            ty: type_operand, ..
-        }
-        | IrExpr::PrimitiveNeg {
-            ty: type_operand, ..
-        }
-        | IrExpr::PropertyRead {
-            ty: type_operand, ..
-        }
-        | IrExpr::PropertyWrite {
-            ty: type_operand, ..
-        }
-        | IrExpr::AbsentArgument { ty: type_operand }
-        | IrExpr::RefNew {
-            elem: type_operand, ..
-        }
-        | IrExpr::RefGet {
-            elem: type_operand, ..
-        }
-        | IrExpr::RefSet {
-            elem: type_operand, ..
-        }
-        | IrExpr::Vararg {
-            array_type: type_operand,
-            ..
-        }
-        | IrExpr::NewArray {
-            array_type: type_operand,
-            ..
-        } => specialize_ty(type_operand, bindings),
-        IrExpr::Try {
-            result: type_operand,
-            catches,
-            ..
-        } => {
-            specialize_ty(type_operand, bindings);
-            // The semantic type is the only catch fact. A reified parameter stays a parameter
-            // until this substitution; emission derives the JVM class from whatever `ty` is then.
-            for catch in catches {
-                specialize_ty(&mut catch.ty, runtime);
-            }
-        }
-        IrExpr::New {
-            ctor_params: Some(parameters),
-            ..
-        } => specialize_tys(parameters, bindings),
-        IrExpr::InvokeFunction { params, ret, .. } => {
-            specialize_tys(params, bindings);
-            specialize_ty(ret, bindings);
-        }
-        IrExpr::PluginPlaceholder { types, .. } => specialize_tys(types, bindings),
-        IrExpr::Lambda { sam: Some(sam), .. } => specialize_sam_target(sam, bindings),
-        IrExpr::Const(_)
-        | IrExpr::ClassConst { .. }
-        | IrExpr::SingletonValue { .. }
-        | IrExpr::GetValue(_)
-        | IrExpr::ForwardedSuperArgument { .. }
-        | IrExpr::SetValue { .. }
-        | IrExpr::SetFrameResult { .. }
-        | IrExpr::Return(_)
-        | IrExpr::Block { .. }
-        | IrExpr::When { .. }
-        | IrExpr::While { .. }
-        | IrExpr::Break { .. }
-        | IrExpr::Continue { .. }
-        | IrExpr::PrimitiveBinOp { .. }
-        | IrExpr::Equality { .. }
-        | IrExpr::StringConcat(_)
-        | IrExpr::EnclosingInstance { .. }
-        | IrExpr::GetField { .. }
-        | IrExpr::LateinitInitialized { .. }
-        | IrExpr::BottomValue { .. }
-        | IrExpr::SetField { .. }
-        | IrExpr::GetStatic(_)
-        | IrExpr::SetStatic { .. }
-        | IrExpr::New {
-            ctor_params: None, ..
-        }
-        | IrExpr::MethodCall { .. }
-        | IrExpr::EnumEntry { .. }
-        | IrExpr::StaticInstance { .. }
-        | IrExpr::ExternalStaticField { .. }
-        | IrExpr::EnumValues { .. }
-        | IrExpr::EnumValueOf { .. }
-        | IrExpr::EnumEntries { .. }
-        | IrExpr::EnumConstant { .. }
-        | IrExpr::EnumAllocation { .. }
-        | IrExpr::EnumEntriesList { .. }
-        | IrExpr::NoSuchEnumConstant { .. }
-        | IrExpr::EnumSwitchOrdinal { .. }
-        | IrExpr::EnumSwitchKey { .. }
-        | IrExpr::ReifiedClassMarker { .. }
-        | IrExpr::ReifiedTypeOp { .. }
-        | IrExpr::Lambda { sam: None, .. }
-        | IrExpr::UnitInstance
-        | IrExpr::CurrentContinuation
-        | IrExpr::InlineFrameMarker
-        | IrExpr::NotNullAssert { .. }
-        | IrExpr::LateinitCheck { .. }
-        | IrExpr::ExternalStaticInstance { .. }
-        | IrExpr::Throw { .. } => {}
-    }
-}
-
-pub(super) fn specialize_recorded_facts(
-    ir: &mut crate::ir::IrFile,
-    expression: ExprId,
-    bindings: &HashMap<String, Ty>,
-    runtime: &HashMap<String, Ty>,
-) {
-    if let Some(ty) = ir.logical_type_mut(expression) {
-        specialize_ty(ty, bindings);
-    }
-    if let Some(ty) = ir.physical_type_mut(expression) {
-        specialize_ty(ty, bindings);
-    }
-    for ty in [
-        ir.whens.exhaustive.get_mut(&expression),
-        ir.ext_call_source_receiver.get_mut(&expression),
-        ir.call_declared_ret.get_mut(&expression),
-        ir.suspend_calls.get_mut(&expression),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        specialize_ty(ty, bindings);
-    }
-    if let Some(parameters) = ir.call_declared_params.get_mut(&expression) {
-        specialize_tys(parameters, bindings);
-    }
-    if let Some(access) = ir.module_member_accesses.get_mut(&expression) {
-        let parameters = match access {
-            crate::ir::IrModuleMemberAccess::Callable {
-                selected_parameters,
-                ..
-            }
-            | crate::ir::IrModuleMemberAccess::Property {
-                selected_parameters,
-                ..
-            } => selected_parameters,
-        };
-        specialize_tys(parameters, bindings);
-    }
-    if let IrExpr::New {
-        declared_params: Some(parameters),
-        ..
-    } = &mut ir.exprs[expression as usize]
-    {
-        specialize_tys(parameters, bindings);
-    }
-    if let Some(substitutions) = ir.reified_call_subst.get_mut(&expression) {
-        for (_, ty) in substitutions {
-            specialize_ty(ty, runtime);
-        }
-    }
-    if let Some(construction) = ir.annotation_constructions.get_mut(&expression) {
-        for (_, ty) in &mut construction.members {
-            specialize_ty(ty, bindings);
-        }
-    }
-    if let Some(result) = ir.value_class_suspend_calls.get_mut(&expression) {
-        match result {
-            IrValueClassSuspendResult::Boxed { carrier, .. }
-            | IrValueClassSuspendResult::Carrier { carrier, .. } => {
-                specialize_ty(carrier, bindings)
-            }
-        }
-    }
-    if let Some(point) = ir.intrinsic_suspension_points.get_mut(&expression) {
-        specialize_ty(&mut point.result, bindings);
-    }
-}
-
-fn specialize_ty(ty: &mut Ty, bindings: &HashMap<String, Ty>) {
-    *ty = ty_subst_keep_unbound(*ty, bindings).canonical_semantic();
-}
-
-fn specialize_optional_ty(ty: &mut Option<Ty>, bindings: &HashMap<String, Ty>) {
-    if let Some(ty) = ty {
-        specialize_ty(ty, bindings);
-    }
-}
-
-fn specialize_tys(types: &mut [Ty], bindings: &HashMap<String, Ty>) {
-    for ty in types {
-        specialize_ty(ty, bindings);
-    }
-}
-
-fn specialize_resolved_ty(ty: &mut ResolvedTy, bindings: &HashMap<String, Ty>) {
-    *ty = ResolvedTy::new(ty_subst_keep_unbound(ty.get(), bindings).canonical_semantic())
-        .expect("inline specialization preserves resolved types");
-}
-
-fn specialize_resolved_tys(types: &mut [ResolvedTy], bindings: &HashMap<String, Ty>) {
-    for ty in types {
-        specialize_resolved_ty(ty, bindings);
-    }
-}
-
-fn specialize_checked_substitution(
-    substitution: &mut IrCheckedSubstitution,
-    bindings: &HashMap<String, Ty>,
-) {
-    specialize_ty(&mut substitution.value, bindings);
-    specialize_ty(&mut substitution.reified_runtime, bindings);
-    specialize_tys(&mut substitution.additional_bounds, bindings);
-}
-
-fn specialize_checked_argument(argument: &mut IrCheckedArgument, bindings: &HashMap<String, Ty>) {
-    if let IrCheckedArgument::Vararg { array_type, .. } = argument {
-        specialize_ty(array_type, bindings);
-    }
-}
-
-fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, Ty>) {
-    match operation {
-        IrIntrinsic::PrimitiveCompare { operand, .. }
-        | IrIntrinsic::UnsignedCompare { operand }
-        | IrIntrinsic::UnsignedToString { source: operand }
-        | IrIntrinsic::PrimitiveArrayNew { element: operand }
-        | IrIntrinsic::EnumValueOf {
-            classifier: operand,
-        }
-        | IrIntrinsic::EnumEntries {
-            classifier: operand,
-        }
-        | IrIntrinsic::GeneratedPropertyEquals { ty: operand }
-        | IrIntrinsic::Ieee754Equals { operand }
-        | IrIntrinsic::GeneratedPropertyHash { ty: operand }
-        | IrIntrinsic::GeneratedPropertyArrayToString { ty: operand }
-        | IrIntrinsic::TypeOf { ty: operand } => specialize_ty(operand, bindings),
-        IrIntrinsic::Assert { .. }
-        | IrIntrinsic::ArrayGet
-        | IrIntrinsic::ArraySet
-        | IrIntrinsic::ArraySize
-        | IrIntrinsic::StringGet
-        | IrIntrinsic::StringLength
-        | IrIntrinsic::EnumOrdinal
-        | IrIntrinsic::NullableAnyToString
-        | IrIntrinsic::CoroutineContext => {}
-    }
-}
-
-fn specialize_callee(
-    callee: &mut Callee,
-    bindings: &HashMap<String, Ty>,
-    runtime: &HashMap<String, Ty>,
-) {
-    match callee {
-        Callee::Intrinsic { operation, ret } => {
-            specialize_intrinsic(operation, runtime);
-            specialize_ty(ret, bindings);
-        }
-        Callee::CrossFile { params, ret, .. }
-        | Callee::Module { params, ret, .. }
-        | Callee::Super { params, ret, .. } => {
-            specialize_tys(params, bindings);
-            specialize_ty(ret, bindings);
-        }
-        Callee::ModuleConstructorDefaultEntry {
-            outer, params, ret, ..
-        } => {
-            specialize_tys(params, bindings);
-            specialize_ty(ret, bindings);
-            if let Some(outer) = outer {
-                specialize_ty(outer, bindings);
-            }
-        }
-        Callee::ModuleWithDefaults {
-            params,
-            ret,
-            dispatch_receiver_ty,
-            ..
-        }
-        | Callee::ModuleDefaultEntry {
-            params,
-            ret,
-            dispatch_receiver_ty,
-            ..
-        } => {
-            specialize_tys(params, bindings);
-            specialize_ty(ret, bindings);
-            if let Some(receiver) = dispatch_receiver_ty {
-                specialize_ty(receiver, bindings);
-            }
-        }
-        // The dependency's own substitutions are specialized separately, by the reified
-        // arguments alone (`specialize_dependency_substitutions`).
-        Callee::External { params, ret, .. } => {
-            specialize_tys(params, bindings);
-            specialize_ty(ret, bindings);
-        }
-        Callee::Virtual {
-            params: Some((params, ret)),
-            ..
-        } => {
-            specialize_tys(params, bindings);
-            specialize_ty(ret, bindings);
-        }
-        Callee::Local(_)
-        | Callee::LocalWithDefaults { .. }
-        | Callee::ClassStatic { .. }
-        | Callee::ClassStaticWithDefaults { .. }
-        | Callee::ClassStaticDefault { .. }
-        | Callee::LocalDefault(_)
-        | Callee::Static { .. }
-        | Callee::Virtual { params: None, .. }
-        | Callee::Special { .. } => {}
-    }
-}
-
-/// Specialize the type arguments a dependency call selected. Only these reach a dependency's
-/// reified operations, which see the reified arguments of the expanded declaration and nothing
-/// else.
-pub(super) fn specialize_dependency_substitutions(
-    expression: &mut IrExpr,
-    reified_bindings: &HashMap<String, Ty>,
-) {
-    if let IrExpr::Call {
-        callee: call_callee,
-        ..
-    } = expression
-    {
-        if let Callee::External { substitutions, .. } = &mut **call_callee {
-            for substitution in substitutions {
-                specialize_checked_substitution(substitution, reified_bindings);
-            }
-        }
-    }
-}
-
-fn specialize_sam_target(target: &mut IrSamTarget, bindings: &HashMap<String, Ty>) {
-    specialize_tys(&mut target.parameters, bindings);
-    specialize_ty(&mut target.result, bindings);
-    specialize_tys(&mut target.declared_parameters, bindings);
-    specialize_ty(&mut target.declared_result, bindings);
-    for frame in target
-        .dispatch_methods
-        .iter_mut()
-        .chain(&mut target.default_methods)
-    {
-        specialize_tys(&mut frame.parameters, bindings);
-        specialize_ty(&mut frame.result, bindings);
-    }
-}
-
-fn specialize_reference_adaptation(
-    adaptation: &mut Option<Box<FirReferenceAdaptation>>,
-    bindings: &HashMap<String, Ty>,
-) {
-    let Some(adaptation) = adaptation else {
-        return;
-    };
-    specialize_resolved_tys(&mut adaptation.parameter_types, bindings);
-    specialize_resolved_ty(&mut adaptation.result_type, bindings);
-}
-
-fn specialize_property_target(target: &mut FirPropertyTarget, bindings: &HashMap<String, Ty>) {
-    if let FirPropertyTarget::External {
-        receiver,
-        parameters,
-        result,
-        ..
-    } = target
-    {
-        if let Some(receiver) = receiver {
-            specialize_resolved_ty(receiver, bindings);
-        }
-        specialize_resolved_tys(parameters, bindings);
-        specialize_resolved_ty(result, bindings);
-    }
-}
-
-fn specialize_property_reference_target(
-    target: &mut FirPropertyReferenceTarget,
-    bindings: &HashMap<String, Ty>,
-) {
-    match target {
-        FirPropertyReferenceTarget::Module(_) => {}
-        FirPropertyReferenceTarget::SpecializedModule {
-            receiver,
-            property_type,
-            getter_inline_splice,
-            ..
-        } => {
-            if let Some(receiver) = receiver {
-                specialize_resolved_ty(receiver, bindings);
-            }
-            specialize_resolved_ty(property_type, bindings);
-            if let Some(splice) = getter_inline_splice {
-                for substitution in &mut splice.substitutions {
-                    specialize_resolved_ty(&mut substitution.value, bindings);
-                }
-            }
-        }
-        FirPropertyReferenceTarget::Classifier { property_type, .. } => {
-            specialize_resolved_ty(property_type, bindings)
-        }
-        FirPropertyReferenceTarget::External {
-            reflection_owner,
-            getter,
-            setter,
-            property_type,
-            ..
-        } => {
-            if let Some(owner) = reflection_owner {
-                specialize_resolved_ty(owner, bindings);
-            }
-            specialize_property_target(getter, bindings);
-            if let Some(setter) = setter {
-                specialize_property_target(setter, bindings);
-            }
-            specialize_resolved_ty(property_type, bindings);
-        }
-    }
-}
-
-fn specialize_checked_operation(
-    operation: &mut IrCheckedOperation,
-    bindings: &HashMap<String, Ty>,
-) {
-    match operation {
-        IrCheckedOperation::Call {
-            arguments,
-            substitutions,
-            ..
-        } => {
-            for argument in arguments {
-                specialize_checked_argument(argument, bindings);
-            }
-            for substitution in substitutions {
-                specialize_checked_substitution(substitution, bindings);
-            }
-        }
-        IrCheckedOperation::ConstructorDelegation {
-            target,
-            outer_parameter,
-            capture_arguments,
-            arguments,
-            substitutions,
-            ..
-        } => {
-            // The declared parameters name the dependency constructor's own formals, which an
-            // inline call's bindings never substitute.
-            if let crate::ir::IrCheckedConstructorTarget::External { parameters, .. } = target {
-                specialize_tys(parameters, bindings);
-            }
-            specialize_optional_ty(outer_parameter, bindings);
-            for (_, ty) in capture_arguments.iter_mut().flatten() {
-                specialize_ty(ty, bindings);
-            }
-            for argument in arguments {
-                specialize_checked_argument(argument, bindings);
-            }
-            for substitution in substitutions {
-                specialize_checked_substitution(substitution, bindings);
-            }
-        }
-        IrCheckedOperation::PropertyRead { substitutions, .. }
-        | IrCheckedOperation::PropertyWrite { substitutions, .. } => {
-            for substitution in substitutions {
-                specialize_checked_substitution(substitution, bindings);
-            }
-        }
-        IrCheckedOperation::ExternalPropertyRead {
-            parameters,
-            result,
-            substitutions,
-            source_receiver,
-            ..
-        }
-        | IrCheckedOperation::ExternalPropertyWrite {
-            parameters,
-            result,
-            substitutions,
-            source_receiver,
-            ..
-        } => {
-            specialize_tys(parameters, bindings);
-            specialize_ty(result, bindings);
-            specialize_optional_ty(source_receiver, bindings);
-            for substitution in substitutions {
-                specialize_checked_substitution(substitution, bindings);
-            }
-        }
-        IrCheckedOperation::RangeConstruction {
-            start_type,
-            end_type,
-            result,
-            ..
-        } => {
-            specialize_ty(start_type, bindings);
-            specialize_ty(end_type, bindings);
-            specialize_ty(result, bindings);
-        }
-        IrCheckedOperation::RangeContains { counter, .. }
-        | IrCheckedOperation::RangeLoop { counter, .. } => specialize_ty(counter, bindings),
-        IrCheckedOperation::IllegalProgressionStep { .. }
-        | IrCheckedOperation::AtomicField { .. }
-        | IrCheckedOperation::AtomicArrayElement { .. }
-        | IrCheckedOperation::ComparableRangeContains { .. } => {}
-        IrCheckedOperation::PropertyReference {
-            target,
-            substitutions,
-            adaptation,
-            ..
-        } => {
-            specialize_property_reference_target(target, bindings);
-            for substitution in substitutions {
-                specialize_checked_substitution(substitution, bindings);
-            }
-            specialize_reference_adaptation(adaptation, bindings);
-        }
-        IrCheckedOperation::LateinitFieldRead { .. }
-        | IrCheckedOperation::BackingFieldRead { .. }
-        | IrCheckedOperation::BackingFieldWrite { .. } => {}
-    }
-}
-
 /// The terminal Unit of a body made only of empty block scaffolding and Unit values. Such a body
 /// emits no operation of its own, unlike an ordinary Unit body whose effects restore the caller's
 /// line naturally.
@@ -2175,105 +1546,6 @@ fn unit_only_body_result(ir: &crate::ir::IrFile, root: ExprId) -> Option<ExprId>
         return None;
     };
     (matches!(ir.expr(*unit), IrExpr::UnitInstance) && is_scaffolding(ir, root)).then_some(*unit)
-}
-
-/// Rewrite `root` to PRODUCE the value of its sole rewritten return, or leave it exactly as it was.
-///
-/// The shape is PROVED before anything changes, and proving it cannot change anything: the chain of
-/// statement blocks from `root` down to `tail` is collected from a shared reference. Only once that
-/// answers does the `Unit` placeholder get allocated and the blocks rewritten. Ordering it the other
-/// way left an orphan `UnitInstance` in the arena whenever the answer turned out to be no — the
-/// block shapes were restored, but the allocation was not, so a refused optimization still shifted
-/// every expression identity after it.
-fn produce_sole_tail_return(
-    ir: &mut crate::ir::IrFile,
-    root: ExprId,
-    tail: ExprId,
-    value: Option<ExprId>,
-    result_ty: Ty,
-    close_line: Option<u32>,
-) -> bool {
-    let Some(chain) = tail_statement_block_chain(ir, root, tail) else {
-        return false;
-    };
-    let mut produced = value.unwrap_or_else(|| ir.add_expr(IrExpr::UnitInstance));
-    if result_ty == Ty::Unit && !matches!(ir.expr(produced), IrExpr::UnitInstance) {
-        let effect = produced;
-        let unit = ir.add_expr(IrExpr::UnitInstance);
-        ir.copy_inline_copy_mark(tail, unit);
-        if let Some(line) = ir
-            .source_line(tail)
-            .or_else(|| ir.source_line(effect))
-            .or_else(|| ir.fallthrough_return_line(tail))
-            .or_else(|| ir.end_line(tail))
-            .or_else(|| ir.end_line(root))
-            .or(close_line)
-        {
-            ir.set_source_line(unit, line);
-        }
-        ir.retain_inline_unit_line(unit);
-        produced = ir.add_expr(IrExpr::Block {
-            stmts: vec![effect],
-            value: Some(unit),
-        });
-    }
-    if matches!(ir.expr(produced), IrExpr::UnitInstance) {
-        ir.copy_inline_copy_mark(tail, produced);
-        if !ir.source_line(produced).is_some() {
-            if let Some(line) = ir
-                .source_line(tail)
-                .or_else(|| ir.fallthrough_return_line(tail))
-                .or_else(|| ir.end_line(tail))
-                .or_else(|| ir.end_line(root))
-                .or(close_line)
-            {
-                ir.set_source_line(produced, line);
-            }
-        }
-        ir.retain_inline_unit_line(produced);
-    }
-    ir.exprs[tail as usize] = IrExpr::Block {
-        stmts: Vec::new(),
-        value: Some(produced),
-    };
-    for &block in &chain {
-        let IrExpr::Block { stmts, value: None } = ir.expr(block).clone() else {
-            unreachable!("the chain was proved to be statement blocks")
-        };
-        let mut stmts = stmts;
-        let last = stmts.pop().expect("a chained block ends in a statement");
-        ir.exprs[block as usize] = IrExpr::Block {
-            stmts,
-            value: Some(last),
-        };
-    }
-    true
-}
-
-/// The statement blocks from `block` down to `tail`, outermost first — the ones that must become
-/// value-producing for `tail`'s value to reach `block`.
-///
-/// `None` unless the path is a chain of statement blocks each ending in the next, which is every
-/// case that has to keep the caller's result local and labelled exit loop: a `return` anywhere but
-/// the tail must be able to carry its value out of the middle of the body.
-fn tail_statement_block_chain(
-    ir: &crate::ir::IrFile,
-    block: ExprId,
-    tail: ExprId,
-) -> Option<Vec<ExprId>> {
-    let mut chain = Vec::new();
-    let mut current = block;
-    loop {
-        let IrExpr::Block { stmts, value: None } = ir.expr(current) else {
-            return None;
-        };
-        let &last = stmts.last()?;
-        chain.push(current);
-        if last == tail {
-            return Some(chain);
-        }
-        current = last;
-    }
 }
 
 #[cfg(test)]
@@ -2306,230 +1578,5 @@ mod expansion_mode_tests {
             supplied_operand_plan(Some(InlineExpansionMode::Receiver), false, true),
             Some(SuppliedOperandPlan::Copy)
         );
-    }
-}
-
-#[cfg(test)]
-mod value_rebasing_tests {
-    use super::{lambda_splice_contract, rebase_values};
-    use crate::fir::FirRangeOperation;
-    use crate::ir::{IrCheckedOperation, IrExpr};
-    use crate::types::Ty;
-
-    #[test]
-    fn a_checked_range_loop_reserves_and_rebases_its_declared_value() {
-        let mut expression = IrExpr::Checked(Box::new(IrCheckedOperation::RangeLoop {
-            variable: 4,
-            variable_name: Some("element".into()),
-            counter: Ty::Int,
-            source: crate::ir::IrProgressionSource::Literal {
-                operation: FirRangeOperation::Until,
-                start: 0,
-                end: 1,
-            },
-            unsigned_compare: None,
-            body: 2,
-            label: "loop".to_string(),
-            with_index: None,
-        }));
-
-        assert_eq!(lambda_splice_contract::value_indices(&expression), vec![4]);
-        assert_eq!(rebase_values(&mut expression, 2, &[], 20), Some(()));
-        assert_eq!(lambda_splice_contract::value_indices(&expression), vec![22]);
-    }
-}
-
-#[cfg(test)]
-mod tail_promotion_tests {
-    use super::{produce_sole_tail_return, tail_statement_block_chain};
-    use crate::ir::{ExprId, IrConst, IrExpr, IrFile};
-    use crate::types::Ty;
-
-    fn statement(ir: &mut IrFile, value: i32) -> ExprId {
-        ir.add_expr(IrExpr::Const(IrConst::Int(value)))
-    }
-
-    fn statement_block(ir: &mut IrFile, stmts: Vec<ExprId>) -> ExprId {
-        ir.add_expr(IrExpr::Block { stmts, value: None })
-    }
-
-    /// Everything the arena holds, as text: both its LENGTH and every node, so a refusal that
-    /// allocated or replaced anything at all shows up.
-    fn arena(ir: &IrFile) -> String {
-        format!("{} nodes: {:?}", ir.exprs.len(), ir.exprs)
-    }
-
-    fn assert_block(ir: &IrFile, block: ExprId, stmts: &[ExprId], value: Option<ExprId>) {
-        let IrExpr::Block {
-            stmts: actual,
-            value: produced,
-        } = ir.expr(block)
-        else {
-            panic!("expression {block} is not a block");
-        };
-        assert_eq!(actual.as_slice(), stmts, "block {block} statements");
-        assert_eq!(*produced, value, "block {block} value");
-    }
-
-    /// The direct case: the expansion's body IS the block whose last statement is the tail.
-    #[test]
-    fn a_direct_tail_statement_becomes_the_blocks_value() {
-        let mut ir = IrFile::default();
-        let first = statement(&mut ir, 1);
-        let returned = statement(&mut ir, 2);
-        let tail = statement_block(&mut ir, vec![]);
-        let block = statement_block(&mut ir, vec![first, tail]);
-
-        assert!(produce_sole_tail_return(
-            &mut ir,
-            block,
-            tail,
-            Some(returned),
-            Ty::Int,
-            None,
-        ));
-        assert_block(&ir, block, &[first], Some(tail));
-        assert_block(&ir, tail, &[], Some(returned));
-    }
-
-    /// A statement-bodied inline function wraps its body one level deeper, so the promotion has to
-    /// descend — and every block on that path becomes value-producing, or the value is discarded by
-    /// whichever block above it still ends in a statement.
-    #[test]
-    fn a_nested_tail_statement_promotes_every_block_on_its_path() {
-        let mut ir = IrFile::default();
-        let first = statement(&mut ir, 1);
-        let returned = statement(&mut ir, 2);
-        let tail = statement_block(&mut ir, vec![]);
-        let inner = statement_block(&mut ir, vec![first, tail]);
-        let outer = statement_block(&mut ir, vec![inner]);
-
-        assert!(produce_sole_tail_return(
-            &mut ir,
-            outer,
-            tail,
-            Some(returned),
-            Ty::Int,
-            None,
-        ));
-        assert_block(&ir, outer, &[], Some(inner));
-        assert_block(&ir, inner, &[first], Some(tail));
-        assert_block(&ir, tail, &[], Some(returned));
-    }
-
-    /// The return is not the tail, which is the case that must keep the caller's result local and
-    /// labelled exit loop — a non-local return has to be able to carry its value out of the middle
-    /// of the body. Nothing may be left half-promoted when the answer is no.
-    #[test]
-    fn a_statement_after_the_return_changes_nothing() {
-        let mut ir = IrFile::default();
-        let returned = statement(&mut ir, 1);
-        let tail = statement_block(&mut ir, vec![]);
-        let after = statement(&mut ir, 2);
-        let block = statement_block(&mut ir, vec![tail, after]);
-        let before = arena(&ir);
-
-        assert!(!produce_sole_tail_return(
-            &mut ir,
-            block,
-            tail,
-            Some(returned),
-            Ty::Int,
-            None,
-        ));
-        assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
-    }
-
-    /// The `Unit` case, which is the one that used to allocate before it knew the answer: there is
-    /// no returned expression, so the promotion has to materialize `Unit` itself. A refusal must
-    /// leave the arena at exactly its previous LENGTH — the block shapes being restored is not
-    /// enough, because an orphan allocation shifts every later expression identity.
-    #[test]
-    fn a_refused_unit_return_allocates_nothing() {
-        let mut ir = IrFile::default();
-        let tail = statement_block(&mut ir, vec![]);
-        let after = statement(&mut ir, 1);
-        let block = statement_block(&mut ir, vec![tail, after]);
-        let before = arena(&ir);
-
-        assert!(!produce_sole_tail_return(
-            &mut ir,
-            block,
-            tail,
-            None,
-            Ty::Unit,
-            None,
-        ));
-        assert_eq!(
-            arena(&ir),
-            before,
-            "a refused Unit promotion allocates no placeholder"
-        );
-    }
-
-    /// Refusal deep in the path also leaves every block above it untouched: the chain is proved
-    /// before anything is written, so a failure below happens before any of them is reached.
-    #[test]
-    fn a_refusal_below_leaves_the_blocks_above_untouched() {
-        let mut ir = IrFile::default();
-        let returned = statement(&mut ir, 1);
-        let tail = statement_block(&mut ir, vec![]);
-        let after = statement(&mut ir, 2);
-        let inner = statement_block(&mut ir, vec![tail, after]);
-        let outer = statement_block(&mut ir, vec![inner]);
-        let before = arena(&ir);
-
-        assert!(!produce_sole_tail_return(
-            &mut ir,
-            outer,
-            tail,
-            Some(returned),
-            Ty::Int,
-            None,
-        ));
-        assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
-    }
-
-    /// A block that already produces a value is not a statement block, so there is no tail
-    /// statement to promote.
-    #[test]
-    fn a_value_producing_block_changes_nothing() {
-        let mut ir = IrFile::default();
-        let returned = statement(&mut ir, 1);
-        let tail = statement_block(&mut ir, vec![]);
-        let produced = statement(&mut ir, 2);
-        let block = ir.add_expr(IrExpr::Block {
-            stmts: vec![tail],
-            value: Some(produced),
-        });
-        let before = arena(&ir);
-
-        assert!(!produce_sole_tail_return(
-            &mut ir,
-            block,
-            tail,
-            Some(returned),
-            Ty::Int,
-            None,
-        ));
-        assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
-    }
-
-    /// The proof itself takes a SHARED reference, so it cannot write even in principle. Asserted
-    /// here as a contract rather than left to the signature alone.
-    #[test]
-    fn the_chain_is_proved_without_touching_the_arena() {
-        let mut ir = IrFile::default();
-        let first = statement(&mut ir, 1);
-        let tail = statement_block(&mut ir, vec![]);
-        let inner = statement_block(&mut ir, vec![first, tail]);
-        let outer = statement_block(&mut ir, vec![inner]);
-        let before = arena(&ir);
-
-        assert_eq!(
-            tail_statement_block_chain(&ir, outer, tail),
-            Some(vec![outer, inner])
-        );
-        assert_eq!(arena(&ir), before, "proving the chain reads only");
     }
 }

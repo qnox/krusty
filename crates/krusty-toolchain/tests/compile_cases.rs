@@ -322,7 +322,7 @@ fn ledger(problems: &[ExpectedDiagnostic]) -> String {
 fn every_compile_case_is_exact() {
     compiling::recorder();
     let cases = compile_cases();
-    assert_eq!(cases.len(), 19, "the cases are missing");
+    assert_eq!(cases.len(), 20, "the cases are missing");
     let mut failures = Vec::new();
     for case in &cases {
         let ran = krusty_toolchain(
@@ -662,16 +662,16 @@ fn a_failing_ksp_run_stops_the_task_before_its_module_compiles() {
     );
 }
 
-/// krusty-toolchain does not compile the sources KSP generates: a module KSP generates a source for
-/// fails before it compiles.
+/// krusty-toolchain compiles no Java sources: a module KSP generates a Java source for fails before
+/// it compiles.
 #[test]
-fn a_ksp_run_that_generates_sources_fails_its_module() {
+fn a_ksp_run_that_generates_java_sources_fails_its_module() {
     compiling::recorder();
     let case = ksp_case(&[(
-        "app/ksp-generates/src/ksp/kotlin/generated/Registry.kt",
-        "package generated\n\nobject Registry\n",
+        "app/ksp-generates/src/ksp/java/generated/Registry.java",
+        "package generated;\n\npublic class Registry {}\n",
     )]);
-    let ran = krusty_toolchain("ksp-sources", &case, &[":consumer:compileJvm"], |_| {});
+    let ran = krusty_toolchain("ksp-java-sources", &case, &[":consumer:compileJvm"], |_| {});
     assert_eq!(
         (
             ran.output.code,
@@ -683,7 +683,37 @@ fn a_ksp_run_that_generates_sources_fails_its_module() {
         (
             1,
             String::new(),
-            "\nERROR: KSP generated sources for module `app` (<directory>/project/build/generated/app/main/src/ksp/kotlin/generated/Registry.kt first), and krusty-toolchain does not compile generated sources yet\n"
+            "\nERROR: KSP generated Java sources for module `app` (<directory>/project/build/generated/app/main/src/ksp/java/generated/Registry.java first), and krusty-toolchain compiles Kotlin sources only\n"
+                .to_string(),
+            vec![true],
+            String::new(),
+        )
+    );
+}
+
+/// krusty-toolchain compiles a module only when it has Kotlin sources of its own: KSP generating
+/// the only Kotlin sources of a module fails it.
+#[test]
+fn a_ksp_run_generating_a_modules_only_kotlin_sources_fails_it() {
+    compiling::recorder();
+    let mut case = ksp_case(&[(
+        "app/ksp-generates/src/ksp/kotlin/generated/Registry.kt",
+        "package generated\n\nobject Registry\n",
+    )]);
+    case.project.retain(|(file, _)| file != "app/src/Model.kt");
+    let ran = krusty_toolchain("ksp-only-sources", &case, &[":consumer:compileJvm"], |_| {});
+    assert_eq!(
+        (
+            ran.output.code,
+            placed(&ran.output.root, &ran.output.stdout),
+            placed(&ran.output.root, &ran.output.stderr),
+            runs_ksp(&ran.record),
+            ran.outputs,
+        ),
+        (
+            1,
+            String::new(),
+            "\nERROR: KSP generated Kotlin sources for module `app`, which has none of its own, and krusty-toolchain compiles a module only when it has Kotlin sources of its own\n"
                 .to_string(),
             vec![true],
             String::new(),

@@ -62,6 +62,10 @@ if command -v just >/dev/null 2>&1; then
   just kotlinc "$v" >/dev/null
   if [ "${KRUSTY_PROVISION_BOX_CORPUS:-1}" != 0 ]; then
     just box-corpus "$v" >/dev/null
+    # Every compiler plugin that keeps its own box corpus beside its code (`just plugin-corpora`).
+    while read -r plugin; do
+      just plugin-corpus "$plugin" "$v" >/dev/null
+    done < <(just plugin-corpora)
   fi
 fi
 

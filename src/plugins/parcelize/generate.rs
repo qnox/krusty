@@ -21,13 +21,57 @@ use crate::plugins::runtime_declarations::BoundRuntimeFunction;
 use crate::types::{Ty, TypeName, Visibility};
 
 use super::facts::{ParcelizeFileFacts, ParcelizedClass, GENERATED_BODY};
+use super::serializers::{ParcelContext, ParcelTarget};
 
 /// Complete every parcelized class of the file.
 pub(super) fn complete(ir: &mut IrFile, facts: &ParcelizeFileFacts) {
+    // A property may name another parcelized class of the file, so every class's `CREATOR` slot
+    // and `writeToParcel` method are known before any body reads them.
+    let targets = facts
+        .classes
+        .iter()
+        .map(|class| reserve_target(ir, class))
+        .collect::<Vec<_>>();
     for class in &facts.classes {
         describe_contents(ir, class);
-        write_to_parcel(ir, facts, class);
-        creator(ir, facts, class);
+        write_to_parcel(ir, facts, class, &targets);
+        creator(ir, facts, class, &targets);
+    }
+}
+
+/// The class's `writeToParcel` method slot and a static slot for its `CREATOR`, filled by
+/// [`creator`].
+fn reserve_target(ir: &mut IrFile, class: &ParcelizedClass) -> ParcelTarget {
+    let owner = &ir.classes[class.class as usize];
+    let name = owner.fq_name_id();
+    let write_index = owner
+        .methods
+        .iter()
+        .position(|&function| function == class.write_to_parcel)
+        .expect("a parcelized class declares its writeToParcel") as u32;
+    let creator = ir.statics.len() as u32;
+    let creator_ty = Ty::obj_args_name(super::creator_interface(), &[Ty::obj_name(name)]);
+    ir.statics.push(IrStatic {
+        name: "CREATOR".to_string(),
+        ty: creator_ty,
+        init: None,
+        is_var: false,
+        is_const: false,
+        is_lateinit: false,
+        owner: Some(name),
+        visibility: Visibility::Public,
+        erased_declared_ty: None,
+        accessors: IrStaticAccessors::ABSENT,
+        line: 0,
+        accessor_lines: crate::ir::IrAccessorLines::default(),
+        source_order: u32::MAX,
+        property_delegate: false,
+    });
+    ParcelTarget {
+        name,
+        class: class.class,
+        write_index,
+        creator,
     }
 }
 
@@ -63,8 +107,18 @@ fn class_lines(ir: &IrFile, class: &ParcelizedClass) -> (u32, u32) {
 ///
 /// kotlinc writes the properties without source offsets; only the return the body falls off into
 /// maps to the declaration's end, which is the class's.
-fn write_to_parcel(ir: &mut IrFile, facts: &ParcelizeFileFacts, class: &ParcelizedClass) {
-    const DEST: u32 = 1;
+fn write_to_parcel(
+    ir: &mut IrFile,
+    facts: &ParcelizeFileFacts,
+    class: &ParcelizedClass,
+    targets: &[ParcelTarget],
+) {
+    let context = ParcelContext {
+        parcel: 1,
+        flags: 2,
+        owner: ir.classes[class.class as usize].fq_name_id(),
+        targets,
+    };
     // `this`, `dest` and `flags` come first; each null-aware write keeps its value in a temporary.
     let mut temporary = 3;
     let mut stmts = Vec::with_capacity(class.properties.len());
@@ -78,7 +132,7 @@ fn write_to_parcel(ir: &mut IrFile, facts: &ParcelizeFileFacts, class: &Parceliz
         stmts.push(facts.runtime.write(
             ir,
             property.serializer,
-            DEST,
+            &context,
             value,
             property.ty,
             temporary,
@@ -97,14 +151,19 @@ fn write_to_parcel(ir: &mut IrFile, facts: &ParcelizeFileFacts, class: &Parceliz
 }
 
 /// The static `CREATOR` and its local `Creator` class.
-fn creator(ir: &mut IrFile, facts: &ParcelizeFileFacts, class: &ParcelizedClass) {
+fn creator(
+    ir: &mut IrFile,
+    facts: &ParcelizeFileFacts,
+    class: &ParcelizedClass,
+    targets: &[ParcelTarget],
+) {
     let parcelized = ir.classes[class.class as usize].fq_name_id();
     let parcelized_ty = Ty::obj_name(parcelized);
     let creator_interface = super::creator_interface();
     let creator_ty = Ty::obj_args_name(creator_interface, &[parcelized_ty]);
     let name = parcelized.nested_child("Creator");
 
-    let create_from_parcel = create_from_parcel(ir, facts, class, name, parcelized_ty);
+    let create_from_parcel = create_from_parcel(ir, facts, class, targets, name, parcelized_ty);
     let new_array = new_array(ir, name, parcelized_ty);
 
     let mut creator = crate::plugins::synthetic_class_name(name);
@@ -139,7 +198,7 @@ fn creator(ir: &mut IrFile, facts: &ParcelizeFileFacts, class: &ParcelizedClass)
     ir.local_class_name_provenance.insert(
         creator_id,
         crate::ir::IrLocalClassNameProvenance {
-            source: facts.source,
+            source: crate::ir::IrLocalClassNameRoot::Source(facts.source),
             lexical_owner: Some(crate::ir::IrLocalClassOwner::Class(class.class)),
             segments: vec!["Creator".to_string()].into_boxed_slice(),
             ordinal: None,
@@ -191,22 +250,12 @@ fn creator(ir: &mut IrFile, facts: &ParcelizeFileFacts, class: &ParcelizedClass)
         arg: instance,
         type_operand: creator_ty,
     });
-    ir.statics.push(IrStatic {
-        name: "CREATOR".to_string(),
-        ty: creator_ty,
-        init: Some(init),
-        is_var: false,
-        is_const: false,
-        is_lateinit: false,
-        owner: Some(parcelized),
-        visibility: Visibility::Public,
-        erased_declared_ty: None,
-        accessors: IrStaticAccessors::ABSENT,
-        line: 0,
-        accessor_lines: crate::ir::IrAccessorLines::default(),
-        source_order: u32::MAX,
-        property_delegate: false,
-    });
+    let slot = targets
+        .iter()
+        .find(|target| target.name == parcelized)
+        .expect("every parcelized class has a reserved CREATOR slot")
+        .creator;
+    ir.statics[slot as usize].init = Some(init);
 }
 
 /// `createFromParcel(parcel)`: the primary constructor called with each property read back.
@@ -214,17 +263,23 @@ fn create_from_parcel(
     ir: &mut IrFile,
     facts: &ParcelizeFileFacts,
     class: &ParcelizedClass,
+    targets: &[ParcelTarget],
     owner: TypeName,
     parcelized: Ty,
 ) -> FunId {
-    const PARCEL: u32 = 1;
+    let context = ParcelContext {
+        parcel: 1,
+        flags: 0,
+        owner: ir.classes[class.class as usize].fq_name_id(),
+        targets,
+    };
     let args = class
         .properties
         .iter()
         .map(|property| {
             facts
                 .runtime
-                .read(ir, property.serializer, PARCEL, property.ty)
+                .read(ir, property.serializer, &context, property.ty)
         })
         .collect();
     let constructed = ir.add_expr(IrExpr::New {

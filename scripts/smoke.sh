@@ -3,29 +3,39 @@
 # It is not the gate (`./run-tests.sh` and CI are); it is what to run before every push.
 #
 #   scripts/smoke.sh [base-rev]        base defaults to origin/master; use the parent PR's branch
-#                                      (`origin/<parent-branch>`) for a stacked PR
+#                                      (`origin/<parent-branch>`) for a stacked PR, or the
+#                                      branch's own remote head to check only unpushed commits
+#
+# The branch's own change is what its first-parent, non-merge commits in base..HEAD touch. Merges of
+# master or of a parent pull request bring code their own runs already checked, so they select
+# nothing here.
 #
 # In order, stopping at the first failure:
 #   1. attribution and outcome lists of the commits in base..HEAD;
-#   2. rustfmt as CI checks it (`just fmt-check`, which also covers `tests/*_e2e.rs`), then the
-#      legacy and clippy baselines;
-#   3. the lib tests of krusty and the backend crates;
-#   4. the e2e modules (`tests/*_e2e.rs`) this branch changes;
-#   5. the conformance entries CI runs, in parallel jobs, on the newest Kotlin version, and on the
-#      others too if it fails: per lane (JVM, Native, wasm-js, wasm-wasi) an even sample of the box
-#      corpus and the owned regressions (`tests/box_regressions/`), the non-box conformance
-#      (CLI and bytecode corpora), the focused Native and Wasm tests, and the diagnostics lane
-#      when this branch changes its expectations.
+#   2. rustfmt as CI checks it (`just fmt-check`, which also covers `tests/*_e2e.rs`), the legacy
+#      baseline, then the clippy baseline when the change touches Rust;
+#   3. ONE cargo build of every test binary the later steps run, so the compiler is built once;
+#   4. the lib tests of krusty and of the backend crates;
+#   5. the e2e modules (`tests/*_e2e.rs`) this change touches, and those that name a plugin whose
+#      source (`src/plugins/<name>/`) it touches, then the build-tools packaging
+#      (`scripts/package-build-tools.sh`: compile, test, jar twice) for every supported Kotlin
+#      release when it touches `tools/krusty-build-tools` or that script;
+#   6. the conformance entries CI runs for the lanes this change can affect (see select_lanes), in
+#      parallel jobs, on the newest Kotlin version, and on the others too if it fails: per lane
+#      (JVM, Native, wasm-js, wasm-wasi) an even sample of the box corpus and the owned regressions
+#      (`tests/box_regressions/`), the non-box conformance (CLI and bytecode corpora), the focused
+#      Native and Wasm tests, and the diagnostics lane when this change touches its expectations.
 #
 # Every test process runs under the harness's configurable deadlines (scripts/test-gate-defaults.sh).
 #
 # Knobs: KRUSTY_SMOKE_BOX_LIMIT (corpus cases sampled per lane, default 150; 0 runs the owned
-# regressions only), KRUSTY_SMOKE_LANES (default "jvm native wasm-js wasm-wasi"),
-# KRUSTY_SMOKE_VERSIONS (default: newest, then the rest on failure; "all" runs every version,
-# or list versions), KRUSTY_SMOKE_JOBS (parallel jobs, default nproc),
+# regressions only), KRUSTY_SMOKE_LANES (overrides the selected lanes, e.g. "jvm native wasm-js
+# wasm-wasi"; empty runs none), KRUSTY_SMOKE_VERSIONS (default: newest, then the rest on failure;
+# "all" runs every version, or list versions), KRUSTY_SMOKE_JOBS (parallel jobs, default nproc),
 # KRUSTY_SMOKE_DIAGNOSTICS=1 (always run the diagnostics lane),
 # KRUSTY_JDK_CACHE (where missing JDK 8, 11, 17, 21 and 25 are downloaded),
-# KRUSTY_SMOKE_SKIP_CLIPPY=1 (skip step 2's clippy run, which is the slowest static check).
+# KRUSTY_SMOKE_SKIP_CLIPPY=1 (skip the clippy run, the slowest static check: it lints the whole
+# workspace from a clean target of its own).
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,12 +51,78 @@ git rev-parse --verify --quiet "$base^{commit}" >/dev/null || {
 }
 fork="$(git merge-base "$base" HEAD)"
 limit="${KRUSTY_SMOKE_BOX_LIMIT:-150}"
-lanes="${KRUSTY_SMOKE_LANES:-jvm native wasm-js wasm-wasi}"
 start=$SECONDS
 
 step() { printf '\nsmoke: [%3ss] %s\n' "$((SECONDS - start))" "$*" >&2; }
 
-changed() { git diff --name-only --diff-filter=AMR "$fork" HEAD -- "$@"; }
+# Every path the branch's own commits touch, including a deletion and both sides of a rename: what
+# a change can affect, which selects the lanes and checks. A path that no longer exists still changed
+# the effective inputs (a deleted expectation list), so it is not filtered out.
+affected() {
+  git log --first-parent --no-merges --no-renames --name-only --format= "$fork..HEAD" -- "$@" | sort -u
+}
+
+# The affected paths that still exist at HEAD: the executable inputs (E2E modules, owned regressions)
+# a step can run.
+changed() {
+  affected "$@" | while IFS= read -r file; do [ -e "$file" ] && printf '%s\n' "$file"; done
+}
+
+# The box lanes a change can affect. A backend crate, or its expected-failure lists, selects its own
+# lanes; the shared KLIB lowering selects the KLIB lanes; the class-file layer selects JVM. Any other
+# compiler source, a shared regression, a conformance script, the harness, or the build selects
+# every lane. This script, its test, the workflows and documentation select none.
+select_lanes() {
+  local file jvm=0 native=0 wasm=0
+  while IFS= read -r file; do
+    case "$file" in
+      crates/krusty-jvm/* | src/jvm/* | tests/box_expected_failures/jvm*) jvm=1 ;;
+      crates/krusty-native/* | tests/box_expected_failures/native* | tests/klib_uncovered_implementations/native/*) native=1 ;;
+      crates/krusty-wasm/* | tests/box_expected_failures/wasm*) wasm=1 ;;
+      src/klib_lowering/* | src/klib/*) native=1 wasm=1 ;;
+      *.md | docs/* | scripts/smoke.sh | scripts/test-smoke-selection.sh | .github/*) ;;
+      src/* | crates/* | tests/* | scripts/* | build.rs | Cargo.toml | Cargo.lock | .cargo/* | justfile)
+        jvm=1 native=1 wasm=1 ;;
+    esac
+  done < <(affected)
+  local selected=()
+  [ "$jvm" = 0 ] || selected+=(jvm)
+  [ "$native" = 0 ] || selected+=(native)
+  [ "$wasm" = 0 ] || selected+=(wasm-js wasm-wasi)
+  printf '%s\n' "${selected[*]}"
+}
+lanes="${KRUSTY_SMOKE_LANES-$(select_lanes)}"
+
+# The e2e modules a change can affect: the modules it changes, and the modules that name a plugin
+# whose source it changes. A plugin is the directory (or file stem) directly under src/plugins/ that
+# a changed path is in; a module covers it when its file, or any file of its directory, names the
+# plugin as a word. A source file directly under src/plugins/ belongs to no plugin.
+e2e_modules_for() {
+  {
+    changed 'tests/*_e2e.rs' 'tests/*_e2e/*.rs' | sed -E 's#^tests/([^/]+_e2e)(/.*)?\.rs$#\1#; s#^tests/([^/]+_e2e)/.*#\1#'
+    affected 'src/plugins/*/*' | sed -E 's#^src/plugins/([^/]+)/.*#\1#' | sort -u | while IFS= read -r plugin; do
+      grep -liw -- "$plugin" tests/*_e2e.rs || true
+      for dir in tests/*_e2e/; do
+        ! grep -rqiw -- "$plugin" "$dir" || printf '%s\n' "${dir%/}.rs"
+      done
+    done | sed -E 's#^tests/##; s#\.rs$##'
+  } | sort -u | sed 's#$#::#'
+}
+e2e_modules=()
+while IFS= read -r module; do
+  e2e_modules+=("$module")
+done < <(e2e_modules_for)
+# The selection alone, for the scenario test: no checks, no build.
+if [ "${KRUSTY_SMOKE_PRINT_E2E:-}" = 1 ]; then
+  printf '%s\n' "${e2e_modules[@]}"
+  exit 0
+fi
+
+# The selection alone, for the scenario test: no checks, no build.
+if [ "${KRUSTY_SMOKE_PRINT_LANES:-}" = 1 ]; then
+  printf '%s\n' "$lanes"
+  exit 0
+fi
 
 step "attribution and outcome lists ($fork..HEAD)"
 bash scripts/check-attribution.sh "$fork..HEAD"
@@ -56,7 +132,7 @@ step "rustfmt"
 just fmt-check
 step "legacy baseline"
 just legacy-baseline-check
-if [ "${KRUSTY_SMOKE_SKIP_CLIPPY:-}" != 1 ]; then
+if [ "${KRUSTY_SMOKE_SKIP_CLIPPY:-}" != 1 ] && [ -n "$(affected '*.rs')" ]; then
   step "clippy baseline"
   just clippy-baseline-check
 fi
@@ -73,30 +149,69 @@ export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}"
 # missing class dump instead of refusing it, as the conformance-regressions run does.
 export KRUSTY_CLASS_DUMP_COMPILE_MISSING="${KRUSTY_CLASS_DUMP_COMPILE_MISSING:-1}"
 
-step "lib tests"
-for package in krusty krusty-native krusty-wasm krusty-jvm; do
-  lib_bin="$(scripts/cargo-test-binary.sh "${package//-/_}" -p "$package" --lib)"
-  run_with_deadline "$KRUSTY_TEST_TIMEOUT_SECONDS" "$lib_bin" -q
-done
-
-e2e_modules=()
-while IFS= read -r file; do
-  e2e_modules+=("$(basename "$file" .rs)::")
-done < <(changed 'tests/*_e2e.rs')
-if [ "${#e2e_modules[@]}" -gt 0 ]; then
-  step "changed e2e modules: ${e2e_modules[*]}"
-  e2e_bin="$(scripts/cargo-test-binary.sh e2e --test e2e)"
-  run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$e2e_bin" "${e2e_modules[@]}"
-fi
-
-# The owned regressions this branch adds or changes, by their path under the repository.
+# The owned regressions this change adds or modifies, by their path under the repository.
 regressions=()
 while IFS= read -r file; do
   regressions+=("/$file")
 done < <(changed 'tests/box_regressions/*.kt' 'tests/box_regressions/**/*.kt')
 
-step "building the conformance binary"
-bin="$(scripts/cargo-test-binary.sh conformance --test conformance)"
+# One cargo invocation builds every binary the remaining steps run. Separate invocations per
+# package rebuild the krusty library under each package's feature set; one invocation unifies them.
+libs=(krusty krusty-native krusty-wasm krusty-jvm)
+build=(--lib)
+for package in "${libs[@]}"; do build+=(-p "$package"); done
+[ -z "$lanes" ] || build+=(--test conformance)
+[ "${#e2e_modules[@]}" = 0 ] || build+=(--test e2e)
+step "building test binaries (${build[*]})"
+artifacts="$(mktemp)"
+cargo test --no-run --profile gate "${build[@]}" --message-format=json \
+  | tee >(jq -r 'select(.reason == "compiler-message") | .message.rendered // empty' >&2) \
+  | jq -r 'select(.reason == "compiler-artifact" and .executable != null)
+      | [.target.name, (.target.kind | join(",")), .executable] | @tsv' >"$artifacts"
+binary() { # <target name> <target kind>
+  awk -F'\t' -v n="$1" -v k="$2" '$1 == n && $2 == k { path = $3 } END { print path }' "$artifacts"
+}
+
+step "lib tests"
+for package in "${libs[@]}"; do
+  lib_bin="$(binary "${package//-/_}" lib)"
+  [ -x "$lib_bin" ] || { echo "smoke: no lib test binary for $package" >&2; exit 1; }
+  run_with_deadline "$KRUSTY_TEST_TIMEOUT_SECONDS" "$lib_bin" -q
+done
+
+if [ "${#e2e_modules[@]}" -gt 0 ]; then
+  step "changed e2e modules: ${e2e_modules[*]}"
+  # An e2e module that spawns the CLI runs the gate build of it, as run-tests.sh passes it.
+  if [ -z "${KRUSTY_BIN:-}" ]; then
+    cargo build --profile gate -p krusty-cli --bin krusty
+    target_root="${CARGO_TARGET_DIR:-$repo_root/target}"
+    export KRUSTY_BIN="$target_root/gate/krusty"
+  fi
+  run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$(binary e2e test)" "${e2e_modules[@]}"
+fi
+
+# CI builds and tests the Build Tools API implementation once per supported Kotlin release, and a
+# release's API can differ from the newest one's (an option constructor, a missing option), so a
+# change there runs the same packaging for each release.
+if [ -n "$(changed 'tools/krusty-build-tools/*' 'scripts/package-build-tools.sh')" ]; then
+  if [ -z "${KRUSTY_BIN:-}" ]; then
+    cargo build --profile gate -p krusty-cli --bin krusty
+    export KRUSTY_BIN="${CARGO_TARGET_DIR:-$repo_root/target}/gate/krusty"
+  fi
+  packaged="$(mktemp -d)"
+  while IFS= read -r release; do
+    step "build-tools packaging for Kotlin $release"
+    scripts/package-build-tools.sh 0.0.0-smoke "$release" "$KRUSTY_BIN" "$packaged/$release"
+  done < <(just kotlin-versions)
+  rm -rf "$packaged"
+fi
+
+if [ -z "$lanes" ]; then
+  step "no conformance lane is affected by this change"
+  step "passed"
+  exit 0
+fi
+bin="$(binary conformance test)"
 # The CLI the non-box corpus drives is the one built beside the binary, as in CI.
 sibling="$(cd "$(dirname "$bin")" && pwd)/krusty"
 [ -x "$sibling" ] && export KRUSTY_BIN="${KRUSTY_BIN:-$sibling}"
@@ -144,7 +259,7 @@ export KRUSTY_KLIB_REFERENCE_CACHE="${KRUSTY_KLIB_REFERENCE_CACHE:-$PWD/target/c
 
 diagnostics=0
 [ "${KRUSTY_SMOKE_DIAGNOSTICS:-}" = 1 ] && diagnostics=1
-if [ -n "$(changed 'tests/diagnostics_false_accepts/**' 'tests/diagnostics_not_scored/**' 'tests/kotlin_diagnostics_jvm_conformance.rs')" ]; then
+if [ -n "$(affected 'tests/diagnostics_false_accepts/**' 'tests/diagnostics_not_scored/**' 'tests/kotlin_diagnostics_jvm_conformance.rs')" ]; then
   diagnostics=1
 fi
 
@@ -198,7 +313,7 @@ run_job() {
 }
 
 logdir="$(mktemp -d "${TMPDIR:-/tmp}/krusty-smoke.XXXXXX")"
-trap 'rm -rf "$logdir"' EXIT
+trap 'rm -rf "$logdir" "$artifacts"' EXIT
 declare -A job_pid job_began kotlinc_of box_of native_of
 failed=()
 order=()
@@ -228,7 +343,10 @@ run_versions() {
     # Each step is checked on its own: an assignment's status is not reliably seen by `set -e`.
     kc="$(just kotlinc "$v")" || exit 1
     bc="$(just box-corpus "$v")" || exit 1
-    just ser-corpus "$v" >/dev/null || exit 1
+    # Every plugin that has a box corpus, as the conformance entries need all of them.
+    while read -r plugin; do
+      just plugin-corpus "$plugin" "$v" >/dev/null || exit 1
+    done < <(just plugin-corpora)
     kotlinc_of[$v]="$kc"
     box_of[$v]="$bc"
     case " $lanes " in

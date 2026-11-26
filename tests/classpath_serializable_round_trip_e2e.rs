@@ -32,7 +32,9 @@ fn serialization_core_jar() -> PathBuf {
             "no kotlinx-serialization-core-jvm jar; the serialization tests cannot run.\n\
              It is provisioned on demand from Maven Central (version {}); check network access or \
              set KRUSTY_DEPS_CACHE to a directory that already holds it.",
-            krusty::toolchain::SERIALIZATION_VERSION
+            krusty::conformance::plugin_corpus::named("serialization")
+                .runtime_version("kotlinx-serialization-core-jvm")
+                .expect("the serialization corpus pins its runtime")
         )
     })
 }
@@ -43,7 +45,9 @@ fn serialization_json_jar() -> PathBuf {
             "no kotlinx-serialization-json-jvm jar; the serialization tests cannot run.\n\
              It is provisioned on demand from Maven Central (version {}); check network access or \
              set KRUSTY_DEPS_CACHE to a directory that already holds it.",
-            krusty::toolchain::SERIALIZATION_VERSION
+            krusty::conformance::plugin_corpus::named("serialization")
+                .runtime_version("kotlinx-serialization-core-jvm")
+                .expect("the serialization corpus pins its runtime")
         )
     })
 }

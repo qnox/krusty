@@ -2,7 +2,9 @@
 //! declaration, with their arguments in the order the source wrote them and the defaults of the
 //! elements they did not write.
 
-use krusty_plugin_ir::{KspAnnotation, KspAnnotationArguments, KspArgument, KspUseSite, KspValue};
+use krusty_plugin_api::ksp::{
+    KspAnnotation, KspAnnotationArguments, KspArgument, KspUseSite, KspValue,
+};
 
 use super::type_model::{qualified_name, TypeParameterScope};
 use super::{Source, Subject};
@@ -243,7 +245,7 @@ impl<'a> Annotations<'a> {
     /// element type, so an array class literal is not described. One read from a class file names
     /// the JVM class it records as it is read in Kotlin, with no type arguments but an array's
     /// element.
-    fn class_literal(&self, ty: Ty, read: ValueSource) -> Option<krusty_plugin_ir::KspType> {
+    fn class_literal(&self, ty: Ty, read: ValueSource) -> Option<krusty_plugin_api::ksp::KspType> {
         let scope = TypeParameterScope::default();
         if read == ValueSource::ClassFile {
             return scope.ty(self.read_as_kotlin(ty));
@@ -263,7 +265,7 @@ impl<'a> Annotations<'a> {
         };
         let mut described = scope.ty(ty)?;
         if described.arguments.is_empty() {
-            described.arguments = vec![krusty_plugin_ir::KspTypeArgument::Star; arity];
+            described.arguments = vec![krusty_plugin_api::ksp::KspTypeArgument::Star; arity];
         }
         Some(described)
     }

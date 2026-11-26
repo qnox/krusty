@@ -45,11 +45,48 @@ pub enum IrClassDeclarationContext {
     ClassInitializer { owner: TypeName },
 }
 
+/// What starts a local classifier's name when no classifier lexically owns it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrLocalClassNameRoot {
+    /// A source file of this module: its facade on a target with facade classes, its package on
+    /// one without. An inline payload classifier keeps its declaring source's root, not the file
+    /// that realizes the payload.
+    Source(super::IrModuleSource),
+    /// A dependency's file in `package`, whose body a dependency lowering realizes. It is no
+    /// source file of this module and has no facade here: the name starts in its package.
+    Dependency { package: TypeName },
+}
+
+impl IrLocalClassNameRoot {
+    /// The package the name is declared in.
+    pub fn package(&self) -> TypeName {
+        match self {
+            Self::Source(source) => source.package,
+            Self::Dependency { package } => *package,
+        }
+    }
+
+    fn package_mut(&mut self) -> &mut TypeName {
+        match self {
+            Self::Source(source) => &mut source.package,
+            Self::Dependency { package } => package,
+        }
+    }
+
+    /// The classifier the name starts in on a target with facade classes: `facade` of a source
+    /// file, and a dependency file's package, which has none.
+    pub fn facade(&self, facade: impl Fn(super::IrModuleSource) -> TypeName) -> TypeName {
+        match self {
+            Self::Source(source) => facade(*source),
+            Self::Dependency { package } => *package,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrLocalClassNameProvenance {
-    /// Source file whose facade roots the name when there is no lexical owner. An inline payload
-    /// classifier keeps its declaring source's facade, not the file that realizes the payload.
-    pub source: super::IrModuleSource,
+    /// What roots the name when there is no lexical owner.
+    pub source: IrLocalClassNameRoot,
     /// Exact source classifier that lexically owns this executable context, or the file facade.
     pub lexical_owner: Option<IrLocalClassOwner>,
     /// Source declaration identities below the owner (callable/property/local/class names).
@@ -470,11 +507,13 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
         | Callee::ClassStaticWithDefaults { owner, .. }
         | Callee::ClassStaticDefault { owner, .. }
         | Callee::Static { owner, .. }
+        | Callee::ValueClassAdapter { owner, .. }
         | Callee::Special { owner, .. } => name(owner, names),
         Callee::Intrinsic { operation, ret } => {
             *ret = ty(*ret, names);
             match operation {
                 super::IrIntrinsic::EnumValueOf { classifier }
+                | super::IrIntrinsic::EnumValues { classifier }
                 | super::IrIntrinsic::EnumEntries { classifier }
                 | super::IrIntrinsic::PrimitiveCompare {
                     operand: classifier,
@@ -501,6 +540,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
                 | super::IrIntrinsic::StringGet
                 | super::IrIntrinsic::StringLength
                 | super::IrIntrinsic::EnumOrdinal
+                | super::IrIntrinsic::EnumName
                 | super::IrIntrinsic::NullableAnyToString
                 | super::IrIntrinsic::CoroutineContext => {}
             }
@@ -986,7 +1026,7 @@ fn local_class_name_provenance(
     provenance: &mut IrLocalClassNameProvenance,
     names: &IdentityRemap<'_>,
 ) {
-    name(&mut provenance.source.package, names);
+    name(provenance.source.package_mut(), names);
     if let Some(IrLocalClassOwner::External(owner)) = &mut provenance.lexical_owner {
         name(owner, names);
     }
@@ -1130,6 +1170,11 @@ fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
             .staticbound_recv_unbox
             .iter_mut()
             .for_each(|value| name(value, names));
+        reference
+            .bound_context_unbox
+            .iter_mut()
+            .flatten()
+            .for_each(|value| name(&mut value.value_class, names));
     }
     for bridge in &mut class.bridges {
         bridge
@@ -1453,6 +1498,9 @@ impl super::IrFile {
             for property in properties {
                 property.receiver = ty(property.receiver, names);
                 property.ty = ty(property.ty, names);
+                for (_, _, parameter) in &mut property.context_params {
+                    *parameter = ty(*parameter, names);
+                }
                 type_parameters(&mut property.type_params, names);
             }
         }
@@ -1830,7 +1878,7 @@ impl super::IrFile {
     /// (`box$Local`).
     pub(crate) fn realize_local_class_names(
         &mut self,
-        root: impl Fn(super::IrModuleSource, &str) -> TypeName,
+        root: impl Fn(IrLocalClassNameRoot, &str) -> TypeName,
     ) {
         let classes = self
             .local_class_name_provenance
@@ -1853,14 +1901,14 @@ impl super::IrFile {
     /// local to a top-level `box` is `box$Local` and its first anonymous object `box$1`.
     pub fn realize_local_class_names_in_packages(&mut self) {
         self.realize_local_class_names(|source, first| {
-            crate::types::type_name_child(source.package, first)
+            crate::types::type_name_child(source.package(), first)
         });
     }
 }
 
 fn physical_name(
     class: ClassId,
-    root: &impl Fn(super::IrModuleSource, &str) -> TypeName,
+    root: &impl Fn(IrLocalClassNameRoot, &str) -> TypeName,
     ir: &super::IrFile,
     cache: &mut HashMap<ClassId, TypeName>,
 ) -> TypeName {

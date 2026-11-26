@@ -87,22 +87,53 @@ pub(super) fn validate_after_parsing(file: &File, parser_error: bool, diags: &mu
              guarantees are provided.",
         );
     }
-    if parser_error || file.is_script {
-        return;
+    // The body check does not run for a syntax-error file. Members still owe the same body
+    // requirement as a top-level function; only the sentence differs. The top-level sentence is
+    // reported for a syntax-error file too — `fun broken(` at EOF is still a function without a
+    // body. A script keeps its previous exemption.
+    if parser_error {
+        report_member_functions_without_bodies(file, diags);
     }
+    if !file.is_script {
+        report_top_level_functions_without_bodies(file, diags);
+    }
+}
+
+fn function_body_status(
+    function: &crate::ast::FunDecl,
+    is_abstract: bool,
+    is_expect: bool,
+) -> crate::declaration_validation::FunctionBodyStatus {
+    crate::declaration_validation::FunctionBodyStatus {
+        has_body: !matches!(function.body, crate::ast::FunBody::None),
+        is_abstract,
+        is_external: function.is_external(),
+        is_expect,
+        is_companion_block_member: function.is_companion_block_member(),
+    }
+}
+
+fn declaration_is_expect(file: &File, declaration: crate::ast::DeclId) -> bool {
+    file.expect_decls
+        .iter()
+        .any(|expected| expected.declaration == declaration)
+}
+
+fn report_top_level_functions_without_bodies(file: &File, diags: &mut DiagSink) {
     for &declaration in &file.decls {
         let Decl::Fun(function) = file.decl(declaration) else {
             continue;
         };
-        if !matches!(function.body, crate::ast::FunBody::None)
-            || function.is_abstract()
-            || function.is_external()
-            || function.is_companion_block_member()
-            || file
-                .expect_decls
-                .iter()
-                .any(|expected| expected.declaration == declaration)
-        {
+        // A failed name parse (`fun` with nothing after it) is not a function this requirement
+        // reports. That file's diagnostics stay the three syntax errors the recovery test pins.
+        if function.name == "<error>" {
+            continue;
+        }
+        if !crate::declaration_validation::function_requires_body(function_body_status(
+            function,
+            function.is_abstract(),
+            declaration_is_expect(file, declaration),
+        )) {
             continue;
         }
         diags.error_named(
@@ -110,6 +141,37 @@ pub(super) fn validate_after_parsing(file: &File, parser_error: bool, diags: &mu
             crate::diag::names::NON_MEMBER_FUNCTION_NO_BODY,
             format!("function '{}' must have a body.", function.name),
         );
+    }
+}
+
+fn report_member_functions_without_bodies(file: &File, diagnostics: &mut DiagSink) {
+    for &declaration in &file.decls {
+        let Decl::Class(class) = file.decl(declaration) else {
+            continue;
+        };
+        let owner_is_expect = declaration_is_expect(file, declaration);
+        for function in &class.methods {
+            if function.name == "<error>" {
+                continue;
+            }
+            // Interface members are abstract by the classifier's kind. An expect classifier's
+            // members are expect declarations even though each one is not marked abstract.
+            if !crate::declaration_validation::function_requires_body(function_body_status(
+                function,
+                function.is_abstract() || class.is_interface(),
+                owner_is_expect,
+            )) {
+                continue;
+            }
+            diagnostics.error_named(
+                function.span,
+                crate::diag::names::NON_ABSTRACT_FUNCTION_WITH_NO_BODY,
+                format!(
+                    "function '{}' without a body must be abstract.",
+                    function.name
+                ),
+            );
+        }
     }
 }
 
@@ -166,7 +228,7 @@ pub(super) fn validate_expect_bodies(file: &File, diagnostics: &mut DiagSink) ->
                 // the reference compiler points. It travels with the declaration; nothing here
                 // searches for it, and nothing substitutes another position when it is absent.
                 if !matches!(function.body, crate::ast::FunBody::None) {
-                    diagnostics.error(expect.keyword, body_message());
+                    diagnostics.error(expect.keyword, body_message(file.reference));
                 }
             }
             Decl::Property(property) => {
@@ -182,7 +244,7 @@ pub(super) fn validate_expect_bodies(file: &File, diagnostics: &mut DiagSink) ->
 fn validate_expect_class(file: &File, class: &crate::ast::ClassDecl, diagnostics: &mut DiagSink) {
     for function in &class.methods {
         if !matches!(function.body, crate::ast::FunBody::None) {
-            diagnostics.error(function.signature_span, body_message());
+            diagnostics.error(function.signature_span, body_message(file.reference));
         }
     }
     for property in &class.body_props {
@@ -195,7 +257,7 @@ fn validate_expect_class(file: &File, class: &crate::ast::ClassDecl, diagnostics
             // a broken parse product rather than a block to skip: reporting nothing here would drop
             // the diagnostic for an implementation the header really carries.
             match file.init_blocks.get(body) {
-                Some(header) => diagnostics.error(header.keyword, body_message()),
+                Some(header) => diagnostics.error(header.keyword, body_message(file.reference)),
                 None => diagnostics.error(
                     class.span,
                     "internal error: an init block in an expect classifier has no `init` keyword",
@@ -206,7 +268,7 @@ fn validate_expect_class(file: &File, class: &crate::ast::ClassDecl, diagnostics
     for entry in &class.enum_entries {
         for function in &entry.methods {
             if !matches!(function.body, crate::ast::FunBody::None) {
-                diagnostics.error(function.signature_span, body_message());
+                diagnostics.error(function.signature_span, body_message(file.reference));
             }
         }
     }
@@ -228,7 +290,7 @@ fn validate_expect_property(
     if let Some(init) = property.init {
         // At the initializer EXPRESSION: `expect val x: Int = 3` is reported under the `3`.
         match file.expr_span(init) {
-            Some(at) => diagnostics.error(at, initializer_message()),
+            Some(at) => diagnostics.error(at, initializer_message(file.reference)),
             None => diagnostics.error(declaration, missing("initializer")),
         }
     }
@@ -236,19 +298,19 @@ fn validate_expect_property(
         // A delegate is an implementation too, and gets its own sentence — at the delegate
         // EXPRESSION (`by lazy { 1 }` is reported under `lazy { 1 }`).
         match file.expr_span(delegate) {
-            Some(at) => diagnostics.error(at, delegate_message()),
+            Some(at) => diagnostics.error(at, delegate_message(file.reference)),
             None => diagnostics.error(declaration, missing("delegate")),
         }
     }
     if property.getter.is_some() {
         match property.getter_span {
-            Some(at) => diagnostics.error(at, body_message()),
+            Some(at) => diagnostics.error(at, body_message(file.reference)),
             None => diagnostics.error(declaration, missing("getter")),
         }
     }
     if let Some(setter) = &property.setter {
         if setter.body.is_some() {
-            diagnostics.error(setter.span, body_message());
+            diagnostics.error(setter.span, body_message(file.reference));
         }
     }
 }

@@ -2,49 +2,78 @@
 
 use crate::types::{Ty, TyKind};
 
+/// Whether an application carries a decoder-placeholder star whose bound only its declaration knows.
+pub(crate) fn has_placeholder_star(arguments: &[Ty]) -> bool {
+    arguments.iter().copied().any(is_placeholder_star)
+}
+
+fn is_placeholder_star(argument: Ty) -> bool {
+    matches!(argument.kind(), TyKind::StarProjection(inner) if inner == metadata_star_bound())
+}
+
+/// The nested type a decoder gives a star it read without one.
+fn metadata_star_bound() -> Ty {
+    Ty::nullable(Ty::obj("kotlin/Any"))
+}
+
+/// The arguments of an application of `classifier`, with every decoder-placeholder star replaced by
+/// the star of its declared bound.
+///
+/// Kotlin metadata and JVM signatures record STAR without a nested type. Its readable type comes
+/// from the corresponding declaration bound, specialized by the complete application. Reconstruct
+/// it where declaration and application meet, for the members and for the supertypes alike, so a
+/// supertype never sees the placeholder and rebuilds it from its own, wider bound. This also
+/// handles dependent/F-bounds: `Rec<R, out T : Rec<R, T>>` applied as `Rec<*, *>` gives the second
+/// star the readable bound `Rec<*, *>`, rather than the decoder placeholder `Any?`.
+pub(crate) fn application_arguments_with_star_bounds(
+    formals: &crate::types::TypeParameters<Vec<Vec<Ty>>>,
+    arguments: &[Ty],
+) -> Vec<Ty> {
+    if !has_placeholder_star(arguments) {
+        return arguments.to_vec();
+    }
+    let raw_bindings = formals
+        .type_params()
+        .iter()
+        .cloned()
+        .zip(arguments.iter().copied())
+        .collect::<crate::fx_hash::HashMap<_, _>>();
+    arguments
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, argument)| {
+            if !is_placeholder_star(argument) {
+                return argument;
+            }
+            let upper_bound = formals
+                .type_param_bounds()
+                .get(index)
+                .and_then(|bounds| bounds.first())
+                .copied()
+                .map(|bound| crate::types::ty_subst_keep_unbound(bound, &raw_bindings))
+                .unwrap_or_else(metadata_star_bound);
+            Ty::star_projection(upper_bound)
+        })
+        .collect()
+}
+
 pub(crate) fn classifier_bindings(
     classifier: &crate::libraries::LibraryType,
     receiver: Ty,
 ) -> crate::types::TyParamBindings {
-    let raw_bindings = classifier
-        .type_params
-        .iter()
-        .cloned()
-        .zip(receiver.type_args().iter().copied())
-        .collect::<crate::fx_hash::HashMap<_, _>>();
-
+    let arguments =
+        application_arguments_with_star_bounds(&classifier.type_parameters, receiver.type_args());
     classifier
         .type_params
         .iter()
         .map(crate::types::TyParamName::from)
         .zip(
-            receiver
-                .type_args()
+            arguments
                 .iter()
                 .copied()
                 .enumerate()
                 .map(|(index, argument)| {
-                    // Kotlin metadata records STAR without a nested type. Its readable type comes from
-                    // the corresponding declaration bound, specialized by the complete application.
-                    // Reconstruct it here, where declaration and application meet. This also handles
-                    // dependent/F-bounds: `Rec<R, out T : Rec<R, T>>` applied as `Rec<*, *>` gives the
-                    // second star the readable bound `Rec<*, *>`, rather than the decoder placeholder
-                    // `Any?`.
-                    let metadata_star_bound = Ty::nullable(Ty::obj("kotlin/Any"));
-                    let argument = if matches!(argument.kind(), TyKind::StarProjection(inner) if inner == metadata_star_bound)
-                    {
-                        let upper_bound = classifier
-                            .type_param_bounds()
-                            .get(index)
-                            .and_then(|bounds| bounds.first())
-                            .copied()
-                            .map(|bound| crate::types::ty_subst_keep_unbound(bound, &raw_bindings))
-                            .unwrap_or(metadata_star_bound);
-                        Ty::star_projection(upper_bound)
-                    } else {
-                        argument
-                    };
-
                     // Declaration-site variance makes the MATCHING use-site projection redundant:
                     // `interface List<out E>` means `List<out X>` — and so `List<*>` — simply is
                     // `List<X>`, so members see the plain argument and `List<*>.indexOf` takes
@@ -58,7 +87,9 @@ pub(crate) fn classifier_bindings(
                             Some(crate::types::TypeVariance::Out),
                             TyKind::OutProjection(inner) | TyKind::StarProjection(inner),
                         ) => inner,
-                        (Some(crate::types::TypeVariance::In), TyKind::InProjection(inner)) => inner,
+                        (Some(crate::types::TypeVariance::In), TyKind::InProjection(inner)) => {
+                            inner
+                        }
                         _ => argument,
                     }
                 }),

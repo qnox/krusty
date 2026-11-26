@@ -73,23 +73,39 @@ impl KlibBodyClassContract {
             && self.modality == KotlinModality::Final
     }
 
+    /// Whether a support unit emits this interface's default bodies as functions of the instance
+    /// a class's dispatch record calls them on, materializing nothing: the interface lays out
+    /// no storage, and its receiver is the implementing instance as the interface type. A call
+    /// through the interface stays a virtual one; only a class that inherits the default
+    /// reaches the body.
+    pub(crate) fn emits_default_members(&self) -> bool {
+        self.kind == super::TypeKind::Interface && !self.is_expect && !self.is_builtin_type()
+    }
+
     /// Whether a support unit materializes this class and emits its members as functions of the
-    /// class it materializes: a value class, or a class or object that is not sealed, inner or
-    /// expected; a generic one carries its formals, which its members' bodies read. A builtin type
-    /// of the common type model is neither, and neither is `kotlin.Any`, the root of every class,
-    /// which each target lays out itself.
+    /// class it materializes: a value class, or a class, object or enum class that is not sealed,
+    /// inner or expected; a generic one carries its formals, which its members' bodies read. A
+    /// builtin type of the common type model is neither, and neither is `kotlin.Any`, the root of
+    /// every class, which each target lays out itself.
     pub(crate) fn emits_members(&self) -> bool {
         if self.is_builtin_type() || self.classifier == crate::types::wk::any() {
             return false;
         }
         self.is_value
-            || (matches!(self.kind, super::TypeKind::Class | super::TypeKind::Object)
-                && matches!(
-                    self.modality,
-                    KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract
-                )
-                && !self.is_inner
+            || (matches!(
+                self.kind,
+                super::TypeKind::Class | super::TypeKind::Object | super::TypeKind::Enum
+            ) && matches!(
+                self.modality,
+                KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract
+            ) && !self.is_inner
                 && !self.is_expect)
+    }
+
+    /// Whether the class's own declaration creates every instance of it, through its private
+    /// primary constructor: an object its one instance, an enum class each of its entries.
+    pub(crate) fn declares_instances(&self) -> bool {
+        matches!(self.kind, super::TypeKind::Object | super::TypeKind::Enum)
     }
 
     /// This class applied to its declared formals. A non-generic class is the bare classifier.

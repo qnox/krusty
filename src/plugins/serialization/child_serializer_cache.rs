@@ -387,7 +387,7 @@ pub(super) fn add_child_serializer_cache(
         let accessor = ir
             .generated_class(
                 serialized,
-                crate::ir::IrGeneratedClassRole::SerializationSerializer,
+                crate::plugins::serialization::roles::SerializationClass::Serializer,
             )
             .map(|_| {
                 // Read the static just declared rather than describing the field again: a read built from a
@@ -575,7 +575,7 @@ impl ChildSerializersBody<'_> {
 #[cfg(test)]
 mod tests {
     use super::add_child_serializer_cache;
-    use crate::ir::{IrExpr, IrFile, IrGeneratedClassRole};
+    use crate::ir::{IrExpr, IrFile};
     use crate::plugins::{synthetic_class, PluginContext};
     use crate::types::Ty;
 
@@ -651,7 +651,7 @@ mod tests {
         let serializer = ir.add_class(synthetic_class("demo/Holder$$serializer"));
         ir.record_generated_class(
             serialized,
-            IrGeneratedClassRole::SerializationSerializer,
+            crate::plugins::serialization::roles::SerializationClass::Serializer,
             serializer,
         );
 

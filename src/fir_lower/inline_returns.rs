@@ -63,58 +63,6 @@ pub(super) fn returns_by_body(ir: &IrFile, root: ExprId) -> Vec<ReachableReturn>
     out
 }
 
-/// The statements that leave inline-return frame `label` with `value`: store it as the frame's
-/// result, then `break`. A return in the frame's own body stores by the result's value index; one
-/// in a nested lambda's template names the frame instead. With no result, the value still runs.
-pub(super) fn frame_exit(
-    ir: &mut IrFile,
-    label: &str,
-    result: Option<u32>,
-    nested: bool,
-    value: Option<ExprId>,
-    source: ExprId,
-) -> IrExpr {
-    let mut stmts = Vec::new();
-    let store = if let Some(value) = value {
-        let store = match (result, nested) {
-            (Some(var), false) => Some(ir.add_expr(IrExpr::SetValue { var, value })),
-            (Some(_), true) => Some(ir.add_expr(IrExpr::SetFrameResult {
-                frame: label.to_string(),
-                value,
-            })),
-            (None, _) => {
-                stmts.push(value);
-                None
-            }
-        };
-        if let Some(store) = store {
-            stmts.push(store);
-        }
-        store
-    } else {
-        None
-    };
-    // The break replaces `source`. It keeps that return's line and inline-copy identity so the
-    // `goto` after `finally` is the rewritten return, not an unlabeled jump the goto cleanup
-    // threads into the finalizer's own exit. The store takes the same line, marked at the
-    // `istore`/`astore` rather than at the value that precedes it.
-    let exit = ir.add_expr(IrExpr::Break {
-        label: Some(label.to_string()),
-    });
-    let line = ir.statement_line(source).or_else(|| ir.source_line(source));
-    if let Some(line) = line {
-        ir.set_statement_line(exit, line);
-        ir.set_source_line(exit, line);
-        if let Some(store) = store {
-            ir.set_source_line(store, line);
-            ir.copy_inline_copy_mark(source, store);
-        }
-    }
-    ir.copy_inline_copy_mark(source, exit);
-    stmts.push(exit);
-    IrExpr::Block { stmts, value: None }
-}
-
 /// Prepare the value-producing template for one inline-callable boundary. Local returns become a
 /// labelled structural exit; non-local returns remain ordinary returns and move one lexical frame
 /// nearer their checked target. Consumers clone this prepared template without repeating either
@@ -155,8 +103,14 @@ pub(super) fn prepare_inline_template(
         let IrExpr::Return(value) = ir.expr(found.returned).clone() else {
             return None;
         };
-        ir.exprs[found.returned as usize] =
-            frame_exit(ir, &label, result_slot, found.nested, value, found.returned);
+        ir.exprs[found.returned as usize] = crate::inline_expansion::frame_exit(
+            ir,
+            &label,
+            result_slot,
+            found.nested,
+            value,
+            found.returned,
+        );
     }
 
     let mut frame_statements = Vec::new();

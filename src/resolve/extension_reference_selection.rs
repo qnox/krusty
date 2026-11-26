@@ -53,13 +53,14 @@ pub(super) fn select_extension_reference(
     receiver: Ty,
     unbound: bool,
     expected: Option<&'static FnSig>,
+    quirks: crate::kotlin_version::Quirks,
     rules: &impl ExtensionReferenceRules,
 ) -> ExtensionReferenceChoice {
     let candidates = overloads
         .iter()
         .cloned()
         .filter_map(|function| {
-            applicable_extension(source, function, receiver, unbound, expected, rules)
+            applicable_extension(source, function, receiver, unbound, expected, quirks, rules)
         })
         .collect::<Vec<_>>();
     let Some(nearest) = candidates
@@ -122,6 +123,7 @@ fn applicable_extension(
     receiver: Ty,
     unbound: bool,
     expected: Option<&'static FnSig>,
+    quirks: crate::kotlin_version::Quirks,
     rules: &impl ExtensionReferenceRules,
 ) -> Option<ApplicableExtension> {
     if !function.is_extension() {
@@ -161,6 +163,7 @@ fn applicable_extension(
             } else {
                 rules.type_variable_inputs()
             },
+            quirks,
         },
         |actual, bound| rules.bound_admits(actual, bound),
     )
@@ -327,7 +330,7 @@ impl ExtensionReferenceRules for super::Checker<'_> {
     }
 
     fn binds_reference_contexts(&self) -> bool {
-        self.file.callable_references_to_contextual
+        self.file.language.callable_references_to_contextual
     }
 
     fn type_variable_inputs(&self) -> TypeVariableInputs {

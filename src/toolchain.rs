@@ -14,7 +14,7 @@ use crate::jvm::classpath::Classpath;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-mod maven_download;
+use krusty_download as maven_download;
 
 /// Locate the kotlin-stdlib jar from the dist or standard local caches, mirroring how a drop-in
 /// `kotlinc` user supplies it via `-classpath`. Each source names the exact reference release's
@@ -109,7 +109,7 @@ fn jdk_home_from(java_home: Option<OsString>, reference_home: Option<OsString>) 
 
 /// The reference version whose provisioned toolchain this process uses: the one it reproduces.
 fn reference_version() -> String {
-    crate::kotlin_version::target().to_string()
+    crate::kotlin_version::environment_release().to_string()
 }
 
 /// The `<version>.txt` outcome lists in one directory, as seen by the reference version this
@@ -124,7 +124,7 @@ pub struct ReleaseList {
 }
 
 pub fn release_list(directory: &Path) -> ReleaseList {
-    let version = crate::kotlin_version::target();
+    let version = crate::kotlin_version::environment_release();
     let path_of = |release| directory.join(format!("{release}.txt"));
     let own = path_of(version);
     ReleaseList {
@@ -192,20 +192,39 @@ pub fn kotlinc_path() -> Option<PathBuf> {
 /// library that is not provisioned.
 pub fn kotlin_stdlib_klib(target: crate::compilation_target::CompilationTarget) -> Option<PathBuf> {
     use crate::compilation_target::CompilationTarget;
+    if matches!(target, CompilationTarget::Jvm) {
+        return None;
+    }
+    kotlin_stdlib_klib_or_reason(target).ok()
+}
+
+/// [`kotlin_stdlib_klib`] that says why the library is unavailable: the URL and status or deadline
+/// of a failed wasm-wasi download, or the distribution the other targets read it from.
+pub fn kotlin_stdlib_klib_or_reason(
+    target: crate::compilation_target::CompilationTarget,
+) -> Result<PathBuf, String> {
+    use crate::compilation_target::CompilationTarget;
+    let missing = |what: &str| format!("{what} is not provisioned");
     match target {
-        CompilationTarget::Jvm => None,
-        CompilationTarget::Js => dist_jar("kotlin-stdlib-js.klib"),
-        CompilationTarget::WasmJs => dist_jar("kotlin-stdlib-wasm-js.klib"),
+        CompilationTarget::Jvm => Err("the JVM stdlib is a jar, not a KLIB".to_string()),
+        CompilationTarget::Js => {
+            dist_jar("kotlin-stdlib-js.klib").ok_or_else(|| missing("the kotlinc distribution"))
+        }
+        CompilationTarget::WasmJs => dist_jar("kotlin-stdlib-wasm-js.klib")
+            .ok_or_else(|| missing("the kotlinc distribution")),
         CompilationTarget::WasmWasi => kotlin_wasm_wasi_stdlib_klib(),
-        CompilationTarget::Native => kotlin_native_stdlib_klib(),
+        CompilationTarget::Native => {
+            kotlin_native_stdlib_klib().ok_or_else(|| missing("the Kotlin/Native distribution"))
+        }
     }
 }
 
 /// Kotlin publishes the wasm-wasi stdlib as a target-specific Maven KLIB for every supported
 /// release. Some compiler distributions do not bundle that publication, so use its versioned
 /// coordinate as the one authoritative source rather than selecting a different platform's bytes.
-fn kotlin_wasm_wasi_stdlib_klib() -> Option<PathBuf> {
-    ensure_maven_artifact(
+fn kotlin_wasm_wasi_stdlib_klib() -> Result<PathBuf, String> {
+    fetch_repository_artifact(
+        MAVEN_CENTRAL,
         "org.jetbrains.kotlin",
         "kotlin-stdlib-wasm-wasi",
         &reference_version(),
@@ -274,7 +293,7 @@ fn maven_version_from_build_number(build: &str) -> Option<&str> {
 
 /// The Kotlin version to pin Maven fallbacks to — from the dist `build.txt` (e.g.
 /// `1.9.24-release-822` → `1.9.24`, but `2.4.20-RC2-release-17` → `2.4.20-RC2`) or a located
-/// versioned stdlib jar, defaulting to the process-wide reference target. Dependency provisioning
+/// versioned stdlib jar, defaulting to the environment-selected reference release. Dependency provisioning
 /// must not alias one configured compiler release to another.
 pub fn kotlin_version() -> String {
     if let Some(lib) = kotlinc_lib_dir() {
@@ -375,6 +394,24 @@ pub fn ensure_google_maven(group: &str, artifact: &str, version: &str) -> Option
     ensure_repository_artifact(GOOGLE_MAVEN, group, artifact, version, "jar")
 }
 
+/// [`ensure_maven`] that says why the jar is unavailable.
+pub fn fetch_maven_or_reason(
+    group: &str,
+    artifact: &str,
+    version: &str,
+) -> Result<PathBuf, String> {
+    fetch_repository_artifact(MAVEN_CENTRAL, group, artifact, version, "jar")
+}
+
+/// [`ensure_google_maven`] that says why the jar is unavailable.
+pub fn fetch_google_maven_or_reason(
+    group: &str,
+    artifact: &str,
+    version: &str,
+) -> Result<PathBuf, String> {
+    fetch_repository_artifact(GOOGLE_MAVEN, group, artifact, version, "jar")
+}
+
 fn ensure_repository_artifact(
     repository: &str,
     group: &str,
@@ -382,12 +419,24 @@ fn ensure_repository_artifact(
     version: &str,
     extension: &str,
 ) -> Option<PathBuf> {
+    fetch_repository_artifact(repository, group, artifact, version, extension).ok()
+}
+
+/// [`ensure_repository_artifact`] that says why an artifact is unavailable: the URL and the status
+/// or deadline that stopped the download, so a failed provisioning explains itself.
+fn fetch_repository_artifact(
+    repository: &str,
+    group: &str,
+    artifact: &str,
+    version: &str,
+    extension: &str,
+) -> Result<PathBuf, String> {
     if extension.is_empty()
         || !extension
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     {
-        return None;
+        return Err(format!("{extension:?} is not a file extension"));
     }
     let cache = std::env::var("KRUSTY_DEPS_CACHE")
         .ok()
@@ -397,33 +446,46 @@ fn ensure_repository_artifact(
             std::env::var("HOME")
                 .ok()
                 .map(|h| PathBuf::from(h).join(".cache/krusty-deps"))
-        })?;
+        })
+        .ok_or_else(|| "neither KRUSTY_DEPS_CACHE nor HOME is set".to_string())?;
     let _ = std::fs::create_dir_all(&cache);
     let file = cache.join(format!("{artifact}-{version}.{extension}"));
     if file.is_file() {
-        return Some(file);
+        return Ok(file);
     }
     let url = format!(
         "{repository}/{}/{artifact}/{version}/{artifact}-{version}.{extension}",
         group.replace('.', "/"),
     );
     let download = maven_download_path(&file);
-    let completed = maven_download::process_budget()
-        .spend(|deadline| {
-            maven_download::download(
-                &url,
-                &download,
-                maven_download::MAVEN_CENTRAL_RETRIES,
-                deadline,
-            )
-            .completed
-        })
-        .unwrap_or(false);
-    if completed {
-        publish_maven_download(&download, &file)
-    } else {
-        let _ = std::fs::remove_file(&download);
-        None
+    let downloaded = maven_download::process_budget().spend(|deadline| {
+        maven_download::download(
+            &url,
+            &download,
+            maven_download::MAVEN_CENTRAL_RETRIES,
+            deadline,
+        )
+    });
+    match downloaded {
+        Some((outcome, _)) if outcome.completed => publish_maven_download(&download, &file)
+            .ok_or_else(|| {
+                format!(
+                    "{url} downloaded but could not be published to {}",
+                    file.display()
+                )
+            }),
+        Some((outcome, failure)) => {
+            let _ = std::fs::remove_file(&download);
+            Err(format!(
+                "{url} was not downloaded after {} attempt(s): {}",
+                outcome.attempts,
+                failure.unwrap_or_else(|| "no failure was recorded".to_string())
+            ))
+        }
+        None => Err(format!(
+            "{url} was not downloaded: the process's download budget \
+             (KRUSTY_DEPS_DEADLINE_SECONDS) was already spent by earlier downloads"
+        )),
     }
 }
 
@@ -464,11 +526,33 @@ pub fn jvm_classpath_jars_for(src: &str) -> Vec<PathBuf> {
     jars
 }
 
+fn plugin_runtime_jars() -> &'static std::sync::Mutex<std::collections::BTreeSet<PathBuf>> {
+    static JARS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    JARS.get_or_init(Default::default)
+}
+
+fn note_plugin_runtime_jar(jar: &Path) {
+    plugin_runtime_jars()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(jar.to_path_buf());
+}
+
+/// Whether `jar` is a plugin corpus's runtime jar that [`classpath_jars_for`] handed out. Such a
+/// jar links against the corpus's own stubs, so a runner must load both through one loader.
+pub fn is_plugin_runtime_jar(jar: &Path) -> bool {
+    plugin_runtime_jars()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(jar)
+}
+
 /// The set of `-classpath` jars a box test needs, formed from its directives — mirroring kotlinc's
 /// `JvmEnvironmentConfigurator`: stdlib + kotlin-test + annotations are always present (kotlinc only
 /// drops stdlib under `-no-stdlib`); `WITH_REFLECT` adds kotlin-reflect; `STDLIB_JDK8` adds
-/// kotlin-stdlib-jdk8; `WITH_COROUTINES` adds kotlinx-coroutines-core; `WITH_COMPOSE` adds the Compose
-/// runtime. Missing jars are fetched from Maven Central (Google's Maven repository for Compose).
+/// kotlin-stdlib-jdk8; `WITH_COROUTINES` adds kotlinx-coroutines-core; a plugin corpus's directive (`WITH_COMPOSE`, ...) adds that
+/// plugin's runtime. Missing jars are fetched from Maven Central (Google's Maven repository for Compose).
 /// Memoized per directive-signature — locating jars walks the (huge) gradle/m2 caches,
 /// so this collapses thousands of filesystem walks into at most a handful.
 pub fn classpath_jars_for(src: &str) -> Vec<PathBuf> {
@@ -476,10 +560,15 @@ pub fn classpath_jars_for(src: &str) -> Vec<PathBuf> {
         | (directive(src, "WITH_RUNTIME") as u8) << 1
         | (directive(src, "WITH_REFLECT") as u8) << 2
         | (directive(src, "STDLIB_JDK8") as u8) << 3
-        | (directive(src, "WITH_COROUTINES") as u8) << 4
-        | (directive(src, "WITH_COMPOSE") as u8) << 5
-        | (directive(src, "WITH_ATOMICFU") as u8) << 6;
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<crate::fx_hash::HashMap<u8, Vec<PathBuf>>>> =
+        | (directive(src, "WITH_COROUTINES") as u8) << 4;
+    // Each plugin corpus whose directive `src` carries contributes its runtime jars.
+    let plugins: Vec<&'static str> = crate::conformance::plugin_corpus::enabled_by(src)
+        .map(|corpus| corpus.plugin.as_str())
+        .collect();
+    let sig = (sig, plugins);
+    /// Jars by directive signature and the plugin corpora the case enables.
+    type JarsBySignature = crate::fx_hash::HashMap<(u8, Vec<&'static str>), Vec<PathBuf>>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<JarsBySignature>> =
         std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(crate::fx_hash::HashMap::default()));
     if let Some(v) = cache.lock().unwrap().get(&sig) {
@@ -523,11 +612,12 @@ fn classpath_jars_uncached(src: &str) -> Vec<PathBuf> {
             jars.push(j);
         }
     }
-    if extra.compose {
-        jars.extend(compose_runtime_jars().into_iter().flatten());
-    }
-    if extra.atomicfu {
-        jars.extend(atomicfu_runtime_jar());
+    for corpus in crate::conformance::plugin_corpus::enabled_by(src) {
+        let runtime = corpus.runtime_jars().into_iter().flatten();
+        for jar in runtime {
+            note_plugin_runtime_jar(&jar);
+            jars.push(jar);
+        }
     }
     if extra.coroutines {
         // Coroutines aren't in the dist; fetch the runtime jar from Maven.
@@ -552,81 +642,53 @@ pub fn kotlin_test_jar() -> Option<PathBuf> {
     })
 }
 
-/// The pinned kotlinx.serialization runtime version. The compiler plugin ships with the reference
-/// distribution, so the runtime must be a version that plugin emits calls against.
+/// The kotlinx.serialization runtime version, for callers that name it as a constant. The
+/// serialization corpus descriptor is the producer; `plugin_runtime_version_constants_match_descriptors`
+/// pins this to it.
 pub const SERIALIZATION_VERSION: &str = "1.9.0";
 
-/// `kotlinx-serialization-core-jvm`, provisioned like every other pinned dependency.
+/// `kotlinx-serialization-core-jvm`, the runtime the serialization plugin emits calls against, at
+/// the version its corpus descriptor pins.
 ///
 /// Searching the local Gradle/Maven caches for "the newest jar whose name starts with …" cannot be
 /// used here: it sorts names lexicographically (so `1.9` beats `1.10`) and can pair a core jar with a
 /// mismatched json jar. A pinned pair is reproducible and version-consistent.
 pub fn serialization_core_jar() -> Option<PathBuf> {
-    dist_jar("kotlinx-serialization-core-jvm.jar").or_else(|| {
-        ensure_maven(
-            "org.jetbrains.kotlinx",
-            "kotlinx-serialization-core-jvm",
-            SERIALIZATION_VERSION,
-        )
-    })
+    crate::conformance::plugin_corpus::named("serialization").runtime[0].resolve()
 }
 
-/// `kotlinx-serialization-json-jvm`, pinned to [`SERIALIZATION_VERSION`] alongside the core jar.
+/// `kotlinx-serialization-json-jvm`, pinned alongside the core jar by the same descriptor.
 pub fn serialization_json_jar() -> Option<PathBuf> {
-    dist_jar("kotlinx-serialization-json-jvm.jar").or_else(|| {
-        ensure_maven(
-            "org.jetbrains.kotlinx",
-            "kotlinx-serialization-json-jvm",
-            SERIALIZATION_VERSION,
-        )
-    })
+    crate::conformance::plugin_corpus::named("serialization").runtime[1].resolve()
 }
 
-/// The pinned Compose runtime version `// WITH_COMPOSE` cases compile against. The compiler plugin
-/// ships with the reference distribution; this runtime declares every API the plugin calls.
+/// The Compose runtime version, for callers that name it as a constant (the Gradle handoff
+/// fixtures). The compose corpus descriptor is the producer;
+/// `plugin_runtime_version_constants_match_descriptors` pins this to it.
 pub const COMPOSE_RUNTIME_VERSION: &str = "1.12.1";
 
 /// The Compose runtime jars, the runtime's own dependencies included: what a JVM (desktop)
-/// project that applies the Compose compiler plugin compiles and runs against.
+/// project that applies the Compose compiler plugin compiles and runs against. The compiler plugin
+/// ships with the reference distribution; this runtime declares every API the plugin calls.
 pub fn compose_runtime_jars() -> Option<Vec<PathBuf>> {
-    Some(vec![
-        ensure_google_maven(
-            "androidx.compose.runtime",
-            "runtime-desktop",
-            COMPOSE_RUNTIME_VERSION,
-        )?,
-        ensure_google_maven(
-            "androidx.compose.runtime",
-            "runtime-annotation-jvm",
-            COMPOSE_RUNTIME_VERSION,
-        )?,
-        ensure_google_maven("androidx.collection", "collection-jvm", "1.5.0")?,
-        coroutines_jar()?,
-    ])
+    crate::conformance::plugin_corpus::named("compose").runtime_jars()
 }
 
-/// The pinned atomicfu runtime version `// WITH_ATOMICFU` cases compile against: the one
-/// kotlinx.coroutines builds with.
+/// The atomicfu runtime version, for callers that name it as a constant. The atomicfu corpus
+/// descriptor is the producer;
+/// `plugin_runtime_version_constants_match_descriptors` pins this to it.
 pub const ATOMICFU_RUNTIME_VERSION: &str = "0.32.1";
 
 /// `atomicfu-jvm`, the runtime the atomicfu compiler plugin lowers away.
 pub fn atomicfu_runtime_jar() -> Option<PathBuf> {
-    ensure_maven(
-        "org.jetbrains.kotlinx",
-        "atomicfu-jvm",
-        ATOMICFU_RUNTIME_VERSION,
-    )
+    crate::conformance::plugin_corpus::named("atomicfu").runtime[0].resolve()
 }
 
 /// The atomicfu compiler plugin of the reference distribution's exact Kotlin version. Unlike the
 /// Compose and serialization plugins, the distribution does not ship it; Maven Central publishes it
 /// with every Kotlin release.
 pub fn atomicfu_compiler_plugin_jar() -> Option<PathBuf> {
-    ensure_maven(
-        "org.jetbrains.kotlin",
-        "kotlin-atomicfu-compiler-plugin-embeddable",
-        &kotlin_version(),
-    )
+    crate::conformance::plugin_corpus::named("atomicfu").plugin_jar()
 }
 
 /// KLIB libraries a box case's directives add for `target`.
@@ -639,48 +701,70 @@ pub fn klib_libraries_for(
     src: &str,
     target: crate::compilation_target::CompilationTarget,
 ) -> Result<Vec<PathBuf>, String> {
-    let extra = crate::conformance::extra_libs(src);
     let mut libraries = Vec::new();
-    if extra.atomicfu {
-        match atomicfu_klib(target) {
-            Some(library) => libraries.push(library),
-            None if matches!(
-                target,
-                crate::compilation_target::CompilationTarget::Jvm
-                    | crate::compilation_target::CompilationTarget::Js
-            ) => {}
-            None => {
-                return Err(format!(
-                    "box directive `// WITH_ATOMICFU` needs the atomicfu runtime KLIB for {target:?}"
-                ));
-            }
+    if crate::conformance::plugin_corpus::named("atomicfu").enabled_by(src) {
+        if let Some(library) =
+            atomicfu_klib(target).map_err(|reason| atomicfu_klib_unavailable(target, &reason))?
+        {
+            libraries.push(library);
         }
     }
     Ok(libraries)
 }
 
-/// The atomicfu runtime KLIB for `target`, pinned to [`ATOMICFU_RUNTIME_VERSION`].
+/// Why a `// WITH_ATOMICFU` case has no atomicfu runtime KLIB: the target and the reason the
+/// download or lookup gave, so a refused answer from Maven Central is named in the failure.
+fn atomicfu_klib_unavailable(
+    target: crate::compilation_target::CompilationTarget,
+    reason: &str,
+) -> String {
+    format!(
+        "box directive `// WITH_ATOMICFU` needs the atomicfu runtime KLIB for {target:?}: {reason}"
+    )
+}
+
+/// The prebuilt static caches a Kotlin/Native distribution rooted at `native_root` ships for debug
+/// binaries of this host (`klib/cache/linux_x64-gSTATIC-system`), the caches Gradle's debug
+/// binaries and Kotlin's own Native box tests link against. `None` on a host Kotlin/Native does
+/// not target.
+pub fn kotlin_native_debug_static_caches(native_root: &Path) -> Option<PathBuf> {
+    let konan = crate::native_target::NativeTarget::host()?.konan_name()?;
+    Some(native_root.join(format!("klib/cache/{konan}-gSTATIC-system")))
+}
+
+/// The atomicfu runtime KLIB for `target`, pinned to the version of the atomicfu corpus's runtime; `Ok(None)` for
+/// the targets without a KLIB form (the JVM lane uses [`atomicfu_runtime_jar`] and the compiler
+/// plugin instead). An `Err` says why the KLIB is unavailable: the URL and the status or deadline
+/// that stopped the download.
 ///
-/// Native and Wasm `// WITH_ATOMICFU` cases resolve `kotlinx.atomicfu` against this library. The
-/// JVM lane uses [`atomicfu_runtime_jar`] and the compiler plugin instead. Maven drops the
-/// underscores of a Kotlin/Native target name, so `linux_x64` is `atomicfu-linuxx64`.
-pub fn atomicfu_klib(target: crate::compilation_target::CompilationTarget) -> Option<PathBuf> {
+/// Native and Wasm `// WITH_ATOMICFU` cases resolve `kotlinx.atomicfu` against this library. Maven
+/// drops the underscores of a Kotlin/Native target name, so `linux_x64` is `atomicfu-linuxx64`.
+pub fn atomicfu_klib(
+    target: crate::compilation_target::CompilationTarget,
+) -> Result<Option<PathBuf>, String> {
     use crate::compilation_target::CompilationTarget;
     let artifact = match target {
         CompilationTarget::Native => {
-            let konan = crate::native_target::NativeTarget::host()?.konan_name()?;
+            let konan = crate::native_target::NativeTarget::host()
+                .and_then(|host| host.konan_name())
+                .ok_or_else(|| "this host has no Kotlin/Native target".to_string())?;
             format!("atomicfu-{}", konan.replace('_', ""))
         }
         CompilationTarget::WasmJs => "atomicfu-wasm-js".to_string(),
         CompilationTarget::WasmWasi => "atomicfu-wasm-wasi".to_string(),
-        CompilationTarget::Jvm | CompilationTarget::Js => return None,
+        CompilationTarget::Jvm | CompilationTarget::Js => return Ok(None),
     };
-    ensure_maven_artifact(
+    let version = crate::conformance::plugin_corpus::named("atomicfu")
+        .runtime_version("atomicfu-jvm")
+        .ok_or_else(|| "the atomicfu corpus names no `atomicfu-jvm` runtime version".to_string())?;
+    fetch_repository_artifact(
+        MAVEN_CENTRAL,
         "org.jetbrains.kotlinx",
         &artifact,
-        ATOMICFU_RUNTIME_VERSION,
+        version,
         "klib",
     )
+    .map(Some)
 }
 
 /// Locate the coroutines runtime jar used by classpath suspend tests.
@@ -765,7 +849,55 @@ fn find_exact_jar(dir: &std::path::Path, expected: &str, depth: usize) -> Option
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_jvm_has_no_stdlib_klib_and_says_so() {
+        use crate::compilation_target::CompilationTarget;
+        assert_eq!(
+            kotlin_stdlib_klib_or_reason(CompilationTarget::Jvm),
+            Err("the JVM stdlib is a jar, not a KLIB".to_string())
+        );
+        assert_eq!(kotlin_stdlib_klib(CompilationTarget::Jvm), None);
+    }
+
     use super::*;
+
+    #[test]
+    fn debug_static_caches_are_the_host_targets_gstatic_system_directory() {
+        let konan = crate::native_target::NativeTarget::host().and_then(|host| host.konan_name());
+        assert_eq!(
+            kotlin_native_debug_static_caches(Path::new("/dist")),
+            konan.map(|konan| PathBuf::from(format!("/dist/klib/cache/{konan}-gSTATIC-system")))
+        );
+        if std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64" {
+            assert_eq!(
+                kotlin_native_debug_static_caches(Path::new("/dist")),
+                Some(PathBuf::from("/dist/klib/cache/linux_x64-gSTATIC-system"))
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_runtime_version_constants_match_descriptors() {
+        use crate::conformance::plugin_corpus::named;
+        assert_eq!(
+            named("compose").runtime_version("runtime-desktop"),
+            Some(COMPOSE_RUNTIME_VERSION)
+        );
+        assert_eq!(
+            named("atomicfu").runtime_version("atomicfu-jvm"),
+            Some(ATOMICFU_RUNTIME_VERSION)
+        );
+        for artifact in [
+            "kotlinx-serialization-core-jvm",
+            "kotlinx-serialization-json-jvm",
+        ] {
+            assert_eq!(
+                named("serialization").runtime_version(artifact),
+                Some(SERIALIZATION_VERSION),
+                "{artifact}"
+            );
+        }
+    }
 
     #[test]
     fn distribution_build_number_preserves_the_exact_prerelease_version() {
@@ -951,5 +1083,23 @@ mod tests {
         );
 
         std::fs::remove_dir_all(directory).expect("remove isolated Maven cache");
+    }
+
+    #[test]
+    fn a_missing_atomicfu_klib_names_the_target_and_the_download_failure() {
+        assert_eq!(
+            atomicfu_klib_unavailable(
+                crate::compilation_target::CompilationTarget::Native,
+                "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/atomicfu-linuxx64/0.32.1/atomicfu-linuxx64-0.32.1.klib was not downloaded after 5 attempt(s): curl: (22) The requested URL returned error: 429",
+            ),
+            "box directive `// WITH_ATOMICFU` needs the atomicfu runtime KLIB for Native: https://repo1.maven.org/maven2/org/jetbrains/kotlinx/atomicfu-linuxx64/0.32.1/atomicfu-linuxx64-0.32.1.klib was not downloaded after 5 attempt(s): curl: (22) The requested URL returned error: 429"
+        );
+    }
+
+    #[test]
+    fn jvm_and_js_have_no_atomicfu_klib_to_fetch() {
+        use crate::compilation_target::CompilationTarget;
+        assert_eq!(atomicfu_klib(CompilationTarget::Jvm), Ok(None));
+        assert_eq!(atomicfu_klib(CompilationTarget::Js), Ok(None));
     }
 }

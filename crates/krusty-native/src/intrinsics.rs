@@ -262,37 +262,18 @@ pub(super) fn throwable_descriptor(owner: krusty::types::TypeName) -> Option<&'s
     })
 }
 
-/// Whether Kotlin gives this member a SPECIAL BRIDGE, so that a call through the wide type does
-/// not always reach an override at all.
+/// Whether the runtime's entry point for this `Map` member applies the special bridge itself.
 ///
-/// `Map<Any, Any>.get(key: Any)` is declared with a NON-NULL parameter, and a caller holding the
-/// same object as a `Map<Any?, Any?>` may pass `null`. Kotlin does not call the override there: it
-/// answers the member's default — `null` for `get` and `remove`, `false` for a `contains`, `-1` for
-/// an `indexOf` — because the argument cannot be what the declaration accepts. The corpus asks
-/// exactly that (`specialBuiltins/notEmptyMap.kt`, `bridges/special.kt`).
-///
-/// The receiver dispatch has no bridge to put in front of an implementor's arm, so it declines
-/// these rather than calling an override Kotlin would have skipped. Every one of them takes an
-/// ARGUMENT, which is why the nullary members are unaffected.
-pub(super) fn has_special_bridge(collection: krusty::types::MappedCollection, name: &str) -> bool {
-    let over_a_map = matches!(
-        collection.kind,
-        krusty::types::CollectionKind::Map | krusty::types::CollectionKind::MapEntry
-    );
-    let over_a_collection = matches!(
-        collection.kind,
-        krusty::types::CollectionKind::Iterable
-            | krusty::types::CollectionKind::Collection
-            | krusty::types::CollectionKind::List
-            | krusty::types::CollectionKind::Set
-    );
-    match name {
-        "get" | "containsKey" | "containsValue" | "getOrDefault" => over_a_map,
-        // `MutableCollection.remove(element)` is as special as `Map.remove(key)`.
-        "remove" => over_a_map || over_a_collection,
-        "contains" | "indexOf" | "lastIndexOf" => over_a_collection,
-        _ => false,
-    }
+/// `kt_map_get`, `kt_map_contains_key` and `kt_map_contains_value` reach a program class through
+/// its `KType.map_members` thunks, which answer the bridge's neutral result for an argument that is
+/// not the override's type. A call through `Map` to such an object therefore needs no bridge of its
+/// own at the call site, unlike the other members `has_special_bridge` names.
+pub(super) fn map_thunk_guards_bridge(
+    collection: krusty::types::MappedCollection,
+    name: &str,
+) -> bool {
+    collection.kind == krusty::types::CollectionKind::Map
+        && matches!(name, "get" | "containsKey" | "containsValue")
 }
 
 /// The one member of a functional interface the RUNTIME knows, or `None` for any other.
@@ -1350,6 +1331,28 @@ pub(super) fn iteration_runtime_member(
     if declaration_shape != Some(CollectionShape::Iterator) {
         return None;
     }
+    // A `ListIterator`'s own members read the same runtime iterator from its cursor.
+    if signature
+        .owner
+        .classifier_matches("kotlin/collections/ListIterator")
+    {
+        let any = || vec![Ty::obj("kotlin/Any")];
+        match name {
+            "hasPrevious" if ret == Ty::Boolean => {
+                return Some(("kt_list_iterator_has_previous", any(), Ty::Boolean))
+            }
+            "nextIndex" if ret == Ty::Int => {
+                return Some(("kt_list_iterator_next_index", any(), Ty::Int))
+            }
+            "previousIndex" if ret == Ty::Int => {
+                return Some(("kt_list_iterator_previous_index", any(), Ty::Int))
+            }
+            "previous" if ret.is_ty_param() => {
+                return Some(("kt_list_iterator_previous", any(), Ty::obj("kotlin/Any")))
+            }
+            _ => {}
+        }
+    }
     if name == "hasNext" && ret == Ty::Boolean {
         return Some((
             "kt_iterator_has_next",
@@ -2039,6 +2042,15 @@ pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'stati
             // The range form, `append(value: CharSequence?, startIndex, endIndex)`, the builder's one
             // three-operand `append`: its bounds cross boxed like every operand here.
             ("append", [_, Ty::Int, Ty::Int]) => Some("kt_string_builder_append_range"),
+            // `appendRange(value: CharSequence, startIndex, endIndex)` is what that `append` calls
+            // with `value ?: "null"`: the same bounds checks and copy, of a value never null. The
+            // `CharArray` overload copies an array instead and is not this function.
+            ("appendRange", [value, Ty::Int, Ty::Int])
+                if matches!(value.kind(), TyKind::Obj(owner, _)
+                    if classifier_matches(owner, "kotlin/CharSequence")) =>
+            {
+                Some("kt_string_builder_append_range")
+            }
             ("appendLine", [_]) => Some("kt_string_builder_append_line"),
             ("appendLine", []) => Some("kt_string_builder_append_new_line"),
             _ => None,
@@ -2670,27 +2682,6 @@ mod tests {
     }
 
     #[test]
-    fn collection_roles_keep_their_special_bridges() {
-        let collection = |kind, mutable| krusty::types::MappedCollection { kind, mutable };
-        assert!(has_special_bridge(
-            collection(krusty::types::CollectionKind::Collection, false),
-            "contains"
-        ));
-        assert!(has_special_bridge(
-            collection(krusty::types::CollectionKind::Collection, true),
-            "remove"
-        ));
-        assert!(has_special_bridge(
-            collection(krusty::types::CollectionKind::Map, false),
-            "remove"
-        ));
-        assert!(!has_special_bridge(
-            collection(krusty::types::CollectionKind::Collection, false),
-            "get"
-        ));
-    }
-
-    #[test]
     fn the_builder_realizes_each_appendable_member_with_a_runtime_function() {
         let builder = krusty::types::type_name("kotlin/text/StringBuilder");
         let appendable = || member("kotlin/text/Appendable");
@@ -2713,6 +2704,24 @@ mod tests {
                 function(appendable(), "append", &[text, Ty::Int, Ty::Int], answer)
             ),
             Some("kt_string_builder_append_range")
+        );
+    }
+
+    /// `appendRange` of a `CharSequence` is the range `append` without its `null` case; the
+    /// `CharArray` overload copies an array and has no runtime function.
+    #[test]
+    fn the_builder_realizes_only_the_char_sequence_append_range() {
+        let builder = || member("kotlin/text/StringBuilder");
+        let answer = Ty::obj("kotlin/text/StringBuilder");
+        let sequence = [Ty::obj("kotlin/CharSequence"), Ty::Int, Ty::Int];
+        let array = [Ty::obj("kotlin/CharArray"), Ty::Int, Ty::Int];
+        assert_eq!(
+            runtime_member(function(builder(), "appendRange", &sequence, answer)),
+            Some("kt_string_builder_append_range")
+        );
+        assert_eq!(
+            runtime_member(function(builder(), "appendRange", &array, answer)),
+            None
         );
     }
 

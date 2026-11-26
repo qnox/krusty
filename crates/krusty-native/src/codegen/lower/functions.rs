@@ -55,6 +55,9 @@ struct Site {
     /// the runtime does not have to guess it is the first reference-typed field: a reference to a
     /// local function carries that function's ordinary captures as reference fields too.
     receiver_capture: Option<usize>,
+    /// How many of the leading captures are values bound for the declaration's context
+    /// parameters; equality reads them as it reads the receiver.
+    context_captures: usize,
 }
 
 /// The site an expression creates, or `None` when it creates none.
@@ -76,6 +79,7 @@ fn closure_site(file: &FileLowering<'_>, expr: &IrExpr) -> Option<Result<Site, U
             // so it and the flag below are decided in `declare_lambdas` rather than here.
             identity: None,
             receiver_capture: None,
+            context_captures: 0,
         })),
         // A suspend reference's adapter is a suspend function like a suspend lambda's body: its
         // frame ends in the continuation, which `declare_lambdas` authenticates the same way.
@@ -101,6 +105,7 @@ fn closure_site(file: &FileLowering<'_>, expr: &IrExpr) -> Option<Result<Site, U
                     .bound_receiver
                     .is_some()
                     .then_some(reference.captures.len()),
+                context_captures: reference.bound_context_slots().len(),
             })
         })()),
         _ => None,
@@ -344,6 +349,7 @@ impl<'a> FileLowering<'a> {
                 sam,
                 identity,
                 mut receiver_capture,
+                context_captures,
             } = site?;
             let body = self
                 .ir
@@ -449,6 +455,11 @@ impl<'a> FileLowering<'a> {
                 // box matters even for a value class whose unboxed machine carrier is Ref.
                 *stored = any();
             }
+            // The runtime compares the bound contexts as `KRef`s, so they are stored boxed, as the
+            // receiver is.
+            for stored in capture_types.iter_mut().take(context_captures) {
+                *stored = any();
+            }
             let (capture_offsets, instance_size, references) = layout(self.values, &capture_types);
             let storage = CaptureStorage {
                 stored_types: capture_types,
@@ -459,6 +470,7 @@ impl<'a> FileLowering<'a> {
             let receiver_offset = receiver_capture
                 .and_then(|capture| storage.offsets.get(capture).copied())
                 .unwrap_or(0);
+            let context_offsets: Vec<u32> = storage.offsets[..context_captures].to_vec();
 
             let base = format!("kt_fn_{index}");
             let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
@@ -488,7 +500,11 @@ impl<'a> FileLowering<'a> {
                             let marker = self.scoped_reference_identity_marker(name)?;
                             vtable[0] = self.runtime_member_import("kt_reference_equals")?;
                             vtable[1] = self.runtime_member_import("kt_reference_hash_code")?;
-                            Some((marker, receiver_offset))
+                            Some(super::objects::ReferenceTarget {
+                                marker,
+                                receiver_offset,
+                                context_offsets: context_offsets.clone(),
+                            })
                         }
                         None => None,
                     };
@@ -511,6 +527,9 @@ impl<'a> FileLowering<'a> {
                             class_names: 0,
                         },
                     )?;
+                    let dependency =
+                        self.sam_dependency_implementations(target, &base, impl_fn, &storage)?;
+                    self.write_dependency_implementations(descriptor, &base, &dependency)?;
                 }
                 None => {
                     let thunk = self.declare_local_function(
@@ -531,7 +550,11 @@ impl<'a> FileLowering<'a> {
                             // two are `equals` and `hashCode` (`KT_SLOT_*` in `krusty_rt.h`).
                             vtable[0] = self.runtime_member_import("kt_reference_equals")?;
                             vtable[1] = self.runtime_member_import("kt_reference_hash_code")?;
-                            Some((marker, receiver_offset))
+                            Some(super::objects::ReferenceTarget {
+                                marker,
+                                receiver_offset,
+                                context_offsets: context_offsets.clone(),
+                            })
                         }
                         None => None,
                     };
@@ -721,8 +744,8 @@ impl<'a> FileLowering<'a> {
             .copied()
             .collect();
         let inherited_default = self
-            .slot_plan
-            .interfaces()
+            .model
+            .numbers()
             .numbers_of(&implemented)
             .into_iter()
             .any(|other| {
@@ -774,6 +797,12 @@ impl<'a> FileLowering<'a> {
                 interfaces.push(descriptor);
             }
         }
+        let local_interfaces = self.model.interfaces[interface as usize].clone();
+        for descriptor in self.dependency_interface_memberships(interface, &local_interfaces)? {
+            if !interfaces.contains(&descriptor) {
+                interfaces.push(descriptor);
+            }
+        }
         let kotlin_name = target.classifier.render().replace(['/', '$'], ".");
         Ok(SamTables {
             vtable,
@@ -781,6 +810,28 @@ impl<'a> FileLowering<'a> {
             interfaces,
             kotlin_name,
         })
+    }
+
+    /// What the object a lambda becomes when converted to the `fun interface` `target` implements
+    /// each member of a dependency's interface with (`sam_dependency_members`): a thunk of the
+    /// member's own declared signature for each.
+    fn sam_dependency_implementations(
+        &mut self,
+        target: &krusty::ir::IrSamTarget,
+        base: &str,
+        impl_fn: u32,
+        captures: &CaptureStorage,
+    ) -> Result<Vec<(Vec<u8>, FuncId)>, Unsupported> {
+        let mut implemented = Vec::new();
+        for (identity, parameters, result) in self.sam_dependency_members(target) {
+            let mut signature = vec![any()];
+            signature.extend(parameters.iter().copied());
+            let name = format!("{base}_dependency_{}", implemented.len());
+            let thunk = self.declare_local_function(&name, &signature, result)?;
+            self.define_sam_thunk(thunk, &name, impl_fn, captures, &parameters, result)?;
+            implemented.push((identity, thunk));
+        }
+        Ok(implemented)
     }
 
     /// Why a lambda's body function was not emitted, for a thunk that needs to call it.

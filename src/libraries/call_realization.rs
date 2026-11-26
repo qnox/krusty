@@ -116,6 +116,9 @@ pub struct KlibBodyCallable<'a> {
     generic_signature: Option<&'a super::GenericSig>,
     type_parameters: &'a [Ty],
     reified_type_parameter_ordinals: &'a [u32],
+    /// Each value parameter's `noinline`/`crossinline` modifier, context parameters included and
+    /// the extension receiver excluded, in declaration order.
+    inline_modifiers: &'a [crate::types::InlineParameterModifier],
     compiler_intrinsic: Option<CompilerIntrinsic>,
     /// The range operator an exact builtin `rangeTo`/`rangeUntil` member constructs.
     range_construction: Option<crate::fir::FirRangeOperation>,
@@ -151,6 +154,7 @@ pub(crate) struct KlibBodyCallableShape<'a> {
     pub(crate) generic_signature: Option<&'a super::GenericSig>,
     pub(crate) type_parameters: &'a [Ty],
     pub(crate) reified_type_parameter_ordinals: &'a [u32],
+    pub(crate) inline_modifiers: &'a [crate::types::InlineParameterModifier],
     pub(crate) compiler_intrinsic: Option<CompilerIntrinsic>,
     pub(crate) range_construction: Option<crate::fir::FirRangeOperation>,
     pub(crate) declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
@@ -180,6 +184,7 @@ impl<'a> KlibBodyCallable<'a> {
             generic_signature,
             type_parameters,
             reified_type_parameter_ordinals,
+            inline_modifiers,
             compiler_intrinsic,
             range_construction,
             declaration_modifiers,
@@ -200,6 +205,7 @@ impl<'a> KlibBodyCallable<'a> {
             generic_signature,
             type_parameters,
             reified_type_parameter_ordinals,
+            inline_modifiers,
             compiler_intrinsic,
             range_construction,
             declaration_modifiers,
@@ -258,6 +264,10 @@ impl<'a> KlibBodyCallable<'a> {
 
     pub(crate) fn reified_type_parameter_ordinals(self) -> &'a [u32] {
         self.reified_type_parameter_ordinals
+    }
+
+    pub(crate) fn inline_modifiers(self) -> &'a [crate::types::InlineParameterModifier] {
+        self.inline_modifiers
     }
 
     pub(crate) fn parameter_identities(self) -> &'a [crate::fir::ResolvedParameterIdentity] {
@@ -331,6 +341,22 @@ impl<'a> KlibBodyCallable<'a> {
     /// Whether two selected edges describe the same dependency declaration before their
     /// call-site singleton dispatch is applied. A KLIB identity names one declaration, while
     /// inherited object selections may legitimately contribute several receiver variants.
+    /// This edge with its accessor facet as `accessor` numbers its property: every provider
+    /// numbers the properties it declares itself, so one program's support names each property
+    /// in the numbering of the provider it lowers with.
+    pub(crate) fn with_accessor<'b>(
+        self,
+        accessor: &'b super::KlibBodyAccessor,
+    ) -> KlibBodyCallable<'b>
+    where
+        'a: 'b,
+    {
+        KlibBodyCallable {
+            accessor: Some(accessor),
+            ..self
+        }
+    }
+
     pub(crate) fn same_declaration_contract(self, other: Self) -> bool {
         self.accessor == other.accessor
             && self.name == other.name
@@ -434,6 +460,7 @@ impl ExternalCallableRealization {
                 generic_signature: self.callable.generic_sig.as_deref(),
                 type_parameters: &self.klib_body_type_parameters,
                 reified_type_parameter_ordinals: &self.callable.reified_type_parameter_ordinals,
+                inline_modifiers: &self.callable.inline_modifiers,
                 compiler_intrinsic: self
                     .callable
                     .compiler_intrinsic
@@ -539,6 +566,7 @@ impl LibraryCallable {
             reflection_name: None,
             compiler_intrinsic: None,
             semantic_role: None,
+            property_accessor_role: None,
             overridden_declarations: Box::new([]),
             collection_barrier: None,
             plugin_expression: None,
@@ -575,9 +603,26 @@ impl LibraryCallable {
             nonvirtual_realization: None,
             overridden_call_realizations: Box::new([]),
             declared_ret: None,
+            result_alias: None,
             overridden_results: Box::new([]),
             enhanced_result: crate::libraries::EnhancedResult::NONE,
         }
+    }
+
+    /// As [`Self::library`], for a callable the provider builds from its Kotlin declaration's own
+    /// parameters, which are therefore its declared parameters. A caller that has only a JVM
+    /// descriptor's parameters uses [`Self::library`], which declares none.
+    pub fn declared(
+        owner: impl Into<TypeName>,
+        name: impl Into<String>,
+        params: Vec<Ty>,
+        ret: Ty,
+        physical_ret: Ty,
+        descriptor: impl Into<String>,
+    ) -> Self {
+        let mut callable = Self::library(owner, name, params, ret, physical_ret, descriptor);
+        callable.declared_params = Some(callable.params.clone().into_boxed_slice());
+        callable
     }
 
     /// Normalize a selected classifier constructor into the provider-owned callable identity consumed

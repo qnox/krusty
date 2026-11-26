@@ -1073,6 +1073,7 @@ impl BodyLowering<'_> {
                 Some(IrCheckedArgument::Expression {
                     parameter: u32::try_from(parameter).ok()?,
                     value: *value,
+                    context: Default::default(),
                 })
             })
             .collect::<Option<Vec<_>>>()?;
@@ -1526,15 +1527,23 @@ impl BodyLowering<'_> {
                 // `apply` returns the callee's receiver, and a `finally` keeps that local
                 // outside the protected region, so those expansions store it separately and
                 // copy it into the extension lambda's `$this$`. Otherwise kotlinc has only
-                // the lambda receiver: the value is stored there directly.
+                // the lambda receiver: the value is stored there directly. A value already
+                // held in a local is that callee receiver; copying it would be a slot the
+                // reference compiler does not emit.
                 let init = if layout.distinct_callee_receiver {
-                    let callee_slot = self.allocate_temporary();
-                    statements.push(self.ir.add_expr(IrExpr::Variable {
-                        index: callee_slot,
-                        ty,
-                        init: Some(value),
-                        named: false,
-                    }));
+                    let callee_slot = match self.ir.expr(value) {
+                        IrExpr::GetValue(held) => *held,
+                        _ => {
+                            let callee_slot = self.allocate_temporary();
+                            statements.push(self.ir.add_expr(IrExpr::Variable {
+                                index: callee_slot,
+                                ty,
+                                init: Some(value),
+                                named: false,
+                            }));
+                            callee_slot
+                        }
+                    };
                     callee_receiver = Some(callee_slot);
                     self.ir.add_expr(IrExpr::GetValue(callee_slot))
                 } else {

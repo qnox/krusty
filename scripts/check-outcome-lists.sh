@@ -10,6 +10,11 @@
 # base which has since dropped entries is not charged with them. The CLI not-applicable lists and the
 # diagnostics not-scored lists are not checked here: they record what the reference kotlinc cannot
 # run in this environment, and the required reference run proves every entry instead.
+# The one exception to "only shrink" is a plugin corpus's `included` inventory
+# (src/plugins/<name>/boxes/included): it lists the cases that must pass, so it only GROWS. A change
+# may add entries, never remove one, including by deleting a release's own file when the inherited
+# one lists fewer; otherwise a case that starts failing could be dropped from the list instead of
+# fixed. A release the base did not support yet is exempt, as everywhere else.
 # The sole approved #2459 migration pins each exact loaded old/new blob and effective release in
 # outcome-list-migrations.tsv. Only a row introduced in this comparison can authorize that reset;
 # the approval is spent once the merge-base or actual target records it. A different blob transition
@@ -103,14 +108,26 @@ approved_migration() {
 }
 
 added_total=0
+removed_total=0
 while read -r lane; do
+  # An `included` inventory only grows; every other manifest only shrinks.
+  case "$lane" in
+    src/plugins/*/boxes/included/*) grows=1 ;;
+    *) grows=0 ;;
+  esac
   base_releases=$(releases "$base" "$lane")
   for release in $( { echo "$base_releases"; releases "$head" "$lane"; recorded "$head" "$lane"; } | sed '/^$/d' | sort -uV); do
     grep -qx -- "$release" <<<"$base_releases" || continue
     from=$(reads "$base" "$lane" "$release")
     [ -n "$from" ] || continue
     to=$(reads "$head" "$lane" "$release")
-    if [ -n "$to" ]; then
+    if [ "$grows" = 1 ]; then
+      if [ -n "$to" ]; then
+        added=$(comm -23 <(entries "$base:$lane/$from.txt") <(entries "$head:$lane/$to.txt"))
+      else
+        added=$(entries "$base:$lane/$from.txt")
+      fi
+    elif [ -n "$to" ]; then
       added=$(comm -13 <(entries "$base:$lane/$from.txt") <(entries "$head:$lane/$to.txt"))
     else
       added=""
@@ -118,7 +135,13 @@ while read -r lane; do
     [ -n "$added" ] || continue
     count=$(wc -l <<<"$added" | tr -d '[:space:]')
     manifest="$lane/$release.txt"
-    [ "$to" = "$release" ] || manifest="$manifest (reads $lane/$to.txt)"
+    [ "$to" = "$release" ] || manifest="$manifest (reads ${to:+$lane/$to.txt})"
+    if [ "$grows" = 1 ]; then
+      removed_total=$((removed_total + count))
+      echo "outcome-lists: $manifest loses $count entr$([ "$count" -eq 1 ] && echo y || echo ies):" >&2
+      sed 's/^/    /' <<<"$added" >&2
+      continue
+    fi
     if approved_migration "$lane" "$release" "$from" "$to"; then
       echo "outcome-lists: authorized #2459 migration for $manifest: $count added entr$([ "$count" -eq 1 ] && echo y || echo ies)" >&2
       continue
@@ -129,11 +152,16 @@ while read -r lane; do
   done
 done < <(
   { git ls-tree -r --name-only "$base"; git ls-tree -r --name-only "$head"; } |
-    grep -E '^tests/(box_expected_failures|box_expected_not_applicable|cli_expected_failures|diagnostics_false_accepts|klib_uncovered_implementations)/[^/]+/[^/]+\.txt$' |
+    grep -E '^(tests/(box_expected_failures|box_expected_not_applicable|cli_expected_failures|diagnostics_false_accepts|klib_uncovered_implementations)|src/plugins/[^/]+/boxes/(expected_not_applicable|included))/[^/]+/[^/]+\.txt$' |
     sed 's|/[^/]*$||' | sort -u
 )
 
+if ((removed_total)); then
+  echo "outcome-lists: a plugin corpus's included cases only grow; fix the failing cases above instead of dropping them" >&2
+fi
 if ((added_total)); then
   echo "outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them" >&2
+fi
+if ((added_total || removed_total)); then
   exit 1
 fi

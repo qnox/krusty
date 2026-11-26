@@ -15,18 +15,30 @@
 //! is materialized. An actual representation declines when its override cannot be emitted, so no
 //! stub reaches a builtin value without its implementation.
 
-use krusty::backend::{BackendCompilerIntrinsic, BuiltinImplementation};
+use krusty::backend::{BackendClassifierSource, BackendCompilerIntrinsic, BuiltinImplementation};
+use krusty::libraries::RuntimeExceptionKind;
 use krusty::types::{Ty, TypeName};
 
 use super::boxes::BoxForm;
 use super::builtin_order;
-use super::encode::{Code, Function, HeapType, Module, ValType};
+use super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::interface_dispatch::MemberRef;
 use super::numeric_conversions;
 use super::runtime::Runtime;
 
+/// `i32.ge_u`.
+const I32_GE_U: u8 = 0x4f;
+
 /// A function's wasm parameters (the receiver first) and results.
 type Signature = (Vec<ValType>, Vec<ValType>);
+
+/// The library member a call goes through, as its checked declaration gives it: its name and the
+/// builtin classes implementing it.
+#[derive(Clone, Copy)]
+pub(super) struct LibraryMemberDeclaration<'a> {
+    pub(super) name: &'a str,
+    pub(super) implementations: &'a [BuiltinImplementation],
+}
 
 /// The library members a call has gone through whose builtin implementations are recorded.
 #[derive(Default)]
@@ -118,23 +130,29 @@ enum BuilderMember {
     AppendChar,
     /// `length`.
     Length,
-    /// `get(Int)`.
-    Get,
+    /// `get(Int)`, which throws the runtime `IndexOutOfBoundsException` whose struct is
+    /// `index_out_of_bounds` for an index outside the units in use.
+    Get { index_out_of_bounds: u32 },
 }
 
 impl Runtime {
-    /// Record the builtin implementations of `member`, a library member named `name` carried as
+    /// Record the builtin implementations of `member`, the library member `declared` carried as
     /// `signature` (the receiver first), which a call goes through: a string's and the runtime
-    /// builder's now, and each box's now or when the box is declared. Declines when a builtin class
+    /// builder's and list's now, and each box's now or when the box is declared. Declines when a builtin class
     /// runs something this generator cannot write for it.
     pub(super) fn builtin_member(
         &mut self,
         module: &mut Module,
+        classifiers: &dyn BackendClassifierSource,
         member: MemberRef,
-        name: &str,
+        declared: LibraryMemberDeclaration<'_>,
         signature: &Signature,
-        implementations: &[BuiltinImplementation],
     ) -> Result<(), String> {
+        let LibraryMemberDeclaration {
+            name,
+            implementations,
+            ..
+        } = declared;
         if self
             .builtin_members
             .members
@@ -163,7 +181,18 @@ impl Runtime {
                     string = Some(operation(representation, implementation, signature)?);
                 }
                 Representation::StringBuilder => {
-                    builder = Some(builder_operation(name, implementation, signature));
+                    builder = Some(builder_operation(
+                        name,
+                        implementation,
+                        signature,
+                        &mut || {
+                            self.exception_class(
+                                module,
+                                classifiers,
+                                RuntimeExceptionKind::IndexOutOfBounds.classifier(),
+                            )
+                        },
+                    ));
                 }
                 Representation::Box(boxed) => {
                     let identity = boxed
@@ -183,7 +212,7 @@ impl Runtime {
         match builder {
             Some(Ok(operation)) => {
                 let function =
-                    self.define_implementation(module, member, Receiver::StringBuilder, operation)?;
+                    self.define_implementation(module, member, Receiver::Runtime, operation)?;
                 self.objects
                     .interfaces
                     .implement(self.string_builders.class, member, function)?;
@@ -307,18 +336,39 @@ impl Runtime {
                     .local_get(1)
                     .array_get_u(self.chars);
             }
-            (Receiver::StringBuilder, Operation::Builder(BuilderMember::AppendCharSequence)) => {
-                let append = self.append_char_sequence(module)?;
-                code.local_get(1).call(append);
-            }
-            (Receiver::StringBuilder, Operation::Builder(BuilderMember::AppendChar)) => {
-                code.local_get(1).call(self.string_builders.append_char);
-            }
-            (Receiver::StringBuilder, Operation::Builder(BuilderMember::Length)) => {
-                code.call(self.string_builders.length);
-            }
-            (Receiver::StringBuilder, Operation::Builder(BuilderMember::Get)) => {
-                code.local_get(1).call(self.string_builders.get);
+            (Receiver::Runtime, Operation::Builder(builder)) => {
+                let builders = &self.string_builders;
+                match builder {
+                    BuilderMember::AppendCharSequence => {
+                        let append = self.append_char_sequence(module)?;
+                        code.local_get(1).call(append);
+                    }
+                    BuilderMember::AppendChar => {
+                        code.local_get(1).call(builders.append_char);
+                    }
+                    BuilderMember::Length => {
+                        code.call(builders.length);
+                    }
+                    BuilderMember::Get {
+                        index_out_of_bounds,
+                    } => {
+                        // `StringBuilder.get` throws for an index outside the units in use, as a
+                        // direct call of it does. Unsigned, a negative index is outside too.
+                        code.local_get(1)
+                            .local_get(0)
+                            .call(builders.length)
+                            .op(I32_GE_U)
+                            .if_(BlockType::Empty);
+                        self.exceptions.construct_class(
+                            &mut code,
+                            index_out_of_bounds,
+                            None,
+                            self.string,
+                        )?;
+                        code.throw(self.exceptions.tag).end();
+                        code.local_get(1).call(builders.get);
+                    }
+                }
             }
             _ => return Err("a builtin implementation of another representation".to_string()),
         }
@@ -339,8 +389,8 @@ impl Runtime {
 #[derive(Clone, Copy)]
 enum Receiver {
     String,
-    /// The runtime's `StringBuilder`, which its functions take as a reference.
-    StringBuilder,
+    /// An instance of a class the runtime lays out, which its functions take as a reference.
+    Runtime,
     /// The box of a builtin classifier.
     Box(BoxForm),
 }
@@ -352,6 +402,7 @@ fn builder_operation(
     name: &str,
     implementation: &BuiltinImplementation,
     (params, results): &Signature,
+    index_out_of_bounds: &mut dyn FnMut() -> Result<u32, String>,
 ) -> Result<Operation, String> {
     let Some(declaration) = &implementation.declaration else {
         return Err(format!(
@@ -370,7 +421,9 @@ fn builder_operation(
             Some(BuilderMember::Length)
         }
         ("get", [Ty::Int]) if declaration.ret == Ty::Char && params[1..] == [ValType::I32] => {
-            Some(BuilderMember::Get)
+            Some(BuilderMember::Get {
+                index_out_of_bounds: index_out_of_bounds()?,
+            })
         }
         _ => None,
     };

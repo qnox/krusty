@@ -37,7 +37,7 @@ impl CallLinker for NoCalls {
         &mut self,
         _: &mut IrFile,
         _: &KlibAccessorIdSignature,
-    ) -> Lowered<LinkedAccessor> {
+    ) -> Lowered<LinkedAccessorCall> {
         panic!("no accessor")
     }
     fn singleton(&mut self, _: &mut IrFile, _: TypeName) -> Lowered<()> {
@@ -47,10 +47,13 @@ impl CallLinker for NoCalls {
         (sub.kotlin_class_internal() == Some(owner)).then_some(sub)
     }
     fn is_subtype(&self, _: &KlibTypeParameters, sub: Ty, sup: Ty) -> bool {
-        sub == sup
+        sub == sup || sub.ty_param_bound() == Some(sup)
     }
     fn same_type(&self, left: Ty, right: Ty) -> bool {
         left == right
+    }
+    fn classifier_parameter_bounds(&self, _: TypeName, _: usize) -> Vec<Ty> {
+        Vec::new()
     }
     fn constructor_bound(&self, _: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool {
         argument == bound
@@ -329,7 +332,7 @@ impl Fixture {
     }
 
     fn lower(&self, expression: KlibIrExprId, access: Access) -> (IrFile, Lowered<ExprId>) {
-        self.lower_with(expression, access, false, false)
+        self.lower_with(expression, access, false, Operation::Expression)
     }
 
     fn lower_with(
@@ -337,7 +340,7 @@ impl Fixture {
         expression: KlibIrExprId,
         access: Access,
         no_declared_receiver: bool,
-        implicit: bool,
+        operation: Operation,
     ) -> (IrFile, Lowered<ExprId>) {
         let purpose = if matches!(access, Access::ValueReadOnly) {
             HeaderPurpose::PrivateClassMember(self.owner)
@@ -413,15 +416,39 @@ impl Fixture {
                     .collect(),
             });
         }
-        let result = if implicit {
-            lowering.expression(self.receiver).and_then(|receiver| {
-                lowering.initializer_store(&self.fields[1].base.symbol, receiver, self.value)
-            })
-        } else {
-            lowering.expression(expression)
+        let result = match operation {
+            Operation::Expression => lowering.expression(expression),
+            Operation::InitializerStore => {
+                lowering.expression(self.receiver).and_then(|receiver| {
+                    lowering.initializer_store(&self.fields[1].base.symbol, receiver, self.value)
+                })
+            }
+            Operation::Operand(expected) => lowering.operand(expression, expected),
+            Operation::NullProvenOperand(expected) => {
+                let proof = super::super::safe_calls::NullProvenRead::Field {
+                    field: self.fields[1].base.symbol.clone(),
+                    receiver: self.function.regular_parameters[0].base.symbol.clone(),
+                };
+                lowering.null_proven.insert(proof);
+                lowering.operand(expression, expected)
+            }
         };
         (ir, result)
     }
+}
+
+/// What a fixture lowers.
+#[derive(Clone, Copy)]
+enum Operation {
+    /// The expression itself.
+    Expression,
+    /// The implicit store of the fixture's value into its second field.
+    InitializerStore,
+    /// The expression as an operand of the given type.
+    Operand(Ty),
+    /// The expression as an operand of the given type, where a generated `when` proved the
+    /// second field's read on the receiver parameter non-null.
+    NullProvenOperand(Ty),
 }
 
 #[test]
@@ -442,6 +469,43 @@ fn generic_multifield_read_uses_the_second_exact_field_and_applied_receiver() {
     assert!(matches!(ir.expr(receiver), IrExpr::GetValue(0)));
     assert_eq!(ir.checked_type(receiver), Some(fixture.receiver_ty));
     assert_eq!(ir.checked_type(result), Some(fixture.field_ty));
+}
+
+/// A generated data class member, such as `Pair.hashCode`, tests a field of the type parameter `T`
+/// against `null` and, in the `else`, passes the same read where `Any` is expected with no cast.
+/// As checked FIR lowering smart-casts a `T` value proven non-null, the read is cast to `T & Any`,
+/// which is then a value of its bound `Any` with no further conversion. Without the proof the read
+/// still declines.
+#[test]
+fn a_null_proven_type_parameter_field_is_a_value_of_its_non_null_bound() {
+    let any = Ty::obj("kotlin/Any");
+    let mut fixture = Fixture::new(false);
+    let read = fixture.read(1, Some(fixture.receiver), fixture.field_type);
+    let (ir, result) = fixture.lower_with(
+        read,
+        Access::Initializer,
+        false,
+        Operation::NullProvenOperand(any),
+    );
+    let result = result.expect("the proven read is a value of `Any`");
+    let proven = fixture.field_ty.definitely_non_null();
+    assert_ne!(proven, fixture.field_ty);
+    let IrExpr::TypeOp {
+        op: IrTypeOp::ImplicitCoercion,
+        arg,
+        type_operand,
+    } = *ir.expr(result)
+    else {
+        panic!("the smart cast of the proven read: {:?}", ir.expr(result))
+    };
+    assert_eq!(type_operand, proven);
+    assert_eq!(ir.checked_type(result), Some(proven));
+    assert!(matches!(ir.expr(arg), IrExpr::GetField { index: 1, .. }));
+    assert_eq!(ir.checked_type(arg), Some(fixture.field_ty));
+
+    let (_, unproven) =
+        fixture.lower_with(read, Access::Initializer, false, Operation::Operand(any));
+    assert_eq!(unproven, Err(KlibBodyDeclineReason::ImplicitConversion));
 }
 
 #[test]
@@ -561,7 +625,12 @@ fn a_super_qualifier_naming_another_class_is_a_superclass_field_access() {
 #[test]
 fn implicit_initializer_store_uses_the_same_second_field_projection() {
     let fixture = Fixture::new(false);
-    let (ir, result) = fixture.lower_with(fixture.value, Access::Initializer, false, true);
+    let (ir, result) = fixture.lower_with(
+        fixture.value,
+        Access::Initializer,
+        false,
+        Operation::InitializerStore,
+    );
     let result = result.unwrap();
     let IrExpr::SetField {
         receiver,
@@ -660,14 +729,14 @@ fn value_receiver_failure_order_and_malformed_store_type_are_unchanged() {
     let read = fixture.read(0, None, fixture.field_type);
     assert_eq!(
         fixture
-            .lower_with(read, Access::ValueReadOnly, true, false)
+            .lower_with(read, Access::ValueReadOnly, true, Operation::Expression)
             .1,
         Err(mismatch("a value class member has no receiver"))
     );
     let read = fixture.read(0, None, fixture.int_type);
     assert_eq!(
         fixture
-            .lower_with(read, Access::ValueReadOnly, true, false)
+            .lower_with(read, Access::ValueReadOnly, true, Operation::Expression)
             .1,
         Err(mismatch(
             "a field read disagrees with its declared storage type"

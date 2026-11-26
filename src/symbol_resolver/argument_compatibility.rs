@@ -69,10 +69,29 @@ pub(crate) fn sam_arg_matches(
     if sam.params.len() != usize::from(arity) {
         return false;
     }
+    if let TyKind::Fun(function) = argument.non_null().kind() {
+        if !sam_parameters_admit(source, &sam.params, &function.params) {
+            return false;
+        }
+    }
     let Some(result) = argument.fun_ret() else {
         return false;
     };
     sam_return_matches(platform, source, sam.ret, result)
+}
+
+/// Whether a function value's parameters take a SAM method's parameters, as a function type's
+/// parameters are compared: contravariantly, so `(Int) -> R` does not convert to a method taking
+/// `Any?`. A parameter not known yet, or a SAM parameter naming an open type parameter that
+/// inference fixes later, does not decide it.
+pub(crate) fn sam_parameters_admit(source: &dyn SymbolSource, sam: &[Ty], function: &[Ty]) -> bool {
+    sam.iter().zip(function).all(|(&sam, &parameter)| {
+        parameter == Ty::Error
+            || parameter.mentions_pending()
+            || sam.mentions_ty_param()
+            || sam.mentions_pending()
+            || resolution_subtype(source, sam, parameter)
+    })
 }
 
 pub(crate) fn sam_return_matches(

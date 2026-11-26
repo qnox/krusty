@@ -321,6 +321,33 @@ pub(super) fn accessor_type_is_value_class(t: &Ty, under: &Under) -> bool {
     mangling_info(t, under).is_value
 }
 
+/// The JVM name of the `@JvmOverloads` overload of `function` that keeps its parameters `kept`.
+/// kotlinc mangles each overload over its own signature, so an overload that keeps no value-class
+/// parameter takes the plain name. `file_class`: the overload is a member of a file facade.
+pub(crate) fn overload_name(
+    ir: &krusty::ir::IrFile,
+    function: krusty::ir::FunId,
+    kept: &[usize],
+    file_class: bool,
+) -> String {
+    if !ir.value_class_renamed_functions.contains(&function) {
+        return ir.functions[function as usize].name.clone();
+    }
+    let (source_name, parameters, result) = &ir.vc_declared_sigs[&function];
+    let kept_parameters = kept
+        .iter()
+        .map(|&index| parameters[index])
+        .collect::<Vec<_>>();
+    vc_mangle(
+        source_name,
+        &kept_parameters,
+        result,
+        ir,
+        file_class,
+        ir.suspend_funs.contains(&function),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{module_call_jvm_name, Under};

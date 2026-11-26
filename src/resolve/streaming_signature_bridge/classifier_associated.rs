@@ -28,12 +28,163 @@ pub(super) struct AssociatedSignatureArguments<'call, 'argument> {
     pub(super) expected: Option<crate::fir::ResolvedTy>,
 }
 
-pub(super) type Demand<'demand> = dyn FnMut(
-        crate::fir::DeclarationId,
-    ) -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>
-    + 'demand;
+/// The classifier call `Classifier.spelling(...)` a selection is about.
+#[derive(Clone, Copy)]
+pub(super) struct ClassifierCallee<'a>(
+    pub(super) crate::fir::SignatureScope,
+    pub(super) crate::types::TypeName,
+    pub(super) &'a str,
+);
 
 impl ProductionSignatureSemantics<'_> {
+    /// Select the ordinary callable family denoted by `Classifier.name(...)`. The shared resolver
+    /// owns whether the declaration is a Java static, Kotlin companion instance/static, or an
+    /// implicit enum callable; compact signature solving only consumes the selected semantic member
+    /// and, for source declarations, demands its stable inferred result.
+    pub(super) fn classifier_call_argument_expectations(
+        &self,
+        callee: ClassifierCallee<'_>,
+        arguments: &[crate::fir::SigCallArgumentProbe<'_>],
+        type_arguments: &[crate::fir::ResolvedTy],
+        trailing_lambda: bool,
+        refresh_typed_postponed: bool,
+    ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
+        let ClassifierCallee(scope, classifier, spelling) = callee;
+        let resolved_type_arguments = type_arguments
+            .iter()
+            .map(|argument| argument.get())
+            .collect::<Vec<_>>();
+        let (parameters, call_sig) = self.with_resolver(scope, |resolver| {
+            let (receiver, candidates) =
+                resolver.classifier_call_candidates(classifier, spelling)?;
+            let (kinds, _) = Self::probe_call_arguments(&candidates, arguments, trailing_lambda)?;
+            crate::trace_compiler!(
+                "signature",
+                "classifier call expectation candidates classifier={classifier:?} spelling={spelling} kinds={kinds:?} candidates={:?}",
+                candidates
+                    .iter()
+                    .map(|candidate| (
+                        candidate.callable.owner,
+                        candidate.callable.descriptor.as_str(),
+                        candidate.semantic_params(),
+                        candidate.call_sig.required,
+                    ))
+                    .collect::<Vec<_>>(),
+            );
+            let callables = crate::libraries::Callables::from_parts(
+                crate::libraries::FunctionSet {
+                    overloads: candidates.clone(),
+                },
+                crate::libraries::PropertySet::default(),
+            );
+            let selected = match resolver.select_receiver_function_with_params_tracking(
+                receiver,
+                spelling,
+                crate::symbol_resolver::FamilyArguments::Shared(&kinds),
+                &resolved_type_arguments,
+                &callables,
+                None,
+            ) {
+                crate::symbol_resolver::CandidateSelection::Selected((selected, _, _)) => {
+                    selected
+                }
+                crate::symbol_resolver::CandidateSelection::None
+                | crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                    Self::uniquely_mapped_candidate(&candidates, arguments, trailing_lambda)?
+                }
+            };
+            let parameters = crate::symbol_resolver::specialized_function_params(
+                &selected,
+                &kinds,
+                &resolved_type_arguments,
+            );
+            let parameters = parameters
+                .get(selected.context_count.min(parameters.len())..)
+                .unwrap_or_default()
+                .iter()
+                .copied();
+            Some((
+                Self::functional_parameter_shapes(resolver, &selected, parameters),
+                selected.call_sig,
+            ))
+        })?;
+        Self::postponed_call_expectations(
+            arguments,
+            &parameters,
+            &call_sig,
+            trailing_lambda,
+            refresh_typed_postponed,
+        )
+        .ok_or_else(Self::failure)
+    }
+
+    pub(super) fn select_classifier_call(
+        &self,
+        callee: ClassifierCallee<'_>,
+        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+        type_arguments: &[crate::fir::ResolvedTy],
+        trailing_lambda: bool,
+        demand: &mut crate::fir::SignatureDemand<'_>,
+    ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
+        let ClassifierCallee(scope, classifier, spelling) = callee;
+        let resolved_type_arguments = type_arguments
+            .iter()
+            .map(|argument| argument.get())
+            .collect::<Vec<_>>();
+        let selected = self.with_resolver(scope, |resolver| {
+            let (receiver, candidates) =
+                resolver.classifier_call_candidates(classifier, spelling)?;
+            let (arguments, argument_types) =
+                Self::mapped_call_arguments(&candidates, arguments, trailing_lambda)?;
+            let member = resolver.select_classifier_callable_from_candidates(
+                receiver,
+                spelling,
+                &arguments,
+                &resolved_type_arguments,
+                candidates,
+            )?;
+            Some((member, argument_types))
+        });
+        let Ok((member, argument_types)) = selected else {
+            return Ok(None);
+        };
+        let receiver = member.receiver;
+        if let Some(declaration) = member.member.stable_declaration {
+            if self
+                .headers
+                .stub(declaration)
+                .is_some_and(|stub| stub.signature_inference.is_some())
+            {
+                let signature = demand(declaration)?;
+                return self
+                    .apply_demanded_member(
+                        receiver,
+                        &member.member,
+                        &signature,
+                        &argument_types,
+                        &resolved_type_arguments,
+                    )
+                    .map(Some);
+            }
+        }
+        if let Some(signature) =
+            self.demanded_member_signature(member.member.stable_declaration, demand)?
+        {
+            return self
+                .apply_demanded_member(
+                    receiver,
+                    &member.member,
+                    &signature,
+                    &argument_types,
+                    &resolved_type_arguments,
+                )
+                .map(Some);
+        }
+        crate::fir::ResolvedTy::new(member.ret)
+            .map(Some)
+            .map_err(|_| Self::failure())
+    }
+
     /// The classifier a companion-associated declaration is associated with.
     pub(super) fn declaration_associated_classifier(
         &self,
@@ -143,7 +294,7 @@ impl ProductionSignatureSemantics<'_> {
         classifier: crate::types::TypeName,
         spelling: &str,
         call: &AssociatedSignatureArguments<'_, '_>,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<AssociatedSignatureCall, crate::fir::DiagnosticId> {
         let candidates = self
             .with_resolver(scope, |resolver| {
@@ -161,7 +312,7 @@ impl ProductionSignatureSemantics<'_> {
         classifier: crate::types::TypeName,
         spelling: &str,
         call: &AssociatedSignatureArguments<'_, '_>,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<AssociatedSignatureCall, crate::fir::DiagnosticId> {
         let candidates = self
             .with_resolver(scope, |resolver| {
@@ -179,7 +330,7 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
         candidates: Vec<crate::libraries::FunctionInfo>,
         call: &AssociatedSignatureArguments<'_, '_>,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<AssociatedSignatureCall, crate::fir::DiagnosticId> {
         if candidates.is_empty() {
             return Ok(AssociatedSignatureCall::Absent);
@@ -257,7 +408,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         (classifier, spelling): (crate::types::TypeName, &str),
         expected: Option<crate::fir::ResolvedTy>,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
         let (functions, properties) = self
             .with_resolver(scope, |resolver| {
@@ -280,7 +431,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         (classifier, spelling): (crate::types::TypeName, &str),
         expected: Option<crate::fir::ResolvedTy>,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
         let expected_fun = match expected
             .map(|expected| expected.get().non_null())
@@ -331,7 +482,7 @@ impl ProductionSignatureSemantics<'_> {
         functions: Vec<crate::libraries::FunctionInfo>,
         properties: Vec<crate::libraries::PropertyInfo>,
         expected: Option<crate::fir::ResolvedTy>,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
         if let (false, Some(TyKind::Fun(expected))) = (
             functions.is_empty(),
@@ -404,7 +555,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         classifier: crate::types::TypeName,
         spelling: &str,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<SelectedValue>, crate::fir::DiagnosticId> {
         let properties = self
             .with_resolver(scope, |resolver| {
@@ -420,7 +571,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         classifier: crate::types::TypeName,
         spelling: &str,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<SelectedValue>, crate::fir::DiagnosticId> {
         let properties = self
             .with_resolver(scope, |resolver| {
@@ -433,7 +584,7 @@ impl ProductionSignatureSemantics<'_> {
     fn associated_property_result(
         &self,
         properties: Vec<crate::libraries::PropertyInfo>,
-        demand: &mut Demand<'_>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<SelectedValue>, crate::fir::DiagnosticId> {
         let Some(nearest) = properties
             .iter()
@@ -454,12 +605,15 @@ impl ProductionSignatureSemantics<'_> {
                 classifier: property.owner,
                 name: property.name.clone(),
             });
-        let result =
+        let selected =
             match self.demanded_source_signature(None, property.stable_declaration, demand)? {
-                Some(signature) => signature.result,
-                None => crate::fir::ResolvedTy::new(property.ty).map_err(|_| Self::failure())?,
+                Some(signature) => SelectedValue::declared(signature),
+                None => SelectedValue::property(&property)?,
             };
-        Ok(Some(SelectedValue { result, enum_entry }))
+        Ok(Some(SelectedValue {
+            enum_entry,
+            ..selected
+        }))
     }
 }
 

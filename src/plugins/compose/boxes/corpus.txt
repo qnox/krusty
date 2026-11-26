@@ -1,0 +1,22 @@
+# The Compose compiler plugin's box corpus descriptor. See src/conformance/plugin_corpus.rs for the
+# format; the shared harness discovers this file and runs the cases that name its directive.
+plugin = compose
+directive = WITH_COMPOSE
+plugin-jar = dist:compose-compiler-plugin.jar
+plugin-option = androidx.compose.compiler.plugins.kotlin:sourceInformation=true
+runtime = google:androidx.compose.runtime:runtime-desktop:1.12.1
+runtime = google:androidx.compose.runtime:runtime-annotation-jvm:1.12.1
+runtime = google:androidx.collection:collection-jvm:1.5.0
+runtime = google:androidx.compose.ui:ui-jvmstubs:1.12.1
+runtime = google:androidx.compose.ui:ui-unit-jvmstubs:1.12.1
+runtime = google:androidx.compose.ui:ui-graphics-jvmstubs:1.12.1
+runtime = google:androidx.compose.ui:ui-geometry-jvmstubs:1.12.1
+runtime = google:androidx.compose.ui:ui-text-jvmstubs:1.12.1
+runtime = google:androidx.compose.ui:ui-util-jvmstubs:1.12.1
+runtime = google:androidx.compose.foundation:foundation-jvmstubs:1.12.1
+runtime = google:androidx.compose.foundation:foundation-layout-jvmstubs:1.12.1
+runtime = dist:kotlinx-coroutines-core-jvm.jar | maven:org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.9.0
+# The upstream codegen cases are IR/bytecode dump tests with no box(): a case passes when krusty emits
+# the reference compiler's classes byte for byte.
+upstream = plugins/compose/compiler-hosted/testData/codegen
+check = classes

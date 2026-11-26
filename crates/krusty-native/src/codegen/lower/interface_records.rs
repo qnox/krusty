@@ -74,15 +74,15 @@ impl FileLowering<'_> {
     /// interface identity (`krusty::backend::interface_identity`). The same member keeps one
     /// number, after the numbers of this module's own interfaces.
     pub(super) fn dependency_interface_number(&mut self, bytes: Vec<u8>) -> u32 {
-        let base = self.slot_plan.interfaces().count();
-        let number = match self.dependency_interface_numbers.get(&bytes).copied() {
+        let count = self.model.numbers().count();
+        let numbers = &mut *self.dependency_interface_numbers;
+        let number = match numbers.dependency.get(&bytes).copied() {
             Some(number) => number,
             None => {
-                let number = base
-                    + u32::try_from(self.dependency_interface_numbers.len())
-                        .expect("a dependency interface number fits u32");
-                self.dependency_interface_numbers
-                    .insert(bytes.clone(), number);
+                // Fresh across the module: no installed member of any file and no other
+                // dependency member has it.
+                let number = numbers.extended.fresh(count);
+                numbers.dependency.insert(bytes.clone(), number);
                 number
             }
         };
@@ -185,6 +185,7 @@ impl FileLowering<'_> {
                 DependencyImplementation::Function(function) => {
                     Some(self.import_object_function(&function)?)
                 }
+                DependencyImplementation::Declared(function) => Some(function),
                 DependencyImplementation::Bridge {
                     slot,
                     declared,
@@ -207,6 +208,17 @@ impl FileLowering<'_> {
             })?;
             implemented.push((identity, function));
         }
+        self.write_dependency_implementations(descriptor, base, &implemented)
+    }
+
+    /// Write, for the link, the record naming the function `descriptor`'s type implements each
+    /// member of a dependency's interface with, by the member's KLIB identity.
+    pub(super) fn write_dependency_implementations(
+        &mut self,
+        descriptor: DataId,
+        base: &str,
+        implemented: &[(Vec<u8>, FuncId)],
+    ) -> Result<(), Unsupported> {
         if implemented.is_empty() {
             return Ok(());
         }
@@ -214,7 +226,7 @@ impl FileLowering<'_> {
         let mut description = DataDescription::new();
         let mut contents = Vec::new();
         let mut fields = Vec::with_capacity(implemented.len());
-        for (identity, function) in &implemented {
+        for (identity, function) in implemented {
             let at = contents.len() as u32;
             contents.extend_from_slice(&(identity.len() as u64).to_le_bytes());
             contents.extend_from_slice(&[0; 16]);
@@ -236,6 +248,54 @@ impl FileLowering<'_> {
             .define_data(id, &description)
             .map_err(|error| format!("defining `kt_itfdep_{base}` ({error})"))?;
         Ok(())
+    }
+
+    /// Each member of a dependency's interface the `fun interface` `target`'s abstract member
+    /// overrides, by the member's KLIB identity, with the member's declared parameters and
+    /// result: what the object a lambda becomes when converted to `target` implements. A call
+    /// through the dependency's member reaches that object through the link's record, not through
+    /// this module's number, and hands over the overridden declaration's own operands.
+    pub(super) fn sam_dependency_members(
+        &self,
+        target: &krusty::ir::IrSamTarget,
+    ) -> Vec<(Vec<u8>, Vec<Ty>, Ty)> {
+        let krusty::ir::IrSamMethod::Module(method) = target.method_target else {
+            return Vec::new();
+        };
+        let mut members: Vec<(Vec<u8>, Vec<Ty>, Ty)> = Vec::new();
+        for edge in self
+            .ir
+            .function_overrides
+            .get(&target.classifier)
+            .into_iter()
+            .flatten()
+        {
+            let ResolvedFunctionOverrideTarget::External(overridden) = edge.overridden else {
+                continue;
+            };
+            if !edge.overridden_is_interface
+                || edge.implementation != ResolvedFunctionOverrideTarget::Module(method)
+            {
+                continue;
+            }
+            let Some(identity) = self
+                .callables
+                .callable(overridden)
+                .and_then(|fact| fact.dependency_callable.as_ref())
+            else {
+                continue;
+            };
+            let identity = member_identity(identity);
+            if members.iter().any(|(known, _, _)| *known == identity) {
+                continue;
+            }
+            members.push((
+                identity,
+                edge.declared_parameters.clone(),
+                edge.declared_result,
+            ));
+        }
+        members
     }
 
     /// The bridges of a class no instance of which is made here, which a class of another module
@@ -286,6 +346,24 @@ impl FileLowering<'_> {
         Ok(id)
     }
 
+    /// Whether the class named `class` inherits the dependency interface default `declaration`
+    /// without overriding it.
+    fn inherits_default(
+        &self,
+        class: krusty::types::TypeName,
+        declaration: krusty::fir::ExternalCallableId,
+    ) -> bool {
+        self.ir
+            .inherited_defaults
+            .get(&class)
+            .into_iter()
+            .flatten()
+            .any(|default| {
+                default.body
+                    == krusty::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration)
+            })
+    }
+
     /// How an instance of `class` implements each member of another source module's interface,
     /// by the member's KLIB identity, most derived first: by the function at a slot of its vtable
     /// (an override takes a slot of its own, so the most derived implementation is read there),
@@ -297,8 +375,9 @@ impl FileLowering<'_> {
         class: ClassId,
     ) -> Result<Vec<(Vec<u8>, DependencyImplementation)>, Unsupported> {
         let mut implemented: Vec<(Vec<u8>, DependencyImplementation)> = Vec::new();
-        // Only a source module of this program calls a member through a stub; the members of a
-        // prebuilt library's interfaces need no records.
+        // Executable exports are needed only for inherited default bodies below. Abstract
+        // interface declarations still own dispatch identities even when their KLIB has no body
+        // exports: implementations must publish the recorded declared-to-implementation frame.
         let source_modules: krusty::fx_hash::HashSet<&str> = self
             .dependency_symbols
             .keys()
@@ -325,18 +404,34 @@ impl FileLowering<'_> {
                 let Some(identity) = self
                     .callables
                     .callable(target)
-                    .filter(|fact| {
-                        fact.dependency_callable.as_ref().is_some_and(|member| {
-                            source_modules.contains(member.module.as_str())
-                                || self.unit_kind
-                                    == krusty::backend::CheckedIrUnitKind::DependencySupport
-                        })
-                    })
                     .and_then(|fact| fact.member_slot_identity())
                 else {
                     continue;
                 };
                 if implemented.iter().any(|(known, _)| *known == identity) {
+                    continue;
+                }
+                // A default the interface publishes and the class does not override implements the
+                // member with its own body, which is not a slot of the class.
+                if edge.implementation == edge.overridden
+                    && edge.implementation_function.is_some_and(|function| {
+                        self.ir.functions[function as usize].dispatch_receiver
+                            != Some(self.ir.classes[owner as usize].fq_name_id())
+                    })
+                {
+                    let function = edge
+                        .implementation_function
+                        .and_then(|function| self.functions.get(function as usize).copied())
+                        .flatten()
+                        .ok_or_else(|| {
+                            declined!(
+                                "a default a dependency's interface declares without a body to \
+                                 call (`{}.{}`)",
+                                self.kotlin_name(owner),
+                                edge.name
+                            )
+                        })?;
+                    implemented.push((identity, DependencyImplementation::Declared(function)));
                     continue;
                 }
                 let carried_alike = edge.declared_parameters.len()
@@ -356,6 +451,14 @@ impl FileLowering<'_> {
                     // superclass an earlier file laid out answers it below.
                     ResolvedFunctionOverrideTarget::External(_)
                         if edge.implementation_function.is_none() && inherits_record =>
+                    {
+                        continue;
+                    }
+                    // A dependency interface's default the class inherits: the defaults below
+                    // implement it.
+                    ResolvedFunctionOverrideTarget::External(implementation)
+                        if edge.implementation_function.is_none()
+                            && self.inherits_default(name, implementation) =>
                     {
                         continue;
                     }
@@ -413,11 +516,7 @@ impl FileLowering<'_> {
                 };
                 implemented.push((identity, implementation));
             }
-            self.record_dependency_property_implementations(
-                owner,
-                &source_modules,
-                &mut implemented,
-            )?;
+            self.record_dependency_property_implementations(owner, &mut implemented)?;
             for default in self.ir.inherited_defaults.get(&name).into_iter().flatten() {
                 let krusty::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration) =
                     default.body
@@ -451,13 +550,19 @@ impl FileLowering<'_> {
                 if implemented.iter().any(|(known, _)| *known == identity) {
                     continue;
                 }
-                let export = self.dependency_symbols.get(member).ok_or_else(|| {
-                    declined!(
-                        "a default a dependency's interface declares without a body to call \
-                         (`{}`)",
-                        self.kotlin_name(owner)
-                    )
-                })?;
+                let Some(export) = self.dependency_symbols.get(member) else {
+                    // A library default whose body lowering does not model is not support: a
+                    // call through the member declines instead of reaching nothing.
+                    self.unimplementable_interface_members.insert(
+                        identity,
+                        format!(
+                            "a default a dependency's interface declares without a body to call \
+                             (`{}`)",
+                            self.kotlin_name(owner)
+                        ),
+                    );
+                    continue;
+                };
                 let (symbol, parameters, result) = (
                     export.symbol.clone(),
                     export.signature.parameters().to_vec(),
@@ -491,7 +596,6 @@ impl FileLowering<'_> {
     fn record_dependency_property_implementations(
         &mut self,
         owner: ClassId,
-        source_modules: &krusty::fx_hash::HashSet<&str>,
         implemented: &mut Vec<(Vec<u8>, DependencyImplementation)>,
     ) -> Result<(), Unsupported> {
         let name = self.ir.classes[owner as usize].fq_name_id();
@@ -507,20 +611,18 @@ impl FileLowering<'_> {
                 .callables
                 .callable(target)
                 .and_then(|fact| fact.dependency_callable.as_ref())
-                .filter(|member| source_modules.contains(member.module.as_str()))
             else {
                 continue;
             };
-            if model::representation(self.values, edge.declared_type)
-                != model::representation(self.values, edge.implementation_type)
-            {
-                return Err(declined!(
-                    "a property of a dependency's interface implemented with another carrier \
-                     (`{}.{}`)",
-                    self.kotlin_name(owner),
-                    edge.name
-                ));
-            }
+            let carried_alike = [
+                (Some(edge.declared_type), Some(edge.implementation_type)),
+                (edge.declared_receiver, edge.implementation_receiver),
+            ]
+            .into_iter()
+            .all(|(declared, implementation)| {
+                declared.map(|ty| model::representation(self.values, ty))
+                    == implementation.map(|ty| model::representation(self.values, ty))
+            });
             let roles = [false, true]
                 .into_iter()
                 .filter(|setter| !setter || edge.overridden_setter_value.is_some());
@@ -547,6 +649,16 @@ impl FileLowering<'_> {
                     }
                     krusty::fir::ResolvedPropertyOverrideTarget::External(_) => None,
                 };
+                // An interface's table entry cannot convert between carriers; only a class's
+                // accessor, reached through its slot, is bridged.
+                if interface_number.is_some() && !carried_alike {
+                    return Err(declined!(
+                        "a property of a dependency's interface implemented with another carrier \
+                         (`{}.{}`)",
+                        self.kotlin_name(owner),
+                        edge.name
+                    ));
+                }
                 let implementation = if let Some(number) = interface_number {
                     Some(DependencyImplementation::Interface(number))
                 } else {
@@ -555,9 +667,35 @@ impl FileLowering<'_> {
                     } else {
                         crate::classes::SlotKey::Getter(edge.overridden)
                     };
-                    self.model
-                        .slot(owner, &key)
-                        .map(DependencyImplementation::Slot)
+                    self.model.slot(owner, &key).map(|slot| {
+                        if carried_alike {
+                            DependencyImplementation::Slot(slot)
+                        } else {
+                            // The accessor takes its member extension's receiver, if any, then
+                            // (for a setter) the written value; its getter answers the value.
+                            let operands = |value: Ty, receiver: Option<Ty>| {
+                                receiver
+                                    .into_iter()
+                                    .chain(setter.then_some(value))
+                                    .collect::<Vec<Ty>>()
+                            };
+                            let result = |value: Ty| if setter { Ty::Unit } else { value };
+                            DependencyImplementation::Bridge {
+                                slot,
+                                declared: (
+                                    operands(edge.declared_type, edge.declared_receiver),
+                                    result(edge.declared_type),
+                                ),
+                                implemented: (
+                                    operands(
+                                        edge.implementation_type,
+                                        edge.implementation_receiver,
+                                    ),
+                                    result(edge.implementation_type),
+                                ),
+                            }
+                        }
+                    })
                 }
                 .ok_or_else(|| {
                     declined!(

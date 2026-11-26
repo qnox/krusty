@@ -244,6 +244,8 @@ fn run_backend_passes_after_plugins(
         lambda_modes,
     } = target;
     let facades = file_classes.map(|classes| &classes.containers[..]);
+    // kotlinc's lambda-offset lowering runs after the plugins' IR extensions, over their output.
+    crate::lambda_offsets::patch(ir, &facts.property_realizations);
     // Every later pass reads a type parameter's JVM carrier off its occurrences. Select it once,
     // from the declarations' complete bounds, before any of them runs.
     crate::enclosing_capture_storage::realize(ir).map_err(SkipReason::CallArguments)?;
@@ -369,7 +371,12 @@ fn run_backend_passes_after_plugins(
             classpath,
             &facts.override_results,
         ),
-        read_only_stubs: crate::read_only_collection_stubs::select(ir, classpath, classifiers)?,
+        read_only_stubs: crate::read_only_collection_stubs::select(
+            ir,
+            classpath,
+            classifiers,
+            &crate::internal_names::MangledMembers::plan(ir, module_name, facade),
+        )?,
         abstract_overrides,
         to_array: crate::collection_to_array::select(ir, classpath, classifiers)?,
     };
@@ -486,6 +493,8 @@ fn run_backend_passes_after_plugins(
         SkipReason::InlineParameters
     })?;
     crate::ir_emit::reparent_lambda_impls(ir);
+    // A method placed on a coroutine state-machine class keeps no parameter guards.
+    crate::parameter_assertions::drop_in_coroutine_classes(ir);
     // After reparenting: a lifted name is distinct only within the class the method lands in.
     crate::lifted_names::realize(
         ir,

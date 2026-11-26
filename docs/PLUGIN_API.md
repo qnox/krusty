@@ -198,11 +198,11 @@ with `changedInstance`, and one decided only when the function runs by the calle
 with a call passing the `$stable` of its class. Every
 other mode is an explicit decline at its declaration or call: a function with a receiver, a default
 argument that is not a constant, a vararg, or another
-result, any other composable function type or use of a composable lambda parameter, recursion
+result, a composable function type that returns a value, takes context receivers, takes ten or more values or is `suspend`, any other use of a composable lambda parameter, recursion
 through lambda parameters, an explicit applier target, a call argument the pass cannot classify as constant, passed on or computed, a grouping annotation (`@NonRestartableComposable`, `@NonSkippableComposable`,
 `@ReadOnlyComposable`, `@ExplicitGroupsComposable`), a call to a composable of another file of
 the module, a call to a library composable that takes a receiver, declares default arguments, a
-function-typed parameter other than `@Composable () -> Unit`, returns a result or is `inline`, a composable
+function-typed parameter that is not a composable function type, returns a result or is `inline`, a composable
 lambda that captures a composable lambda parameter or passes a captured local to a composable call, holds
 another lambda or is empty, a composable
 whose lambda numbering another lambda or overload shares, and a class whose stability its file
@@ -405,7 +405,7 @@ identity krusty names a dependency's declaration by when it hands the host IR th
 
 ### The module's IR
 
-`Host::generate` hands the session the module's own declarations as a `ModuleIr` (from `crates/krusty-plugin-ir`, plain data with no dependencies, so the compiler can build it without depending on the host): each source file
+`Host::generate` hands the session the module's own declarations as a `ModuleIr` (`krusty_plugin_api::ir`, plain data in the plugin API, so the compiler builds it without depending on the host): each source file
 with its path, package and text, and its functions in kotlinc's IR shape, every element with the
 UTF-16 offsets kotlinc gives the same source. The host builds them as fir2ir builds a module's
 sources (every declaration first, so a body can call any function of the module, then every body),
@@ -415,6 +415,14 @@ file and position, and a dependency's function by its `CallableIdentity`. IR the
 yet, such as a type annotation or a module function's type parameters, refuses the request by what
 it is, before anything is added; a session builds one module.
 
+`Host::generate` returns the module the plugins left, as a `ModuleIr` again (`adapter/ModuleOutput.kt`
+frames it): the files krusty sent, each with every declaration it holds now. An element a plugin made
+without a source position keeps kotlinc's `UNDEFINED_OFFSET` or `SYNTHETIC_OFFSET`, which `Span`
+spells as `Span::UNDEFINED` and `Span::SYNTHETIC`. The whole module is written before it is sent, so
+IR the plugin IR does not cover, such as a `when` a plugin made, refuses the module by what it is,
+naming the element, instead of returning the module without it. A test runs a plugin that changes
+constants and adds calls, and requires the exact module it leaves.
+
 The IR covers top-level functions with regular parameters and a block body (an expression body as
 the block kotlinc makes of it), local `val` and `var`, constants, reads and plain assignments of
 parameters and locals, `return`, and calls to module and dependency functions with their type and
@@ -422,7 +430,7 @@ value arguments. A test compiles the same source with kotlinc and an IR plugin t
 with its offsets, then builds krusty's IR for it in the host under the same plugin, and requires the
 two dumps to be identical.
 
-krusty builds that `ModuleIr` from checked FIR: `hosted_plugin_ir::plugin_module_ir` analyzes the
+krusty builds that `ModuleIr` from checked FIR: `plugin_ir::plugin_module_ir` analyzes the
 module and runs Pass 2 with a `CheckedBodyObserver` that sees each checked body before common
 lowering consumes it. Declarations come from the parser's unit and the resolved index, statements
 and expressions from checked FIR, offsets from source spans converted to UTF-16. kotlinc's own

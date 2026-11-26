@@ -3,7 +3,7 @@ use crate::libraries::{GenericSig, SemanticPlatform};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind, TypeName};
 
-use super::{infer_generic_return_bindings, semantic_arg_assignable};
+use super::{infer_generic_return_bindings_from_symbols, semantic_arg_assignable};
 
 #[derive(Clone, Debug)]
 pub(crate) enum CallArgKind {
@@ -125,7 +125,8 @@ impl CallArgKind {
     /// applicability is decided: an omitted default always, an unchecked lambda literal when the
     /// parameter can host a function value, a function-shaped argument by SAM conversion, and
     /// otherwise the argument's type for that parameter (an integer literal adapts) by
-    /// assignability.
+    /// assignability. A nested generic call also fits a parameter that can complete its result:
+    /// `consume(produce())` takes `T` of `fun <T> produce(): T` from `consume`'s parameter.
     pub(crate) fn fits_parameter(
         &self,
         lib: &dyn SemanticPlatform,
@@ -142,6 +143,7 @@ impl CallArgKind {
         let sam = (self.is_lambda_literal() || self.function_type().is_some())
             && super::sam_arg_matches(lib, src, parameter, function);
         sam || super::arg_fits_source(lib, src, &parameter, &self.type_for(parameter))
+            || self.binds_result_to(src, parameter)
     }
 
     pub(crate) fn type_for(&self, parameter: Ty) -> Ty {
@@ -365,8 +367,10 @@ impl CallArgKind {
         let admits = |actual: Ty, bound: Ty| {
             actual == bound || semantic_arg_assignable(src, &bound, &actual)
         };
-        let infer = |signature: &GenericSig| {
-            infer_generic_return_bindings(signature, parameter, admits).is_some_and(|bindings| {
+        // The same expected-result relation used when checking the selected argument owns
+        // applied supertypes and provider-declared platform collection faces during selection.
+        infer_generic_return_bindings_from_symbols(src, generic_sig, parameter, admits).is_some_and(
+            |bindings| {
                 expected_result_keeps_call_evidence(
                     ProvisionalResult {
                         ty: *provisional,
@@ -375,26 +379,10 @@ impl CallArgKind {
                     generic_sig,
                     parameter,
                     &bindings,
+                    admits,
                 )
-            })
-        };
-        if infer(generic_sig) {
-            return true;
-        }
-        // An expected parameter may constrain a generic construction through an applied
-        // supertype (`ArrayList<T>` consumed as `Iterable<Int>`). Applicability must admit that
-        // contextual result before the checker can re-run the nested construction with the
-        // selected parameter; direct result unification alone sees different classifiers.
-        let Some(applied) = crate::assignable::applied_supertype(
-            &super::SourceOracle(src),
-            generic_sig.ret,
-            parameter,
-        ) else {
-            return false;
-        };
-        let mut projected = generic_sig.as_ref().clone();
-        projected.ret = applied;
-        infer(&projected)
+            },
+        )
     }
 
     /// Whether expected-result inference is the only possible source of the nested call's result
@@ -450,13 +438,22 @@ pub(crate) fn nested_result_is_input_constrained(
         .filter(|formal| {
             crate::types::ty_mentions_param(generic_sig.ret, std::slice::from_ref(*formal))
         })
-        .any(|formal| {
-            generic_sig.receiver.is_some_and(|receiver| {
-                crate::types::ty_mentions_param(receiver, std::slice::from_ref(formal))
-            }) || generic_sig.params.iter().any(|parameter| {
-                crate::types::ty_mentions_param(*parameter, std::slice::from_ref(formal))
-            })
-        })
+        .any(|formal| formal_is_input_constrained(generic_sig, formal))
+}
+
+/// Whether a nested call's own receiver or value parameters mention `formal`, so the call's
+/// arguments can bind it. A result formal they do not mention reads as its declared bound in the
+/// provisional result: that is a placeholder, not evidence.
+fn formal_is_input_constrained(
+    generic_sig: &GenericSig,
+    formal: &crate::types::TyParamName,
+) -> bool {
+    generic_sig.receiver.is_some_and(|receiver| {
+        crate::types::ty_mentions_param(receiver, std::slice::from_ref(formal))
+    }) || generic_sig
+        .params
+        .iter()
+        .any(|parameter| crate::types::ty_mentions_param(*parameter, std::slice::from_ref(formal)))
 }
 
 /// A nested call's expectation-free result type, and whether it still mentions an open formal.
@@ -466,21 +463,23 @@ pub(crate) struct ProvisionalResult {
     pub(crate) open: bool,
 }
 
-/// Whether binding a nested call's result to an enclosing expectation keeps the nullability the
+/// Whether binding a nested call's result to an enclosing expectation keeps the type evidence the
 /// call itself established.
 ///
 /// A declared nullable result (`fun <R> f(c: Column<R>): Column<R>?`) stays nullable under every
-/// binding, so a non-null expectation cannot accept it. An input-constrained result also keeps a
-/// nullable lower bound its own arguments put on a result formal, read back from the call's
-/// expectation-free `provisional` type: `id(x)` with `x: String?` cannot become a `String`, so a
-/// `String` parameter does not accept it. Only nullability is read back. A provisional's classifier
-/// may still be a placeholder when the call's own inputs are contextual (`forward(produce())`),
-/// and the expectation may widen a binding anyway (`mutableListOf(1)` as `MutableList<Number>`).
+/// binding, so a non-null expectation cannot accept it. An input-constrained result carries lower
+/// bounds its own arguments put on its result formals, read back from the call's expectation-free
+/// `provisional` type. The expectation may widen such a binding (`mutableListOf(1)` as
+/// `MutableList<Number>`) but never narrow it: `id(x)` with `x: String?` cannot become a `String`,
+/// and `value.let { f(it) }` whose lambda returns `T` cannot become an `R`. A lower bound that is
+/// only its formal's declared bound is a placeholder, not evidence: the call's own inputs were
+/// contextual (`forward(produce())`), so only its nullability is read back.
 pub(crate) fn expected_result_keeps_call_evidence(
     provisional: ProvisionalResult,
     generic_sig: &GenericSig,
     expected: Ty,
     expected_bindings: &super::GSigBinds,
+    is_subtype: impl Fn(Ty, Ty) -> bool,
 ) -> bool {
     let admits_null = |ty: Ty| ty.admits_null() || ty.upper_bound_admits_null();
     if generic_sig.ret.is_nullable() && !admits_null(expected) {
@@ -492,11 +491,41 @@ pub(crate) fn expected_result_keeps_call_evidence(
     let mut input_bindings = super::GSigBinds::default();
     super::unify_inferred_ty(generic_sig.ret, provisional.ty, &mut input_bindings);
     input_bindings.iter().all(|(formal, input)| {
-        !input.admits_null()
-            || expected_bindings
-                .get(formal)
-                .is_none_or(|expected| admits_null(*expected))
+        if !formal_is_input_constrained(generic_sig, formal) {
+            return true;
+        }
+        let Some(&expected) = expected_bindings.get(formal) else {
+            return true;
+        };
+        if input.admits_null() && !admits_null(expected) {
+            return false;
+        }
+        formal_bound_placeholder(generic_sig, formal, *input)
+            || *input == Ty::Error
+            || input.mentions_pending()
+            || is_subtype(*input, expected)
     })
+}
+
+/// Whether `input` is only `formal`'s declared upper bound, which a provisional result reads when
+/// nothing but the enclosing expectation constrains that formal.
+fn formal_bound_placeholder(
+    generic_sig: &GenericSig,
+    formal: &crate::types::TyParamName,
+    input: Ty,
+) -> bool {
+    let bounds = generic_sig
+        .formals
+        .iter()
+        .position(|declared| declared == formal)
+        .and_then(|index| generic_sig.formal_bounds.get(index))
+        .filter(|bounds| !bounds.is_empty());
+    match bounds {
+        Some(bounds) => bounds
+            .iter()
+            .any(|bound| bound.non_null() == input.non_null()),
+        None => input.non_null().is_semantic_top(),
+    }
 }
 
 #[cfg(test)]
@@ -562,6 +591,62 @@ mod tests {
         );
 
         assert!(!call.result_is_input_constrained());
+    }
+
+    #[test]
+    fn a_nested_producer_binds_through_the_provider_platform_collection_face() {
+        let (Some(stdlib), Some(jdk)) = (
+            crate::toolchain::stdlib_jar(),
+            crate::toolchain::jdk_modules(),
+        ) else {
+            return;
+        };
+        let source = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
+        ))
+        .expect("JVM provider initialization");
+        let formal = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let signature = GenericSig {
+            formals: vec!["T".into()],
+            formal_bounds: vec![vec![]],
+            receiver: None,
+            params: vec![],
+            ret: Ty::obj_args("kotlin/collections/List", &[formal]),
+            return_policy: Default::default(),
+        };
+        let producer = CallArgKind::ExpectedTypeCallable {
+            provisional: signature.ret,
+            provisional_open: true,
+            generic_sig: std::sync::Arc::new(signature.clone()),
+        };
+        let mutable = Ty::obj_args(
+            "kotlin/collections/MutableCollection",
+            &[Ty::out_projection(Ty::String)],
+        );
+        let platform = Ty::platform_nullable(mutable);
+        assert!(producer.binds_result_to(&source, platform));
+        assert!(!producer.binds_result_to(&source, mutable));
+        assert!(!producer.binds_result_to(&source, Ty::Int));
+
+        // A platform parameter cannot discard nullability established by the nested call's
+        // inputs. Retain that evidence against the original result declaration after projecting
+        // the result's generic superclass during inference.
+        let constrained = CallArgKind::ExpectedTypeCallable {
+            provisional: Ty::obj_args("kotlin/collections/List", &[Ty::nullable(Ty::String)]),
+            provisional_open: false,
+            generic_sig: std::sync::Arc::new(GenericSig {
+                params: vec![formal],
+                ..signature
+            }),
+        };
+        assert!(!constrained.binds_result_to(&source, platform));
+        assert!(constrained.binds_result_to(
+            &source,
+            Ty::platform_nullable(Ty::obj_args(
+                "kotlin/collections/MutableCollection",
+                &[Ty::out_projection(Ty::nullable(Ty::String))],
+            )),
+        ));
     }
 
     #[test]

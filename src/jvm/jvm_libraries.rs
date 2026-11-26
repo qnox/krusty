@@ -97,7 +97,9 @@ use crate::types::{
     TypeName, TypeNameList,
 };
 
-use java_operator_convention::java_method_has_operator_convention;
+use java_operator_convention::{
+    java_method_has_operator_convention, publish_classfile_member_shape, ClassfileMemberShape,
+};
 
 /// The JVM platform's contribution to Kotlin's default imports. The language-level `kotlin.*` set is
 /// composed with this list in the import-level builder and in the seed filter, so neither list is duplicated.
@@ -485,6 +487,7 @@ impl JvmLibraries {
                 generic_sig: generic_sig_for_callable.clone().map(Box::new),
                 declared_params,
                 declared_ret,
+                result_alias: meta.ret_alias,
                 reified_type_parameter_ordinals: call_sig
                     .reified_type_parameter_ordinals
                     .clone()
@@ -831,10 +834,10 @@ impl JvmLibraries {
                 continue;
             };
             let getter_inline = property_getter_inline(property.getter_inline, getter_public);
-            let Some((getter_params, getter_ret)) = parse_method_desc(&getter_sig.desc) else {
+            let Some((mut getter_params, getter_ret)) = parse_method_desc(&getter_sig.desc) else {
                 continue;
             };
-            if getter_params.len() != 1 {
+            if !parameter_plans::declared_prefix(&mut getter_params, 1) {
                 continue; // exactly the extension receiver
             }
             let property_gsig = property.generic_sig.clone();
@@ -870,7 +873,15 @@ impl JvmLibraries {
                 let setter_inline = property_accessor_inline(setter_public);
                 let (params, ret) = parse_method_desc(&setter_sig.desc)?;
                 (params.len() == 2 && ret == Ty::Unit).then(|| {
-                    accessor(
+                    let receiver = property_gsig
+                        .as_ref()
+                        .and_then(|gsig| gsig.receiver)
+                        .unwrap_or_else(|| {
+                            property
+                                .receiver_class
+                                .map_or(getter_params[0], Ty::obj_name)
+                        });
+                    let mut setter = accessor(
                         crate::names::property_setter_name(&property.name),
                         &setter_sig.name,
                         &setter_sig.desc,
@@ -878,7 +889,9 @@ impl JvmLibraries {
                         Ty::Unit,
                         ret,
                         setter_inline,
-                    )
+                    );
+                    setter.declared_params = Some(Box::new([receiver, property_ty]));
+                    setter
                 })
             });
             props.push(PropertyInfo {
@@ -906,15 +919,18 @@ impl JvmLibraries {
                 context_count: 0,
                 context_param_names: Vec::new(),
                 context_parameter_identities: Vec::new(),
-                getter: accessor(
-                    crate::names::property_getter_name(&property.name),
-                    &getter_sig.name,
-                    &getter_sig.desc,
-                    getter_params,
-                    property_ty,
-                    getter_ret,
-                    getter_inline,
-                ),
+                getter: crate::libraries::LibraryCallable {
+                    result_alias: property.ret_alias,
+                    ..accessor(
+                        crate::names::property_getter_name(&property.name),
+                        &getter_sig.name,
+                        &getter_sig.desc,
+                        getter_params,
+                        property_ty,
+                        getter_ret,
+                        getter_inline,
+                    )
+                },
                 setter: setter.map(Box::new),
                 setter_visibility: property.visibility,
                 setter_parameter_name: None,
@@ -1421,6 +1437,7 @@ impl JvmLibraries {
                     member.set_deprecated_hidden(self.function_hidden_at_api(declaration));
                     member.call_sig = declaration.member_call_sig();
                     member.declared_ret = metadata_declared_nonnull_return(declaration);
+                    member.result_alias = declaration.ret_alias();
                 } else if let Some(declaration) = constructor_declaration {
                     if declaration.params.types.contains(&Ty::Error) {
                         crate::trace_compiler!(
@@ -1659,22 +1676,15 @@ impl JvmLibraries {
                     member.set_ret_nullable(true);
                 }
                 if declaration.is_none() && constructor_declaration.is_none() {
-                    member.call_sig = {
-                        let vararg_index = m
-                            .is_vararg()
-                            .then_some(value_arity)
-                            .and_then(|arity| arity.checked_sub(1));
-                        CallSig::metadata_member(value_arity, Vec::new(), Vec::new(), vararg_index)
-                    };
-                    // Java has no `operator` modifier. Kotlin therefore recognizes a Java method
-                    // as an operator declaration from the language-defined name/arity convention.
-                    // Normalize that capability here; the resolver can then require the same
-                    // semantic flag for Kotlin metadata, Java classfiles, and Java source stubs.
-                    if uses_java_type_semantics
-                        && java_method_has_operator_convention(&member.name, member.params.len())
-                    {
-                        member.set_is_operator(true);
-                    }
+                    publish_classfile_member_shape(
+                        &mut member,
+                        ClassfileMemberShape {
+                            value_arity,
+                            vararg: m.is_vararg(),
+                            java_semantics: uses_java_type_semantics,
+                            java_declaration: !has_kotlin_metadata && m.name != "<init>",
+                        },
+                    );
                 }
                 if let Some(java_nullable) = platform_nullable_params {
                     member.call_sig.platform_nullable_params = java_nullable.into();
@@ -2438,18 +2448,6 @@ pub(crate) fn signature_formals(sig: &str) -> Vec<String> {
     parse_formals(sig).0
 }
 
-fn has_free_ty_params(ty: Ty) -> bool {
-    match ty.kind() {
-        TyKind::TyParam(..) => true,
-        TyKind::Fun(sig) => {
-            sig.params.iter().any(|param| has_free_ty_params(*param)) || has_free_ty_params(sig.ret)
-        }
-        TyKind::Obj(_, args) => args.iter().any(|arg| has_free_ty_params(*arg)),
-        TyKind::Nullable(inner) => has_free_ty_params(inner),
-        _ => false,
-    }
-}
-
 fn parse_concrete_field_gsig(signature: &str, erased_descriptor: &str) -> Option<Ty> {
     let (ty, has_free) = parse_field_gsig(signature, erased_descriptor, &Default::default())?;
     (!has_free).then_some(ty)
@@ -2726,7 +2724,7 @@ impl JvmLibraries {
                     // frontend continues to see only the two semantic receiver roles.
                     let value_dispatch = metadata::class_inline(&ci).is_some();
                     let extension_index = context_count + usize::from(value_dispatch);
-                    if getter_params.len() != extension_index + 1 {
+                    if !parameter_plans::declared_prefix(&mut getter_params, extension_index + 1) {
                         continue;
                     }
                     let Some(physical_receiver) = getter_params.get(extension_index).copied()
@@ -2758,6 +2756,7 @@ impl JvmLibraries {
                         .copied()
                         .chain(std::iter::once(receiver))
                         .collect();
+                    getter.declared_params = Some(getter.params.clone().into_boxed_slice());
                     getter.source_receiver = Some(receiver);
                     getter.context_count = context_count;
                     getter.generic_sig = property_signature.cloned().map(Box::new);
@@ -2765,6 +2764,7 @@ impl JvmLibraries {
                     getter.is_abstract = mp.is_abstract;
                     getter.inline = property_getter_inline(mp.getter_inline, getter_public);
                     attach_interface_holder(&self.cp, cn, &mut getter);
+                    getter.result_alias = mp.ret_alias;
                     getter.semantic_role =
                         crate::libraries::builtin_declaration::semantic_call_role(
                             crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
@@ -2807,6 +2807,7 @@ impl JvmLibraries {
                             .copied()
                             .chain([receiver, ty])
                             .collect();
+                        callable.declared_params = Some(callable.params.clone().into_boxed_slice());
                         callable.source_receiver = Some(receiver);
                         callable.context_count = context_count;
                         callable.owner_is_interface = ci.is_interface();
@@ -2876,7 +2877,7 @@ impl JvmLibraries {
                 // NOT the value class's own sole property: that one IS the carrier (`Result.value`),
                 // reached as the underlying value itself rather than through a computed `-impl`
                 // accessor, and rerouting it breaks the box/unbox boundary.
-                let carrier_receiver = getter_params.len() == context_count + 1
+                let carrier_receiver = getter_params.len() > context_count
                     && metadata::class_inline(&ci).is_some_and(|inline| {
                         context_count != 0
                             || inline.property_name.as_deref() != Some(mp.name.as_str())
@@ -2884,7 +2885,7 @@ impl JvmLibraries {
                 if carrier_receiver {
                     getter_params.remove(0);
                 }
-                if getter_params.len() != context_count {
+                if !parameter_plans::declared_prefix(&mut getter_params, context_count) {
                     continue;
                 }
                 let semantic_context = property_signature
@@ -2903,6 +2904,7 @@ impl JvmLibraries {
                 getter.physical_name =
                     (getter_physical_name != getter_source_name).then_some(getter_physical_name);
                 getter.params = semantic_context.clone();
+                getter.declared_params = Some(getter.params.clone().into_boxed_slice());
                 // The property declaration's generic signature owns classifier parameters too
                 // (`Base<T>.value: T?`). `specialize_property` reads that relation from the getter,
                 // just as it does for member-extension properties; omitting it here turned an
@@ -2913,6 +2915,7 @@ impl JvmLibraries {
                 getter.is_abstract = mp.is_abstract;
                 getter.inline = property_getter_inline(mp.getter_inline, getter_public);
                 attach_interface_holder(&self.cp, cn, &mut getter);
+                getter.result_alias = mp.ret_alias;
                 let getter_signature = self
                     .member_functions(recv, &getter.name)
                     .overloads
@@ -2967,6 +2970,7 @@ impl JvmLibraries {
                         .copied()
                         .chain(std::iter::once(ty))
                         .collect();
+                    setter.declared_params = Some(setter.params.clone().into_boxed_slice());
                     setter.context_count = context_count;
                     setter.owner_is_interface = ci.is_interface();
                     setter.is_abstract = mp.is_abstract;
@@ -3115,6 +3119,7 @@ impl JvmLibraries {
                     );
                     setter.physical_name = setter_physical_name;
                     setter.params = vec![field_ty];
+                    setter.declared_params = Some(setter.params.clone().into_boxed_slice());
                     setter.external_identity = Some(self.cp.intern_external_callable(
                         &setter,
                         super::classpath::ExternalCallableKind::InstanceFieldWrite,
@@ -3779,6 +3784,11 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         Some("'Array<Nothing?>' is not supported on the JVM.")
     }
 
+    /// kotlinc's JVM `FirJvmSuspensionPointInsideMutexLockChecker`.
+    fn rejects_suspension_in_critical_sections(&self) -> bool {
+        true
+    }
+
     fn install_source_module_headers(
         &self,
         sources: &[crate::libraries::PlatformSourceHeaderInput<'_>],
@@ -4139,7 +4149,7 @@ impl JvmLibraries {
         };
         let until = match elem {
             Ty::Double | Ty::Float => None,
-            Ty::UInt => Some(LibraryCallable::library(
+            Ty::UInt => Some(LibraryCallable::declared(
                 type_name("kotlin/ranges/URangesKt"),
                 "until-J1ME1BU",
                 vec![elem, elem],
@@ -4147,7 +4157,7 @@ impl JvmLibraries {
                 Ty::obj(internal),
                 format!("({prim}{prim})L{internal};"),
             )),
-            Ty::ULong => Some(LibraryCallable::library(
+            Ty::ULong => Some(LibraryCallable::declared(
                 type_name("kotlin/ranges/URangesKt"),
                 "until-eb3DHEI",
                 vec![elem, elem],
@@ -4155,7 +4165,7 @@ impl JvmLibraries {
                 Ty::obj(internal),
                 format!("({prim}{prim})L{internal};"),
             )),
-            _ if trailing_nulls == 0 => Some(LibraryCallable::library(
+            _ if trailing_nulls == 0 => Some(LibraryCallable::declared(
                 type_name("kotlin/ranges/RangesKt"),
                 "until",
                 vec![elem, elem],
@@ -4170,7 +4180,7 @@ impl JvmLibraries {
                 let iface = "kotlin/ranges/ClosedFloatingPointRange";
                 (
                     Ty::obj(iface),
-                    Some(LibraryCallable::library(
+                    Some(LibraryCallable::declared(
                         type_name("kotlin/ranges/RangesKt"),
                         "rangeTo",
                         vec![elem, elem],

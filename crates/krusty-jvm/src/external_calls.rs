@@ -1038,6 +1038,11 @@ fn realize_expressions(
                     classifier: semantic_ret,
                 })
             }
+            Some(krusty::libraries::CompilerIntrinsic::EnumValues) => {
+                unreachable!(
+                    "the frontend selects `enumValues` of a reified parameter as an operation"
+                )
+            }
             Some(krusty::libraries::CompilerIntrinsic::EnumEntries) => {
                 let classifier = substitutions.iter().find_map(|substitution| {
                     matches!(
@@ -1078,6 +1083,9 @@ fn realize_expressions(
             ) => {
                 unreachable!("a Native continuation intrinsic cannot reach JVM call realization")
             }
+            Some(krusty::libraries::CompilerIntrinsic::InterceptedContinuation) => {
+                unreachable!("a Wasm continuation intrinsic cannot reach JVM call realization")
+            }
             Some(
                 krusty::libraries::CompilerIntrinsic::UnsignedDivide { .. }
                 | krusty::libraries::CompilerIntrinsic::UnsignedRemainder { .. }
@@ -1102,9 +1110,13 @@ fn realize_expressions(
                 krusty::libraries::CompilerIntrinsic::ArraySize
                 | krusty::libraries::CompilerIntrinsic::FloatingIsNaN { .. }
                 | krusty::libraries::CompilerIntrinsic::FloatingIsInfinite { .. }
+                | krusty::libraries::CompilerIntrinsic::FloatingAdjacent { .. }
+                | krusty::libraries::CompilerIntrinsic::CountLeadingZeroBits { .. }
+                | krusty::libraries::CompilerIntrinsic::CharIsSurrogate(_)
                 | krusty::libraries::CompilerIntrinsic::RadixToString { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayStorageCopy
                 | krusty::libraries::CompilerIntrinsic::StringRangeEquals
+                | krusty::libraries::CompilerIntrinsic::StringIndexOf { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayCopy { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayGet
                 | krusty::libraries::CompilerIntrinsic::ArraySet
@@ -1112,7 +1124,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::ListStorageConstruction(_)
                 | krusty::libraries::CompilerIntrinsic::CharCode
                 | krusty::libraries::CompilerIntrinsic::StringLength
-                | krusty::libraries::CompilerIntrinsic::Assert
+                | krusty::libraries::CompilerIntrinsic::Assert { .. }
                 | krusty::libraries::CompilerIntrinsic::AssertFailsWith
                 | krusty::libraries::CompilerIntrinsic::Print
                 | krusty::libraries::CompilerIntrinsic::Println
@@ -1120,7 +1132,6 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::CoroutineContext
                 | krusty::libraries::CompilerIntrinsic::CoroutineSuspended
                 | krusty::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
-                | krusty::libraries::CompilerIntrinsic::EnumValues
                 | krusty::libraries::CompilerIntrinsic::EnumName
                 | krusty::libraries::CompilerIntrinsic::IsEmpty
                 | krusty::libraries::CompilerIntrinsic::IsNotEmpty
@@ -1770,6 +1781,7 @@ fn record_protected_dependency_call(
             name: name.clone(),
             parameters: callable.physical_params.clone().into_boxed_slice(),
             parameter_names: crate::parameter_names::dependency_access_bridge_local_variables(
+                ir.reference.quirks(),
                 &callable.parameter_identities,
                 &callable.params,
                 &callable.physical_params,

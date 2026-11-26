@@ -25,6 +25,7 @@ mod compiler_blocks;
 mod conditionals;
 mod constructions;
 mod elvis_blocks;
+mod enum_members;
 mod instance_storage;
 mod loops;
 mod object_literals;
@@ -36,7 +37,8 @@ mod string_templates;
 mod try_catch;
 mod type_operators;
 
-pub(super) use blocks::publish_parameter_defaults;
+pub(super) use blocks::{lower_parameter_defaults, publish_parameter_defaults};
+pub(super) use enum_members::ImplicitEnumMember;
 
 use super::decline::KlibBodyDeclineReason;
 use super::function_lowering::FunctionHeader;
@@ -152,12 +154,33 @@ pub(super) trait CallLinker {
         Ok(None)
     }
 
+    /// The enum class whose implicit `values`, `valueOf` or `entries` getter a call of
+    /// `callee` names, which the linker has materialized, and that member. Template linkers keep
+    /// the call's ordinary declaration boundary.
+    fn implicit_enum_member(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<(TypeName, ImplicitEnumMember)>> {
+        Ok(None)
+    }
+
     /// The provider-selected compiler suspension intrinsic, if this template linker owns its
     /// identity and has authenticated its serialized header.
     fn unintercepted_suspension(
         &self,
         _callee: &crate::libraries::KlibDeclarationSignature,
     ) -> Lowered<Option<UninterceptedSuspensionCall>> {
+        Ok(None)
+    }
+
+    /// The continuation interception this linker's selected declaration of `callee` is:
+    /// Kotlin/Wasm's `interceptedIntrinsic`, which a body expands to its coroutine class's own
+    /// interception.
+    fn intercepted_continuation(
+        &self,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<super::intercepted_continuation::InterceptedContinuationExpansion>> {
         Ok(None)
     }
 
@@ -311,6 +334,21 @@ pub(super) trait CallLinker {
         unsupported("a file-private object value")
     }
 
+    /// Whether `signature` names a non-public interface of the library of the body being lowered.
+    fn is_local_interface(&self, _signature: &crate::metadata::klib_ir::KlibIrSignature) -> bool {
+        false
+    }
+
+    /// The non-public interface a type test or a cast of this library's body names, installed in
+    /// the unit with its abstract members. Template linkers keep the refusal.
+    fn link_local_interface(
+        &mut self,
+        _ir: &mut IrFile,
+        _signature: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<()> {
+        unsupported("a type of a file-private interface")
+    }
+
     /// The constructor a file-local construction invokes. Template linkers keep the refusal.
     fn link_local_constructor(
         &mut self,
@@ -320,8 +358,27 @@ pub(super) trait CallLinker {
         unsupported("a call of a file-private constructor")
     }
 
+    /// The member a call of the file-local `callee` inherits when `callee` is a fake override of
+    /// a class private to its file, which no declaration defines: the call is one of that member,
+    /// dispatched on its receiver. `None` for any other callee; template linkers find none.
+    fn inherited_member(
+        &self,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Option<crate::metadata::klib_ir::KlibIrSignature> {
+        None
+    }
+
     /// The function a file-local call invokes: a top-level function private to the lowered
     /// body's file, or a member of a file-local class. Template linkers keep the refusal.
+    /// The getter of an inherited property that a call of the fake override `callee` of a local
+    /// class stands for. `None` when `callee` is no such fake override.
+    fn inherited_getter(
+        &self,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Lowered<Option<crate::metadata::klib_ir::KlibIrSignature>> {
+        Ok(None)
+    }
+
     fn link_local_function(
         &mut self,
         _ir: &mut IrFile,
@@ -330,12 +387,13 @@ pub(super) trait CallLinker {
         unsupported("a call of a file-private declaration")
     }
 
-    /// The dependency property a call of its accessor `callee` reads or writes.
+    /// What a call of the property accessor `callee` reaches: the dependency property it reads or
+    /// writes, or the accessor function the unit emits.
     fn link_accessor(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibAccessorIdSignature,
-    ) -> Lowered<LinkedAccessor>;
+    ) -> Lowered<LinkedAccessorCall>;
 
     /// The static storage of the top-level property whose backing field is `field`, which a body
     /// of that property's own library reads or writes. `None` leaves the access to the body's
@@ -379,6 +437,11 @@ pub(super) trait CallLinker {
     /// Whether `left` and `right` are one type in the calling compilation's class model, apart
     /// from projections that restate their parameter's declaration-site variance.
     fn same_type(&self, left: Ty, right: Ty) -> bool;
+
+    /// The declared upper bounds of the classifier `owner`'s type parameter at `index` in the
+    /// calling compilation's class model: what a star or `out` projection of that slot captures
+    /// besides its own read type.
+    fn classifier_parameter_bounds(&self, owner: TypeName, index: usize) -> Vec<Ty>;
 
     /// Constructor generic bounds consume explicit hierarchy/full-formal evidence without
     /// changing the independent operand-coercion capability.
@@ -425,10 +488,12 @@ pub(super) enum ConstructorRole {
 }
 
 /// The dependency constructor a constructor call invokes: the provider's identity, the class it
-/// constructs and its declared value parameters.
+/// constructs and its declared value parameters, and, when the linking unit materializes that
+/// class, the constructor of the materialized class the call selects.
 pub(super) struct LinkedConstructor {
     pub(super) target: crate::fir::ExternalCallableId,
     pub(super) declaration: super::constructor_calls::ConstructorDeclaration,
+    pub(super) materialized: Option<crate::ir::IrConstructorTarget>,
 }
 
 /// The dependency property a call of one of its accessors reads or writes, as a source access of
@@ -436,7 +501,7 @@ pub(super) struct LinkedConstructor {
 /// and the accessor's dispatch receiver, parameters (context parameters, extension receiver, and a
 /// setter's value) and result.
 pub(super) struct LinkedAccessor {
-    pub(super) target: LinkedAccessorTarget,
+    pub(super) property: crate::fir::ExternalPropertyId,
     pub(super) write: bool,
     pub(super) receiver: Option<Ty>,
     pub(super) params: Vec<Ty>,
@@ -491,13 +556,12 @@ pub(super) struct StaticField {
 }
 
 /// What an accessor call reaches.
-#[derive(Clone, Copy)]
-pub(super) enum LinkedAccessorTarget {
+pub(super) enum LinkedAccessorCall {
     /// The provider's property, read or written through its accessor.
-    External(crate::fir::ExternalPropertyId),
-    /// The getter this unit emits, for a member of a value class: a member function of its
-    /// class, called on the receiver in place of the property read.
-    Local(FunId),
+    Property(LinkedAccessor),
+    /// The accessor function this unit emits, called as any function of the unit is: a member of
+    /// a class the unit materializes, or a top-level accessor, generic ones among them.
+    Function(LinkedCallee),
 }
 
 /// The function a body is lowered into: its serialized symbol, the only target its `return`s may
@@ -784,6 +848,7 @@ impl<'a> BodyLowering<'a> {
             } if matches!(
                 origin.as_str(),
                 "INLINE_ARGS_CONTAINER"
+                    | "ARGUMENTS_REORDERING_FOR_CALL"
                     | "WHEN"
                     | "PLUSEQ"
                     | "MINUSEQ"
@@ -818,7 +883,7 @@ impl<'a> BodyLowering<'a> {
                 origin: Some(origin),
             } if origin == "OBJECT_LITERAL" => return self.object_literal(statements),
             KlibIrExprKind::Block { .. } => {
-                return unsupported("a block of a compiler-introduced form")
+                return unsupported("a block of a compiler-introduced form");
             }
             KlibIrExprKind::Composite { .. } => return unsupported("a composite block"),
             KlibIrExprKind::ReturnableBlock {
@@ -1036,6 +1101,18 @@ impl<'a> BodyLowering<'a> {
     /// of every nullable type. Any other use, such as an erased body's value where its declared
     /// type is expected, is a conversion the body must state.
     fn operand(&mut self, id: KlibIrExprId, expected: Ty) -> Lowered<ExprId> {
+        self.operand_capturing(id, expected, None)
+    }
+
+    /// [`Self::operand`] for an argument of a call, whose callee declaration `site` names: a
+    /// star-projected argument is also a value of the parameter when the call binds the type
+    /// parameter the parameter applies there to the capture of that star.
+    fn operand_capturing(
+        &mut self,
+        id: KlibIrExprId,
+        expected: Ty,
+        site: Option<CaptureSite<'_>>,
+    ) -> Lowered<ExprId> {
         let lowered = self.expression(id)?;
         let actual = self.lowered_type(lowered);
         if is_value_of(actual, expected) {
@@ -1046,6 +1123,9 @@ impl<'a> BodyLowering<'a> {
         }
         if let Some(narrowed) = self.null_proven_field(id, lowered, actual, expected) {
             return Ok(narrowed);
+        }
+        if site.is_some_and(|site| captures_star_projection(actual, expected, site)) {
+            return Ok(lowered);
         }
         self.upcast(lowered, actual, expected)
             .ok_or(KlibBodyDeclineReason::ImplicitConversion)
@@ -1315,7 +1395,15 @@ impl<'a> BodyLowering<'a> {
             return Err(KlibBodyDeclineReason::ForeignReturnTarget);
         }
         let expected = self.member_result.unwrap_or(self.header.body_result());
-        let mut value = self.operand(value, expected)?;
+        let mut value = if !member && self.header.erases_result() {
+            // An erased body leaves the smart cast of its result to a type parameter out with the
+            // parameter (`checkNotNull` returns its `value: T?` as `T` after its `null` test), and
+            // Kotlin's inliner casts the inlined result to the call's result type implicitly.
+            let lowered = self.expression(value)?;
+            self.implicit_cast_of(lowered, expected, expected)?
+        } else {
+            self.operand(value, expected)?
+        };
         if !member && self.header.body_result() != self.header.result() {
             value = self.declared_value(value, self.header.result());
         }
@@ -1349,6 +1437,78 @@ fn is_value_of(actual: Ty, expected: Ty) -> bool {
     actual == expected || (actual == Ty::Null && expected.is_nullable())
 }
 
+/// The callee declaration a call argument is passed to, as the callee declares it before the
+/// call binds its type parameters.
+#[derive(Clone, Copy)]
+struct CaptureSite<'a> {
+    /// The declared type of the parameter the argument is passed to.
+    declared: Ty,
+    /// Every declared parameter of the callee.
+    parameters: &'a [Ty],
+    /// The type parameters of the callee itself.
+    formals: &'a [crate::types::TyParamName],
+}
+
+/// A value typed `actual` is one of `expected` through the capture of a star projection: the
+/// call binds a type parameter of its callee to the star, which the serialized call states as
+/// the type parameter's bound (`Key<*>` passed to `get<E : Element>(key: Key<E>)` is read at
+/// `Key<Element>`).
+///
+/// Every slot where the types differ must be a star projection of `actual` against a type
+/// parameter of the callee that the declaration applies in that slot alone, and `expected` must
+/// state that parameter's bound there. A parameter the declaration fixes (`Key<Element>`) or a
+/// type parameter the call does not bind is no capture and is read as written.
+fn captures_star_projection(actual: Ty, expected: Ty, site: CaptureSite<'_>) -> bool {
+    let (
+        Some((class, actual_args)),
+        Some((expected_class, expected_args)),
+        Some((owner, declared_args)),
+    ) = (
+        actual.obj_parts(),
+        expected.obj_parts(),
+        site.declared.obj_parts(),
+    )
+    else {
+        return false;
+    };
+    if class != expected_class
+        || class != owner
+        || actual_args.len() != expected_args.len()
+        || actual_args.len() != declared_args.len()
+    {
+        return false;
+    }
+    let mut captured = false;
+    for (slot, ((have, want), declared)) in actual_args
+        .iter()
+        .zip(expected_args)
+        .zip(declared_args)
+        .enumerate()
+    {
+        if have == want {
+            continue;
+        }
+        let crate::types::TyKind::TyParam(name, bound) = declared.kind() else {
+            return false;
+        };
+        let sole = !declared_args
+            .iter()
+            .enumerate()
+            .any(|(other, argument)| other != slot && calls::names(*argument, name))
+            && site
+                .parameters
+                .iter()
+                .filter(|parameter| calls::names(**parameter, name))
+                .count()
+                == 1;
+        if !have.is_star_projection() || !site.formals.contains(&name) || !sole || *want != bound {
+            return false;
+        }
+        captured = true;
+    }
+    captured
+}
+
 /// The target-neutral zero a deferred local of type `ty` holds before its first assignment, as the
 /// source parser supplies it: the primitive's zero, and `null` for every other type (a backend
 /// reads the deferred type to choose the physical zero it stores).
@@ -1363,5 +1523,114 @@ fn deferred_zero(ty: Ty) -> IrConst {
         Ty::Double => IrConst::Double(0.0),
         Ty::Char => IrConst::Char(0),
         _ => IrConst::Null,
+    }
+}
+
+#[cfg(test)]
+mod capture_conversion_tests {
+    use super::{captures_star_projection, CaptureSite};
+    use crate::types::{Ty, TyParamName};
+
+    fn key(argument: Ty) -> Ty {
+        Ty::obj_args("demo/Key", &[argument])
+    }
+
+    fn star() -> Ty {
+        Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))
+    }
+
+    fn formal() -> (TyParamName, Ty) {
+        let name = TyParamName::from("E");
+        (name, Ty::ty_param("E", Ty::obj("demo/Element")))
+    }
+
+    #[test]
+    fn a_star_is_captured_by_a_type_parameter_of_the_callee_at_its_bound() {
+        let (name, e) = formal();
+        let declared = key(e);
+        let site = CaptureSite {
+            declared,
+            parameters: &[declared],
+            formals: &[name],
+        };
+        assert!(captures_star_projection(
+            key(star()),
+            key(Ty::obj("demo/Element")),
+            site
+        ));
+    }
+
+    #[test]
+    fn a_star_is_not_captured_where_the_declaration_fixes_or_does_not_bind_the_slot() {
+        let (name, e) = formal();
+        let element = Ty::obj("demo/Element");
+        // The declared parameter is fixed to `Key<Element>`.
+        let fixed = key(element);
+        assert!(!captures_star_projection(
+            key(star()),
+            key(element),
+            CaptureSite {
+                declared: fixed,
+                parameters: &[fixed],
+                formals: &[name]
+            }
+        ));
+        // The parameter applies a type parameter the callee does not declare.
+        let rigid = key(e);
+        assert!(!captures_star_projection(
+            key(star()),
+            key(element),
+            CaptureSite {
+                declared: rigid,
+                parameters: &[rigid],
+                formals: &[]
+            }
+        ));
+        // Another parameter constrains the same type parameter too.
+        let declared = key(e);
+        assert!(!captures_star_projection(
+            key(star()),
+            key(element),
+            CaptureSite {
+                declared,
+                parameters: &[declared, e],
+                formals: &[name]
+            }
+        ));
+    }
+
+    #[test]
+    fn a_capture_states_the_bound_and_only_a_star_is_captured() {
+        let (name, e) = formal();
+        let declared = key(e);
+        let site = CaptureSite {
+            declared,
+            parameters: &[declared],
+            formals: &[name],
+        };
+        let element = Ty::obj("demo/Element");
+        // Another type argument than the bound.
+        assert!(!captures_star_projection(
+            key(star()),
+            key(Ty::obj("demo/Other")),
+            site
+        ));
+        // A concrete argument is not a capture.
+        assert!(!captures_star_projection(
+            key(Ty::obj("demo/Other")),
+            key(element),
+            site
+        ));
+        // Another class or another nullability.
+        assert!(!captures_star_projection(
+            Ty::obj_args("demo/Lock", &[star()]),
+            key(element),
+            site
+        ));
+        assert!(!captures_star_projection(
+            key(star()),
+            Ty::nullable(key(element)),
+            site
+        ));
     }
 }

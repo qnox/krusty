@@ -13,6 +13,7 @@
 //! whatever a position needs, so this is the only place the two can disagree.
 
 use super::*;
+use krusty::libraries::AtomicOperation;
 
 impl BodyLowering<'_, '_, '_> {
     /// The checked Kotlin type of `id`'s value, or `None` when lowering recorded none.
@@ -88,6 +89,27 @@ impl BodyLowering<'_, '_, '_> {
                 ir.classes[class as usize].fields[field as usize].ty
             }
             IrExpr::GetStatic(index) => ir.statics[*index as usize].ty,
+            // An atomic access answers the value it read at the field's storage type, or whether
+            // its comparison held.
+            IrExpr::Checked(checked_op)
+                if let IrCheckedOperation::AtomicField {
+                    operation,
+                    class,
+                    index,
+                    ..
+                } = &**checked_op =>
+            {
+                match operation {
+                    AtomicOperation::CompareAndSet => Ty::Boolean,
+                    AtomicOperation::Store => Ty::Unit,
+                    AtomicOperation::Load
+                    | AtomicOperation::Exchange
+                    | AtomicOperation::CompareAndExchange
+                    | AtomicOperation::FetchAndAdd => {
+                        model::field_storage_ty(self.file.values, ir, *class, *index).ok()?
+                    }
+                }
+            }
             // The zero of the omitted parameter's own carrier.
             IrExpr::AbsentArgument { ty } => *ty,
             IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. } => *elem,

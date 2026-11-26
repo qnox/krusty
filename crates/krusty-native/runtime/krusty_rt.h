@@ -126,14 +126,43 @@ typedef struct KType {
        implementing no interface of the program has none: nothing dispatches through it here.
        Appended, like the names above, so no existing initializer moves. */
     const kt_fn *itable;
+    /* On a class of the PROGRAM that implements `kotlin.collections.Map`: its members, through
+       typed virtual thunks, for the map entry points below to answer for an object they did not
+       make. NULL for every other type. */
+    const struct KMapMembers *map_members;
+    /* On a CALLABLE REFERENCE's descriptor: the byte offsets of the fields holding the values it
+       bound for the declaration's context parameters, `reference_context_count` of them, in
+       parameter order. Equality and `hashCode` read them as they read the bound receiver, so two
+       references to one declaration with different contexts are different. NULL, and a count of
+       0, for a reference binding none. */
+    const uint32_t *reference_context_offsets;
+    uint32_t reference_context_count;
 } KType;
+
+/* The read-only members of `Map` a program class answers, each a thunk with the fixed signature
+   written here that dispatches to the class's override virtually, so a subclass overriding one is
+   reached through the same thunk. A key or value crosses as a reference, as `Map` declares it. */
+typedef struct KMapMembers {
+    kt_int (*size)(struct KObject *self);
+    kt_boolean (*is_empty)(struct KObject *self);
+    kt_boolean (*contains_key)(struct KObject *self, struct KObject *key);
+    kt_boolean (*contains_value)(struct KObject *self, struct KObject *value);
+    struct KObject *(*get)(struct KObject *self, struct KObject *key);
+    struct KObject *(*keys)(struct KObject *self);
+    struct KObject *(*values)(struct KObject *self);
+    struct KObject *(*entries)(struct KObject *self);
+} KMapMembers;
 
 /* The compiler writes each descriptor field at a fixed offset (`ktype` in
    `codegen/lower/objects.rs`); these pin the C layout to the same numbers. */
 _Static_assert(offsetof(KType, class_names) == 148, "KType.class_names moved");
 _Static_assert(offsetof(KType, collection_size) == 152, "KType.collection_size moved");
 _Static_assert(offsetof(KType, itable) == 160, "KType.itable moved");
-_Static_assert(sizeof(KType) == 168, "KType changed size");
+_Static_assert(offsetof(KType, map_members) == 168, "KType.map_members moved");
+_Static_assert(offsetof(KType, reference_context_offsets) == 176, "KType.reference_context_offsets moved");
+_Static_assert(offsetof(KType, reference_context_count) == 184, "KType.reference_context_count moved");
+_Static_assert(sizeof(KType) == 192, "KType changed size");
+_Static_assert(offsetof(KMapMembers, entries) == 56, "KMapMembers.entries moved");
 
 /* What a descriptor publishes about its class's names, in `KType.class_names`.
 
@@ -254,6 +283,12 @@ extern const KType kt_type_number;
 extern const KType kt_type_comparable;
 /* `kotlin.CharSequence`, which a `String` and a `StringBuilder` both point at. */
 extern const KType kt_type_char_sequence;
+/* `kotlin.text.Appendable`, which a `StringBuilder` points at. */
+extern const KType kt_type_appendable;
+/* `kotlin.ranges.ClosedRange`, which each of the runtime's ranges points at, and
+   `ClosedFloatingPointRange`, which the floating-point ones point at too. */
+extern const KType kt_type_closed_range;
+extern const KType kt_type_closed_floating_point_range;
 /* The four unsigned integers. Each is a value class over a signed primitive and is carried as the
    machine integer it wraps, so a descriptor of its own is the only thing keeping a BOXED one from
    being an `Int`: `1u as? Int` must fail, and printing one must not print the signed number sharing
@@ -401,6 +436,7 @@ extern const KType kt_type_kmutable_property2;
    `KType.interfaces` requires) and a class of the program that implements one names it too. None
    has instances of its own; each lists its own bases. */
 extern const KType kt_type_iterator_interface;
+extern const KType kt_type_list_iterator_interface;
 extern const KType kt_type_iterable_interface;
 extern const KType kt_type_mutable_iterable_interface;
 extern const KType kt_type_collection_interface;
@@ -420,6 +456,11 @@ extern const KType kt_type_mutable_map_interface;
    `listOf(vararg)` answers an anonymous read-only `AbstractList`, which this class stands for. */
 extern const KType kt_type_list;
 extern const KType kt_type_list_iterator;
+/* The view `List.subList` answers: the range of a list, reading the list as it is. A `List`, not a
+   `MutableList`; its size is fixed, and a growable parent that changes shape after it was made
+   makes each read raise `ConcurrentModificationException`. */
+extern const KType kt_type_sub_list;
+extern const KType kt_type_mutable_sub_list;
 
 KRef kt_list_of(KRef elements);
 KRef kt_list_empty(void);
@@ -458,7 +499,9 @@ kt_boolean kt_mutable_collection_add(KRef self, KRef value);
 kt_boolean kt_mutable_collection_remove(KRef self, KRef value);
 void kt_mutable_collection_clear(KRef self);
 kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements);
+kt_boolean kt_mutable_collection_add_all_reading_first(KRef self, KRef elements);
 KRef kt_list_get(KRef list, kt_int index);
+KRef kt_list_sub_list(KRef list, kt_int from, kt_int to);
 /* `first()` / `last()`; both raise `NoSuchElementException` on an empty list, as Kotlin does. */
 KRef kt_list_first(KRef list);
 KRef kt_list_last(KRef list);
@@ -466,6 +509,8 @@ kt_int kt_list_index_of(KRef list, KRef value);
 kt_int kt_list_last_index_of(KRef list, KRef value);
 kt_boolean kt_list_contains(KRef list, KRef value);
 KRef kt_list_iterator(KRef list);
+KRef kt_list_list_iterator(KRef list, kt_int index);
+KRef kt_list_list_iterator_from_start(KRef list);
 
 /* ---- a growable list -------------------------------------------------------------------------
 
@@ -478,6 +523,8 @@ KRef kt_mutable_list_new(void);
 KRef kt_mutable_list_with_capacity(kt_int capacity);
 /* A growable list holding a COPY of an array's elements. */
 KRef kt_mutable_list_of(KRef elements);
+/* `ArrayList(elements)`: a growable list holding a copy of any collection's elements. */
+KRef kt_mutable_list_copy_of(KRef elements);
 kt_boolean kt_mutable_list_add(KRef self, KRef value);
 void kt_mutable_list_add_at(KRef self, kt_int index, KRef value);
 /* Answers the element that was there, as Kotlin's `set` does. */
@@ -492,8 +539,15 @@ void kt_mutable_list_clear(KRef self);
    answers `Unit`. */
 void kt_mutable_list_plus_assign(KRef self, KRef value);
 void kt_mutable_list_add_all(KRef self, KRef elements);
+void kt_mutable_list_add_all_reading_first(KRef self, KRef elements);
 kt_boolean kt_list_iterator_has_next(KRef iterator);
 KRef kt_list_iterator_next(KRef iterator);
+/* `ListIterator`'s members over a list's iterator. `kt_list_iterator_at` is `listIterator(index)`. */
+KRef kt_list_iterator_at(KRef list, kt_int index);
+kt_boolean kt_list_iterator_has_previous(KRef iterator);
+KRef kt_list_iterator_previous(KRef iterator);
+kt_int kt_list_iterator_next_index(KRef iterator);
+kt_int kt_list_iterator_previous_index(KRef iterator);
 
 /* Iteration through a receiver the generator could only type by the INTERFACE, where either of the
    two iterable things this runtime has may turn up. The descriptor decides which, and `next`
@@ -709,26 +763,6 @@ kt_boolean kt_floating_range_is_empty(KRef range);
 kt_double kt_floating_range_start(KRef range);
 kt_double kt_floating_range_end(KRef range);
 
-/* ---- comparable ranges ------------------------------------------------------------------------
-
-   `"a".."c"`, and every other `a..b` ordered by `Comparable` rather than by a machine comparison.
-   The bounds are OBJECTS, and the range carries the `compareTo` it orders them by: the generator
-   chose that operation where it built the range, knowing the element type, so the runtime never
-   has to rediscover it from the bounds' descriptors. `kt_compare_any` is the one for the builtin
-   comparables; a program's own `Comparable` class passes its `compareTo`. Not a progression
-   either: `Comparable` names no successor, so there is no step and no walk. */
-extern const KType kt_type_comparable_range;
-
-/* `a.compareTo(b)`: negative, zero or positive. A program's `compareTo` may raise instead; it then
-   leaves the exception pending and its answer means nothing. */
-typedef kt_int (*kt_compare_fn)(KRef a, KRef b);
-
-KRef kt_comparable_range(KRef start, KRef end, kt_compare_fn compare);
-kt_boolean kt_comparable_range_contains(KRef range, KRef value);
-kt_boolean kt_comparable_range_is_empty(KRef range);
-KRef kt_comparable_range_start(KRef range);
-KRef kt_comparable_range_end(KRef range);
-
 /* `for (x in range)` over a range the program materialized. The iterator is its own object because
    the loop reads it twice per step; a range iterated straight from a literal never becomes one,
    because checked common IR preserves that literal as a range-loop operation for this backend to
@@ -865,6 +899,12 @@ kt_int kt_string_compare_to(KRef a, KRef b);
    both ranges are already within their strings (Kotlin/Native's `unsafeRangeEquals`). */
 kt_boolean kt_string_range_equals(KRef self, kt_int self_offset, KRef other, kt_int other_offset,
                                   kt_int length);
+
+/* Kotlin/Native's `indexOfString` and `indexOfChar`: the first UTF-16 unit offset at or after
+   `from` (a negative start counts from zero) where `other` or `ch` occurs, or -1. */
+kt_int kt_string_index_of_string(KRef self, KRef other, kt_int from);
+kt_int kt_string_index_of_char(KRef self, kt_char ch, kt_int from);
+kt_int kt_string_last_index_of_char(KRef self, kt_char ch, kt_int from);
 
 /* `s.removeSuffix(suffix)`: the receiver without it, cut by UTF-16 unit as `endsWith` and
    `substring` are; either may be a `StringBuilder`. A string that does not end there comes back
@@ -1269,6 +1309,10 @@ kt_long kt_abs_long(kt_long value);
 kt_float kt_abs_float(kt_float value);
 kt_double kt_abs_double(kt_double value);
 
+/* `countLeadingZeroBits`: the zero bits above the highest set one; the whole width for zero. */
+kt_int kt_count_leading_zero_bits_int(kt_int value);
+kt_int kt_count_leading_zero_bits_long(kt_long value);
+
 /* `compareTo` on scalars. Separate functions rather than an emitted `a < b ? -1 : ...` so neither
    operand is evaluated twice, and so the floating-point cases can implement Kotlin's TOTAL order
    (NaN above everything, -0.0 below 0.0) rather than C's comparison operators. */
@@ -1287,6 +1331,12 @@ kt_double kt_rem_double(kt_double a, kt_double b);
    so is not the sign bit. */
 kt_float  kt_mod_float(kt_float a, kt_float b);
 kt_double kt_mod_double(kt_double a, kt_double b);
+/* `kotlin.math.nextUp` and `nextDown`: the adjacent representable value toward positive or negative
+   infinity. Defined in `krusty_fp.c`. */
+kt_float  kt_next_up_float(kt_float value);
+kt_float  kt_next_down_float(kt_float value);
+kt_double kt_next_up_double(kt_double value);
+kt_double kt_next_down_double(kt_double value);
 
 kt_int kt_compare_float(kt_float a, kt_float b);
 kt_int kt_compare_double(kt_double a, kt_double b);

@@ -75,17 +75,28 @@ pub fn not_applicable_path(platform: Platform, version: KotlinVersion) -> PathBu
     read_path(NOT_APPLICABLE, platform.name(), version)
 }
 
+/// The directory the repository-wide inventories live under.
+fn tests_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests")
+}
+
 /// The file `version` reads under `tests/<directory>/<lane>/`: its own, or its predecessor's. A
 /// release no file covers reads its own path, which does not exist.
 pub fn read_path(directory: &str, lane: &str, version: KotlinVersion) -> PathBuf {
-    krusty::kotlin_version::recorded_file(version, |release| own_path(directory, lane, release))
-        .unwrap_or_else(|| own_path(directory, lane, version))
+    read_path_in(&tests_root(), directory, lane, version)
 }
 
-fn own_path(directory: &str, lane: &str, version: KotlinVersion) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join(directory)
+/// [`read_path`] under `root` instead of `tests/`: a compiler plugin keeps its own inventories
+/// beside its box corpus descriptor.
+pub fn read_path_in(root: &Path, directory: &str, lane: &str, version: KotlinVersion) -> PathBuf {
+    krusty::kotlin_version::recorded_file(version, |release| {
+        own_path(root, directory, lane, release)
+    })
+    .unwrap_or_else(|| own_path(root, directory, lane, version))
+}
+
+fn own_path(root: &Path, directory: &str, lane: &str, version: KotlinVersion) -> PathBuf {
+    root.join(directory)
         .join(lane)
         .join(format!("{version}.txt"))
 }
@@ -99,9 +110,21 @@ pub fn record(
     paths: &BTreeSet<String>,
     rendered: &str,
 ) -> std::io::Result<()> {
-    let own = own_path(directory, lane, version);
+    record_in(&tests_root(), directory, lane, version, paths, rendered)
+}
+
+/// [`record`] under `root` instead of `tests/`.
+pub fn record_in(
+    root: &Path,
+    directory: &str,
+    lane: &str,
+    version: KotlinVersion,
+    paths: &BTreeSet<String>,
+    rendered: &str,
+) -> std::io::Result<()> {
+    let own = own_path(root, directory, lane, version);
     let inherited = krusty::kotlin_version::inherited_file(version, |release| {
-        own_path(directory, lane, release)
+        own_path(root, directory, lane, release)
     });
     if let Some(inherited) = inherited {
         let text = std::fs::read_to_string(&inherited)?;
@@ -125,7 +148,7 @@ pub fn load(platform: Platform, version: KotlinVersion) -> Baseline {
     }
 }
 
-fn load_path(path: &Path, required: bool) -> BTreeSet<String> {
+pub fn load_path(path: &Path, required: bool) -> BTreeSet<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => parse(&text)
             .unwrap_or_else(|error| panic!("invalid box expectation {}: {error}", path.display())),
@@ -291,6 +314,17 @@ pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
         }
         return result;
     }
+}
+
+/// The subject a lane's expectation mismatches are reported under, in place of a corpus file.
+pub fn expectations_subject(platform: Platform) -> PathBuf {
+    PathBuf::from(format!("<{} box expectations>", platform.name()))
+}
+
+/// One failed subject as every box lane prints it. The merge queue's autoheal recipes read these
+/// lines, so each lane reports through this one format.
+pub fn failed_line(subject: &Path, reason: &str) -> String {
+    format!("FAILED {}: {reason}", subject.display())
 }
 
 pub fn corpus_key(box_dir: &Path, file: &Path) -> String {
@@ -473,6 +507,31 @@ mod tests {
                  KRUSTY_BLESS_BOX_EXPECTATIONS=1",
                 failure_path(Platform::Native, version).display(),
                 not_applicable_path(Platform::Native, version).display(),
+            )
+        );
+    }
+
+    #[test]
+    fn an_expectation_mismatch_is_reported_as_a_failed_line_of_its_lane() {
+        let version = KotlinVersion::V2_4_20;
+        let expected = Baseline {
+            failures: BTreeSet::new(),
+            not_applicable: set(&["na-to-pass.kt"]),
+        };
+        let outcomes = BTreeMap::from([("na-to-pass.kt".into(), Outcome::Pass)]);
+        let corpus = outcomes.keys().cloned().collect();
+        let mismatches = compare(&expected, &outcomes, &corpus);
+        assert_eq!(
+            failed_line(
+                &expectations_subject(Platform::Jvm),
+                &mismatches.report(Platform::Jvm, version)
+            ),
+            format!(
+                "FAILED <jvm box expectations>: 1 file(s) outcome changed:\n  na-to-pass.kt: expected \
+                 not-applicable, got pass\njvm box conformance disagrees with {} and {}; update them \
+                 from one full local run with KRUSTY_BLESS_BOX_EXPECTATIONS=1",
+                failure_path(Platform::Jvm, version).display(),
+                not_applicable_path(Platform::Jvm, version).display(),
             )
         );
     }

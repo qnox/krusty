@@ -10,6 +10,7 @@ mod compiler_arguments;
 mod coroutine_support;
 mod kotlinc_release_range;
 mod native_box_configuration;
+pub mod plugin_corpus;
 mod reference_jvm;
 mod wasm_options;
 
@@ -301,7 +302,7 @@ class ResultContinuation : Continuation<Any?> {
 /// and Wasm always expand it to nothing because their `value class` needs no JVM annotation.
 pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
     let full_value_classes =
-        crate::features::LangFeatures::from_source(src).has("FullValueClasses");
+        crate::features::LangFeatures::from_source_in_environment(src).has("FullValueClasses");
     let (value_class_annotation, backend) = match target {
         TestTarget::Jvm if !full_value_classes => ("@JvmInline", "\"JVM_IR\""),
         TestTarget::Jvm => ("", "\"JVM_IR\""),
@@ -637,12 +638,6 @@ pub struct ExtraLibs {
     pub reflect: bool,
     pub stdlib_jdk8: bool,
     pub coroutines: bool,
-    /// `// WITH_COMPOSE`: the Compose runtime, which the case compiles with the Compose compiler
-    /// plugin (see [`compiler_arguments::case_kotlinc_arguments`]).
-    pub compose: bool,
-    /// `// WITH_ATOMICFU`: the atomicfu runtime, which the case compiles with the atomicfu compiler
-    /// plugin.
-    pub atomicfu: bool,
 }
 
 pub fn extra_libs(src: &str) -> ExtraLibs {
@@ -650,8 +645,6 @@ pub fn extra_libs(src: &str) -> ExtraLibs {
         reflect: directive(src, "WITH_REFLECT"),
         stdlib_jdk8: directive(src, "STDLIB_JDK8"),
         coroutines: directive(src, "WITH_COROUTINES"),
-        compose: directive(src, "WITH_COMPOSE"),
-        atomicfu: directive(src, "WITH_ATOMICFU"),
     }
 }
 

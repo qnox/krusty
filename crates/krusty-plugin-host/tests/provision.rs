@@ -423,9 +423,15 @@ fn a_platform_without_a_pinned_jdk_asks_for_java_home() {
 #[ignore = "downloads kotlin-compiler-embeddable 2.4.20 and its classpath"]
 fn provisions_the_pinned_kotlin_2_4_20_classpath() {
     let mut env = Environment::from_process().unwrap();
+    // CI sets KRUSTY_CACHE_DIR to the cache it restored, so a run that already holds the verified
+    // jars reuses them and never asks Maven Central; anywhere else the test starts from nothing
+    // in a directory of its own and removes it.
+    let own_cache = std::env::var_os("KRUSTY_CACHE_DIR").is_none();
     let cache =
         std::env::temp_dir().join(format!("krusty-plugin-host-real-{}", std::process::id()));
-    env.cache_dir = cache.clone();
+    if own_cache {
+        env.cache_dir = cache.clone();
+    }
     let pins = Pins::builtin(&env.platform);
     let request = Request {
         kotlin_version: "2.4.20",
@@ -440,7 +446,9 @@ fn provisions_the_pinned_kotlin_2_4_20_classpath() {
         &krusty_plugin_host::Curl,
         &mut report,
     );
-    let _ = std::fs::remove_dir_all(&cache);
+    if own_cache {
+        let _ = std::fs::remove_dir_all(&cache);
+    }
     eprint!("{}", String::from_utf8_lossy(&report));
     let runtime = result.unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(runtime.compiler_classpath.len(), 10);

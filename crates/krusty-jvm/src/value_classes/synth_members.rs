@@ -509,11 +509,9 @@ pub(super) fn synth_value_members(
         let cmp = if custom_equals.is_some() {
             let [left, right] = [a, b].map(|carrier| {
                 ir.add_expr(IrExpr::Call {
-                    callee: Box::new(Callee::Static {
+                    callee: Box::new(Callee::ValueClassAdapter {
+                        adapter: ValueClassAdapter::Box,
                         owner: internal_name,
-                        name: "box-impl".to_string(),
-                        descriptor: format!("({udesc})L{};", internal_name.render()),
-                        inline: InlineKind::None,
                     }),
                     dispatch_receiver: None,
                     args: vec![carrier],
@@ -684,7 +682,7 @@ pub(super) fn synth_value_members(
             // temporary is declared as the immediate underlying and erased to that same carrier.
             // The call descriptor has to name the carrier now: a nested value class would otherwise
             // return its box into the primitive store.
-            let ounbox = super::unboxing_rewrites::unbox_call(ir, ocast, internal_name, &eu);
+            let ounbox = super::unboxing_rewrites::unbox_call(ir, ocast, internal_name);
             // kotlinc INLINES the underlying comparison here (it does not call `equals-impl0`): the
             // other value is unboxed into a temporary and compared as `arg0 == tmp`, then guarded
             // `if (!eq) return false; return true`. Temporary elimination later keeps a reference

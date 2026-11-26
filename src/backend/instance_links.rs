@@ -1,12 +1,12 @@
 //! Links from one file to an instance of a classifier another file realizes: an object's single
 //! instance, one constant of an enum, or a new instance built by one of its constructors; and to
-//! an enum's `values()` and `valueOf`, which answer its constants.
+//! an enum's `values()`, `valueOf` and `entries`, which answer its constants.
 //!
 //! Only the declaring file holds such an instance's layout, storage and initialization, so it
 //! realizes an entry, an ordinary function answering the instance: an object's and a
-//! constructor's in `super::construction_entries`, an enum constant's, `values()` and `valueOf`
-//! in `super::enums`. Every other file reads the instance by calling that entry. These are the same problem, so they
-//! share one identity ([`InstanceEntry`]), one Pass-1 fact
+//! constructor's in `super::construction_entries`, an enum constant's, `values()`, `valueOf` and
+//! `entries` in `super::enums`. Every other file reads the instance by calling that entry. These
+//! are the same problem, so they share one identity ([`InstanceEntry`]), one Pass-1 fact
 //! (`super::BackendModuleFacts::declares_instance`) and one table of links
 //! ([`super::module_links::ModuleLinks`]): whichever of the reading and the declaring file is
 //! lowered first allocates the link, and the other finds it. The table serves every module of a
@@ -26,8 +26,8 @@ pub enum InstanceEntry {
     /// The single instance of an `object` or companion object.
     Object(TypeName),
     EnumConstant(EnumConstant),
-    /// The `values()` or `valueOf` of an enum, which read the constants the declaring file holds;
-    /// the entry takes the member's own parameters.
+    /// The `values()`, `valueOf` or `entries` of an enum, which read the constants the declaring
+    /// file holds; the entry takes the member's own parameters.
     EnumMember {
         classifier: TypeName,
         member: super::enums::StaticMember,
@@ -48,6 +48,10 @@ pub enum InstanceEntry {
         module: Box<str>,
         declaration: DeclarationId,
     },
+    /// Whether a reference is an instance of the named class another file of the module
+    /// declares: only the declaring file knows the class's object layout, so it answers with a
+    /// function of one reference that returns the test's result.
+    TypeTest(TypeName),
 }
 
 impl InstanceEntry {
@@ -58,7 +62,8 @@ impl InstanceEntry {
             Self::Object(_)
             | Self::EnumMember { .. }
             | Self::Constructor { .. }
-            | Self::ConstructorDefaults { .. } => None,
+            | Self::ConstructorDefaults { .. }
+            | Self::TypeTest(_) => None,
         }
     }
 }
@@ -83,7 +88,7 @@ pub fn link_entries<V: Clone>(
 }
 
 /// The link of each instance of another file's classifier that `ir` emits a read of, and of each
-/// `values()` and `valueOf` of another file's enum it calls: the declaring
+/// `values()`, `valueOf` and `entries` of another file's enum it uses: the declaring
 /// file's defined link, or, for an instance `module` certifies but whose file comes later, a link
 /// reserved from `allocate` for that file to define. An instance of neither kind has no link, and
 /// the target declines its read.
@@ -104,15 +109,10 @@ pub fn link_reads<V: Clone>(
                 name: name.clone(),
             }),
             IrExpr::SingletonValue { classifier } => InstanceEntry::Object(*classifier),
-            IrExpr::EnumValues { classifier } => InstanceEntry::EnumMember {
-                classifier: *classifier,
-                member: super::enums::StaticMember::Values,
+            node => match super::enums::StaticMember::of(node) {
+                Some((classifier, member)) => InstanceEntry::EnumMember { classifier, member },
+                None => continue,
             },
-            IrExpr::EnumValueOf { classifier, .. } => InstanceEntry::EnumMember {
-                classifier: *classifier,
-                member: super::enums::StaticMember::ValueOf,
-            },
-            _ => continue,
         };
         let declared_here = match &instance {
             InstanceEntry::Object(classifier) | InstanceEntry::EnumMember { classifier, .. } => {
@@ -121,9 +121,9 @@ pub fn link_reads<V: Clone>(
             InstanceEntry::EnumConstant(constant) => {
                 ir.class_id_by_name(constant.classifier).is_some()
             }
-            InstanceEntry::Constructor { .. } | InstanceEntry::ConstructorDefaults { .. } => {
-                continue
-            }
+            InstanceEntry::Constructor { .. }
+            | InstanceEntry::ConstructorDefaults { .. }
+            | InstanceEntry::TypeTest(_) => continue,
         };
         if declared_here || reads.contains_key(&instance) {
             continue;
@@ -179,6 +179,46 @@ pub fn link_constructor_reads<V: Clone>(
             }
             _ => continue,
         };
+        if reads.contains_key(&instance) {
+            continue;
+        }
+        let declared = module.declares_instance(&instance);
+        if let Some(link) = links.read(instance.clone(), declared, &mut allocate) {
+            reads.insert(instance, link);
+        }
+    }
+    reads
+}
+
+/// The link of each type test against another file's class that `ir` emits: an `is` or `!is`
+/// whose class `ir` does not declare and `module` certifies a file declares. One `module` does
+/// not certify has no link, and the target declines it.
+pub fn link_type_test_reads<V: Clone>(
+    ir: &IrFile,
+    module: &BackendModuleFacts,
+    links: &mut ModuleLinks<InstanceEntry, V>,
+    mut allocate: impl FnMut() -> V,
+) -> HashMap<InstanceEntry, V> {
+    let mut reads = HashMap::default();
+    for expression in crate::ir::emitted_body_roots(ir)
+        .into_iter()
+        .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
+    {
+        let IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::InstanceOf | crate::ir::IrTypeOp::NotInstanceOf,
+            type_operand,
+            ..
+        } = ir.expr(expression)
+        else {
+            continue;
+        };
+        let Some(classifier) = type_operand.non_null().obj_internal() else {
+            continue;
+        };
+        if ir.class_id_by_name(classifier).is_some() {
+            continue;
+        }
+        let instance = InstanceEntry::TypeTest(classifier);
         if reads.contains_key(&instance) {
             continue;
         }

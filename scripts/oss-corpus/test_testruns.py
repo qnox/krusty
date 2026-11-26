@@ -2,11 +2,13 @@
 """The projects' own tests run on kotlinc's and on krusty's classes: `compare.py` compares only the
 tests that passed on kotlinc's classes, separates the test tasks that run classes krusty built only,
 `run.sh` moves each test build's JUnit reports out of the checkout, and `summarize.py` reports it."""
+import http.server
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -126,7 +128,9 @@ class Compare(unittest.TestCase):
             " Not run | Passing, tasks on krusty's classes only |",
             '| --- | --- | ---: | ---: | ---: | ---: | ---: |',
             '| p | 0 / 1 | 2 / 5 (40.0%) | 1 | 1 | 1 | 1 / 4 (25.0%) in 1 / 3 tasks |',
-            '| **Total** | | **2 / 5 (40.0%)** | **1** | **1** | **1** | **1 / 4 (25.0%) in 1 / 3 tasks** |',
+            '',
+            "**Total** over 1 project: 2 / 5 (40.0%) passing on krusty's classes, 1 failing, 1 skipped, 1 not run; "
+            "1 / 4 (25.0%) in 1 / 3 tasks on krusty's classes only.",
             '',
             "First tests that pass on kotlinc's classes and not on krusty's:",
             '',
@@ -139,7 +143,7 @@ class RunScript(unittest.TestCase):
     checkout, so the krusty test build cannot read the kotlinc one's. The test build runs on the
     measured outputs, snapshotted before it starts; anything it changes in them is detected."""
 
-    def run_corpus(self, work, gradlew, expected_exit=0):
+    def run_corpus(self, work, gradlew, expected_exit=0, compared=True):
         repo = f'{work}/upstream'
         write(f'{repo}/gradlew', gradlew)
         os.chmod(f'{repo}/gradlew', 0o755)
@@ -157,6 +161,10 @@ class RunScript(unittest.TestCase):
                                 env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, expected_exit, result.stderr)
         self.stderr = result.stderr
+        with open(f'{work}/corpus/logs/STATUS') as f:
+            self.status = f.read().splitlines()
+        if not compared:
+            return None
         with open(f'{work}/corpus/out/p/compare.json') as f:
             return json.load(f)
 
@@ -169,6 +177,70 @@ class RunScript(unittest.TestCase):
                                       expected_exit=1)
         self.assertEqual(project['reference_exit'], 3)
         self.assertIn("p: the reference kotlinc build failed (exit 3); see p.kotlinc.log", self.stderr)
+
+    def test_a_failed_krusty_build_is_compared_and_leaves_the_run_green(self):
+        with tempfile.TemporaryDirectory() as work:
+            # Every build records its one compilation; only the krusty builds fail.
+            project = self.run_corpus(work, '#!/bin/sh\n'
+                                            'if [ -n "$CORPUS_COMPILATIONS" ]; then : > "$CORPUS_COMPILATIONS"; fi\n'
+                                            'case "$*" in *krusty.binary*) exit 4;; *) exit 0;; esac\n',
+                                      expected_exit=0)
+        self.assertEqual(project['reference_exit'], 0)
+        self.assertEqual([line.split(' seconds ')[0] for line in self.status if line.startswith('p krusty ')],
+                         ['p krusty exit 4', 'p krusty tests exit 4'])
+        self.assertNotIn('the krusty build failed', self.stderr)
+
+    # The warm-up is the only build that is not offline. This one fails to download on its first
+    # `failures` attempts; every other build records its one compilation.
+    FLAKY_WARMUP = ('#!/bin/sh\n'
+                    'case "$*" in *--offline*) ;; *)\n'
+                    '  n=$(cat "$HOME/attempts" 2>/dev/null || echo 0); echo $((n + 1)) > "$HOME/attempts"\n'
+                    '  if [ "$n" -lt {failures} ]; then\n'
+                    "    echo \"Plugin [id: 'x'] was not found: could not resolve plugin artifact 'x:x:1'\"; exit 1\n"
+                    '  fi;;\n'
+                    'esac\n'
+                    'if [ -n "$CORPUS_COMPILATIONS" ]; then : > "$CORPUS_COMPILATIONS"; fi\n')
+
+    def test_a_warm_up_that_could_not_download_stops_the_run_after_one_attempt(self):
+        with tempfile.TemporaryDirectory() as work:
+            os.environ['HOME'], home = work, os.environ.get('HOME')
+            try:
+                self.run_corpus(work, self.FLAKY_WARMUP.replace('{failures}', '1'), expected_exit=1, compared=False)
+            finally:
+                os.environ['HOME'] = home
+        self.assertEqual([line.split(' seconds')[0] for line in self.status], ['p warmup exit 1'])
+        self.assertIn('p: the warm-up could not download what the build needs; see p.warmup.log', self.stderr)
+
+    def test_a_failed_warm_up_records_the_status_of_the_repositories_it_names(self):
+        class Dead(http.server.BaseHTTPRequestHandler):
+            def do_HEAD(self):
+                self.send_response(503)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(('127.0.0.1', 0), Dead)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        url = f'http://127.0.0.1:{server.server_port}/dead/'
+        gradlew = ('#!/bin/sh\n'
+                   f"echo \"Plugin [id: 'x'] was not found: could not resolve plugin artifact 'x:x:1'\"\n"
+                   f'echo "    maven({url})"\n'
+                   'exit 1\n')
+        try:
+            with tempfile.TemporaryDirectory() as work:
+                os.environ['CORPUS_PROBE_URLS'] = ''
+                try:
+                    self.run_corpus(work, gradlew, expected_exit=1, compared=False)
+                finally:
+                    del os.environ['CORPUS_PROBE_URLS']
+                with open(f'{work}/corpus/logs/p.warmup.http.tsv') as f:
+                    recorded = f.read().splitlines()
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(recorded, [f'503 {url}'])
+        self.assertEqual(self.stderr.count(f'503 {url}'), 1)
 
     def test_each_test_build_reports_on_its_own_classes(self):
         with tempfile.TemporaryDirectory() as work:
@@ -218,10 +290,11 @@ class RunScript(unittest.TestCase):
             kotlinc=dict(changed=1, examples=['build/classes/A.class']),
             krusty=dict(changed=1, examples=['build/classes/A.class']))))
         # Nothing the test builds ran is counted.
-        self.assertEqual(text[text.index('## Project tests'):text.index('## Build cost')].splitlines()[8:], [
-            '| p | 0 / 0 | unavailable: the kotlinc test build changed 1 measured output files; '
-            'the krusty test build changed 1 measured output files | | | | |',
-            '| **Total** | | **0 / 0** | **0** | **0** | **0** | **0 / 0 in 0 / 0 tasks** |',
+        self.assertEqual(text[text.index('## Project tests'):text.index('## Build cost')].splitlines()[6:], [
+            'Tests not compared, each with the reason its test builds cannot be compared:',
+            '',
+            '- **p** (test builds 0 / 0): the kotlinc test build changed 1 measured output files; '
+            'the krusty test build changed 1 measured output files',
             '',
         ])
 
@@ -253,10 +326,11 @@ class Inventory(unittest.TestCase):
                                   check=True, capture_output=True, text=True).stdout
         self.assertEqual(project['tests'], dict(exit=dict(kotlinc=1, krusty=1),
                                                 unavailable=dict(kotlinc=dict(inventory='missing'))))
-        self.assertEqual(text[text.index('## Project tests'):text.index('## Build cost')].splitlines()[8:], [
-            '| p | 1 / 1 | unavailable: the kotlinc test build listed no test task '
-            '(it failed before Gradle planned its tasks) | | | | |',
-            '| **Total** | | **0 / 0** | **0** | **0** | **0** | **0 / 0 in 0 / 0 tasks** |',
+        self.assertEqual(text[text.index('## Project tests'):text.index('## Build cost')].splitlines()[6:], [
+            'Tests not compared, each with the reason its test builds cannot be compared:',
+            '',
+            '- **p** (test builds 1 / 1): the kotlinc test build listed no test task '
+            '(it failed before Gradle planned its tasks)',
             '',
         ])
 

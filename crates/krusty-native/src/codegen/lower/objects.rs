@@ -17,6 +17,7 @@ use krusty::types::TypeName;
 
 #[cfg(test)]
 mod layout_tests;
+mod map_members;
 mod walking;
 pub(super) use walking::WalkMembers;
 
@@ -55,7 +56,13 @@ pub(super) mod ktype {
     /// The interface table; see the note on `KType`. Absent for a type implementing no interface
     /// of the program.
     pub const ITABLE: u32 = 160;
-    pub const SIZE: usize = 168;
+    /// The `Map` members of a class of the program implementing it; see the note on `KType`.
+    pub const MAP_MEMBERS: u32 = 168;
+    /// A callable reference's `uint32_t[]` of the byte offsets of its bound context values; see
+    /// the note on `KType`. Absent when it binds none.
+    pub const REFERENCE_CONTEXT_OFFSETS: u32 = 176;
+    pub const REFERENCE_CONTEXT_COUNT: u32 = 184;
+    pub const SIZE: usize = 192;
 }
 
 const CLASS_NAMES_MEMBER: u32 = 1;
@@ -69,6 +76,16 @@ const _: () = {
     assert!(TYPE_OFFSET as u32 == super::super::super::interface_calls::RECEIVER_TYPE_OFFSET);
     assert!(ktype::ITABLE == super::super::super::interface_calls::ITABLE_OFFSET);
 };
+
+/// What equality of a callable reference reads: the identity of the declaration it names, then the
+/// values it binds, each as the byte offset of the field holding it.
+pub(super) struct ReferenceTarget {
+    pub(super) marker: DataId,
+    /// The bound receiver, or 0 when the reference binds none (no field sits at offset 0).
+    pub(super) receiver_offset: u32,
+    /// The values bound for the declaration's context parameters, in parameter order.
+    pub(super) context_offsets: Vec<u32>,
+}
 
 /// The emitted items of one class.
 pub(super) struct ClassItems {
@@ -166,9 +183,9 @@ pub(super) struct DescriptorShape<'s> {
     pub(super) superclass: DataId,
     /// Every interface the type implements, transitively.
     pub(super) interfaces: &'s [DataId],
-    /// A callable reference's declaration identity, and the byte offset of its bound receiver —
-    /// 0 when it binds none. The two travel together because only a reference has either.
-    pub(super) reference_target: Option<(DataId, u32)>,
+    /// A callable reference's declaration identity and the fields its equality reads. They travel
+    /// together because only a reference has any of them.
+    pub(super) reference_target: Option<ReferenceTarget>,
     /// How to reach this type's own `iterator`/`hasNext`/`next`, for a class of this file the
     /// runtime may be asked to walk. Empty for everything else, which is every type emitted here
     /// but a class.
@@ -194,7 +211,7 @@ impl<'a> FileLowering<'a> {
         key: &model::SlotKey,
     ) -> Option<model::Dispatch> {
         self.model
-            .dispatch(self.ir, self.slot_plan.interfaces(), class, key)
+            .dispatch(self.ir, self.model.numbers(), class, key)
     }
 
     pub(super) fn class_of(&self, internal: TypeName, what: &str) -> Result<ClassId, Unsupported> {
@@ -630,8 +647,38 @@ impl<'a> FileLowering<'a> {
         write_u32(
             &mut bytes,
             ktype::REFERENCE_RECEIVER_OFFSET,
-            reference_target.map_or(0, |(_, receiver)| receiver),
+            reference_target
+                .as_ref()
+                .map_or(0, |target| target.receiver_offset),
         );
+        write_u32(
+            &mut bytes,
+            ktype::REFERENCE_CONTEXT_COUNT,
+            reference_target
+                .as_ref()
+                .map_or(0, |target| target.context_offsets.len() as u32),
+        );
+        let context_offsets = match reference_target
+            .as_ref()
+            .filter(|target| !target.context_offsets.is_empty())
+        {
+            Some(target) => {
+                let id = self.declare_local_data(&format!("kt_ctx_{base}"), false)?;
+                let mut description = DataDescription::new();
+                let bytes: Vec<u8> = target
+                    .context_offsets
+                    .iter()
+                    .flat_map(|offset| offset.to_le_bytes())
+                    .collect();
+                description.define(bytes.into_boxed_slice());
+                description.set_align(4);
+                self.module
+                    .define_data(id, &description)
+                    .map_err(|error| format!("defining `kt_ctx_{base}` ({error})"))?;
+                Some(id)
+            }
+            None => None,
+        };
         write_u32(
             &mut bytes,
             ktype::QUALIFIED_NAME_LENGTH,
@@ -676,10 +723,12 @@ impl<'a> FileLowering<'a> {
             (ktype::INTERFACES, implemented),
             (
                 ktype::REFERENCE_TARGET,
-                reference_target.map(|(marker, _)| marker),
+                reference_target.as_ref().map(|target| target.marker),
             ),
+            (ktype::REFERENCE_CONTEXT_OFFSETS, context_offsets),
             (ktype::QUALIFIED_NAME, qualified_name_data),
             (ktype::SIMPLE_NAME, simple_name_data),
+            (ktype::MAP_MEMBERS, walk.map_members),
         ] {
             let Some(data) = data else {
                 continue;
@@ -838,6 +887,11 @@ impl<'a> FileLowering<'a> {
             let descriptor = self
                 .type_descriptor(Ty::obj_name(name))?
                 .ok_or("an interface of the module with no descriptor")?;
+            if !interfaces.contains(&descriptor) {
+                interfaces.push(descriptor);
+            }
+        }
+        for descriptor in self.dependency_interface_memberships(class, &local_interfaces)? {
             if !interfaces.contains(&descriptor) {
                 interfaces.push(descriptor);
             }
@@ -1209,8 +1263,7 @@ impl<'a> FileLowering<'a> {
             };
             body.record_semantic_slots(&semantic_slots);
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
-                let variable = body.declare_value(slot as u32, *ty)?;
-                body.builder.def_var(variable, *value);
+                body.bind_parameter(slot as u32, *value, *ty)?;
             }
             let this = params[0];
             if let Some(getter) = companion {
@@ -1740,8 +1793,7 @@ impl<'a> FileLowering<'a> {
             body.scope = krusty::ir::IrEnclosure::Constructor { class, ordinal: 0 };
             body.record_semantic_slots(&semantic_slots);
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
-                let variable = body.declare_value(slot as u32, *ty)?;
-                body.builder.def_var(variable, *value);
+                body.bind_parameter(slot as u32, *value, *ty)?;
             }
             let this = params[0];
             if let Some(getter) = companion {
@@ -1902,6 +1954,12 @@ impl<'a> FileLowering<'a> {
             .and_then(|outer| self.ir.enum_initializers().get(&outer))
             .and_then(|&initializer| self.functions[initializer as usize]);
 
+        // A `ThreadLocal` object keeps one instance on every thread, in the slot the runtime gives
+        // each thread for this declaration, which the program's own slot identifies. The runtime
+        // roots every such slot for as long as its thread lives.
+        let per_thread = self.ir.classes[class as usize]
+            .applied_annotations
+            .declares(krusty::types::wk::thread_local());
         let name = format!("{}.INSTANCE", self.ir.classes[class as usize].fq_name());
         let signature = self.signature_of(&[], any())?;
         self.emit_function(getter, signature, any(), &name, &mut |body, _| {
@@ -1910,6 +1968,12 @@ impl<'a> FileLowering<'a> {
                 body.emit_call(func_ref, &[])?;
             }
             let slot_address = body.data_address(slot);
+            let slot_address = if per_thread {
+                body.runtime_call("kt_thread_object_slot", &[any()], any(), &[slot_address])?
+                    .ok_or("a per-thread object slot without an address")?
+            } else {
+                slot_address
+            };
             let current = body
                 .builder
                 .ins()
@@ -1920,7 +1984,9 @@ impl<'a> FileLowering<'a> {
             body.builder.ins().brif(is_null, construct, &[], done, &[]);
 
             body.continue_in(construct);
-            body.runtime_call("kt_gc_add_global_root", &[any()], Ty::Unit, &[slot_address])?;
+            if !per_thread {
+                body.runtime_call("kt_gc_add_global_root", &[any()], Ty::Unit, &[slot_address])?;
+            }
             let instance = body.allocate(descriptor, size)?;
             body.builder
                 .ins()
@@ -2498,7 +2564,40 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         &self,
         target: &krusty::fir::PropertyId,
     ) -> Result<CheckedProperty, Unsupported> {
-        match self.file.ir.local_property_layouts.get(target) {
+        self.checked_property_layout(self.file.ir.local_property_layouts.get(target))
+    }
+
+    /// Whether this file holds a layout for `target` at `operation`: the property of a class it
+    /// declares, or of a copy it realizes of another file's local class.
+    pub(super) fn has_property_layout_at(
+        &self,
+        operation: krusty::ir::ExprId,
+        target: &krusty::fir::PropertyId,
+    ) -> bool {
+        self.file
+            .ir
+            .property_layout_at(operation, *target)
+            .is_ok_and(|layout| layout.is_some())
+    }
+
+    pub(super) fn checked_property_at(
+        &self,
+        operation: krusty::ir::ExprId,
+        target: &krusty::fir::PropertyId,
+    ) -> Result<CheckedProperty, Unsupported> {
+        let layout = self
+            .file
+            .ir
+            .property_layout_at(operation, *target)
+            .map_err(|_| "a malformed property specialization".to_owned())?;
+        self.checked_property_layout(layout.as_ref())
+    }
+
+    fn checked_property_layout(
+        &self,
+        layout: Option<&krusty::ir::IrLocalPropertyLayout>,
+    ) -> Result<CheckedProperty, Unsupported> {
+        match layout {
             Some(krusty::ir::IrLocalPropertyLayout::Member {
                 class, property, ..
             }) => Ok(CheckedProperty::Member(*class, *property as usize)),
@@ -2598,6 +2697,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(self
             .convert(value, Some(stored), property.ty)?
             .map(|value| (value, property.ty)))
+    }
+
+    /// Write a property of a value class through its declared setter. The receiver is the carrier,
+    /// which that setter takes directly exactly as the getter does; a value class has no dispatch
+    /// slot or object header to write through.
+    pub(super) fn value_property_write_of(
+        &mut self,
+        class: ClassId,
+        index: usize,
+        carrier: Value,
+        value: Value,
+    ) -> Result<(), Unsupported> {
+        let property = self.file.ir.classes[class as usize].properties[index].clone();
+        let Some(setter) = property.setter else {
+            return Err(declined!(
+                "a value-class property written without a setter (`{}`)",
+                property.name
+            ));
+        };
+        let id = self.file.functions[setter as usize].expect("a setter has a body");
+        let func_ref = self.func_ref(id);
+        self.emit_call(func_ref, &[carrier, value])?;
+        Ok(())
     }
 
     /// [`Self::property_read`] with the receiver already evaluated — what a synthesized body has.

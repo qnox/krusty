@@ -74,6 +74,25 @@ pub(super) struct FunctionHeader {
 }
 
 impl FunctionHeader {
+    /// The formals this header bound for `function`'s own type parameters, with their bounds.
+    pub(super) fn own_formals(
+        &self,
+        function: &KlibIrFunction,
+    ) -> Vec<(crate::types::TyParamName, Vec<Ty>)> {
+        function
+            .type_parameters
+            .iter()
+            .filter_map(|parameter| {
+                let formal = self.type_parameters.bound(&parameter.base.symbol)?;
+                let TyKind::TyParam(name, _) = formal.kind() else {
+                    return None;
+                };
+                let bounds = self.type_parameters.declared_bounds(name.as_str())?;
+                Some((name, bounds.to_vec()))
+            })
+            .collect()
+    }
+
     pub(super) fn result(&self) -> Ty {
         self.ret
     }
@@ -161,6 +180,11 @@ impl FunctionHeader {
             return ty;
         }
         crate::types::ty_subst(ty, &self.erasures)
+    }
+
+    /// Whether the body returns the erasure of a declared result that names a type parameter.
+    pub(super) fn erases_result(&self) -> bool {
+        self.erased_result.is_some_and(|erased| erased != self.ret)
     }
 
     /// The type the body's own returns carry.
@@ -723,12 +747,13 @@ fn header(
                 Some(serialized)
             }
             (Some(receiver), Some(selected))
-                if selected.class_contract().is_some_and(
-                    crate::libraries::KlibBodyClassContract::emits_receiver_members,
-                ) =>
+                if selected.class_contract().is_some_and(|class| {
+                    class.emits_receiver_members() || class.emits_default_members()
+                }) =>
             {
                 // A builtin type's member is a function of its receiver value, which its body
-                // reads as the value the target carries.
+                // reads as the value the target carries; an interface's default body is a
+                // function of the implementing instance, typed as the interface.
                 let serialized = semantic_type(arena, types, receiver.ty)?;
                 if selected.declaration_owner()
                     != serialized
@@ -849,11 +874,9 @@ fn header(
         .map(IrParameterIdentity::resolved)
         .collect::<Vec<_>>();
     let first_parameter = match value_receiver {
-        Some(_)
-            if !function.context_parameters.is_empty() || function.extension_receiver.is_some() =>
-        {
+        Some(_) if !function.context_parameters.is_empty() => {
             return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                "a value class member with context parameters or an extension receiver",
+                "a value class member with context parameters",
             ));
         }
         Some((symbol, _)) => {

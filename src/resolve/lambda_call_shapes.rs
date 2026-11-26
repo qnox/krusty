@@ -8,6 +8,26 @@ use super::member_extension_selection::MemberExtensionLambdaShape;
 use super::*;
 use crate::types::TyKind;
 
+/// The function shape a lambda takes from a projected function classifier (`Function1<*, *>`):
+/// each parameter is what the projection admits as input and the result is what it reads back,
+/// so a star parameter is `Nothing` and a star result is its upper bound, as kotlinc types them.
+fn projected_function_shape(function: Ty) -> Ty {
+    let TyKind::Fun(signature) = function.kind() else {
+        return function;
+    };
+    Ty::fun_with_shape(
+        signature
+            .params
+            .iter()
+            .map(|parameter| parameter.projection_write_ty())
+            .collect(),
+        signature.ret.projection_read_ty(),
+        signature.context_count,
+        signature.has_receiver,
+        signature.suspend,
+    )
+}
+
 /// A call whose lambda arguments are not typed yet, as a lambda's shape is derived from it.
 #[derive(Clone, Copy)]
 pub(super) struct UntypedLambdaCall<'a> {
@@ -22,6 +42,128 @@ pub(super) struct UntypedLambdaCall<'a> {
 }
 
 impl Checker<'_> {
+    /// Project an explicitly declared Kotlin function classifier (`FunctionN<P..., R>`) onto the
+    /// exact callable shape published by its semantic provider. Callable objects remain nominal:
+    /// only classifiers whose declaration says they represent a function type are normalized.
+    /// A nullable classifier (`FunctionN<P..., R>?`) projects onto the nullable function type.
+    pub(super) fn declared_function_semantic_type(&self, ty: Ty) -> Ty {
+        let nominal = ty.non_null();
+        let Some(internal) = nominal.kotlin_class_internal() else {
+            return ty;
+        };
+        let source = self.fed_source();
+        if !source
+            .classifier(internal)
+            .is_some_and(|classifier| classifier.represents_function_type())
+        {
+            return ty;
+        }
+        self.stable_classifier_callable_signatures(nominal)
+            .into_iter()
+            .next()
+            .map(|function| ty.rewrap_nullability(projected_function_shape(function)))
+            .unwrap_or(ty)
+    }
+
+    /// A lambda argument's shape before a candidate supplies its function type. Written
+    /// parameters, or an explicit `->` with none, fix the arity. A lambda that omits its parameter
+    /// list has no arity of its own: it fits `() -> R` and, with an implicit `it`, any
+    /// one-parameter function type, so it probes as the error type. Whether the body spells `it`
+    /// does not decide the arity.
+    pub(super) fn lambda_probe_ty(&self, arg: ExprId) -> Option<Ty> {
+        match self.file.expr(arg) {
+            Expr::Lambda { params, .. }
+                if !params.is_empty() || self.lambda_declares_its_parameters(arg) =>
+            {
+                Some(Ty::fun(vec![Ty::Error; params.len()], Ty::Error))
+            }
+            Expr::Lambda { .. } => Some(Ty::Error),
+            _ => None,
+        }
+    }
+
+    /// A lambda that selection saw only by its written arity, now bound to a parameter that gives
+    /// it no function or SAM shape: it still owes its one analysis, as a standalone literal. That
+    /// parameter is a classifier, or a type variable inference left open whose bound has no such
+    /// shape; kotlinc then gives the lambda its natural function type, which infers the variable.
+    pub(super) fn lambda_awaits_unshaped_analysis(&self, expression: ExprId, expected: Ty) -> bool {
+        let target = match expected.non_null().kind() {
+            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => bound,
+            _ => expected,
+        };
+        matches!(self.file.expr(expression), Expr::Lambda { .. })
+            && !matches!(
+                self.expr_lowers.get(&expression),
+                Some(ExprLowering::Lambda(_))
+            )
+            && matches!(
+                self.declared_function_semantic_type(target)
+                    .non_null()
+                    .kind(),
+                TyKind::Obj(..) | TyKind::Unit | TyKind::Intersection(_)
+            )
+            && self.semantic_sam_signature(target.non_null()).is_none()
+    }
+
+    /// Collect an argument's symbolic result before overload selection without finalizing whether
+    /// a result-only type variable is uninferrable. The selected parameter immediately rechecks the
+    /// argument and exclusively owns that diagnostic decision.
+    pub(super) fn check_postponed_argument(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+    ) -> Ty {
+        // A lambda is analysed only under the shape its selected parameter gives it: before
+        // selection its body has no parameters to bind, so it contributes just its written arity.
+        if let Some(probe) = self.lambda_probe_ty(expression) {
+            return probe;
+        }
+        self.check_unshaped_argument(scope, expression, None)
+    }
+
+    /// A lambda whose selected member parameter gives it no function or SAM shape (a bare callee
+    /// type variable) is analysed before inference, so its natural function type infers that
+    /// variable: `Holder().id { 42 }` is `T = () -> Int`, as kotlinc infers it.
+    pub(super) fn unshaped_member_argument(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        member: Option<&MemberLambdaShape>,
+        (index, argument): (usize, ExprId),
+        implicit_label: Option<&str>,
+    ) -> Option<Ty> {
+        let expected = member?.expected_types.get(index).copied().flatten()?;
+        self.lambda_awaits_unshaped_analysis(argument, expected)
+            .then(|| self.check_unshaped_argument(scope, argument, implicit_label))
+    }
+
+    /// An argument checked once its selected parameter is known to give it no function shape: a
+    /// lambda is then analysed as a standalone literal, so it declares no implicit `it` and has its
+    /// natural function type. It still takes the call's implicit return label
+    /// (`yield { return@yield x }`), as every lambda argument does.
+    pub(super) fn check_unshaped_argument(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        implicit_label: Option<&str>,
+    ) -> Ty {
+        self.postponed_argument_depth += 1;
+        let ty = match self.file.expr(expression).clone() {
+            Expr::Lambda { params, body } => {
+                self.expr_inner_lambda(scope, expression, None, params, body, implicit_label)
+            }
+            _ => self.expr(scope, expression),
+        };
+        self.postponed_argument_depth -= 1;
+        ty
+    }
+
+    /// Whether a lambda literal's parameter list is written, so it never gets an implicit `it`:
+    /// `{ x -> }`, `{ -> }`, or an anonymous function `fun() {}`.
+    fn lambda_declares_its_parameters(&self, lambda: ExprId) -> bool {
+        self.file.lambda_explicit_arrows.contains(&lambda.0)
+            || self.file.anon_fun_lambdas.contains(&lambda.0)
+    }
+
     /// Select a provider family's functional argument expectations before checking its bodies.
     pub(super) fn provider_member_lambda_expectations(
         &self,
@@ -662,6 +804,11 @@ impl Checker<'_> {
                 }
             }
         }
+        shape.fixed_input_bindings = binds
+            .iter()
+            .filter(|(formal, _)| fixed_expectation_formals.contains(*formal))
+            .map(|(formal, actual)| (*formal, *actual))
+            .collect();
         let mut expectation_binds = binds.clone();
         expectation_binds.retain(|formal, _| {
             !semantic.formals.iter().any(|declared| declared == formal)
@@ -1101,7 +1248,7 @@ impl Checker<'_> {
         } else {
             ExplicitTypeArgumentBounds::Enforced
         };
-        let shaped = overloads
+        let mut shaped = overloads
             .iter()
             .filter(|overload| overload.kind == crate::libraries::FnKind::TopLevel)
             .filter_map(|overload| {
@@ -1109,6 +1256,11 @@ impl Checker<'_> {
                     .map(|shape| (overload, shape))
             })
             .collect::<Vec<_>>();
+        // The nearest level with a candidate that shapes the lambda owns it; a farther level's
+        // different inputs are no ambiguity (`foo { it }` beside an imported `foo((Int) -> _)`).
+        crate::symbol_resolver::retain_nearest_scope_level(&mut shaped, |(overload, _)| {
+            crate::symbol_resolver::scope_level(overload)
+        });
         let Some((_, first)) = shaped.first() else {
             return Ok(self.companion_invoke_lambda_shape(
                 lexical_scope,
@@ -1131,6 +1283,29 @@ impl Checker<'_> {
         Ok(shaped.into_iter().next().map(|(_, shape)| shape))
     }
 
+    /// kotlinc's overload ambiguity for `call`. No candidate shapes the call's lambdas, so each is
+    /// then analysed as a standalone literal and reports its own diagnostics.
+    pub(super) fn report_callable_ambiguity(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        name: &str,
+        candidates: &[crate::libraries::FunctionInfo],
+    ) {
+        let args = match self.file.expr(call) {
+            Expr::Call { args, .. } if self.call_has_error_argument(args) => return,
+            Expr::Call { args, .. } => args.clone(),
+            _ => Vec::new(),
+        };
+        let mut message = "overload resolution ambiguity between candidates:".to_string();
+        for candidate in candidates {
+            message.push('\n');
+            message.push_str(&Self::callable_candidate_display(name, candidate));
+        }
+        self.diags.error(self.call_callee_name_span(call), message);
+        self.report_unshaped_lambda_diagnostics(scope, &args, Some(name));
+    }
+
     /// Report a call whose untyped lambda the applicable `candidates` would shape differently:
     /// kotlinc's overload ambiguity, and the lambda's own diagnostics as no candidate shapes it.
     pub(super) fn reject_ambiguous_lambda_call(
@@ -1140,23 +1315,7 @@ impl Checker<'_> {
         name: &str,
         candidates: &[crate::libraries::FunctionInfo],
     ) -> Ty {
-        self.report_callable_ambiguity(call, name, candidates);
-        if let Expr::Call { args, .. } = self.file.expr(call) {
-            let args = args.clone();
-            // A lambda with neither parameters nor an implicit `it` is still checked, without a
-            // receiver: kotlinc reports `{ length }` as `unresolved reference 'length'`.
-            for &argument in &args {
-                let Expr::Lambda { params, body } = self.file.expr(argument).clone() else {
-                    continue;
-                };
-                if params.is_empty() && !self.untyped_lambda_binds_implicit_it(scope, body) {
-                    self.omit_unshaped_any_receiver_type += 1;
-                    self.expr_inner_lambda(scope, argument, None, params, body, Some(name));
-                    self.omit_unshaped_any_receiver_type -= 1;
-                }
-            }
-            self.report_unshaped_lambda_diagnostics(scope, &args);
-        }
+        self.report_callable_ambiguity(scope, call, name, candidates);
         self.set(call, Ty::Error)
     }
 
@@ -1408,6 +1567,7 @@ impl Checker<'_> {
         let params = self.lambda_return_overload_param_types(receiver, name)?;
         Some(crate::symbol_resolver::LambdaCallShape {
             generic_formals: Vec::new(),
+            fixed_input_bindings: Default::default(),
             argument_parameters: Vec::new(),
             param_types: Some(
                 args.iter()
@@ -1537,9 +1697,9 @@ impl Checker<'_> {
             {
                 *fixed = None;
             }
-            return MemberExtensionLambdaShape::Selected(shape);
+            return MemberExtensionLambdaShape::Selected(Box::new(shape));
         };
-        MemberExtensionLambdaShape::Selected(tied.swap_remove(chosen))
+        MemberExtensionLambdaShape::Selected(Box::new(tied.swap_remove(chosen)))
     }
 
     /// What a tie of the extension call's ordinary selection decides for its lambdas. Tied
@@ -1560,9 +1720,9 @@ impl Checker<'_> {
             return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Absent);
         };
         if others.iter().all(|(shape, _)| shape == first) {
-            return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Selected(
+            return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Selected(Box::new(
                 first.clone(),
-            ));
+            )));
         }
         let refinable = tied.iter().any(|(_, overload)| {
             overload
@@ -1650,4 +1810,55 @@ fn fully_explicit_type_arguments(type_args: &[Ty]) -> bool {
         && type_args
             .iter()
             .all(|argument| !argument.mentions_error() && !argument.mentions_pending())
+}
+
+/// The selected lambda shape's per-slot facts, as a bare call's postponed lambda analysis reads
+/// them. Without a selected shape every fact is absent and the shape is not inline.
+pub(super) struct SelectedLambdaInputs {
+    pub(super) param_types: Option<Vec<Vec<Ty>>>,
+    pub(super) expected_types: Option<Vec<Option<Ty>>>,
+    pub(super) fixed_expected_types: Option<Vec<Option<Ty>>>,
+    pub(super) generic_formals: Vec<crate::types::TyParamName>,
+    /// Per-param receiver function type for a classpath top-level HOF (`NavHost(builder:
+    /// NGB.()->Unit){…}`): a lambda to such a param binds its implicit `this` to the receiver.
+    /// From `@Metadata`'s `@ExtensionFunctionType`, so it needs no JVM `Signature` and also drives a
+    /// krusty-emitted module's HOF whose `Signature` attribute is absent. `None` for a user fn.
+    pub(super) receivers: Option<Vec<Option<Ty>>>,
+    pub(super) context_counts: Option<Vec<usize>>,
+    /// Per-param `crossinline`/`noinline`: a mutable local such a lambda captures is `Ref`-boxed
+    /// (see `InlineParameterModifier::boxes_captures`), not an inline splice's.
+    pub(super) boxes_captures: Option<Vec<Option<bool>>>,
+    /// The shape's own callable may be a companion's `operator fun invoke` rather than a top-level
+    /// function; its inline flag decides where a lambda's `return` may go.
+    pub(super) inline: bool,
+}
+
+impl SelectedLambdaInputs {
+    pub(super) fn of(shape: Option<&crate::symbol_resolver::LambdaCallShape>) -> Self {
+        Self {
+            param_types: shape.and_then(|shape| shape.param_types.clone()),
+            expected_types: shape.and_then(|shape| shape.expected_types.clone()),
+            fixed_expected_types: shape.and_then(|shape| shape.fixed_expected_types.clone()),
+            generic_formals: shape
+                .map(|shape| shape.generic_formals.clone())
+                .unwrap_or_default(),
+            receivers: shape.and_then(|shape| shape.receivers.clone()),
+            context_counts: shape.and_then(|shape| shape.context_counts.clone()),
+            boxes_captures: shape.and_then(|shape| shape.boxes_captures.clone()),
+            inline: shape.is_some_and(|shape| shape.inline),
+        }
+    }
+}
+
+/// Seed a call's known bindings with the formals the selected shape's explicit type arguments and
+/// receiver fixed before any argument was analyzed. An implicit receiver's extension (`runningFold`
+/// inside an extension of `List<E>`) proves `T = E` only through its shape, so its lambdas'
+/// rechecks would otherwise keep the declaration's own `T`. A binding the call already knows wins.
+pub(super) fn seed_fixed_input_bindings(
+    shape: Option<&crate::symbol_resolver::LambdaCallShape>,
+    known: &mut crate::symbol_resolver::GSigBinds,
+) {
+    for (formal, actual) in shape.iter().flat_map(|shape| &shape.fixed_input_bindings) {
+        known.entry(*formal).or_insert(*actual);
+    }
 }

@@ -59,8 +59,7 @@ impl FileLowering<'_> {
                             .zip(accessor.parameters.iter())
                             .enumerate()
                         {
-                            let variable = body.declare_value(slot as u32, ty)?;
-                            body.builder.def_var(variable, value);
+                            body.bind_parameter(slot as u32, value, ty)?;
                         }
                         if accessor.result == Ty::Unit {
                             return body.statement(accessor.body);

@@ -13,6 +13,30 @@
 use super::DependencyExportSignatures;
 use crate::ir::{FunId, IrExpr, IrFile};
 
+/// Build the type-test entry of every class of `ir` that `module` certifies another file may test
+/// an instance against, and record it as that class's type-test instance (see
+/// `super::instance_links`).
+pub fn publish_type_tests(
+    ir: &mut IrFile,
+    module: &super::BackendModuleFacts,
+    exports: &mut DependencyExportSignatures,
+) {
+    for class in 0..ir.classes.len() {
+        let class = crate::ir::ClassId::try_from(class).expect("too many classes");
+        let declaration = &ir.classes[class as usize];
+        if declaration.is_anonymous_object || declaration.is_local_class {
+            continue;
+        }
+        let instance = super::instance_links::InstanceEntry::TypeTest(declaration.fq_name);
+        if !module.declares_instance(&instance) {
+            continue;
+        }
+        if let Some(entry) = ir.add_type_test_entry(class) {
+            exports.record_instance_entry(instance, entry);
+        }
+    }
+}
+
 /// Build the entry of every constructor of `ir` that `module` certifies another file may build an
 /// instance through, and record it as that constructor's instance (see `super::instance_links`).
 /// [`realize`] later exports the same entry under a KLIB identity, when the constructor has one.

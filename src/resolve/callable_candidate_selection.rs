@@ -2,6 +2,26 @@
 
 use super::*;
 
+/// Whether an argument of exactly the parameter's type takes the top specificity rank. A type
+/// parameter is not such evidence: whether `X` fits better than its bound is decided by comparing
+/// the declarations, so two overloads over `X` and `Right` stay tied.
+pub(super) fn is_exact_argument_rank(expected: Ty, actual: Ty) -> bool {
+    expected == actual && !matches!(expected.kind(), TyKind::TyParam(..) | TyKind::Var(..))
+}
+
+/// The call-site signature's parameters, before inference binds its variables, in the order of
+/// the scored shape. `None` when the shape names a parameter the signature does not declare.
+fn shaped_declared_parameters(
+    signature: &crate::libraries::GenericSig,
+    shape: &ContextualCallShape,
+) -> Option<Vec<Ty>> {
+    shape
+        .parameter_indices
+        .iter()
+        .map(|&index| signature.params.get(index).copied())
+        .collect()
+}
+
 impl Checker<'_> {
     /// Select one declaration from a provider's raw callable family. Receiver/name lookup has already
     /// produced the family; applicability, generic binding, and contextual argument shape are shared.
@@ -265,12 +285,8 @@ impl Checker<'_> {
                                 .copied()
                                 .unwrap_or(false)
                         {
-                            if let Some(TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) =
-                                signature
-                                    .params
-                                    .get(declaration_parameter)
-                                    .copied()
-                                    .map(|ty| ty.non_null().kind())
+                            if let TyKind::TyParam(formal, _) | TyKind::Var(formal, _) =
+                                declared.non_null().kind()
                             {
                                 let intersection = self
                                     .expr_access_path(args[argument])
@@ -1010,6 +1026,14 @@ impl Checker<'_> {
                     argument_names,
                 )?
             };
+            let Some(declared_params) = shaped_declared_parameters(&signature, &shape) else {
+                crate::trace_compiler!(
+                    "resolve",
+                    "candidate {} rejected: call shape names an undeclared parameter",
+                    candidate.callable.name,
+                );
+                continue;
+            };
             let Some(mut score) = call_applicability::score_with_declaration(
                 self,
                 scope,
@@ -1027,6 +1051,10 @@ impl Checker<'_> {
                         bindings: &specialized_bindings,
                         parameter_indices: &shape.parameter_indices,
                     }
+                }),
+                Some(call_applicability::DeclaredParameters {
+                    params: &declared_params,
+                    formals: &signature.formals,
                 }),
             ) else {
                 crate::trace_compiler!(
@@ -1104,6 +1132,14 @@ impl Checker<'_> {
                         argument_names,
                     )?
                 };
+                let Some(declared_params) = shaped_declared_parameters(&signature, &shape) else {
+                    crate::trace_compiler!(
+                        "resolve",
+                        "candidate {} rejected: call shape names an undeclared parameter",
+                        candidate.callable.name,
+                    );
+                    continue;
+                };
                 let Some(specialized_score) = call_applicability::score_with_declaration(
                     self,
                     scope,
@@ -1121,6 +1157,10 @@ impl Checker<'_> {
                             bindings: &specialized_bindings,
                             parameter_indices: &shape.parameter_indices,
                         }
+                    }),
+                    Some(call_applicability::DeclaredParameters {
+                        params: &declared_params,
+                        formals: &signature.formals,
                     }),
                 ) else {
                     continue;
@@ -1374,9 +1414,10 @@ impl Checker<'_> {
         // members above ordinary extensions, and skip a rung whose only candidates lack context.
         // Later rules share one rung. Argument score there is type fit and omitted defaults;
         // a vararg loses only after element specificity, as a tie-break among equal shapes.
-        let hides_members = crate::types::type_name("kotlin/internal/HidesMembers");
         let tower_rank = |candidate: &SelectedCallable| {
-            if candidate.is_extension() && candidate.callable.annotations.contains(&hides_members) {
+            if candidate.is_extension()
+                && crate::symbol_resolver::hides_members(&candidate.callable)
+            {
                 (0_u8, (0_u8, 0_u32), candidate.receiver_rank)
             } else if candidate.kind == crate::libraries::FnKind::Member {
                 (1_u8, (0_u8, 0_u32), candidate.receiver_rank)
@@ -1540,6 +1581,106 @@ impl Checker<'_> {
         call_applicability::refine_lambda_tie(self.file, (args, arg_tys), &mut maximal, |t| {
             (&t.5.info, &t.6, !misfits.contains(&t.2))
         });
+        if maximal.len() > 1 {
+            // A generic declaration whose parameters another's accept, and not the reverse, is the
+            // more general one: `reference(Column<T>)` over a free `T` accepts
+            // `reference(Column<E>)` over `E : EntityID<T>`, which is the more specific.
+            let source = self.fed_source();
+            let accepts = |general: &crate::libraries::GenericSig, specific| {
+                crate::symbol_resolver::generic_declaration_accepts_parameters_of(
+                    &source, general, specific,
+                )
+            };
+            let dominated = maximal
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (_, _, _, _, _, candidate, _, _))| {
+                    // A vararg parameter stands for its element type at a call, which the declaration
+                    // comparison does not model; those overloads keep ordinary specificity.
+                    let general = candidate
+                        .info
+                        .generic_sig
+                        .as_ref()
+                        .filter(|_| candidate.call_sig.vararg_index.is_none())?;
+                    maximal
+                        .iter()
+                        .any(|(_, _, _, _, _, other, _, _)| {
+                            other
+                                .info
+                                .generic_sig
+                                .as_ref()
+                                .filter(|_| other.call_sig.vararg_index.is_none())
+                                .is_some_and(|specific| {
+                                    accepts(general, specific) && !accepts(specific, general)
+                                })
+                        })
+                        .then_some(index)
+                })
+                .collect::<crate::fx_hash::HashSet<_>>();
+            maximal = maximal
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, candidate)| (!dominated.contains(&index)).then_some(candidate))
+                .collect();
+        }
+        if maximal.len() > 1 {
+            // Generic overloads of which neither accepts the other's parameters are incomparable:
+            // kotlinc ranks declarations by exactly that solve, so they are ambiguous. Only the
+            // overloads that take the arguments with their type parameters at their bounds take
+            // part: an argument whose type is not final yet is left to the ordinary selection.
+            let source = self.fed_source();
+            let no_bindings = crate::types::TyParamBindings::default();
+            let viable = maximal
+                .iter()
+                .filter(|(_, _, _, _, _, candidate, _, _)| {
+                    candidate.info.generic_sig.as_ref().is_some_and(|sig| {
+                        sig.params.len() == arg_tys.len()
+                            && sig.params.iter().zip(arg_tys).all(|(parameter, argument)| {
+                                crate::symbol_resolver::resolution_subtype(
+                                    &source,
+                                    *argument,
+                                    parameter.substitute_erased(&no_bindings),
+                                )
+                            })
+                    })
+                })
+                .collect::<Vec<_>>();
+            // Only a parameter that mentions a type parameter is compared by the solve; a
+            // constructor's class parameters do not make `(Int)` and `(Long)` incomparable.
+            let signatures = viable
+                .iter()
+                .map(|(_, _, _, _, _, candidate, _, _)| {
+                    candidate.info.generic_sig.as_ref().filter(|sig| {
+                        candidate.call_sig.vararg_index.is_none()
+                            && sig
+                                .params
+                                .iter()
+                                .any(|parameter| parameter.mentions_ty_param())
+                    })
+                })
+                .collect::<Option<Vec<_>>>();
+            if viable.len() > 1
+                && signatures.is_some_and(|signatures| {
+                    signatures.iter().enumerate().all(|(index, general)| {
+                        signatures.iter().skip(index + 1).all(|specific| {
+                            !crate::symbol_resolver::generic_declaration_accepts_parameters_of(
+                                &source, general, specific,
+                            ) && !crate::symbol_resolver::generic_declaration_accepts_parameters_of(
+                                &source, specific, general,
+                            )
+                        })
+                    })
+                })
+            {
+                return Some(CallableCandidateSelection::Ambiguous(
+                    viable
+                        .iter()
+                        .map(|(_, _, _, _, _, candidate, _, _)| candidate.info.clone())
+                        .collect(),
+                    viable.iter().filter_map(|t| t.5.candidate_index).collect(),
+                ));
+            }
+        }
         // Distinct SAM target types do not make an overload family inherently ambiguous. The
         // ordinary most-specific relation below must still compare them: if one SAM interface
         // inherits the other, its overload wins (`MyRunnable : Runnable`; `foo(MyRunnable)` beats
@@ -1575,8 +1716,14 @@ impl Checker<'_> {
                     // one-input function with implicit `it`. Replacing it with the expectation-free
                     // fallback Function0 here would discard every applicable one-input SAM and turn
                     // a real ambiguity into “none applicable.”
-                    if self.lambda_probe_ty(scope, argument) == Some(Ty::Error) {
+                    if self.lambda_probe_ty(argument) == Some(Ty::Error) {
                         CallArgKind::LambdaLiteral(Ty::Error)
+                    } else if let Some(intersection) =
+                        self.flow_intersection_argument(scope, argument)
+                    {
+                        // A stable path proven to be several types is applicable to a parameter
+                        // of any one of them, as it was when the candidate was admitted.
+                        CallArgKind::Typed(intersection)
                     } else {
                         self.call_arg_kind(scope, argument)
                     }

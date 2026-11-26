@@ -10,7 +10,7 @@
 //! runtime decides from the descriptor, and the pair of loops in
 //! `an_interface_typed_receiver_iterates_whichever_it_holds` is that decision's whole point.
 
-use super::common::expect_native_box;
+use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
 #[test]
 fn a_for_loop_walks_a_list_in_order() {
@@ -341,14 +341,11 @@ fn a_range_joins_the_same_way_a_list_does() {
 }
 
 #[test]
-fn joining_with_an_argument_still_declines() {
-    // Every parameter of `joinToString` is defaulted and this backend has no `$default` synthetic
-    // of a dependency to call, so a call that passes one has nothing to route to. Declining keeps
-    // the argument in sight rather than dropping it.
-    super::common::expect_native_decline(
+fn joining_with_a_separator_argument_uses_it() {
+    // Every parameter of `joinToString` is defaulted; the call passes one of them.
+    super::common::expect_native_box_as_kotlinc(
         "fun box(): String = listOf(1, 2, 3).joinToString(\"-\")\n",
         "JoinToStringWithSeparator",
-        "joinToString",
     );
 }
 
@@ -418,6 +415,13 @@ fn an_indexed_value_is_a_data_class() {
         "IndexedValueIsAData",
         "OK",
     );
+}
+
+#[test]
+fn a_written_indexed_value_constructor_builds_the_walks_carrier() {
+    let source = include_str!("box_regressions/indexedValueConstructor.kt");
+    expect_box_ok_with_stdlib(source, "WrittenIndexedValue");
+    expect_native_box(source, "WrittenIndexedValue", "OK");
 }
 
 #[test]

@@ -545,7 +545,7 @@ fn inline_capture_splices_are_valid(
         return false;
     };
     for &expression in &expressions {
-        for index in super::super::lambda_splice_contract::value_indices(ir.expr(expression)) {
+        for index in crate::inline_expansion::value_indices(ir.expr(expression)) {
             if index >= shape.params.len() as u32 {
                 let Some(local) = index
                     .checked_sub(shape.params.len() as u32)
@@ -756,7 +756,7 @@ fn inline_body_local_count(
         if !seen.insert(expression) {
             continue;
         }
-        for index in super::super::lambda_splice_contract::value_indices(ir.expr(expression)) {
+        for index in crate::inline_expansion::value_indices(ir.expr(expression)) {
             if index < formal_count {
                 continue;
             }
@@ -865,7 +865,7 @@ fn specialized_lambda_function(
     let mut copied_expressions = cloned.values().copied().collect::<Vec<_>>();
     copied_expressions.sort_unstable();
     for copy in copied_expressions {
-        super::super::specialize_inline_copy(ir, copy, bindings, reified_bindings)
+        crate::inline_expansion::specialize_inline_copy(ir, copy, bindings, reified_bindings)
             .expect("a cloned expression id remains valid while a specialization commits");
         // The implementation body is outside the inline template expression DAG. Record the same
         // declaration/source provenance on its copy so a regenerated class can distinguish its
@@ -1947,7 +1947,7 @@ fn checked_substitutions(operation: &IrCheckedOperation) -> Option<&[IrCheckedSu
 /// Whether this node carries a runtime type operation the reified map would change.
 ///
 /// Static signature slots are not a reason to copy.
-/// [`super::super::specialize_typed_expression`] applies
+/// [`crate::inline_expansion::specialize_inline_copy`] applies
 /// the same split when the copy is built, so detection does not clone the expression to compare it.
 fn node_uses_binding(expression: &IrExpr, bindings: &HashMap<String, Ty>) -> bool {
     match expression {

@@ -890,7 +890,7 @@ fn non_enclosing_receiver_profiles_remain_unsupported() {
         IrCapturedReceiver::Lambda(None),
         IrCapturedReceiver::Callable {
             label: "callable".into(),
-            owner: krusty::fir::CapturedCallableOwner::Declaration,
+            owner: krusty::fir::CapturedCallableOwner::LocalFunction,
         },
         IrCapturedReceiver::Context {
             kind: krusty::types::CapturedContextKind::LegacyReceiver,
@@ -978,6 +978,8 @@ fn proven_context_lambda_and_callable_receivers_are_ordinary_references() {
     scalar.classes[class as usize].fields[field as usize].ty = Ty::Unit;
     assert_eq!(check_supported(&scalar, class), expected);
 
+    // The extension receiver of the capturing declaration itself is that declaration's own
+    // object parameter, with or without a receiver identity; a local function's is not.
     let mut callable = copy_transport(&original);
     install(
         &mut callable,
@@ -995,6 +997,17 @@ fn proven_context_lambda_and_callable_receivers_are_ordinary_references() {
         .class_capture_identities
         .remove(&(class, parameter));
     assert_eq!(check_supported(&unchecked, class), Ok(()));
+
+    // A support unit's `suspend () -> T` extension receiver is a function value, an ordinary
+    // reference of the same kind as an object.
+    let mut function_value = copy_transport(&unchecked);
+    let function = Ty::fun(Vec::new(), Ty::String);
+    let field = function_value.classes[class as usize].ctor_args[parameter as usize]
+        .field_index
+        .unwrap();
+    function_value.classes[class as usize].ctor_args[parameter as usize].ty = function;
+    function_value.classes[class as usize].fields[field as usize].ty = function;
+    assert_eq!(check_supported(&function_value, class), Ok(()));
 
     let mut unregistered = copy_transport(&callable);
     unregistered

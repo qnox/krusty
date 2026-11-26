@@ -221,7 +221,7 @@ impl Checker<'_> {
                 let actual = if actual == Ty::Error
                     && matches!(self.file.expr(argument), Expr::Lambda { .. })
                 {
-                    self.check_postponed_argument(scope, argument)
+                    self.check_unshaped_argument(scope, argument, None)
                 } else {
                     actual
                 };
@@ -280,8 +280,10 @@ impl Checker<'_> {
                             );
                         }
                         RejectedFunctionArgumentDiagnostic::Reference(declaration) => {
-                            self.diags
-                                .error(declaration.span, declaration.into_message());
+                            self.diags.error(
+                                declaration.span,
+                                declaration.into_message(self.file.reference),
+                            );
                         }
                     }
                 }

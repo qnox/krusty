@@ -39,7 +39,7 @@ built=$project/build/libs/$name.jar
 gradle=("$project/gradlew" --no-daemon -p "$project"
   -PkrustyBuildToolsVersion="$version" -PkotlinVersion="$kotlin" -Pkrusty.binary="$krusty")
 
-"${gradle[@]}" clean test jar
+"${gradle[@]}" clean test kotlinGradlePluginTest jar
 first=$(mktemp)
 trap 'rm -f "$first"' EXIT
 cp "$built" "$first"

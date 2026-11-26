@@ -142,7 +142,7 @@ impl HeaderScopeArena {
             is_common,
             explicit_context_arguments: file.explicit_context_arguments,
             eager_lambda_analysis: file.eager_lambda_analysis,
-            callable_references_to_contextual: file.callable_references_to_contextual,
+            callable_references_to_contextual: file.language.callable_references_to_contextual,
         });
     }
 

@@ -39,7 +39,7 @@ grep -q '<artifactId>krusty-gradle-plugin</artifactId>' "$marker"
 grep -q "<version>$version</version>" "$marker"
 
 # The repository's kotlin-versions manifest is the only list of supported Kotlin releases.
-kotlin_versions=$(sed 's/#.*//' "$repo/kotlin-versions" | awk 'NF { print $1 }' | sort -V)
+kotlin_versions=$(sed 's/#.*//' "$repo/kotlin-versions" | awk 'NF { print $1 }' | "$repo/scripts/sort-kotlin-versions.sh")
 newest_kotlin=$(tail -n 1 <<<"$kotlin_versions")
 supported_kotlin=$(paste -sd, <<<"$kotlin_versions" | sed 's/,/, /g')
 
@@ -79,8 +79,7 @@ receives the Kotlin Gradle plugin's compiler-plugin classpath and options as kot
 compiler identifies plugin jars and directories from their registrar service entries; any unsupported
 Kotlin compiler plugin is rejected regardless of artifact filename because krusty cannot preserve its
 compiler semantics. KSP2 (\`com.google.devtools.ksp\`) is supported: it runs processors in its own
-task and adds no compiler plugin to the compilation; krusty compiles the sources they generate
-(KSP's Gradle plugin needs Gradle 8 or newer).
+task and adds no compiler plugin to the compilation; krusty compiles the sources they generate.
 Projects applying Gradle's \`kotlin-dsl\` (such as \`buildSrc\`) and Kotlin
 compile tasks outside any source set stay with kotlinc; the plugin logs each task it leaves.
 
@@ -90,7 +89,7 @@ The Kotlin/JVM plugin is an explicit consumer dependency and is not bundled here
 distribution does not claim availability from the Gradle Plugin Portal. A Build Tools API
 \`compilerVersion\` override, like any request krusty does not implement, leaves that compile task
 to kotlinc.
-Validated Gradle boundaries: 7.6.3, 8.14.3, 9.5.0, and 9.7.0.
+Supported Gradle: 8.14 and newer. Validated Gradle boundaries: 8.14.8 and 9.9.2.
 EOF
 
 cat > "$root/manifest.txt" <<EOF
@@ -99,7 +98,7 @@ plugin-version=$version
 implementation=dev.krustythecompiler:krusty-gradle-plugin:$version
 marker=dev.krustythecompiler:dev.krustythecompiler.gradle.plugin:$version
 kotlin-gradle-plugin=$(paste -sd, <<<"$kotlin_versions")
-gradle=7.6.3,8.14.3,9.5.0,9.7.0
+gradle=8.14.8,9.9.2
 EOF
 
 (

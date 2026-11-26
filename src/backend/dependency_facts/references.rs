@@ -274,6 +274,7 @@ impl ReferencedDependencies {
             | Callee::Static { .. }
             | Callee::Virtual { .. }
             | Callee::Super { .. }
+            | Callee::ValueClassAdapter { .. }
             | Callee::Special { .. } => {}
         }
     }

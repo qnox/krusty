@@ -4,7 +4,7 @@
 
 use std::io::{self, Read, Write};
 
-use krusty_plugin_ir::{
+use krusty_plugin_api::ksp::{
     KspAccessor, KspAnnotation, KspArgument, KspClass, KspClassKind, KspDeclaration,
     KspDeclarationOrigin, KspFunction, KspFunctionKind, KspLibraryClass, KspMember, KspModifier,
     KspNameMapping, KspOrigin, KspOverridee, KspParameter, KspProperty, KspRound, KspType,
@@ -619,7 +619,7 @@ fn outcome(payload: &mut Payload) -> io::Result<KspOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krusty_plugin_ir::KspFile;
+    use krusty_plugin_api::ksp::KspFile;
 
     fn parameter_t() -> KspType {
         KspType {
@@ -676,7 +676,7 @@ mod tests {
                         qualified_name: "p.M".into(),
                         use_site: None,
                         synthetic: false,
-                        arguments: Some(krusty_plugin_ir::KspAnnotationArguments {
+                        arguments: Some(krusty_plugin_api::ksp::KspAnnotationArguments {
                             arguments: vec![KspArgument {
                                 name: "v".into(),
                                 value: KspValue::Int(5),

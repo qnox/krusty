@@ -9,6 +9,34 @@ impl Checker<'_> {
     pub(super) fn check_expression_usage(&mut self, scope: &CheckerScope<'_>, expression: ExprId) {
         self.check_expression_opt_in(scope, expression);
         self.check_expression_deprecation(expression);
+        self.check_expression_dsl_scope(expression);
+        self.check_reserved_underscore_reference(expression);
+        self.record_suspension_point(expression);
+    }
+
+    /// Report a resolved reference or call whose written name is underscores only and not
+    /// back-ticked (`UNDERSCORE_USAGE_WITHOUT_BACKTICKS`). An unresolved one reports only the
+    /// unresolved reference, as kotlinc does.
+    fn check_reserved_underscore_reference(&mut self, expression: ExprId) {
+        if self.discover_anonymous_captures {
+            return;
+        }
+        let (name, resolved) = match self.file.expr(expression) {
+            Expr::Name(_) => (expression, self.expr_lowers.contains_key(&expression)),
+            Expr::Call { callee, .. } => (
+                *callee,
+                self.resolved_calls.contains_key(&expression)
+                    || self.resolved_constructors.contains_key(&expression),
+            ),
+            _ => return,
+        };
+        if resolved && self.file.unescaped_underscore_names.contains(&name.0) {
+            self.diags.error_named(
+                self.span(name),
+                crate::diag::names::UNDERSCORE_USAGE_WITHOUT_BACKTICKS,
+                "names _, __, ___, ... can only be used in back-ticks (`_`, `__`, `___`, ...).",
+            );
+        }
     }
 
     /// Check a type reference the body check resolved.
@@ -29,12 +57,19 @@ impl Checker<'_> {
 
     /// Check the supertypes class `class` lists, as their types were published with the class
     /// header in Pass 1.
-    pub(super) fn check_supertype_usage(&mut self, class: &ClassDecl, owner: Option<TypeName>) {
+    pub(super) fn check_supertype_usage(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        class: &ClassDecl,
+        owner: Option<TypeName>,
+    ) {
         if self.discover_anonymous_captures {
             return;
         }
         for (reference, supertype) in self.declared_supertype_references(class, owner) {
+            let policy_depth = self.push_type_use_policies(scope, reference.span.lo);
             self.check_finalized_type_reference_usage(&reference, supertype);
+            self.active_lexical_policies.truncate(policy_depth);
         }
     }
 

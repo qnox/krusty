@@ -13,8 +13,9 @@ import org.jetbrains.kotlin.buildtools.api.jvm.JvmPlatformToolchain;
  * through {@code META-INF/services}. A build tool that loads the Build Tools API implementation from
  * a classpath compiles Kotlin/JVM with the krusty binary when this jar is that classpath.
  *
- * Only in-process execution and the JVM toolchain exist. In-process means the operation runs on the
- * caller's thread; the compiler itself is always a krusty child process.
+ * Only the JVM toolchain exists. Either execution policy runs the operation on the caller's thread,
+ * and the compiler itself is always a krusty child process: the in-process policy and the daemon
+ * policy, which asks for a compile outside the caller's process, compile alike.
  */
 public final class KrustyToolchains implements KotlinToolchains {
     private final KrustyConfiguration configuration = KrustyConfiguration.load();
@@ -35,7 +36,7 @@ public final class KrustyToolchains implements KotlinToolchains {
 
     @Override
     public ExecutionPolicy.WithDaemon.Builder daemonExecutionPolicyBuilder() {
-        throw new UnsupportedOperationException("krusty has no compile daemon; use the in-process policy");
+        return new DaemonPolicy.Builder();
     }
 
     @Override
@@ -70,8 +71,8 @@ public final class KrustyToolchains implements KotlinToolchains {
 
         @Override
         public <R> R executeOperation(BuildOperation<R> operation, ExecutionPolicy policy, KotlinLogger logger) {
-            if (!(policy instanceof InProcess)) {
-                throw new IllegalArgumentException("krusty runs only with its own in-process policy, not " + policy);
+            if (!(policy instanceof InProcess) && !(policy instanceof DaemonPolicy)) {
+                throw new IllegalArgumentException("krusty runs only with its own execution policies, not " + policy);
             }
             if (operation instanceof KrustyOperation<R> krustyOperation) {
                 return krustyOperation.execute(logger == null ? NoLogger.INSTANCE : logger);

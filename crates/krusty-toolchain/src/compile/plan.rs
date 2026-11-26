@@ -3,10 +3,9 @@
 //! before anything runs.
 
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use super::arguments::{arguments, Compilation};
+use super::arguments::Compilation;
 use super::classpath::{classpath, runtime_classpath};
 use super::ksp::{self, Ksp, KspOutputs, KspRun};
 use super::order::{compile_dependencies, compile_order};
@@ -30,9 +29,13 @@ pub struct Step {
     /// Where the compiled classes go (`-d`). It holds exactly this run's classes, and nothing
     /// when the fragment has no Kotlin sources.
     pub output: PathBuf,
-    /// krusty's arguments; `None` when the fragment has no Kotlin sources, which the toolchain
-    /// does not compile.
-    pub arguments: Option<Vec<OsString>>,
+    /// What krusty compiles but for the sources; `None` when the fragment has no Kotlin sources,
+    /// which the toolchain does not compile.
+    pub(super) compilation: Option<Compilation>,
+    /// The fragment's source directories, in the toolchain's order, which the compilation walks
+    /// for its sources when it runs: the module's own, the ones its plugins add, then the
+    /// directory of the Kotlin sources KSP generates when the fragment runs KSP processors.
+    pub(super) sources: Vec<PathBuf>,
     /// Where the last successful compilation's inputs and output are recorded (`avoidance.rs`).
     pub state: PathBuf,
     /// Where the resources are copied. It holds exactly the resource directories' contents, and
@@ -325,22 +328,18 @@ pub fn plan(
             }
             None => None,
         };
-        let arguments = if found.kotlin.is_empty() {
-            None
-        } else {
-            Some(arguments(&Compilation {
-                release,
-                jdk_home: &jdk_home,
-                classpath: &entries,
-                module_name: name,
-                java_parameters: settings.is_enabled(&["jvm", "storeParameterNames"]),
-                fragment_sources: (found.filled > 1).then_some(found.walked.as_slice()),
-                plugins: &plugins,
-                kotlin_version: &kotlin_version,
-                output: &output,
-                sources: &found.kotlin,
-            })?)
-        };
+        let compilation = (!found.kotlin.is_empty()).then(|| Compilation {
+            release,
+            jdk_home: jdk_home.clone(),
+            classpath: entries,
+            module_name: name.to_string(),
+            java_parameters: settings.is_enabled(&["jvm", "storeParameterNames"]),
+            plugins,
+            kotlin_version: kotlin_version.clone(),
+            output: output.clone(),
+        });
+        let mut sources = layout.sources;
+        sources.extend(ksp.as_ref().map(|ksp| ksp.outputs.kotlin.clone()));
         let waits: Option<Vec<usize>> = dependencies[index]
             .iter()
             .map(|dependency| planned_steps.get(dependency).copied())
@@ -359,7 +358,8 @@ pub fn plan(
         steps.push(Step {
             module: name.to_string(),
             output,
-            arguments,
+            compilation,
+            sources,
             state: state_file(root, name),
             resources_output,
             resources,

@@ -1,7 +1,7 @@
 //! Flow facts and semantic comparison plans carried between `when` conditions.
 
 use super::scope::NarrowPath;
-use super::{Checker, CheckerScope};
+use super::{Checker, CheckerScope, ReceiverNarrowing};
 use crate::ast::{Expr, ExprId, WhenCondition};
 use crate::fx_hash::HashMap;
 use crate::types::Ty;
@@ -15,7 +15,7 @@ pub(super) struct CheckedWhenGuard {
     pub(super) casts: Vec<(NarrowPath, Ty)>,
     pub(super) declined: Vec<(String, Ty)>,
     /// The implicit receiver's refinement from a guard `this is T`.
-    pub(super) this_narrow: Option<Ty>,
+    pub(super) this_narrow: Option<ReceiverNarrowing>,
 }
 
 /// The subject facts each condition of a subject `when` was checked against, keyed by the

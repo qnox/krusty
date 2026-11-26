@@ -157,15 +157,19 @@ private fun <T : Any> finished(
  * fir2ir adds a module's sources, and runs [extensions] over it in order, with the session's plugin
  * context, as kotlinc runs IR generation extensions after fir2ir. IR the host cannot build refuses
  * the request before anything is added, and the session can still build its module.
+ *
+ * Returns the module the extensions left, framed by [ModuleWriter]; IR it does not cover refuses the
+ * request once the extensions ran, and the session's module stays built.
  */
-internal fun generate(input: DataInputStream, extensions: List<IrGenerationExtension>) {
+internal fun generate(input: DataInputStream, extensions: List<IrGenerationExtension>): ByteArray {
     val open = session ?: throw Refused("no session is open")
     if (open.generated) throw Refused("the session's module is already built; a session builds one module")
     val files = ModuleBuilder(open.ir).read(input)
     open.generated = true
     val module = open.ir.irModuleFragment
-    module.files += files
+    module.files += files.keys
     for (extension in extensions) extension.generate(module, open.ir.pluginContext)
+    return ModuleWriter(files).write(module.files)
 }
 
 /** Ends the open session, if one is open. */

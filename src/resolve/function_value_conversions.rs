@@ -65,7 +65,10 @@ impl Checker<'_> {
     /// ([`crate::kotlin_version::Quirk::UnitConversionRejectsNonUnitResult`]).
     pub(super) fn unit_conversion_admits_result(&self, expected: Ty) -> bool {
         self.file.unit_conversions_on_arbitrary_expressions
-            && !crate::kotlin_version::Quirks::target()
+            && !self
+                .file
+                .reference
+                .quirks()
                 .has(crate::kotlin_version::Quirk::UnitConversionRejectsNonUnitResult)
             && expected == Ty::Unit
     }
@@ -190,9 +193,6 @@ impl Checker<'_> {
         let TyKind::Fun(target) = expected.non_null().kind() else {
             return None;
         };
-        if nominal.is_nullable() {
-            return None;
-        }
         // A callable reference adapts its own result to `Unit` as part of its checked reference
         // adaptation; it is not a value converted after the fact.
         let unit_conversion = self.unit_conversion_admits_result(target.ret)
@@ -203,7 +203,7 @@ impl Checker<'_> {
         self.expression_function_types(scope, expression, nominal)
             .into_iter()
             .find(|candidate| {
-                let TyKind::Fun(source) = candidate.kind() else {
+                let TyKind::Fun(source) = candidate.non_null().kind() else {
                     return false;
                 };
                 // Kind conversion only adds suspension: a suspend value never reaches a regular
@@ -216,7 +216,8 @@ impl Checker<'_> {
                 if source.suspend == target.suspend && !converts_result {
                     return false;
                 }
-                let converted_target = Ty::fun_with_shape(
+                // A nullable value converts only where the target admits `null` too.
+                let converted_target = expected.rewrap_nullability(Ty::fun_with_shape(
                     target.params.clone(),
                     if converts_result {
                         source.ret
@@ -226,7 +227,7 @@ impl Checker<'_> {
                     target.context_count,
                     target.has_receiver,
                     source.suspend,
-                );
+                ));
                 self.receiver_is_assignable(*candidate, converted_target)
             })
     }

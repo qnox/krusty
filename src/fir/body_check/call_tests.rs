@@ -1271,12 +1271,16 @@ fn suspend_coroutine_is_an_ordinary_inline_suspend_call() {
 }
 
 #[test]
-fn kotlin_assert_is_a_checked_lazy_fir_intrinsic() {
-    let (body, _) = checked_function_body_with_platform(
-        "// WITH_STDLIB\n\
-         fun verify(value: Boolean): Unit = assert(value)\n",
+fn kotlin_assert_under_jvm_assertions_is_a_checked_lazy_fir_intrinsic() {
+    let source = "// WITH_STDLIB\n\
+                  // ASSERTIONS_MODE: jvm\n\
+                  fun verify(value: Boolean): Unit = assert(value)\n";
+    let features = crate::features::LangFeatures::from_source(source);
+    let (body, _) = checked_function_body_with_platform_and_features(
+        source,
         "verify",
         jvm_stdlib_semantics(),
+        &features,
     );
     let FirExprKind::Call(call) = &body.expr(root_expression(&body)).expect("assert call").kind
     else {
@@ -1296,6 +1300,27 @@ fn kotlin_assert_is_a_checked_lazy_fir_intrinsic() {
     assert!(matches!(
         call.arguments.as_ref(),
         [FirCallArgument::Expression { parameter: 0, .. }]
+    ));
+}
+
+#[test]
+fn kotlin_assert_by_default_is_an_ordinary_inline_call_like_kotlincs_legacy_mode() {
+    let (body, _) = checked_function_body_with_platform(
+        "// WITH_STDLIB\n\
+         fun verify(value: Boolean): Unit = assert(value)\n",
+        "verify",
+        jvm_stdlib_semantics(),
+    );
+    let FirExprKind::Call(call) = &body.expr(root_expression(&body)).expect("assert call").kind
+    else {
+        panic!("the selected kotlin.assert declaration must remain an explicit checked call")
+    };
+    assert!(matches!(
+        call.target,
+        FirCallTarget::External {
+            inline: crate::libraries::InlineKind::MustInline,
+            ..
+        }
     ));
 }
 
@@ -1567,13 +1592,40 @@ fn generic_call_solves_mixed_lower_constraints_with_its_declared_bound() {
         "choose",
         jvm_semantics(),
     );
+    // `Int` and `Double` meet at `Number & Comparable<*>`: the type argument, and the call's
+    // result, which approximates to the declared bound `Number`. The declared result reads its
+    // `Number` constituent through a smart cast.
     let root = body.expr(root_expression(&body)).expect("generic call");
-    let FirExprKind::Call(call) = &root.kind else {
-        panic!("mixed numeric lower constraints must retain the selected generic call")
+    let FirExprKind::ImplicitConversion {
+        value,
+        conversion:
+            FirConversion {
+                kind: FirConversionKind::SmartCast { to },
+                ..
+            },
+    } = &root.kind
+    else {
+        panic!("the declared result must read the Number constituent of the call's result")
     };
     assert_eq!(root.ty.get(), Ty::obj("kotlin/Number"));
+    assert_eq!(to.get(), Ty::obj("kotlin/Number"));
+    let call_expression = body.expr(*value).expect("generic call");
+    let FirExprKind::Call(call) = &call_expression.kind else {
+        panic!("mixed numeric lower constraints must retain the selected generic call")
+    };
+    let joined = Ty::intersection(&[
+        Ty::obj("kotlin/Number"),
+        Ty::obj_args(
+            "kotlin/Comparable",
+            &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
+        ),
+    ]);
+    assert_eq!(
+        call_expression.ty.get(),
+        joined.with_intersection_approximation(Ty::obj("kotlin/Number"))
+    );
     assert_eq!(call.substitutions.len(), 1);
-    assert_eq!(call.substitutions[0].value.get(), Ty::obj("kotlin/Number"));
+    assert_eq!(call.substitutions[0].value.get(), joined);
 }
 
 #[test]

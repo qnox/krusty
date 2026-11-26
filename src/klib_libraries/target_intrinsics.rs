@@ -8,8 +8,9 @@
 use std::collections::HashMap;
 
 use crate::libraries::{
-    AtomicOperation, CompilerIntrinsic, ExternalCallableKind, KlibDeclarationSignature,
-    KlibDependencyCallable, ScalarClass, ScalarComparison, ScalarInstruction,
+    AdjacentDirection, AtomicOperation, CompilerIntrinsic, ExternalCallableKind,
+    KlibDeclarationSignature, KlibDependencyCallable, ScalarClass, ScalarComparison,
+    ScalarInstruction, SurrogateHalf,
 };
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrExprKind, KlibIrFunction, KlibIrNullability, KlibIrType,
@@ -716,12 +717,14 @@ pub(super) fn authenticate(
     {
         return None;
     }
-    // Past the continuation intrinsics above, only `wasm_array_copy` is generic: its one type
-    // parameter is the GC array type both operands share.
+    // Past the continuation intrinsics above, only `wasm_array_copy` and `interceptedIntrinsic`
+    // are generic: the one type parameter is the GC array type both operands share, or the
+    // continuation's result type.
     match (platform?, declaration.formals.is_empty()) {
         (TargetIntrinsicPlatform::Native, true) => native(placement, declaration),
         (TargetIntrinsicPlatform::Wasm, true) => wasm(placement, declaration),
-        (TargetIntrinsicPlatform::Wasm, false) => wasm_array_copy(placement, declaration),
+        (TargetIntrinsicPlatform::Wasm, false) => wasm_array_copy(placement, declaration)
+            .or_else(|| wasm_intercepted_continuation(placement, declaration)),
         (TargetIntrinsicPlatform::Native, false) => None,
     }
 }
@@ -882,6 +885,69 @@ fn wasm_array_copy(
     })
 }
 
+/// `interceptedIntrinsic<T>(cont: Continuation<T>): Continuation<T>` in `kotlin.wasm.internal`,
+/// the `@ExcludedFromCodegen` body of Kotlin/Wasm's `Continuation<T>.intercepted()`. kotlinc binds
+/// the declaration by this name and expands its call to the stdlib's
+/// `if (cont is CoroutineImpl) cont.intercepted() else cont`.
+fn wasm_intercepted_continuation(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    let [result] = declaration.formals.as_slice() else {
+        return None;
+    };
+    let is_continuation = |ty: &KotlinType| {
+        matches!(
+            ty,
+            KotlinType::Class {
+                internal,
+                args,
+                nullable: false,
+                shape: KotlinFunctionTypeShape {
+                    receiver: false,
+                    context_count: 0,
+                    suspend: false,
+                },
+            } if internal == "kotlin/coroutines/Continuation"
+                && matches!(
+                    args.as_slice(),
+                    [KotlinType::Param { id, nullable: false, .. }] if *id == result.id
+                )
+        )
+    };
+    let excluded = declaration
+        .annotation_applications
+        .iter()
+        .filter(|annotation| {
+            annotation.identity == type_name("kotlin/wasm/internal/ExcludedFromCodegen")
+        })
+        .count();
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/wasm/internal"))
+        && declaration.name == "interceptedIntrinsic"
+        && excluded == 1
+        && declaration.receiver.is_none()
+        && !result.reified
+        && result.bounds.iter().all(is_nullable_any)
+        && matches!(declaration.params.as_slice(), [continuation] if is_continuation(continuation))
+        && is_continuation(&declaration.ret))
+    .then(|| {
+        let continuation = Ty::obj_args(
+            "kotlin/coroutines/Continuation",
+            &[Ty::ty_param(
+                &result.name,
+                Ty::nullable(Ty::obj_name(crate::types::wk::any())),
+            )],
+        );
+        KlibIntrinsicShape {
+            operation: CompilerIntrinsic::InterceptedContinuation,
+            kind: ExternalCallableKind::TopLevel,
+            receiver: None,
+            params: vec![continuation],
+            ret: continuation,
+        }
+    })
+}
+
 /// `intToString(value: Int, radix: Int): String` and its `Long` counterpart in `kotlin.text`.
 fn radix_to_string(
     placement: crate::libraries::CallablePlacement,
@@ -934,6 +1000,36 @@ fn string_range_equals(
     })
 }
 
+/// `String.nativeIndexOf(sought, fromIndex: Int): Int` and `String.nativeLastIndexOf(sought,
+/// fromIndex: Int): Int` in `kotlin.text`, where `sought` is a `String` or a `Char`.
+fn string_index_of(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+    sought: Ty,
+    sought_name: &str,
+    last: bool,
+) -> Option<KlibIntrinsicShape> {
+    let string = Ty::obj("kotlin/String");
+    let [value, from] = declaration.params.as_slice() else {
+        return None;
+    };
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/text"))
+        && declaration
+            .receiver
+            .as_ref()
+            .is_some_and(|receiver| exact_type(receiver, "kotlin/String"))
+        && exact_type(value, sought_name)
+        && semantic_type(from) == Some(Ty::Int)
+        && exact_type(&declaration.ret, "kotlin/Int"))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::StringIndexOf { sought, last },
+        kind: ExternalCallableKind::Extension,
+        receiver: Some(string),
+        params: vec![string, sought, Ty::Int],
+        ret: Ty::Int,
+    })
+}
+
 /// `arrayCopy(array, fromIndex: Int, destination, toIndex: Int, count: Int)` in
 /// `kotlin.collections`, where both arrays are `declared`, the array of `element`: a specialized
 /// primitive array, or `Array<Any?>`.
@@ -965,6 +1061,85 @@ fn array_copy(
         receiver: None,
         params: vec![array, Ty::Int, array, Ty::Int, Ty::Int],
         ret: Ty::Unit,
+    })
+}
+
+/// Native's `Char.isHighSurrogate()`/`isLowSurrogate()`: an external `kotlin.text` extension on
+/// `Char` with no parameters and a `Boolean` result.
+fn char_is_surrogate(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+    half: SurrogateHalf,
+) -> Option<KlibIntrinsicShape> {
+    if placement != crate::libraries::CallablePlacement::Package(type_name("kotlin/text"))
+        || !declaration.params.is_empty()
+        || !declaration
+            .receiver
+            .as_ref()
+            .is_some_and(|receiver| exact_type(receiver, "kotlin/Char"))
+        || !exact_type(&declaration.ret, "kotlin/Boolean")
+    {
+        return None;
+    }
+    Some(KlibIntrinsicShape {
+        operation: CompilerIntrinsic::CharIsSurrogate(half),
+        kind: ExternalCallableKind::Extension,
+        receiver: Some(Ty::Char),
+        params: vec![Ty::Char],
+        ret: Ty::Boolean,
+    })
+}
+
+/// `Float.nextUp()` / `Double.nextDown()` and the other two: an extension in `kotlin.math` with
+/// no parameters whose result is its receiver's own type.
+fn adjacent_floating(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+    operand: Ty,
+    direction: AdjacentDirection,
+) -> Option<KlibIntrinsicShape> {
+    let classifier = match operand {
+        Ty::Float => "kotlin/Float",
+        Ty::Double => "kotlin/Double",
+        _ => return None,
+    };
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/math"))
+        && declaration.params.is_empty()
+        && declaration
+            .receiver
+            .as_ref()
+            .is_some_and(|receiver| exact_type(receiver, classifier))
+        && exact_type(&declaration.ret, classifier))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::FloatingAdjacent { operand, direction },
+        kind: ExternalCallableKind::Extension,
+        receiver: Some(operand),
+        params: vec![operand],
+        ret: operand,
+    })
+}
+
+/// The external `countLeadingZeroBits(value: Int): Int` and `(value: Long): Int` in `kotlin` that
+/// the public `Int.countLeadingZeroBits()` and `Long.countLeadingZeroBits()` extensions call.
+fn count_leading_zero_bits(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+    operand: Ty,
+) -> Option<KlibIntrinsicShape> {
+    let classifier = match operand {
+        Ty::Int => "kotlin/Int",
+        Ty::Long => "kotlin/Long",
+        _ => return None,
+    };
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin"))
+        && declaration.receiver.is_none()
+        && exact_signature(declaration, classifier, "kotlin/Int"))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::CountLeadingZeroBits { operand },
+        kind: ExternalCallableKind::TopLevel,
+        receiver: None,
+        params: vec![operand],
+        ret: Ty::Int,
     })
 }
 
@@ -1004,6 +1179,40 @@ fn native(
                 },
                 Ty::Double,
             ),
+            "Kotlin_math_Float_nextUp" => {
+                return adjacent_floating(placement, declaration, Ty::Float, AdjacentDirection::Up)
+            }
+            "Kotlin_math_Double_nextUp" => {
+                return adjacent_floating(placement, declaration, Ty::Double, AdjacentDirection::Up)
+            }
+            "Kotlin_math_Float_nextDown" => {
+                return adjacent_floating(
+                    placement,
+                    declaration,
+                    Ty::Float,
+                    AdjacentDirection::Down,
+                )
+            }
+            "Kotlin_math_Double_nextDown" => {
+                return adjacent_floating(
+                    placement,
+                    declaration,
+                    Ty::Double,
+                    AdjacentDirection::Down,
+                )
+            }
+            "Kotlin_Int_countLeadingZeroBits" => {
+                return count_leading_zero_bits(placement, declaration, Ty::Int)
+            }
+            "Kotlin_Long_countLeadingZeroBits" => {
+                return count_leading_zero_bits(placement, declaration, Ty::Long)
+            }
+            "Kotlin_Char_isHighSurrogate" => {
+                return char_is_surrogate(placement, declaration, SurrogateHalf::High)
+            }
+            "Kotlin_Char_isLowSurrogate" => {
+                return char_is_surrogate(placement, declaration, SurrogateHalf::Low)
+            }
             "Kotlin_Array_copyImpl" => {
                 let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
                 return array_copy(
@@ -1093,6 +1302,21 @@ fn native(
             }
             "Kotlin_String_unsafeRangeEquals" => {
                 return string_range_equals(placement, declaration)
+            }
+            "Kotlin_String_indexOfString" => {
+                return string_index_of(
+                    placement,
+                    declaration,
+                    Ty::obj("kotlin/String"),
+                    "kotlin/String",
+                    false,
+                )
+            }
+            "Kotlin_String_indexOfChar" => {
+                return string_index_of(placement, declaration, Ty::Char, "kotlin/Char", false)
+            }
+            "Kotlin_String_lastIndexOfChar" => {
+                return string_index_of(placement, declaration, Ty::Char, "kotlin/Char", true)
             }
             _ => return None,
         };
@@ -1188,6 +1412,22 @@ fn native(
                 Ty::Double,
             )
         }
+        // `areEqualByValue(first: T, second: T): Boolean` compares two operands of one integral
+        // scalar by value, which is the scalar's own equality.
+        ("ARE_EQUAL_BY_VALUE", crate::libraries::CallablePlacement::Package(package))
+            if package == type_name("kotlin/native/internal") =>
+        {
+            let operand = integral_scalar_pair(declaration)?;
+            return Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::ScalarInstruction(ScalarInstruction::Compare(
+                    ScalarComparison::Equal,
+                )),
+                kind: ExternalCallableKind::TopLevel,
+                receiver: None,
+                params: vec![operand, operand],
+                ret: Ty::Boolean,
+            });
+        }
         _ => return None,
     };
     Some(KlibIntrinsicShape {
@@ -1196,6 +1436,26 @@ fn native(
         receiver: shape.1,
         params: shape.2,
         ret: shape.3,
+    })
+}
+
+/// The one integral scalar both parameters of `declaration` are, when it answers `Boolean`.
+fn integral_scalar_pair(declaration: &KotlinFunction) -> Option<Ty> {
+    let [first, second] = declaration.params.as_slice() else {
+        return None;
+    };
+    if !exact_type(&declaration.ret, "kotlin/Boolean") {
+        return None;
+    }
+    [
+        ("kotlin/Byte", Ty::Byte),
+        ("kotlin/Short", Ty::Short),
+        ("kotlin/Int", Ty::Int),
+        ("kotlin/Long", Ty::Long),
+    ]
+    .into_iter()
+    .find_map(|(classifier, scalar)| {
+        (exact_type(first, classifier) && exact_type(second, classifier)).then_some(scalar)
     })
 }
 
@@ -1715,6 +1975,101 @@ mod tests {
     }
 
     #[test]
+    fn native_are_equal_by_value_requires_one_integral_scalar_and_a_boolean_result() {
+        let internal =
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/native/internal"));
+        let native = Some(TargetIntrinsicPlatform::Native);
+        for (name, scalar) in [
+            ("kotlin/Byte", Ty::Byte),
+            ("kotlin/Short", Ty::Short),
+            ("kotlin/Int", Ty::Int),
+            ("kotlin/Long", Ty::Long),
+        ] {
+            let exact = declaration(
+                "areEqualByValue",
+                &[name, name],
+                "kotlin/Boolean",
+                native_annotation("ARE_EQUAL_BY_VALUE"),
+            );
+            assert_eq!(
+                authenticate(native, internal, &exact),
+                Some(KlibIntrinsicShape {
+                    operation: CompilerIntrinsic::ScalarInstruction(ScalarInstruction::Compare(
+                        ScalarComparison::Equal
+                    )),
+                    kind: ExternalCallableKind::TopLevel,
+                    receiver: None,
+                    params: vec![scalar, scalar],
+                    ret: Ty::Boolean,
+                }),
+                "{name}"
+            );
+        }
+        for (rejected, why) in [
+            (
+                declaration(
+                    "areEqualByValue",
+                    &["kotlin/Int", "kotlin/Long"],
+                    "kotlin/Boolean",
+                    native_annotation("ARE_EQUAL_BY_VALUE"),
+                ),
+                "both operands have one type",
+            ),
+            (
+                declaration(
+                    "areEqualByValue",
+                    &["kotlin/Float", "kotlin/Float"],
+                    "kotlin/Boolean",
+                    native_annotation("ARE_EQUAL_BY_VALUE"),
+                ),
+                "a floating value is equal by its bits, not by this scalar comparison",
+            ),
+            (
+                declaration(
+                    "areEqualByValue",
+                    &["kotlin/Int"],
+                    "kotlin/Boolean",
+                    native_annotation("ARE_EQUAL_BY_VALUE"),
+                ),
+                "two operands",
+            ),
+            (
+                declaration(
+                    "areEqualByValue",
+                    &["kotlin/Int", "kotlin/Int"],
+                    "kotlin/Int",
+                    native_annotation("ARE_EQUAL_BY_VALUE"),
+                ),
+                "a Boolean result",
+            ),
+        ] {
+            assert!(authenticate(native, internal, &rejected).is_none(), "{why}");
+        }
+        let exact = declaration(
+            "areEqualByValue",
+            &["kotlin/Int", "kotlin/Int"],
+            "kotlin/Boolean",
+            native_annotation("ARE_EQUAL_BY_VALUE"),
+        );
+        assert!(
+            authenticate(
+                native,
+                crate::libraries::CallablePlacement::Package(type_name("spoof")),
+                &exact
+            )
+            .is_none(),
+            "only the platform package authenticates the intrinsic"
+        );
+        assert!(
+            authenticate(Some(TargetIntrinsicPlatform::Wasm), internal, &exact).is_none(),
+            "another target's stdlib does not carry the Native intrinsic"
+        );
+        let mut bodyful = exact;
+        bodyful.is_external = false;
+        assert!(authenticate(native, internal, &bodyful).is_none());
+    }
+
+    #[test]
     fn native_gc_unsafe_floating_predicates_require_the_exact_entry_and_extension_shape() {
         let gc_unsafe = |callee: &str| AnnotationApplication {
             identity: type_name("kotlin/native/internal/GCUnsafeCall"),
@@ -1818,6 +2173,229 @@ mod tests {
             &exact,
         )
         .is_none());
+    }
+
+    #[test]
+    fn native_gc_unsafe_scalar_answers_require_the_exact_entry_package_and_shape() {
+        let gc_unsafe = |callee: &str| AnnotationApplication {
+            identity: type_name("kotlin/native/internal/GCUnsafeCall"),
+            arguments: vec![(
+                "callee".to_owned(),
+                AnnotationArgument::String(callee.to_owned()),
+            )],
+        };
+        let native = Some(TargetIntrinsicPlatform::Native);
+        let package = |name: &str| crate::libraries::CallablePlacement::Package(type_name(name));
+        let extension = |name: &str, entry: &str, receiver: &str, ret: &str| {
+            let mut function = declaration(name, &[], ret, gc_unsafe(entry));
+            function.receiver = Some(KotlinType::class(receiver));
+            function
+        };
+        for (name, entry, receiver, operand, direction) in [
+            (
+                "nextUp",
+                "Kotlin_math_Float_nextUp",
+                "kotlin/Float",
+                Ty::Float,
+                AdjacentDirection::Up,
+            ),
+            (
+                "nextUp",
+                "Kotlin_math_Double_nextUp",
+                "kotlin/Double",
+                Ty::Double,
+                AdjacentDirection::Up,
+            ),
+            (
+                "nextDown",
+                "Kotlin_math_Float_nextDown",
+                "kotlin/Float",
+                Ty::Float,
+                AdjacentDirection::Down,
+            ),
+            (
+                "nextDown",
+                "Kotlin_math_Double_nextDown",
+                "kotlin/Double",
+                Ty::Double,
+                AdjacentDirection::Down,
+            ),
+        ] {
+            let exact = extension(name, entry, receiver, receiver);
+            assert_eq!(
+                authenticate(native, package("kotlin/math"), &exact),
+                Some(KlibIntrinsicShape {
+                    operation: CompilerIntrinsic::FloatingAdjacent { operand, direction },
+                    kind: ExternalCallableKind::Extension,
+                    receiver: Some(operand),
+                    params: vec![operand],
+                    ret: operand,
+                })
+            );
+            assert!(
+                authenticate(native, package("spoof"), &exact).is_none(),
+                "another package's declaration is not the stdlib's"
+            );
+            assert!(
+                authenticate(
+                    native,
+                    package("kotlin/math"),
+                    &extension(name, "User_math_nextUp", receiver, receiver)
+                )
+                .is_none(),
+                "the runtime entry is the evidence"
+            );
+            assert!(
+                authenticate(
+                    native,
+                    package("kotlin/math"),
+                    &extension(name, entry, "kotlin/Int", receiver)
+                )
+                .is_none(),
+                "the receiver must be the entry's own width"
+            );
+            assert!(
+                authenticate(
+                    native,
+                    package("kotlin/math"),
+                    &extension(name, entry, receiver, "kotlin/Int")
+                )
+                .is_none(),
+                "the result must be the receiver's own type"
+            );
+        }
+        let counter = |entry: &str, parameter: &str, result: &str| {
+            let mut function = declaration(
+                "countLeadingZeroBits",
+                &[parameter],
+                result,
+                gc_unsafe(entry),
+            );
+            function.receiver = None;
+            function
+        };
+        for (entry, parameter, operand) in [
+            ("Kotlin_Int_countLeadingZeroBits", "kotlin/Int", Ty::Int),
+            ("Kotlin_Long_countLeadingZeroBits", "kotlin/Long", Ty::Long),
+        ] {
+            let exact = counter(entry, parameter, "kotlin/Int");
+            assert_eq!(
+                authenticate(native, package("kotlin"), &exact),
+                Some(KlibIntrinsicShape {
+                    operation: CompilerIntrinsic::CountLeadingZeroBits { operand },
+                    kind: ExternalCallableKind::TopLevel,
+                    receiver: None,
+                    params: vec![operand],
+                    ret: Ty::Int,
+                })
+            );
+            assert!(
+                authenticate(native, package("spoof"), &exact).is_none(),
+                "another package's declaration is not the stdlib's"
+            );
+            assert!(
+                authenticate(
+                    native,
+                    package("kotlin"),
+                    &counter(entry, "kotlin/Short", "kotlin/Int")
+                )
+                .is_none(),
+                "the parameter must be the entry's own width"
+            );
+            assert!(
+                authenticate(
+                    native,
+                    package("kotlin"),
+                    &counter(entry, parameter, "kotlin/Long")
+                )
+                .is_none(),
+                "the count is an `Int`"
+            );
+        }
+    }
+
+    #[test]
+    fn native_gc_unsafe_surrogate_predicates_require_the_exact_entry_package_and_shape() {
+        let gc_unsafe = |callee: &str| AnnotationApplication {
+            identity: type_name("kotlin/native/internal/GCUnsafeCall"),
+            arguments: vec![(
+                "callee".to_owned(),
+                AnnotationArgument::String(callee.to_owned()),
+            )],
+        };
+        let native = Some(TargetIntrinsicPlatform::Native);
+        let text = crate::libraries::CallablePlacement::Package(type_name("kotlin/text"));
+        let predicate = |name: &str, entry: &str, receiver: &str| {
+            let mut function = declaration(name, &[], "kotlin/Boolean", gc_unsafe(entry));
+            function.receiver = Some(KotlinType::class(receiver));
+            function
+        };
+        for (name, entry, half) in [
+            (
+                "isHighSurrogate",
+                "Kotlin_Char_isHighSurrogate",
+                SurrogateHalf::High,
+            ),
+            (
+                "isLowSurrogate",
+                "Kotlin_Char_isLowSurrogate",
+                SurrogateHalf::Low,
+            ),
+        ] {
+            assert_eq!(
+                authenticate(native, text, &predicate(name, entry, "kotlin/Char")),
+                Some(KlibIntrinsicShape {
+                    operation: CompilerIntrinsic::CharIsSurrogate(half),
+                    kind: ExternalCallableKind::Extension,
+                    receiver: Some(Ty::Char),
+                    params: vec![Ty::Char],
+                    ret: Ty::Boolean,
+                })
+            );
+            assert_eq!(
+                authenticate(
+                    native,
+                    crate::libraries::CallablePlacement::Package(type_name("kotlin")),
+                    &predicate(name, entry, "kotlin/Char"),
+                ),
+                None
+            );
+            assert_eq!(
+                authenticate(native, text, &predicate(name, entry, "kotlin/Int")),
+                None
+            );
+            let mut with_parameter = predicate(name, entry, "kotlin/Char");
+            with_parameter.params = vec![KotlinType::class("kotlin/Char")];
+            with_parameter.param_names = vec!["p0".to_owned()];
+            with_parameter.param_defaults = vec![false];
+            with_parameter.inline_modifiers = vec![crate::types::InlineParameterModifier::None];
+            assert_eq!(authenticate(native, text, &with_parameter), None);
+            let mut wrong_result = predicate(name, entry, "kotlin/Char");
+            wrong_result.ret = KotlinType::class("kotlin/Int");
+            assert_eq!(authenticate(native, text, &wrong_result), None);
+            assert_eq!(
+                authenticate(None, text, &predicate(name, entry, "kotlin/Char")),
+                None
+            );
+        }
+        assert_eq!(
+            authenticate(
+                native,
+                text,
+                &predicate(
+                    "isHighSurrogate",
+                    "User_Char_isHighSurrogate",
+                    "kotlin/Char"
+                ),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn surrogate_halves_cover_the_utf16_surrogate_block_without_overlap() {
+        assert_eq!(SurrogateHalf::High.code_units(), 0xD800..=0xDBFF);
+        assert_eq!(SurrogateHalf::Low.code_units(), 0xDC00..=0xDFFF);
     }
 
     #[test]
@@ -2006,6 +2584,95 @@ mod tests {
         assert!(authenticate(wasm, internal, &reified).is_none());
         let mut concrete = generic("wasm_array_copy", excluded);
         concrete.params[2] = KotlinType::class("kotlin/Int");
+        assert!(authenticate(wasm, internal, &concrete).is_none());
+    }
+
+    #[test]
+    fn wasm_intercepted_continuation_requires_its_exact_generic_declaration() {
+        let wasm = Some(TargetIntrinsicPlatform::Wasm);
+        let internal =
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/wasm/internal"));
+        let excluded = AnnotationApplication {
+            identity: type_name("kotlin/wasm/internal/ExcludedFromCodegen"),
+            arguments: Vec::new(),
+        };
+        let result = crate::metadata::semantic::KotlinTypeParameterId(3);
+        let continuation = |argument: KotlinType| KotlinType::Class {
+            internal: "kotlin/coroutines/Continuation".to_owned(),
+            args: vec![argument],
+            nullable: false,
+            shape: KotlinFunctionTypeShape {
+                receiver: false,
+                context_count: 0,
+                suspend: false,
+            },
+        };
+        let formal = KotlinType::Param {
+            name: "T".to_owned(),
+            id: result,
+            nullable: false,
+        };
+        let generic = |name: &str, annotation: AnnotationApplication| {
+            let mut intercepted = declaration(name, &["kotlin/Int"], "kotlin/Int", annotation);
+            intercepted.is_external = false;
+            intercepted.formals = vec![crate::metadata::semantic::KotlinTypeParameter {
+                id: result,
+                name: "T".to_owned(),
+                bounds: Vec::new(),
+                variance: crate::types::TypeVariance::Invariant,
+                only_input: false,
+                reified: false,
+            }];
+            intercepted.params[0] = continuation(formal.clone());
+            intercepted.ret = continuation(formal.clone());
+            intercepted
+        };
+        let exact = generic("interceptedIntrinsic", excluded.clone());
+        let operand = Ty::obj_args(
+            "kotlin/coroutines/Continuation",
+            &[Ty::ty_param(
+                "T",
+                Ty::nullable(Ty::obj_name(crate::types::wk::any())),
+            )],
+        );
+        assert_eq!(
+            authenticate(wasm, internal, &exact),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::InterceptedContinuation,
+                kind: ExternalCallableKind::TopLevel,
+                receiver: None,
+                params: vec![operand],
+                ret: operand,
+            })
+        );
+        assert!(authenticate(Some(TargetIntrinsicPlatform::Native), internal, &exact).is_none());
+        assert!(authenticate(
+            wasm,
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/coroutines")),
+            &exact
+        )
+        .is_none());
+        assert!(authenticate(wasm, internal, &generic("intercepted", excluded.clone())).is_none());
+        let mut included = generic("interceptedIntrinsic", excluded.clone());
+        included.annotation_applications.clear();
+        assert!(authenticate(wasm, internal, &included).is_none());
+        let mut nullable = generic("interceptedIntrinsic", excluded.clone());
+        nullable.ret = KotlinType::Class {
+            internal: "kotlin/coroutines/Continuation".to_owned(),
+            args: vec![formal.clone()],
+            nullable: true,
+            shape: KotlinFunctionTypeShape {
+                receiver: false,
+                context_count: 0,
+                suspend: false,
+            },
+        };
+        assert!(authenticate(wasm, internal, &nullable).is_none());
+        let mut reified = generic("interceptedIntrinsic", excluded.clone());
+        reified.formals[0].reified = true;
+        assert!(authenticate(wasm, internal, &reified).is_none());
+        let mut concrete = generic("interceptedIntrinsic", excluded);
+        concrete.params[0] = continuation(KotlinType::class("kotlin/Int"));
         assert!(authenticate(wasm, internal, &concrete).is_none());
     }
 

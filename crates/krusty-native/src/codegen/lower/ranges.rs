@@ -155,48 +155,6 @@ fn closed_range_element(ty: Ty) -> Option<Ty> {
     }
 }
 
-/// A COMPARABLE range: `"a".."c"`, and every other `a..b` whose bounds are ordered by `Comparable`
-/// rather than by a machine comparison.
-///
-/// The TYPE ARGUMENT says which: a reference element is one no machine comparison reaches, so the
-/// bounds are kept as objects and each comparison is the value's own. A type PARAMETER is not one
-/// — `Ty::Obj` excludes it — because the object behind a `ClosedRange<T>` in a generic body may be
-/// any of the three shapes, and only a concrete element rules the other two out.
-///
-/// The range carries the `compareTo` it orders by, chosen where it is built
-/// ([`FunctionLowering::range_compare_function`]), so its members need nothing from the element's
-/// descriptor and answer for any element the construction could order.
-fn comparable_range_element(ty: Ty) -> Option<Ty> {
-    let TyKind::Obj(internal, arguments) = ty.non_null().kind() else {
-        return None;
-    };
-    if !super::classifier_shapes::is_closed_range(internal) {
-        return None;
-    }
-    let argument = arguments.first()?.non_null();
-    (matches!(argument.kind(), TyKind::Obj(..)) && machine_carrier(argument) == Carrier::Ref)
-        .then_some(argument)
-}
-
-/// The runtime function answering one member of a comparable range, and what it answers with.
-fn comparable_range_symbol(
-    signature: super::super::super::intrinsics::FunctionSignature<'_>,
-) -> Option<(&'static str, Ty)> {
-    if !signature
-        .owner
-        .semantic_classifier()
-        .is_some_and(super::classifier_shapes::is_closed_range)
-        && !super::super::super::intrinsics::is_ranges_facade(signature.owner)
-    {
-        return None;
-    }
-    Some(match (signature.name, signature.params, signature.ret) {
-        ("contains", [_], Ty::Boolean) => ("kt_comparable_range_contains", Ty::Boolean),
-        ("isEmpty", [], Ty::Boolean) => ("kt_comparable_range_is_empty", Ty::Boolean),
-        _ => return None,
-    })
-}
-
 /// Whether this names text the runtime walks by UTF-16 unit.
 ///
 /// Every `CharSequence` this target can produce IS a string — `subSequence` answers one and
@@ -240,14 +198,6 @@ fn floating_range_property_symbol(name: &str) -> Option<(&'static str, Ty)> {
     Some(match name {
         "start" => ("kt_floating_range_start", Ty::Double),
         "endInclusive" => ("kt_floating_range_end", Ty::Double),
-        _ => return None,
-    })
-}
-
-fn comparable_range_property_symbol(name: &str) -> Option<(&'static str, Ty)> {
-    Some(match name {
-        "start" => ("kt_comparable_range_start", any()),
-        "endInclusive" => ("kt_comparable_range_end", any()),
         _ => return None,
     })
 }
@@ -436,12 +386,6 @@ impl BodyLowering<'_, '_, '_> {
             if let Some((kind, element)) = floating_range(ret) {
                 return Some(self.floating_range_of(kind, element, receiver, args[0], ret));
             }
-            // `"a".."c"`: the same shape one level up, with the bounds kept as OBJECTS. Kotlin
-            // declares this `rangeTo` on `Comparable<T>`, so the receiver is whatever the program
-            // is ordering and the type it RETURNS is what says the element is a reference.
-            if let Some(element) = comparable_range_element(ret) {
-                return Some(self.comparable_range_of(element, receiver, args[0], ret));
-            }
         }
         // A member of one. The RECEIVER is what says so, never the owner: `contains` is declared
         // on the facade as well as on the interface, and `start` on the interface a user class may
@@ -450,12 +394,6 @@ impl BodyLowering<'_, '_, '_> {
             let (_, element) = floating_range(self.checked_type(receiver)?)?;
             let (symbol, answer) = floating_range_symbol(signature)?;
             return Some(self.floating_range_call(symbol, answer, element, receiver, args, ret));
-        }
-        // A member of a COMPARABLE range, keyed on the receiver for the same reason. The range
-        // carries its own order, so any element the construction accepted can be asked about.
-        if comparable_range_element(self.checked_type(receiver)?).is_some() {
-            let (symbol, answer) = comparable_range_symbol(signature)?;
-            return Some(self.comparable_range_call(symbol, answer, receiver, args, ret));
         }
         // `range step n` and `progression.reversed()`. Both answer a PROGRESSION, which this
         // runtime represents as the range it already had with a step beside it — so the receiver
@@ -547,10 +485,6 @@ impl BodyLowering<'_, '_, '_> {
             let (symbol, answer) = floating_range_property_symbol(name)?;
             return Some(self.floating_range_call(symbol, answer, element, receiver, &[], ret));
         }
-        if comparable_range_element(receiver_ty).is_some() {
-            let (symbol, answer) = comparable_range_property_symbol(name)?;
-            return Some(self.comparable_range_call(symbol, answer, receiver, &[], ret));
-        }
         if let Some(element) = closed_range_element(receiver_ty) {
             let (symbol, carried) = integral_range_property_symbol(name)?;
             return Some(self.closed_range_call(symbol, carried, element, receiver, &[], ret));
@@ -558,129 +492,6 @@ impl BodyLowering<'_, '_, '_> {
         let element = range_element(owner.physical())?;
         let (symbol, carried) = integral_range_property_symbol(name)?;
         Some(self.range_call(symbol, carried, element, receiver, &[], ret))
-    }
-
-    /// `a..b` on a receiver ordered by `Comparable`: the range object, its bounds kept as objects
-    /// and the `compareTo` that orders them carried beside them.
-    fn comparable_range_of(
-        &mut self,
-        element: Ty,
-        start: u32,
-        end: u32,
-        ret: Ty,
-    ) -> Result<Option<Value>, Unsupported> {
-        let compare = self.range_compare_function(element)?;
-        let first = self.reference(start)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        let last = self.reference(end)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        self.runtime_call(
-            "kt_comparable_range",
-            &[any(), any(), any()],
-            ret,
-            &[first, last, compare],
-        )
-    }
-
-    /// The address of the `compareTo` a range of `element` orders by: what the runtime's
-    /// `kt_compare_fn` calls with two bounds, or a bound and a value.
-    ///
-    /// The element type decides, here, where it is known; the runtime is never left to rediscover
-    /// the order from a bound's descriptor.
-    ///
-    /// - A final class of this file that declares `compareTo(other: Self): Int` passes that
-    ///   function. It takes the receiver and the other object and answers an `Int`, which is the
-    ///   runtime's `kt_compare_fn` exactly, and no subclass can override it.
-    /// - A `String`, or any element in a file that declares no `Comparable` of its own, passes
-    ///   `kt_compare_any`: every object such an element can hold is a builtin comparable, and the
-    ///   builtin order is the runtime's.
-    /// - Anything else declines. An open class could be overridden by the object behind the bound,
-    ///   and an element that could hold both a builtin and a program object has no single function
-    ///   to pass.
-    fn range_compare_function(&mut self, element: Ty) -> Result<Value, Unsupported> {
-        let TyKind::Obj(name, _) = element.non_null().kind() else {
-            return Err(declined!(
-                "a range of `{}`",
-                super::type_checks::type_name_of(element)
-            ));
-        };
-        let ir = self.file.ir;
-        let Some(class) = ir.class_id_by_name(name) else {
-            if name == krusty::types::wk::string() || !self.file.declares_its_own_comparable {
-                let id = self
-                    .file
-                    .import("kt_compare_any", &[any(), any()], Ty::Int)?;
-                let func_ref = self.func_ref(id);
-                return Ok(self.builder.ins().func_addr(types::I64, func_ref));
-            }
-            return Err(declined!(
-                "a range of `{}` in a file that declares its own `Comparable`",
-                name.render().replace('/', ".")
-            ));
-        };
-        let declared = &ir.classes[class as usize];
-        let is_final = !declared.is_open
-            && !declared.is_abstract
-            && !declared.is_interface
-            && !declared.is_sealed
-            && !self.file.values.is_value_class(declared.fq_name)
-            && !declared.is_enum
-            && !declared.is_enum_entry;
-        let own = declared.methods.iter().copied().find(|&function| {
-            let function = &ir.functions[function as usize];
-            function.name == "compareTo"
-                && function.dispatch_receiver.is_some()
-                && function.ret == Ty::Int
-                && matches!(function.params.as_slice(), [other] if other.obj_parts().is_some_and(|(other, _)| other == name))
-        });
-        let (true, Some(function)) = (is_final, own) else {
-            return Err(declined!(
-                "a range of `{}`, which is not a final class declaring its own `compareTo`",
-                name.render().replace('/', ".")
-            ));
-        };
-        let Some(id) = self.file.functions[function as usize] else {
-            return Err(declined!(
-                "a range of `{}`, whose `compareTo` has no body",
-                name.render().replace('/', ".")
-            ));
-        };
-        let func_ref = self.func_ref(id);
-        Ok(self.builder.ins().func_addr(types::I64, func_ref))
-    }
-
-    /// One member of a comparable range. Every operand crosses as a REFERENCE, which is what the
-    /// bounds are: the comparison is the `compareTo` the range carries.
-    fn comparable_range_call(
-        &mut self,
-        symbol: &str,
-        answer: Ty,
-        receiver: u32,
-        args: &[u32],
-        ret: Ty,
-    ) -> Result<Option<Value>, Unsupported> {
-        let object = self.reference(receiver)?;
-        let mut params = vec![any()];
-        let mut operands = vec![object];
-        for argument in args {
-            let value = self.reference(*argument)?;
-            if self.terminated {
-                return Ok(None);
-            }
-            params.push(any());
-            operands.push(value);
-        }
-        if self.terminated {
-            return Ok(None);
-        }
-        let Some(produced) = self.runtime_call(symbol, &params, answer, &operands)? else {
-            return Ok(None);
-        };
-        self.convert(produced, Some(answer), ret)
     }
 
     /// One member of an integral range reached through `ClosedRange<T>`. The call is `range_call`'s
@@ -942,6 +753,73 @@ impl BodyLowering<'_, '_, '_> {
         )
     }
 
+    /// A checked read of a range member whose interface a class of this file may implement.
+    ///
+    /// The runtime reads a bound from the range object it built, so the object behind a
+    /// `ClosedRange<Int>` that the file also puts a class behind is told apart first: each such
+    /// class is dispatched to through its own getter, and only what remains reaches the runtime,
+    /// as a `KType` member is. A class of another file has no override this file can name, so a
+    /// read in a module whose other files implement the interface declines.
+    pub(super) fn range_property_through_implementors(
+        &mut self,
+        target: krusty::fir::ExternalPropertyId,
+        owner: super::super::super::intrinsics::DeclarationOwner,
+        name: &str,
+        receiver: u32,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let runtime = |body: &mut Self| {
+            body.range_property_member(owner, name, receiver, ret)
+                .unwrap_or_else(|| {
+                    Err(declined!("`{name}` of a range the runtime does not answer"))
+                })
+        };
+        let Some(internal) = self
+            .checked_type(receiver)
+            .and_then(|ty| ty.non_null().obj_internal())
+            .filter(|&internal| self.file.implements_dependency(internal))
+        else {
+            return runtime(self);
+        };
+        let module_implementors = self.file.module_facts.dependency_implementors(internal);
+        if module_implementors
+            .iter()
+            .any(|implementor| implementor.file != self.file.source)
+        {
+            return Err(declined!(
+                "the member `{name}` of a range type another file implements"
+            ));
+        }
+        let getter = self
+            .file
+            .callables
+            .property(target)
+            .ok_or("a range member without its property")?
+            .getter;
+        let arms = self.file.implementors_of(internal);
+        let implementors: Vec<_> = arms
+            .iter()
+            .filter_map(|&class| self.external_property_getter_slot(class, getter))
+            .collect();
+        // Every class of the module that can be an instance must be answered by an arm that has
+        // a getter to enter: an arm also answers the classes below it.
+        if implementors.len() != arms.len()
+            || self.file.classes_answered_by(&arms) != module_implementors.len()
+        {
+            return Err(declined!(
+                "the member `{name}` of a range type this file implements with a class whose \
+                 override cannot be dispatched to"
+            ));
+        }
+        let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.dispatch_by_implementor_with(&implementors, object, &[], ret, false, |body, _| {
+            runtime(body)
+        })
+    }
+
     /// The owner, name and result of a dependency getter naming a member of a range type.
     ///
     /// `range.first` reaches the generator as a checked read of a dependency property rather than as
@@ -968,8 +846,6 @@ impl BodyLowering<'_, '_, '_> {
             let ty = self.checked_type(receiver)?;
             if floating_range(ty).is_some() {
                 floating_range_property_symbol(&property.name)?;
-            } else if comparable_range_element(ty).is_some() {
-                comparable_range_property_symbol(&property.name)?;
             } else if closed_range_element(ty).is_some() {
                 integral_range_property_symbol(&property.name)?;
             } else {

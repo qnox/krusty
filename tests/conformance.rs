@@ -56,7 +56,9 @@ mod kotlin_native_multimodule_support;
 mod kotlinc_argument_conformance;
 #[path = "krusty_case_workers.rs"]
 mod krusty_case_workers;
-#[path = "common/reference_targets/invocation.rs"]
+#[path = "plugin_box_corpus.rs"]
+mod plugin_box_corpus;
+#[path = "common/reference_targets/recorded_library.rs"]
 mod reference_invocation_support;
 #[path = "common/reference_recording.rs"]
 mod reference_recording_support;

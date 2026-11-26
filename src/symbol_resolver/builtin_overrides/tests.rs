@@ -8,8 +8,10 @@ fn wasm_stdlibs() -> Vec<KlibLibraries> {
     [CompilationTarget::WasmJs, CompilationTarget::WasmWasi]
         .into_iter()
         .map(|target| {
-            let path = crate::toolchain::kotlin_stdlib_klib(target)
-                .expect("the exact target stdlib must be provisioned");
+            let path =
+                crate::toolchain::kotlin_stdlib_klib_or_reason(target).unwrap_or_else(|reason| {
+                    panic!("the exact target stdlib must be provisioned: {reason}")
+                });
             KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
                 path,
                 KlibStdlibSemantics::Wasm,
@@ -292,5 +294,43 @@ fn a_target_laid_out_class_carries_its_own_overrides_of_the_members_above_it() {
             to_long
         )
         .is_empty());
+    }
+}
+
+/// A generic laid-out class is read against its own formals: `ArrayList<E>.get` overrides
+/// `List<E>.get`, which a bare `ArrayList` receiver would read as answering `Any`, missing it.
+#[test]
+fn a_generic_laid_out_class_overrides_the_members_above_it_at_its_own_formals() {
+    let list = type_name("kotlin/collections/ArrayList");
+    for libraries in wasm_stdlibs() {
+        for (owner, name, params) in [
+            ("kotlin/collections/List", "get", &[Ty::Int][..]),
+            ("kotlin/collections/List", "listIterator", &[Ty::Int][..]),
+        ] {
+            let (functions, _) =
+                declared_member_declarations(&libraries, Ty::obj(owner), name).into_parts();
+            let identity = functions
+                .overloads
+                .iter()
+                .find(|function| function_declaration_identity(function).params.as_ref() == params)
+                .and_then(|function| function.callable.external_identity)
+                .expect("`List` declares the member");
+            let facts = represented_implementation_facts(
+                &libraries,
+                &[list],
+                type_name(owner),
+                name,
+                identity,
+            );
+            let [fact] = facts.as_slice() else {
+                panic!("`ArrayList` is the one laid-out class below `{owner}`");
+            };
+            assert_eq!(fact.receiver.obj_internal(), Some(list));
+            let declaration = fact
+                .declaration
+                .as_ref()
+                .expect("`ArrayList` overrides the member itself");
+            assert_eq!(declaration.params.as_ref(), params);
+        }
     }
 }

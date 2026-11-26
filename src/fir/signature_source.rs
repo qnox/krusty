@@ -7,6 +7,21 @@ use crate::ast::{ExprId, File};
 
 use super::DeclarationStub;
 
+/// An enum-entry method is a streamed callable even when its enum is a local class. Pass 1
+/// publishes that header; leaving it for an ordinary local body drops the finalized signature
+/// the checker requires.
+pub(super) fn source_enum_entry_function(file: &File, range: crate::diag::Span) -> bool {
+    file.decl_arena.iter().any(|declaration| {
+        let crate::ast::Decl::Class(class) = declaration else {
+            return false;
+        };
+        class
+            .enum_entries
+            .iter()
+            .any(|entry| entry.methods.iter().any(|method| method.span == range))
+    })
+}
+
 pub(super) fn source_function(
     file: &File,
     range: crate::diag::Span,

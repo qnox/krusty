@@ -12,7 +12,7 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 use super::expression_copy::InheritedFacts;
-use super::{ExprId, IrFile};
+use super::{ExprId, IrExpr, IrFile, IrNodeOrigin};
 use crate::types::{Ty, TypeName};
 
 /// Source identity for code copied from a same-module inline declaration. Common IR retains the
@@ -116,6 +116,38 @@ impl IrFile {
     /// inline body that may already hold another expansion), or an operand left unread.
     pub fn copy_inline_copy_mark(&mut self, source: ExprId, target: ExprId) {
         self.inline_expansions.inherit(source, target);
+    }
+
+    /// Wrap `body`, the code an expansion spliced from a `crossinline` literal's body, in a block
+    /// that is the crossinline scope's root. The root's origin is the fact, so every copy keeps
+    /// it, and `body` keeps the origin it was lowered with (an inlined call's role among them).
+    /// Returns the wrapper that takes `body`'s place.
+    pub(crate) fn wrap_crossinline_body(&mut self, body: ExprId) -> ExprId {
+        let wrapper = self.add_expr(IrExpr::Block {
+            stmts: Vec::new(),
+            value: Some(body),
+        });
+        if let Some(cause) = self.node_origin(body) {
+            self.fir_origins.insert(
+                wrapper,
+                IrNodeOrigin::Synthetic {
+                    cause,
+                    kind: crate::fir::SyntheticOriginKind::CrossinlineLiteralBody,
+                },
+            );
+        }
+        wrapper
+    }
+
+    /// Whether `expression` is the root of code spliced from a `crossinline` literal's body.
+    pub fn is_crossinline_body(&self, expression: ExprId) -> bool {
+        matches!(
+            self.fir_origins.get(&expression),
+            Some(IrNodeOrigin::Synthetic {
+                kind: crate::fir::SyntheticOriginKind::CrossinlineLiteralBody,
+                ..
+            })
+        )
     }
 
     pub fn is_inline_copy(&self, expression: ExprId) -> bool {

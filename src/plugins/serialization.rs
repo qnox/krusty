@@ -33,6 +33,7 @@ mod generated_classifier;
 mod generated_members;
 mod program_order_metadata;
 mod property_default;
+mod roles;
 mod runtime_abi;
 mod sealed_serializer;
 mod serial_elements;
@@ -42,6 +43,7 @@ mod synthesized_accessor;
 mod transient_initializer;
 mod type_argument_serializers;
 mod type_parameter_serializers;
+mod use_serializers;
 mod value_class_body;
 mod value_class_types;
 
@@ -221,10 +223,7 @@ impl SerializationPlugin {
                     serial_elements::SerialParent::Local(parent) => {
                         let owner = ir.classes[parent as usize].fq_name_id();
                         let write_self = ir
-                            .generated_function(
-                                owner,
-                                crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
-                            )
+                            .generated_function(owner, roles::SerializationFunction::WriteSelf)
                             .expect("a serializable superclass declares its write$Self");
                         (owner, Some(write_self))
                     }
@@ -243,7 +242,7 @@ impl SerializationPlugin {
             write_self: ir
                 .generated_function(
                     ir.classes[class_id as usize].fq_name_id(),
-                    crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
+                    roles::SerializationFunction::WriteSelf,
                 )
                 .expect("a plain serializable class declares its write$Self"),
             write_self_name: self.write_self_name(&ir.classes[class_id as usize]),
@@ -1151,10 +1150,10 @@ impl IrPlugin for SerializationPlugin {
 
     fn publish_frontend_generated_classifiers(
         &self,
-        ctx: &FrontendClassContext<'_>,
+        header: &crate::plugins::FrontendClassifierHeader<'_>,
         classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
     ) {
-        publish_generated_classifier_facts(ctx, classifiers);
+        publish_generated_classifier_facts(header, classifiers);
     }
 
     fn check_frontend_class(
@@ -1483,10 +1482,7 @@ impl IrPlugin for SerializationPlugin {
             );
             let class_classifier = ir.classes[class_id as usize].fq_name_id();
             let ser_idx = ir
-                .generated_class(
-                    class_classifier,
-                    crate::ir::IrGeneratedClassRole::SerializationSerializer,
-                )
+                .generated_class(class_classifier, roles::SerializationClass::Serializer)
                 .expect("a serializable class publishes its generated serializer identity");
             // The serialized class's ClassId (for constructing it in `deserialize`).
             let foo_id = class_id;
@@ -1496,29 +1492,23 @@ impl IrPlugin for SerializationPlugin {
             let serializer = ir.classes[ser_idx as usize].fq_name_id();
             let members = GeneratedSerializerMembers::declared(ir, serializer);
             for (role, fid) in [
+                (roles::SerializationFunction::Descriptor, members.descriptor),
+                (roles::SerializationFunction::Serialize, members.serialize),
                 (
-                    crate::ir::IrGeneratedFunctionRole::SerializationDescriptor,
-                    members.descriptor,
-                ),
-                (
-                    crate::ir::IrGeneratedFunctionRole::SerializationSerialize,
-                    members.serialize,
-                ),
-                (
-                    crate::ir::IrGeneratedFunctionRole::SerializationDeserialize,
+                    roles::SerializationFunction::Deserialize,
                     members.deserialize,
                 ),
                 (
-                    crate::ir::IrGeneratedFunctionRole::SerializationChildSerializers,
+                    roles::SerializationFunction::ChildSerializers,
                     members.child_serializers,
                 ),
                 (
-                    crate::ir::IrGeneratedFunctionRole::SerializationTypeParameterSerializers,
+                    roles::SerializationFunction::TypeParameterSerializers,
                     members.type_parameter_serializers,
                 ),
             ] {
                 match role {
-                    crate::ir::IrGeneratedFunctionRole::SerializationDescriptor => {
+                    roles::SerializationFunction::Descriptor => {
                         // return this.descriptor
                         let recv = ir.add_expr(IrExpr::GetValue(0));
                         let d = ir.add_expr(IrExpr::GetField {
@@ -1533,8 +1523,8 @@ impl IrPlugin for SerializationPlugin {
                         });
                         complete_generated_body(ir, fid, body);
                     }
-                    crate::ir::IrGeneratedFunctionRole::SerializationSerialize
-                    | crate::ir::IrGeneratedFunctionRole::SerializationDeserialize
+                    roles::SerializationFunction::Serialize
+                    | roles::SerializationFunction::Deserialize
                         if ir.classes[foo_id as usize].is_value =>
                     {
                         let Some(property) = fields.first() else {
@@ -1547,28 +1537,27 @@ impl IrPlugin for SerializationPlugin {
                             property,
                             type_parameter_serializers,
                         };
-                        if role == crate::ir::IrGeneratedFunctionRole::SerializationSerialize {
+                        if role == roles::SerializationFunction::Serialize {
                             body.serialize(ir, ctx);
                         } else {
                             body.deserialize(ir, ctx);
                         }
                     }
-                    crate::ir::IrGeneratedFunctionRole::SerializationSerialize => self
-                        .generate_write_self(
-                            ir,
-                            ctx,
-                            foo_id,
-                            &SerializedClassElements {
-                                properties: &properties,
-                                elements: &elements,
-                                type_parameter_serializers,
-                            },
-                            Some(serialize_body::GeneratedSerialize {
-                                function: fid,
-                                serializer_class: ser_idx,
-                            }),
-                        ),
-                    crate::ir::IrGeneratedFunctionRole::SerializationDeserialize => {
+                    roles::SerializationFunction::Serialize => self.generate_write_self(
+                        ir,
+                        ctx,
+                        foo_id,
+                        &SerializedClassElements {
+                            properties: &properties,
+                            elements: &elements,
+                            type_parameter_serializers,
+                        },
+                        Some(serialize_body::GeneratedSerialize {
+                            function: fid,
+                            serializer_class: ser_idx,
+                        }),
+                    ),
+                    roles::SerializationFunction::Deserialize => {
                         DeserializeBody {
                             function: fid,
                             serializer_class: ser_idx,
@@ -1581,7 +1570,7 @@ impl IrPlugin for SerializationPlugin {
                         }
                         .generate(ir, ctx);
                     }
-                    crate::ir::IrGeneratedFunctionRole::SerializationChildSerializers => {
+                    roles::SerializationFunction::ChildSerializers => {
                         ChildSerializersBody {
                             function: fid,
                             serialized_class: foo_id,
@@ -1594,14 +1583,14 @@ impl IrPlugin for SerializationPlugin {
                     }
                     // A serializer without type parameters keeps the semantic interface-default
                     // delegation installed when its member was declared.
-                    crate::ir::IrGeneratedFunctionRole::SerializationTypeParameterSerializers
+                    roles::SerializationFunction::TypeParameterSerializers
                         if !type_parameter_identities.is_empty() =>
                     {
                         type_parameter_serializers.install_member_body(ir, fid);
                     }
-                    crate::ir::IrGeneratedFunctionRole::SerializationTypeParameterSerializers => {}
-                    crate::ir::IrGeneratedFunctionRole::SerializationWriteSelf
-                    | crate::ir::IrGeneratedFunctionRole::SerializationTypeSerializerGetter(_) => {
+                    roles::SerializationFunction::TypeParameterSerializers => {}
+                    roles::SerializationFunction::WriteSelf
+                    | roles::SerializationFunction::TypeSerializerGetter(_) => {
                         unreachable!("the serializer member ledger holds only its declared members")
                     }
                 }
@@ -2074,7 +2063,7 @@ mod tests {
         let ser_id = ir
             .generated_class(
                 ir.classes[owner as usize].fq_name_id(),
-                crate::ir::IrGeneratedClassRole::SerializationSerializer,
+                roles::SerializationClass::Serializer,
             )
             .expect("the declaration phase publishes the generated classifier");
         let ser = &ir.classes[ser_id as usize];
@@ -2354,7 +2343,7 @@ mod tests {
         let ser_id = ir
             .generated_class(
                 ir.classes[id as usize].fq_name_id(),
-                crate::ir::IrGeneratedClassRole::SerializationSerializer,
+                roles::SerializationClass::Serializer,
             )
             .expect("generic serializer class");
         let serializer = ir.classes[ser_id as usize].fq_name_id();

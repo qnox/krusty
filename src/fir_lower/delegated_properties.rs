@@ -419,6 +419,12 @@ pub(super) fn materialize_member_delegate(
         if property.flags.has(DeclarationFlags::OPEN) {
             ir.open_methods.insert(function);
         }
+        // Like a concrete accessor with a backing field, a delegated accessor is synthesized from
+        // the property: record its semantic shape so an enclosing class type parameter survives
+        // erasure in the JVM Signature (`class C<T> { val property: T by lazy { … } }`).
+        let signature = &ir.functions[function as usize];
+        ir.member_semantic_sigs
+            .insert(function, (signature.params.clone(), signature.ret));
         attach_accessor_type_parameters(ir, function, &type_params);
     }
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
@@ -700,6 +706,8 @@ pub(super) fn materialize_member_extension_delegate(
             source_order: declaration.source_order,
             receiver: extension_receiver,
             ty: property.ty,
+            // A delegated member extension with context parameters is rejected above.
+            context_params: Vec::new(),
             is_var: property.flags.has(DeclarationFlags::MUTABLE),
             is_abstract: false,
             modifiers: super::properties::member_property_modifiers(property.flags, false),
@@ -763,6 +771,7 @@ fn delegated_property_reference(
             mutable: flags.has(DeclarationFlags::MUTABLE),
             substitutions: Vec::new(),
             adaptation: None,
+            function_type: None,
         },
     )));
     // The node is the value passed to `getValue`/`setValue`/`provideDelegate`. A backend reads

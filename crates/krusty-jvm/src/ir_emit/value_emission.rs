@@ -1,7 +1,7 @@
 //! Physical JVM emission of one common-IR value node.
 
 use crate::value_classes::instance_representation;
-use krusty::ir::{Callee, IrExpr, NullCheck};
+use krusty::ir::{Callee, IrExpr};
 use krusty::jvm::classfile::CodeBuilder;
 use krusty::jvm::names::{method_descriptor, type_descriptor};
 use krusty::types::Ty;
@@ -733,6 +733,9 @@ impl super::Emitter<'_> {
                 Callee::Super { .. } => {
                     unreachable!("a super call must be realized before JVM emission")
                 }
+                Callee::ValueClassAdapter { .. } => {
+                    unreachable!("a value-class adapter must be realized before JVM emission")
+                }
                 Callee::Local(fid) => {
                     self.emit_static_function_call(e, *fid, None, args, code);
                 }
@@ -829,8 +832,12 @@ impl super::Emitter<'_> {
                     | krusty::ir::IrIntrinsic::StringGet
                     | krusty::ir::IrIntrinsic::StringLength
                     | krusty::ir::IrIntrinsic::EnumOrdinal
+                    | krusty::ir::IrIntrinsic::EnumName
                     | krusty::ir::IrIntrinsic::NullableAnyToString) => {
                         self.emit_builtin_member(e, op, dispatch_receiver.unwrap(), args, code)
+                    }
+                    krusty::ir::IrIntrinsic::EnumValues { classifier } => {
+                        self.emit_enum_values(*classifier, code);
                     }
                     krusty::ir::IrIntrinsic::EnumEntries { classifier } => {
                         self.emit_enum_entries(*classifier, code);
@@ -1126,7 +1133,7 @@ impl super::Emitter<'_> {
                     params,
                     interface,
                     module_target,
-                    target: _,
+                    target,
                 } => {
                     let recv = dispatch_receiver.expect("virtual call needs a receiver");
                     let interface = *interface || declared_jvm_interface(self.ir, *owner);
@@ -1134,9 +1141,20 @@ impl super::Emitter<'_> {
                     // descriptor and emit a plain virtual/interface call. The classpath-operator
                     // special-casing below only applies to the `descriptor` form (a classpath receiver).
                     if let Some((param_tys, ret_ty)) = params {
-                        if let Some(owner) = module_target.and_then(|target| {
-                            jvm_static_members::module_singleton_static_owner(self.ir, target)
-                        }) {
+                        let static_owner = match (module_target, target) {
+                            (Some(target), _) => {
+                                jvm_static_members::module_singleton_static_owner(self.ir, *target)
+                            }
+                            (None, Some(target)) => {
+                                module_property_accessor(target).and_then(|(property, side)| {
+                                    jvm_static_members::module_singleton_static_accessor(
+                                        self.ir, property, side,
+                                    )
+                                })
+                            }
+                            (None, None) => None,
+                        };
+                        if let Some(owner) = static_owner {
                             let call = jvm_static_members::ModuleStaticCall {
                                 owner,
                                 name,
@@ -1584,9 +1602,7 @@ impl super::Emitter<'_> {
                 code.push_int(key, self.cw);
             }
             IrExpr::EnumValues { classifier } => {
-                let fq = classifier.render();
-                let m = self.cw.methodref(&fq, "values", &format!("()[L{fq};"));
-                code.invokestatic(m, 0, 1);
+                self.emit_enum_values(Ty::obj_name(*classifier), code);
             }
             IrExpr::EnumEntries { classifier } => {
                 let fq = classifier.render();
@@ -1922,11 +1938,20 @@ impl super::Emitter<'_> {
                 // kotlinc checks a value in the slot that produced it and narrows the checked
                 // value afterwards: a captured `var`'s `ObjectRef.element` is checked as `Object`
                 // and only then cast to the variable's type (`getfield; dup; checkNotNull;
-                // checkcast`).
+                // checkcast`), and so is an erased result, such as a suspension point's `Object`.
+                let mut erased = None;
                 let shared_cell = match *self.ir.expr(*operand) {
                     IrExpr::RefGet { holder, elem } if ir_ty_to_jvm(&elem).is_reference() => {
                         self.emit_shared_cell_read(holder, elem, false, code);
                         Some(elem)
+                    }
+                    _ if matches!(
+                        self.erased_reference_result(*operand),
+                        Some(super::operand_representation::ErasedResult::Suspension)
+                    ) =>
+                    {
+                        erased = Some(self.emit_consumed_operand(*operand, code));
+                        None
                     }
                     _ => {
                         self.emit_value(*operand, code);
@@ -1942,39 +1967,12 @@ impl super::Emitter<'_> {
                 if self.value_ty(*operand).is_jvm_scalar() {
                     return;
                 }
-                // kotlinc lowers the implicit check to a temporary of the checked value
-                // (`TypeOperatorLowering`), whose declaration marks the check's line once the
-                // value is on the stack: after an inlined operand the mapper wrote nothing yet.
-                if matches!(check, NullCheck::Named { .. }) {
-                    self.mark_expression_start(e, code);
-                }
-                code.dup();
-                // A platform value narrowed to a declared non-null type names the checked expression
-                // in its failure (`getenv(...) must not be null`); `x!!` has no such name and uses the
-                // one-argument form. Both consume the duplicate and leave the value in place.
-                let m = match check {
-                    NullCheck::Named { message, .. } => {
-                        code.push_string(message, self.cw);
-                        self.cw.methodref(
-                            "kotlin/jvm/internal/Intrinsics",
-                            "checkNotNullExpressionValue",
-                            "(Ljava/lang/Object;Ljava/lang/String;)V",
-                        )
-                    }
-                    NullCheck::Source | NullCheck::Unnamed { .. } => self.cw.methodref(
-                        "kotlin/jvm/internal/Intrinsics",
-                        "checkNotNull",
-                        "(Ljava/lang/Object;)V",
-                    ),
-                };
-                let arguments = if matches!(check, NullCheck::Named { .. }) {
-                    2
-                } else {
-                    1
-                };
-                code.invokestatic(m, arguments, 0);
+                self.emit_null_assertion_check(e, check, code);
                 if let Some(elem) = shared_cell {
                     self.narrow_shared_cell_element(elem, code);
+                }
+                if let Some(slot) = erased {
+                    self.coerce_reference_on_stack(slot, self.value_ty(*operand), code);
                 }
             }
             IrExpr::LateinitCheck { operand, name } => {
@@ -2063,5 +2061,18 @@ impl super::Emitter<'_> {
             }
             _ => {}
         }
+    }
+}
+
+/// The sibling-file property and accessor side a virtual accessor call selects.
+fn module_property_accessor(
+    target: &krusty::ir::IrVirtualTarget,
+) -> Option<(krusty::fir::PropertyId, super::PropertyAccessorSide)> {
+    use krusty::fir::ResolvedPropertyOverrideTarget::Module;
+    use krusty::ir::IrVirtualTarget::{PropertyGetter, PropertySetter};
+    match target {
+        PropertyGetter(Module(property)) => Some((*property, super::PropertyAccessorSide::Getter)),
+        PropertySetter(Module(property)) => Some((*property, super::PropertyAccessorSide::Setter)),
+        _ => None,
     }
 }

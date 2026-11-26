@@ -61,10 +61,7 @@ impl ProductionSignatureSemantics<'_> {
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         type_arguments: &[crate::fir::ResolvedTy],
         trailing_lambda: bool,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let (qualifier, name) = spelling.rsplit_once('.').ok_or_else(Self::failure)?;
         self.with_qualified_package_resolver(scope, qualifier, |package, resolver| {

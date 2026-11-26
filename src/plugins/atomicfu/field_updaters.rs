@@ -31,13 +31,13 @@ struct LoweredUpdater {
 }
 
 pub(super) fn transform(ir: &mut IrFile) {
-    let Some(facts) = ir.atomicfu.take() else {
-        return;
-    };
-    let AtomicfuFileFacts {
+    let Some(AtomicfuFileFacts {
         updaters,
         operations,
-    } = *facts;
+    }) = ir.plugin_facts.take::<AtomicfuFileFacts>()
+    else {
+        return;
+    };
     let lowered = updaters
         .iter()
         .map(|updater| lower_declaration(ir, updater))

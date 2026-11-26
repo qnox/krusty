@@ -279,17 +279,23 @@ impl Checker<'_> {
                         } else if actual.is_nullable() && !expected.is_nullable() {
                             false
                         } else {
-                            actual
-                                .non_null()
-                                .obj_internal()
-                                .zip(expected.non_null().obj_internal())
-                                .is_some_and(|(actual_owner, expected_owner)| {
+                            // A function type is an instance of its function classifier
+                            // (`(A) -> R` is `Function1<A, R>`), so it reaches a constructed
+                            // `Function1<F, T>` slot through that classifier.
+                            crate::libraries::function_classifiers::supertype_classifier(
+                                actual.non_null(),
+                            )
+                            .obj_internal()
+                            .zip(expected.non_null().obj_internal())
+                            .is_some_and(
+                                |(actual_owner, expected_owner)| {
                                     self.generic_constructed_argument_reaches(
                                         expected,
                                         actual_owner,
                                         expected_owner,
                                     )
-                                })
+                                },
+                            )
                         }
                     }
                     ConstructorParameterConstraint::GenericFunction => {
@@ -675,6 +681,28 @@ impl Checker<'_> {
         {
             if slot == vararg && name.is_some() && !self.file.is_spread_arg(argument) {
                 self.resolved_whole_array_vararg_args.insert(argument);
+            }
+        }
+    }
+}
+
+impl Checker<'_> {
+    /// Types the arguments of a `this(...)`/`super(...)` delegation ahead of constructor selection.
+    ///
+    /// A lambda or callable reference is contextual: its initial `Error` placeholder stays until the
+    /// shared constructor selector maps it to a parameter slot, just like a primary class-header
+    /// base argument.
+    pub(super) fn type_delegation_arguments(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        arguments: &[ExprId],
+    ) {
+        for &argument in arguments {
+            if !matches!(
+                self.file.expr(argument),
+                Expr::Lambda { .. } | Expr::CallableRef { .. }
+            ) {
+                self.expr(scope, argument);
             }
         }
     }

@@ -24,7 +24,7 @@ mod class_entry_bytes;
 mod class_locations;
 mod class_members;
 pub mod content_snapshot;
-mod ct_sym_index;
+pub(crate) mod ct_sym_index;
 mod declaration_annotations;
 mod entry_class_reads;
 mod external_identities;
@@ -3809,8 +3809,11 @@ impl JarPackages {
     /// Record a class this entry declares, keeping [`Self::classes`] sorted and unique.
     fn add_class(&mut self, class: NameId) {
         match self.classes.last() {
-            Some(last) if last.0 >= class.0 => {
-                if let Err(at) = self.classes.binary_search_by_key(&class.0, |known| known.0) {
+            Some(last) if last.index() >= class.index() => {
+                if let Err(at) = self
+                    .classes
+                    .binary_search_by_key(&class.index(), |known| known.index())
+                {
                     self.classes.insert(at, class);
                 }
             }
@@ -3821,7 +3824,7 @@ impl JarPackages {
     /// Whether this entry declares the class `class` (an id in [`Self::names`]).
     fn declares_class(&self, class: NameId) -> bool {
         self.classes
-            .binary_search_by_key(&class.0, |known| known.0)
+            .binary_search_by_key(&class.index(), |known| known.index())
             .is_ok()
     }
 

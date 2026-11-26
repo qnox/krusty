@@ -9,7 +9,9 @@
 //! the member — the position `lists.rs` already takes, and for the same reason: `get` is declared
 //! on `Map`, which a user class may implement, and keying on the owner would send a user's object
 //! into the runtime. A file that declares such an implementation is declined at every member asked
-//! of a type it implements itself, before this is reached.
+//! of a type it implements itself, before this is reached. The runtime answers a map member of a
+//! class of the program implementing `Map` through that class's own members, which its type
+//! descriptor publishes.
 
 use super::*;
 use krusty::types::TyKind;
@@ -56,7 +58,11 @@ pub(super) fn runtime_symbol(
     } else if collection.kind == krusty::types::CollectionKind::Map {
         map_symbol(declaration?, signature)
     } else if collection.kind == krusty::types::CollectionKind::Set {
-        set_symbol(set_declaration(file, signature)?, signature)
+        set_symbol(
+            file.ir.reference.quirks(),
+            set_declaration(file, signature)?,
+            signature,
+        )
     } else {
         None
     }
@@ -152,6 +158,7 @@ fn is_map_set_extension(signature: super::super::super::intrinsics::FunctionSign
 /// A set's `size` and `isEmpty` are the map's: a set IS a map with no values, and both questions
 /// are about its keys.
 fn set_symbol(
+    quirks: krusty::kotlin_version::Quirks,
     declaration: classifier_shapes::CollectionDeclaration,
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
@@ -170,7 +177,7 @@ fn set_symbol(
             Ty::Boolean,
         ),
         ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
-            "kt_mutable_collection_add_all",
+            super::lists::collection_add_all_symbol(quirks),
             vec![any(), any()],
             Ty::Boolean,
         ),
@@ -375,11 +382,12 @@ impl BodyLowering<'_, '_, '_> {
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let ty = self.checked_type(receiver)?;
-        // A file that declares its own map, set or entry puts an object of ITS own behind that
-        // type, and the runtime would read a header that is not there. No static type tells the
-        // two apart within a shape, so a receiver of a shape the file implements declines — the
-        // same position `lists.rs` takes, and by the same test.
-        if self.file.implements_collection_of(ty) {
+        // A file that declares its own set or entry puts an object of ITS own behind that type,
+        // and the runtime would read a header that is not there. No static type tells the two
+        // apart within a shape, so a receiver of a shape the file implements declines — the same
+        // position `lists.rs` takes, and by the same test. A map is the exception: the runtime
+        // asks a program class implementing `Map` for its own members (`KType.map_members`).
+        if self.file.implements_collection_of(ty) && !is_map(self.file, ty) {
             return None;
         }
         let declaration = signature.owner.semantic_classifier().and_then(|owner| {
@@ -392,7 +400,11 @@ impl BodyLowering<'_, '_, '_> {
                 map_symbol(declaration?, signature)?
             }
         } else if is_set(self.file, ty) {
-            set_symbol(set_declaration(self.file, signature)?, signature)?
+            set_symbol(
+                self.file.ir.reference.quirks(),
+                set_declaration(self.file, signature)?,
+                signature,
+            )?
         } else if is_map_entry(self.file, ty) {
             map_entry_symbol(declaration, signature)?
         } else {
@@ -427,7 +439,8 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
     ) -> Option<MapProperty> {
         let ty = self.checked_type(receiver)?;
-        if self.file.implements_collection_of(ty)
+        // As for a member call: only a map's runtime reads answer for the program's maps too.
+        if (self.file.implements_collection_of(ty) && !is_map(self.file, ty))
             || !(is_map(self.file, ty) || is_set(self.file, ty) || is_map_entry(self.file, ty))
         {
             return None;
@@ -463,7 +476,9 @@ impl BodyLowering<'_, '_, '_> {
         let kind = self.file.mapped_collection(ty)?.kind;
         let (symbol, carried, answer) = match kind {
             krusty::types::CollectionKind::Map => map_symbol(declaration, signature)?,
-            krusty::types::CollectionKind::Set => set_symbol(declaration, signature)?,
+            krusty::types::CollectionKind::Set => {
+                set_symbol(self.file.ir.reference.quirks(), declaration, signature)?
+            }
             krusty::types::CollectionKind::MapEntry => {
                 map_entry_symbol(Some(declaration), signature)?
             }
@@ -504,6 +519,10 @@ impl BodyLowering<'_, '_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quirks() -> krusty::kotlin_version::Quirks {
+        krusty::kotlin_version::ReferenceProfile::default().quirks()
+    }
 
     fn signature<'a>(
         owner: &str,
@@ -595,12 +614,13 @@ mod tests {
         let size = signature("kotlin/collections/Set", "size", &[], Ty::Int);
         let clear = signature("kotlin/collections/MutableSet", "clear", &[], Ty::Unit);
         let hash_set = CollectionDeclaration::Implementation(StandardCollectionImplementation::Set);
-        assert!(set_symbol(face(false), size).is_some());
-        assert!(set_symbol(face(true), size).is_none());
-        assert!(set_symbol(face(true), clear).is_some());
-        assert!(set_symbol(face(false), clear).is_none());
-        assert!(set_symbol(hash_set, clear).is_some());
+        assert!(set_symbol(quirks(), face(false), size).is_some());
+        assert!(set_symbol(quirks(), face(true), size).is_none());
+        assert!(set_symbol(quirks(), face(true), clear).is_some());
+        assert!(set_symbol(quirks(), face(false), clear).is_none());
+        assert!(set_symbol(quirks(), hash_set, clear).is_some());
         assert!(set_symbol(
+            quirks(),
             CollectionDeclaration::Implementation(StandardCollectionImplementation::List),
             size
         )

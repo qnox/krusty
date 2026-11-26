@@ -4,26 +4,22 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-/// What one compilation is made of.
-pub(super) struct Compilation<'a> {
+use super::sources::Sources;
+
+/// What one compilation is made of, but for its sources.
+pub(super) struct Compilation {
     /// `jvm.release`, when set.
     pub release: Option<i32>,
-    pub jdk_home: &'a Path,
-    pub classpath: &'a [PathBuf],
-    pub module_name: &'a str,
+    pub jdk_home: PathBuf,
+    pub classpath: Vec<PathBuf>,
+    pub module_name: String,
     /// `jvm.storeParameterNames`.
     pub java_parameters: bool,
-    /// The main fragment's source files in the order the toolchain walks its source directories,
-    /// when it compiles more than one: the toolchain then describes the fragment to the compiler
-    /// (`-Xmulti-platform`, `-Xfragments`, `-Xfragment-sources`).
-    pub fragment_sources: Option<&'a [PathBuf]>,
     /// Compiler plugin jars, in order.
-    pub plugins: &'a [PathBuf],
+    pub plugins: Vec<PathBuf>,
     /// `kotlin.version`: the Kotlin release krusty compiles as.
-    pub kotlin_version: &'a str,
-    pub output: &'a Path,
-    /// The source files, sorted.
-    pub sources: &'a [PathBuf],
+    pub kotlin_version: String,
+    pub output: PathBuf,
 }
 
 /// The name of a module's main fragment.
@@ -35,14 +31,20 @@ fn joined(prefix: &str, path: &Path) -> OsString {
     argument
 }
 
-/// The arguments of `compilation`, the program name excluded.
-pub(super) fn arguments(compilation: &Compilation<'_>) -> Result<Vec<OsString>, String> {
+/// The arguments of `compilation` over the main fragment's `sources`, the program name excluded.
+/// The Kotlin files are passed sorted. A fragment of more than one source directory is described
+/// to the compiler (`-Xmulti-platform`, `-Xfragments`, `-Xfragment-sources`) with its files in
+/// the order the toolchain walks its source directories.
+pub(super) fn arguments(
+    compilation: &Compilation,
+    sources: &Sources,
+) -> Result<Vec<OsString>, String> {
     let mut arguments = Vec::new();
     if let Some(release) = compilation.release {
         arguments.push(OsString::from(format!("-Xjdk-release={release}")));
     }
-    arguments.push(joined("-jdk-home=", compilation.jdk_home));
-    let classpath = std::env::join_paths(compilation.classpath).map_err(|error| {
+    arguments.push(joined("-jdk-home=", &compilation.jdk_home));
+    let classpath = std::env::join_paths(&compilation.classpath).map_err(|error| {
         format!(
             "module `{}` has a classpath entry krusty cannot be given: {error}",
             compilation.module_name
@@ -59,17 +61,17 @@ pub(super) fn arguments(compilation: &Compilation<'_>) -> Result<Vec<OsString>, 
     if compilation.java_parameters {
         arguments.push(OsString::from("-java-parameters"));
     }
-    if let Some(sources) = compilation.fragment_sources {
+    if sources.filled > 1 {
         arguments.push(OsString::from("-Xmulti-platform"));
         arguments.push(OsString::from(format!("-Xfragments={MAIN_FRAGMENT}")));
-        for source in sources {
+        for source in &sources.walked {
             arguments.push(joined(
                 &format!("-Xfragment-sources={MAIN_FRAGMENT}:"),
                 source,
             ));
         }
     }
-    for plugin in compilation.plugins {
+    for plugin in &compilation.plugins {
         arguments.push(joined("-Xplugin=", plugin));
     }
     arguments.push(OsString::from(format!(
@@ -79,8 +81,8 @@ pub(super) fn arguments(compilation: &Compilation<'_>) -> Result<Vec<OsString>, 
     arguments.push(OsString::from("-d"));
     arguments.push(compilation.output.as_os_str().to_owned());
     arguments.extend(
-        compilation
-            .sources
+        sources
+            .kotlin
             .iter()
             .map(|source| source.as_os_str().to_owned()),
     );
@@ -91,25 +93,30 @@ pub(super) fn arguments(compilation: &Compilation<'_>) -> Result<Vec<OsString>, 
 mod tests {
     use super::*;
 
+    fn paths(paths: &[&str]) -> Vec<PathBuf> {
+        paths.iter().map(PathBuf::from).collect()
+    }
+
     #[test]
     fn the_arguments_follow_the_toolchain_order() {
-        let classpath = [PathBuf::from("/out/lib"), PathBuf::from("/m2/a.jar")];
-        let plugins = [PathBuf::from("/m2/plugin.jar")];
-        let sources = [PathBuf::from("/p/src/a.kt")];
         let compilation = Compilation {
             release: Some(21),
-            jdk_home: Path::new("/jdk"),
-            classpath: &classpath,
-            module_name: "app",
+            jdk_home: PathBuf::from("/jdk"),
+            classpath: paths(&["/out/lib", "/m2/a.jar"]),
+            module_name: "app".to_string(),
             java_parameters: true,
-            fragment_sources: None,
-            plugins: &plugins,
-            kotlin_version: "2.4.20",
-            output: Path::new("/out/app"),
-            sources: &sources,
+            plugins: paths(&["/m2/plugin.jar"]),
+            kotlin_version: "2.4.20".to_string(),
+            output: PathBuf::from("/out/app"),
+        };
+        let sources = Sources {
+            kotlin: paths(&["/p/src/a.kt"]),
+            walked: paths(&["/p/src/a.kt"]),
+            filled: 1,
+            ..Sources::default()
         };
         assert_eq!(
-            arguments(&compilation).unwrap(),
+            arguments(&compilation, &sources).unwrap(),
             [
                 "-Xjdk-release=21",
                 "-jdk-home=/jdk",
@@ -128,33 +135,35 @@ mod tests {
         let bare = Compilation {
             release: None,
             java_parameters: false,
-            plugins: &[],
+            plugins: Vec::new(),
             ..compilation
         };
         assert_eq!(
-            arguments(&bare).unwrap()[..2],
+            arguments(&bare, &sources).unwrap()[..2],
             ["-jdk-home=/jdk", "-classpath=/out/lib:/m2/a.jar"].map(OsString::from)
         );
     }
 
     #[test]
     fn a_fragment_of_several_source_directories_is_described_before_the_plugins() {
-        let plugins = [PathBuf::from("/m2/plugin.jar")];
-        let walked = [PathBuf::from("/p/src/b.kt"), PathBuf::from("/p/gen/a.kt")];
         let compilation = Compilation {
             release: None,
-            jdk_home: Path::new("/jdk"),
-            classpath: &[],
-            module_name: "app",
+            jdk_home: PathBuf::from("/jdk"),
+            classpath: Vec::new(),
+            module_name: "app".to_string(),
             java_parameters: true,
-            fragment_sources: Some(&walked),
-            plugins: &plugins,
-            kotlin_version: "2.4.20",
-            output: Path::new("/out/app"),
-            sources: &[PathBuf::from("/p/gen/a.kt"), PathBuf::from("/p/src/b.kt")],
+            plugins: paths(&["/m2/plugin.jar"]),
+            kotlin_version: "2.4.20".to_string(),
+            output: PathBuf::from("/out/app"),
+        };
+        let sources = Sources {
+            kotlin: paths(&["/p/gen/a.kt", "/p/src/b.kt"]),
+            walked: paths(&["/p/src/b.kt", "/p/gen/a.kt"]),
+            filled: 2,
+            ..Sources::default()
         };
         assert_eq!(
-            arguments(&compilation).unwrap(),
+            arguments(&compilation, &sources).unwrap(),
             [
                 "-jdk-home=/jdk",
                 "-classpath=",

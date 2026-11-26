@@ -93,13 +93,15 @@ impl BodyLowering<'_> {
                 .map(|parameter| crate::ir::IrCheckedArgument::Expression {
                     parameter: parameter as u32,
                     value: self.ir.add_expr(IrExpr::GetValue(parameter as u32)),
+                    context: Default::default(),
                 })
                 .collect::<Vec<_>>();
             let construction = self.constructor_reference_call(
                 target, classifier, parameters, None, None, &arguments,
             )?;
             let body =
-                self.callable_reference_adapter_body(construction, result.get(), reference.ret);
+                self.ir
+                    .callable_reference_adapter_body(construction, result.get(), reference.ret);
             let adapter_name = format!(
                 "$fir_ctor_ref_{}_{}",
                 self.body.owner().raw(),
@@ -172,6 +174,7 @@ impl BodyLowering<'_> {
                             crate::ir::IrCheckedArgument::Expression {
                                 parameter,
                                 value: self.ir.add_expr(IrExpr::GetValue(own_start + *source)),
+                                context: Default::default(),
                             }
                         }
                         FirAdaptedReferenceArgument::Context => return Err(failed()),
@@ -218,6 +221,7 @@ impl BodyLowering<'_> {
                             + u32::try_from(parameter + identity_source_start)
                                 .expect("too many constructor-reference parameters"),
                     )),
+                    context: Default::default(),
                 })
                 .collect()
         };
@@ -234,7 +238,9 @@ impl BodyLowering<'_> {
             &arguments,
         )?;
         self.next_temporary = enclosing_temporary;
-        let body = self.callable_reference_adapter_body(construction, result.get(), reference.ret);
+        let body =
+            self.ir
+                .callable_reference_adapter_body(construction, result.get(), reference.ret);
         wrapper_parameters.extend(reference.params.iter().copied());
         let adapter_name = format!(
             "$fir_ctor_ref_{}_{}",
@@ -252,7 +258,7 @@ impl BodyLowering<'_> {
         });
         self.ir
             .set_method_visibility(function, crate::types::Visibility::Private);
-        if reflective {
+        if reflective || adaptation.is_none() {
             let capture = match captures.as_slice() {
                 [] => None,
                 [capture] => Some(*capture),
@@ -531,7 +537,9 @@ impl BodyLowering<'_> {
         let call = self.classifier_callable_adapter_call(callable, &arguments);
         self.next_temporary = enclosing_temporary;
         let call = call?;
-        let body = self.callable_reference_adapter_body(call, result.get(), reference.ret);
+        let body = self
+            .ir
+            .callable_reference_adapter_body(call, result.get(), reference.ret);
         let function = self.ir.add_fun(IrFunction {
             name: format!(
                 "$fir_classifier_ref_{}_{}",

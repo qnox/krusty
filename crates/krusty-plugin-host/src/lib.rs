@@ -45,12 +45,6 @@ mod session;
 pub use download::{Curl, Fetcher};
 pub use environment::{Environment, Platform};
 pub use host::{Host, HostError};
-pub use krusty_plugin_ir::{
-    BodyIr, CallIr, CallableIdentity, CallableKind, Callee, ClassName, Classifier, Constant,
-    ExpressionIr, ExpressionKind, FileIr, FunctionIr, KspAnnotation, KspClass, KspClassKind,
-    KspFile, KspRound, ModuleIr, ParameterIr, Span, StatementIr, TypeArgument, TypeIdentity,
-    TypeParameterOwner, ValueId, VariableIr, Visibility,
-};
 pub use ksp::{GeneratedKind, KspGenerated, KspHost, KspLoad, KspOutcome, KspOutputs};
 pub use pins::{ArtifactPin, JdkPin, Pins};
 pub use protocol::LoadedPlugin;

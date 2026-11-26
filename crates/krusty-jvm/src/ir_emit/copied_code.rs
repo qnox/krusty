@@ -20,7 +20,8 @@ impl Emitter<'_> {
     /// A same-module expansion re-emits the inline body in the caller. When that expression was
     /// copied from an inline function whose private access is published, it calls the same
     /// accessors the published method does. A lambda the caller substituted into the expansion is
-    /// not such a copy, so it keeps the caller's own access. Member references the copy interns
+    /// not such a copy, so it keeps the caller's own access, which a `crossinline` literal's body
+    /// exports, whether the backend inlines it or the expansion spliced it. Member references the copy interns
     /// are recorded as copied code, the same way [`Self::emitting`] records them.
     pub(super) fn with_copied_private_access(
         &mut self,
@@ -28,9 +29,13 @@ impl Emitter<'_> {
         emit: impl FnOnce(&mut Self),
     ) {
         let previous = self.export_private_calls;
-        self.export_private_calls =
-            self.method_exports_private_access || self.copy_exports_private_access(expression);
+        let caller_crossinline = self.crossinline_lambda_body;
+        self.crossinline_lambda_body |= self.ir.is_crossinline_body(expression);
+        self.export_private_calls = self.method_exports_private_access
+            || self.crossinline_lambda_body
+            || self.copy_exports_private_access(expression);
         self.emitting(expression, emit);
+        self.crossinline_lambda_body = caller_crossinline;
         self.export_private_calls = previous;
     }
 

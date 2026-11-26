@@ -1,0 +1,10 @@
+[package]
+name = "krusty-plugin-api"
+version = "0.0.1"
+edition = "2021"
+description = "The contract between krusty and its compiler plugins"
+license = "Apache-2.0"
+repository = "https://github.com/qnox/krusty"
+
+[dependencies]
+krusty-core = { path = "../krusty-core" }

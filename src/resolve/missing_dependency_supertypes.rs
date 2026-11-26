@@ -166,7 +166,7 @@ impl Checker<'_> {
 
     /// kotlinc's `ClassId.asSingleFqName` of a declared classifier: a local classifier is
     /// `<local>.Name`, and an object expression is `<anonymous>` in its package.
-    fn declared_classifier_label(
+    pub(super) fn declared_classifier_label(
         &self,
         declaration: DeclId,
         owner: TypeName,

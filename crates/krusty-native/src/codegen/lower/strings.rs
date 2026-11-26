@@ -104,6 +104,7 @@ impl BodyLowering<'_, '_, '_> {
         if self.terminated {
             return Ok(None);
         }
+        self.null_check(value)?;
         self.runtime_call("kt_string_length", &[any()], Ty::Int, &[value])
     }
 
@@ -121,6 +122,7 @@ impl BodyLowering<'_, '_, '_> {
         if self.terminated {
             return Ok(None);
         }
+        self.null_check(value)?;
         let produced = self.runtime_call(
             "kt_string_get",
             &[any(), Ty::Int],

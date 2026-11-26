@@ -1,6 +1,7 @@
 //! Physical parameter roles published while classfile entries are aligned with declarations.
 
 use crate::libraries::{LibraryCallable, LibraryMember};
+use crate::types::Ty;
 
 /// A top-level callable's provider-normalized vector has already had synthetic ABI tails removed.
 pub(super) fn source_only(callable: &mut LibraryCallable) {
@@ -9,6 +10,16 @@ pub(super) fn source_only(callable: &mut LibraryCallable) {
             callable.physical_params.len(),
         ),
     );
+}
+
+/// Keep the declaration's own `declared` parameters of a compiled accessor entry's `physical` ones.
+/// A compiler plugin may append parameters to the entry, as Compose gives a `@Composable` getter
+/// the composer and `$changed`: those are a synthetic tail, the declaration's parameters are the
+/// accessor's physical ones, and the descriptor still spells the whole entry, as for a function.
+/// `false` when the entry takes fewer parameters than the declaration declares.
+pub(super) fn declared_prefix(physical: &mut Vec<Ty>, declared: usize) -> bool {
+    physical.truncate(declared);
+    physical.len() == declared
 }
 
 /// Publish the explicit ABI roles for a provider-built callable whose physical vector may retain

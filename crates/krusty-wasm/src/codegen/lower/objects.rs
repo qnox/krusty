@@ -200,7 +200,7 @@ impl Body<'_> {
             if let Some(element) = element {
                 self.pass_shared_capture(*arg, element)?;
             } else {
-                self.value(*arg, param)?;
+                self.argument(*arg, param)?;
             }
         }
         self.code.call(constructor).local_get(object);
@@ -241,7 +241,7 @@ impl Body<'_> {
                 ));
             }
             for (argument, parameter) in args.iter().zip(parameters.iter()) {
-                self.value(*argument, *parameter)?;
+                self.argument(*argument, *parameter)?;
             }
             self.code.call(function);
             Ok(())
@@ -367,6 +367,12 @@ impl Body<'_> {
         receiver: u32,
         args: &[u32],
     ) -> Result<(), Unsupported> {
+        // A value class is final and none of its members can be overridden, and the receiver
+        // need not be its box: a target-carried one (`UIntArray`) is the target's own value.
+        // Its members are called directly, never through a table.
+        if self.ir.classes[class as usize].is_value {
+            return self.direct_method_call(class, function, receiver, args);
+        }
         let tables = &self.file_classes()?.tables;
         if tables.table(class).direct_methods.contains(&function) {
             return self.direct_method_call(class, function, receiver, args);
@@ -509,7 +515,7 @@ impl Body<'_> {
         for (parameter, (&arg, &param)) in args.iter().zip(params).enumerate() {
             match function {
                 Some(function) => self.function_argument(function, parameter as u32, arg)?,
-                None => self.value(arg, param)?,
+                None => self.argument(arg, param)?,
             }
         }
         self.code.local_get(this);
@@ -557,7 +563,7 @@ impl Body<'_> {
         self.value(receiver, Ty::obj_name(owner))?;
         self.code.local_tee(this);
         for (&arg, &param) in args.iter().zip(params) {
-            self.value(arg, param)?;
+            self.argument(arg, param)?;
         }
         self.code.local_get(this);
         self.table_of_object();
@@ -703,9 +709,11 @@ impl Body<'_> {
         if call.params.len() != args.len() {
             return Err("a call whose arguments do not match its parameters".into());
         }
+        self.runtime
+            .null_receiver_throws(self.module, self.classifiers)?;
         self.value(receiver, any())?;
         for (arg, param) in args.iter().zip(&call.params) {
-            self.value(*arg, *param)?;
+            self.argument(*arg, *param)?;
         }
         let stub = self
             .runtime
@@ -737,7 +745,7 @@ impl Body<'_> {
         self.value(receiver, any())?;
         self.code.local_tee(this);
         for (arg, param) in args.iter().zip(&params) {
-            self.value(*arg, *param)?;
+            self.argument(*arg, *param)?;
         }
         self.code.local_get(this);
         self.table_of_object();
@@ -754,6 +762,49 @@ impl Body<'_> {
         self.code
             .ref_cast(false, HeapType::Concrete(object))
             .struct_get(object, 0);
+    }
+
+    /// A call to member `function` of this file. Common lowering already dispatches an
+    /// overridable function and leaves a `super` call direct, so a function with a body is
+    /// called directly here. A bodiless (abstract) member has nothing to call directly: it is
+    /// reached through its class's dispatch slot, as an override the receiver's own table
+    /// answers.
+    pub(super) fn local_member_call(
+        &mut self,
+        function: FunId,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let declaration = &self.ir.functions[function as usize];
+        let class = declaration
+            .dispatch_receiver
+            .filter(|_| declaration.body.is_none())
+            .and_then(|owner| self.classes.and(self.ir.class_id_by_name(owner)));
+        if let Some(class) = class {
+            let tables = &self.file_classes()?.tables;
+            let key = function_key(self.ir, class, function);
+            if !tables.table(class).direct_methods.contains(&function)
+                && tables.slot(class, &key).is_some()
+            {
+                return self.dispatch_function(class, function, receiver, args);
+            }
+            // An abstract member of an interface a KLIB lowering unit installed has no class
+            // slot and no source callable: it is numbered after the module's members, and a call
+            // through it goes to the stub of that number.
+            if self.ir.classes[class as usize].is_interface {
+                let installed = PlanKey::Installed(function);
+                let numbers = &tables.numbers;
+                if let Some(number) = numbers.number(installed) {
+                    let (params, result) = numbers
+                        .function_carriers(installed)
+                        .ok_or("an installed interface member with no carriers")?;
+                    let (params, result) = (params.to_vec(), result);
+                    let call = self.numbered_member(number, params, result)?;
+                    return self.interface_call(call, receiver, args);
+                }
+            }
+        }
+        self.direct_member_call(function, receiver, args)
     }
 
     /// A call to member `function` of this file, without dispatch.
@@ -805,7 +856,7 @@ impl Body<'_> {
             .ok_or("a `super` call to a function of no function type")?;
         let mut expected = vec![REFERENCE];
         for param in params {
-            expected.push(super::parameter_carrier_of(*param)?.ok_or("a `Unit` parameter")?);
+            expected.push(super::parameter_carrier_of(*param)?);
         }
         if params.len() != args.len()
             || carried != expected
@@ -817,7 +868,7 @@ impl Body<'_> {
         }
         self.value(receiver, any())?;
         for (&arg, param) in args.iter().zip(params) {
-            self.value(arg, *param)?;
+            self.argument(arg, *param)?;
         }
         self.code.call(function);
         Ok(())
@@ -923,7 +974,11 @@ impl Body<'_> {
                 params,
                 ret,
                 ..
-            } => self.dependency_super_call(*target, params.len(), *ret, receiver, args),
+            } => match self.ir.dependency_methods.get(target) {
+                // The dependency member is a method of a class this file materializes.
+                Some(&function) => self.direct_member_call(function, receiver, args),
+                None => self.dependency_super_call(*target, params.len(), *ret, receiver, args),
+            },
             Callee::Super { .. } => Err("a `super` call to a library member".to_string()),
             _ => Err("a member call through this calling convention".to_string()),
         }
@@ -1020,12 +1075,15 @@ impl Body<'_> {
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less read of `{}`", property.name))?;
-        let slot = local_property_target(self.ir, class, index).and_then(|target| {
-            self.file_classes()
-                .ok()?
-                .tables
-                .slot(class, &SlotKey::Getter(target))
-        });
+        // A value class's property is final: it is accessed directly, as its members are called.
+        let slot = local_property_target(self.ir, class, index)
+            .filter(|_| !self.ir.classes[class as usize].is_value)
+            .and_then(|target| {
+                self.file_classes()
+                    .ok()?
+                    .tables
+                    .slot(class, &SlotKey::Getter(target))
+            });
         if let Some(slot) = slot {
             return self.dispatch(class, slot, receiver, &[], &[], None);
         }
@@ -1103,12 +1161,15 @@ impl Body<'_> {
         let property = self.ir.classes[class as usize].properties[index].clone();
         let receiver =
             receiver.ok_or_else(|| format!("a receiver-less write of `{}`", property.name))?;
-        let slot = local_property_target(self.ir, class, index).and_then(|target| {
-            self.file_classes()
-                .ok()?
-                .tables
-                .slot(class, &SlotKey::Setter(target))
-        });
+        // A value class's property is final: it is accessed directly, as its members are called.
+        let slot = local_property_target(self.ir, class, index)
+            .filter(|_| !self.ir.classes[class as usize].is_value)
+            .and_then(|target| {
+                self.file_classes()
+                    .ok()?
+                    .tables
+                    .slot(class, &SlotKey::Setter(target))
+            });
         if let Some(slot) = slot {
             return self.dispatch(class, slot, receiver, &[value], &[property.ty], None);
         }
@@ -1301,11 +1362,13 @@ impl Body<'_> {
             return;
         }
         let subtypes = self.classifiers.builtin_subtypes(interface);
-        let string_builder = self
-            .classifiers
-            .is_subclassifier(krusty::types::wk::string_builder(), interface);
+        let laid_out = crate::builtin_instances::RuntimeLayouts {
+            string_builder: self
+                .classifiers
+                .is_subclassifier(krusty::types::wk::string_builder(), interface),
+        };
         self.runtime
-            .builtin_instances(interface, subtypes, string_builder);
+            .builtin_instances(interface, subtypes, laid_out);
         self.interface_test(interface, nullable);
     }
 
@@ -1413,6 +1476,12 @@ impl Body<'_> {
             TyKind::Obj(name, _) if name == krusty::types::wk::any() => {
                 self.code.ref_test(nullable, HeapType::Eq);
             }
+            // A `KClass` is the runtime's class token: the one object a class literal evaluates
+            // to, so the test is its structure's.
+            TyKind::Obj(name, _) if name == krusty::types::wk::kclass() => {
+                let token = self.runtime.class_tokens.structure;
+                self.code.ref_test(nullable, HeapType::Concrete(token));
+            }
             TyKind::Obj(name, _)
                 if self
                     .classifiers
@@ -1441,12 +1510,36 @@ impl Body<'_> {
                 }
                 (None, None) => match self.library_interface_of_type(tested) {
                     Some(interface) => self.library_interface_test(interface, nullable),
-                    None => {
-                        return Err(format!("a type test against `{}`", super::describe(tested)));
-                    }
+                    None => return self.cross_file_type_test(tested, nullable),
                 },
             },
         }
+        Ok(())
+    }
+
+    /// Replace the reference on the stack with whether it is an instance of `tested`, a class
+    /// another file of the module declares: the answer of the entry that file realizes, which
+    /// alone knows the class's layout. A null is an instance only of a nullable `tested`.
+    fn cross_file_type_test(&mut self, tested: Ty, nullable: bool) -> Result<(), Unsupported> {
+        let refused = || format!("a type test against `{}`", super::describe(tested));
+        let classifier = tested.non_null().obj_internal().ok_or_else(refused)?;
+        let entry = self
+            .calls
+            .instance(&krusty::backend::instance_links::InstanceEntry::TypeTest(
+                classifier,
+            ))
+            .ok_or_else(refused)?;
+        if !nullable {
+            self.code.call(entry);
+            return Ok(());
+        }
+        let value = self.local(REFERENCE);
+        self.code
+            .local_tee(value)
+            .call(entry)
+            .local_get(value)
+            .ref_is_null()
+            .op(OR32);
         Ok(())
     }
 
@@ -2052,7 +2145,7 @@ impl Body<'_> {
                 .local_get(u32::try_from(parameter).expect("too many parameters"));
         }
         for (arg, param) in args.iter().zip(&params[forwarded..]) {
-            self.value(*arg, *param)?;
+            self.argument(*arg, *param)?;
         }
         self.code.call(constructor);
         Ok(())

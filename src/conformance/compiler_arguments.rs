@@ -59,7 +59,7 @@ fn unit_codegen_modes<'a>(case: &str, unit: impl IntoIterator<Item = &'a str>) -
 }
 
 fn case_compiler_configuration(src: &str) -> Result<UnitCompilerConfiguration, String> {
-    case_compiler_configuration_for_release(src, crate::kotlin_version::target())
+    case_compiler_configuration_for_release(src, crate::kotlin_version::environment_release())
 }
 
 fn case_compiler_configuration_for_release(
@@ -74,7 +74,11 @@ pub fn platform_compiler_configuration(
     src: &str,
     target: super::TestTarget,
 ) -> Result<UnitCompilerConfiguration, String> {
-    platform_compiler_configuration_for_release(src, target, crate::kotlin_version::target())
+    platform_compiler_configuration_for_release(
+        src,
+        target,
+        crate::kotlin_version::environment_release(),
+    )
 }
 
 fn platform_compiler_configuration_for_release(
@@ -115,8 +119,7 @@ fn platform_compiler_configuration_for_release(
 /// | `// STRING_CONCAT: X` | `-Xstring-concat=X` |
 /// | `// ASSERTIONS_MODE: X` | `-Xassertions=X` |
 /// | `// WHEN_EXPRESSIONS: X` | `-Xwhen-expressions=x` |
-/// | `// WITH_COMPOSE` | `-Xplugin=<the distribution's Compose plugin>`, with source information |
-/// | `// WITH_ATOMICFU` | `-Xplugin=<the atomicfu plugin of the distribution's Kotlin version>` |
+/// | a plugin corpus's directive (`// WITH_COMPOSE`, `// WITH_ATOMICFU`, …) | `-Xplugin=<its plugin jar>` and its `-P` options, from its descriptor (see [`super::plugin_corpus`]) |
 ///
 /// The per-unit `// LAMBDAS:`, `// SAM_CONVERSIONS:` and `// JVM_DEFAULT_MODE:` directives belong
 /// to [`unit_kotlinc_arguments`]; a value of one that names no mode fails closed here, so no unit
@@ -207,30 +210,9 @@ fn case_cli_arguments(
             arguments.push(format!("-Xwhen-expressions={}", mode.to_ascii_lowercase()));
         }
     }
-    if directive(src, "WITH_COMPOSE") {
-        // The reference distribution's own plugin jar, with source information on so a case
-        // covers its encoding; every other option keeps the plugin's default.
-        let plugin =
-            crate::toolchain::dist_jar("compose-compiler-plugin.jar").ok_or_else(|| {
-                "box directive `// WITH_COMPOSE` needs the reference distribution's Compose plugin"
-                    .to_string()
-            })?;
-        arguments.push(format!("-Xplugin={}", plugin.display()));
-        arguments.extend([
-            "-P".to_string(),
-            format!(
-                "plugin:{}:sourceInformation=true",
-                crate::plugins::cli::COMPOSE_PLUGIN_ID
-            ),
-        ]);
-    }
-    if directive(src, "WITH_ATOMICFU") {
-        let plugin = crate::toolchain::atomicfu_compiler_plugin_jar().ok_or_else(|| {
-            "box directive `// WITH_ATOMICFU` needs the atomicfu compiler plugin of the reference \
-             Kotlin version"
-                .to_string()
-        })?;
-        arguments.push(format!("-Xplugin={}", plugin.display()));
+    // A plugin corpus's directive loads that plugin, with the options its descriptor names.
+    for corpus in super::plugin_corpus::enabled_by(src) {
+        arguments.extend(corpus.compiler_arguments(compiler)?);
     }
     Ok(arguments)
 }

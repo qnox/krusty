@@ -8,6 +8,9 @@ use crate::resolve::implicit_rungs::ImplicitRung;
 pub(super) struct SelectedValue {
     pub(super) result: crate::fir::ResolvedTy,
     pub(super) enum_entry: Option<SelectedEnumEntry>,
+    /// The typealias application the selected declaration spelled its type through (`val
+    /// names: Names`). kotlinc's read of the declaration carries that abbreviation.
+    pub(super) result_alias: Option<crate::libraries::DeclaredResultAlias>,
 }
 
 /// The exact enum entry a value selection chose: its enum and its declared name.
@@ -22,11 +25,49 @@ impl SelectedValue {
         Self {
             result,
             enum_entry: None,
+            result_alias: None,
         }
+    }
+
+    /// The value of a declaration whose published signature was demanded. These reads apply no
+    /// receiver substitution, so only an alias application closed over the declaration's type
+    /// parameters is carried.
+    pub(super) fn declared(signature: crate::fir::ResolvedSignature) -> Self {
+        Self {
+            result_alias: signature.result_alias().filter(|alias| alias.is_closed()),
+            ..Self::plain(signature.result)
+        }
+    }
+
+    /// The value of a provider-normalized property declaration.
+    pub(super) fn property(
+        property: &crate::libraries::PropertyInfo,
+    ) -> Result<Self, crate::fir::DiagnosticId> {
+        let result = crate::fir::ResolvedTy::new(property.ty)
+            .map_err(|_| ProductionSignatureSemantics::failure())?;
+        Ok(Self {
+            result_alias: property
+                .getter
+                .result_alias
+                .filter(|alias| alias.is_closed()),
+            ..Self::plain(result)
+        })
     }
 }
 
 impl ProductionSignatureSemantics<'_> {
+    /// A value read through the member selection that recorded its declared alias at `origin`.
+    fn selected_value(
+        &self,
+        origin: crate::fir::OriginId,
+        result: crate::fir::ResolvedTy,
+    ) -> SelectedValue {
+        SelectedValue {
+            result_alias: self.selected_aliases.get(origin),
+            ..SelectedValue::plain(result)
+        }
+    }
+
     /// The value of enum entry `name` of `classifier`, which has the enum's type.
     fn enum_entry_value(
         classifier: TypeName,
@@ -40,6 +81,7 @@ impl ProductionSignatureSemantics<'_> {
                 classifier,
                 name: name.to_owned(),
             }),
+            result_alias: None,
         })
     }
 
@@ -50,10 +92,7 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
         origin: crate::fir::OriginId,
         _expected: Option<crate::fir::ResolvedTy>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<SelectedValue, crate::fir::DiagnosticId> {
         crate::trace_compiler!(
             "signature",
@@ -67,7 +106,7 @@ impl ProductionSignatureSemantics<'_> {
             if let Some(receiver) =
                 self.qualified_value_receiver(scope, spelling, origin, demand)?
             {
-                return Ok(SelectedValue::plain(receiver));
+                return Ok(self.selected_value(origin, receiver));
             }
             if let Some((qualifier, name)) = spelling.rsplit_once('.') {
                 if qualifier
@@ -75,9 +114,7 @@ impl ProductionSignatureSemantics<'_> {
                     .is_some_and(|label| self.enclosing_enum_entry_receiver(scope, label).is_some())
                 {
                     if let Some(declaration) = self.enclosing_enum_entry_property(scope, name) {
-                        return demand(declaration)
-                            .map(|signature| signature.result)
-                            .map(SelectedValue::plain);
+                        return demand(declaration).map(SelectedValue::declared);
                     }
                 }
                 if qualifier == "super"
@@ -112,8 +149,11 @@ impl ProductionSignatureSemantics<'_> {
                     }
                 }
             }
-            if let Ok(value) = self.qualified_receiver_ty(scope, spelling, origin, demand) {
-                return Ok(SelectedValue::plain(value));
+            match self.qualified_receiver_ty(scope, spelling, origin, demand) {
+                Ok(value) => return Ok(self.selected_value(origin, value)),
+                // A selected member read commits to its property: still being inferred is a cycle.
+                Err(failure) if failure.in_progress_declaration().is_some() => return Err(failure),
+                Err(_) => {}
             }
             if let Some((qualifier, name)) = spelling.rsplit_once('.') {
                 let package = crate::types::type_name(&qualifier.replace('.', "/"));
@@ -149,11 +189,9 @@ impl ProductionSignatureSemantics<'_> {
                         property.stable_declaration,
                         demand,
                     )? {
-                        return Ok(SelectedValue::plain(signature.result));
+                        return Ok(SelectedValue::declared(signature));
                     }
-                    return crate::fir::ResolvedTy::new(property.ty)
-                        .map_err(|_| Self::failure())
-                        .map(SelectedValue::plain);
+                    return SelectedValue::property(&property);
                 }
             }
             return Err(Self::failure());
@@ -197,10 +235,7 @@ impl ProductionSignatureSemantics<'_> {
             }
             let module =
                 crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-            let source = crate::symbol_source::CompositeSource::new(vec![
-                &module as &dyn crate::symbol_source::SymbolSource,
-                &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-            ]);
+            let source = self.source_over(&module);
             let source = &source as &dyn crate::symbol_source::SymbolSource;
             let supertypes = crate::symbol_resolver::direct_supertypes(source, current);
             let selected = self
@@ -269,9 +304,7 @@ impl ProductionSignatureSemantics<'_> {
                 .map(SelectedValue::plain);
         }
         if let Some(declaration) = self.enclosing_enum_entry_property(scope, spelling) {
-            return demand(declaration)
-                .map(|signature| signature.result)
-                .map(SelectedValue::plain);
+            return demand(declaration).map(SelectedValue::declared);
         }
         for rung in self.implicit_rungs(scope) {
             let receiver = match rung {
@@ -296,9 +329,9 @@ impl ProductionSignatureSemantics<'_> {
                 crate::resolve::implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
             };
             if let Some(result) =
-                self.selected_member_property_type(scope, receiver, spelling, None, demand)?
+                self.selected_member_property_type(scope, receiver, spelling, Some(origin), demand)?
             {
-                return Ok(SelectedValue::plain(result));
+                return Ok(self.selected_value(origin, result));
             }
             // Compile-time constants are declaration facts on the receiver classifier, not
             // property accessor candidates. This is the same provider-normalized constant channel
@@ -338,17 +371,23 @@ impl ProductionSignatureSemantics<'_> {
                     if let Some(signature) =
                         self.demanded_member_signature(member.stable_declaration, demand)?
                     {
+                        let result_alias =
+                            signature.result_alias().filter(|alias| alias.is_closed());
                         return self
                             .apply_demanded_member(receiver, member, &signature, &[], &[])
-                            .map(SelectedValue::plain);
+                            .map(|result| SelectedValue {
+                                result_alias,
+                                ..SelectedValue::plain(result)
+                            });
                     }
                 }
                 if let Some(extension) = extension {
                     if let Some(signature) =
                         self.demanded_source_signature(None, extension.stable_declaration, demand)?
                     {
-                        return Ok(SelectedValue::plain(signature.result));
+                        return Ok(SelectedValue::declared(signature));
                     }
+                    return SelectedValue::property(&extension);
                 }
                 return crate::fir::ResolvedTy::new(result)
                     .map_err(|_| Self::failure())
@@ -378,9 +417,7 @@ impl ProductionSignatureSemantics<'_> {
                         .stub(declaration)
                         .is_some_and(|stub| stub.signature_inference.is_some())
                     {
-                        return demand(declaration)
-                            .map(|signature| signature.result)
-                            .map(SelectedValue::plain);
+                        return demand(declaration).map(SelectedValue::declared);
                     }
                 }
                 return crate::fir::ResolvedTy::new(result)
@@ -408,9 +445,7 @@ impl ProductionSignatureSemantics<'_> {
             if let Ok(property) = self.with_resolver(scope, |resolver| {
                 resolver.accessible_classifier_associated_property(owner, spelling)
             }) {
-                return crate::fir::ResolvedTy::new(property.ty)
-                    .map_err(|_| Self::failure())
-                    .map(SelectedValue::plain);
+                return SelectedValue::property(&property);
             }
         }
         // Enum entries are values exported by an explicit member import or a classifier star
@@ -430,11 +465,7 @@ impl ProductionSignatureSemantics<'_> {
             if let Ok(property) = self.with_resolver(scope, |resolver| {
                 resolver.associated_property(owner, &declared_name)
             }) {
-                explicit_values.push(
-                    crate::fir::ResolvedTy::new(property.ty)
-                        .map_err(|_| Self::failure())
-                        .map(SelectedValue::plain)?,
-                );
+                explicit_values.push(SelectedValue::property(&property)?);
             }
         }
         match explicit_values.len() {
@@ -468,10 +499,7 @@ impl ProductionSignatureSemantics<'_> {
                 .values();
             let module =
                 crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-            let source = crate::symbol_source::CompositeSource::new(vec![
-                &module as &dyn crate::symbol_source::SymbolSource,
-                &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-            ]);
+            let source = self.source_over(&module);
             let oracle = crate::symbol_resolver::SourceOracle(&source);
             let receivers = self.implicit_receivers(scope);
             let mut applicable = properties
@@ -532,10 +560,8 @@ impl ProductionSignatureSemantics<'_> {
             Some(origin),
             demand,
         )? {
-            return Ok(SelectedValue::plain(signature.result));
+            return Ok(SelectedValue::declared(signature));
         }
-        crate::fir::ResolvedTy::new(property.ty)
-            .map(SelectedValue::plain)
-            .map_err(|_| Self::failure())
+        SelectedValue::property(&property)
     }
 }

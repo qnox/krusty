@@ -7,10 +7,18 @@ use crate::klib::write::{KlibPlatform, KlibStamp};
 use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
 
-struct RecordingTarget;
+/// Records the module of each file it lowers. One that emits dependency support lowers no file
+/// until the whole program is checked.
+struct RecordingTarget {
+    emits_dependency_support: bool,
+}
 
 impl Backend for RecordingTarget {
     type State = Vec<String>;
+
+    fn emits_dependency_support(&self) -> bool {
+        self.emits_dependency_support
+    }
 
     fn compilation_target(&self) -> CompilationTarget {
         CompilationTarget::Native
@@ -81,8 +89,23 @@ fn manifest(module: &EmittedDependencyModule) -> &str {
 
 #[test]
 fn separately_analyzed_modules_publish_distinct_metadata_and_share_target_state() {
-    let backend = RecordingTarget;
-    let mut session = EmissionSession::new(&backend);
+    emit_two_modules(&RecordingTarget {
+        emits_dependency_support: false,
+    });
+}
+
+#[test]
+fn a_dependency_support_target_lowers_every_module_once_the_program_is_checked() {
+    emit_two_modules(&RecordingTarget {
+        emits_dependency_support: true,
+    });
+}
+
+/// Emit a library module and an application module through one session, asserting that the
+/// target lowers both in arrival order. A target that emits dependency support has lowered nothing
+/// before `finish`, which closes its support over the whole program.
+fn emit_two_modules(backend: &RecordingTarget) {
+    let mut session = EmissionSession::new(backend);
 
     let mut lib_diags = DiagSink::new();
     let lib = session
@@ -119,6 +142,16 @@ fn separately_analyzed_modules_publish_distinct_metadata_and_share_target_state(
     assert!(app_diags.diags.is_empty(), "{:#?}", app_diags.diags);
     assert_eq!(app.name(), "app");
     assert!(manifest(&app).contains("unique_name=app\n"));
+
+    let lowered = session
+        .state
+        .as_ref()
+        .expect("an unfinished session retains its target state");
+    if backend.emits_dependency_support {
+        assert!(lowered.is_empty(), "lowered before finish: {lowered:?}");
+    } else {
+        assert_eq!(lowered, &["lib", "app"]);
+    }
 
     let mut finish_diags = DiagSink::new();
     let target = session.finish("program", &mut finish_diags);

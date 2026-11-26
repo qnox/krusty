@@ -85,6 +85,8 @@ pub(super) const REIFIED_BODY_ON_BYTE_SPLICE: &str =
 /// cannot splice the body around them.
 const VALUE_USED_LITERAL_UNSPLICED: &str =
     "an inline body that takes a literal lambda as a value cannot be spliced around it";
+const VALUE_USED_REFERENCE_UNSPLICED: &str =
+    "an inline body that takes a callable reference as a value cannot be spliced around it";
 pub(super) const DEFAULT_BRIDGE_REQUIRES_METHOD_INLINER: &str =
     "a default bridge whose lambda requires the byte splice is not supported";
 
@@ -446,6 +448,16 @@ impl Emitter<'_> {
                 return InlineCallOutcome::HandledWithError;
             }
         }
+        // The bridge passes each literal as a function object, which a lambda becomes. A callable
+        // reference placed as a literal is only its template: it has no function object to pass.
+        if inline_call
+            .args
+            .iter()
+            .any(|&argument| matches!(self.ir.expr(argument), IrExpr::CallableReference(_)))
+        {
+            self.run.set_inline_bail(VALUE_USED_REFERENCE_UNSPLICED);
+            return InlineCallOutcome::HandledWithError;
+        }
         if let Err(reason) = ensure_no_unexpanded_default_masks(inline_call.defaults) {
             self.run.set_emit_error(reason.to_string());
             return InlineCallOutcome::HandledWithError;
@@ -740,7 +752,7 @@ impl Emitter<'_> {
             let crossinline = index
                 .checked_sub(leading_non_argument_operands)
                 .and_then(|parameter| {
-                    crate::inline_parameters::is_crossinline_parameter(
+                    crate::inline_parameters::crossinline_literal_moves(
                         self.ir,
                         call_expression,
                         parameter,

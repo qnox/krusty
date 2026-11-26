@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use krusty_plugin_ir::{CallableIdentity, ModuleIr};
+use krusty_plugin_api::ir::{CallableIdentity, ModuleIr};
+use krusty_plugin_api::{ModuleIrPlugin, ModuleIrRefusal};
 
 use crate::adapter;
 use crate::environment::Environment;
@@ -106,6 +107,16 @@ impl std::fmt::Display for HostError {
 }
 
 impl std::error::Error for HostError {}
+
+/// The host answers for the plugins it loaded: the compiler hands it a module through the plugin
+/// API and gets back the module they leave, or the reason the host could not return one.
+impl ModuleIrPlugin for Host {
+    fn transform(&mut self, module: &ModuleIr) -> Result<ModuleIr, ModuleIrRefusal> {
+        self.generate(module).map_err(|error| ModuleIrRefusal {
+            message: error.to_string(),
+        })
+    }
+}
 
 /// A running host. Dropping it stops the process: it is asked to exit, and killed when it has not
 /// within a grace interval.
@@ -213,13 +224,15 @@ impl Host {
         }
     }
 
-    /// Builds `module`'s IR in the open session, as kotlinc's fir2ir builds a module's sources, and
-    /// runs the loaded plugins' IR generation extensions over it, in registration order, with the
-    /// session's plugin context. A session builds one module: a second one in the same session is
-    /// refused, and so is IR the host cannot build, by what it is.
-    pub fn generate(&mut self, module: &ModuleIr) -> Result<(), HostError> {
+    /// Builds `module`'s IR in the open session, as kotlinc's fir2ir builds a module's sources, runs
+    /// the loaded plugins' IR generation extensions over it, in registration order, with the
+    /// session's plugin context, and returns the module they left. A session builds one module: a
+    /// second one in the same session is refused, and so is IR the host cannot build, by what it is.
+    /// IR a plugin produced that the plugin IR does not cover refuses the module by what it is,
+    /// rather than returning it without that IR.
+    pub fn generate(&mut self, module: &ModuleIr) -> Result<ModuleIr, HostError> {
         match self.exchange(&Request::Generate(module))? {
-            Reply::Generated => Ok(()),
+            Reply::Generated(module) => Ok(module),
             Reply::Failed(message) => Err(HostError::Plugin { message }),
             _ => Err(unexpected("generate")),
         }
@@ -267,8 +280,8 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
-    /// The host's greeting for protocol 5 and kotlinc 2.4.20, as `printf` octal escapes.
-    const HELLO: &str = r"\000\000\000\017\000\000\000\000\005\000\000\000\0062.4.20";
+    /// The host's greeting for protocol 6 and kotlinc 2.4.20, as `printf` octal escapes.
+    const HELLO: &str = r"\000\000\000\017\000\000\000\000\006\000\000\000\0062.4.20";
     const GRACE: Duration = Duration::from_millis(300);
 
     /// A host that writes its pid to `pid_file`, greets, then runs `then` in the same process.

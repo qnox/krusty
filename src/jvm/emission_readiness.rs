@@ -16,6 +16,8 @@ pub fn jvm_can_emit(ir: &IrFile) -> bool {
     fn callee_ok(callee: &Callee) -> bool {
         match callee {
             Callee::Static { .. } | Callee::Special { .. } => true,
+            // Realized into `Callee::Static`/`Callee::Virtual` by the value-class lowering.
+            Callee::ValueClassAdapter { .. } => false,
             // Realized into `Callee::Special` before emission.
             Callee::Super { params, ret, .. } => params.iter().all(ty_ok) && ty_ok(ret),
             // A user (sibling-file) method carries `Ty`s; a classpath one a descriptor string.

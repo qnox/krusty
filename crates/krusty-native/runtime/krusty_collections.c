@@ -36,6 +36,7 @@ static const uint32_t kt_list_offsets[] = {offsetof(KList, elements)};
                               .vtable_length = 3};
 
 static const KType *const kt_iterable_bases[] = {&kt_type_iterable_interface};
+static const KType *const kt_iterator_bases[] = {&kt_type_iterator_interface};
 static const KType *const kt_mutable_iterable_bases[] = {&kt_type_iterable_interface};
 static const KType *const kt_collection_bases[] = {&kt_type_iterable_interface};
 static const KType *const kt_mutable_collection_bases[] = {
@@ -48,6 +49,7 @@ static const KType *const kt_mutable_list_bases[] = {
     &kt_type_mutable_iterable_interface, &kt_type_iterable_interface};
 
 KT_ROOT_INTERFACE(kt_type_iterator_interface, "Iterator")
+KT_INTERFACE(kt_type_list_iterator_interface, "ListIterator", kt_iterator_bases)
 KT_ROOT_INTERFACE(kt_type_iterable_interface, "Iterable")
 KT_INTERFACE(kt_type_mutable_iterable_interface, "MutableIterable", kt_mutable_iterable_bases)
 KT_INTERFACE(kt_type_collection_interface, "Collection", kt_collection_bases)
@@ -71,6 +73,8 @@ static const KType *const kt_mutable_list_interfaces[] = {
     &kt_type_mutable_iterable_interface, &kt_type_iterable_interface,
     &kt_type_random_access_interface};
 static const KType *const kt_iterator_interfaces[] = {&kt_type_iterator_interface};
+static const KType *const kt_list_iterator_interfaces[] = {&kt_type_list_iterator_interface,
+                                                           &kt_type_iterator_interface};
 
 static kt_boolean kt_list_equals(KRef self, KRef other);
 static kt_int kt_list_hash_code(KRef self);
@@ -174,6 +178,105 @@ kt_boolean kt_is_mutable_list(KRef value) {
     return value != NULL && value->header.type == &kt_type_mutable_list;
 }
 
+/* ---- a view of a list's range ----------------------------------------------------------------
+
+   `List.subList(from, to)`. Kotlin answers a VIEW: the range reads the parent's elements as they
+   are now, so a write through a growable parent's `set` shows in the range. The view holds its
+   parent, not the parent's storage, because a growable list replaces its array when it grows;
+   asking the parent for each element is what keeps reading the live one. Its size is the range's,
+   fixed when it is made, and a structural change of a growable parent after that makes every later
+   read raise `ConcurrentModificationException`, as `ArrayList.subList` does -- the range then names
+   elements that are no longer where it said. A read-only parent never changes, so it records zero
+   and nothing compares.
+
+   A view of a growable list (or of a view of one) is writable, as `ArrayList.subList` is: a write
+   through it lands in the parent at the range's offset, the range's size follows, and the range
+   takes the parent's new shape so it stays valid. A view of a read-only list is read-only, like the
+   list. Either face of `subList` reaches the same function, because what the view may do is the
+   parent's to say, not the static type's. */
+typedef struct KSubList {
+    KObjectHeader header;
+    KRef parent;
+    kt_int offset;
+    kt_int size;
+    /* The parent's shape when the range last made or saw it, and the structural writes made
+       through this range, which a walk of the range or a view of it compares as `modifications`
+       is compared on a growable list. */
+    uint32_t modifications;
+    uint32_t version;
+    kt_boolean writable;
+} KSubList;
+
+static const uint32_t kt_sub_list_offsets[] = {offsetof(KSubList, parent)};
+
+static kt_int kt_sub_list_collection_size(KRef self);
+
+const KType kt_type_sub_list = {KT_NAMED("kotlin.collections.", "SubList"),
+                                .instance_size = sizeof(KSubList),
+                                .reference_count = 1,
+                                .reference_offsets = kt_sub_list_offsets,
+                                .super = &kt_type_any,
+                                .vtable = kt_list_vtable,
+                                .vtable_length = 3,
+                                .interfaces = kt_list_interfaces,
+                                .interface_count = sizeof(kt_list_interfaces) / sizeof(KType *),
+                                .collection_size = kt_sub_list_collection_size};
+
+/* A view of a growable list is also a `MutableList`, which the interface inventory says so that
+   `is` and `as` agree with the mutators it answers. */
+const KType kt_type_mutable_sub_list = {KT_NAMED("kotlin.collections.", "SubList"),
+                                        .instance_size = sizeof(KSubList),
+                                        .reference_count = 1,
+                                        .reference_offsets = kt_sub_list_offsets,
+                                        .super = &kt_type_any,
+                                        .vtable = kt_list_vtable,
+                                        .vtable_length = 3,
+                                        .interfaces = kt_mutable_list_interfaces,
+                                        .interface_count =
+                                            sizeof(kt_mutable_list_interfaces) / sizeof(KType *),
+                                        .collection_size = kt_sub_list_collection_size};
+
+static kt_boolean kt_is_sub_list(KRef value) {
+    return value != NULL && (value->header.type == &kt_type_sub_list ||
+                             value->header.type == &kt_type_mutable_sub_list);
+}
+
+/* Any of the runtime's own lists: the two that hold storage and the view of a range of either. */
+static kt_boolean kt_is_runtime_list(KRef value) {
+    return kt_is_read_only_list(value) || kt_is_mutable_list(value) || kt_is_sub_list(value);
+}
+
+/* A list a write may reach: a growable list, or a view of one. */
+static kt_boolean kt_is_writable_list(KRef value) {
+    return kt_is_mutable_list(value) || (kt_is_sub_list(value) && ((const KSubList *)value)->writable);
+}
+
+/* A list's structural version: a growable list's modification count, a view's count of the writes
+   made through it, and zero for a list nothing can change. A view of a list, an iterator of one
+   and a view of a view each record it and compare it later. */
+static uint32_t kt_list_version(KRef list) {
+    if (kt_is_mutable_list(list)) {
+        return ((const KMutableList *)list)->modifications;
+    }
+    return kt_is_sub_list(list) ? ((const KSubList *)list)->version : 0;
+}
+
+static uint32_t kt_shape_of(KRef parent) { return kt_list_version(parent); }
+
+/* Whether the view's parent has changed shape since the view was made: the check every read of a
+   view makes first. It raises and answers true when so. A view of a view asks the view above it
+   first, so a change of the list at the root reaches every range taken from it. */
+static kt_boolean kt_sub_list_is_stale(const KSubList *view) {
+    if (kt_is_sub_list(view->parent) && kt_sub_list_is_stale((const KSubList *)view->parent)) {
+        return true;
+    }
+    if (kt_shape_of(view->parent) != view->modifications) {
+        kt_throw(kt_throwable_new(&kt_type_concurrent_modification_exception, NULL));
+        return true;
+    }
+    return false;
+}
+
 /* The cursor an iterator holds is an INDEX, not a pointer: the collector may not move an object,
    but an index needs no such promise and reads the same whatever the list is. */
 typedef struct KListIterator {
@@ -190,22 +293,29 @@ static const uint32_t kt_list_iterator_offsets[] = {offsetof(KListIterator, list
 /* An iterator answers `kotlin.Any`'s three members by identity, as Kotlin's own iterators do. Its
    class is Kotlin/Native's: a read-only list's is the anonymous iterator `Array.asList` answers
    (`listOf(a, b)` is `a, b` as a list), a growable one's `ArrayList`'s nested `Itr`. */
-#define KT_LIST_ITERATOR_TYPE                                                                      \
+#define KT_LIST_ITERATOR_TYPE(bases)                                                               \
     .instance_size = sizeof(KListIterator), .reference_count = 1,                                  \
     .reference_offsets = kt_list_iterator_offsets, .super = &kt_type_any, .vtable = kt_any_vtable, \
-    .vtable_length = 3, .interfaces = kt_iterator_interfaces,                                      \
-    .interface_count = sizeof(kt_iterator_interfaces) / sizeof(KType *)
+    .vtable_length = 3, .interfaces = bases, .interface_count = sizeof(bases) / sizeof(KType *)
 const KType kt_type_list_iterator = {KT_ANONYMOUS("kotlin.collections.Iterator"),
-                                     KT_LIST_ITERATOR_TYPE};
-static const KType kt_type_array_list_iterator = {KT_NAMED("kotlin.collections.ArrayList.", "Itr"),
-                                                  KT_LIST_ITERATOR_TYPE};
+                                     KT_LIST_ITERATOR_TYPE(kt_iterator_interfaces)};
+/* `ArrayList.iterator()` and `listIterator()` answer the same `Itr`, which is a `ListIterator`. */
+static const KType kt_type_array_list_iterator = {
+    KT_NAMED("kotlin.collections.ArrayList.", "Itr"),
+    KT_LIST_ITERATOR_TYPE(kt_list_iterator_interfaces)};
+/* The `listIterator()` of a read-only list, which is a `ListIterator` and not a mutable one. */
+static const KType kt_type_read_only_list_iterator = {
+    KT_ANONYMOUS("kotlin.collections.ListIterator"),
+    KT_LIST_ITERATOR_TYPE(kt_list_iterator_interfaces)};
 /* `EnumEntriesList` is an `AbstractList`, and its iterator is that class's own. */
 static const KType kt_type_abstract_list_iterator = {
-    KT_NAMED("kotlin.collections.AbstractList.", "IteratorImpl"), KT_LIST_ITERATOR_TYPE};
+    KT_NAMED("kotlin.collections.AbstractList.", "IteratorImpl"),
+    KT_LIST_ITERATOR_TYPE(kt_iterator_interfaces)};
 
 static kt_boolean kt_is_list_iterator(KRef value) {
     return value != NULL && (value->header.type == &kt_type_list_iterator ||
                              value->header.type == &kt_type_array_list_iterator ||
+                             value->header.type == &kt_type_read_only_list_iterator ||
                              value->header.type == &kt_type_abstract_list_iterator);
 }
 
@@ -240,6 +350,10 @@ KRef kt_list_single(KRef value) {
 /* Both list shapes answer here; see the note on `KMutableList` for why they share the entry point
    rather than each having its own. A growable list's array is capacity, so its SIZE is the field. */
 kt_int kt_list_size(KRef list) {
+    if (kt_is_sub_list(list)) {
+        const KSubList *view = (const KSubList *)list;
+        return kt_sub_list_is_stale(view) ? 0 : view->size;
+    }
     if (kt_is_mutable_list(list)) {
         return ((const KMutableList *)list)->size;
     }
@@ -273,6 +387,17 @@ kt_int kt_collection_size_or_default(KRef iterable, kt_int fallback) {
 kt_boolean kt_collection_is_empty(KRef collection) { return kt_collection_size(collection) == 0; }
 
 KRef kt_list_get(KRef list, kt_int index) {
+    if (kt_is_sub_list(list)) {
+        const KSubList *view = (const KSubList *)list;
+        if (kt_sub_list_is_stale(view)) {
+            return NULL;
+        }
+        if (index < 0 || index >= view->size) {
+            kt_index_out_of_bounds(index, view->size);
+            return NULL;
+        }
+        return kt_list_get(view->parent, view->offset + index);
+    }
     KRef elements = ((const KList *)list)->elements;
     kt_int size = kt_list_size(list);
     if (index < 0 || index >= size) {
@@ -282,6 +407,43 @@ KRef kt_list_get(KRef list, kt_int index) {
         return NULL;
     }
     return kt_elements_of(elements)[index];
+}
+
+static kt_int kt_sub_list_collection_size(KRef self) { return kt_list_size(self); }
+
+/* `list.subList(from, to)`: the range `[from, to)` of a read-only list as a view of it. The bounds
+   are checked as `AbstractList.checkRangeIndexes` does in the common stdlib, with its wording. */
+KRef kt_list_sub_list(KRef list, kt_int from, kt_int to) {
+    kt_int size = kt_list_size(list);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    if (from < 0 || to > size) {
+        KRef message = kt_string_utf8("fromIndex: ", 11);
+        message = kt_string_plus(message, kt_to_string(kt_box_int(from)));
+        message = kt_string_plus(message, kt_string_utf8(", toIndex: ", 11));
+        message = kt_string_plus(message, kt_to_string(kt_box_int(to)));
+        message = kt_string_plus(message, kt_string_utf8(", size: ", 8));
+        message = kt_string_plus(message, kt_to_string(kt_box_int(size)));
+        kt_throw(kt_throwable_new(&kt_type_index_out_of_bounds_exception, message));
+        return NULL;
+    }
+    if (from > to) {
+        KRef message = kt_string_utf8("fromIndex: ", 11);
+        message = kt_string_plus(message, kt_to_string(kt_box_int(from)));
+        message = kt_string_plus(message, kt_string_utf8(" > toIndex: ", 12));
+        message = kt_string_plus(message, kt_to_string(kt_box_int(to)));
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception, message));
+        return NULL;
+    }
+    KSubList *view = (KSubList *)kt_gc_allocate(
+        kt_is_writable_list(list) ? &kt_type_mutable_sub_list : &kt_type_sub_list, sizeof(KSubList));
+    view->parent = list;
+    view->offset = from;
+    view->size = to - from;
+    view->modifications = kt_shape_of(list);
+    view->writable = kt_is_writable_list(list);
+    return (KRef)view;
 }
 
 /* `first()` and `last()`. Kotlin raises `NoSuchElementException` on an empty list, with its own
@@ -294,7 +456,7 @@ KRef kt_list_first(KRef list) {
                                   kt_string_utf8("List is empty.", 14)));
         return NULL;
     }
-    return kt_elements_of(((const KList *)list)->elements)[0];
+    return kt_list_get(list, 0);
 }
 
 KRef kt_list_last(KRef list) {
@@ -304,7 +466,7 @@ KRef kt_list_last(KRef list) {
                                   kt_string_utf8("List is empty.", 14)));
         return NULL;
     }
-    return kt_elements_of(((const KList *)list)->elements)[size - 1];
+    return kt_list_get(list, size - 1);
 }
 
 /* Whether an exception is in flight. `kt_throw` records one and comes back, so every walk below
@@ -345,10 +507,9 @@ static kt_boolean kt_counter_overflowed(uint32_t value, KCounter counts) {
 }
 
 kt_int kt_list_index_of(KRef list, KRef value) {
-    KRef elements = ((const KList *)list)->elements;
     kt_int length = kt_list_size(list);
     for (kt_int i = 0; i < length; i++) {
-        kt_boolean equal = kt_equals(kt_elements_of(elements)[i], value);
+        kt_boolean equal = kt_equals(kt_list_get(list, i), value);
         /* An `equals` that threw answered nothing, whatever it returned: the search ends there with
            no index, so `remove` built on it removes nothing, and no later element is compared. */
         if (kt_raised()) {
@@ -362,9 +523,8 @@ kt_int kt_list_index_of(KRef list, KRef value) {
 }
 
 kt_int kt_list_last_index_of(KRef list, KRef value) {
-    KRef elements = ((const KList *)list)->elements;
     for (kt_int i = kt_list_size(list) - 1; i >= 0; i--) {
-        kt_boolean equal = kt_equals(kt_elements_of(elements)[i], value);
+        kt_boolean equal = kt_equals(kt_list_get(list, i), value);
         if (kt_raised()) {
             return -1;
         }
@@ -442,7 +602,89 @@ KRef kt_mutable_list_of(KRef elements) {
     return list;
 }
 
+/* ---- writing through a view ------------------------------------------------------------------
+
+   Each write lands in the parent at the range's offset, so the parent stays the one place the
+   elements live. A structural write then moves the range's size and takes the parent's new shape:
+   the range made the change, so it is not stale for it, where a change from anywhere else is. A
+   view of a read-only list refuses every write, as the list does. */
+static kt_boolean kt_sub_list_may_write(KSubList *view) {
+    if (kt_sub_list_is_stale(view)) {
+        return false;
+    }
+    if (!view->writable) {
+        kt_throw(kt_throwable_new(&kt_type_unsupported_operation_exception, NULL));
+        return false;
+    }
+    return true;
+}
+
+static void kt_sub_list_add_at(KSubList *view, kt_int index, KRef value) {
+    if (!kt_sub_list_may_write(view)) {
+        return;
+    }
+    if (index < 0 || index > view->size) {
+        kt_index_out_of_bounds(index, view->size);
+        return;
+    }
+    kt_mutable_list_add_at((KRef)view->parent, view->offset + index, value);
+    if (kt_pending_exception() != NULL) {
+        return;
+    }
+    view->size++;
+    view->version++;
+    view->modifications = kt_shape_of(view->parent);
+}
+
+static KRef kt_sub_list_remove_at(KSubList *view, kt_int index) {
+    if (!kt_sub_list_may_write(view)) {
+        return NULL;
+    }
+    if (index < 0 || index >= view->size) {
+        kt_index_out_of_bounds(index, view->size);
+        return NULL;
+    }
+    KRef removed = kt_mutable_list_remove_at(view->parent, view->offset + index);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    view->size--;
+    view->version++;
+    view->modifications = kt_shape_of(view->parent);
+    return removed;
+}
+
+static KRef kt_sub_list_set(KSubList *view, kt_int index, KRef value) {
+    if (!kt_sub_list_may_write(view)) {
+        return NULL;
+    }
+    if (index < 0 || index >= view->size) {
+        kt_index_out_of_bounds(index, view->size);
+        return NULL;
+    }
+    return kt_mutable_list_set(view->parent, view->offset + index, value);
+}
+
+static void kt_sub_list_clear(KSubList *view) {
+    /* An empty range still answers to its list: `AbstractList.clear` is `removeRange(0, size)`, whose
+       `size` validates the view before there is anything to remove. */
+    if (!kt_sub_list_may_write(view)) {
+        return;
+    }
+    while (view->size > 0) {
+        (void)kt_sub_list_remove_at(view, view->size - 1);
+        if (kt_pending_exception() != NULL) {
+            return;
+        }
+    }
+}
+
 kt_boolean kt_mutable_list_add(KRef self, KRef value) {
+    if (kt_is_sub_list(self)) {
+        KSubList *view = (KSubList *)self;
+        kt_sub_list_add_at(view, view->size, value);
+        return kt_pending_exception() == NULL;
+    }
     kt_mutable_list_reserve(self);
     KMutableList *list = (KMutableList *)self;
     kt_elements_of(list->elements)[list->size++] = value;
@@ -456,20 +698,57 @@ kt_boolean kt_mutable_list_add(KRef self, KRef value) {
    result the caller has to remember to drop. */
 void kt_mutable_list_plus_assign(KRef self, KRef value) { kt_mutable_list_add(self, value); }
 
-/* `list += elements`, where the right-hand side is something to walk. Kotlin has one `plusAssign`
-   per shape of that — an `Iterable`, an `Array`, a `Sequence` — and each appends every element in
-   order, which is the one walk this runtime already knows how to do.
+/* `list += elements` and `addAll(elements)`, where the right-hand side is something to walk. Kotlin
+   has one `plusAssign` per shape of that — an `Iterable`, an `Array`, a `Sequence` — and each
+   appends every element in order.
 
-   A LIST argument is copied by index up to the size it had when the call began, because that is
-   what Kotlin's `addAll` of a collection does: it takes the argument's elements out first. That is
-   what makes `xs.addAll(xs)` double the list, where walking `xs` with an iterator while appending
-   to it would see its own list modified at the second step. */
-void kt_mutable_list_add_all(KRef self, KRef elements) {
+   A LIST argument is read up to the size it had when the call began. When it is read is the
+   difference between kotlinc-native and the JVM. Kotlin/Native's `ArrayList.addAll` makes room for
+   the new elements first, then walks the argument: a range of this very list is then invalidated
+   before it is read, so the call raises `ConcurrentModificationException` and leaves the list grown
+   by that many nulls (`Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument`). The JVM's takes
+   `c.toArray()` first, so the same call appends the range; `read_first` asks for that, under
+   `-Xfix-kotlinc-defects`. Either way `xs.addAll(xs)` doubles the list: its walk starts after the
+   room is made, and reads only the elements that were there. */
+static void kt_list_append_all(KRef self, KRef elements, kt_boolean read_first) {
     if (elements != NULL
-        && (kt_is_read_only_list(elements) || kt_is_mutable_list(elements))) {
+        && (kt_is_runtime_list(elements))) {
         kt_int count = kt_list_size(elements);
+        if (kt_raised()) {
+            return;
+        }
+        if (!read_first && !kt_is_sub_list(self)) {
+            KMutableList *list = (KMutableList *)self;
+            kt_int at = list->size;
+            for (kt_int added = 0; added < count; added++) {
+                kt_mutable_list_reserve(self);
+                kt_elements_of(list->elements)[list->size++] = NULL;
+            }
+            list->modifications++;
+            KRef iterator = kt_iterable_iterator(elements);
+            for (kt_int read = 0; read < count; read++) {
+                KRef element = kt_iterator_next(iterator);
+                if (kt_raised()) {
+                    return;
+                }
+                kt_elements_of(list->elements)[at + read] = element;
+            }
+            return;
+        }
+        /* The array is a root across the allocations the appends make. */
+        KRef snapshot = kt_array_new(&kt_type_array, count);
         for (kt_int at = 0; at < count; at++) {
-            kt_mutable_list_add(self, kt_list_get(elements, at));
+            KRef element = kt_list_get(elements, at);
+            if (kt_raised()) {
+                return;
+            }
+            kt_elements_of(snapshot)[at] = element;
+        }
+        for (kt_int at = 0; at < count; at++) {
+            kt_mutable_list_add(self, kt_elements_of(snapshot)[at]);
+            if (kt_raised()) {
+                return;
+            }
         }
         return;
     }
@@ -483,7 +762,28 @@ void kt_mutable_list_add_all(KRef self, KRef elements) {
     }
 }
 
+void kt_mutable_list_add_all(KRef self, KRef elements) {
+    kt_list_append_all(self, elements, false);
+}
+
+void kt_mutable_list_add_all_reading_first(KRef self, KRef elements) {
+    kt_list_append_all(self, elements, true);
+}
+
+/* `ArrayList(elements)`: a new list holding the elements of any collection, in its iteration order,
+   read once now. The list owns its own storage, so a later write to either is not seen by the
+   other. */
+KRef kt_mutable_list_copy_of(KRef elements) {
+    KRef list = kt_mutable_list_new();
+    /* A new list is no range's parent, so either reading gives the same list. */
+    kt_mutable_list_add_all(list, elements);
+    return kt_raised() ? NULL : list;
+}
+
 KRef kt_mutable_list_set(KRef self, kt_int index, KRef value) {
+    if (kt_is_sub_list(self)) {
+        return kt_sub_list_set((KSubList *)self, index, value);
+    }
     KMutableList *list = (KMutableList *)self;
     /* Returns straight after raising, as `add(index, e)` and `removeAt` below do: `kt_throw` records
        the exception and comes back, and the write it forbids would land outside the elements --
@@ -500,6 +800,10 @@ KRef kt_mutable_list_set(KRef self, kt_int index, KRef value) {
 }
 
 void kt_mutable_list_add_at(KRef self, kt_int index, KRef value) {
+    if (kt_is_sub_list(self)) {
+        kt_sub_list_add_at((KSubList *)self, index, value);
+        return;
+    }
     KMutableList *list = (KMutableList *)self;
     if (index < 0 || index > list->size) {
         kt_index_out_of_bounds(index, list->size);
@@ -516,6 +820,9 @@ void kt_mutable_list_add_at(KRef self, kt_int index, KRef value) {
 }
 
 KRef kt_mutable_list_remove_at(KRef self, kt_int index) {
+    if (kt_is_sub_list(self)) {
+        return kt_sub_list_remove_at((KSubList *)self, index);
+    }
     KMutableList *list = (KMutableList *)self;
     if (index < 0 || index >= list->size) {
         kt_index_out_of_bounds(index, list->size);
@@ -578,6 +885,10 @@ kt_boolean kt_mutable_list_retain_all(KRef self, KRef elements) {
 }
 
 void kt_mutable_list_clear(KRef self) {
+    if (kt_is_sub_list(self)) {
+        kt_sub_list_clear((KSubList *)self);
+        return;
+    }
     KMutableList *list = (KMutableList *)self;
     KRef *elements = kt_elements_of(list->elements);
     for (kt_int at = 0; at < list->size; at++) {
@@ -594,7 +905,7 @@ void kt_mutable_list_clear(KRef self) {
    the runtime made read-only answers a mutation the way Kotlin's does. */
 
 static kt_boolean kt_read_only_list(KRef value) {
-    if (value->header.type != &kt_type_list) {
+    if (value->header.type != &kt_type_list && !(kt_is_sub_list(value) && !kt_is_writable_list(value))) {
         return false;
     }
     kt_throw(kt_throwable_new(&kt_type_unsupported_operation_exception, NULL));
@@ -621,14 +932,14 @@ kt_boolean kt_mutable_collection_add(KRef self, KRef value) {
     if (kt_read_only_list(self)) {
         return false;
     }
-    return kt_is_mutable_list(self) ? kt_mutable_list_add(self, value) : kt_set_add(self, value);
+    return kt_is_writable_list(self) ? kt_mutable_list_add(self, value) : kt_set_add(self, value);
 }
 
 kt_boolean kt_mutable_collection_remove(KRef self, KRef value) {
     if (kt_read_only_list(self)) {
         return false;
     }
-    return kt_is_mutable_list(self) ? kt_mutable_list_remove(self, value)
+    return kt_is_writable_list(self) ? kt_mutable_list_remove(self, value)
                                     : kt_set_remove(self, value);
 }
 
@@ -636,7 +947,7 @@ void kt_mutable_collection_clear(KRef self) {
     if (kt_read_only_list(self)) {
         return;
     }
-    if (kt_is_mutable_list(self)) {
+    if (kt_is_writable_list(self)) {
         kt_mutable_list_clear(self);
     } else {
         kt_map_clear(self);
@@ -644,14 +955,14 @@ void kt_mutable_collection_clear(KRef self) {
 }
 
 /* `addAll`: whether the receiver changed. A list appends every element (Kotlin's answer is that the
-   argument was not empty), by `kt_mutable_list_add_all`'s snapshot; a set adds each it lacks. */
-kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements) {
+   argument was not empty), read as `kt_list_append_all` says; a set adds each it lacks. */
+static kt_boolean kt_collection_add_all(KRef self, KRef elements, kt_boolean read_first) {
     if (kt_read_only_list(self)) {
         return false;
     }
-    if (kt_is_mutable_list(self)) {
+    if (kt_is_writable_list(self)) {
         kt_int before = kt_list_size(self);
-        kt_mutable_list_add_all(self, elements);
+        kt_list_append_all(self, elements, read_first);
         return !kt_raised() && kt_list_size(self) != before;
     }
     kt_boolean changed = false;
@@ -669,6 +980,14 @@ kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements) {
     return changed;
 }
 
+kt_boolean kt_mutable_collection_add_all(KRef self, KRef elements) {
+    return kt_collection_add_all(self, elements, false);
+}
+
+kt_boolean kt_mutable_collection_add_all_reading_first(KRef self, KRef elements) {
+    return kt_collection_add_all(self, elements, true);
+}
+
 KRef kt_list_iterator(KRef list) {
     const KType *type = &kt_type_list_iterator;
     if (kt_is_mutable_list(list)) {
@@ -679,9 +998,34 @@ KRef kt_list_iterator(KRef list) {
     KListIterator *iterator = (KListIterator *)kt_gc_allocate(type, sizeof(KListIterator));
     iterator->list = list;
     iterator->at = 0;
-    iterator->modifications = kt_is_mutable_list(list) ? ((const KMutableList *)list)->modifications
-                                                       : 0;
+    iterator->modifications = kt_list_version(list);
     return (KRef)iterator;
+}
+
+/* `listIterator(index)`: the iterator of `kt_list_iterator`, whose next element is the one at
+   `index`. An index outside `0..size` raises, as Kotlin/Native's `ArrayList.listIterator` does. */
+KRef kt_list_list_iterator(KRef list, kt_int index) {
+    kt_int size = kt_list_size(list);
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    if (index < 0 || index > size) {
+        kt_index_out_of_bounds(index, size);
+        return NULL;
+    }
+    KRef iterator = kt_list_iterator(list);
+    /* A read-only list's and an enum's entries' iterators implement `Iterator` alone; this one
+       is a `ListIterator` too. The growable list's already is. */
+    if (iterator->header.type == &kt_type_list_iterator ||
+        iterator->header.type == &kt_type_abstract_list_iterator) {
+        iterator->header.type = &kt_type_read_only_list_iterator;
+    }
+    ((KListIterator *)iterator)->at = index;
+    return iterator;
+}
+
+KRef kt_list_list_iterator_from_start(KRef list) {
+    return kt_list_list_iterator(list, 0);
 }
 
 /* `cursor < size`, as Kotlin/Native's `ArrayList` iterator answers it (`Itr.hasNext` in the
@@ -699,16 +1043,69 @@ KRef kt_list_iterator_next(KRef iterator) {
     /* Checked BEFORE the bound, because that is the order the difference shows in: a `remove`
        during the walk can leave the cursor inside the shortened list, where the bound says nothing
        is wrong and Kotlin still raises. */
+    if (kt_list_version(self->list) != self->modifications) {
+        kt_throw(kt_throwable_new(&kt_type_concurrent_modification_exception, NULL));
+        return NULL;
+    }
+    kt_int size = kt_list_size(self->list);
+    /* A range whose list changed raised `ConcurrentModificationException` and answered no size;
+       that exception is the one the walk ends with, not an exhausted list's. */
+    if (kt_pending_exception() != NULL) {
+        return NULL;
+    }
+    if (self->at >= size) {
+        kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, NULL));
+        return NULL;
+    }
+    return kt_list_get(self->list, self->at++);
+}
+
+/* `listIterator(index)`: an iterator whose first `next()` answers the element at `index`, and
+   whose first `previous()` the one before it. `index` may be the size, where `next()` has nothing
+   left; past that, or below zero, it is an `IndexOutOfBoundsException`, as Kotlin's
+   `checkPositionIndex` raises. */
+KRef kt_list_iterator_at(KRef list, kt_int index) {
+    kt_int size = kt_list_size(list);
+    if (index < 0 || index > size) {
+        kt_index_out_of_bounds(index, size);
+        return NULL;
+    }
+    KRef iterator = kt_list_iterator(list);
+    ((KListIterator *)iterator)->at = index;
+    return iterator;
+}
+
+static KListIterator *kt_list_iterator_of(KRef iterator) {
+    if (!kt_is_list_iterator(iterator)) {
+        KT_FAIL("krusty: a list iterator was expected here\n");
+    }
+    return (KListIterator *)iterator;
+}
+
+kt_boolean kt_list_iterator_has_previous(KRef iterator) {
+    return kt_list_iterator_of(iterator)->at > 0;
+}
+
+/* The element before the cursor, which moves back over it. Checked against modification first,
+   as `next()` is, then against the start: there is no element before the first. */
+KRef kt_list_iterator_previous(KRef iterator) {
+    KListIterator *self = kt_list_iterator_of(iterator);
     if (kt_is_mutable_list(self->list) &&
         ((const KMutableList *)self->list)->modifications != self->modifications) {
         kt_throw(kt_throwable_new(&kt_type_concurrent_modification_exception, NULL));
         return NULL;
     }
-    if (self->at >= kt_list_size(self->list)) {
+    if (self->at <= 0) {
         kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, NULL));
         return NULL;
     }
-    return kt_list_get(self->list, self->at++);
+    return kt_list_get(self->list, --self->at);
+}
+
+kt_int kt_list_iterator_next_index(KRef iterator) { return kt_list_iterator_of(iterator)->at; }
+
+kt_int kt_list_iterator_previous_index(KRef iterator) {
+    return kt_list_iterator_of(iterator)->at - 1;
 }
 
 /* An `Iterable` or an `Iterator` that the generator could only type by the INTERFACE — a generic
@@ -1372,7 +1769,7 @@ KRef kt_iterable_iterator(KRef iterable) {
     /* Either list shape: the one list iterator serves both, because its cursor is an index and the
        bound it compares against is `kt_list_size`, which both answer. */
     if (iterable != NULL
-        && (kt_is_read_only_list(iterable) || kt_is_mutable_list(iterable))) {
+        && (kt_is_runtime_list(iterable))) {
         return kt_list_iterator(iterable);
     }
     if (iterable != NULL && kt_is_array(iterable->header.type)) {
@@ -1468,7 +1865,7 @@ static kt_int kt_iterable_size(KRef iterable) {
         kt_null_receiver();
         return 0;
     }
-    if (kt_is_read_only_list(iterable) || kt_is_mutable_list(iterable)) {
+    if (kt_is_runtime_list(iterable)) {
         return kt_list_size(iterable);
     }
     kt_int held = kt_map_collection_size(iterable);
@@ -2217,14 +2614,12 @@ static kt_boolean kt_list_equals(KRef self, KRef other) {
         return false;
     }
     kt_int size = kt_list_size(self);
-    KRef left = ((const KList *)self)->elements;
-    if (kt_is_read_only_list(other) || kt_is_mutable_list(other)) {
+    if (kt_is_runtime_list(other)) {
         if (size != kt_list_size(other)) {
             return false;
         }
-        KRef right = ((const KList *)other)->elements;
         for (kt_int i = 0; i < size; i++) {
-            kt_boolean equal = kt_equals(kt_elements_of(left)[i], kt_elements_of(right)[i]);
+            kt_boolean equal = kt_equals(kt_list_get(self, i), kt_list_get(other, i));
             if (kt_raised() || !equal) {
                 return false;
             }
@@ -2244,7 +2639,7 @@ static kt_boolean kt_list_equals(KRef self, KRef other) {
         if (kt_raised()) {
             return false;
         }
-        kt_boolean equal = kt_equals(kt_elements_of(left)[i], theirs);
+        kt_boolean equal = kt_equals(kt_list_get(self, i), theirs);
         if (kt_raised() || !equal) {
             return false;
         }
@@ -2254,11 +2649,10 @@ static kt_boolean kt_list_equals(KRef self, KRef other) {
 
 /* Kotlin's own: 1 folded with `31 * h + e.hashCode()`, a null element contributing 0. */
 static kt_int kt_list_hash_code(KRef self) {
-    KRef elements = ((const KList *)self)->elements;
     kt_int length = kt_list_size(self);
     uint32_t hash = 1;
     for (kt_int i = 0; i < length; i++) {
-        kt_int element_hash = kt_hash_code(kt_elements_of(elements)[i]);
+        kt_int element_hash = kt_hash_code(kt_list_get(self, i));
         /* A `hashCode` that threw ends the fold before its answer is folded in; the zero is no
            hash, and the caller finds the exception pending before it reads one. */
         if (kt_raised()) {
@@ -2275,14 +2669,13 @@ static kt_int kt_list_hash_code(KRef self) {
    renders that element as `(this Collection)`, Kotlin's `AbstractCollection.toString`, rather
    than recursing into its own `toString`. */
 static KRef kt_list_to_string(KRef self) {
-    KRef elements = ((const KList *)self)->elements;
     kt_int length = kt_list_size(self);
     KRef text = kt_string_utf8("[", 1);
     for (kt_int i = 0; i < length; i++) {
         if (i > 0) {
             text = kt_string_plus(text, kt_string_utf8(", ", 2));
         }
-        KRef element = kt_elements_of(elements)[i];
+        KRef element = kt_list_get(self, i);
         KRef rendered = element == self ? kt_string_utf8("(this Collection)", 17)
                                         : kt_to_string(element);
         /* A `toString` that threw leaves the rendering there: its answer is no text, and the

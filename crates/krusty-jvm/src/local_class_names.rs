@@ -42,7 +42,7 @@ fn provenance_name(
     let mut name = match provenance.lexical_owner {
         Some(IrLocalClassOwner::Class(owner)) => physical_name(owner, facade, ir, cache),
         Some(IrLocalClassOwner::External(owner)) => owner,
-        None => facade(provenance.source),
+        None => provenance.source.facade(facade),
     };
     for segment in provenance.segments.iter() {
         name = type_name_nested_child(name, segment);
@@ -82,7 +82,7 @@ fn declaration_path(
             }
         },
         Some(IrLocalClassOwner::External(owner)) => qualified_name(owner),
-        None => qualified_name(facade(provenance.source)),
+        None => qualified_name(provenance.source.facade(facade)),
     };
     for parent in provenance.parents.iter() {
         path.push('.');

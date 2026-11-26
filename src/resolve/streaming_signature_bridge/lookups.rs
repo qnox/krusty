@@ -93,10 +93,7 @@ impl ProductionSignatureSemantics<'_> {
             .map(|anchor| anchor.source.raw())
             .unwrap_or(0);
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, source_file);
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         let context = crate::assignable::TyCtx::new();
         crate::assignable::is_subtype(&context, &oracle, actual.get(), expected.get())
@@ -566,11 +563,11 @@ impl ProductionSignatureSemantics<'_> {
         if let Some(origin) = selected_site.and_then(|site| site.abbreviation_origin) {
             self.selected_types.record(
                 origin,
-                crate::fir::ResolvedTypeAbbreviation {
-                    alias: identity,
-                    arguments: arguments.clone().into_boxed_slice(),
-                    argument_path: Box::new([]),
-                },
+                crate::fir::ResolvedTypeAbbreviation::root(
+                    identity,
+                    arguments.clone().into_boxed_slice(),
+                    false,
+                ),
             );
         }
         let bindings = formals
@@ -948,10 +945,7 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         qualifier: &str,
         origin: crate::fir::OriginId,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         // A CLASSIFIER prefix is a namespace, not a value: `A.E.OK` reads the entry `OK` of the
         // nested enum `A.E`, and only the last classifier in the path denotes a value at all. Take
@@ -987,6 +981,9 @@ impl ProductionSignatureSemantics<'_> {
                         self, scope, segment, origin, receiver, None, demand,
                     ) {
                         Ok(next) => receiver = next,
+                        Err(failure) if failure.in_progress_declaration().is_some() => {
+                            return Err(failure)
+                        }
                         Err(_) => resolved = false,
                     }
                 }
@@ -997,6 +994,9 @@ impl ProductionSignatureSemantics<'_> {
                         self, scope, segment, origin, receiver, None, demand,
                     ) {
                         Ok(next) => receiver = next,
+                        Err(failure) if failure.in_progress_declaration().is_some() => {
+                            return Err(failure)
+                        }
                         Err(_) => {
                             resolved = false;
                             break;
@@ -1107,10 +1107,7 @@ impl ProductionSignatureSemantics<'_> {
         ) -> R,
     ) -> R {
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         let receivers = [super::super::ImplicitReceiver::signature_receiver(
             dispatch_receiver,
@@ -1361,7 +1358,7 @@ impl ProductionSignatureSemantics<'_> {
                 super::super::member_extension_selection::MemberExtensionLambdaShape::Selected(
                     selected,
                 ) => {
-                    shape = Some(selected);
+                    shape = Some(*selected);
                     break;
                 }
                 super::super::member_extension_selection::MemberExtensionLambdaShape::Ambiguous => {
@@ -1423,10 +1420,7 @@ impl ProductionSignatureSemantics<'_> {
         trailing_lambda: bool,
         refresh_typed_postponed: bool,
         expected: Option<Ty>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
         let call = super::semantics::ReceiverLevelCall {
             scope,
@@ -1457,7 +1451,7 @@ impl ProductionSignatureSemantics<'_> {
             // operation used by final call selection so an explicit or lazily inferred member
             // function type can contextualize its arguments without duplicating member lookup.
             if let Some(callee) =
-                self.selected_member_property_type(scope, receiver, spelling, None, demand)?
+                self.invoke_callee_property_type(scope, receiver, spelling, demand)?
             {
                 if let Ok(expectations) = self.invoke_argument_expectations_for_refresh(
                     scope,
@@ -1761,10 +1755,7 @@ impl ProductionSignatureSemantics<'_> {
         }
         let owner = self.classifier_types.get(&header_owner).copied()?;
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let inheriting_supertypes = |owner: crate::types::TypeName| {
             crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(owner))
                 .into_iter()
@@ -1799,10 +1790,7 @@ impl ProductionSignatureSemantics<'_> {
         name: &str,
     ) -> Result<Option<(Ty, Option<crate::fir::DeclarationId>)>, ()> {
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         let receivers = [super::super::ImplicitReceiver::signature_receiver(
             dispatch_receiver,

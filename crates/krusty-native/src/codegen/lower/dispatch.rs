@@ -283,7 +283,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return self.direct_method_call(function, receiver, args);
         }
         let key = super::super::super::classes::function_key(self.file.ir, class, function);
-        let Some(slot) = self.file.model.slot(class, &key) else {
+        let Some(through) = self.file.dispatch_of(class, &key) else {
             return Err(declined!(
                 "a member of `{}` with no slot",
                 owner.render().replace('/', ".")
@@ -301,7 +301,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.terminated {
             return Ok(None);
         }
-        self.dispatch(object, slot, &params, ret, &arguments)
+        self.dispatch_through(object, through, &params, ret, &arguments)
     }
 
     /// A call through the receiver's vtable: `receiver.type.vtable[slot](receiver, args…)`.
@@ -664,12 +664,21 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             krusty::ir::IrSuperCallKind::Function => {}
         }
         let ir = self.file.ir;
-        let Some(krusty::fir::ResolvedFunctionOverrideTarget::Module(source)) = declaration else {
-            return Err(declined!(
-                "a `super` call without a source declaration (`{name}`)"
-            ));
+        // A dependency member is a method of a class this file materializes.
+        let method = match declaration {
+            Some(krusty::fir::ResolvedFunctionOverrideTarget::Module(source)) => {
+                ir.checked_callable_functions.get(&source)
+            }
+            Some(krusty::fir::ResolvedFunctionOverrideTarget::External(member)) => {
+                ir.dependency_methods.get(&member)
+            }
+            None => {
+                return Err(declined!(
+                    "a `super` call without a source declaration (`{name}`)"
+                ))
+            }
         };
-        let Some(&fid) = ir.checked_callable_functions.get(&source) else {
+        let Some(&fid) = method else {
             return Err(declined!("a `super` call to an unknown method (`{name}`)"));
         };
         let Some(id) = self.file.functions[fid as usize] else {

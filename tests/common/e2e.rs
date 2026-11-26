@@ -47,7 +47,7 @@ pub fn compile_in_process_files_metadata_version(
         jdk_modules,
         None,
         metadata_version,
-        &krusty::language_settings::LanguageSettings::default(),
+        &krusty::language_settings::LanguageSettings::from_environment(),
     )
 }
 
@@ -86,7 +86,7 @@ pub fn compile_in_process_files_common(
         jdk_modules,
         None,
         None,
-        &krusty::language_settings::LanguageSettings::default(),
+        &krusty::language_settings::LanguageSettings::from_environment(),
     )
 }
 
@@ -200,14 +200,48 @@ pub fn write_native_runtime_headers(directory: &std::path::Path) -> std::io::Res
     std::fs::write(directory.join("krusty_rt.h"), NATIVE_RUNTIME_HEADER)
 }
 
+/// The analysis a Native compilation of `sources` (`(stem, text)`) starts from: the semantic
+/// platform and language settings every Native test compiles with, and the file stems in order.
+/// `None` when this build has no selected Native stdlib to analyze against.
+pub fn native_analysis(
+    sources: &[(&str, &str)],
+    diags: &mut krusty::diag::DiagSink,
+) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
+    analyze_natively(sources, &[], false, diags)
+}
+
+fn analyze_natively(
+    sources: &[(&str, &str)],
+    libraries: &[std::path::PathBuf],
+    plugins: bool,
+    diags: &mut krusty::diag::DiagSink,
+) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
+    let inputs = common::native_backend::native_library_inputs(libraries)?;
+    let libraries = krusty::klib_libraries::KlibLibraries::open(&inputs)
+        .expect("open selected Native analysis KLIBs");
+    Some(common::native_backend::analyze_with_native_libraries(
+        sources, libraries, plugins, diags,
+    ))
+}
+
+/// Compile `sources` with the native code generator into one object per file, or say why there
+/// are none.
+pub fn native_objects(
+    sources: &[(&str, &str)],
+    target: krusty_native::NativeTarget,
+) -> Result<Vec<Vec<u8>>, common::native_backend::NativeBox> {
+    common::native_backend::compile_native_sources(sources, target)
+        .map(|compilation| compilation.into_parts().0)
+}
+
 /// `native_analysis` of a build applying every compiler plugin krusty ships, with their
-/// `libraries` (the plugins' runtimes) on the classpath after the stdlib and `kotlin-test`.
+/// `libraries` (the plugins' Native runtime KLIBs) after the selected Native stdlib.
 pub fn native_analysis_with_plugins(
     sources: &[(&str, &str)],
     libraries: &[std::path::PathBuf],
     diags: &mut krusty::diag::DiagSink,
 ) -> Option<(krusty::frontend::StreamingSourceSetAnalysis, Vec<String>)> {
-    common::native_backend::analyze_natively(sources, libraries, true, diags)
+    analyze_natively(sources, libraries, true, diags)
 }
 
 /// A positive front-end coverage test upgraded to true e2e: the source must be checker-clean, the
@@ -450,7 +484,7 @@ fn krusty_cli_diagnostics_in_process(
             friend_paths.to_vec(),
         ))
     };
-    let settings = LanguageSettings::default();
+    let settings = LanguageSettings::from_environment();
     let libraries = JvmLibraries::new(cp.clone())
         .map(|libraries| libraries.with_api_version(settings.api_version));
     let mut diags = DiagSink::new();
@@ -532,7 +566,7 @@ fn krusty_cli_diagnostics_in_process(
 /// where it changes ([`krusty::kotlin_version::ReleaseRecords`]): the newest row at or below the
 /// target.
 pub fn for_reference<T: Copy>(rows: &[(krusty::kotlin_version::KotlinVersion, T)]) -> T {
-    let target = krusty::kotlin_version::target();
+    let target = krusty::kotlin_version::environment_release();
     rows.iter()
         .rev()
         .find(|(release, _)| *release <= target)
@@ -564,12 +598,12 @@ pub fn assert_sources_accepted_like_kotlinc(sources: &[(&str, &str)], reference_
         krusty_error_ledger_with_args(sources, reference_args),
         expected,
         "krusty's ledger against kotlinc {}",
-        krusty::kotlin_version::target()
+        krusty::kotlin_version::environment_release()
     );
     assert!(
         expected.is_empty(),
         "kotlinc {} accepts the fixture",
-        krusty::kotlin_version::target()
+        krusty::kotlin_version::environment_release()
     );
 }
 
@@ -603,7 +637,7 @@ pub fn assert_errors_match_kotlinc(sources: &[(&str, &str)], reference_args: &[S
         krusty_error_ledger_with_args(sources, reference_args),
         expected,
         "krusty's ledger against kotlinc {}",
-        krusty::kotlin_version::target()
+        krusty::kotlin_version::environment_release()
     );
 }
 
@@ -646,7 +680,7 @@ pub fn assert_error_blocks_match_kotlinc(sources: &[(&str, &str)], reference_arg
         krusty_error_blocks_with_args(sources, reference_args),
         expected,
         "krusty's complete errors against kotlinc {}",
-        krusty::kotlin_version::target()
+        krusty::kotlin_version::environment_release()
     );
 }
 
@@ -680,7 +714,7 @@ pub fn assert_messages_match_kotlinc(source: &str) {
         front_end_diagnostics_with_stdlib(source),
         expected,
         "krusty's messages against kotlinc {}",
-        krusty::kotlin_version::target()
+        krusty::kotlin_version::environment_release()
     );
 }
 
@@ -724,7 +758,7 @@ pub fn front_end_diagnostics_inputs(
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         inputs,
         common::with_native_plugins(CompilationTarget::Jvm, platform),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         |_, _| {},
         &mut diagnostics,
     );
@@ -757,7 +791,7 @@ pub fn front_end_named_input_result(
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &[input],
         common::with_native_plugins(CompilationTarget::Jvm, platform),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         |_, _| {},
         &mut diagnostics,
     );
@@ -893,6 +927,12 @@ pub fn inspect_checker_with_stdlib<T>(
 /// Compile one in-memory fixture with the persistent reference compiler harness.
 pub fn kotlinc_source_result(tag: &str, source: &str) -> (i32, String) {
     kotlinc_source_result_with_args(tag, source, &[])
+}
+
+/// Require the native backend's answer for `source` to be the one kotlinc's own run of it gives.
+pub fn expect_native_box_as_kotlinc(source: &str, stem: &str) {
+    let expected = kotlinc_box_result(source);
+    common::expect_native_box(source, stem, &expected);
 }
 
 /// Run the same `box()` fixture with kotlinc and krusty and require the exact same successful

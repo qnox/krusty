@@ -126,7 +126,7 @@ fn callable_receiver(argument: &IrCtorArg) -> bool {
     matches!(
         argument.capture_identity,
         None | Some(ClassCaptureIdentity::Receiver(_))
-    ) && matches!(argument.ty.kind(), TyKind::Obj(_, _))
+    ) && matches!(argument.ty.kind(), TyKind::Obj(_, _) | TyKind::Fun(_))
 }
 
 // A source enclosing receiver is an ordinary reference only after its selected declaration,

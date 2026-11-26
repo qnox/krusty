@@ -1158,6 +1158,12 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             &member.attributes.parameter_access,
             enclosing_instance_prefix,
         );
+        if member.access & ACC_VARARGS != 0 {
+            drop_vararg_array_nullability(
+                &member.descriptor,
+                &mut member.attributes.parameter_nullability,
+            );
+        }
     }
     let annotation_element_defaults = raw_methods
         .iter()
@@ -1871,6 +1877,23 @@ fn read_declaration_annotations(
         }
     }
     Ok(())
+}
+
+/// A Kotlin `vararg` parameter is always a non-null array of its element, so a qualifier on the
+/// Java array itself (`Object @Nullable ... values`) does not make the parameter nullable: kotlinc
+/// still accepts element arguments and no argument at all. The qualifier on its elements is
+/// unaffected, since it addresses a type below the array.
+fn drop_vararg_array_nullability(descriptor: &str, nullability: &mut [Option<JavaNullability>]) {
+    let Some((parameters, _)) = crate::jvm::names::parse_method_descriptor(descriptor) else {
+        return;
+    };
+    if let Some(slot) = parameters
+        .len()
+        .checked_sub(1)
+        .and_then(|last| nullability.get_mut(last))
+    {
+        *slot = None;
+    }
 }
 
 fn align_parameter_nullability(

@@ -78,6 +78,80 @@ impl IntoIterator for TyList {
     }
 }
 
+/// An interned intersection: its components, and the type it approximates to where a supertype
+/// is wanted when inference recorded one (see [`super::TyKind::Intersection`]). Reads as its
+/// components.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IntersectionParts(&'static IntersectionRecord);
+
+#[derive(PartialEq, Eq, Hash)]
+struct IntersectionRecord {
+    parts: TyList,
+    approximation: Option<Ty>,
+}
+
+impl IntersectionParts {
+    pub fn new(parts: TyList, approximation: Option<Ty>) -> IntersectionParts {
+        static I: OnceLock<ShardedInterner<IntersectionRecord>> = OnceLock::new();
+        IntersectionParts(I.get_or_init(ShardedInterner::default).intern_owned(
+            IntersectionRecord {
+                parts,
+                approximation,
+            },
+        ))
+    }
+
+    pub fn parts(self) -> TyList {
+        self.0.parts
+    }
+
+    pub fn as_slice(self) -> &'static [Ty] {
+        self.0.parts.as_slice()
+    }
+
+    /// The type this intersection approximates to where a supertype is wanted, when the type
+    /// variable inference fixed to it had an upper type the components' own approximation misses.
+    pub fn approximation(self) -> Option<Ty> {
+        self.0.approximation
+    }
+}
+
+impl Deref for IntersectionParts {
+    type Target = [Ty];
+
+    fn deref(&self) -> &[Ty] {
+        self.as_slice()
+    }
+}
+
+impl fmt::Debug for IntersectionParts {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.parts.fmt(formatter)?;
+        match self.0.approximation {
+            Some(approximation) => write!(formatter, " ~> {approximation:?}"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl IntoIterator for &IntersectionParts {
+    type Item = &'static Ty;
+    type IntoIter = std::slice::Iter<'static, Ty>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
+impl IntoIterator for IntersectionParts {
+    type Item = &'static Ty;
+    type IntoIter = std::slice::Iter<'static, Ty>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
 impl PartialEq<TyList> for &[Ty] {
     fn eq(&self, other: &TyList) -> bool {
         *self == *other.0

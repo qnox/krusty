@@ -27,6 +27,31 @@ use super::implementor_dispatch::ImplementorArm;
 use super::*;
 use krusty::types::CollectionKind;
 
+/// Whether a list's `addAll` makes room before it reads its argument, as kotlinc-native's library
+/// does ([`krusty::kotlin_version::Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument`]), or
+/// reads the argument first, under `-Xfix-kotlinc-defects`.
+fn add_all_grows_first(quirks: krusty::kotlin_version::Quirks) -> bool {
+    quirks.has(krusty::kotlin_version::Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument)
+}
+
+/// The runtime's `MutableCollection.addAll`, read as [`add_all_grows_first`] says.
+pub(super) fn collection_add_all_symbol(quirks: krusty::kotlin_version::Quirks) -> &'static str {
+    if add_all_grows_first(quirks) {
+        "kt_mutable_collection_add_all"
+    } else {
+        "kt_mutable_collection_add_all_reading_first"
+    }
+}
+
+/// The runtime's `list += elements`, read as [`add_all_grows_first`] says.
+fn list_add_all_symbol(quirks: krusty::kotlin_version::Quirks) -> &'static str {
+    if add_all_grows_first(quirks) {
+        "kt_mutable_list_add_all"
+    } else {
+        "kt_mutable_list_add_all_reading_first"
+    }
+}
+
 /// Whether a type is one of the list shapes the runtime builds.
 ///
 /// `Iterable` is deliberately NOT one of them — a range is one, and answering a range's `size` out
@@ -178,6 +203,7 @@ pub(super) fn indexed_value_getter_ty(name: &str) -> Ty {
 /// realizations differ where it counts: the index one takes an `Int` and the element one takes the
 /// erased reference, whatever `E` was substituted to.
 fn list_symbol(
+    quirks: krusty::kotlin_version::Quirks,
     declaration: classifier_shapes::CollectionDeclaration,
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
     physical: &[Ty],
@@ -197,6 +223,19 @@ fn list_symbol(
         ("get", [Ty::Int], ret) if reads && ret.is_reference() => {
             ("kt_list_get", vec![any(), Ty::Int], any())
         }
+        // The range of a list as a view. Either face selects it: whether the view may write is the
+        // parent's to say at run time, as it is for the JVM's, not the static type's.
+        ("subList", [Ty::Int, Ty::Int], ret) if (reads || mutates) && ret.is_reference() => {
+            ("kt_list_sub_list", vec![any(), Ty::Int, Ty::Int], any())
+        }
+        // The iterator over a list from its start or from an index: either face selects it, as
+        // `subList` does, because the iterator is the runtime's own.
+        ("listIterator", [], ret) if (reads || mutates) && ret.is_reference() => {
+            ("kt_list_list_iterator_from_start", vec![any()], any())
+        }
+        ("listIterator", [Ty::Int], ret) if (reads || mutates) && ret.is_reference() => {
+            ("kt_list_list_iterator", vec![any(), Ty::Int], any())
+        }
         ("indexOf", [element], Ty::Int) if reads && element.is_reference() => {
             ("kt_list_index_of", vec![any(), any()], Ty::Int)
         }
@@ -211,6 +250,12 @@ fn list_symbol(
             vec![any(), any()],
             Ty::Boolean,
         ),
+        ("listIterator", [], ret) if reads && ret.is_reference() => {
+            ("kt_list_iterator", vec![any()], any())
+        }
+        ("listIterator", [Ty::Int], ret) if reads && ret.is_reference() => {
+            ("kt_list_iterator_at", vec![any(), Ty::Int], any())
+        }
         // The mutating half, declared on the MUTABLE face (or by `ArrayList` itself). A read-only
         // face never declares one, so a same-shaped member of anything else stays its own.
         ("add", [element], Ty::Boolean) if mutates && element.is_reference() => {
@@ -248,7 +293,7 @@ fn list_symbol(
         ),
         ("clear", [], Ty::Unit) if mutates => ("kt_mutable_list_clear", vec![any()], Ty::Unit),
         ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
-            "kt_mutable_collection_add_all",
+            collection_add_all_symbol(quirks),
             vec![any(), any()],
             Ty::Boolean,
         ),
@@ -256,8 +301,31 @@ fn list_symbol(
     })
 }
 
-/// The runtime function for one list or collection member, selected by the receiver's collection
-/// kind and the declaration's physical parameters.
+/// The runtime function for one member `ListIterator` declares over a list's iterator: the steps
+/// back and the positions on either side of the cursor. `hasNext` and `next` are every iterator's
+/// and the walk answers them.
+fn list_iterator_symbol(
+    declaration: classifier_shapes::CollectionDeclaration,
+    signature: super::super::super::intrinsics::FunctionSignature<'_>,
+) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    if !declaration.reads(&[CollectionKind::ListIterator]) {
+        return None;
+    }
+    Some(match (signature.name, signature.params, signature.ret) {
+        ("hasPrevious", [], Ty::Boolean) => {
+            ("kt_list_iterator_has_previous", vec![any()], Ty::Boolean)
+        }
+        ("previous", [], ret) if ret.is_reference() => {
+            ("kt_list_iterator_previous", vec![any()], any())
+        }
+        ("nextIndex", [], Ty::Int) => ("kt_list_iterator_next_index", vec![any()], Ty::Int),
+        ("previousIndex", [], Ty::Int) => ("kt_list_iterator_previous_index", vec![any()], Ty::Int),
+        _ => return None,
+    })
+}
+
+/// The runtime function for one list, collection or list-iterator member, selected by the
+/// receiver's collection kind and the declaration's physical parameters.
 ///
 /// `ArrayList.contains` is declared on `AbstractMutableList`. The receiver is still the runtime's
 /// list, so the operation is that list's, not a member the owner alone names.
@@ -267,6 +335,14 @@ pub(super) fn collection_runtime_member(
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
     physical: &[Ty],
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    // A list's iterator, held as a `ListIterator`: its steps back are the runtime's too.
+    if file.iteration_shape_of(ty)
+        == Some(super::super::super::intrinsics::CollectionShape::Iterator)
+    {
+        let owner = signature.owner.semantic_classifier()?;
+        let declaration = classifier_shapes::collection_declaration(file.classifiers, owner)?;
+        return list_iterator_symbol(declaration, signature);
+    }
     let list = is_list(file, ty);
     if !(list || is_collection(file, ty)) {
         return None;
@@ -279,9 +355,9 @@ pub(super) fn collection_runtime_member(
                 .map(classifier_shapes::CollectionDeclaration::Implementation)
         })?;
     if list {
-        list_symbol(declaration, signature, physical)
+        list_symbol(file.ir.reference.quirks(), declaration, signature, physical)
     } else {
-        collection_symbol(declaration, signature)
+        collection_symbol(file.ir.reference.quirks(), declaration, signature)
     }
 }
 
@@ -289,6 +365,7 @@ pub(super) fn collection_runtime_member(
 /// typed by no narrower collection. Which collection stands behind it is the descriptor's to say,
 /// so each entry point asks it rather than reading one shape's header.
 fn collection_symbol(
+    quirks: krusty::kotlin_version::Quirks,
     declaration: classifier_shapes::CollectionDeclaration,
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
@@ -317,7 +394,7 @@ fn collection_symbol(
             Ty::Boolean,
         ),
         ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
-            "kt_mutable_collection_add_all",
+            collection_add_all_symbol(quirks),
             vec![any(), any()],
             Ty::Boolean,
         ),
@@ -640,9 +717,14 @@ impl BodyLowering<'_, '_, '_> {
             getter.ret,
         );
         let (symbol, _, _) = if is_list(self.file, ty) {
-            list_symbol(declaration, signature, &getter.physical_params)?
+            list_symbol(
+                self.file.ir.reference.quirks(),
+                declaration,
+                signature,
+                &getter.physical_params,
+            )?
         } else {
-            collection_symbol(declaration, signature)?
+            collection_symbol(self.file.ir.reference.quirks(), declaration, signature)?
         };
         matches!(symbol, "kt_list_size" | "kt_collection_size").then(|| property.name.to_string())
     }
@@ -753,7 +835,14 @@ impl BodyLowering<'_, '_, '_> {
         // REPRESENTATION rather than about walking. A file that also puts a class of its own
         // behind the receiver's type dispatches that class first; this direct call is only for a
         // receiver no class of the file can be. See [`FileLowering::implements_collection_of`].
-        if self.file.implements_collection_of(ty) {
+        // The shape is as coarse as `Iterable`, so a class implementing only `Collection` marks
+        // `List` too; only a class that can stand behind this very type is one to dispatch to.
+        if self.file.implements_collection_of(ty)
+            && ty
+                .non_null()
+                .obj_internal()
+                .is_none_or(|internal| !self.file.implementors_of(internal).is_empty())
+        {
             return None;
         }
         let (symbol, carried, answer) =
@@ -791,14 +880,8 @@ impl BodyLowering<'_, '_, '_> {
         // shape the receiver is the runtime's own and the walk IS the member.
         if self.file.implements_collection_of(ty)
             && ty.non_null().obj_internal().is_some_and(|internal| {
-                classifier_shapes::mapped_collection(self.file.classifiers, internal).is_some_and(
-                    |collection| {
-                        super::super::super::intrinsics::has_special_bridge(
-                            collection,
-                            signature.name,
-                        )
-                    },
-                )
+                classifier_shapes::mapped_collection(self.file.classifiers, internal)
+                    .is_some_and(|collection| collection.has_special_bridge(signature.name))
             })
         {
             return None;
@@ -999,7 +1082,7 @@ impl BodyLowering<'_, '_, '_> {
                     && !self.file.implements_collection_of(receiver_ty) =>
             {
                 (
-                    "kt_mutable_list_add_all",
+                    list_add_all_symbol(self.file.ir.reference.quirks()),
                     vec![any(), any()],
                     Ty::Unit,
                     args,
@@ -1037,13 +1120,17 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let name = signature.name;
         let params = signature.params;
-        // A member Kotlin gives a SPECIAL BRIDGE is not this dispatch's to make: a call through the
+        // A member Kotlin gives a SPECIAL BRIDGE is not this dispatch's to make, except the `Map` reads
+        // the runtime's own thunks guard (`KType.map_members`): a call through the
         // wide type answers the member's default rather than reaching the override when the
         // argument cannot be what the declaration accepts, and there is no bridge here to put in
         // front of an implementor's arm. Every one of them takes an argument, so the nullary
         // members are untouched.
         if classifier_shapes::mapped_collection(self.file.classifiers, internal).is_some_and(
-            |collection| super::super::super::intrinsics::has_special_bridge(collection, name),
+            |collection| {
+                collection.has_special_bridge(name)
+                    && !super::super::super::intrinsics::map_thunk_guards_bridge(collection, name)
+            },
         ) {
             return None;
         }
@@ -1102,7 +1189,15 @@ impl BodyLowering<'_, '_, '_> {
             carried: &carried,
             answer,
         };
-        Some(self.member_by_implementor(&implementors, runtime, receiver, args, ret))
+        // A `Map` read the runtime's thunks guard goes to the runtime entry point alone: an arm of
+        // this dispatch would hand the override an argument its bridge has not checked, and the
+        // thunk of `KType.map_members` is where the guard lives for a program class.
+        let guarded = classifier_shapes::mapped_collection(self.file.classifiers, internal)
+            .is_some_and(|collection| {
+                super::super::super::intrinsics::map_thunk_guards_bridge(collection, name)
+            });
+        let arms: &[ImplementorArm] = if guarded { &[] } else { &implementors };
+        Some(self.member_by_implementor(arms, runtime, receiver, args, ret))
     }
 
     /// One of those, with the runtime entry point as the last arm.
@@ -1215,6 +1310,10 @@ impl BodyLowering<'_, '_, '_> {
 mod tests {
     use super::*;
 
+    fn quirks() -> krusty::kotlin_version::Quirks {
+        krusty::kotlin_version::ReferenceProfile::default().quirks()
+    }
+
     fn signature<'a>(
         owner: &str,
         name: &'a str,
@@ -1241,18 +1340,21 @@ mod tests {
         let element = Ty::ty_param("E", any());
         let list = face(CollectionKind::List, false);
         assert!(list_symbol(
+            quirks(),
             list,
             signature("kotlin/collections/List", "get", &[Ty::Int], element),
             &[Ty::Int],
         )
         .is_some());
         assert!(list_symbol(
+            quirks(),
             list,
             signature("kotlin/collections/List", "get", &[Ty::String], element),
             &[Ty::String],
         )
         .is_none());
         assert!(list_symbol(
+            quirks(),
             list,
             signature(
                 "kotlin/collections/List",
@@ -1264,6 +1366,7 @@ mod tests {
         )
         .is_none());
         assert!(list_symbol(
+            quirks(),
             face(CollectionKind::Set, false),
             signature("kotlin/collections/List", "get", &[Ty::Int], element),
             &[Ty::Int],
@@ -1289,24 +1392,66 @@ mod tests {
         let array_list =
             CollectionDeclaration::Implementation(StandardCollectionImplementation::List);
 
-        assert!(list_symbol(face(CollectionKind::List, false), size, &[]).is_some());
-        assert!(list_symbol(face(CollectionKind::List, true), size, &[]).is_none());
-        assert!(list_symbol(face(CollectionKind::List, true), clear, &[]).is_some());
-        assert!(list_symbol(face(CollectionKind::List, false), clear, &[]).is_none());
-        assert!(list_symbol(face(CollectionKind::List, false), add, &[any()]).is_none());
-        assert!(list_symbol(array_list, size, &[]).is_some());
-        assert!(list_symbol(array_list, clear, &[]).is_some());
+        assert!(list_symbol(quirks(), face(CollectionKind::List, false), size, &[]).is_some());
+        assert!(list_symbol(quirks(), face(CollectionKind::List, true), size, &[]).is_none());
+        assert!(list_symbol(quirks(), face(CollectionKind::List, true), clear, &[]).is_some());
+        assert!(list_symbol(quirks(), face(CollectionKind::List, false), clear, &[]).is_none());
+        assert!(list_symbol(quirks(), face(CollectionKind::List, false), add, &[any()]).is_none());
+        assert!(list_symbol(quirks(), array_list, size, &[]).is_some());
+        assert!(list_symbol(quirks(), array_list, clear, &[]).is_some());
 
         let collection = face(CollectionKind::Collection, false);
         let mutable_collection = face(CollectionKind::Collection, true);
-        assert!(collection_symbol(collection, size).is_some());
-        assert!(collection_symbol(mutable_collection, size).is_none());
-        assert!(collection_symbol(mutable_collection, clear).is_some());
-        assert!(collection_symbol(collection, clear).is_none());
-        assert!(collection_symbol(collection, add).is_none());
+        assert!(collection_symbol(quirks(), collection, size).is_some());
+        assert!(collection_symbol(quirks(), mutable_collection, size).is_none());
+        assert!(collection_symbol(quirks(), mutable_collection, clear).is_some());
+        assert!(collection_symbol(quirks(), collection, clear).is_none());
+        assert!(collection_symbol(quirks(), collection, add).is_none());
         // `Collection` is the only declaration a `Collection`-typed receiver can select.
-        assert!(collection_symbol(face(CollectionKind::List, false), size).is_none());
-        assert!(collection_symbol(array_list, size).is_none());
+        assert!(collection_symbol(quirks(), face(CollectionKind::List, false), size).is_none());
+        assert!(collection_symbol(quirks(), array_list, size).is_none());
+    }
+
+    /// `listIterator` is a query of a list, and the steps back are `ListIterator`'s own: an
+    /// `Iterator` declares no `previous`, and a step with another shape is not this table's.
+    #[test]
+    fn list_iterator_members_match_their_declaration() {
+        let element = Ty::ty_param("E", any());
+        let iterator = Ty::obj_args("kotlin/collections/ListIterator", &[element]);
+        let list = face(CollectionKind::List, false);
+        let at_params = [Ty::Int];
+        let at = signature(
+            "kotlin/collections/List",
+            "listIterator",
+            &at_params,
+            iterator,
+        );
+        let first = signature("kotlin/collections/List", "listIterator", &[], iterator);
+        let by_text_params = [Ty::String];
+        let by_text = signature(
+            "kotlin/collections/List",
+            "listIterator",
+            &by_text_params,
+            iterator,
+        );
+        assert!(list_symbol(quirks(), list, first, &[]).is_some());
+        assert!(list_symbol(quirks(), list, at, &[Ty::Int]).is_some());
+        assert!(list_symbol(quirks(), list, by_text, &[Ty::String]).is_none());
+        assert!(list_symbol(quirks(), face(CollectionKind::Set, false), at, &[Ty::Int]).is_none());
+
+        let steps = face(CollectionKind::ListIterator, false);
+        let previous = signature("kotlin/collections/ListIterator", "previous", &[], element);
+        let next_index = signature("kotlin/collections/ListIterator", "nextIndex", &[], Ty::Int);
+        let long_index = signature(
+            "kotlin/collections/ListIterator",
+            "nextIndex",
+            &[],
+            Ty::Long,
+        );
+        assert!(list_iterator_symbol(steps, previous).is_some());
+        assert!(list_iterator_symbol(steps, next_index).is_some());
+        assert!(list_iterator_symbol(steps, long_index).is_none());
+        assert!(list_iterator_symbol(face(CollectionKind::Iterator, false), previous).is_none());
     }
 
     #[test]

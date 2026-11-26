@@ -158,7 +158,8 @@ pub(super) fn realize(ir: &mut IrFile) {
         if !class.is_source_declared || class.is_sealed || private {
             continue;
         }
-        let assertion_names = crate::parameter_names::constructor_assertions(&class.ctor_args);
+        let assertion_names =
+            crate::parameter_names::constructor_assertions(ir.reference.quirks(), &class.ctor_args);
         for (parameter, assertion_name) in class.ctor_args.iter_mut().zip(assertion_names) {
             if parameter.check.is_some() {
                 continue;
@@ -213,6 +214,27 @@ fn realize_secondary_constructors(ir: &mut IrFile) {
                     requires_reference_guard(*ty).then_some(krusty::ir::IrParameterCheck::NonNull)
                 })
                 .collect();
+        }
+    }
+}
+
+/// kotlinc guards no parameter of a method declared on a coroutine state-machine class
+/// (`generateNonNullAssertions` skips a parent of origin `SUSPEND_LAMBDA` or
+/// `CONTINUATION_CLASS`). That includes the implementation of a lambda literal written in a
+/// suspend lambda's body: its `invokedynamic` handle names a private method of the suspend
+/// lambda's class, so it keeps no receiver or value-parameter guard there, although the same
+/// lambda placed on a facade or an ordinary class guards them. Placement is physical, so this runs
+/// once lambda implementations have been reparented onto the class that emits them.
+pub(super) fn drop_in_coroutine_classes(ir: &mut IrFile) {
+    let methods = ir
+        .classes
+        .iter()
+        .filter(|class| super::coroutine_classes::is_coroutine_state_machine(class))
+        .flat_map(|class| class.methods.iter().copied())
+        .collect::<Vec<_>>();
+    for method in methods {
+        if let Some(function) = ir.functions.get_mut(method as usize) {
+            function.param_checks.fill(None);
         }
     }
 }

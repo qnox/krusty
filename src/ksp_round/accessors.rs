@@ -2,7 +2,7 @@
 //! setter, written in the source or made by the compiler; an annotation targeted at one from the
 //! property (`@get:A`, `@set:A`, `@setparam:A`) is shown on it.
 
-use krusty_plugin_ir::{KspAccessor, KspAnnotation, KspDeclarationOrigin, KspModifier};
+use krusty_plugin_api::ksp::{KspAccessor, KspAnnotation, KspDeclarationOrigin, KspModifier};
 
 use super::annotations::Placement;
 use super::{Source, Subject};

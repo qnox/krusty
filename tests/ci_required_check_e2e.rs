@@ -54,7 +54,7 @@ fn run_script(job: &str) -> String {
 }
 
 /// The aggregate's result variables, in the order its log names them.
-const RESULT_VARIABLES: [&str; 10] = [
+const RESULT_VARIABLES: [&str; 11] = [
     "CI_RESULT",
     "LINT_RESULT",
     "PLUGIN_HOST_RESULT",
@@ -64,10 +64,11 @@ const RESULT_VARIABLES: [&str; 10] = [
     "GRADLE_RESULT",
     "MAVEN_RESULT",
     "BUILD_TOOLS_RESULT",
+    "ANALYSIS_API_RESULT",
     "BAZEL_RESULT",
 ];
 
-fn run_predicate(script: &str, results: [&str; 10]) -> std::process::Output {
+fn run_predicate(script: &str, results: [&str; 11]) -> std::process::Output {
     let mut child = Command::new("bash")
         .arg("-s")
         .env_clear()
@@ -91,8 +92,8 @@ fn run_predicate(script: &str, results: [&str; 10]) -> std::process::Output {
 fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     let workflow = workflow();
     let script = run_script(job(&workflow, AGGREGATE));
-    let run = |results: [&str; 10]| run_predicate(&script, results);
-    let success = ["success"; 10];
+    let run = |results: [&str; 11]| run_predicate(&script, results);
+    let success = ["success"; 11];
     let output = run(success);
     assert!(
         output.status.success(),
@@ -101,7 +102,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "ci: success\nlint: success\nplugin-host: success\ne2e: success\nconformance: success\nbuild-gradle-plugin: success\ngradle: success\nmaven: success\nbuild-tools: success\nbazel: success\n",
+        "ci: success\nlint: success\nplugin-host: success\ne2e: success\nconformance: success\nbuild-gradle-plugin: success\ngradle: success\nmaven: success\nbuild-tools: success\nanalysis-api: success\nbazel: success\n",
         "the log names every dependency result"
     );
 
@@ -115,6 +116,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
         "gradle",
         "maven",
         "build-tools",
+        "analysis-api",
         "bazel",
     ];
     for (gate, index) in gates.into_iter().zip(0..) {
@@ -128,7 +130,7 @@ fn aggregate_passes_only_when_every_merge_gate_succeeded() {
             );
             assert_eq!(
                 String::from_utf8_lossy(&output.stderr),
-                "lint, plugin host tests, the own test suites (including KLIB implementation coverage), e2e, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, and every Bazel lane must succeed\n",
+                "lint, plugin host tests, the own test suites (including KLIB implementation coverage), e2e, conformance (including KLIB semantics), every Gradle gate, the Maven goal, every build-tools lane, the Analysis API session provider, and every Bazel lane must succeed\n",
                 "{gate}={result:?}"
             );
         }

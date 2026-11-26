@@ -13,6 +13,7 @@ reference=$(cd "$repo" && just max-version)
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
 cp "$repo/justfile" "$repo/push.just" "$fixture/"
+mkdir "$fixture/scripts" && cp "$repo/scripts/sort-kotlin-versions.sh" "$fixture/scripts/"
 
 export GIT_AUTHOR_NAME='Version Fixture'
 export GIT_AUTHOR_EMAIL='version@example.invalid'

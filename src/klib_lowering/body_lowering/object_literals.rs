@@ -231,6 +231,11 @@ impl<'a> BodyLowering<'a> {
             });
         }
         let class_id = self.ir.add_class(declared);
+        if let Some(provenance) = self.anonymous_object_provenance() {
+            self.ir
+                .local_class_name_provenance
+                .insert(class_id, provenance);
+        }
         let owner = self.ir.classes[class_id as usize].fq_name_id();
         let mut capture_fields = HashMap::default();
         for (index, capture) in captures.iter().enumerate() {
@@ -247,20 +252,21 @@ impl<'a> BodyLowering<'a> {
             .iter()
             .map(|(field, ty, _, is_final)| (&field.base.symbol, *ty, *is_final))
             .collect::<Vec<_>>();
+        let storage = ObjectStorage {
+            declaring: &class.base.symbol,
+            first_index: capture_count,
+            fields: storage,
+            properties: super::super::class_storage::backed_properties(&class.members),
+        };
         self.lower_members(
             class,
             class_id,
             owner,
             &supertypes,
             &capture_fields,
-            &ObjectStorage {
-                declaring: &class.base.symbol,
-                first_index: capture_count,
-                fields: storage,
-                properties: super::super::class_storage::backed_properties(&class.members),
-            },
+            &storage,
         )?;
-        self.initialize_object(class_id, owner, &capture_fields, &stored)?;
+        self.initialize_object(class, class_id, owner, &capture_fields, &storage, &stored)?;
         let mut args = Vec::with_capacity(captures.len());
         let mut params = Vec::with_capacity(captures.len());
         for capture in &captures {
@@ -299,6 +305,59 @@ impl<'a> BodyLowering<'a> {
             default_prefix_count: prefix_count,
         });
         Ok(self.typed(constructed, Ty::obj_name(owner)))
+    }
+
+    /// How Kotlin names an object literal the body of a published function declares: in the
+    /// function's class, or its package for a top-level one, below the function, numbered after
+    /// the ones it already declared. A body of any other declaration names none here.
+    fn anonymous_object_provenance(&self) -> Option<crate::ir::IrLocalClassNameProvenance> {
+        let crate::metadata::klib_ir::KlibIrSignature::Public(signature) =
+            &self.function.symbol.signature
+        else {
+            return None;
+        };
+        let (function, owner) = signature.declaration().segments().split_last()?;
+        let package = signature
+            .package()
+            .segments()
+            .iter()
+            .fold(TypeName::ROOT, |parent, segment| {
+                crate::types::type_name_child(parent, segment)
+            });
+        let lexical_owner = match owner.split_first() {
+            None => None,
+            Some((first, nested)) => {
+                let owner = nested.iter().fold(
+                    crate::types::type_name_child(package, first),
+                    |parent, segment| crate::types::type_name_nested_child(parent, segment),
+                );
+                Some(match self.ir.class_id_by_name(owner) {
+                    Some(class) => crate::ir::IrLocalClassOwner::Class(class),
+                    None => crate::ir::IrLocalClassOwner::External(owner),
+                })
+            }
+        };
+        let source = crate::ir::IrLocalClassNameRoot::Dependency { package };
+        let segments: Box<[String]> = Box::new([function.clone()]);
+        let ordinal = self
+            .ir
+            .local_class_name_provenance
+            .values()
+            .filter(|known| {
+                known.source == source
+                    && known.lexical_owner == lexical_owner
+                    && known.segments == segments
+            })
+            .filter_map(|known| known.ordinal)
+            .max()
+            .map_or(1, |ordinal| ordinal.saturating_add(1));
+        Some(crate::ir::IrLocalClassNameProvenance {
+            source,
+            lexical_owner,
+            segments,
+            ordinal: Some(ordinal),
+            parents: Box::new([]),
+        })
     }
 
     /// Checks the members an object literal may declare, and returns the constructor's delegation
@@ -510,6 +569,35 @@ impl<'a> BodyLowering<'a> {
                 receiver,
             }));
         }
+        // The instance a member's body reads as `this` is no declared parameter, yet an object
+        // literal written in the member reads it as the enclosing instance.
+        if let Some(value) = self.header.value(symbol) {
+            let receiver = self
+                .header
+                .capture_parameter(
+                    symbol,
+                    0,
+                    crate::ir::IrCapturingCallable::LocalFunction,
+                    &self
+                        .ir
+                        .fn_params
+                        .get(&self.function.function)
+                        .expect("a body publishes its parameters")
+                        .captured_receivers,
+                    false,
+                )?
+                .and_then(|parameter| parameter.receiver);
+            if receiver.is_none() {
+                return Err(mismatch("an object literal captures an unnamed receiver"));
+            }
+            return Ok(Some(Capture {
+                symbol: (*symbol).clone(),
+                name: "this$0".to_owned(),
+                ty: self.header.slot_type(value.index),
+                crossinline: None,
+                receiver,
+            }));
+        }
         if let Some(local) = self.locals.get(symbol) {
             if local.mutable {
                 return unsupported("an object literal capturing a mutable local");
@@ -642,6 +730,8 @@ impl<'a> BodyLowering<'a> {
                         }
                         None => None,
                     };
+                    let dispatched =
+                        self.record_property_override(&name, &getter, fun, owner, supertypes, ret)?;
                     self.ir.classes[class_id as usize]
                         .properties
                         .push(property_declaration(
@@ -650,8 +740,8 @@ impl<'a> BodyLowering<'a> {
                             ret,
                             fun,
                             setter,
+                            dispatched,
                         )?);
-                    self.record_property_override(&name, &getter, fun, owner, supertypes, ret)?;
                 }
                 _ => {}
             }
@@ -774,12 +864,33 @@ impl<'a> BodyLowering<'a> {
     /// captured values are its fields.
     fn enter_initializer(
         &mut self,
+        class: &KlibIrClass,
+        class_id: ClassId,
+        owner: TypeName,
         captures: &HashMap<KlibIrSymbol, CaptureField>,
-    ) -> MemberFrame<'a> {
+        storage: &ObjectStorage<'a>,
+    ) -> Lowered<MemberFrame<'a>> {
         let mut locals = super::super::local_values::LocalValues::after(0);
-        locals.anonymous_slot();
-        MemberFrame {
-            instance_storage: self.instance_storage.take(),
+        // An initializer reads the object itself, and the properties it stores, through the
+        // class's own receiver, as a member does through its dispatch receiver.
+        match &class.this_receiver {
+            Some(receiver) => {
+                locals.temporary(&receiver.base.symbol, Ty::obj_name(owner))?;
+            }
+            None => {
+                locals.anonymous_slot();
+            }
+        }
+        let fields = super::instance_storage::InstanceStorageFrame::object_member(
+            class_id,
+            storage.declaring,
+            storage.first_index,
+            storage.fields.iter().copied(),
+            storage.properties.clone(),
+            Ty::obj_name(owner),
+        );
+        Ok(MemberFrame {
+            instance_storage: self.instance_storage.replace(fields),
             locals: std::mem::replace(&mut self.locals, locals),
             captures: std::mem::replace(&mut self.captures, captures.clone()),
             member_return: self.member_return.take(),
@@ -788,21 +899,23 @@ impl<'a> BodyLowering<'a> {
             returnable_targets: std::mem::take(&mut self.returnable_targets),
             returnable_frames: std::mem::take(&mut self.returnable_frames),
             null_proven: std::mem::take(&mut self.null_proven),
-        }
+        })
     }
 
     /// Stores each property with storage's initializer into its field, in declaration order.
     fn initialize_object(
         &mut self,
+        class: &KlibIrClass,
         class_id: ClassId,
         owner: TypeName,
         captures: &HashMap<KlibIrSymbol, CaptureField>,
+        storage: &ObjectStorage<'a>,
         stored: &[(&KlibIrField, Ty, u32, bool)],
     ) -> Lowered<()> {
         if stored.iter().all(|(field, ..)| field.initializer.is_none()) {
             return Ok(());
         }
-        let frame = self.enter_initializer(captures);
+        let frame = self.enter_initializer(class, class_id, owner, captures, storage)?;
         let lowered = self.object_initializers(class_id, owner, stored);
         self.exit_member(frame);
         let body = self.ir.add_expr(IrExpr::Block {
@@ -899,6 +1012,49 @@ impl<'a> BodyLowering<'a> {
         Ok(())
     }
 
+    /// An override of the accessor `record` names, which this unit emits as a method of the
+    /// class it materializes: the override edge of a function without parameters.
+    fn record_accessor_method_override(
+        &mut self,
+        getter: &KlibIrFunction,
+        fun: FunId,
+        owner: TypeName,
+        record: super::super::same_library_class::MemberOverride,
+        interface: bool,
+        ty: Ty,
+    ) -> Lowered<()> {
+        let target = crate::fir::ResolvedFunctionOverrideTarget::External(
+            self.linker.external_override(&record.identity)?,
+        );
+        self.ir
+            .function_overrides
+            .entry(owner)
+            .or_default()
+            .push(IrFunctionOverride {
+                implementation: target,
+                implementation_function: Some(fun),
+                implementation_owner: owner,
+                overridden: target,
+                overridden_owner: record.owner,
+                overridden_semantic_role: record.semantic_role,
+                collection_barrier: None,
+                overridden_is_interface: interface,
+                name: getter.name.clone(),
+                declared_parameters: record.declared_parameters,
+                declared_result: record.declared_result,
+                applied_parameters: record.applied_parameters,
+                applied_result: record.applied_result,
+                implementation_parameters: Vec::new(),
+                implementation_parameter_identities: Vec::new(),
+                overridden_parameter_identities: Vec::new(),
+                implementation_result: ty,
+                suspend: false,
+                has_kotlin_superclass_override: false,
+                depth: 1,
+            });
+        Ok(())
+    }
+
     fn record_property_override(
         &mut self,
         name: &str,
@@ -907,16 +1063,22 @@ impl<'a> BodyLowering<'a> {
         owner: TypeName,
         supertypes: &[Ty],
         ty: Ty,
-    ) -> Lowered<()> {
+    ) -> Lowered<bool> {
         use crate::fir::ResolvedPropertyOverrideTarget;
+        let mut dispatched = false;
         for symbol in &getter.overridden {
             let Some(record) = self.linker.dependency_override(symbol, supertypes, true)? else {
                 continue;
             };
-            let target = ResolvedPropertyOverrideTarget::External(
-                self.linker.external_override(&record.identity)?,
-            );
+            let external = self.linker.external_override(&record.identity)?;
             let interface = self.linker.is_interface(record.owner)?;
+            // An accessor a class this unit materializes declares is a method of that class,
+            // whose slot a function override edge reaches.
+            if self.ir.dependency_methods.contains_key(&external) {
+                self.record_accessor_method_override(getter, fun, owner, record, interface, ty)?;
+                continue;
+            }
+            let target = ResolvedPropertyOverrideTarget::External(external);
             self.ir
                 .property_overrides
                 .entry(owner)
@@ -940,8 +1102,9 @@ impl<'a> BodyLowering<'a> {
                     has_kotlin_superclass_override: false,
                     depth: 1,
                 });
+            dispatched = true;
         }
-        Ok(())
+        Ok(dispatched)
     }
 }
 
@@ -958,20 +1121,24 @@ struct MemberFrame<'a> {
 }
 
 /// An object literal property, with the modality its serialized declaration flags state: only an
-/// `open` or `abstract` one (an `override` not marked `final` included) dispatches.
+/// `open` or `abstract` one (an `override` not marked `final` included) dispatches, and only when it
+/// overrides a property of a supertype the unit does not materialize; an accessor of a class the
+/// unit materializes is overridden as that class's method, so the property itself stays final.
 fn property_declaration(
     name: &str,
     flags: u64,
     ty: Ty,
     getter: FunId,
     setter: Option<FunId>,
+    dispatched: bool,
 ) -> Lowered<IrProperty> {
     use crate::metadata::semantic::KotlinModality;
     let modality = match crate::metadata::semantic::declaration_modality(flags) {
+        KotlinModality::Sealed => return Err(mismatch("an object literal property is sealed")),
+        _ if !dispatched => crate::ir::IrPropertyModality::Final,
         KotlinModality::Final => crate::ir::IrPropertyModality::Final,
         KotlinModality::Open => crate::ir::IrPropertyModality::Open,
         KotlinModality::Abstract => crate::ir::IrPropertyModality::Abstract,
-        KotlinModality::Sealed => return Err(mismatch("an object literal property is sealed")),
     };
     Ok(IrProperty {
         name: name.to_owned(),

@@ -65,7 +65,7 @@ pub(super) fn realize(
         );
         let end = coerce(ir, expression as ExprId, end, end_type, construction.elem);
         let physical_result = construction.result;
-        let physical = match operation {
+        let (physical, declared_parameters) = match operation {
             FirRangeOperation::Through => {
                 if let Some(callable) = construction.through_static {
                     static_call(callable, start, end)
@@ -76,7 +76,7 @@ pub(super) fn realize(
                         copy_expression_facts(ir, expression as ExprId, null);
                         arguments.push(null);
                     }
-                    IrExpr::New {
+                    let construction = IrExpr::New {
                         internal: krusty::types::type_name(&construction.through.internal),
                         args: arguments,
                         ctor_params: None,
@@ -85,7 +85,8 @@ pub(super) fn realize(
                         external_target: None,
                         defaults: Box::new([]),
                         default_prefix_count: 0,
-                    }
+                    };
+                    (construction, None)
                 }
             }
             FirRangeOperation::OpenEnd | FirRangeOperation::Until => static_call(
@@ -97,8 +98,9 @@ pub(super) fn realize(
             // compiler-supplied range-construction operation.
             FirRangeOperation::DownTo => return Err(failure),
         };
-        if physical_result == result {
+        let call = if physical_result == result {
             ir.exprs[expression] = physical;
+            expression as ExprId
         } else {
             let physical = ir.add_expr(physical);
             copy_expression_facts(ir, expression as ExprId, physical);
@@ -107,6 +109,12 @@ pub(super) fn realize(
                 arg: physical,
                 type_operand: result,
             };
+            physical
+        };
+        // The helper is a Kotlin declaration (`infix fun Int.until(to: Int)`): its parameters are
+        // the representation each bound is passed in, as for any selected call.
+        if let Some(parameters) = declared_parameters {
+            ir.call_declared_params.insert(call, parameters);
         }
     }
     for expression in 0..expression_count {
@@ -230,9 +238,14 @@ fn illegal_step(ir: &mut IrFile, cause: ExprId, step: ExprId) -> IrExpr {
     IrExpr::Throw { operand: exception }
 }
 
-fn static_call(callable: krusty::libraries::LibraryCallable, start: ExprId, end: ExprId) -> IrExpr {
+/// The static call of a range helper over `start` and `end`, and the parameters it declares.
+fn static_call(
+    callable: krusty::libraries::LibraryCallable,
+    start: ExprId,
+    end: ExprId,
+) -> (IrExpr, Option<Box<[Ty]>>) {
     let physical_name = callable.physical_name().to_string();
-    IrExpr::Call {
+    let call = IrExpr::Call {
         callee: Box::new(Callee::Static {
             owner: callable.owner,
             name: physical_name,
@@ -241,7 +254,8 @@ fn static_call(callable: krusty::libraries::LibraryCallable, start: ExprId, end:
         }),
         dispatch_receiver: None,
         args: vec![start, end],
-    }
+    };
+    (call, callable.declared_params)
 }
 
 fn coerce(ir: &mut IrFile, cause: ExprId, value: ExprId, source: Ty, target: Ty) -> ExprId {

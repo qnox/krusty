@@ -63,9 +63,13 @@ impl Emitter<'_> {
         else {
             return true;
         };
+        let layout = self
+            .ir
+            .property_layout_at(operation, *property)
+            .expect("a realized property retains its checked specialization");
         let Some(krusty::ir::IrLocalPropertyLayout::Member {
             class, property, ..
-        }) = self.ir.local_property_layouts.get(property)
+        }) = layout.as_ref()
         else {
             return true;
         };
@@ -128,7 +132,12 @@ impl Emitter<'_> {
                 .is_some_and(|class| class.fq_name == access_owner),
             _ => false,
         };
-        if !self.operand_runs_no_code(receiver) && !initializes_owner {
+        // Inside the owner the instance is already published, so naming it is not initializing it.
+        let inside_owner = matches!(
+            self.static_owner,
+            Some(crate::private_static_access::StaticOwner::Class(owner)) if owner == access_owner
+        );
+        if !self.operand_runs_no_code(receiver) && (!initializes_owner || inside_owner) {
             self.emit_value(receiver, code);
             code.pop();
         }
@@ -542,11 +551,15 @@ impl Emitter<'_> {
         else {
             return None;
         };
+        let layout = self
+            .ir
+            .property_layout_at(operation, *property)
+            .expect("a realized property retains its checked specialization")?;
         let krusty::ir::IrLocalPropertyLayout::Member {
             class,
             backing_field: Some(field),
             ..
-        } = self.ir.local_property_layouts.get(property)?
+        } = &layout
         else {
             return None;
         };

@@ -26,6 +26,7 @@ pub mod local_properties;
 mod module_facts;
 pub mod module_links;
 pub mod property_entries;
+pub mod property_reference_values;
 pub mod range_constructions;
 pub mod reference_names;
 mod source_class_members;
@@ -61,7 +62,7 @@ pub use entry::{Entry, BOX_RESULT_FRAME};
 
 pub use module_facts::{
     BackendClassifierFact, BackendClassifierSource, BackendFactError, BackendModuleFacts,
-    CheckedBackendClassifiers, EnumEntriesAccessor, UndeterminedType,
+    CheckedBackendClassifiers, DependencyImplementor, EnumEntriesAccessor, UndeterminedType,
 };
 pub use source_class_members::{
     SourceClassMembers, SourceFunctionSignature, SourceMemberFunction, SourceMemberProperty,
@@ -129,6 +130,10 @@ pub type Artifact = (String, Vec<u8>);
 pub struct CommonIrPreparation {
     pub counted_loops: counted_loops::CountedLoopPolicy,
     pub enums: enums::Contract,
+    /// Realize each source `KProperty` reference as a function value
+    /// ([`property_reference_values::realize`]) instead of leaving it to the target's own
+    /// reference objects.
+    pub property_reference_values: bool,
 }
 
 /// An unsupported checked shape or a failed invariant during common-IR preparation.
@@ -198,6 +203,14 @@ pub trait Backend {
         false
     }
 
+    /// Whether this target lays out a dependency class an earlier support unit realized from that
+    /// unit's record, so a later unit may add the final members it needs of the class
+    /// ([`crate::ir::ClassOwnership::EarlierUnit`]) instead of realizing the class again. A target
+    /// that does not keeps the error that one class is never realized twice.
+    fn adds_members_to_realized_classes(&self) -> bool {
+        false
+    }
+
     /// Whether a dependency-support body may call an exact provider declaration which has no
     /// serialized KLIB body. Such a call is admitted only when the target's ordinary dependency
     /// registry can realize the frozen provider handle directly.
@@ -234,10 +247,11 @@ pub trait Backend {
         Vec::new()
     }
 
-    /// Whether this target's `StringBuilder` appends a `CharSequence` by reading its `length` and
-    /// each indexed `Char` (Kotlin/Wasm WASI) rather than by rendering it with `toString`
-    /// (Kotlin/Wasm JS). The handoff then freezes those `CharSequence` members for the target to
-    /// call ([`CheckedBackendCallables::char_sequence_protocol`]).
+    /// Whether this target's `StringBuilder` reads an appended `CharSequence` through its members:
+    /// its `length` and each indexed `Char` (Kotlin/Wasm WASI), or its `length` ahead of a
+    /// `toString` rendering (Kotlin/Wasm JS's ranged append). The handoff then freezes those
+    /// `CharSequence` members for the target to call
+    /// ([`CheckedBackendCallables::char_sequence_protocol`]).
     fn appends_char_sequences_by_index(&self) -> bool {
         false
     }
@@ -248,6 +262,11 @@ pub trait Backend {
     fn same_module_inlining(&self) -> crate::ir::SameModuleInlining {
         crate::ir::SameModuleInlining::ExpandInIr
     }
+
+    /// Told, before any file or dependency support is lowered, every source file of the program.
+    /// A backend whose lowering of a dependency body depends on what the program declares (a class
+    /// an operand typed by a library interface may hold) reads it here.
+    fn observe_program_sources(&self, _state: &mut Self::State, _sources: &[&CheckedIrFile<'_>]) {}
 
     /// Consume one checked common-IR file produced by the streaming FIR path. No parsed source or
     /// AST-keyed semantic table crosses this boundary; target realization consumes only checked IR

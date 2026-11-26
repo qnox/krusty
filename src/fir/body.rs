@@ -35,6 +35,7 @@ pub use origins::{Origin, OriginStore, SyntheticOriginKind};
 mod branches;
 pub use branches::{FirCatch, FirWhenBranch, FirWhenCondition, FirWhenSubjectNumericEquality};
 mod call_storage;
+mod expression_storage;
 mod ranges;
 pub use ranges::{
     FirIndices, FirProgressionClass, FirProgressionSource, FirRangeComparisonProvenance,
@@ -276,6 +277,11 @@ pub enum FirIntrinsic {
     PrimitiveArrayNew {
         element: ResolvedTy,
     },
+    /// `enumValues<T>()` of a reified type parameter, inside the inline function that declares it.
+    /// Inline specialization names the enum; until then `classifier` is that parameter.
+    EnumValues {
+        classifier: ResolvedTy,
+    },
 }
 
 /// Language-defined callable contributed by a classifier. Its identity is the classifier plus this
@@ -374,6 +380,10 @@ pub enum FirCallTarget {
         /// are parallel to the call's parameters for a source declaration, whose `descriptor` the
         /// target derives from them; a provider-described declaration keeps its own ABI shape.
         parameters: Box<[ResolvedTy]>,
+        /// The selected declaration's own semantic parameters, before the call site's
+        /// substitution, parallel to the call's arguments: the representation each argument is
+        /// passed in. Unset when the provider declares none.
+        declared_parameters: Option<Box<[ResolvedTy]>>,
         result: ResolvedTy,
         /// The selected owner is an interface, so the call reaches a default method.
         interface: bool,
@@ -1178,6 +1188,9 @@ pub enum FirExprKind {
         function_type: ResolvedTy,
         reflective: bool,
         extension_receiver: Option<FirReceiver>,
+        /// Values selected at the reference site for the local function's leading context
+        /// parameters, bound into the reference exactly as for any other declaration.
+        context_arguments: Box<[FirReceiver]>,
         adaptation: Option<Box<FirReferenceAdaptation>>,
     },
     /// Reflection value supplied to a checked local delegated-property convention call: the
@@ -1353,213 +1366,6 @@ pub enum FirExprKind {
         statements: Box<[FirStatementId]>,
         result: Option<FirExprId>,
     },
-}
-
-impl FirExprKind {
-    fn storage_payload_bytes(&self) -> usize {
-        match self {
-            FirExprKind::Constant(FirConstant::String(value)) => value.len_utf16() * 2,
-            FirExprKind::Constant(
-                FirConstant::Int(_)
-                | FirConstant::Long(_)
-                | FirConstant::UInt(_)
-                | FirConstant::ULong(_)
-                | FirConstant::Double(_)
-                | FirConstant::Float(_)
-                | FirConstant::Boolean(_)
-                | FirConstant::Char(_)
-                | FirConstant::Null,
-            )
-            | FirExprKind::ImplicitReceiver { .. }
-            | FirExprKind::SingletonValue { .. }
-            | FirExprKind::EnumEntry { .. }
-            | FirExprKind::ClassifierPropertyRead { .. }
-            | FirExprKind::ValueRead(_)
-            | FirExprKind::ForwardedSuperArgument { .. }
-            | FirExprKind::CapturedValueRead { .. }
-            | FirExprKind::ClassStorageRead { .. }
-            | FirExprKind::ConstructorCaptureRead { .. }
-            | FirExprKind::ConstructorContextRead { .. }
-            | FirExprKind::ClassStorageSharedRead { .. }
-            | FirExprKind::ClassStorageSharedWrite { .. }
-            | FirExprKind::ConstructorCaptureSharedWrite { .. }
-            | FirExprKind::EnclosingClassStorageRead { .. }
-            | FirExprKind::LateinitFieldRead { .. }
-            | FirExprKind::CapturedValueWrite { .. }
-            | FirExprKind::ValueWrite { .. }
-            | FirExprKind::TypeOperation { .. }
-            | FirExprKind::ImplicitConversion { .. }
-            | FirExprKind::Unary { .. }
-            | FirExprKind::Binary { .. }
-            | FirExprKind::Equality { .. }
-            | FirExprKind::NullablePrimitiveComparison { .. }
-            | FirExprKind::NullableNumericComparison { .. }
-            | FirExprKind::Range { .. }
-            | FirExprKind::InRange { .. }
-            | FirExprKind::IndicesContainment { .. }
-            | FirExprKind::SafeCall { .. }
-            | FirExprKind::Elvis { .. }
-            | FirExprKind::Throw(_)
-            | FirExprKind::Jump { .. }
-            | FirExprKind::Conditional { .. } => 0,
-            FirExprKind::LateinitRead { name, .. } => name.len(),
-            FirExprKind::EnclosingReceiver { path }
-            | FirExprKind::CapturedImplicitReceiver { path, .. }
-            | FirExprKind::CapturedClassStorageRead { path, .. }
-            | FirExprKind::CapturedClassStorageSharedWrite { path, .. } => {
-                path.len() * std::mem::size_of::<DeclarationId>()
-            }
-            FirExprKind::ClassLiteral { .. } => 0,
-            FirExprKind::LocalPropertyReference { name, .. } => name.len(),
-            FirExprKind::LocalDelegateAccess { .. } => 0,
-            FirExprKind::AnnotationArray(expressions)
-            | FirExprKind::StringTemplate(expressions) => {
-                expressions.len() * std::mem::size_of::<FirExprId>()
-            }
-            FirExprKind::ArrayLiteral { elements, .. } => {
-                elements.len() * std::mem::size_of::<FirArrayElement>()
-            }
-            FirExprKind::ArrayConstruction { .. } => 0,
-            FirExprKind::PropertyRead {
-                target,
-                context_arguments,
-                substitutions,
-                ..
-            }
-            | FirExprKind::PropertyWrite {
-                target,
-                context_arguments,
-                substitutions,
-                ..
-            } => {
-                target.storage_payload_bytes()
-                    + context_arguments.len() * std::mem::size_of::<FirReceiver>()
-                    + substitutions.len() * std::mem::size_of::<FirTypeSubstitution>()
-            }
-            FirExprKind::BackingFieldRead { .. } | FirExprKind::BackingFieldWrite { .. } => 0,
-            FirExprKind::PluginExpression {
-                data,
-                types,
-                operands,
-                ..
-            } => {
-                data.len() * std::mem::size_of::<TypeName>()
-                    + types.len() * std::mem::size_of::<ResolvedTy>()
-                    + operands.len() * std::mem::size_of::<FirPluginOperand>()
-            }
-            FirExprKind::FunctionInvokeReference {
-                target_parameters,
-                reference_parameters,
-                ..
-            } => {
-                (target_parameters.len() + reference_parameters.len())
-                    * std::mem::size_of::<ResolvedTy>()
-            }
-            FirExprKind::CallableReference {
-                target,
-                substitutions,
-                adaptation,
-                ..
-            } => {
-                target.storage_payload_bytes()
-                    + substitutions.len() * std::mem::size_of::<FirTypeSubstitution>()
-                    + adaptation.as_deref().map_or(0, |adaptation| {
-                        std::mem::size_of::<FirReferenceAdaptation>()
-                            + adaptation.storage_payload_bytes()
-                    })
-            }
-            FirExprKind::PropertyReference {
-                target,
-                substitutions,
-                adaptation,
-                ..
-            } => {
-                target.storage_payload_bytes()
-                    + substitutions.len() * std::mem::size_of::<FirTypeSubstitution>()
-                    + adaptation.as_deref().map_or(0, |adaptation| {
-                        std::mem::size_of::<FirReferenceAdaptation>()
-                            + adaptation.storage_payload_bytes()
-                    })
-            }
-            FirExprKind::LocalCallableReference { adaptation, .. } => {
-                adaptation.as_deref().map_or(0, |adaptation| {
-                    std::mem::size_of::<FirReferenceAdaptation>()
-                        + adaptation.storage_payload_bytes()
-                })
-            }
-            FirExprKind::Call(call) => call.storage_payload_bytes(),
-            FirExprKind::ConstructorCall(call) => call.storage_payload_bytes(),
-            FirExprKind::AnonymousObject(object) => {
-                object.captures.len() * std::mem::size_of::<FirLocalClassCapture>()
-                    + object
-                        .captures
-                        .iter()
-                        .map(FirLocalClassCapture::storage_payload_bytes)
-                        .sum::<usize>()
-                    + std::mem::size_of_val(object.capture_order.as_ref())
-                    + object.delegate_arguments.len()
-                        * std::mem::size_of::<FirInterfaceDelegateArgument>()
-                    + object.super_arguments.len()
-                        * std::mem::size_of::<FirAnonymousSuperArgument>()
-            }
-            FirExprKind::LocalCall {
-                arguments,
-                parameter_types,
-                ..
-            } => {
-                arguments.len() * std::mem::size_of::<FirCallArgument>()
-                    + arguments
-                        .iter()
-                        .map(FirCallArgument::storage_payload_bytes)
-                        .sum::<usize>()
-                    + parameter_types.len() * std::mem::size_of::<ResolvedTy>()
-            }
-            FirExprKind::FunctionInvoke {
-                context_arguments,
-                arguments,
-                parameter_types,
-                ..
-            } => {
-                context_arguments.len() * std::mem::size_of::<FirReceiver>()
-                    + arguments.len() * std::mem::size_of::<FirCallArgument>()
-                    + arguments
-                        .iter()
-                        .map(FirCallArgument::storage_payload_bytes)
-                        .sum::<usize>()
-                    + parameter_types.len() * std::mem::size_of::<ResolvedTy>()
-            }
-            FirExprKind::ExtensionFunctionBinding {
-                target_parameters, ..
-            } => target_parameters.len() * std::mem::size_of::<ResolvedTy>(),
-            FirExprKind::ComparisonCall { call, .. }
-            | FirExprKind::ContainmentCall { call, .. }
-            | FirExprKind::ComparableRangeContainment { lower: call, .. } => {
-                call.storage_payload_bytes()
-            }
-            FirExprKind::Lambda {
-                type_parameters,
-                body,
-                ..
-            } => {
-                type_parameters.len() * std::mem::size_of::<TypeParameterId>()
-                    + std::mem::size_of::<FirBody>()
-                    + body.storage_payload_bytes()
-            }
-            FirExprKind::Try { catches, .. } => catches.len() * std::mem::size_of::<FirCatch>(),
-            FirExprKind::When { branches, .. } => {
-                branches.len() * std::mem::size_of::<FirWhenBranch>()
-                    + branches
-                        .iter()
-                        .map(|branch| {
-                            branch.conditions.len() * std::mem::size_of::<FirWhenCondition>()
-                        })
-                        .sum::<usize>()
-            }
-            FirExprKind::Block { statements, .. } => {
-                statements.len() * std::mem::size_of::<FirStatementId>()
-            }
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1775,6 +1581,14 @@ pub struct FirBody {
     /// Local-storage blocks originating from postfix `++`/`--`, whose checked shape snapshots the
     /// old value.
     postfix_updates: HashSet<FirExprId>,
+    /// Context arguments checking selected from the scope rather than from the call's source
+    /// arguments: a read of a context parameter or an implicit receiver, passed where the callee
+    /// takes it. An explicit context argument is an ordinary source argument and is not listed.
+    implicit_context_arguments: HashSet<FirExprId>,
+    /// Explicit context arguments (`receiver().f(context = value())`) the call evaluates after its
+    /// extension receiver, as they are written, although they are passed before it. kotlinc does so
+    /// since 2.5; earlier releases evaluate a call's operands in the order they are passed.
+    receiver_ordered_context_arguments: HashSet<FirExprId>,
     /// Conversion origins that realize, in place, a call of an inline function kotlinc inlines
     /// (`Char.code`'s getter): the conversion is the end of an inlined call.
     inlined_call_conversions: HashSet<OriginId>,
@@ -1858,6 +1672,8 @@ impl FirBody {
             generated_class_provenance: HashMap::default(),
             source_forms: HashMap::default(),
             postfix_updates: HashSet::default(),
+            implicit_context_arguments: HashSet::default(),
+            receiver_ordered_context_arguments: HashSet::default(),
             inlined_call_conversions: HashSet::default(),
             lifting_site: None,
             declaration_span: None,
@@ -2561,6 +2377,22 @@ impl FirBody {
 
     pub(crate) fn is_postfix_update(&self, block: FirExprId) -> bool {
         self.postfix_updates.contains(&block)
+    }
+
+    pub(crate) fn record_implicit_context_argument(&mut self, value: FirExprId) {
+        self.implicit_context_arguments.insert(value);
+    }
+
+    pub(crate) fn is_implicit_context_argument(&self, value: FirExprId) -> bool {
+        self.implicit_context_arguments.contains(&value)
+    }
+
+    pub(crate) fn record_receiver_ordered_context_argument(&mut self, value: FirExprId) {
+        self.receiver_ordered_context_arguments.insert(value);
+    }
+
+    pub(crate) fn is_receiver_ordered_context_argument(&self, value: FirExprId) -> bool {
+        self.receiver_ordered_context_arguments.contains(&value)
     }
 
     pub(crate) fn record_inlined_call_conversion(&mut self, origin: OriginId) {

@@ -80,3 +80,54 @@ fun withArgument(): suspend (String) -> Nothing = { throw Error(it) }\n";
         .unwrap_or_else(|diff| panic!("{class} byte-identical to kotlinc: {diff}"));
     }
 }
+
+/// A generic suspend function's continuation class carries the function's type parameters, as
+/// kotlinc's does: `<T:Ljava/lang/Object;>Lkotlin/coroutines/jvm/internal/ContinuationImpl;`.
+#[test]
+fn a_generic_suspend_function_continuation_declares_its_type_parameters_like_kotlinc() {
+    const SOURCE: &str = r#"suspend fun next(): Int = 2
+
+suspend fun <T> keep(value: T): T {
+    next()
+    return value
+}
+
+suspend fun <T : CharSequence, U : Comparable<U>> both(text: T, order: U): T {
+    next()
+    return text
+}
+"#;
+    common::assert_classes_identical_to_kotlinc(
+        "SuspendContinuationSignature",
+        SOURCE,
+        &[
+            "SuspendContinuationSignatureKt$keep$1",
+            "SuspendContinuationSignatureKt$both$1",
+        ],
+    );
+}
+
+/// A member suspend function's continuation class carries the function's type parameters like a
+/// top-level one's, and nothing for the receiver.
+#[test]
+fn a_member_suspend_function_continuation_declares_its_type_parameters_like_kotlinc() {
+    const SOURCE: &str = r#"suspend fun next(): Int = 2
+
+class Holder {
+    suspend fun <T> keep(value: T): T {
+        next()
+        return value
+    }
+
+    suspend fun plain(value: String): String {
+        next()
+        return value
+    }
+}
+"#;
+    common::assert_classes_identical_to_kotlinc(
+        "SuspendMemberContinuationSignature",
+        SOURCE,
+        &["Holder$keep$1", "Holder$plain$1"],
+    );
+}

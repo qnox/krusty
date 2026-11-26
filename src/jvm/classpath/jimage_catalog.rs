@@ -43,7 +43,7 @@ impl JimageIndex {
     /// Project the completed location index into the package view without copying its name tree.
     pub(super) fn package_catalog(&self) -> JarPackages {
         let mut catalog = JarPackages::with_names(Arc::clone(&self.names));
-        for class in self.locations.class_ids() {
+        for class in self.locations.class_ids(&self.names) {
             let Some(package) = self.names.parent(class) else {
                 continue;
             };

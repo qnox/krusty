@@ -1,0 +1,6 @@
+# The atomicfu compiler plugin's box corpus descriptor. See src/conformance/plugin_corpus.rs for the
+# format; the shared harness discovers this file and runs the cases that name its directive.
+plugin = atomicfu
+directive = WITH_ATOMICFU
+plugin-jar = maven-kotlin:org.jetbrains.kotlin:kotlin-atomicfu-compiler-plugin-embeddable
+runtime = maven:org.jetbrains.kotlinx:atomicfu-jvm:0.32.1

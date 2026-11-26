@@ -605,6 +605,7 @@ struct UnmatchedExpectRoots<'a> {
     incompatible: &'a crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     symbols: &'a FrontendSymbols,
     module_name: &'a str,
+    reference: crate::features::ReferenceProfile,
     silent: bool,
 }
 
@@ -619,6 +620,7 @@ fn report_unmatched_expect_roots(
         incompatible,
         symbols,
         module_name,
+        reference,
         silent,
     } = context;
     let mut unmatched = headers
@@ -687,7 +689,7 @@ fn report_unmatched_expect_roots(
         diags.error_kind(
             range,
             crate::diag::DiagnosticKind::Actualization,
-            crate::diagnostic_wording::no_actual_for_expect(name, module_name, target),
+            crate::diagnostic_wording::no_actual_for_expect(reference, name, module_name, target),
         );
     }
 }
@@ -1286,6 +1288,9 @@ where
     let diagnostics_start = diags.diags.len();
     let mut files = Vec::with_capacity(sources.len());
     let mut parse_errors = Vec::with_capacity(sources.len());
+    // Syntax errors are the files header inventory refuses. Later checks already skip them;
+    // capture discovery must see the same set, or it checks a class with no collected signature.
+    let mut syntax_errors = Vec::with_capacity(sources.len());
     // Set when any file writes an `expect` declaration with an implementation. The reference
     // compiler stops before actualization once one exists, so the unmatched-expect report below is
     // skipped for the WHOLE compilation rather than per file.
@@ -1380,7 +1385,9 @@ where
                 .iter()
                 .any(|diagnostic| diagnostic.severity == Severity::Error);
         parse_errors.push(parse_error);
+        syntax_errors.push(parser_error);
         header_validation::validate_after_parsing(&file, parser_error, diags);
+        diags.sort_source_order_from(diagnostics_before);
         let extracted = pass1_builder.add_source(
             index,
             source,
@@ -1625,6 +1632,7 @@ where
             &files[inferred_count..],
             platform,
             native_plugins.clone(),
+            project_features.reference(),
             target,
             &mut dependency_diags,
         );
@@ -1648,10 +1656,13 @@ where
     }
     let mut symbols = crate::resolve::collect_signatures_with_cp_headers_and_local_contexts(
         &files[..inferred_end],
-        &pass1_headers,
-        &local_class_contexts[..inferred_end],
+        crate::resolve::PassOneHeaders {
+            headers: &pass1_headers,
+            local_contexts: &local_class_contexts[..inferred_end],
+        },
         platform,
         native_plugins,
+        project_features.reference(),
         target,
         diags,
     );
@@ -1668,6 +1679,7 @@ where
                 incompatible: &incompatible_expects,
                 symbols: &symbols,
                 module_name,
+                reference: project_features.reference(),
                 silent: expect_bodies_rejected,
             },
             &mut parse_errors,
@@ -1684,23 +1696,17 @@ where
         .iter()
         .take(inferred_end)
         .any(|roots| !roots.is_empty());
-    let retained_anonymous_captures = if retain_inspection_analysis {
-        Some(crate::resolve::discover_anonymous_object_captures(
-            &files[..inferred_end],
-            &mut symbols,
-        ))
-    } else if has_inline_capture_roots {
+    // Only retained inline bodies need their captures before signature finalization. Every other
+    // capture is discovered once the signatures it reads are final: a local typed by a call to an
+    // inferred-return function is still pending here.
+    if has_inline_capture_roots {
         crate::resolve::discover_inline_anonymous_object_captures(
             &files[..inferred_end],
+            &syntax_errors[..inferred_end],
             &inline_capture_selection.roots[..inferred_end],
             &inline_capture_selection.bodies[..inferred_end],
             &mut symbols,
         );
-        None
-    } else {
-        None
-    };
-    if retain_inspection_analysis || has_inline_capture_roots {
         crate::resolve::install_streamed_anonymous_capture_declarations(
             &files[..inferred_end],
             &mut pass1_headers,
@@ -1775,6 +1781,7 @@ where
                 &incompatible_members,
                 &symbols,
                 &pass1_headers,
+                project_features.reference(),
                 diags,
             );
             no_expect_for_actual::report_unactualized_members(
@@ -1783,6 +1790,7 @@ where
                 &expected_members,
                 &symbols,
                 &pass1_headers,
+                project_features.reference(),
                 diags,
             );
         }
@@ -1884,6 +1892,8 @@ where
         // genuine signature error would make every use of an unrelated inferred declaration look
         // unresolved in an editor's steady state. Failed declarations remain absent.
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
+        // Pass 2 checks each finalized declaration type against the spelling it was written with.
+        crate::resolve::publish_declared_spellings(&mut index, &symbols);
         // File-level policies (`@file:Suppress`, opt-ins) govern the recovery diagnostics too.
         crate::resolve::publish_file_annotations(
             &files[..inferred_end],
@@ -1921,6 +1931,11 @@ where
     // checking and inline preparation finish; the next source set must not see them.
     let _supertype_projection = crate::resolve::SupertypeProjectionCache::enter();
     let (types, streamed) = if retain_inspection_analysis {
+        let retained_anonymous_captures = crate::resolve::discover_anonymous_object_captures(
+            &files[..inferred_end],
+            &syntax_errors[..inferred_end],
+            &mut symbols,
+        );
         // Successful finalization and diagnostic recovery both publish the same stable declaration
         // inventory. Recovery merely lacks signatures for declarations that failed to finalize;
         // it must not reopen the parser-keyed checker and silently switch identity models.
@@ -1937,9 +1952,7 @@ where
             &files,
             &mut symbols,
             index,
-            retained_anonymous_captures
-                .as_deref()
-                .expect("retained analysis must preserve capture discovery"),
+            &retained_anonymous_captures,
             &parse_errors,
             checked_count,
             diags,

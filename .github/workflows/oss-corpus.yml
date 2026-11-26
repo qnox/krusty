@@ -1,9 +1,10 @@
 name: oss corpus
 
 # Conformance on the top-starred Kotlin projects and the Android sample listed in
-# scripts/oss-corpus/projects.tsv. Rows whose lane is `lsp` only (intellij-community) are measured
-# by scripts/parity-scan.py and are not built here. Each built project builds twice from a pinned commit with its own
-# Gradle build: once with kotlinc, once with the krusty Gradle plugin applied by an init script. The
+# scripts/oss-corpus/projects.tsv. A row whose lane is `lsp` only would be measured by
+# scripts/parity-scan.py and not built here. intellij-community builds with Bazel
+# (scripts/oss-corpus/bazel.sh). Each built project builds twice from a pinned commit with its own
+# Gradle or Bazel build: once with kotlinc, once with the krusty Gradle plugin applied by an init script. The
 # run reports, per project, how many Kotlin/JVM compilations krusty built, how many classes match
 # kotlinc's byte for byte, why the rest missed, how many of the project's own tests that pass on
 # kotlinc's classes also pass on krusty's, and what both builds cost (compile time, wall and CPU
@@ -67,13 +68,13 @@ jobs:
         with:
           toolchain: 1.100.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: just
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
-          java-version: '17'
+          java-version: '17.0.21+0.3.1'
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
         with:
           cache-provider: basic
@@ -115,21 +116,26 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: zulu
           # kotlin's own build asks for JDK 8, 11 and 17 toolchains; run.sh offers Gradle every one
           # installed here. The last one listed is JAVA_HOME.
           java-version: |
-            8
-            11
-            25
-            17
-            21
+            8.0.512+9
+            11.0.33+10
+            25.0.5+0.3.1
+            17.0.21+0.3.1
+            21.0.13+0.3.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: corpus-tools
           path: corpus-tools
+      - name: free disk space for a Bazel project
+        # A Bazel build keeps its whole output tree and every external repository (toolchains,
+        # libraries) on disk; the runner's preinstalled SDKs it does not use make room for them.
+        if: hashFiles(format('scripts/oss-corpus/bazel/{0}/targets', matrix.project)) != ''
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/share/swift
       - name: install perf
         run: |
           set -euo pipefail
@@ -161,7 +167,7 @@ jobs:
           if-no-files-found: warn
 
   summary:
-    needs: [project]
+    needs: [prepare, project]
     if: always()
     runs-on: ubuntu-latest
     # Reading the previous run's summary artifact takes actions: read.
@@ -208,8 +214,12 @@ jobs:
               break
             done
       - name: summarize
+        env:
+          # The projects this run was asked to measure: a run limited to some projects expects only those.
+          EXPECTED: ${{ needs.prepare.outputs.projects }}
         run: |
           set -euo pipefail
+          jq -r '.[]' <<<"$EXPECTED" > expected.tsv
           previous=()
           if [ -f previous/summary.json ]; then
             previous=(--previous previous/summary.json)
@@ -219,12 +229,25 @@ jobs:
             echo "no project produced a comparison" >&2
             exit 1
           fi
-          python3 scripts/oss-corpus/summarize.py --stars stars.tsv --plugins results --json summary.json \
-            "${previous[@]}" "${reports[@]}" \
-            | tee summary.md >> "$GITHUB_STEP_SUMMARY"
+          # A project of this run whose job left no comparison is reported as not measured, with why,
+          # instead of vanishing from the tables. The job summary page refuses more than 1 MiB, so
+          # it gets the report cut to fit; summary.md, uploaded below, is complete.
+          python3 scripts/oss-corpus/summarize.py --stars stars.tsv --expected expected.tsv --results results \
+            --plugins results --json summary.json --step-summary "$GITHUB_STEP_SUMMARY" \
+            "${previous[@]}" "${reports[@]}" > summary.md
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: summary
           path: |
             summary.md
             summary.json
+      - name: fail when a project was not measured
+        run: |
+          set -euo pipefail
+          # The summary and its json are published above either way, so the next run still compares
+          # with this one; the run itself is not green while a project has no result.
+          if jq -e '.not_measured | length == 0' summary.json >/dev/null; then
+            exit 0
+          fi
+          jq -r '.not_measured[] | "::error title=\(.name) was not measured::\(.reason)"' summary.json
+          exit 1

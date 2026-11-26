@@ -11,7 +11,7 @@
 //! ([`crate::plugins::class_metadata`]); nothing is recorded for it beforehand.
 
 use super::write_self_is_public;
-use crate::ir::{IrClass, IrFile, IrGeneratedFunctionRole, IrSecondaryConstructorRole};
+use crate::ir::{IrClass, IrFile, IrSecondaryConstructorRole};
 use crate::plugins::class_metadata::ClassMetadataExtensions;
 
 /// The field number kotlinc's serialization plugin registers for the list.
@@ -26,7 +26,7 @@ pub(super) fn write(ir: &IrFile, class: &IrClass, out: &mut ClassMetadataExtensi
     if ir
         .generated_function(
             class.fq_name_id(),
-            IrGeneratedFunctionRole::SerializationWriteSelf,
+            super::roles::SerializationFunction::WriteSelf,
         )
         .is_none()
     {

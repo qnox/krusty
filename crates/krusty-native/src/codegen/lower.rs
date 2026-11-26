@@ -39,6 +39,7 @@ mod atomic_accesses;
 mod functions;
 mod implementor_dispatch;
 mod imported_functions;
+mod interface_descriptors;
 mod interface_records;
 pub(super) use imported_functions::ImportedAbis;
 mod lists;
@@ -235,8 +236,16 @@ pub struct FileInput<'a> {
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     pub dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
-    /// Stable dependency-member numbers shared by every file in the source module.
-    pub dependency_interface_numbers: &'a mut HashMap<Vec<u8>, u32>,
+    /// The interface member numbers beyond the module's own, shared by every file in the source
+    /// module: installed interfaces' members and the dependency members its files call.
+    pub dependency_interface_numbers: &'a mut ModuleInterfaceNumbers,
+    /// Dependency interface members a library default implements without a lowered body, with
+    /// the reason; shared by the whole emission session.
+    pub unimplementable_interface_members: &'a mut HashMap<Vec<u8>, String>,
+    /// What the files lowered so far declare, which a file lowered later reads beside its own: a
+    /// dependency body emitted for the program calls through a type the program puts a class of
+    /// its own behind exactly as the program itself would.
+    pub program_declarations: &'a mut ProgramDeclarations,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::dependency_references`].
     pub dependency_properties:
@@ -251,6 +260,37 @@ pub struct FileInput<'a> {
     /// The classes earlier files of the source module laid out, which a class of this file may
     /// extend.
     pub laid_out: &'a LaidOutClasses,
+}
+
+/// The capabilities the files of one program made unsafe for the runtime's own tables, kept across
+/// every file lowered: see [`declares_its_own_comparable`] and [`implemented_dependencies`].
+#[derive(Default)]
+pub struct ProgramDeclarations {
+    declares_its_own_comparable: bool,
+    implemented_dependencies: krusty::fx_hash::HashSet<krusty::types::TypeName>,
+}
+
+impl ProgramDeclarations {
+    /// Take in, before any file is lowered, the `Comparable` objects a source file of the program
+    /// declares: a dependency body ordering its operands through `Comparable` must reach them by
+    /// dispatch, where the runtime's own order answers only the builtin ones.
+    pub(super) fn absorb_comparable(&mut self, ir: &IrFile) {
+        self.declares_its_own_comparable |= declares_its_own_comparable(ir);
+        self.implemented_dependencies.extend(
+            implemented_dependencies(ir, |_| false)
+                .into_iter()
+                .filter(|&owner| super::super::intrinsics::is_comparable_supertype(owner)),
+        );
+    }
+
+    /// Take in what a file of the program's own source declares. Only source files count: a
+    /// library class a support unit lays out answers through its own table, whichever type
+    /// reaches it.
+    fn absorb(&mut self, ir: &IrFile, laid_out: impl Fn(krusty::types::TypeName) -> bool) {
+        self.declares_its_own_comparable |= declares_its_own_comparable(ir);
+        self.implemented_dependencies
+            .extend(implemented_dependencies(ir, laid_out));
+    }
 }
 
 pub fn lower_file(
@@ -278,12 +318,23 @@ pub fn lower_file(
         dependency_symbols,
         dependency_instances,
         dependency_interface_numbers,
+        unimplementable_interface_members,
+        program_declarations,
         value_classes,
         slot_plan,
         module_facts,
         laid_out,
     } = input;
-    let class_model = model::build(ir, value_classes, slot_plan, laid_out)?;
+    if unit_kind == krusty::backend::CheckedIrUnitKind::Source {
+        program_declarations.absorb(ir, |owner| laid_out.get(owner).is_some());
+    }
+    let class_model = model::build(
+        ir,
+        value_classes,
+        slot_plan,
+        &mut dependency_interface_numbers.extended,
+        laid_out,
+    )?;
     let extended = extended_elsewhere(
         ir,
         unit_kind,
@@ -358,6 +409,7 @@ pub fn lower_file(
         imports: imported_functions::ImportedFunctions::new(imported_abis),
         data_imports: HashMap::default(),
         type_of_objects: HashMap::default(),
+        dependency_interface_descriptors: HashMap::default(),
         static_classes: HashMap::default(),
         comdat_objects: Vec::new(),
         strings: HashMap::default(),
@@ -379,16 +431,25 @@ pub fn lower_file(
         // a thunk could be emitted for, and only the model knows that.
         unwalkable_collections: krusty::fx_hash::HashSet::default(),
         walkable_classes: krusty::fx_hash::HashMap::default(),
-        declares_its_own_comparable: declares_its_own_comparable(ir),
-        implemented_dependencies: implemented_dependencies(ir, |owner| {
-            laid_out.get(owner).is_some()
-        }),
+        declares_its_own_comparable: declares_its_own_comparable(ir)
+            || program_declarations.declares_its_own_comparable,
+        implemented_dependencies: {
+            let mut own = implemented_dependencies(ir, |owner| laid_out.get(owner).is_some());
+            own.extend(
+                program_declarations
+                    .implemented_dependencies
+                    .iter()
+                    .copied(),
+            );
+            own
+        },
         module_name,
         unit_kind,
         dependency_signatures,
         dependency_symbols,
         dependency_interface_calls: Vec::new(),
         dependency_interface_numbers,
+        unimplementable_interface_members,
         dependency_instances,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
@@ -584,6 +645,7 @@ struct FileLowering<'a> {
     data_imports: HashMap<String, DataId>,
     /// The static `KType` object of each distinct type a `typeOf` in this file names.
     type_of_objects: HashMap<Ty, DataId>,
+    dependency_interface_descriptors: HashMap<krusty::backend::KlibClassIdentity, DataId>,
     /// The static `KClass` of each descriptor a `typeOf` classifier names.
     static_classes: HashMap<DataId, DataId>,
     /// The program-wide static objects this file emits, each the COMDAT group of its own section.
@@ -664,10 +726,12 @@ struct FileLowering<'a> {
     /// Dependency interface members this file calls, numbered after the module's own interfaces.
     /// The identity bytes are what a dependent implementation records itself under.
     dependency_interface_calls: Vec<(u32, Vec<u8>)>,
-    /// Module-wide numbers for imported interface identities. The local vector above is only
-    /// this file's emitted identity records; the shared map prevents a second file from reusing
-    /// one stub number for another dependency member.
-    dependency_interface_numbers: &'a mut krusty::fx_hash::HashMap<Vec<u8>, u32>,
+    /// Module-wide numbers for imported interface identities and installed interfaces' members.
+    /// The local vector above is only this file's emitted identity records; the shared numbering
+    /// prevents a second file from reusing one stub number for another member.
+    dependency_interface_numbers: &'a mut ModuleInterfaceNumbers,
+    /// See [`FileInput::unimplementable_interface_members`].
+    unimplementable_interface_members: &'a mut krusty::fx_hash::HashMap<Vec<u8>, String>,
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
@@ -677,7 +741,7 @@ impl<'a> FileLowering<'a> {
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
         let mut signature = Signature::new(CallConv::SystemV);
         for param in params {
-            match self.carrier(*param).abi_param() {
+            match self.carrier(parameter_slot(*param)).abi_param() {
                 Some(abi) => signature.params.push(abi),
                 None => return Err("a `Unit` parameter".into()),
             }
@@ -695,16 +759,10 @@ impl<'a> FileLowering<'a> {
         if let Some(owner) = function.dispatch_receiver {
             // A value class's member takes the VALUE as `this`; its box reaches it through a
             // bridge. Every other member takes the object, as a reference.
-            params.push(match self.value_receiver(owner) {
-                Some(value) => value,
-                None if self.ir.class_id_by_name(owner).is_some() => any(),
-                None => {
-                    return Err(declined!(
-                        "a method of `{}`, which is not declared in this file",
-                        owner.render()
-                    ))
-                }
-            });
+            // An owner this file does not declare is a library classifier whose members the
+            // dependency unit lowers as functions of the instance (an interface's default body),
+            // so its receiver is the instance reference too.
+            params.push(self.value_receiver(owner).unwrap_or_else(any));
         }
         params.extend(super::super::captures::carried_parameters(self.ir, id));
         self.signature_of(&params, function.ret)
@@ -1024,8 +1082,7 @@ impl<'a> FileLowering<'a> {
                 lowering.scope = krusty::ir::IrEnclosure::Function(index as krusty::ir::FunId);
                 lowering.record_semantic_slots(&semantic_slots);
                 for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
-                    let variable = lowering.declare_value(slot as u32, *ty)?;
-                    lowering.builder.def_var(variable, *value);
+                    lowering.bind_parameter(slot as u32, *value, *ty)?;
                 }
                 lowering.frame_objects = lowering.frame_constructions(body);
                 lowering.statement(body)
@@ -1165,6 +1222,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 "common-IR value slot {slot} has two semantic declaration types"
             );
         }
+    }
+
+    /// Bind an entry parameter to its slot. A `Unit` parameter arrives as the `Unit` instance;
+    /// reading it answers `Unit` exactly as a `Unit`-typed local does, so nothing is stored.
+    pub(super) fn bind_parameter(
+        &mut self,
+        slot: u32,
+        value: Value,
+        ty: Ty,
+    ) -> Result<(), Unsupported> {
+        if ty == Ty::Unit {
+            self.unit_values.insert(slot);
+            return Ok(());
+        }
+        let variable = self.declare_value(slot, ty)?;
+        self.builder.def_var(variable, value);
+        Ok(())
     }
 
     fn declare_value(&mut self, slot: u32, ty: Ty) -> Result<Variable, Unsupported> {
@@ -1584,11 +1658,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(());
                 }
                 // A property declared in another file of the module has no layout here; its
-                // declaring file exports the entry points of one shared plan.
-                if self.file.is_imported_property(target) {
+                // declaring file exports the entry points of one shared plan. A copy of its
+                // class this file realizes keeps the property's layout, and its own storage.
+                if self.file.is_imported_property(target)
+                    && !self.has_property_layout_at(id, target)
+                {
                     return self.module_property_write(target, *dispatch_receiver, *value);
                 }
-                match self.checked_property(target) {
+                match self.checked_property_at(id, target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
                         self.property_write(class, index, *dispatch_receiver, *value)?
                     }
@@ -2047,8 +2124,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 value,
             } => self.ref_set(holder, elem, value),
             // The shared enum lowering realized every enum this file declares; what is left names
-            // an enum another file declares, whose constants live there. A constant, `values()`
-            // and `valueOf` are each reached through the entry the declaring file exports.
+            // an enum another file declares, whose constants live there. A constant, `values()`,
+            // `valueOf` and `entries` are each reached through the entry the declaring file
+            // exports.
             IrExpr::EnumEntry { classifier, name } => {
                 self.dependency_enum_constant(classifier, &name)
             }
@@ -2064,10 +2142,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 krusty::backend::enums::StaticMember::ValueOf,
                 Some(arg),
             ),
-            IrExpr::EnumEntries { classifier } => Err(declined!(
-                "the `entries` of an enum another file declares (`{}`)",
-                classifier.render()
-            )),
+            IrExpr::EnumEntries { classifier } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::Entries,
+                None,
+            ),
             IrExpr::EnumConstant {
                 name,
                 ordinal,
@@ -2224,8 +2303,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let (owner, name) = self
                     .range_getter(*target, *receiver)
                     .expect("checked by the guard");
-                self.range_property_member(owner, &name, *receiver, *result)
-                    .expect("a range member, by the guard")
+                self.range_property_through_implementors(*target, owner, &name, *receiver, *result)
             }
             IrExpr::Checked(ref checked_op)
                 if let IrCheckedOperation::ExternalPropertyRead {
@@ -2317,10 +2395,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         None,
                     );
                 }
-                if self.file.is_imported_property(target) {
+                if self.file.is_imported_property(target)
+                    && !self.has_property_layout_at(id, target)
+                {
                     return self.module_property_read(target, *dispatch_receiver);
                 }
-                match self.checked_property(target) {
+                match self.checked_property_at(id, target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
                         self.property_read(class, index, *dispatch_receiver)
                     }
@@ -2805,7 +2885,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let mut values = Vec::with_capacity(args.len());
         for (index, argument) in args.iter().enumerate() {
             let value = match parameters.get(index) {
-                Some(ty) => self.coerce(*argument, *ty)?,
+                Some(ty) => self.coerce(*argument, parameter_slot(*ty))?,
                 None => self.expression(*argument)?,
             };
             if self.terminated {
@@ -2825,6 +2905,17 @@ fn any() -> Ty {
     Ty::nullable(Ty::obj("kotlin/Any"))
 }
 
+/// The type a parameter declared `ty` is passed as. A `Unit` parameter is passed the `Unit`
+/// instance in a reference slot, as kotlinc passes it: the argument is evaluated, and the callee
+/// receives the singleton.
+fn parameter_slot(ty: Ty) -> Ty {
+    if ty == Ty::Unit {
+        any()
+    } else {
+        ty
+    }
+}
+
 fn callee_kind(callee: &Callee) -> &'static str {
     match callee {
         Callee::Local(_) => "local",
@@ -2842,6 +2933,7 @@ fn callee_kind(callee: &Callee) -> &'static str {
         Callee::Static { .. } => "static",
         Callee::Virtual { .. } => "virtual",
         Callee::Super { .. } => "super",
+        Callee::ValueClassAdapter { .. } => "value-class adapter",
         Callee::Special { .. } => "special",
     }
 }
@@ -2925,4 +3017,14 @@ mod tests {
         assert!(!isa_for(target, false).unwrap().flags().enable_verifier());
         assert!(isa_for(target, true).unwrap().flags().enable_verifier());
     }
+}
+
+/// The interface member numbers one source module's files take beyond the module's own, shared
+/// by every file of it: what keeps one stub number naming one member module-wide.
+#[derive(Debug, Default)]
+pub(crate) struct ModuleInterfaceNumbers {
+    /// The numbers installed interfaces' members and dependency members draw from.
+    pub(crate) extended: krusty::backend::class_tables::module_interfaces::ExtendedNumbers,
+    /// The number of each dependency interface member a file calls, by its interface identity.
+    pub(crate) dependency: HashMap<Vec<u8>, u32>,
 }

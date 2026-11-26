@@ -25,6 +25,7 @@ use crate::fir::{
     CallableId, ExternalCallableId, PropertyId, ResolvedFunctionOverrideTarget,
     ResolvedPropertyOverrideTarget,
 };
+use crate::ir::FunId;
 use crate::types::{SemanticCallRole, Ty, TypeName};
 
 use super::members::any_slot;
@@ -46,6 +47,10 @@ pub enum PlanKey {
     DependencyCallable(ExternalCallableId),
     DependencyGetter(ExternalCallableId),
     DependencySetter(ExternalCallableId),
+    /// An abstract function of an interface a KLIB lowering unit installed in one file. It has no
+    /// declaration identity of its own, so it is named by the function the file's IR holds, and
+    /// only that file numbers it ([`ModuleInterfaces::with_installed`]).
+    Installed(FunId),
 }
 
 impl PlanKey {
@@ -387,9 +392,9 @@ impl Planner<'_> {
         let parent = match class.superclass {
             Some(superclass) if self.representation.owns_base(superclass) => None,
             Some(superclass) if self.classes.class(superclass).is_some() => {
-                Some(self.plan(superclass).map_err(|_| {
+                Some(self.plan(superclass).map_err(|reason| {
                     format!(
-                        "a class whose superclass has no module-wide layout (`{}`)",
+                        "a class whose superclass has no module-wide layout (`{}`): {reason}",
                         qualified()
                     )
                 })?)
@@ -700,7 +705,7 @@ impl PlannedTable {
 
 /// What a slot holding a function of `parameters` answering `result` is typed by: a `suspend`
 /// one in the form every target that lowers coroutines on common IR gives it.
-fn carried(parameters: &[Ty], result: Ty, suspend: bool) -> (Box<[Ty]>, Ty) {
+pub(super) fn carried(parameters: &[Ty], result: Ty, suspend: bool) -> (Box<[Ty]>, Ty) {
     if suspend {
         let (continuation, completed) = crate::types::continuation_passing(result);
         (

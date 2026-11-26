@@ -45,6 +45,10 @@ if [ "$lane" = lsp ]; then
   echo "$name is in the language-server metric set; this corpus does not build it" >&2
   exit 2
 fi
+# A Bazel project (one with a `bazel/<name>` target set) builds through `bazel.sh`.
+if [ -d "${CORPUS_BAZEL:-$here/bazel}/$name" ]; then
+  exec "$here/bazel.sh" "$name" "$work" "$krusty"
+fi
 IFS=$'\t' read -r _ _ _ gradle_root jdk _ android_variant <<<"$row"
 checkout=$work/src/$name
 logs=$work/logs
@@ -164,8 +168,30 @@ release() {
 # The warm-up build downloads everything the build needs (dependencies, Gradle and compiler plugins,
 # toolchains) and is not compared; its cost goes unrecorded and its outputs are dropped. The two
 # measured builds then run offline, so neither pays for the network and both start from the same
-# caches.
+# caches. A warm-up that could not download something (a repository or the plugin portal refused
+# it) stops the run: the offline builds cannot fetch it later, and a retry would only extend a block
+# the repository placed on this host. Any other warm-up failure is the build's own, which the
+# reference build then reports. Gradle reports a refused download as "not found" whichever
+# repository refused it, so before stopping, the repositories are probed and their HTTP status is
+# recorded in <name>.warmup.http.tsv and on stderr: a dead host (000, 5xx) and a throttled one (429)
+# then read differently from a missing artifact.
+unreachable='Could not (resolve|GET|HEAD)|could not resolve plugin artifact|Connection reset|timed out|Name or service not known|No such host'
+# Prints "<status> <url>" for each repository the warm-up log names, and for the default
+# ones (CORPUS_PROBE_URLS overrides those, for hosts a test must not reach).
+probe_repositories() {
+  local url code
+  local defaults=${CORPUS_PROBE_URLS-https://repo.maven.apache.org/maven2/ https://maven.google.com/ https://plugins.gradle.org/m2/}
+  for url in $(grep -oE 'maven\(https?://[^)]+\)' "$logs/$name.warmup.log" | sed -E 's/^maven\(|\)$//g' | sort -u) $defaults; do
+    code=$(curl -s -o /dev/null -I -w '%{http_code}' --max-time 20 "$url") || true
+    echo "$code $url" | tee -a "$logs/$name.warmup.http.tsv" >&2
+  done
+}
 build warmup
+if [ "$status" -ne 0 ] && grep -qE "$unreachable" "$logs/$name.warmup.log"; then
+  probe_repositories
+  echo "$name: the warm-up could not download what the build needs; see $name.warmup.log" >&2
+  exit 1
+fi
 snapshot warmup
 rm -rf "$work/out/$name/warmup" "$logs/$name.warmup.metrics.json" "$logs/$name.warmup.tasks.tsv"
 CORPUS_PLUGIN_SURVEY=$logs/$name.plugins.tsv build kotlinc
@@ -229,3 +255,5 @@ if [ "$reference" -ne 0 ]; then
   echo "$name: the reference kotlinc build failed (exit $reference); see $name.kotlinc.log" >&2
   exit 1
 fi
+# What krusty could not build is a result, not a failure of the run: the comparison above has
+# recorded every compilation it missed and why, and the report carries them.

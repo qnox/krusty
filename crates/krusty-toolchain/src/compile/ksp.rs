@@ -6,11 +6,12 @@
 //! argument.
 //!
 //! KSP writes classes, Kotlin and Java sources and resources below `build/generated/<module>/main`.
-//! The module compiles against the generated classes (the last entry of its classpath), and its
-//! resources output takes the generated resources after its other resource directories, so a module
-//! running KSP always has a resources output, which the modules that compile against it put on
-//! their classpath. krusty-toolchain does not yet compile the sources KSP generates: a run that
-//! generates any fails the module.
+//! The module compiles against the generated classes (the last entry of its classpath), and the
+//! directory of the generated Kotlin sources is the fragment's last source directory, so they
+//! compile with the module's own. Its resources output takes the generated resources after its
+//! other resource directories, so a module running KSP always has a resources output, which the
+//! modules that compile against it put on their classpath. krusty-toolchain compiles no Java
+//! sources: a run that generates any fails the module.
 
 use std::ffi::OsString;
 use std::io;
@@ -258,12 +259,11 @@ pub(super) fn run(ksp: &Ksp) -> io::Result<KspRan> {
     })
 }
 
-/// The sources a KSP run generated, which krusty-toolchain does not compile yet.
-pub(super) fn generated_sources(outputs: &KspOutputs) -> io::Result<Vec<PathBuf>> {
+/// The Java sources a KSP run generated, which krusty-toolchain does not compile. The Kotlin
+/// sources it generates compile with the module's own.
+pub(super) fn generated_java_sources(outputs: &KspOutputs) -> io::Result<Vec<PathBuf>> {
     let mut found = Vec::new();
-    for directory in [&outputs.kotlin, &outputs.java] {
-        walk(directory, &mut found)?;
-    }
+    walk(&outputs.java, &mut found)?;
     Ok(found)
 }
 

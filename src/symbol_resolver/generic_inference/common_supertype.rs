@@ -409,9 +409,12 @@ fn reified_approximation(ty: Ty, to_super: bool, approximation: &Approximation<'
                 Ty::nullable(approximated)
             }
         }
-        TyKind::Intersection(parts) if to_super => {
-            approximate_reified_intersection(parts.as_slice(), approximation).unwrap_or(ty)
-        }
+        // An intersection fixed below an upper type its own approximation does not reach
+        // approximates to that upper type, as kotlinc's approximator does.
+        TyKind::Intersection(parts) if to_super => match parts.approximation() {
+            Some(upper) => reified_approximation(upper, true, approximation),
+            None => approximate_reified_intersection(parts.as_slice(), approximation).unwrap_or(ty),
+        },
         TyKind::Intersection(_) => Ty::Nothing,
         TyKind::Obj(classifier, arguments) if !arguments.is_empty() => {
             let approximated = arguments

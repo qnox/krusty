@@ -55,7 +55,10 @@ pub(super) fn canonical(parts: &[Ty]) -> Ty {
         [one] if all_nullable => Ty::nullable(*one),
         [one] => *one,
         many => {
-            let intersection = Ty::from(TyKind::Intersection(crate::types::TyList::new(many)));
+            let intersection = Ty::from(TyKind::Intersection(super::IntersectionParts::new(
+                crate::types::TyList::new(many),
+                None,
+            )));
             if all_nullable {
                 Ty::nullable(intersection)
             } else {

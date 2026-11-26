@@ -75,7 +75,11 @@ pub(crate) fn marks_line_at_start(ir: &IrFile, expression: ExprId) -> bool {
         // A property read or write is realized as a call of its accessor, which marks at its
         // invoke; one realized as a field access marks where its realization is chosen, as
         // kotlinc's `visitFieldAccess` does before the receiver.
-        IrExpr::PropertyRead { .. }
+        // A source `!!` marks before its operand through [`states_line_at_start`]. An implicit
+        // not-null cast marks once the value is on the stack, at `checkNotNullExpressionValue`,
+        // not on the first instruction of that value.
+        IrExpr::NotNullAssert { .. }
+        | IrExpr::PropertyRead { .. }
         | IrExpr::PropertyWrite { .. }
         | IrExpr::Return(_)
         | IrExpr::Variable { .. }

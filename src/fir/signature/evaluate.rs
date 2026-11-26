@@ -32,7 +32,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
         declaration: DeclarationId,
         result: SigExprId,
         graph: &SignatureGraph,
-        demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+        demand: &mut SignatureDemand<'_>,
     ) -> Result<ResolvedSignature, DiagnosticId> {
         /// Recover integer-constant provenance from nodes whose types have already been resolved.
         /// Binary folding is delegated to semantic policy after `select_binary` populated `memo`;
@@ -145,7 +145,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             semantics: &S,
             argument: &'a SigCallArgument,
             graph: &'a SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<SigCallArgumentProbe<'a>, DiagnosticId> {
@@ -235,7 +235,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             argument: &'a SigCallArgument,
             expectation: Option<ResolvedTy>,
             graph: &'a SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<ResolvedSigCallArgument<'a>, DiagnosticId> {
@@ -631,7 +631,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             expression: SigExprId,
             expected: Option<ResolvedTy>,
             graph: &SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<ResolvedTy, DiagnosticId> {
@@ -945,7 +945,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             expression: SigExprId,
             expected: ResolvedTy,
             graph: &SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Option<Result<ResolvedTy, DiagnosticId>> {
@@ -965,7 +965,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             expression: SigExprId,
             result_constraint: SignatureCallResultConstraint,
             graph: &SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Option<Result<ResolvedTy, DiagnosticId>> {
@@ -1329,7 +1329,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             semantics: &S,
             expression: SigExprId,
             graph: &SignatureGraph,
-            demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
+            demand: &mut SignatureDemand<'_>,
             memo: &mut HashMap<SigExprId, ResolvedTy>,
             computing: &mut crate::fx_hash::HashSet<SigExprId>,
         ) -> Result<ResolvedTy, DiagnosticId> {
@@ -1676,8 +1676,25 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         origin,
                         later,
                     } => {
-                        let callee =
-                            evaluate_expression(semantics, callee, graph, demand, memo, computing)?;
+                        // A callee whose type is still being computed has no `invoke`: only a
+                        // selection that commits to it is a recursive problem, so the call moves
+                        // to the lower-priority alternative.
+                        let callee = match evaluate_expression(
+                            semantics, callee, graph, demand, memo, computing,
+                        ) {
+                            Ok(callee) => callee,
+                            Err(failure) if failure.in_progress_declaration().is_some() => {
+                                match later {
+                                    Some(later) => {
+                                        return evaluate_expression(
+                                            semantics, later, graph, demand, memo, computing,
+                                        );
+                                    }
+                                    None => return Err(failure),
+                                }
+                            }
+                            Err(failure) => return Err(failure),
+                        };
                         let probes = graph
                             .call_arguments(arguments)
                             .iter()
@@ -1799,9 +1816,15 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         // reports `broken()` from the body check. A later expression that depends
                         // on a failed effect fails on its own read of it.
                         for effect in graph.operands(effects).iter().copied() {
-                            let _ = evaluate_expression(
+                            if let Err(failure) = evaluate_expression(
                                 semantics, effect, graph, demand, memo, computing,
-                            );
+                            ) {
+                                // A committed read of a declaration still being inferred is a
+                                // recursive-inference outcome, not an effect's own diagnostic.
+                                if failure.in_progress_declaration().is_some() {
+                                    return Err(failure);
+                                }
+                            }
                         }
                         evaluate_expression(semantics, result, graph, demand, memo, computing)
                     }
@@ -1892,6 +1915,11 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                                 semantics, operand, graph, demand, memo, computing,
                             ) {
                                 Ok(resolved) => resolved_operands.push(resolved),
+                                Err(diagnostic)
+                                    if diagnostic.in_progress_declaration().is_some() =>
+                                {
+                                    return Err(diagnostic);
+                                }
                                 Err(diagnostic) => {
                                     branch_failure.get_or_insert(diagnostic);
                                 }
@@ -1949,13 +1977,34 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                                 sibling.get(),
                                 joined.get(),
                             );
+                                // A dependency call that left a result-only formal open
+                                // (`emptyMap()`) is completed, not symbolic; its recorded
+                                // selection says so and names the sibling face it takes.
+                                let open =
+                                    call_selection_origin(graph, operand).and_then(|origin| {
+                                        semantics.open_result_expectation(scope, origin, sibling)
+                                    });
+                                // A `Nothing` sibling (`?: throw`, a `return` arm) is only the
+                                // trivial lower constraint of the join's variable. As an
+                                // expectation it would instead cap the branch's own variables at
+                                // `Nothing` and override what its inputs proved.
                                 if current == sibling
-                                    || (!current.get().mentions_ty_param() && joined != current)
+                                    || sibling.get() == Ty::Nothing
+                                    || (!current.get().mentions_ty_param()
+                                        && open.is_none()
+                                        && joined != current)
                                 {
                                     continue;
                                 }
+                                let expectation = open.unwrap_or(sibling);
                                 let Some(Ok(rebound)) = evaluate_expression_with_expected(
-                                    semantics, operand, sibling, graph, demand, memo, computing,
+                                    semantics,
+                                    operand,
+                                    expectation,
+                                    graph,
+                                    demand,
+                                    memo,
+                                    computing,
                                 ) else {
                                     continue;
                                 };
@@ -2194,6 +2243,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             result: approximated.published,
             inferred_body_result: approximated.inferred_body_result,
             result_abbreviation,
+            declared_result_alias: None,
         })
     }
 
@@ -2223,6 +2273,12 @@ fn result_abbreviation<S: SignatureSemantics>(
     match graph.expr(expression)? {
         SigExpr::Call { target, .. } => {
             semantics.call_result_abbreviation(graph.callable_selection(target)?.origin)
+        }
+        SigExpr::Value(selection) => {
+            semantics.call_result_abbreviation(graph.value_selection(selection)?.origin)
+        }
+        SigExpr::Member { origin, .. } | SigExpr::MemberCall { origin, .. } => {
+            semantics.call_result_abbreviation(origin)
         }
         SigExpr::ClassLiteral {
             classifier: Some(classifier),

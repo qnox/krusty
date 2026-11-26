@@ -7,14 +7,14 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use crate::fir::DeclarationId;
 use crate::ir::{
-    ExprId, IrCheckedOperation, IrConst, IrDebugLocalProvenance, IrExpr, IrInlineLocalRole,
-    IrInlinePropertySplice, IrInlineTypeSubstitution,
+    ExprId, IrCheckedOperation, IrExpr, IrInlinePropertySplice, IrInlineTypeSubstitution,
 };
-use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
+use crate::types::{ty_subst_keep_unbound, Ty};
 
 use super::super::{FirFileLoweringFailure, InlineAccessorFailure as InlineFail};
-use super::{
-    mark_subtree, produce_sole_tail_return, rebase_values, specialize_inline_copy, InlineReturn,
+use crate::inline_expansion::{
+    fresh_value_base, splice_inline_body, InlineBodySplice, InlineBodySpliceFailure, InlineOperand,
+    SplicedResult,
 };
 
 /// Splice `inline` property accessors at the uses the checker recorded.
@@ -148,144 +148,35 @@ fn expand_inline_accessor(
     let Some(operands) = access_operands(ir, function, access) else {
         return Err(failure(accessor, InlineFail::OperandMismatch));
     };
-    let has_dispatch = ir
-        .functions
-        .get(function as usize)
-        .is_some_and(|function| function.dispatch_receiver.is_some());
-    let parameter_count =
-        u32::try_from(operands.len()).map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
-    let declared = ir
-        .functions
-        .get(function as usize)
-        .map(|function| function.params.len() + usize::from(has_dispatch))
-        .unwrap_or(usize::MAX);
-    if declared != operands.len() {
-        return Err(failure(accessor, InlineFail::ArityMismatch));
-    }
     let (bindings, reified_bindings) = recorded_bindings(&splice.substitutions);
-    let operand_types = ir.functions[function as usize]
-        .dispatch_receiver
-        .map(Ty::obj_name)
-        .into_iter()
-        .chain(ir.functions[function as usize].params.iter().copied())
-        .map(|ty| ty_subst_keep_unbound(ty, &bindings))
-        .collect::<Vec<_>>();
-    let read = crate::ir::read_values(ir, inner);
-    for (ordinal, operand) in operands.iter().enumerate() {
-        if !read.contains(&(ordinal as u32)) {
-            ir.mark_unread_inline_operand(*operand);
-        }
-    }
-    let identities = ir
-        .function_parameter_identities(function)
-        .map(<[_]>::to_vec);
-    let mut operand_slots = Vec::with_capacity(operands.len());
-    let mut declarations = Vec::with_capacity(operands.len());
-    for (ordinal, (operand, ty)) in operands.into_iter().zip(operand_types).enumerate() {
-        let slot = allocate_temporary(next_temporary)?;
-        let declaration = ir.add_expr(IrExpr::Variable {
-            index: slot,
-            ty: stored_value_ty(ty),
-            init: Some(operand),
-            named: true,
-        });
-        ir.call_operand_bindings.insert(declaration);
-        if let Some((name, role)) = operand_debug(&identities, has_dispatch, ordinal) {
-            if let Some(name) = name {
-                ir.value_names.insert(declaration, name);
-            }
-            ir.set_debug_local_provenance(
-                declaration,
-                IrDebugLocalProvenance::inline_value(role, 1),
-            );
-        }
-        declarations.push(declaration);
-        operand_slots.push(Some(slot));
-    }
-
-    let protected = protected_lambda_bodies(ir, inner);
-    let (cloned_root, cloned) = crate::ir::clone_expression_dag(ir, inner);
-    let highest_local = cloned
-        .values()
-        .filter(|copy| !protected.contains(*copy))
-        .filter_map(|copy| {
-            super::lambda_splice_contract::value_indices(ir.expr(*copy))
-                .into_iter()
-                .max()
-        })
-        .filter(|index| *index >= parameter_count)
-        .max();
-    let local_count = highest_local
-        .map(|highest| highest + 1 - parameter_count)
-        .unwrap_or(0);
-    let local_base = *next_temporary;
-    *next_temporary = local_base
-        .checked_add(local_count)
-        .ok_or(FirFileLoweringFailure::ValueIdentityOverflow)?;
-
-    let mut copies = cloned
-        .iter()
-        .map(|(&source, &copy)| (source, copy))
-        .collect::<Vec<_>>();
-    copies.sort_by_key(|&(_, copy)| copy);
-    let mut returns = Vec::new();
-    for &(source, copy) in &copies {
-        ir.mark_inline_copy(copy);
-        specialize_inline_copy(ir, copy, &bindings, &reified_bindings)
-            .ok_or_else(|| failure(accessor, InlineFail::MissingCopy))?;
-        carry_nested_splice(ir, source, copy, &bindings);
-        if protected.contains(&source) {
-            // A nested lambda's template keeps its own numbering, but a return it carries that its
-            // boundaries already moved to this accessor leaves this expansion too.
-            if let (IrExpr::Return(value), Some(0)) = (
-                ir.expr(copy).clone(),
-                ir.checked_return_depths.get(&copy).copied(),
-            ) {
-                returns.push(InlineReturn {
-                    returned: copy,
-                    value,
-                    nested: true,
-                });
-                ir.checked_return_depths.remove(&copy);
-            }
-            continue;
-        }
-        if rebase_values(
-            ir.exprs.get_mut(copy as usize).unwrap(),
-            parameter_count,
-            &operand_slots,
-            local_base,
-        )
-        .is_none()
-        {
-            return Err(failure(accessor, InlineFail::ValueRebase));
-        }
-        if let IrExpr::Return(value) = ir.expr(copy).clone() {
-            returns.push(InlineReturn {
-                returned: copy,
-                value,
-                nested: false,
-            });
-            ir.checked_return_depths.remove(&copy);
-        }
-    }
-
-    let result_ty = ty_subst_keep_unbound(ir.functions[function as usize].ret, &bindings);
-    let setter = access.value.is_some();
-    let close_line = ir.function_position(function).close_line;
-    let produced = finish_accessor_expansion(
+    let spliced = splice_inline_body(
         ir,
-        cloned_root,
-        &returns,
-        result_ty,
-        setter,
-        close_line,
+        InlineBodySplice {
+            function,
+            body: inner,
+            operands: operands.into_iter().map(InlineOperand::Value).collect(),
+            bindings: &bindings,
+            reified_bindings: &reified_bindings,
+            statement: access.value.is_some(),
+            label_prefix: "$fir_inline_prop$",
+        },
         next_temporary,
-    )?;
-    let mut statements = declarations;
-    let value = match produced {
-        ExpandedAccessor::Value(value) => value,
-        ExpandedAccessor::Statement(statement) => {
+    )
+    .map_err(|reason| match reason {
+        InlineBodySpliceFailure::ArityMismatch => failure(accessor, InlineFail::ArityMismatch),
+        InlineBodySpliceFailure::MissingCopy => failure(accessor, InlineFail::MissingCopy),
+        InlineBodySpliceFailure::ValueRebase => failure(accessor, InlineFail::ValueRebase),
+        InlineBodySpliceFailure::ValueIdentityOverflow => {
+            FirFileLoweringFailure::ValueIdentityOverflow
+        }
+    })?;
+    for (&source, &copy) in &spliced.copies {
+        carry_nested_splice(ir, source, copy, &bindings);
+    }
+    let mut statements = spliced.statements;
+    let value = match spliced.produced {
+        SplicedResult::Value(value) => value,
+        SplicedResult::Statement(statement) => {
             statements.push(statement);
             ir.add_expr(IrExpr::UnitInstance)
         }
@@ -299,7 +190,8 @@ fn expand_inline_accessor(
         "lower",
         "spliced inline property accessor function={function} at {site} bindings={bindings:?}"
     );
-    let nested = cloned
+    let nested = spliced
+        .copies
         .values()
         .copied()
         .filter(|copy| ir.inline_property_access.splices.contains_key(copy))
@@ -335,134 +227,6 @@ fn carry_nested_splice(
         substitution.value = ty_subst_keep_unbound(substitution.value, bindings);
     }
     ir.inline_property_access.splices.insert(copy, splice);
-}
-
-enum ExpandedAccessor {
-    /// The accessor’s value, already the expansion’s result.
-    Value(ExprId),
-    /// A setter body, or a multi-return expansion whose value is read after it runs.
-    Statement(ExprId),
-}
-
-fn finish_accessor_expansion(
-    ir: &mut crate::ir::IrFile,
-    cloned_root: ExprId,
-    returns: &[InlineReturn],
-    result_ty: Ty,
-    setter: bool,
-    close_line: Option<u32>,
-    next_temporary: &mut u32,
-) -> Result<ExpandedAccessor, FirFileLoweringFailure> {
-    if returns.is_empty() {
-        return Ok(if setter {
-            ExpandedAccessor::Statement(cloned_root)
-        } else {
-            ExpandedAccessor::Value(cloned_root)
-        });
-    }
-    if let [InlineReturn {
-        returned: tail,
-        value,
-        nested: false,
-    }] = *returns
-    {
-        if tail == cloned_root {
-            let produced = value.unwrap_or_else(|| ir.add_expr(IrExpr::UnitInstance));
-            return Ok(ExpandedAccessor::Value(produced));
-        }
-        if produce_sole_tail_return(ir, cloned_root, tail, value, result_ty, close_line) {
-            return Ok(if setter {
-                ExpandedAccessor::Statement(cloned_root)
-            } else {
-                ExpandedAccessor::Value(cloned_root)
-            });
-        }
-    }
-    let result_slot = (result_ty != Ty::Unit)
-        .then(|| allocate_temporary(next_temporary))
-        .transpose()?;
-    let label = format!("$fir_inline_prop${cloned_root}");
-    for found in returns {
-        ir.exprs[found.returned as usize] = super::super::inline_returns::frame_exit(
-            ir,
-            &label,
-            result_slot,
-            found.nested,
-            found.value,
-            found.returned,
-        );
-    }
-    let mut statements = Vec::new();
-    if let Some(slot) = result_slot {
-        let initial = ir.add_expr(IrExpr::Const(IrConst::zero_for_value_type(result_ty)));
-        let declaration = ir.add_expr(IrExpr::Variable {
-            index: slot,
-            ty: stored_value_ty(result_ty),
-            init: Some(initial),
-            named: false,
-        });
-        ir.inline_return_frames.insert(declaration, label.clone());
-        statements.push(declaration);
-    }
-    let fallthrough = ir.add_expr(IrExpr::Break {
-        label: Some(label.clone()),
-    });
-    let loop_body = ir.add_expr(IrExpr::Block {
-        stmts: vec![cloned_root, fallthrough],
-        value: None,
-    });
-    let condition = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-    statements.push(ir.add_expr(IrExpr::While {
-        cond: condition,
-        body: loop_body,
-        update: None,
-        post_test: false,
-        label: Some(label),
-    }));
-    if let Some(slot) = result_slot {
-        statements.push(ir.add_expr(IrExpr::GetValue(slot)));
-    }
-    let block = ir.add_expr(IrExpr::Block {
-        stmts: statements,
-        value: None,
-    });
-    Ok(if setter || result_slot.is_none() {
-        ExpandedAccessor::Statement(block)
-    } else {
-        // The loop stored the result; the last statement reads it back as the block above has no
-        // value. Promote that read.
-        let IrExpr::Block { mut stmts, .. } = ir.expr(block).clone() else {
-            return Ok(ExpandedAccessor::Statement(block));
-        };
-        let value = stmts.pop();
-        ir.exprs[block as usize] = IrExpr::Block { stmts, value };
-        ExpandedAccessor::Value(block)
-    })
-}
-
-fn allocate_temporary(next_temporary: &mut u32) -> Result<u32, FirFileLoweringFailure> {
-    let slot = *next_temporary;
-    *next_temporary = next_temporary
-        .checked_add(1)
-        .ok_or(FirFileLoweringFailure::ValueIdentityOverflow)?;
-    Ok(slot)
-}
-
-fn operand_debug(
-    identities: &Option<Vec<crate::ir::IrParameterIdentity>>,
-    has_dispatch: bool,
-    ordinal: usize,
-) -> Option<(Option<String>, IrInlineLocalRole)> {
-    if ordinal == 0 && has_dispatch {
-        return Some((None, IrInlineLocalRole::DispatchReceiver));
-    }
-    let identity_index = ordinal - usize::from(has_dispatch);
-    let identity = identities.as_ref()?.get(identity_index)?;
-    let role = match identity.role {
-        crate::ir::IrParameterRole::ExtensionReceiver => IrInlineLocalRole::ExtensionReceiver,
-        _ => IrInlineLocalRole::Value,
-    };
-    Some((identity.source_name.clone(), role))
 }
 
 /// The body `add_accessor_function` wrapped. Getters are `return <body>`; setters are `<body>`
@@ -526,60 +290,6 @@ fn access_operands(
         return None;
     }
     Some(operands)
-}
-
-fn protected_lambda_bodies(ir: &crate::ir::IrFile, root: ExprId) -> HashSet<ExprId> {
-    let mut protected = HashSet::default();
-    let mut pending = vec![root];
-    let mut seen = HashSet::default();
-    while let Some(expression) = pending.pop() {
-        if !seen.insert(expression) {
-            continue;
-        }
-        if let IrExpr::Lambda {
-            captures,
-            inline_body,
-            ..
-        } = ir.expr(expression)
-        {
-            pending.extend(captures.iter().copied());
-            if let Some(body) = inline_body {
-                mark_subtree(ir, *body, &mut protected);
-            }
-            continue;
-        }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-    }
-    protected
-}
-
-/// One past every value index a lowered body may already occupy.
-///
-/// Each function numbers its own parameters from zero, including parameters the body never reads,
-/// so the next free index has to clear both the highest index written in the arena and the highest
-/// parameter slot reserved for a function or constructor.
-fn fresh_value_base(ir: &crate::ir::IrFile) -> u32 {
-    let mut max_index = 0u32;
-    let see = |max_index: &mut u32, index: u32| *max_index = (*max_index).max(index);
-    for function in &ir.functions {
-        let count = function.params.len() + usize::from(function.dispatch_receiver.is_some());
-        if count > 0 {
-            see(&mut max_index, (count - 1) as u32);
-        }
-    }
-    for class in &ir.classes {
-        see(&mut max_index, class.ctor_param_count);
-        for constructor in &class.secondary_ctors {
-            let count = constructor.prefix_params.len() + constructor.params.len();
-            see(&mut max_index, u32::try_from(count).unwrap_or(u32::MAX));
-        }
-    }
-    for expression in &ir.exprs {
-        for index in super::lambda_splice_contract::value_indices(expression) {
-            see(&mut max_index, index);
-        }
-    }
-    max_index.saturating_add(1)
 }
 
 #[cfg(test)]

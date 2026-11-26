@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use krusty::kotlin_version::KotlinVersion;
+use krusty::kotlin_version::{KotlinVersion, KotlincDefects};
 use krusty::language_settings::LanguageSettings;
 use krusty::language_version::LanguageVersion;
 use krusty_jvm::ir_emit::{JvmDefaultMode, LambdaMode};
@@ -139,21 +139,6 @@ fn split_classpath(v: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-pub(super) fn collect_sources(path: &str, out: &mut Vec<String>) {
-    let p = std::path::Path::new(path);
-    if p.is_dir() {
-        if let Ok(rd) = std::fs::read_dir(p) {
-            let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-            entries.sort();
-            for e in entries {
-                collect_sources(&e.to_string_lossy(), out);
-            }
-        }
-    } else if krusty::source::is_batch_compilable_path(p) {
-        out.push(path.to_string());
-    }
-}
-
 /// `-Xkotlin-reference-version` is krusty's own argument: it selects the kotlinc release whose
 /// argument table parses everything else, so it is read before that table is chosen.
 pub(super) fn take_reference_version(arguments: Vec<String>, opts: &mut Options) -> Vec<String> {
@@ -183,6 +168,25 @@ pub(super) fn take_reference_version(arguments: Vec<String>, opts: &mut Options)
     }
     rest
 }
+
+/// `-Xfix-kotlinc-defects` is krusty's own argument, which kotlinc does not have: the compilation
+/// fixes the reference release's defects ([`KotlincDefects::Fix`]) instead of reproducing them.
+pub(super) fn take_defect_fixes(arguments: Vec<String>, opts: &mut Options) -> Vec<String> {
+    let mut rest = Vec::with_capacity(arguments.len());
+    let mut sources_only = false;
+    for argument in arguments {
+        sources_only |= argument == "--";
+        if !sources_only && argument == FIX_KOTLINC_DEFECTS {
+            opts.kotlinc_defects = KotlincDefects::Fix;
+        } else {
+            rest.push(argument);
+        }
+    }
+    rest
+}
+
+/// The spelling of [`take_defect_fixes`]'s argument.
+pub const FIX_KOTLINC_DEFECTS: &str = "-Xfix-kotlinc-defects";
 
 /// The language and API settings read from the command line, applied once every argument is known
 /// so explicit `-XXLanguage` overrides stay ordered independently of where the versions appear.
@@ -277,6 +281,7 @@ pub(super) fn apply(
             }
         }
         "-Xreport-all-warnings" => opts.report_all_warnings = flag,
+        "-Xallow-no-source-files" => opts.allow_no_source_files = flag,
         "-Xmetadata-version" => match parse_metadata_level(text) {
             Some(version) => opts.metadata_version = Some(version),
             None => opts.errors.push(format!(
@@ -347,11 +352,25 @@ pub(super) fn apply(
                 ));
             }
         }
+        // `-XXexplicit-return-types=<mode>` is the return-type half of `-Xexplicit-api`.
+        "-XXexplicit-return-types" => {
+            if matches!(text, "strict" | "warning" | "disable") {
+                opts.explicit_return_types = Some(text.to_string());
+            } else {
+                opts.errors.push(format!(
+                    "unknown value for parameter -XXexplicit-return-types: '{text}'. Value should \
+                     be one of {{disable, strict, warning}}"
+                ));
+            }
+        }
         // `-Xassertions` selects how `assert(...)` is compiled. krusty emits the two unconditional
-        // modes; `jvm` and `legacy` name runtime-checked shapes it does not reproduce yet.
+        // modes and `legacy`, kotlinc's default; `jvm` names a runtime-checked shape it does not
+        // reproduce yet.
         "-Xassertions" => match text {
-            "always-enable" | "always-disable" => opts.assertions = Some(text.to_string()),
-            "jvm" | "legacy" => opts.refuse(format!(
+            "always-enable" | "always-disable" | "legacy" => {
+                opts.assertions = Some(text.to_string())
+            }
+            "jvm" => opts.refuse(format!(
                 "{name}={text} selects an output shape krusty does not emit"
             )),
             _ => opts.errors.push(format!(
@@ -376,7 +395,7 @@ pub(super) fn apply(
         // Compiler plugins, in kotlinc's syntax. They are resolved against the extension registry
         // before compiling, never dropped: a plugin that changes the output must either run
         // natively or fail the compile.
-        "-Xplugin" | "-Xcompiler-plugin" => {
+        "-Xplugin" | "-Xcompiler-plugin" | "-Xcompiler-plugin-order" => {
             for value in list {
                 opts.plugins.accept(&format!("{name}={value}"), || None);
             }
@@ -472,6 +491,21 @@ fn jvm_target_matches_release(target: &str, release: &str) -> bool {
     target == release
 }
 
+/// kotlinc's configuration error for `-Xexplicit-api` and `-XXexplicit-return-types` naming two
+/// different enabled modes; `disable` on either side never conflicts.
+fn explicit_mode_conflict(opts: &Options) -> Option<String> {
+    let api = opts.explicit_api.as_deref().unwrap_or("disable");
+    let return_types = opts.explicit_return_types.as_deref().unwrap_or("disable");
+    if api == "disable" || return_types == "disable" || api == return_types {
+        return None;
+    }
+    Some(format!(
+        "'-Xexplicit-api' and '-XXexplicit-return-types' flags cannot have different values at \
+         the same time.\nConsider use only one of those flags\nPassed:\n  '-Xexplicit-api={api}'\n  \
+         '-XXexplicit-return-types={return_types}'"
+    ))
+}
+
 pub(super) fn finish_language_settings(
     opts: &mut Options,
     mut parsed: ParsedSettings,
@@ -479,6 +513,9 @@ pub(super) fn finish_language_settings(
     explicit: &[(&ArgumentSpec, Recorded)],
     lifecycle: Vec<CliWarning>,
 ) {
+    if let Some(conflict) = explicit_mode_conflict(opts) {
+        opts.configuration_errors.push(conflict);
+    }
     let reference_version = catalog.version;
     let table = FeatureTable::for_version(reference_version)
         .expect("every supported reference release has a language feature table");

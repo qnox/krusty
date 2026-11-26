@@ -35,9 +35,9 @@ class Summary(unittest.TestCase):
         self.assertEqual(text.splitlines()[:5], [
             '| Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Identical classes | Measured |',
             '| --- | ---: | ---: | ---: | --- | ---: | ---: | --- |',
-            '| zeta |  | 1,200 | 30 | ok | 1 / 1 | 4 / 4 (100.0%) | [2026-10-25, krusty 4dd7475](https://example.test/run/1) |',
-            '| **Measured total** | | | | | **1 / 1** | **4 / 4 (100.0%)** | |',
+            '| zeta | not fetched | 1,200 | 30 | ok | 1 / 1 | 4 / 4 (100.0%) | [2026-10-25, krusty 4dd7475](https://example.test/run/1) |',
             '',
+            '**Measured total:** 1 / 1 compilations built by krusty, 4 / 4 identical classes (100.0%).',
         ])
 
     def test_report_and_json(self):
@@ -81,7 +81,8 @@ class Summary(unittest.TestCase):
 | --- | ---: | ---: | ---: | --- | ---: | ---: |
 | Alpha | 7 | 1,200 | 30 | failed (exit 1) | 0 / 1 | 0 / 5 (0.0%) |
 | zeta | 12,345 | 1,200 | 30 | ok | 1 / 3 | 3 / 7 (42.9%) |
-| **Measured total** | | | | | **1 / 3** | **3 / 7 (42.9%)** |
+
+**Measured total:** 1 / 3 compilations built by krusty, 3 / 7 identical classes (42.9%).
 
 ## Missed compilations
 
@@ -147,7 +148,7 @@ class Summary(unittest.TestCase):
             '',
             '| Project | Failed task | First error | Compilations it kept from running |',
             '| --- | --- | --- | ---: |',
-            '| zeta | `:k:kspKotlin` | | 3 |',
+            '| zeta | `:k:kspKotlin` | no error recorded | 3 |',
             '| zeta | `:a:compileKotlin` | `e: a/A.kt:1:1 boom` | 2 |',
             '| Alpha | `:x:compileKotlin` | `e: X.kt:2:2 bad` | 1 |',
             '',
@@ -202,6 +203,43 @@ class Summary(unittest.TestCase):
             '- **zeta** `:c:compileKotlin`, `:d:compileKotlin`',
             '',
         ])
+
+    def test_the_job_summary_drops_the_largest_error_listings_to_fit_its_size_limit(self):
+        def verified(task, count):
+            r = row(task, False, 1, 0, error='not run: a task it depends on failed')
+            r['verify'] = dict(status='failed', errors=[f"{task}/F{n}.kt:1:1: error: unresolved reference 'x{n}'."
+                                                        for n in range(count)])
+            return r
+
+        def compiled(task):
+            return dict(row(task, True, 1, 1), verify=dict(status='compiled', errors=[]))
+        with tempfile.TemporaryDirectory() as work:
+            reports = []
+            for name, count in (('big', 400), ('small', 2)):
+                p = dict(project(name, [verified(':compileKotlin', count), compiled(':other:compileKotlin')]), verify_exit=1)
+                path = os.path.join(work, name + '.json')
+                with open(path, 'w') as f:
+                    json.dump(p, f)
+                reports.append(path)
+            command = [sys.executable, os.path.join(HERE, 'summarize.py'), '--step-summary', f'{work}/job.md']
+            full = subprocess.run([*command, *reports], check=True, capture_output=True, text=True).stdout
+            with open(f'{work}/job.md') as f:
+                unlimited = f.read()
+            os.remove(f'{work}/job.md')
+            subprocess.run([*command, '--step-summary-limit', '6000', *reports], check=True,
+                           capture_output=True, text=True)
+            with open(f'{work}/job.md') as f:
+                trimmed = f.read()
+        self.assertEqual(unlimited, full)
+        self.assertGreater(len(full.encode()), 6000)
+        self.assertLessEqual(len(trimmed.encode()), 6000)
+        lines = trimmed.splitlines()
+        self.assertIn('<details><summary><b>small</b>: 2 errors in 1 compilation, 1 cause; '
+                      '2 of 2 compilations verified (verify build exit 1)</summary>', lines)
+        self.assertEqual([line for line in lines if line.startswith('- **big**: ')], [
+            '- **big**: 400 errors in 1 compilation, 1 cause; 2 of 2 compilations verified (verify build exit 1); '
+            'listed in summary.md of the summary artifact'])
+        self.assertEqual(trimmed.count('<details>'), trimmed.count('</details>'))
 
     def test_verify_errors_are_listed_per_project_and_grouped_by_cause(self):
         def verified(task, *errors, status='failed'):
@@ -310,8 +348,9 @@ class Summary(unittest.TestCase):
         self.assertEqual(text, '''\
 | Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Identical classes |
 | --- | ---: | ---: | ---: | --- | ---: | ---: |
-| zeta |  | 1,200 | 30 | ok | 0 / 1 | 0 / 2 (0.0%) |
-| **Measured total** | | | | | **0 / 1** | **0 / 2 (0.0%)** |
+| zeta | not fetched | 1,200 | 30 | ok | 0 / 1 | 0 / 2 (0.0%) |
+
+**Measured total:** 0 / 1 compilations built by krusty, 0 / 2 identical classes (0.0%).
 
 ## Missed compilations
 
@@ -334,6 +373,97 @@ No verified compilation reported an error.
             ('zeta', [['not run: a task it depends on failed', 1]], [], dict(exit=1, verified=0, unverified=1)),
         ])
 
+    def test_a_project_without_a_result_is_listed_as_not_measured_with_its_reason(self):
+        with tempfile.TemporaryDirectory() as work:
+            def log(name, status, build, text):
+                os.makedirs(f'{work}/results/corpus-{name}/logs')
+                with open(f'{work}/results/corpus-{name}/logs/STATUS', 'w') as f:
+                    f.write(status)
+                if text is not None:
+                    with open(f'{work}/results/corpus-{name}/logs/{name}.{build}.log', 'w') as f:
+                        f.write(text)
+            log('okio', 'okio warmup exit 1 seconds 22\nokio kotlinc exit 1 seconds 4\n', 'warmup',
+                'Welcome to Gradle 9.8.1!\n\n* What went wrong:\nA problem occurred configuring project \':build-support\'.\n'
+                '> Could not resolve all artifacts for configuration \'classpath\'.\n'
+                '      > Received status code 429 from server: Too Many Requests\n')
+            log('koin', 'koin warmup exit 0 seconds 20\nkoin kotlinc exit 2 seconds 5\n', 'kotlinc', 'no cause line here\n')
+            log('moshi', 'moshi warmup exit 3 seconds 2\n', 'warmup', None)
+            # An interrupted project: its builds passed and its reference test build failed.
+            log('ktor', 'ktor warmup exit 0 seconds 9\nktor kotlinc exit 0 seconds 8\n'
+                        'ktor kotlinc tests exit 1 seconds 7\n', 'kotlinc.tests',
+                '* What went wrong:\nExecution failed for task \':test\'.\n')
+            log('Unciv', 'Unciv warmup exit 0 seconds 2\nUnciv kotlinc exit 0 seconds 2\n', 'kotlinc', '')
+            with open(f'{work}/zeta.json', 'w') as f:
+                json.dump(project('zeta', [row(':a:compileKotlin', True, 4, 4)]), f)
+            with open(f'{work}/stars.tsv', 'w') as f:
+                f.write('zeta\t5\nokio\t\nkoin\t9\nghost\t\nmoshi\t3\nUnciv\t4\nktor\t\n')
+            text = subprocess.run(
+                [sys.executable, os.path.join(HERE, 'summarize.py'), '--expected', f'{work}/stars.tsv',
+                 '--results', f'{work}/results', '--json', f'{work}/out.json', f'{work}/zeta.json'],
+                check=True, capture_output=True, text=True).stdout
+            with open(f'{work}/out.json') as f:
+                document = json.load(f)
+        lines = text.splitlines()
+        self.assertEqual(lines[lines.index('## Not measured'):lines.index('## Missed compilations')], [
+            '## Not measured',
+            '',
+            'These projects are in the corpus but produced no comparison in this run, so they have no row above:',
+            '',
+            '| Project | Why |',
+            '| --- | --- |',
+            '| ghost | its job uploaded no logs: it stopped before a build ran, or the artifact is missing |',
+            '| koin | the kotlinc build exited 2 after 5 s |',
+            "| ktor | the kotlinc tests build exited 1 after 7 s: Execution failed for task ':test'. |",
+            '| moshi | the warmup build exited 3 after 2 s and left no log |',
+            "| okio | the warmup build exited 1 after 22 s: A problem occurred configuring project ':build-support'."
+            ' (a download answered HTTP 429) |',
+            '| Unciv | every build exited 0 but the job wrote no comparison |',
+            '',
+        ])
+        self.assertEqual(document['not_measured'], [
+            dict(name='ghost', reason='its job uploaded no logs: it stopped before a build ran, or the artifact is missing'),
+            dict(name='koin', reason='the kotlinc build exited 2 after 5 s'),
+            dict(name='ktor', reason="the kotlinc tests build exited 1 after 7 s: Execution failed for task ':test'."),
+            dict(name='moshi', reason='the warmup build exited 3 after 2 s and left no log'),
+            dict(name='okio', reason="the warmup build exited 1 after 22 s: A problem occurred configuring project "
+                                     "':build-support'. (a download answered HTTP 429)"),
+            dict(name='Unciv', reason='every build exited 0 but the job wrote no comparison'),
+        ])
+
+    def test_a_complete_run_has_no_not_measured_section(self):
+        with tempfile.TemporaryDirectory() as work:
+            with open(f'{work}/zeta.json', 'w') as f:
+                json.dump(project('zeta', [row(':a:compileKotlin', True, 4, 4)]), f)
+            with open(f'{work}/stars.tsv', 'w') as f:
+                f.write('zeta\t5\n')
+            text = subprocess.run(
+                [sys.executable, os.path.join(HERE, 'summarize.py'), '--expected', f'{work}/stars.tsv',
+                 '--results', f'{work}/results', '--json', f'{work}/out.json', f'{work}/zeta.json'],
+                check=True, capture_output=True, text=True).stdout
+            with open(f'{work}/out.json') as f:
+                document = json.load(f)
+        self.assertNotIn('## Not measured', text)
+        self.assertEqual(document['not_measured'], [])
+
+    def test_no_table_has_an_empty_cell(self):
+        def cost(rss):
+            return dict(built_compile_seconds=1.0, compile_seconds=2.0, wall_seconds=3.0, cpu_seconds=4.0,
+                        peak_rss_mb=dict(total=rss, gradle=0, kotlin_daemon=rss, krusty=rss, other=0))
+        with tempfile.TemporaryDirectory() as work:
+            p = project('zeta', [row(':a:compileKotlin', False, 4, 0, error='e: boom')])
+            p['failed_tasks'] = {':a:compileKotlin': None}
+            p['rows'][0]['blocked_by'] = [':a:compileKotlin']
+            p['cost'] = dict(kotlinc=cost(100), krusty=cost(0))
+            p['tests'] = dict(exit=dict(kotlinc=0, krusty=1),
+                              unavailable=dict(kotlinc=dict(inventory='missing')))
+            with open(f'{work}/zeta.json', 'w') as f:
+                json.dump(p, f)
+            text = subprocess.run([sys.executable, os.path.join(HERE, 'summarize.py'), f'{work}/zeta.json'],
+                                  check=True, capture_output=True, text=True).stdout
+        blank = [line for line in text.splitlines()
+                 if line.startswith('|') and any(cell.strip() == '' for cell in line.strip('|').split('|'))]
+        self.assertEqual(blank, [])
+
     def test_build_cost_compares_both_builds_of_each_measured_project(self):
         def cost(built, compile_, wall, cpu, daemon, krusty, total):
             return dict(built_compile_seconds=built, compile_seconds=compile_, wall_seconds=wall,
@@ -354,14 +484,15 @@ No verified compilation reported an error.
             text = subprocess.run([sys.executable, os.path.join(HERE, 'summarize.py'), *reports],
                                   check=True, capture_output=True, text=True).stdout
         section = text[text.index('## Build cost'):].splitlines()
-        self.assertEqual(section[-4:], [
+        self.assertEqual(section[-5:], [
             '| Project | Compile time, compilations krusty built (kotlinc / krusty) | Compile time, all compilations |'
             ' Compiler peak RSS | Build peak RSS | Build wall time | Build CPU time |',
             '| --- | ---: | ---: | ---: | ---: | ---: | ---: |',
             '| zeta | 30.0 s / 10.0 s (3.0×) | 40.0 s / 25.0 s | 1,500 MB / 400 MB | 2,500 MB / 1,400 MB | '
             '120.0 s / 90.0 s | 300.0 s / 200.0 s |',
-            '| **Total** | **30.0 s / 10.0 s (3.0×)** | **40.0 s / 25.0 s** | | | **120.0 s / 90.0 s** | '
-            '**300.0 s / 200.0 s** |',
+            '',
+            '**Total** over 1 project: compile time of the compilations krusty built 30.0 s / 10.0 s (3.0×), '
+            'of all compilations 40.0 s / 25.0 s, build wall time 120.0 s / 90.0 s, build CPU time 300.0 s / 200.0 s.',
         ])
 
     def test_hotspots_rank_functions_across_the_sampled_projects(self):

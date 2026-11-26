@@ -303,6 +303,25 @@ kt_double kt_abs_double(kt_double value) {
     return result;
 }
 
+/* `countLeadingZeroBits`: the zero bits above the highest set one, the whole width for zero. */
+kt_int kt_count_leading_zero_bits_int(kt_int value) {
+    uint32_t bits = (uint32_t)value;
+    if (bits == 0) return 32;
+    kt_int count = 0;
+    if ((bits & 0xFFFF0000u) == 0) { count += 16; bits <<= 16; }
+    if ((bits & 0xFF000000u) == 0) { count += 8; bits <<= 8; }
+    if ((bits & 0xF0000000u) == 0) { count += 4; bits <<= 4; }
+    if ((bits & 0xC0000000u) == 0) { count += 2; bits <<= 2; }
+    if ((bits & 0x80000000u) == 0) { count += 1; }
+    return count;
+}
+
+kt_int kt_count_leading_zero_bits_long(kt_long value) {
+    uint64_t bits = (uint64_t)value;
+    if ((bits >> 32) == 0) return 32 + kt_count_leading_zero_bits_int((kt_int)(uint32_t)bits);
+    return kt_count_leading_zero_bits_int((kt_int)(uint32_t)(bits >> 32));
+}
+
 #define KT_COMPARE(suffix, type)                                                                   \
     kt_int kt_compare_##suffix(type a, type b) { return a < b ? -1 : (a > b ? 1 : 0); }
 
@@ -825,6 +844,21 @@ kt_boolean kt_reference_equals(KRef self, KRef other) {
     if (mine == NULL || mine != other->header.type->reference_target) {
         return false;
     }
+    const KType *type = self->header.type;
+    if (type->reference_context_count != other->header.type->reference_context_count) {
+        return false;
+    }
+    for (uint32_t index = 0; index < type->reference_context_count; index++) {
+        KRef mine_context = *(KRef *)((uint8_t *)self + type->reference_context_offsets[index]);
+        KRef other_context =
+            *(KRef *)((uint8_t *)other + other->header.type->reference_context_offsets[index]);
+        if (!kt_equals(mine_context, other_context)) {
+            return false;
+        }
+        if (kt_raised()) {
+            return false;
+        }
+    }
     return kt_equals(kt_reference_receiver(self), kt_reference_receiver(other));
 }
 
@@ -834,6 +868,15 @@ kt_int kt_reference_hash_code(KRef self) {
        times 31 leaves the signed range for nearly every address, and signed overflow is undefined
        in C, which would leave two equal references free to hash differently. */
     uint32_t hash = (uint32_t)(uintptr_t)self->header.type->reference_target;
+    const KType *type = self->header.type;
+    for (uint32_t index = 0; index < type->reference_context_count; index++) {
+        KRef context = *(KRef *)((uint8_t *)self + type->reference_context_offsets[index]);
+        kt_int context_hash = context == NULL ? 0 : kt_hash_code(context);
+        if (kt_raised()) {
+            return 0;
+        }
+        hash = 31u * hash + (uint32_t)context_hash;
+    }
     KRef receiver = kt_reference_receiver(self);
     if (receiver != NULL) {
         /* The receiver's `hashCode` is the program's, and one that raised answered nothing to

@@ -68,6 +68,17 @@ KT_MARKER_TYPE(kt_type_comparable, "kotlin.", "Comparable")
    `kt_type_string` would have been sound while a string was the only text this runtime made, and
    stopped being sound the moment there was a builder. */
 KT_MARKER_TYPE(kt_type_char_sequence, "kotlin.", "CharSequence")
+KT_MARKER_TYPE(kt_type_appendable, "kotlin.text.", "Appendable")
+
+/* `kotlin.ranges.ClosedRange` has no instances of its own either: each of the runtime's ranges
+   (`IntRange`, `LongRange`, ...) points at it, so a cast or `is` against the interface asks the
+   one marker, as it does of a class of the program that implements the interface. */
+KT_MARKER_TYPE(kt_type_closed_range, "kotlin.ranges.", "ClosedRange")
+KT_MARKER_TYPE(kt_type_closed_floating_point_range, "kotlin.ranges.", "ClosedFloatingPointRange")
+/* Flattened, as `KType.interfaces` requires: a `ClosedFloatingPointRange` is a `ClosedRange` too. */
+static const KType *const kt_range_interfaces[] = {&kt_type_closed_range};
+static const KType *const kt_floating_range_interfaces[] = {&kt_type_closed_range,
+                                                            &kt_type_closed_floating_point_range};
 
 /* `kotlin.Function` and each arity of it. A function value is an object of a type of its own —
    the generator emits one per lambda and per callable reference — so an `is` against a function
@@ -153,7 +164,8 @@ KT_REFLECT_TYPE(kt_type_kmutable_property2, "KMutableProperty2")
 static const KType *const kt_number_interfaces[] = {&kt_type_number, &kt_type_comparable};
 static const KType *const kt_comparable_interfaces[] = {&kt_type_comparable};
 static const KType *const kt_text_interfaces[] = {&kt_type_comparable, &kt_type_char_sequence};
-static const KType *const kt_char_sequence_interfaces[] = {&kt_type_char_sequence};
+static const KType *const kt_string_builder_interfaces[] = {&kt_type_char_sequence,
+                                                            &kt_type_appendable};
 
 #define KT_TYPE_WITH(identifier, package, simple, size, count, offsets, ifaces)                    \
     const KType identifier = {KT_NAMED(package, simple),                                           \
@@ -1242,8 +1254,8 @@ const KType kt_type_string_builder = {KT_NAMED("kotlin.text.", "StringBuilder"),
                                       .super = &kt_type_any,
                                       .vtable = kt_string_builder_vtable,
                                       .vtable_length = 3,
-                                      .interfaces = kt_char_sequence_interfaces,
-                                      .interface_count = 1};
+                                      .interfaces = kt_string_builder_interfaces,
+                                      .interface_count = 2};
 
 static const char *kt_text_of(KRef self, kt_int *byte_length) {
     /* A `CharSequence` the PROGRAM implements holds no bytes to point at: its text exists only as
@@ -2202,6 +2214,18 @@ static const kt_fn kt_range_vtable[] = {(kt_fn)kt_range_equals, (kt_fn)kt_range_
                               .vtable = table,                                                     \
                               .vtable_length = 3};
 
+/* A range proper, as against its progression: it is a `ClosedRange` of its element kind too, and
+   a floating-point one a `ClosedFloatingPointRange` as well. */
+#define KT_CLOSED_RANGE_TYPE(identifier, simple, shape, table, parent, ifaces)                     \
+    const KType identifier = {                                                                     \
+        KT_NAMED("kotlin.ranges.", simple),                                                        \
+        .instance_size = sizeof(shape),                                                            \
+        .super = parent,                                                                           \
+        .vtable = table,                                                                           \
+        .vtable_length = 3,                                                                        \
+        .interfaces = ifaces,                                                                      \
+        .interface_count = (uint32_t)(sizeof(ifaces) / sizeof((ifaces)[0]))};
+
 /* Each range subclasses its element's progression, as Kotlin's `IntRange : IntProgression` does, so
    an `is IntProgression` walk of the super chain finds it. Kotlin declares only two UNSIGNED pairs
    — `UByte.rangeTo` and `UShort.rangeTo` both answer a `UIntRange`. */
@@ -2214,16 +2238,16 @@ KT_RANGE_TYPE(kt_type_uint_progression, "kotlin.ranges.", "UIntProgression", KRa
               kt_range_vtable)
 KT_RANGE_TYPE(kt_type_ulong_progression, "kotlin.ranges.", "ULongProgression", KRange,
               kt_range_vtable)
-KT_RANGE_SUBTYPE(kt_type_int_range, "kotlin.ranges.", "IntRange", KRange, kt_range_vtable,
-                 &kt_type_int_progression)
-KT_RANGE_SUBTYPE(kt_type_long_range, "kotlin.ranges.", "LongRange", KRange, kt_range_vtable,
-                 &kt_type_long_progression)
-KT_RANGE_SUBTYPE(kt_type_char_range, "kotlin.ranges.", "CharRange", KRange, kt_range_vtable,
-                 &kt_type_char_progression)
-KT_RANGE_SUBTYPE(kt_type_uint_range, "kotlin.ranges.", "UIntRange", KRange, kt_range_vtable,
-                 &kt_type_uint_progression)
-KT_RANGE_SUBTYPE(kt_type_ulong_range, "kotlin.ranges.", "ULongRange", KRange, kt_range_vtable,
-                 &kt_type_ulong_progression)
+KT_CLOSED_RANGE_TYPE(kt_type_int_range, "IntRange", KRange, kt_range_vtable,
+                     &kt_type_int_progression, kt_range_interfaces)
+KT_CLOSED_RANGE_TYPE(kt_type_long_range, "LongRange", KRange, kt_range_vtable,
+                     &kt_type_long_progression, kt_range_interfaces)
+KT_CLOSED_RANGE_TYPE(kt_type_char_range, "CharRange", KRange, kt_range_vtable,
+                     &kt_type_char_progression, kt_range_interfaces)
+KT_CLOSED_RANGE_TYPE(kt_type_uint_range, "UIntRange", KRange, kt_range_vtable,
+                     &kt_type_uint_progression, kt_range_interfaces)
+KT_CLOSED_RANGE_TYPE(kt_type_ulong_range, "ULongRange", KRange, kt_range_vtable,
+                     &kt_type_ulong_progression, kt_range_interfaces)
 
 /* The five element kinds, which index the tables below: a kind's range, its progression, and the
    iterator either hands out (defined with the iterator). */
@@ -2812,10 +2836,10 @@ static const kt_fn kt_floating_range_vtable[] = {(kt_fn)kt_floating_range_equals
 /* Kotlin's own names for these: the class a `rangeTo` on a floating-point receiver answers with is
    private to the stdlib, and `ClosedFloatingPointRange` is the interface it is seen through. The
    name here is the CLASS's, because it is what `toString` on the object would report. */
-KT_RANGE_TYPE(kt_type_double_range, "kotlin.ranges.", "ClosedDoubleRange", KFloatingRange,
-              kt_floating_range_vtable)
-KT_RANGE_TYPE(kt_type_float_range, "kotlin.ranges.", "ClosedFloatRange", KFloatingRange,
-              kt_floating_range_vtable)
+KT_CLOSED_RANGE_TYPE(kt_type_double_range, "ClosedDoubleRange", KFloatingRange,
+                     kt_floating_range_vtable, &kt_type_any, kt_floating_range_interfaces)
+KT_CLOSED_RANGE_TYPE(kt_type_float_range, "ClosedFloatRange", KFloatingRange,
+                     kt_floating_range_vtable, &kt_type_any, kt_floating_range_interfaces)
 
 static KRef kt_floating_range_new(const KType *type, kt_double start, kt_double end) {
     KFloatingRange *range =
@@ -2895,142 +2919,7 @@ static KRef kt_floating_range_to_string(KRef self) {
 
 #undef KT_RANGE_TYPE
 #undef KT_RANGE_SUBTYPE
-
-/* ---- comparable ranges ----------------------------------------------------------------------
-
-   `"a".."c"`, and every other `a..b` whose bounds are ordered by `Comparable` rather than by a
-   machine comparison. Kotlin's `rangeTo` for those answers a `ComparableRange<T>`, seen through
-   `ClosedRange<T>`; it holds the two bounds as OBJECTS and orders them by `T`'s `compareTo`, which
-   the range carries: the generator picked it where the range was built (see the header).
-
-   A program's `compareTo`, `equals`, `hashCode` and `toString` are the program's code, and any of
-   them may raise. Each member stops at the first one that does and answers nothing further, as
-   Kotlin's own members do: the exception propagates out of them before anything else runs.
-
-   No walk, for the reason a floating-point range has none: `Comparable` names no successor, so
-   there is nothing to step by. A pair of bounds and the question `value in it`. */
-typedef struct KComparableRange {
-    KObjectHeader header;
-    KRef start;
-    KRef end;
-    kt_compare_fn compare;
-} KComparableRange;
-
-static const uint32_t kt_comparable_range_offsets[] = {offsetof(KComparableRange, start),
-                                                       offsetof(KComparableRange, end)};
-
-static kt_boolean kt_comparable_range_equals(KRef self, KRef other);
-static kt_int kt_comparable_range_hash_code(KRef self);
-static KRef kt_comparable_range_to_string(KRef self);
-
-static const kt_fn kt_comparable_range_vtable[] = {(kt_fn)kt_comparable_range_equals,
-                                                   (kt_fn)kt_comparable_range_hash_code,
-                                                   (kt_fn)kt_comparable_range_to_string};
-
-const KType kt_type_comparable_range = {
-    KT_NAMED("kotlin.ranges.", "ComparableRange"),
-    .instance_size = sizeof(KComparableRange),
-    .reference_count = 2,
-    .reference_offsets = kt_comparable_range_offsets,
-    .super = &kt_type_any,
-    .vtable = kt_comparable_range_vtable,
-    .vtable_length = 3,
-};
-
-KRef kt_comparable_range(KRef start, KRef end, kt_compare_fn compare) {
-    KComparableRange *range =
-        (KComparableRange *)kt_gc_allocate(&kt_type_comparable_range, sizeof(KComparableRange));
-    range->start = start;
-    range->end = end;
-    range->compare = compare;
-    return (KRef)range;
-}
-
-/* `start > end`, which is Kotlin's own `isEmpty` for this class. */
-kt_boolean kt_comparable_range_is_empty(KRef range) {
-    const KComparableRange *self = (const KComparableRange *)range;
-    kt_int order = self->compare(self->start, self->end);
-    return kt_pending_exception() == NULL && order > 0;
-}
-
-/* `value >= start && value <= end`, each comparison the VALUE's own. Kotlin's `ComparableRange`
-   asks the same way round, which matters for a `compareTo` that is not symmetric. A first
-   comparison that raises is the answer: the second never runs. */
-kt_boolean kt_comparable_range_contains(KRef range, KRef value) {
-    const KComparableRange *self = (const KComparableRange *)range;
-    kt_int from_start = self->compare(value, self->start);
-    if (kt_pending_exception() != NULL || from_start < 0) {
-        return false;
-    }
-    kt_int to_end = self->compare(value, self->end);
-    return kt_pending_exception() == NULL && to_end <= 0;
-}
-
-KRef kt_comparable_range_start(KRef range) { return ((const KComparableRange *)range)->start; }
-
-KRef kt_comparable_range_end(KRef range) { return ((const KComparableRange *)range)->end; }
-
-/* Kotlin's own three, which are `ClosedRange`'s documented contract: two empty ranges are equal
-   whatever their bounds, and `-1` hashes an empty one. `toString` is `"$start..$endInclusive"`
-   whether or not the range is empty, as `ComparableRange`'s own is. `equals` is `isEmpty() &&
-   other.isEmpty() || start == other.start && endInclusive == other.endInclusive`, in that order and
-   short-circuiting as Kotlin does: `other` is asked whether it is empty — a call into its
-   `compareTo` — only when this one is. */
-static kt_boolean kt_comparable_range_equals(KRef self, KRef other) {
-    if (other == NULL || other->header.type != &kt_type_comparable_range) {
-        return false;
-    }
-    kt_boolean empty = kt_comparable_range_is_empty(self);
-    if (kt_pending_exception() == NULL && empty) {
-        empty = kt_comparable_range_is_empty(other);
-    }
-    if (kt_pending_exception() != NULL || empty) {
-        return empty;
-    }
-    const KComparableRange *a = (const KComparableRange *)self;
-    const KComparableRange *b = (const KComparableRange *)other;
-    kt_boolean starts = kt_equals(a->start, b->start);
-    if (kt_pending_exception() != NULL || !starts) {
-        return false;
-    }
-    kt_boolean ends = kt_equals(a->end, b->end);
-    return kt_pending_exception() == NULL && ends;
-}
-
-static kt_int kt_comparable_range_hash_code(KRef self) {
-    kt_boolean empty = kt_comparable_range_is_empty(self);
-    if (kt_pending_exception() != NULL) {
-        return 0;
-    }
-    if (empty) {
-        return -1;
-    }
-    const KComparableRange *range = (const KComparableRange *)self;
-    kt_int start = kt_hash_code(range->start);
-    if (kt_pending_exception() != NULL) {
-        return 0;
-    }
-    /* Polled again: the second bound's `hashCode` may throw too, and its placeholder is no hash. */
-    kt_int end = kt_hash_code(range->end);
-    if (kt_pending_exception() != NULL) {
-        return 0;
-    }
-    return (kt_int)(31u * (uint32_t)start + (uint32_t)end);
-}
-
-static KRef kt_comparable_range_to_string(KRef self) {
-    const KComparableRange *range = (const KComparableRange *)self;
-    KRef start = kt_to_string(range->start);
-    if (kt_pending_exception() != NULL) {
-        return NULL;
-    }
-    KRef text = kt_string_plus(start, kt_string_utf8("..", 2));
-    KRef end = kt_to_string(range->end);
-    if (kt_pending_exception() != NULL) {
-        return NULL;
-    }
-    return kt_string_plus(text, end);
-}
+#undef KT_CLOSED_RANGE_TYPE
 
 /* Append `count` bytes of `text` at `out`, answering how many were written. */
 static kt_int kt_range_put(char *out, const char *text, kt_int count) {

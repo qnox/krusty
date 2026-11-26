@@ -22,41 +22,33 @@ impl ProductionSignatureSemantics<'_> {
         self.record_scoped_argument_constraints(scope, &[expected], &[actual]);
     }
 
-    /// Record each argument of an invoked function value against its parameter. `explicit_shape`
-    /// is the form that passes every context and receiver argument in source
-    /// (`action(receiver, value)`, and `receiver.action(value)`, which compact evaluation passes
-    /// the same way). Otherwise the implicit prefix comes from the scope: context parameters use
-    /// the nearest matching receivers and the extension receiver is the innermost receiver whose
-    /// type reaches the declared receiver's classifier, as the body check selects them.
+    /// Record each argument of an invoked function value against its parameter. The
+    /// `implicit_prefix` leading parameters come from the scope (none when every context and
+    /// receiver argument is in source: `action(receiver, value)`, and `receiver.action(value)`,
+    /// which compact evaluation passes the same way): context parameters use the nearest matching
+    /// receivers and the extension receiver, when the prefix covers it, is the innermost receiver
+    /// whose type reaches the declared receiver's classifier, as the body check selects them.
     pub(super) fn record_function_value_invoke_constraints(
         &self,
         scope: crate::fir::SignatureScope,
         signature: &crate::types::FnSig,
         implicit_prefix: usize,
-        explicit_shape: bool,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
     ) {
         let arguments = arguments
             .iter()
             .map(|argument| argument.ty.get())
             .collect::<Vec<_>>();
-        if explicit_shape {
-            self.record_scoped_argument_constraints(scope, &signature.params, &arguments);
-            return;
-        }
         self.record_scoped_argument_constraints(
             scope,
             &signature.params[implicit_prefix..],
             &arguments,
         );
-        if signature.context_count == 0 && !signature.has_receiver {
+        if implicit_prefix == 0 {
             return;
         }
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         let receivers = self.implicit_receivers(scope);
         let active_variables = self.active_postponed_type_variables(scope);
@@ -78,7 +70,7 @@ impl ProductionSignatureSemantics<'_> {
         if let Some(arguments) = context_arguments {
             self.record_scoped_argument_constraints(scope, context_parameters, &arguments);
         }
-        if !signature.has_receiver {
+        if implicit_prefix == signature.context_count {
             return;
         }
         let Some(&declared_receiver) = signature.params.get(signature.context_count) else {

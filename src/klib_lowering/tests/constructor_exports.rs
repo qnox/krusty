@@ -898,6 +898,44 @@ fn rollback_preserves_a_preexisting_self_type_without_class_storage() {
     assert_eq!(ir.declared_class_self_type(appended), None);
 }
 
+/// A declined lowering leaves no naming provenance for the classes it appended: the next object
+/// literal's ordinal and its class id start from what the file held before, as if the declined
+/// attempt never ran.
+#[test]
+fn rollback_removes_the_naming_provenance_of_appended_classes() {
+    let provenance = |ordinal| crate::ir::IrLocalClassNameProvenance {
+        source: crate::ir::IrLocalClassNameRoot::Dependency {
+            package: type_name("demo"),
+        },
+        lexical_owner: None,
+        segments: vec!["make".to_owned()].into_boxed_slice(),
+        ordinal: Some(ordinal),
+        parents: Box::new([]),
+    };
+    let mut ir = IrFile::default();
+    let retained = ir.add_class(crate::ir::IrClass::synthetic(type_name("demo/Kept")));
+    ir.local_class_name_provenance
+        .insert(retained, provenance(1));
+    let before = ir.local_class_name_provenance.clone();
+    let checkpoint = super::super::lowering_checkpoint::LoweringCheckpoint::of(&ir);
+    let declined = ir.add_class(crate::ir::IrClass::synthetic(type_name("demo/Declined")));
+    ir.local_class_name_provenance
+        .insert(declined, provenance(2));
+    checkpoint.restore(&mut ir);
+    assert_eq!(ir.local_class_name_provenance, before);
+
+    // The successful retry takes the declined attempt's class id and ordinal.
+    let retried = ir.add_class(crate::ir::IrClass::synthetic(type_name("demo/Retried")));
+    assert_eq!(retried, declined);
+    let next_ordinal = ir
+        .local_class_name_provenance
+        .values()
+        .filter_map(|known| known.ordinal)
+        .max()
+        .map_or(1, |ordinal| ordinal + 1);
+    assert_eq!(next_ordinal, 2);
+}
+
 /// An accessor overriding an interface property is a member the class dispatches like any
 /// other override, so the class is realized with it.
 #[test]

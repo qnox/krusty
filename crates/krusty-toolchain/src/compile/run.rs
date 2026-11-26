@@ -12,10 +12,12 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::process::Command;
 
+use super::arguments::arguments;
 use super::avoidance;
 use super::ksp;
 use super::plan::{Plan, Step};
 use super::schedule::schedule;
+use super::sources;
 
 /// Why a module failed.
 #[derive(Debug)]
@@ -111,8 +113,17 @@ fn run_step(step: &Step, krusty: &Path, printed: &mut Printed) -> Result<(), Run
     if let Some(ksp) = &step.ksp {
         run_ksp(step, ksp, printed)?;
     }
-    match &step.arguments {
-        Some(arguments) => {
+    // The fragment's sources are found when it compiles: KSP, which runs first, adds the Kotlin
+    // sources it generates.
+    let sources = sources::find(&step.sources).map_err(|error| {
+        RunFailure::Io(format!(
+            "cannot read the sources of module `{}`: {error}",
+            step.module
+        ))
+    })?;
+    match &step.compilation {
+        Some(compilation) => {
+            let arguments = &arguments(compilation, &sources).map_err(RunFailure::Io)?;
             let inputs = avoidance::inputs(krusty, arguments);
             if inputs
                 .as_deref()
@@ -145,6 +156,12 @@ fn run_step(step: &Step, krusty: &Path, printed: &mut Printed) -> Result<(), Run
                 avoidance::record(&step.state, &step.output, &inputs)
                     .map_err(|error| output("record", &step.state, error))?;
             }
+        }
+        None if !sources.kotlin.is_empty() => {
+            return Err(RunFailure::Io(format!(
+                "KSP generated Kotlin sources for module `{}`, which has none of its own, and krusty-toolchain compiles a module only when it has Kotlin sources of its own",
+                step.module
+            )));
         }
         None => {
             avoidance::forget(&step.state).map_err(|error| output("remove", &step.state, error))?;
@@ -186,11 +203,11 @@ fn run_ksp(step: &Step, ksp: &ksp::Ksp, printed: &mut Printed) -> Result<(), Run
             code: ran.status.code().unwrap_or(1),
         });
     }
-    let generated = ksp::generated_sources(&ksp.outputs)
-        .map_err(|error| output("read", &ksp.outputs.base, error))?;
+    let generated = ksp::generated_java_sources(&ksp.outputs)
+        .map_err(|error| output("read", &ksp.outputs.java, error))?;
     if let Some(source) = generated.first() {
         return Err(RunFailure::Io(format!(
-            "KSP generated sources for module `{}` ({} first), and krusty-toolchain does not compile generated sources yet",
+            "KSP generated Java sources for module `{}` ({} first), and krusty-toolchain compiles Kotlin sources only",
             step.module,
             source.display()
         )));

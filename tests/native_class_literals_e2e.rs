@@ -4,7 +4,7 @@
 //! over a TYPE names it statically, while a literal over a VALUE reads the descriptor the object is
 //! wearing. The programs below are written so the two would disagree if the wrong one were read.
 
-use super::common::{expect_box_run_with_stdlib, expect_native_box};
+use super::common::{expect_box_ok_with_stdlib, expect_box_run_with_stdlib, expect_native_box};
 
 #[test]
 fn a_bound_literal_answers_the_runtime_class() {
@@ -111,4 +111,14 @@ fn a_literals_own_to_string_names_the_class() {
         "ClassLiteralToString",
         "OK",
     );
+}
+
+/// `is`/`as?` against `KClass`: a class literal is one, an instance or a string or null is not.
+/// kotlinc answers it first (the JVM oracle), then the runtime's own class descriptor must agree.
+/// The whole program is shared with every other lane in `tests/box_regressions`.
+#[test]
+fn a_class_literal_is_a_kclass_to_an_erased_test() {
+    let source = include_str!("box_regressions/kClassTypeChecks.kt");
+    expect_box_ok_with_stdlib(source, "KClassTypeChecks");
+    expect_native_box(source, "KClassTypeChecks", "OK");
 }

@@ -212,6 +212,16 @@ pub enum Callee {
         defaults: Vec<u32>,
         source_member: Option<crate::libraries::SourceMember>,
     },
+    /// A representation adapter between a value class and its carrier, built by a backend's
+    /// value-class lowering at a representation boundary: [`ValueClassAdapter::Box`] takes the
+    /// carrier and answers the box (the call has one argument), [`ValueClassAdapter::Unbox`] takes
+    /// the box as its dispatch receiver and answers the carrier. It is neither a checked call nor
+    /// a declaration of the program, so it carries no declared parameters; the backend that built
+    /// it realizes it into its own physical call before emission.
+    ValueClassAdapter {
+        adapter: ValueClassAdapter,
+        owner: TypeName,
+    },
     Special {
         owner: TypeName,
         name: String,
@@ -228,6 +238,15 @@ pub enum Callee {
         /// coordinate is deliberately absent.
         source: Option<crate::fir::CallableId>,
     },
+}
+
+/// The direction of a [`Callee::ValueClassAdapter`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ValueClassAdapter {
+    /// The carrier to the value class's box.
+    Box,
+    /// The value class's box to its carrier.
+    Unbox,
 }
 
 /// Source-level member operation selected for a semantic `super` dispatch. This common-IR identity

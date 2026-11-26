@@ -43,7 +43,6 @@ pub(in super::super) fn initializer_header(
         params.push(semantic_type(header.arena, &header.types, parameter.ty)?);
         identities.push(IrParameterIdentity::source(parameter.name.clone()));
     }
-    let count = params.len();
     Ok(FunctionHeader {
         name: header.function.name.clone(),
         params,
@@ -56,7 +55,14 @@ pub(in super::super) fn initializer_header(
         value_receiver: None,
         singleton_extension_unread_receiver: None,
         values,
-        defaults: vec![None; count],
+        // Each parameter's default, lowered in this frame for the constructor's default-argument
+        // entry, whose frame lays out the instance and the parameters as this one does.
+        defaults: header
+            .function
+            .regular_parameters
+            .iter()
+            .map(|parameter| parameter.default_value)
+            .collect(),
         type_parameters: header.types.clone(),
         erasures: HashMap::default(),
         erased_result: None,
@@ -69,6 +75,7 @@ pub(in super::super) fn local_initializer_header(
     function: &KlibIrFunction,
     receiver: &KlibIrParameter,
     receiver_ty: Ty,
+    outer: Option<Ty>,
     arena: &KlibIrArena,
     types: &KlibTypeParameters,
     resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
@@ -78,8 +85,24 @@ pub(in super::super) fn local_initializer_header(
     let mut params = Vec::new();
     let mut identities = Vec::new();
     let mut defaults = Vec::new();
+    // An inner class's initializer takes the outer instance its constructor receives first, so
+    // that it numbers every value as the constructor does: the superclass constructor's arguments
+    // it lowers are evaluated in the constructor's frame.
+    if let Some(outer) = outer {
+        let receiver = function.dispatch_receiver.as_ref().ok_or_else(|| {
+            mismatch("an inner class constructor has no outer instance".to_owned())
+        })?;
+        bind_slot(&mut values, &receiver.base.symbol, 1)?;
+        params.push(outer);
+        identities.push(IrParameterIdentity::generated(
+            crate::ir::IrGeneratedParameterRole::OuterInstance,
+            None,
+        ));
+        defaults.push(None);
+    }
+    let prefix = params.len();
     for (ordinal, parameter) in function.regular_parameters.iter().enumerate() {
-        let index = u32::try_from(ordinal + 1).expect("constructor parameters fit u32");
+        let index = u32::try_from(ordinal + 1 + prefix).expect("constructor parameters fit u32");
         bind_slot(&mut values, &parameter.base.symbol, index)?;
         params.push(semantic_type_in(arena, types, parameter.ty, resolve)?);
         identities.push(IrParameterIdentity::source(parameter.name.clone()));
@@ -112,11 +135,8 @@ pub(in super::super) fn local_member_header(
             "a constructor is not a member function of its class".to_owned(),
         ));
     }
-    if !function.type_parameters.is_empty() {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "a generic member of a non-public class",
-        ));
-    }
+    // A member's own type parameters are formals of its frame beside its class's.
+    let types = &declared_type_parameters::own(function, arena, types.clone(), resolve)?;
     if !function.context_parameters.is_empty()
         || function.extension_receiver.is_some()
         || function.companion_extension_class.is_some()

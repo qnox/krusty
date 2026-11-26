@@ -373,15 +373,19 @@ fn plugin_and_structural_member_keys(
 ) -> std::collections::HashMap<u32, (u32, u8)> {
     use krusty::ir::IrDataClassMemberRole;
     let owner = class.fq_name_id();
-    let structural: Vec<(u32, u32)> = [
-        IrDataClassMemberRole::ToString,
-        IrDataClassMemberRole::HashCode,
-        IrDataClassMemberRole::Equals,
-    ]
-    .into_iter()
-    .filter_map(|role| ir.data_class_member(owner, role))
-    .filter_map(|function| Some((function, *ir.fn_source_order.get(&function)?)))
-    .collect();
+    // kotlinc declares a plugin's member before every member a data class generates (`componentN`,
+    // `copy`, `toString`, `hashCode`, `equals`), so it precedes the first of them.
+    let structural: Vec<(u32, u32)> = [IrDataClassMemberRole::Copy]
+        .into_iter()
+        .chain((0..class.ctor_param_count).map(IrDataClassMemberRole::Component))
+        .chain([
+            IrDataClassMemberRole::ToString,
+            IrDataClassMemberRole::HashCode,
+            IrDataClassMemberRole::Equals,
+        ])
+        .filter_map(|role| ir.data_class_member(owner, role))
+        .filter_map(|function| Some((function, *ir.fn_source_order.get(&function)?)))
+        .collect();
     let Some(first) = structural.iter().map(|&(_, order)| order).min() else {
         return std::collections::HashMap::new();
     };

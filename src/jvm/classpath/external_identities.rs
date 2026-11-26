@@ -186,6 +186,7 @@ impl Classpath {
         }
         if stored.callable.declared_ret.is_none() {
             stored.callable.declared_ret = callable.declared_ret;
+            stored.callable.result_alias = callable.result_alias;
         }
         if stored.callable.generic_sig.is_none() {
             stored.callable.generic_sig = callable.generic_sig.clone();
@@ -366,6 +367,41 @@ mod tests {
                 .generic_sig
                 .as_deref(),
             Some(&signature)
+        );
+    }
+
+    /// A partial view built from a descriptor's parameters declares none; the declaration that
+    /// reaches the same identity later supplies its Kotlin parameters, which a generic `T` slot
+    /// needs where it erases like a value-class one.
+    #[test]
+    fn reinterning_a_physical_callable_takes_the_later_declared_parameters() {
+        let cp = Classpath::new(vec![]);
+        let partial = LibraryCallable::library(
+            type_name("review/Holder"),
+            "put",
+            vec![Ty::obj("java/lang/Object")],
+            Ty::Unit,
+            Ty::Unit,
+            "(Ljava/lang/Object;)V",
+        );
+        assert_eq!(partial.declared_params, None);
+        let identity = cp.intern_external_callable(&partial, ExternalCallableKind::Member, None);
+
+        let mut declared = partial.clone();
+        let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        declared.declared_params = Some(Box::new([parameter]));
+
+        assert_eq!(
+            cp.intern_external_callable(&declared, ExternalCallableKind::Member, None),
+            identity
+        );
+        assert_eq!(
+            cp.external_callable(identity)
+                .expect("the enriched callable")
+                .callable
+                .declared_params
+                .as_deref(),
+            Some(&[parameter][..])
         );
     }
 

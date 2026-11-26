@@ -50,7 +50,11 @@ fn ir_plugin_members_follow_delegation_forwarders() {
     let write_self = method(&mut ir, class, "write$Self$main");
     ir.record_generated_function(
         owner,
-        krusty::ir::IrGeneratedFunctionRole::SerializationWriteSelf,
+        krusty::ir::IrGeneratedFunctionRole {
+            plugin: "test.plugin",
+            role: 0,
+            placement: krusty::ir::IrMemberPlacement::AfterDelegatedMembers,
+        },
         write_self,
     );
     let forwarder = method(&mut ir, class, "greet");

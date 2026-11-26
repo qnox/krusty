@@ -10,7 +10,7 @@
 //! return type (or property type and mutability), none generic or an extension, none itself made
 //! for a supertype, and every one public. Otherwise it leaves the list undescribed.
 
-use krusty_plugin_ir::{
+use krusty_plugin_api::ksp::{
     KspAccessor, KspClassKind, KspDeclaration, KspDeclarationOrigin, KspFunctionKind, KspModifier,
     KspOverridee, KspType, KspTypeArgument, KspTypeSlot,
 };

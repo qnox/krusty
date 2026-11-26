@@ -26,10 +26,7 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         local_operator: Option<crate::fir::ResolvedTy>,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         if let Some(result) =
             self.select_receiver_operator_rung(scope, receiver, spelling, arguments, true, demand)?
@@ -102,10 +99,7 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         members: bool,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+        demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
         let selected = self.with_resolver(scope, |resolver| {
             let (mut functions, _) = resolver
@@ -207,10 +201,7 @@ impl ProductionSignatureSemantics<'_> {
             return None;
         }
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         super::super::context_argument_types(
             &self.implicit_receivers(scope),
@@ -237,9 +228,7 @@ pub(super) fn selects_in_place_assignment(
     receiver: crate::fir::ResolvedTy,
     argument: crate::fir::ResolvedTy,
     local_operator: Option<crate::fir::ResolvedTy>,
-    demand: &mut dyn FnMut(
-        crate::fir::DeclarationId,
-    ) -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+    demand: &mut crate::fir::SignatureDemand<'_>,
 ) -> bool {
     let spelling = match operator {
         crate::fir::SigBinaryOperator::Add => "plusAssign",
@@ -288,9 +277,7 @@ pub(super) fn select_binary(
     origin: crate::fir::OriginId,
     lhs: crate::fir::ResolvedTy,
     rhs: crate::fir::ResolvedTy,
-    demand: &mut dyn FnMut(
-        crate::fir::DeclarationId,
-    ) -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+    demand: &mut crate::fir::SignatureDemand<'_>,
 ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
     let convention = match operator {
         crate::fir::SigBinaryOperator::Add => Some(("plus", false)),

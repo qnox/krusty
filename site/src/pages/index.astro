@@ -90,7 +90,7 @@ const buildSystems: { name: string; level: Level; html: string }[] = [
   {
     name: "Gradle",
     level: "yes",
-    html: `<code>id("dev.krustythecompiler")</code> plugin, shipped as <code>krusty-gradle-plugin-&lt;version&gt;.zip</code> in each <a href="${release}">release</a>. Replaces the Kotlin/JVM compile tasks of source sets and of Android variants (AGP 9's built-in Kotlin or <code>kotlin("android")</code>). Validated with Gradle 7.6.3, 8.14.3, 9.5.0 and 9.7.0. <code>kotlin-dsl</code> builds such as <code>buildSrc</code> and compile tasks outside a source set stay with kotlinc, logged per task.`,
+    html: `<code>id("dev.krustythecompiler")</code> plugin, shipped as <code>krusty-gradle-plugin-&lt;version&gt;.zip</code> in each <a href="${release}">release</a>. Replaces the Kotlin/JVM compile tasks of source sets and of Android variants (AGP 9's built-in Kotlin or <code>kotlin("android")</code>). Supports Gradle 8.14 and newer, validated with 8.14.8 and 9.9.2. <code>kotlin-dsl</code> builds such as <code>buildSrc</code> and compile tasks outside a source set stay with kotlinc, logged per task.`,
   },
   {
     name: "Kotlin Toolchain (project.yaml/module.yaml)",
@@ -100,7 +100,7 @@ const buildSystems: { name: string; level: Level; html: string }[] = [
   {
     name: "Kotlin Build Tools API",
     level: "partial",
-    html: `<code>krusty-build-tools-&lt;version&gt;-kotlin-&lt;kotlin&gt;.jar</code> in each release stands in for <code>kotlin-build-tools-impl</code> in a build tool that loads the API from a classpath. JVM toolchain and in-process execution only. See <a href="${blob("tools/krusty-build-tools/README.md")}">tools/krusty-build-tools</a>.`,
+    html: `<code>krusty-build-tools-&lt;version&gt;-kotlin-&lt;kotlin&gt;.jar</code> in each release stands in for <code>kotlin-build-tools-impl</code> in a build tool that loads the API from a classpath. JVM toolchain only, under the in-process or daemon execution policy. See <a href="${blob("tools/krusty-build-tools/README.md")}">tools/krusty-build-tools</a>.`,
   },
   {
     name: "Bazel",
@@ -122,7 +122,7 @@ const plugins: { name: string; level: Level; html: string }[] = [
   {
     name: "KSP (KSP2)",
     level: "partial",
-    html: "Through a build system. Under Gradle, KSP's own <code>kspKotlin</code> task runs the processors and krusty compiles what they generate (Gradle 8 or newer). Under the Kotlin Toolchain, only generated classes and resources are picked up. The plain command line rejects KSP.",
+    html: "Through a build system. Under Gradle, KSP's own <code>kspKotlin</code> task runs the processors and krusty compiles what they generate (Gradle 8 or newer). Under the Kotlin Toolchain, krusty compiles the generated Kotlin sources and picks up generated classes and resources; generated Java sources are not compiled yet. The plain command line rejects KSP.",
   },
   {
     name: "kapt",

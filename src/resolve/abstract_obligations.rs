@@ -583,19 +583,16 @@ impl Checker<'_> {
                     // whichever supertype happened to be traversed first. Equal results remain one
                     // slot and retain hierarchy order; incomparable results are diagnosed as an
                     // inheritance conflict before a concrete-class obligation is rendered.
-                    let most_specific = abstract_getters
-                        .iter()
-                        .copied()
-                        .filter(|candidate| {
-                            abstract_getters.iter().all(|other| {
-                                crate::symbol_resolver::resolution_subtype(
-                                    &source,
-                                    normalized_property_result_type(candidate),
-                                    normalized_property_result_type(other),
-                                )
-                            })
-                        })
-                        .collect::<Vec<_>>();
+                    let most_specific = crate::assignable::most_specific_results(
+                        &abstract_getters,
+                        |candidate, other| {
+                            crate::symbol_resolver::resolution_subtype(
+                                &source,
+                                normalized_property_result_type(candidate),
+                                normalized_property_result_type(other),
+                            )
+                        },
+                    );
                     // When equally specific declarations contribute `val` and `var`, the
                     // combined fake override needs both accessors. Render the declaration that
                     // owns the missing setter; hierarchy order decides only after accessor shape.

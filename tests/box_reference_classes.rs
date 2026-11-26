@@ -48,23 +48,19 @@ pub fn checked_box(src: &str, stem: &str) -> Result<ReferenceClasses, String> {
 /// Establish the JVM result of source already prepared by the JVM corpus runner. Preparation
 /// cannot run twice: directives such as CHECK_TYPE_WITH_EXACT inject support declarations.
 pub fn checked_prepared_box(src: &str, stem: &str) -> Result<ReferenceClasses, String> {
-    if !krusty::conformance::backend_targeted(src, &["JVM", "JVM_IR"])
-        || krusty::conformance::backend_muted(src, &["JVM", "JVM_IR"])
-    {
-        return Err("owned portable box fixture may not skip the JVM oracle".into());
-    }
-    if krusty::toolchain::kotlinc_path().is_none() {
-        return Err("owned box fixture requires the configured reference Kotlin compiler".into());
-    }
-    let jdk = producing_jdk_modules()?;
-    let classpath = common::classpath_jars_for(src);
-    let reference = reference_compile(
-        src,
-        stem,
-        &classpath,
-        BoxJdk::Full { root: Some(&jdk) },
-        krusty::conformance::COROUTINE_HELPERS,
-    )?;
+    checked_prepared_box_with(src, stem, &[])
+}
+
+/// [`checked_prepared_box`] with `extra` classpath entries (a plugin corpus's runtime stubs) after
+/// the ones the case's directives select.
+pub fn checked_prepared_box_with(
+    src: &str,
+    stem: &str,
+    extra: &[PathBuf],
+) -> Result<ReferenceClasses, String> {
+    let reference = reference_classes_with(src, stem, extra)?;
+    let mut classpath = common::classpath_jars_for(src);
+    classpath.extend_from_slice(extra);
     let units = plan_units(src, stem, krusty::conformance::COROUTINE_HELPERS)?;
     let entry = units
         .last()
@@ -93,6 +89,33 @@ pub fn checked_prepared_box(src: &str, stem: &str) -> Result<ReferenceClasses, S
         ));
     }
     Ok(reference)
+}
+
+/// The reference compiler's classes for a case already prepared by a corpus runner, with `extra`
+/// classpath entries after the ones its directives select. It checks nothing about `box()`.
+pub fn reference_classes_with(
+    src: &str,
+    stem: &str,
+    extra: &[PathBuf],
+) -> Result<ReferenceClasses, String> {
+    if !krusty::conformance::backend_targeted(src, &["JVM", "JVM_IR"])
+        || krusty::conformance::backend_muted(src, &["JVM", "JVM_IR"])
+    {
+        return Err("owned portable box fixture may not skip the JVM oracle".into());
+    }
+    if krusty::toolchain::kotlinc_path().is_none() {
+        return Err("owned box fixture requires the configured reference Kotlin compiler".into());
+    }
+    let jdk = producing_jdk_modules()?;
+    let mut classpath = common::classpath_jars_for(src);
+    classpath.extend_from_slice(extra);
+    reference_compile(
+        src,
+        stem,
+        &classpath,
+        BoxJdk::Full { root: Some(&jdk) },
+        krusty::conformance::COROUTINE_HELPERS,
+    )
 }
 
 /// Bump when the on-disk cache layout, the comparison population, or how a case's reference
@@ -1632,8 +1655,10 @@ mod tests {
 
     #[test]
     fn reference_test_only_properties_cover_each_declared_feature_state() {
-        let table = krusty::features::FeatureTable::for_version(krusty::kotlin_version::target())
-            .expect("the configured release has a feature table");
+        let table = krusty::features::FeatureTable::for_version(
+            krusty::kotlin_version::environment_release(),
+        )
+        .expect("the configured release has a feature table");
         let features = table
             .features()
             .iter()
@@ -1659,8 +1684,10 @@ mod tests {
 
     #[test]
     fn reference_test_only_property_reaches_the_direct_acceptance_oracle() {
-        let table = krusty::features::FeatureTable::for_version(krusty::kotlin_version::target())
-            .expect("the configured release has a feature table");
+        let table = krusty::features::FeatureTable::for_version(
+            krusty::kotlin_version::environment_release(),
+        )
+        .expect("the configured release has a feature table");
         let feature = table
             .features()
             .iter()

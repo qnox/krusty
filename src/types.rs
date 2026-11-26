@@ -13,7 +13,6 @@ mod intersection;
 pub use intersection::declaration_approximation;
 pub(crate) use intersection::{same_component_set, same_structure};
 mod overridden_declaration;
-mod qualified_name;
 mod semantic_call_role;
 mod semantic_callable_owner;
 mod suspension;
@@ -35,7 +34,6 @@ pub use suspension::continuation_passing;
 pub(crate) use value_conversion::{value_conversion, ValueConversion};
 mod annotation_targets;
 mod interning;
-mod spelling;
 pub(crate) use annotation_targets::PropertyAnnotationHost;
 pub use annotation_targets::{
     AnnotationTargets, DeclaredTargetPolicies, KotlinTarget, PropertyAnnotationDefaultTargetMode,
@@ -56,7 +54,6 @@ pub use substitute::{ty_subst, ty_subst_all, ty_subst_applied_arguments, TyParam
 
 pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
 pub use crate::inline_parameter_modifier::{InlineExpansionMode, InlineParameterModifier};
-use crate::name_tree::{NameId, NameTree};
 use interning::ShardedInterner;
 mod array_types;
 mod primitive_arrays;
@@ -65,12 +62,18 @@ pub(crate) use raw_erasure::{formal_erasures, raw_member_type, DeclaredFormals};
 mod thin_handles;
 mod ty_kind;
 mod ty_table;
+pub use krusty_core::{
+    existing_type_name, existing_type_name_child, existing_type_name_in,
+    existing_type_name_nested_child, insert_type_name_in, same, type_name, type_name_child,
+    type_name_from, type_name_from_multifile_facade, type_name_nested_child, InternalName,
+    TypeName, KOTLIN_ARRAY, KOTLIN_BOOLEAN, KOTLIN_BYTE, KOTLIN_CHAR, KOTLIN_DOUBLE, KOTLIN_FLOAT,
+    KOTLIN_INT, KOTLIN_LONG, KOTLIN_NOTHING, KOTLIN_SHORT, KOTLIN_STRING, KOTLIN_UBYTE,
+    KOTLIN_UINT, KOTLIN_ULONG, KOTLIN_UNIT, KOTLIN_USHORT,
+};
 pub use primitive_arrays::{prim_array_element, prim_array_name, primitive_array_creator_element};
-pub(crate) use spelling::type_name_from_multifile_facade;
-pub use spelling::{existing_type_name, existing_type_name_child, type_name, type_name_from};
 use std::fmt;
 use std::sync::OnceLock;
-pub use thin_handles::{TyList, TyParamName};
+pub use thin_handles::{IntersectionParts, TyList, TyParamName};
 pub use ty_kind::TyKind;
 mod type_name_list;
 pub use type_name_list::TypeNameList;
@@ -88,15 +91,7 @@ pub(crate) use type_parameter_identity::declaration_type_parameter;
 #[cfg(any(test, feature = "test-support"))]
 pub use type_parameter_identity::declaration_type_parameter;
 
-/// Compile-time policy for Kotlin's `assert` operation. Every backend must guard, retain, or elide
-/// the checked operation while preserving lazy condition/message evaluation.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum AssertionMode {
-    #[default]
-    Runtime,
-    AlwaysEnabled,
-    AlwaysDisabled,
-}
+pub use krusty_core::assertions::{AssertionCompilation, AssertionMode};
 
 /// Semantic shape of one compiler-provided Kotlin array factory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,71 +103,6 @@ pub enum ArrayFactoryKind {
     EmptyReference,
     NullableReference,
 }
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TypeName(NameId);
-
-// The tree is concurrent (lock-free reads, internally-locked inserts), so the global interner is a
-// bare shared instance.
-static TYPE_NAMES: OnceLock<NameTree> = OnceLock::new();
-
-#[inline]
-fn type_names() -> &'static NameTree {
-    TYPE_NAMES.get_or_init(|| {
-        let names = NameTree::default();
-        for (path, expected) in BUILTIN_TYPE_NAMES {
-            let actual = names.insert(path);
-            assert_eq!(actual, expected.0, "built-in TypeName id for {path}");
-        }
-        names
-    })
-}
-
-/// Find a global type-name identity in another name tree without mutating either tree.
-pub(crate) fn existing_type_name_in(names: &NameTree, internal: TypeName) -> Option<NameId> {
-    names.existing_from(type_names(), internal.name_id())
-}
-
-/// Copy a global type-name identity into another name tree without rendering it to text.
-pub(crate) fn insert_type_name_in(names: &NameTree, internal: TypeName) -> NameId {
-    names.insert_from(type_names(), internal.name_id())
-}
-
-const KOTLIN_BOOLEAN: TypeName = TypeName(NameId(2));
-const KOTLIN_BYTE: TypeName = TypeName(NameId(3));
-const KOTLIN_SHORT: TypeName = TypeName(NameId(4));
-const KOTLIN_INT: TypeName = TypeName(NameId(5));
-const KOTLIN_LONG: TypeName = TypeName(NameId(6));
-const KOTLIN_CHAR: TypeName = TypeName(NameId(7));
-const KOTLIN_FLOAT: TypeName = TypeName(NameId(8));
-const KOTLIN_DOUBLE: TypeName = TypeName(NameId(9));
-const KOTLIN_UBYTE: TypeName = TypeName(NameId(10));
-const KOTLIN_USHORT: TypeName = TypeName(NameId(11));
-const KOTLIN_UINT: TypeName = TypeName(NameId(12));
-const KOTLIN_ULONG: TypeName = TypeName(NameId(13));
-const KOTLIN_STRING: TypeName = TypeName(NameId(14));
-const KOTLIN_UNIT: TypeName = TypeName(NameId(15));
-const KOTLIN_NOTHING: TypeName = TypeName(NameId(16));
-const KOTLIN_ARRAY: TypeName = TypeName(NameId(17));
-
-const BUILTIN_TYPE_NAMES: [(&str, TypeName); 16] = [
-    ("kotlin/Boolean", KOTLIN_BOOLEAN),
-    ("kotlin/Byte", KOTLIN_BYTE),
-    ("kotlin/Short", KOTLIN_SHORT),
-    ("kotlin/Int", KOTLIN_INT),
-    ("kotlin/Long", KOTLIN_LONG),
-    ("kotlin/Char", KOTLIN_CHAR),
-    ("kotlin/Float", KOTLIN_FLOAT),
-    ("kotlin/Double", KOTLIN_DOUBLE),
-    ("kotlin/UByte", KOTLIN_UBYTE),
-    ("kotlin/UShort", KOTLIN_USHORT),
-    ("kotlin/UInt", KOTLIN_UINT),
-    ("kotlin/ULong", KOTLIN_ULONG),
-    ("kotlin/String", KOTLIN_STRING),
-    ("kotlin/Unit", KOTLIN_UNIT),
-    ("kotlin/Nothing", KOTLIN_NOTHING),
-    ("kotlin/Array", KOTLIN_ARRAY),
-];
 
 /// Semantic type of a pre-interned builtin classifier, compared by identity.
 ///
@@ -199,295 +129,12 @@ pub fn builtin_semantic(name: TypeName) -> Option<Ty> {
     })
 }
 
-/// `parent/segment` as a `TypeName` without rendering `parent` — one child step in the name tree.
-/// `segment` must be a single path segment; a multi-segment suffix falls back to the full insert.
-pub fn type_name_child(parent: TypeName, segment: &str) -> TypeName {
-    if segment.contains('/') {
-        return segment
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .fold(parent, type_name_child);
-    }
-    TypeName(type_names().child_of(parent.name_id(), segment))
-}
-
-pub fn type_name_nested_child(owner: TypeName, nested: &str) -> TypeName {
-    TypeName(type_names().nested_child_of(owner.name_id(), nested))
-}
-
-pub fn existing_type_name_nested_child(owner: TypeName, segment: &str) -> Option<TypeName> {
-    type_names()
-        .existing_nested_child_of(owner.name_id(), segment)
-        .map(TypeName)
-}
-
-impl From<&String> for TypeName {
-    fn from(internal: &String) -> Self {
-        type_name(internal)
-    }
-}
-
 /// Intern a generic type-parameter name. This must not be used for class/FQN storage; class names live
 /// in the type name tree as [`TypeName`].
 pub fn intern(name: &str) -> &'static str {
     static I: OnceLock<ShardedInterner<str>> = OnceLock::new();
     I.get_or_init(ShardedInterner::default)
         .intern_ref_with(name, |value| Box::leak(value.to_owned().into_boxed_str()))
-}
-
-impl TypeName {
-    pub const ROOT: TypeName = TypeName(NameId(0));
-
-    #[inline]
-    fn name_id(self) -> NameId {
-        self.0
-    }
-
-    pub fn matches(self, internal: &str) -> bool {
-        type_names().matches_path(self.name_id(), internal)
-    }
-
-    pub fn starts_with(self, prefix: &str) -> bool {
-        type_names().starts_with(self.name_id(), prefix)
-    }
-
-    pub fn contains(self, needle: &str) -> bool {
-        type_names().contains(self.name_id(), needle)
-    }
-
-    pub fn qualifier_matches(self, qualifier: &str) -> bool {
-        type_names().qualifier_matches(self.name_id(), qualifier)
-    }
-
-    pub fn package_matches(self, package: &str) -> bool {
-        type_names().package_matches(self.name_id(), package)
-    }
-
-    pub fn package(self) -> String {
-        type_names().package(self.name_id())
-    }
-
-    pub fn parent(self) -> Option<TypeName> {
-        type_names().parent(self.name_id()).map(TypeName)
-    }
-
-    pub fn namespace(self) -> TypeName {
-        self.parent().unwrap_or(Self::ROOT)
-    }
-
-    pub fn segment(self) -> String {
-        type_names().segment(self.0).to_string()
-    }
-
-    pub fn segment_ref(self) -> &'static str {
-        type_names().segment(self.0)
-    }
-
-    pub fn nested_segment_ref(self) -> &'static str {
-        self.segment_ref()
-            .rsplit_once(['$', '.'])
-            .map_or(self.segment_ref(), |(_, nested)| nested)
-    }
-
-    /// Whether this classifier identity is `owner` or is nested in it. Callers must use this
-    /// identity-tree relation instead of rendering names and interpreting string prefixes.
-    pub fn same_or_nested_within(self, owner: TypeName) -> bool {
-        type_names().same_or_nested_within(self.name_id(), owner.name_id())
-    }
-
-    /// Immediate lexical classifier owner, retained by nested-child construction or decoded from an
-    /// already-interned nested-class segment.
-    #[inline]
-    pub fn nested_owner(self) -> Option<TypeName> {
-        type_names().nested_owner(self.name_id()).map(TypeName)
-    }
-
-    /// Exact declaration nesting, without the backend spelling interpretation of `nested_owner`.
-    pub(crate) fn exact_nested_owner(self) -> Option<TypeName> {
-        type_names()
-            .exact_nested_owner(self.name_id())
-            .map(TypeName)
-    }
-
-    /// Backend-oriented candidates for textual JVM nesting, deepest first. Semantic resolution
-    /// continues to use the single exact [`Self::nested_owner`] relation.
-    pub fn existing_nested_owners(self) -> Vec<TypeName> {
-        type_names()
-            .existing_nested_owners(self.name_id())
-            .into_iter()
-            .map(TypeName)
-            .collect()
-    }
-
-    /// The flattened JVM nested segment relative to an already-resolved enclosing classifier.
-    pub fn nested_segment_within(self, owner: TypeName) -> Option<&'static str> {
-        type_names().nested_segment_within(self.name_id(), owner.name_id())
-    }
-
-    /// Backend boundary split for a nested classifier whose enclosing declaration is external to
-    /// the current file. Semantic callers should keep using [`Self::nested_owner`].
-    pub fn jvm_nested_parts(self) -> Option<(String, String)> {
-        type_names().jvm_nested_parts(self.name_id())
-    }
-
-    /// JVM classfile spelling of this classifier identity. Source/metadata nesting separators are
-    /// converted by the name tree; semantic callers should retain the identity instead.
-    pub fn jvm_binary_name(self) -> String {
-        type_names().jvm_binary_name(self.name_id())
-    }
-
-    /// JVM classfile spelling for a nested classifier below this identity, without interning it.
-    pub(crate) fn jvm_nested_binary_name(self, nested: &str) -> String {
-        type_names().jvm_nested_binary_name(self.name_id(), nested)
-    }
-
-    /// Compare a boundary spelling with a direct JVM nested child of this classifier identity.
-    pub(crate) fn nested_child_matches_path(self, nested: &str, path: &str) -> bool {
-        type_names().nested_child_matches_path(self.name_id(), nested, path)
-    }
-
-    /// Lexicographic path ordering for deterministic internal traversal without boundary rendering.
-    pub(crate) fn path_cmp(self, other: TypeName) -> std::cmp::Ordering {
-        type_names().path_cmp(self.name_id(), other.name_id())
-    }
-
-    /// Existing classifier nested directly in `self`, without rendering or interning a probe.
-    pub fn existing_nested_child(self, nested: &str) -> Option<TypeName> {
-        type_names()
-            .existing_nested_child_of(self.name_id(), nested)
-            .map(TypeName)
-    }
-
-    /// Intern a classifier nested directly in this classifier. This is the identity-preserving
-    /// construction used for compiler-generated nested classes; callers must not render, append a
-    /// `$` spelling, and intern the result again.
-    pub fn nested_child(self, nested: &str) -> TypeName {
-        TypeName(type_names().nested_child_of(self.name_id(), nested))
-    }
-
-    pub fn strip_prefix(self, prefix: &str) -> Option<String> {
-        type_names().strip_prefix(self.name_id(), prefix)
-    }
-
-    pub fn unsigned_suffix_after_prefix(self, prefix: &str) -> Option<usize> {
-        type_names().unsigned_suffix_after_prefix(self.name_id(), prefix)
-    }
-
-    pub fn render(self) -> String {
-        type_names().render(self.0)
-    }
-}
-
-impl fmt::Debug for TypeName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("TypeName").field(&self.render()).finish()
-    }
-}
-
-impl fmt::Display for TypeName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.render())
-    }
-}
-
-impl From<&str> for TypeName {
-    fn from(name: &str) -> Self {
-        type_name(name)
-    }
-}
-
-impl From<String> for TypeName {
-    fn from(name: String) -> Self {
-        type_name(&name)
-    }
-}
-
-impl PartialEq<&str> for TypeName {
-    fn eq(&self, other: &&str) -> bool {
-        self.matches(other)
-    }
-}
-
-impl PartialEq<TypeName> for &str {
-    fn eq(&self, other: &TypeName) -> bool {
-        other.matches(self)
-    }
-}
-
-impl PartialEq<String> for TypeName {
-    fn eq(&self, other: &String) -> bool {
-        self.matches(other)
-    }
-}
-
-impl PartialEq<TypeName> for String {
-    fn eq(&self, other: &TypeName) -> bool {
-        other.matches(self)
-    }
-}
-
-impl PartialEq<&str> for &TypeName {
-    fn eq(&self, other: &&str) -> bool {
-        self.matches(other)
-    }
-}
-
-impl PartialEq<&TypeName> for &str {
-    fn eq(&self, other: &&TypeName) -> bool {
-        other.matches(self)
-    }
-}
-
-pub trait InternalName {
-    fn internal_matches(&self, internal: &str) -> bool;
-
-    /// The name's final path segment (`IntArray` for `kotlin/IntArray`).
-    fn final_segment(&self) -> &str;
-}
-
-impl InternalName for TypeName {
-    fn internal_matches(&self, internal: &str) -> bool {
-        self.matches(internal)
-    }
-
-    fn final_segment(&self) -> &str {
-        self.segment_ref()
-    }
-}
-
-impl InternalName for &TypeName {
-    fn internal_matches(&self, internal: &str) -> bool {
-        self.matches(internal)
-    }
-
-    fn final_segment(&self) -> &str {
-        self.segment_ref()
-    }
-}
-
-impl InternalName for &str {
-    fn internal_matches(&self, internal: &str) -> bool {
-        *self == internal
-    }
-
-    fn final_segment(&self) -> &str {
-        self.rsplit('/').next().unwrap_or(self)
-    }
-}
-
-impl InternalName for &String {
-    fn internal_matches(&self, internal: &str) -> bool {
-        self.as_str() == internal
-    }
-
-    fn final_segment(&self) -> &str {
-        self.rsplit('/').next().unwrap_or(self)
-    }
-}
-
-#[inline]
-pub fn same(a: TypeName, b: TypeName) -> bool {
-    a == b
 }
 
 pub mod wk;
@@ -839,6 +486,41 @@ impl Ty {
         intersection::canonical(parts)
     }
 
+    /// `A & B & …` that approximates to `approximation` where a supertype is wanted. See
+    /// [`TyKind::Intersection`].
+    pub fn intersection_approximated_to(parts: &[Ty], approximation: Option<Ty>) -> Ty {
+        let intersection = intersection::canonical(parts);
+        approximation.map_or(intersection, |approximation| {
+            intersection.with_intersection_approximation(approximation)
+        })
+    }
+
+    /// This type, with an intersection at its root (under a nullable marker) approximating to
+    /// `approximation` where a supertype is wanted. Any other type is returned unchanged.
+    pub fn with_intersection_approximation(self, approximation: Ty) -> Ty {
+        match self.kind() {
+            TyKind::Nullable(inner) => {
+                Ty::nullable(inner.with_intersection_approximation(approximation))
+            }
+            TyKind::Intersection(parts) => Ty::from(TyKind::Intersection(IntersectionParts::new(
+                parts.parts(),
+                Some(approximation),
+            ))),
+            _ => self,
+        }
+    }
+
+    /// This intersection without the upper type it was fixed below, so it approximates by its own
+    /// components. Any other type is returned unchanged.
+    pub fn without_intersection_approximation(self) -> Ty {
+        match self.kind() {
+            TyKind::Intersection(parts) if parts.approximation().is_some() => Ty::from(
+                TyKind::Intersection(IntersectionParts::new(parts.parts(), None)),
+            ),
+            _ => self,
+        }
+    }
+
     pub fn projection_inner(self) -> Option<Ty> {
         match self.kind() {
             TyKind::InProjection(inner)
@@ -856,6 +538,16 @@ impl Ty {
         match self.kind() {
             TyKind::OutProjection(inner) | TyKind::StarProjection(inner) => inner,
             TyKind::InProjection(_) => Ty::nullable(Ty::obj("kotlin/Any")),
+            _ => self,
+        }
+    }
+
+    /// The type a value must have to be written through a use-site projection: a contravariant
+    /// projection admits its bound, while a covariant or star projection admits only `Nothing`.
+    pub fn projection_write_ty(self) -> Ty {
+        match self.kind() {
+            TyKind::InProjection(inner) => inner,
+            TyKind::OutProjection(_) | TyKind::StarProjection(_) => Ty::Nothing,
             _ => self,
         }
     }
@@ -928,7 +620,22 @@ impl Ty {
             TyKind::TyParam(..) | TyKind::Var(..) => {
                 self.with_symbol_bound(self.ty_param_bound().unwrap().definitely_non_null())
             }
+            // Narrowing `(A & B)?` to non-null intersects it with `Any`, which builds a new
+            // intersection: the upper type the original was fixed below no longer applies.
+            TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Intersection(_)) => {
+                inner.without_intersection_approximation()
+            }
             _ => self.non_null_keeping_mutability(),
+        }
+    }
+
+    /// The intersection `T & Any` of a type parameter whose bound admits null, as a KLIB
+    /// serializes a definitely-non-null type. Any other type is already as non-null as it can be.
+    pub fn marked_definitely_not_null(self) -> Ty {
+        if self.is_ty_param() && self.upper_bound_admits_null() {
+            Ty::from(TyKind::DefinitelyNotNull(self))
+        } else {
+            self
         }
     }
 
@@ -981,6 +688,19 @@ impl Ty {
         self.non_null()
             .kotlin_class_internal()
             .is_some_and(|n| same(n, wk::any()) || same(n, wk::java_object()))
+    }
+
+    /// Whether this is Kotlin's top type itself, `Any`/`Any?` or a physical JVM `Object` spelling.
+    /// Unlike [`Self::is_erased_top`], a type parameter whose bound is `Any?` is not the top type:
+    /// it erases to `Object`, but only values of that parameter are its subtypes.
+    pub fn is_semantic_top(self) -> bool {
+        match self.kind() {
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner) => inner.is_semantic_top(),
+            TyKind::Obj(n, _) => same(n, wk::any()) || same(n, wk::java_object()),
+            _ => false,
+        }
     }
 
     /// The canonical **extension-receiver key**: the `Ty` two receivers must share for an extension
@@ -1382,12 +1102,13 @@ impl Ty {
             TyKind::OutProjection(inner) => Ty::out_projection(inner.canonical_semantic()),
             TyKind::StarProjection(inner) => Ty::star_projection(inner.canonical_semantic()),
             TyKind::RawProjection(inner) => Ty::raw_projection(inner.canonical_semantic()),
-            TyKind::Intersection(parts) => Ty::intersection(
+            TyKind::Intersection(parts) => Ty::intersection_approximated_to(
                 &parts
                     .iter()
                     .copied()
                     .map(Ty::canonical_semantic)
                     .collect::<Vec<_>>(),
+                parts.approximation().map(Ty::canonical_semantic),
             ),
             TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
                 self.with_symbol_bound(bound.canonical_semantic())
@@ -2544,7 +2265,7 @@ mod tests {
 
     #[test]
     fn type_name_tree_operations_preserve_identity_without_text_round_trip() {
-        let names = NameTree::default();
+        let names = crate::name_tree::NameTree::default();
         let int = type_name_from(&names, names.insert("kotlin/Int"));
         assert_eq!(int, Ty::Int.kotlin_class_internal().unwrap());
 

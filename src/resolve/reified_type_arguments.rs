@@ -71,7 +71,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         expression: ExprId,
     ) {
-        if self.discover_anonymous_captures {
+        if self.discover_anonymous_captures || self.is_annotation_array_literal_call(expression) {
             return;
         }
         let arguments = self.reified_type_arguments(expression);
@@ -212,6 +212,7 @@ impl Checker<'_> {
             definitely_non_null: reference.definitely_non_null(),
             use_site_definitely_non_null: reference.definitely_non_null(),
             alias: None,
+            alias_absorbs_nullability: false,
             alias_args: Vec::new(),
             args,
             annotations: Vec::new(),

@@ -4,7 +4,7 @@
 //! not resolve declarations or recover value-class identity from source spelling.
 
 use super::{repr_of_ty, target, Repr, ReprCtx, Target};
-use krusty::ir::{Callee, ExprId, IrExpr};
+use krusty::ir::{Callee, ExprId, IrExpr, ValueClassAdapter};
 use krusty::types::{Ty, TypeName};
 
 /// Whether a JVM method descriptor's return type is the classfile form of `class`.
@@ -87,9 +87,10 @@ impl ReprCtx<'_> {
             IrExpr::Call {
                 callee: call_callee,
                 ..
-            } if let Callee::Static { owner, name, .. } = &**call_callee
-                && *owner == x
-                && name == "box-impl" =>
+            } if matches!(
+                &**call_callee,
+                Callee::ValueClassAdapter { adapter: ValueClassAdapter::Box, owner } if *owner == x
+            ) =>
             {
                 true
             }

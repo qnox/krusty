@@ -95,7 +95,7 @@ upstream release notes, which can name an assistant that contributed upstream. T
 - The compiler/plugin wire model must track the existing `KRUSTY_BUILD_CHECKOUT` in Cargo dep-info.
   A shared target must not authenticate a sibling checkout's typed model by source mtimes alone.
   Test checkout switching and unchanged-checkout reuse; do not clean the shared target to mask it.
-  Audit: `rg -n 'KRUSTY_BUILD_CHECKOUT|shared_target_rebuilds_plugin_ir' .cargo crates/krusty-plugin-ir`.
+  Audit: `rg -n 'KRUSTY_BUILD_CHECKOUT|shared_target_rebuilds_plugin_api' .cargo crates/krusty-plugin-api`.
 - **kotlinc is the spec; tests are the record.** A Kotlin-semantics decision lands as a test that
   pins kotlinc's behavior, not as prose. Plans, progress, and per-change notes belong in the pull
   request and its issue, not in the repository.
@@ -309,7 +309,7 @@ Every hit requires semantic review; the commands are smell detectors, not blind 
 
 Follow data ownership rather than starting at the changed test:
 
-1. Name identity and segment operations: `src/name_tree.rs`, `src/names.rs`.
+1. Name identity and segment operations: `crates/krusty-core/src/`, `src/names.rs`.
 2. Scope-tower lookup and normalized candidate collection: `src/resolve/scope.rs`,
    `src/symbol_source.rs`, `src/symbol_resolver.rs`, `src/module_symbols.rs`.
 3. Candidate union, applicability, overload selection, diagnostics, and recorded decisions:

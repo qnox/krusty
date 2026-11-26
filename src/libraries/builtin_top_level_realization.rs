@@ -50,7 +50,8 @@ pub(crate) fn attach_dependency_function_realization(
             crate::types::SemanticCallRole::KotlinCharSequenceIterator
             | crate::types::SemanticCallRole::IntrinsicConstNumeric(_)
             | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateGet(_)
-            | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateSet(_),
+            | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateSet(_)
+            | crate::types::SemanticCallRole::KotlinSuspendCoroutine,
         ) if !compiler_builtin_owner => None,
         role => role,
     };
@@ -110,6 +111,9 @@ pub(crate) fn function_semantic_role(
         && !facts.is_infix
     {
         return Some(SemanticCallRole::KotlinCharSequenceIterator);
+    }
+    if suspend_coroutine(facts) {
+        return Some(SemanticCallRole::KotlinSuspendCoroutine);
     }
     if facts.package != crate::types::wk::kotlin_package()
         || facts.kind != FnKind::Extension
@@ -173,6 +177,29 @@ fn function_shape(ty: Ty, arity: usize, suspend: bool) -> bool {
             && signature.context_count == 0
             && !signature.has_receiver
             && signature.suspend == suspend)
+}
+
+/// `suspend inline fun <T> suspendCoroutine(crossinline block: (Continuation<T>) -> Unit): T`,
+/// the top-level declaration of `kotlin.coroutines`.
+fn suspend_coroutine(facts: &BuiltinFunctionDeclaration<'_>) -> bool {
+    facts.package.matches("kotlin/coroutines")
+        && facts.name == "suspendCoroutine"
+        && facts.kind == FnKind::TopLevel
+        && facts.receiver.is_none()
+        && facts.context_count == 0
+        && facts.type_parameter_count == 1
+        && facts.vararg.is_none()
+        && facts.is_suspend
+        && !facts.is_operator
+        && !facts.is_infix
+        && matches!(facts.params, [block]
+            if function_shape(*block, 1, false)
+                && block.fun_ret() == Some(Ty::Unit)
+                && block
+                    .fun_params()
+                    .and_then(|params| params.first().copied())
+                    .and_then(continuation_argument)
+                    == Some(facts.ret))
 }
 
 fn continuation_argument(ty: Ty) -> Option<Ty> {
@@ -309,7 +336,11 @@ fn kotlin_function(
                 && !facts.is_operator
                 && facts.ret == Ty::Unit =>
         {
-            Some(CompilerIntrinsic::Assert)
+            Some(CompilerIntrinsic::Assert {
+                platform_default: crate::types::AssertionCompilation::Checked(
+                    crate::types::AssertionMode::Runtime,
+                ),
+            })
         }
         ("assert", FnKind::TopLevel, None, [Ty::Boolean, message])
             if facts.type_parameter_count == 0
@@ -319,7 +350,11 @@ fn kotlin_function(
                 && function_shape(*message, 0, false)
                 && message.fun_ret() == Some(Ty::obj("kotlin/Any")) =>
         {
-            Some(CompilerIntrinsic::Assert)
+            Some(CompilerIntrinsic::Assert {
+                platform_default: crate::types::AssertionCompilation::Checked(
+                    crate::types::AssertionMode::Runtime,
+                ),
+            })
         }
         ("enumValues", FnKind::TopLevel, None, [])
             if facts.type_parameter_count == 1
@@ -2067,6 +2102,54 @@ mod tests {
         assert_eq!(
             function_semantic_role(&BuiltinFunctionDeclaration {
                 package: crate::types::type_name("fixture"),
+                ..declaration
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn suspend_coroutine_role_requires_the_complete_stdlib_declaration() {
+        let value = Ty::ty_param("T", Ty::nullable(Ty::obj_name(crate::types::wk::any())));
+        let block = [Ty::fun(
+            vec![Ty::obj_args("kotlin/coroutines/Continuation", &[value])],
+            Ty::Unit,
+        )];
+        let declaration = BuiltinFunctionDeclaration {
+            package: crate::types::type_name("kotlin/coroutines"),
+            name: "suspendCoroutine",
+            kind: FnKind::TopLevel,
+            receiver: None,
+            params: &block,
+            ret: value,
+            context_count: 0,
+            type_parameter_count: 1,
+            vararg: None,
+            is_suspend: true,
+            is_operator: false,
+            is_infix: false,
+        };
+        assert_eq!(
+            function_semantic_role(&declaration),
+            Some(crate::types::SemanticCallRole::KotlinSuspendCoroutine)
+        );
+        assert_eq!(
+            function_semantic_role(&BuiltinFunctionDeclaration {
+                package: crate::types::type_name("fixture"),
+                ..declaration
+            }),
+            None
+        );
+        assert_eq!(
+            function_semantic_role(&BuiltinFunctionDeclaration {
+                is_suspend: false,
+                ..declaration
+            }),
+            None
+        );
+        assert_eq!(
+            function_semantic_role(&BuiltinFunctionDeclaration {
+                ret: Ty::String,
                 ..declaration
             }),
             None

@@ -42,3 +42,58 @@ impl Checker<'_> {
         ))
     }
 }
+
+impl Checker<'_> {
+    /// Applicability of a receiver-less reference that names no local function. Selection walks the
+    /// implicit receiver tower before the top-level family, so a member or extension of an
+    /// implicit receiver (`::add` inside a builder lambda) is a candidate here exactly as it is
+    /// when the reference is selected.
+    pub(super) fn scope_resolved_callable_reference_adapts_to(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        expected: &'static crate::types::FnSig,
+    ) -> bool {
+        let expectation = Ty::from(TyKind::Fun(expected));
+        let implicit_receiver_fits = self.implicit_rungs(scope).into_iter().any(|rung| {
+            let implicit_rungs::ImplicitRung::Receiver(receiver) = rung else {
+                return false;
+            };
+            if receiver
+                .receiver_role
+                .is_some_and(ReceiverDeclarationRole::is_context_parameter)
+            {
+                return false;
+            }
+            let candidates = self.callable_ref_candidates(receiver.ty, name);
+            self.select_bound_callable_ref(&candidates, Some(expectation))
+                .is_some()
+        });
+        implicit_receiver_fits
+            || self
+                .resolver()
+                .top_level_candidates(name)
+                .into_iter()
+                .any(|mut function| {
+                    function.kind == crate::libraries::FnKind::TopLevel
+                        && self
+                            .specialize_callable_ref_candidate(
+                                &mut function,
+                                None,
+                                Some(&expected.params),
+                                Some(expected.ret),
+                            )
+                            .is_ok()
+                        && self
+                            .callable_ref_argument_plan(&function, expected)
+                            .is_some()
+                        && self.callable_ref_is_compatible(
+                            &expected.params,
+                            function.callable.ret,
+                            function.callable.suspend,
+                            expected,
+                            true,
+                        )
+                })
+    }
+}

@@ -946,7 +946,14 @@ impl Checker<'_> {
                 let selected_same_value = fact.selected_result == selected_argument
                     || (fact.through_flexible
                         && fact.selected_result.non_null() == selected_argument);
-                if fact.parts.len() < 2 || !selected_same_value {
+                // A call whose result already is the intersection type binds the formal to that
+                // whole type, as kotlinc fixes it: `keep(pick(StringBuilder(), "a"))` returns the
+                // intersection, which its bound approximation still governs.
+                let whole_intersection = matches!(
+                    fact.selected_result.non_null().kind(),
+                    TyKind::Intersection(_)
+                );
+                if fact.parts.len() < 2 || !selected_same_value || whole_intersection {
                     continue;
                 }
                 let all_arguments_prove_parts = direct_arguments.iter().all(|other| {

@@ -342,6 +342,12 @@ static KMap *kt_map_behind(KRef value) {
     return NULL;
 }
 
+/* The members a class of the PROGRAM implementing `Map` answers through its descriptor, or NULL
+   for a map this runtime made and for anything else. */
+static const KMapMembers *kt_program_map(KRef value) {
+    return value == NULL ? NULL : value->header.type->map_members;
+}
+
 /* The receiver's map. A receiver that has none is a routing mistake, and fails loudly. */
 static KMap *kt_map_of_receiver(KRef value) {
     KMap *map = kt_map_behind(value);
@@ -395,10 +401,20 @@ static kt_int kt_capacity(const KMap *map) { return kt_length_of(map->keys); }
 static kt_int kt_hash_size(const KMap *map) { return kt_length_of(map->hashes); }
 
 kt_int kt_map_size(KRef self) {
+    const KMapMembers *program = kt_program_map(self);
+    if (program != NULL) {
+        return program->size(self);
+    }
     return kt_is_empty_one(self) ? 0 : kt_map_of_receiver(self)->size;
 }
 
-kt_boolean kt_map_is_empty(KRef self) { return kt_map_size(self) == 0; }
+kt_boolean kt_map_is_empty(KRef self) {
+    const KMapMembers *program = kt_program_map(self);
+    if (program != NULL) {
+        return program->is_empty(self);
+    }
+    return kt_map_size(self) == 0;
+}
 
 /* The size of a map, a set or a view, or -1 for anything else. */
 kt_int kt_map_collection_size(KRef value) {
@@ -749,6 +765,10 @@ static kt_boolean kt_remove_key(KMap *map, KRef key) {
 }
 
 kt_boolean kt_map_contains_value(KRef self, KRef value) {
+    const KMapMembers *program = kt_program_map(self);
+    if (program != NULL) {
+        return program->contains_value(self, value);
+    }
     return !kt_is_empty_one(self) && kt_find_value(kt_map_of_receiver(self), value) >= 0;
 }
 
@@ -919,11 +939,19 @@ KRef kt_map_keys_list(KRef self) {
 /* ---- map members ---------------------------------------------------------------------------- */
 
 kt_boolean kt_map_contains_key(KRef self, KRef key) {
+    const KMapMembers *program = kt_program_map(self);
+    if (program != NULL) {
+        return program->contains_key(self, key);
+    }
     return !kt_is_empty_one(self) && kt_find_key(kt_map_of_receiver(self), key) >= 0;
 }
 
 /* `m[k]`, NULL for an absent key. */
 KRef kt_map_get(KRef self, KRef key) {
+    const KMapMembers *program = kt_program_map(self);
+    if (program != NULL) {
+        return program->get(self, key);
+    }
     if (kt_is_empty_one(self)) {
         return NULL;
     }
@@ -986,6 +1014,10 @@ static KRef kt_map_view(KMap *map, KRef *slot, const KType *type) {
 }
 
 KRef kt_map_keys(KRef self) {
+    const KMapMembers *program = kt_program_map(self);
+    if (program != NULL) {
+        return program->keys(self);
+    }
     if (kt_is_empty_one(self)) {
         return kt_set_empty();
     }
@@ -994,6 +1026,10 @@ KRef kt_map_keys(KRef self) {
 }
 
 KRef kt_map_values(KRef self) {
+    const KMapMembers *program = kt_program_map(self);
+    if (program != NULL) {
+        return program->values(self);
+    }
     if (kt_is_empty_one(self)) {
         return kt_list_empty();
     }
@@ -1002,6 +1038,10 @@ KRef kt_map_values(KRef self) {
 }
 
 KRef kt_map_entries(KRef self) {
+    const KMapMembers *program = kt_program_map(self);
+    if (program != NULL) {
+        return program->entries(self);
+    }
     if (kt_is_empty_one(self)) {
         return kt_set_empty();
     }
@@ -1422,17 +1462,17 @@ static KRef kt_set_to_string(KRef self) {
     return kt_string_plus(text, kt_string_utf8("]", 1));
 }
 
-/* `EmptyMap.equals`: `other is Map<*, *> && other.isEmpty()`. A map of the program's would be asked
-   its `isEmpty`, which this runtime cannot call. */
+/* `EmptyMap.equals`: `other is Map<*, *> && other.isEmpty()`. A map of the program's is asked its
+   own `isEmpty`; one that publishes no members fails loudly. */
 static kt_boolean kt_empty_map_equals(KRef self, KRef other) {
     (void)self;
     if (!kt_is_instance(other, &kt_type_map_interface)) {
         return false;
     }
-    if (!kt_is_map(other)) {
+    if (!kt_is_map(other) && kt_program_map(other) == NULL) {
         KT_FAIL_FOREIGN("Map", other);
     }
-    return kt_map_size(other) == 0;
+    return kt_map_is_empty(other);
 }
 
 /* `EmptySet.equals`: `other is Set<*> && other.isEmpty()`, with the same limit. */

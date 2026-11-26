@@ -1,6 +1,6 @@
 //! Compact physical locations for classes stored in a JDK jimage.
 
-use crate::name_tree::NameId;
+use crate::name_tree::{NameId, NameTree};
 
 /// High bit of a location's packed size. On-disk class sizes fit in the low 31 bits.
 const JIMAGE_COMPRESSED: u32 = 1 << 31;
@@ -41,7 +41,7 @@ impl JimageLocations {
         if offset == 0 {
             return;
         }
-        let index = id.0 as usize;
+        let index = id.index() as usize;
         if index >= self.slots.len() {
             self.slots.resize(
                 index + 1,
@@ -74,7 +74,7 @@ impl JimageLocations {
     }
 
     pub(super) fn get(&self, id: NameId) -> Option<(u64, usize, bool)> {
-        let slot = self.slots.get(id.0 as usize)?;
+        let slot = self.slots.get(id.index() as usize)?;
         if slot.offset == 0 {
             return None;
         }
@@ -83,11 +83,16 @@ impl JimageLocations {
         Some((u64::from(slot.offset), size, compressed))
     }
 
-    pub(super) fn class_ids(&self) -> impl Iterator<Item = NameId> + '_ {
+    /// The classes with a recorded location, as ids the owning `names` tree has published.
+    pub(super) fn class_ids<'a>(
+        &'a self,
+        names: &'a NameTree,
+    ) -> impl Iterator<Item = NameId> + 'a {
         self.slots
             .iter()
             .enumerate()
-            .filter_map(|(index, slot)| (slot.offset != 0).then_some(NameId(index as u32)))
+            .filter(|(_, slot)| slot.offset != 0)
+            .filter_map(|(index, _)| names.id_at(index as u32))
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -105,28 +110,48 @@ mod tests {
 
     #[test]
     fn slots_pack_size_and_compressed_flag() {
+        let names = NameTree::default();
+        let ids: Vec<NameId> = (0..9).map(|n| names.insert(&format!("p/C{n}"))).collect();
+        let (first, string, object) = (ids[0], ids[3], ids[8]);
         let mut locations = JimageLocations::default();
-        let string = NameId(3);
-        let object = NameId(8);
         locations.insert(string, 1, 2, false);
         locations.insert(string, 99, 7, true);
         locations.insert(object, 40, 50, true);
 
         assert_eq!(locations.get(string), Some((1, 2, false)));
         assert_eq!(locations.get(object), Some((40, 50, true)));
-        assert_eq!(locations.get(NameId(1)), None);
+        assert_eq!(locations.get(first), None);
         assert_eq!(locations.class_count(), 2);
         assert_eq!(
-            locations.class_ids().collect::<Vec<_>>(),
+            locations.class_ids(&names).collect::<Vec<_>>(),
             vec![string, object]
         );
 
-        locations.insert(NameId(4), 0, 1, false);
+        locations.insert(ids[4], 0, 1, false);
         assert_eq!(locations.class_count(), 2);
-        assert_eq!(locations.get(NameId(4)), None);
+        assert_eq!(locations.get(ids[4]), None);
 
-        locations.insert(NameId(5), 50, JIMAGE_COMPRESSED as usize, false);
+        locations.insert(ids[5], 50, JIMAGE_COMPRESSED as usize, false);
         assert_eq!(locations.class_count(), 2);
-        assert_eq!(locations.get(NameId(5)), None);
+        assert_eq!(locations.get(ids[5]), None);
+    }
+
+    #[test]
+    fn class_ids_skip_slots_the_tree_has_not_published() {
+        let names = NameTree::default();
+        let published = names.insert("p/A");
+        let mut locations = JimageLocations::default();
+        locations.insert(published, 1, 2, false);
+        let foreign = NameTree::default();
+        let beyond = (0..50)
+            .map(|n| foreign.insert(&format!("q/B{n}")))
+            .last()
+            .unwrap();
+        locations.insert(beyond, 1, 2, false);
+
+        assert_eq!(
+            locations.class_ids(&names).collect::<Vec<_>>(),
+            vec![published]
+        );
     }
 }

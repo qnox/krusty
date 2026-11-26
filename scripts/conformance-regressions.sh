@@ -25,7 +25,9 @@ if [ -z "${KRUSTY_KOTLINC:-}" ]; then
   KRUSTY_KOTLINC="$(just --justfile "$repo_root/justfile" kotlinc "$v")"
   export KRUSTY_KOTLINC
   just --justfile "$repo_root/justfile" box-corpus "$v" >/dev/null
-  just --justfile "$repo_root/justfile" ser-corpus "$v" >/dev/null
+  while read -r plugin; do
+    just --justfile "$repo_root/justfile" plugin-corpus "$plugin" "$v" >/dev/null
+  done < <(just --justfile "$repo_root/justfile" plugin-corpora)
 fi
 export KRUSTY_LANGUAGE_VERSION="$v"
 if [ -z "${KRUSTY_KOTLIN_BOX_DIR:-}" ]; then

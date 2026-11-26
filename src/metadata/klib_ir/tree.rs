@@ -66,6 +66,15 @@ impl KlibIrArena {
         &self.functions[id.index()]
     }
 
+    /// The class of this arena that declares `class` as a member.
+    pub(crate) fn enclosing_class(&self, class: &KlibIrClass) -> Option<&KlibIrClass> {
+        self.classes.iter().find(|candidate| {
+            candidate.members.iter().any(|member| {
+                matches!(member, KlibIrMember::Class(id) if std::ptr::eq(self.class(*id), class))
+            })
+        })
+    }
+
     pub fn class(&self, id: KlibIrClassId) -> &KlibIrClass {
         &self.classes[id.index()]
     }
@@ -805,6 +814,21 @@ pub struct KlibIrParameter {
     pub default_value: Option<KlibIrExprId>,
 }
 
+impl KlibIrParameter {
+    /// The `crossinline`/`noinline` modifier the declaration wrote. A serialized value parameter's
+    /// IrFlags store IS_CROSSINLINE at bit 2 and IS_NOINLINE at bit 3: the serialized IR layout,
+    /// not metadata.proto's value-parameter flags.
+    pub(crate) fn inline_modifier(&self) -> crate::types::InlineParameterModifier {
+        if self.base.flags & (1 << 2) != 0 {
+            crate::types::InlineParameterModifier::Crossinline
+        } else if self.base.flags & (1 << 3) != 0 {
+            crate::types::InlineParameterModifier::Noinline
+        } else {
+            crate::types::InlineParameterModifier::None
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct KlibIrTypeParameter {
     pub base: KlibIrDeclarationBase,
@@ -863,6 +887,21 @@ pub struct KlibIrFunction {
     /// offsets refer to.
     pub prepared_inline_file: Option<u32>,
     pub body: Option<KlibIrBody>,
+}
+
+impl KlibIrFunction {
+    /// The synthetic body of an enum's compiler-generated member (`values`, `valueOf` or the
+    /// `entries` getter): the producer's own record that the backend provides the implementation.
+    pub fn enum_special_member(&self) -> Option<KlibIrSyntheticBody> {
+        match &self.body {
+            Some(KlibIrBody::Synthetic(body))
+                if self.base.origin == "ENUM_CLASS_SPECIAL_MEMBER" =>
+            {
+                Some(*body)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -964,6 +1003,22 @@ pub struct KlibIrClass {
     pub members: Vec<KlibIrMember>,
     pub value_class_representation: Option<KlibIrValueClassRepresentation>,
     pub sealed_subclasses: Vec<KlibIrSymbol>,
+}
+
+impl KlibIrClass {
+    /// Whether the class declares a property whose getter is an enum's synthetic `entries` body
+    /// (`IrSyntheticBody(ENUM_ENTRIES)`), which Kotlin builds by passing the enum's `values()` to
+    /// `kotlin.enums.enumEntries`.
+    pub fn declares_synthetic_enum_entries(&self, arena: &KlibIrArena) -> bool {
+        self.members.iter().any(|member| {
+            matches!(member, KlibIrMember::Property(property) if property.getter.is_some_and(
+                |getter| matches!(
+                    arena.function(getter).body,
+                    Some(KlibIrBody::Synthetic(KlibIrSyntheticBody::EnumEntries))
+                )
+            ))
+        })
+    }
 }
 
 #[cfg(test)]

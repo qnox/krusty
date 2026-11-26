@@ -63,6 +63,11 @@ pub struct KlibIrModuleTrees {
     local_functions: HashMap<KlibIrSignature, (usize, KlibIrFunctionId)>,
     /// File-local classes, meaningful only inside this library.
     local_classes: HashMap<KlibIrSignature, (usize, KlibIrClassId)>,
+    /// The container and id each file-local signature of this library serializes.
+    file_local_origins: HashMap<KlibIrSignature, super::symbols::KlibFileLocalOrigin>,
+    /// The public identity each file-private signature scopes to its file.
+    file_private_identities:
+        HashMap<KlibIrSignature, crate::metadata::id_signature::KlibPublicIdSignature>,
     classes: super::class_index::KlibIrClassIndex,
 }
 
@@ -116,7 +121,9 @@ impl KlibIrModuleTrees {
     pub(crate) fn top_level_file(&self, signature: &KlibIrSignature) -> Option<u32> {
         let functions = match signature {
             KlibIrSignature::FileLocal { .. } => &self.local_functions,
-            KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_) => &self.functions,
+            KlibIrSignature::Public(_)
+            | KlibIrSignature::Accessor(_)
+            | KlibIrSignature::TypeParameter { .. } => &self.functions,
         };
         let (tree, function) = *functions.get(signature)?;
         self.trees[tree]
@@ -145,6 +152,68 @@ impl KlibIrModuleTrees {
         let (tree, class) = *self.local_classes.get(signature)?;
         let arena = &self.trees[tree].arena;
         Some((arena, arena.class(class)))
+    }
+
+    /// What the serialized file-local `signature` records beside its table slot.
+    pub(crate) fn file_local_origin(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> Option<&super::symbols::KlibFileLocalOrigin> {
+        self.file_local_origins.get(signature)
+    }
+
+    /// The package of the top-level class private to its file that this library serializes
+    /// under the file-local `signature`, together with that class. A class local to a body or
+    /// nested in another class is not one.
+    pub(crate) fn file_private_class(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> Option<(&[String], &super::tree::KlibIrClass)> {
+        let KlibIrSignature::FileLocal { file, .. } = signature else {
+            return None;
+        };
+        let (tree, class) = *self.local_classes.get(signature)?;
+        let tree = &self.trees[tree];
+        if tree.declaration != KlibIrMember::Class(class) {
+            return None;
+        }
+        let package = self.file_package(*file)?;
+        Some((package, tree.arena.class(class)))
+    }
+
+    /// The public identity the file-private `signature` (`Composite(File, Public)`) scopes to its
+    /// file: the identity of a declaration private to its file, or of a member of a class private
+    /// to its file, including a fake override no declaration defines.
+    pub(crate) fn file_private_identity(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> Option<&crate::metadata::id_signature::KlibPublicIdSignature> {
+        self.file_private_identities.get(signature)
+    }
+
+    /// The class private to the serialized file `file` whose file-private identity has the paths
+    /// `path`. `None` unless exactly one class has them.
+    pub(crate) fn file_private_class_at(
+        &self,
+        file: u32,
+        path: &crate::metadata::id_signature::KlibDeclarationPath,
+    ) -> Option<(&KlibIrArena, &super::tree::KlibIrClass)> {
+        let mut found = None;
+        for (signature, &(tree, class)) in &self.local_classes {
+            if !matches!(signature, KlibIrSignature::FileLocal { file: owner, .. } if *owner == file)
+                || self
+                    .file_private_identities
+                    .get(signature)
+                    .is_none_or(|identity| identity.declaration_path() != *path)
+            {
+                continue;
+            }
+            let arena = &self.trees[tree].arena;
+            if found.replace((arena, arena.class(class))).is_some() {
+                return None;
+            }
+        }
+        found
     }
 
     /// Every file-local class this library serializes, with the arena that owns it.
@@ -203,6 +272,18 @@ impl KlibIrModuleTrees {
     ) -> impl Iterator<Item = (&KlibIrArena, &KlibIrClass)> {
         self.classes
             .owning_member(member)
+            .iter()
+            .map(|at| self.class_at(*at))
+    }
+
+    /// Every public class, outside enum entries, serialized under `class`'s package and
+    /// declaration paths. The caller checks the rest of the identity.
+    pub(crate) fn classes_at_path(
+        &self,
+        class: &crate::metadata::id_signature::KlibPublicIdSignature,
+    ) -> impl Iterator<Item = (&KlibIrArena, &KlibIrClass)> {
+        self.classes
+            .at_path(class)
             .iter()
             .map(|at| self.class_at(*at))
     }
@@ -509,6 +590,12 @@ fn read_declaration_trees_from(
                 .files
                 .push(u32::try_from(index).expect("file count fits u32"));
         }
+        module
+            .file_local_origins
+            .extend(file.signatures.take_origins());
+        module
+            .file_private_identities
+            .extend(file.signatures.take_file_private_identities());
     }
     module.index()?;
     for (tree, function, identity) in prepared_roots {
@@ -2168,6 +2255,36 @@ mod tests {
                 .to_string(),
             "invalid KLIB IR files.knf at byte 0: file entry 1 is absent from fileEntries.knf"
         );
+    }
+
+    #[test]
+    fn ir_file_field_3_spells_the_package_of_its_declarations() {
+        let strings = declaration_strings();
+        let signatures: Vec<&[u8]> = Vec::new();
+        let mut file = FileTables {
+            strings: &strings,
+            signatures: SignatureTable::new(0, &signatures, &strings),
+            types: Vec::new(),
+            bodies: Vec::new(),
+            file_entries: Some(1),
+        };
+        let mut declaration_ids = Vec::new();
+        push_varint(9, &mut declaration_ids);
+        let mut package = Vec::new();
+        push_varint(0, &mut package);
+        push_varint(6, &mut package);
+        let mut bytes = bytes_field(1, &declaration_ids);
+        bytes.extend(bytes_field(3, &package));
+        bytes.extend(varint_field(7, 0));
+        let (ids, package) = ir_file_declaration_ids(&mut file, &bytes).unwrap();
+        assert_eq!(package, ["kotlin".to_owned(), "Marker".to_owned()]);
+        assert_eq!(ids, [9]);
+
+        let mut absent = Vec::new();
+        push_varint(7, &mut absent);
+        let mut bytes = bytes_field(3, &absent);
+        bytes.extend(varint_field(7, 0));
+        assert!(ir_file_declaration_ids(&mut file, &bytes).is_err());
     }
 
     #[test]

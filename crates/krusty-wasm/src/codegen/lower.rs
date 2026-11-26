@@ -21,7 +21,6 @@ use krusty::fx_hash::{HashMap, HashSet};
 mod absent_arguments;
 mod accessor_property_entries;
 pub(super) mod any_members;
-mod array_lists;
 mod array_storage;
 mod arrays;
 mod boxing;
@@ -40,9 +39,6 @@ mod scalar_instructions;
 mod scalar_value_classes;
 mod shared_cells;
 mod string_builders;
-pub(super) use array_lists::{
-    array_list_receiver, declared_by_array_list, is_array_list, realized_array_list_member,
-};
 pub(super) use shared_cells::cell_reference;
 pub(super) use string_builders::{declared_by_string_builder, is_string_builder};
 mod string_conversion;
@@ -69,6 +65,7 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageCopy
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
+        || operation == krusty::backend::BackendCompilerIntrinsic::StringPlus
         || operation
             == krusty::backend::BackendCompilerIntrinsic::StartCoroutineUninterceptedOrReturn
         || matches!(
@@ -160,10 +157,9 @@ pub(super) fn lower_file(
         classes: laid_out_classes,
         tables: module_tables,
     } = state;
+    // A classifier-owned static (an object or companion `const val`) is the same storage as a
+    // top-level one: a global initialized with the file, which its qualified reads address.
     for property in &ir.statics {
-        if property.owner.is_some() {
-            return Err("a static property of a class".to_string());
-        }
         if property.is_lateinit {
             return Err("a `lateinit` top-level property".to_string());
         }
@@ -197,10 +193,7 @@ pub(super) fn lower_file(
             .params
             .iter()
             .enumerate()
-            .map(|(parameter, _)| {
-                parameter_carrier(module, ir, id as FunId, parameter as u32)?
-                    .ok_or_else(|| "a `Unit` parameter".to_string())
-            })
+            .map(|(parameter, _)| parameter_carrier(module, ir, id as FunId, parameter as u32))
             .collect::<Result<Vec<_>, _>>()?;
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(Some(module.func_type(params, results)));
@@ -447,7 +440,7 @@ pub(super) fn lower_file(
             }
         }
     }
-    if objects::holds_unprinted_values(ir) {
+    if objects::holds_unprinted_values(ir, callables) {
         reach.bodiless_value(AnyMember::ToString);
     }
     class_literals::name_type_infos(module, runtime, classifiers);
@@ -526,12 +519,11 @@ struct FileContext<'a> {
 /// The wasm value a parameter of type `ty` is passed as. A `Nothing` parameter holds no value any
 /// caller supplies, yet keeps its slot, so an implementation such as `contains(element: Nothing)`
 /// takes the operands its interface member passes: a reference, as an erased type parameter's is.
-/// A `Unit` parameter still has none.
-pub(super) fn parameter_carrier_of(ty: Ty) -> Result<Option<ValType>, Unsupported> {
-    if ty == Ty::Nothing {
-        return Ok(Some(REFERENCE));
-    }
-    carrier(ty)
+/// A `Unit` parameter is passed the `Unit` instance in a reference slot, as kotlinc-wasm passes
+/// it, so an override of a member whose parameter is an erased `T` takes the same operands.
+pub(super) fn parameter_carrier_of(ty: Ty) -> Result<ValType, Unsupported> {
+    // `carrier` has none only for `Unit` and `Nothing`.
+    Ok(carrier(ty)?.unwrap_or(REFERENCE))
 }
 
 /// The wasm value a Kotlin type is carried as; `None` for a type with no value (`Unit`,
@@ -875,12 +867,20 @@ impl<'a> Body<'a> {
             code: Code::default(),
             locals: Vec::new(),
             next_local: parameters.len() as u32,
+            // A `Unit` parameter's slot holds the `Unit` instance; a read of it is that value, as
+            // a `Unit` local's is, so it needs no load.
             values: parameters
                 .iter()
                 .enumerate()
+                .filter(|(_, ty)| **ty != Ty::Unit)
                 .map(|(slot, ty)| (slot as u32, (slot as u32, *ty)))
                 .collect(),
-            unit_values: HashSet::default(),
+            unit_values: parameters
+                .iter()
+                .enumerate()
+                .filter(|(_, ty)| **ty == Ty::Unit)
+                .map(|(slot, _)| slot as u32)
+                .collect(),
             cells: HashMap::default(),
             declared,
             initializers: HashMap::default(),
@@ -997,6 +997,24 @@ impl<'a> Body<'a> {
             self.code.drop_();
         }
         Ok(())
+    }
+
+    /// Evaluate the argument `id` of a parameter declared `param` and leave it in the parameter's
+    /// carrier ([`parameter_carrier_of`]): a `Unit` argument is evaluated for its effects and the
+    /// callee receives the `Unit` instance.
+    pub(super) fn argument(&mut self, id: u32, param: Ty) -> Result<(), Unsupported> {
+        self.value(id, param)?;
+        self.unit_argument(param);
+        Ok(())
+    }
+
+    /// Push the `Unit` instance a `Unit` parameter receives, after its argument was evaluated at
+    /// its own type.
+    pub(super) fn unit_argument(&mut self, param: Ty) {
+        if param == Ty::Unit {
+            let unit = self.runtime.unit_object(self.module);
+            self.code.global_get(unit);
+        }
     }
 
     /// Evaluate `id` and convert its value to the carrier of `target`.
@@ -1130,6 +1148,9 @@ impl<'a> Body<'a> {
                     }
                 } else if !self.unit_values.contains(&slot) {
                     return Err(format!("a read of value {slot} before its declaration"));
+                } else if let Some(read) = self.type_of(id)? {
+                    // A `Unit` slot read at a reference type is the `Unit` instance.
+                    self.coerce_emitted_value(Ty::Unit, read)?;
                 }
             }
             IrExpr::Variable {
@@ -1187,6 +1208,8 @@ impl<'a> Body<'a> {
                 // The block's value is delivered at the type the block completes with, which an
                 // inline body's erased generic result is narrower than at its call.
                 if let Some(value) = value {
+                    // A block typed apart from its value (`fun f(): Any = g()` over a `Unit` call)
+                    // leaves its value converted to the block's own type.
                     match self.completing_type(id)? {
                         Some(ty) => self.value(value, ty)?,
                         None => self.expression(value)?,
@@ -1462,6 +1485,37 @@ impl<'a> Body<'a> {
             }
             IrExpr::Call {
                 callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
+                defaults,
+                extension_receiver_parameter,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::StringPlus)
+                }) =>
+            {
+                // The member `String.plus(Any?)` and the extension `String?.plus(Any?)` are the
+                // concatenation a template makes of its two operands.
+                let (receiver, other) =
+                    match (dispatch_receiver, args.as_slice(), *extension_receiver_parameter) {
+                        (Some(receiver), [other], None) => (receiver, *other),
+                        (None, [receiver, other], Some(0)) => (*receiver, *other),
+                        _ => {
+                            return Err("an authenticated `String.plus` with malformed operands"
+                                .into())
+                        }
+                    };
+                self.string_of(receiver)?;
+                self.string_of(other)?;
+                self.code.call(self.runtime.string_concat);
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
                 dispatch_receiver: None,
                 args,
             } if let Callee::External { target, params, .. } = &**call_callee
@@ -1536,22 +1590,6 @@ impl<'a> Body<'a> {
                     .is_some_and(string_builders::declared_by_string_builder) =>
             {
                 self.string_builder_call(*target, receiver, &args)?;
-            }
-            IrExpr::Call {
-                callee: ref call_callee,
-                dispatch_receiver: Some(receiver),
-                args,
-            } if let Callee::External {
-                target, defaults, ..
-            } = &**call_callee
-                && defaults.is_empty()
-                && self.callables.callable(*target).is_some_and(|fact| {
-                    array_lists::declared_by_array_list(fact)
-                        || (array_lists::array_list_receiver(self.ir, receiver)
-                            && array_lists::realized_array_list_member(fact))
-                }) =>
-            {
-                self.array_list_call(*target, receiver, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -1733,7 +1771,16 @@ impl<'a> Body<'a> {
                 receiver,
                 class,
                 index,
-            } => self.field_read(receiver, class, index)?,
+            } => {
+                self.field_read(receiver, class, index)?;
+                // A field that stores `kotlin.Unit`'s instance and is read where the checked use
+                // is `Unit` has no carrier there: the stored reference is discarded, as any value
+                // converted to a type without a carrier is.
+                let stored = self.ir.classes[class as usize].fields[index as usize].ty;
+                if carrier(stored)?.is_some() && self.carrier_of(id)?.is_none() {
+                    self.code.drop_();
+                }
+            }
             IrExpr::SetField {
                 receiver,
                 class,
@@ -1780,6 +1827,11 @@ impl<'a> Body<'a> {
                 classifier,
                 krusty::backend::enums::StaticMember::ValueOf,
                 Some(arg),
+            )?,
+            IrExpr::EnumEntries { classifier } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::Entries,
+                None,
             )?,
             IrExpr::PropertyRead {
                 receiver: Some(receiver),
@@ -1923,27 +1975,6 @@ impl<'a> Body<'a> {
                 self.string_builder_property(*target, *receiver)?;
             }
             IrExpr::Checked(ref checked_op)
-                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
-                    target,
-                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
-                    receiver: Some(receiver),
-                    arguments,
-                    parameters,
-                    ..
-                } = &**checked_op
-                    && parameters.is_empty()
-                    && arguments.is_empty()
-                    && (self.is_array_list_property(*target)
-                        || (array_lists::array_list_receiver(self.ir, *receiver)
-                            && self
-                                .callables
-                                .property(*target)
-                                .and_then(|property| self.callables.callable(property.getter))
-                                .is_some_and(array_lists::realized_array_list_member))) =>
-            {
-                self.array_list_property(*target, *receiver)?;
-            }
-            IrExpr::Checked(ref checked_op)
                 if let krusty::ir::IrCheckedOperation::PropertyWrite {
                     target,
                     dispatch_receiver,
@@ -1961,7 +1992,7 @@ impl<'a> Body<'a> {
                 dispatch_receiver: Some(receiver),
                 args,
             } if let Callee::Local(function) = &**call_callee => {
-                self.direct_member_call(*function, receiver, &args)?
+                self.local_member_call(*function, receiver, &args)?
             }
             IrExpr::Call {
                 callee: ref call_callee,
@@ -2041,7 +2072,7 @@ impl<'a> Body<'a> {
             return Err("a call whose arguments do not match its parameters".into());
         }
         for (&arg, &param) in args.iter().zip(params) {
-            self.value(arg, param)?;
+            self.argument(arg, param)?;
         }
         self.code.call(function);
         Ok(())
@@ -2604,7 +2635,9 @@ mod tests {
         lower_file(
             FileInput {
                 module_facts,
-                array_range_checks: super::super::super::array_access::default_range_checks(),
+                array_range_checks: super::super::super::array_access::default_range_checks(
+                    ir.reference.release(),
+                ),
                 classifiers,
                 ir,
                 properties,

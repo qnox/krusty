@@ -87,13 +87,13 @@ pub(super) struct MemberExtensionRejections {
 pub(super) enum MemberExtensionLambdaShape {
     Absent,
     Ambiguous,
-    Selected(crate::symbol_resolver::LambdaCallShape),
+    Selected(Box<crate::symbol_resolver::LambdaCallShape>),
 }
 
 impl MemberExtensionLambdaShape {
     pub(super) fn selected(self) -> Option<crate::symbol_resolver::LambdaCallShape> {
         match self {
-            Self::Selected(shape) => Some(shape),
+            Self::Selected(shape) => Some(*shape),
             Self::Absent | Self::Ambiguous => None,
         }
     }
@@ -700,7 +700,7 @@ pub(super) fn member_extension_lambda_shape_with(
     if best.any(|index| plans[index].2 != plans[selected].2) {
         return MemberExtensionLambdaShape::Ambiguous;
     }
-    MemberExtensionLambdaShape::Selected(plans.swap_remove(selected).2)
+    MemberExtensionLambdaShape::Selected(Box::new(plans.swap_remove(selected).2))
 }
 
 #[cfg(test)]
@@ -756,6 +756,7 @@ mod tests {
                         class_receiver,
                         current: receiver_depth == 0,
                         receiver_depth,
+                        dsl_shadowed: false,
                     }
                 },
             )

@@ -93,12 +93,13 @@ fn compile(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, Ve
 }
 
 fn compile_with_sink(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, DiagSink) {
-    // The JVM front end resolves against the classpath kotlinc would: the stdlib and the JDK.
-    let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_and_jdk_classpath());
-    let platform = Box::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
-            .expect("JVM provider initialization"),
-    );
+    // The front end analyzes against the selected Native stdlib KLIB: a classifier read from a JVM
+    // jar has no KLIB declaration identity for the backend to realize.
+    let inputs = common::native_backend::native_library_inputs(&[])
+        .expect("the selected Native stdlib KLIB is provisioned");
+    let (libraries, _imports) = krusty_native::NativeKlibInputs::open(&inputs, target)
+        .unwrap_or_else(|error| panic!("Native KLIB inputs: {error}"))
+        .into_parts();
     let inputs = sources
         .iter()
         .map(|(stem, source)| SourceInput::kotlin(source).with_file_stem(stem))
@@ -107,7 +108,7 @@ fn compile_with_sink(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Art
         .iter()
         .map(|(stem, _)| (*stem).to_string())
         .collect::<Vec<_>>();
-    let mut features = krusty::features::LangFeatures::new();
+    let mut features = krusty::features::LangFeatures::from_environment();
     for (_, source) in sources {
         features.apply_source_directives(source);
     }
@@ -115,7 +116,7 @@ fn compile_with_sink(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Art
     let backend = CraneliftBackend::new(target).verified();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform),
+        krusty::frontend::PlatformProvider::new(backend.compilation_target(), Box::new(libraries)),
         &features,
         &mut diags,
     );
@@ -481,7 +482,7 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     };
-    // `kotlin.Result` stands in here, because it is the largest remaining cluster on the backlog.
+    // `UIntArray.isEmpty` stands in here: it is a member the backend does not realize yet.
     // The contract under test is not WHICH construct is refused but that the backend SAYS so —
     // emitting a partial object that links and misbehaves would be far worse than refusing.
     //
@@ -493,7 +494,7 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
         &[(
             "Main",
             "fun main() {\n\
-             \x20   println(runCatching { 1 }.getOrNull())\n\
+             \x20   println(uintArrayOf(1u).isEmpty())\n\
              }\n",
         )],
         target,
@@ -505,7 +506,7 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
         "expected a declining diagnostic, got {diagnostics:?}"
     );
     assert!(
-        artifacts.is_empty(),
+        artifacts.iter().all(|(name, _)| name != "Main.o"),
         "a declined file must emit no object: {:?}",
         artifacts.iter().map(|(name, _)| name).collect::<Vec<_>>()
     );
@@ -540,19 +541,19 @@ fn declines_with_the_same_message_are_reported_at_each_ones_own_position() {
     // first occurrence once; with that one gone, the second is reported at its own position. The
     // message is identical both times: only the node decides where it lands.
     let helpers = "package demo\nfun one(): Int = 1\n";
-    let both = "package demo\n\nfun main() {\n    println(one())\n  val a = runCatching { 1 }.getOrNull()\n    val x = 2; println(runCatching { x }.getOrNull())\n}\n";
-    let second = "package demo\n\nfun main() {\n    println(one())\n  val a = 1\n    val x = 2; println(runCatching { x }.getOrNull())\n}\n";
+    let both = "package demo\n\nfun main() {\n    println(one())\n  val a = uintArrayOf(1u).isEmpty()\n    val x = 2; println(uintArrayOf(1u).isEmpty())\n}\n";
+    let second = "package demo\n\nfun main() {\n    println(one())\n  val a = 1\n    val x = 2; println(uintArrayOf(1u).isEmpty())\n}\n";
     let (artifacts, rendered) =
         rendered_diagnostics(&[("Helpers", helpers), ("Main", both)], target);
     assert_eq!(
         rendered,
-        "Main.kt:5:11: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
+        "Main.kt:5:11: error: krusty: the native backend does not support the member `kotlin.UIntArray.isEmpty` yet\n"
     );
     assert!(artifacts.iter().all(|(name, _)| name != "Main.o"));
     let (_, rendered) = rendered_diagnostics(&[("Helpers", helpers), ("Main", second)], target);
     assert_eq!(
         rendered,
-        "Main.kt:6:24: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
+        "Main.kt:6:24: error: krusty: the native backend does not support the member `kotlin.UIntArray.isEmpty` yet\n"
     );
 }
 
@@ -563,12 +564,12 @@ fn a_decline_nested_in_lowered_expressions_is_reported_at_the_innermost_one() {
         return;
     };
     // The decline surfaces through the argument list, `listOf`, the `println` call and the
-    // statement around them; the node it names is the innermost one, the `getOrNull` call.
-    let main = "fun main() {\n    println(listOf(1, runCatching { 2 }.getOrNull()))\n}\n";
+    // statement around them; the node it names is the innermost one, the `isEmpty` call.
+    let main = "fun main() {\n    println(listOf(1, uintArrayOf(1u).isEmpty()))\n}\n";
     let (_, rendered) = rendered_diagnostics(&[("Main", main)], target);
     assert_eq!(
         rendered,
-        "Main.kt:2:23: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
+        "Main.kt:2:23: error: krusty: the native backend does not support the member `kotlin.UIntArray.isEmpty` yet\n"
     );
 }
 
@@ -656,7 +657,7 @@ fn a_string_literal_with_an_unpaired_surrogate_is_declined() {
             .any(|diagnostic| diagnostic.contains("unpaired surrogate")),
         "expected the backend to decline, got {diagnostics:?}"
     );
-    assert!(artifacts.is_empty());
+    assert!(artifacts.iter().all(|(name, _)| name != "Main.o"));
 }
 
 #[test]

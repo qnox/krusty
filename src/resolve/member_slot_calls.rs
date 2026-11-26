@@ -239,7 +239,7 @@ impl Checker<'_> {
                         inaccessible_member: None,
                     };
                 }
-                self.report_callable_ambiguity(call, name, &candidates);
+                self.report_callable_ambiguity(scope, call, name, &candidates);
                 return MemberSlotCall::Ambiguous;
             }
             None => {
@@ -282,10 +282,10 @@ impl Checker<'_> {
         // through an arbitrary base-typed value.
         member.receiver = selected_receiver;
         if tower_rung.explicit_receiver.is_some()
-            && member.member.owner.is_some_and(|owner| {
-                !self.selected_member_accessible(&member, owner)
-                    && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
-            })
+            && member
+                .member
+                .owner
+                .is_some_and(|owner| !self.selected_member_visible(&member, owner))
         {
             return MemberSlotCall::ExtensionRung {
                 extension: ExtensionRungSelection {

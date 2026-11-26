@@ -12,7 +12,8 @@ mod mangling;
 mod metadata_declarations;
 
 pub use mangling::{
-    accessor_signature, callable_signature, class_signature, enum_entry_signature,
+    accessor_mangled, accessor_signature, callable_mangled, callable_signature, class_signature,
+    enclosing_callable_mangled, enum_entry_signature, mangled_id, property_mangled,
     property_signature, Accessor, CallableShape, ClassScope, DeclarationContainer, ManglingError,
     Placement, PropertyShape, SignatureType, TypeParameterShape, TypeView,
 };

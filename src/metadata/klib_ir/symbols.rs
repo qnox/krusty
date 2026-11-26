@@ -9,7 +9,8 @@
 //! exception: its private copy wraps a public-form signature in an exact
 //! `Composite(File, Public)` identity. That component projects the serialized inner identity for
 //! references inside the copied body; the declaration table separately owns the original public
-//! join key. Ordinary IR composites remain file-local.
+//! join key. A type parameter of a public declaration, `Composite(Public, Local(<TP>, index))`, is
+//! that owner and index in every module. Other IR composites remain file-local.
 
 use super::wire::{message, unique_bytes, unique_varint};
 use super::KlibIrDecodeError;
@@ -71,6 +72,13 @@ pub enum KlibIrSignature {
     /// A declaration whose identity is private to one serialized file: file index within the
     /// KLIB and slot in that file's signature table.
     FileLocal { file: u32, slot: u32 },
+    /// The type parameter at `index` of the public declaration `owner`: Kotlin's
+    /// `Composite(owner, Local(<TP>, index))`. Every module that links against the owner names
+    /// it alike, so a body may reference one its own declarations do not declare.
+    TypeParameter {
+        owner: KlibPublicIdSignature,
+        index: u32,
+    },
 }
 
 /// One decoded symbol reference.
@@ -80,6 +88,17 @@ pub struct KlibIrSymbol {
     pub signature: KlibIrSignature,
 }
 
+/// What a serialized file-local signature (`FileLocalIdSignature`) records beside its table slot:
+/// the signature of its container and its id. kotlinc numbers an ordinary file-local declaration
+/// by a counter, but names a fake override of a local class by the hash of its own mangled
+/// signature (`FileLocalIdSignatureComputer.stableIndexForFakeOverride`), which is what links such a
+/// member from a call site that no declaration of the library defines.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct KlibFileLocalOrigin {
+    pub container: KlibIrSignature,
+    pub id: i64,
+}
+
 /// One file's signature table, decoded on demand and memoized by slot.
 pub(super) struct SignatureTable<'a> {
     file: u32,
@@ -87,6 +106,10 @@ pub(super) struct SignatureTable<'a> {
     strings: &'a [String],
     decoded: Vec<Option<KlibIrSignature>>,
     prepared_inline: bool,
+    origins: std::collections::HashMap<KlibIrSignature, KlibFileLocalOrigin>,
+    /// The public identity inside each file-local `Composite(File, Public)` signature decoded so
+    /// far, by the file-local signature it decodes to.
+    file_private: std::collections::HashMap<KlibIrSignature, KlibPublicIdSignature>,
 }
 
 impl<'a> SignatureTable<'a> {
@@ -115,7 +138,24 @@ impl<'a> SignatureTable<'a> {
             strings,
             decoded: vec![None; entries.len()],
             prepared_inline,
+            origins: std::collections::HashMap::new(),
+            file_private: std::collections::HashMap::new(),
         }
+    }
+
+    /// The origins of the file-local signatures decoded so far.
+    pub(super) fn take_origins(
+        &mut self,
+    ) -> std::collections::HashMap<KlibIrSignature, KlibFileLocalOrigin> {
+        std::mem::take(&mut self.origins)
+    }
+
+    /// The public identities of the file-private signatures decoded so far
+    /// ([`KlibIrModuleTrees::file_private_identity`](super::KlibIrModuleTrees)).
+    pub(super) fn take_file_private_identities(
+        &mut self,
+    ) -> std::collections::HashMap<KlibIrSignature, KlibPublicIdSignature> {
+        std::mem::take(&mut self.file_private)
     }
 
     pub(super) fn symbol(&mut self, code: u64) -> Result<KlibIrSymbol, KlibIrDecodeError> {
@@ -197,38 +237,126 @@ impl<'a> SignatureTable<'a> {
                 )));
             }
         }
-        // Kotlin 2.4's prepared-inline component gives its private copied function a
-        // `Composite(File(<dummy>), Public(copy))` signature. Project the exact inner identity only
-        // for references inside this component; `irDeclarations.knd` independently carries the
-        // original public declaration key used across components. General composites in ordinary
-        // IR stay file-local, and neither path reconstructs an identity from a spelling.
+        // kotlinc gives a declaration private to its file, and a member of a class private to its
+        // file, a `Composite(File, Public)` signature: the public identity it would have, scoped
+        // to its file. Kotlin 2.4's prepared-inline component gives its private copied function
+        // the same shape. Project the exact inner identity only for references inside that
+        // component; `irDeclarations.knd` independently carries the original public declaration
+        // key used across components. In ordinary IR the declaration stays file-local, and its
+        // inner identity is kept beside it: a fake override of a file-private class, which no
+        // declaration defines, is linked by it to the member it inherits. Neither path
+        // reconstructs an identity from a spelling.
+        let inner = self.file_composite_identity(&fields, slot)?;
         if self.prepared_inline {
-            if let Some(composite) = unique_bytes(&fields, 5, "composite signature", ENTRY)? {
-                let composite_offset = composite.value_offset;
-                let composite = message(composite.value, ENTRY, composite_offset)?;
-                let container =
-                    unique_varint(&composite, 1, "composite signature container", ENTRY)?;
-                let inner = unique_varint(&composite, 2, "composite inner signature", ENTRY)?;
-                let (Some(container), Some(inner)) = (container, inner) else {
-                    return Err(KlibIrDecodeError::malformed(
-                        ENTRY,
-                        composite_offset,
-                        format!("composite signature {slot} misses a required field"),
-                    ));
-                };
-                let container = self.slot(container, "composite signature container")?;
-                let inner = self.slot(inner, "composite inner signature")?;
-                if self.is_file_signature(container)? {
-                    if let Some(public) = self.direct_public_signature(inner)? {
-                        return Ok(KlibIrSignature::Public(public));
-                    }
+            if let Some(public) = inner {
+                return Ok(KlibIrSignature::Public(public));
+            }
+        }
+        if let Some((owner, index)) = self.public_type_parameter(&fields)? {
+            return Ok(KlibIrSignature::TypeParameter { owner, index });
+        }
+        let local = KlibIrSignature::FileLocal {
+            file: self.file,
+            slot: u32::try_from(slot).expect("a table slot fits u32"),
+        };
+        if let Some(private) = unique_bytes(&fields, 2, "file-local signature", ENTRY)? {
+            let private = message(private.value, ENTRY, private.value_offset)?;
+            let container = unique_varint(&private, 1, "file-local container", ENTRY)?;
+            let id = unique_varint(&private, 2, "file-local id", ENTRY)?;
+            if let (Some(container), Some(id)) = (container, id) {
+                let container = self.slot(container, "file-local container")?;
+                // A signature of a declaration the file serializes never contains itself.
+                if container != slot {
+                    let container = self.signature(container)?;
+                    self.origins.insert(
+                        local.clone(),
+                        KlibFileLocalOrigin {
+                            container,
+                            id: id as i64,
+                        },
+                    );
                 }
             }
         }
-        Ok(KlibIrSignature::FileLocal {
-            file: self.file,
-            slot: u32::try_from(slot).expect("a table slot fits u32"),
-        })
+        if let Some(public) = inner {
+            self.file_private.insert(local.clone(), public);
+        }
+        Ok(local)
+    }
+
+    /// The public identity a `Composite(File, Public)` signature scopes to its file.
+    fn file_composite_identity(
+        &self,
+        fields: &[super::wire::WireField<'_>],
+        slot: usize,
+    ) -> Result<Option<KlibPublicIdSignature>, KlibIrDecodeError> {
+        let Some(composite) = unique_bytes(fields, 5, "composite signature", ENTRY)? else {
+            return Ok(None);
+        };
+        let composite_offset = composite.value_offset;
+        let composite = message(composite.value, ENTRY, composite_offset)?;
+        let container = unique_varint(&composite, 1, "composite signature container", ENTRY)?;
+        let inner = unique_varint(&composite, 2, "composite inner signature", ENTRY)?;
+        let (Some(container), Some(inner)) = (container, inner) else {
+            return Err(KlibIrDecodeError::malformed(
+                ENTRY,
+                composite_offset,
+                format!("composite signature {slot} misses a required field"),
+            ));
+        };
+        let container = self.slot(container, "composite signature container")?;
+        let inner = self.slot(inner, "composite inner signature")?;
+        if !self.is_file_signature(container)? {
+            return Ok(None);
+        }
+        self.direct_public_signature(inner)
+    }
+
+    /// `Composite(Public(owner), Local(<TP>, index))`, the identity Kotlin gives the type
+    /// parameter `index` of a public declaration. A composite of any other shape stays file-local.
+    fn public_type_parameter(
+        &self,
+        fields: &[super::wire::WireField<'_>],
+    ) -> Result<Option<(KlibPublicIdSignature, u32)>, KlibIrDecodeError> {
+        let Some(composite) = unique_bytes(fields, 5, "composite signature", ENTRY)? else {
+            return Ok(None);
+        };
+        let composite_offset = composite.value_offset;
+        let composite = message(composite.value, ENTRY, composite_offset)?;
+        let container = unique_varint(&composite, 1, "composite signature container", ENTRY)?;
+        let inner = unique_varint(&composite, 2, "composite inner signature", ENTRY)?;
+        let (Some(container), Some(inner)) = (container, inner) else {
+            return Ok(None);
+        };
+        let container = self.slot(container, "composite signature container")?;
+        let inner = self.slot(inner, "composite inner signature")?;
+        let Some(owner) = self.direct_public_signature(container)? else {
+            return Ok(None);
+        };
+        let inner_fields = message(self.entries[inner], ENTRY, 0)?;
+        // IdSignature.local_sig: LocalSignature { local_fq_name, local_hash, debug_info }.
+        let Some(local) = unique_bytes(&inner_fields, 6, "local signature", ENTRY)? else {
+            return Ok(None);
+        };
+        let local = message(local.value, ENTRY, local.value_offset)?;
+        let name = super::wire::packed_values(&local, 1, ENTRY, "local signature name")?;
+        let [name] = name.as_slice() else {
+            return Ok(None);
+        };
+        if string(self.strings, *name, "local signature name")? != "<TP>" {
+            return Ok(None);
+        }
+        let Some(index) = unique_varint(&local, 2, "local signature hash", ENTRY)? else {
+            return Ok(None);
+        };
+        let Ok(index) = u32::try_from(index) else {
+            return Err(KlibIrDecodeError::malformed(
+                ENTRY,
+                composite_offset,
+                format!("type parameter index {index} does not fit u32"),
+            ));
+        };
+        Ok(Some((owner, index)))
     }
 
     fn direct_public_signature(
@@ -323,6 +451,64 @@ mod tests {
         signature
     }
 
+    /// `IdSignature.local_sig`: `LocalSignature { local_fq_name = [name], local_hash = hash }`.
+    fn local(name: u64, hash: u64) -> Vec<u8> {
+        let mut body = Vec::new();
+        bytes_field(&mut body, 1, &varint(name));
+        varint_field(&mut body, 2, hash);
+        let mut signature = Vec::new();
+        bytes_field(&mut signature, 6, &body);
+        signature
+    }
+
+    #[test]
+    fn a_public_declaration_type_parameter_is_its_owner_and_index_in_every_table() {
+        let public = public_signature();
+        let parameter = local(2, 1);
+        let composite = composite(0, 1);
+        let entries = [
+            public.as_slice(),
+            parameter.as_slice(),
+            composite.as_slice(),
+        ];
+        let strings = ["fixture".to_owned(), "probe".to_owned(), "<TP>".to_owned()];
+        for table in [
+            SignatureTable::new(3, &entries, &strings),
+            SignatureTable::prepared_inline(3, &entries, &strings),
+        ] {
+            let mut table = table;
+            let symbol = table
+                .symbol(2 << 8 | KlibIrSymbolKind::TypeParameter as u64)
+                .expect("a type parameter symbol");
+            let KlibIrSignature::TypeParameter { owner, index } = symbol.signature else {
+                panic!("the owner's type parameter, not {:?}", symbol.signature)
+            };
+            assert_eq!(owner.declaration().segments(), ["probe"]);
+            assert_eq!(owner.member_id(), Some(0x14ab_8f30_859f_59a9));
+            assert_eq!(index, 1);
+        }
+    }
+
+    #[test]
+    fn another_local_name_under_a_public_owner_stays_file_local() {
+        let public = public_signature();
+        let parameter = local(2, 1);
+        let composite = composite(0, 1);
+        let entries = [
+            public.as_slice(),
+            parameter.as_slice(),
+            composite.as_slice(),
+        ];
+        let strings = ["fixture".to_owned(), "probe".to_owned(), "<BF>".to_owned()];
+        let symbol = SignatureTable::new(3, &entries, &strings)
+            .symbol(2 << 8)
+            .expect("a local symbol");
+        assert_eq!(
+            symbol.signature,
+            KlibIrSignature::FileLocal { file: 3, slot: 2 }
+        );
+    }
+
     #[test]
     fn prepared_inline_file_wrapper_projects_its_exact_public_identity() {
         let file = [0x3a, 0x00];
@@ -342,6 +528,48 @@ mod tests {
         assert_eq!(identity.member_id(), Some(0x14ab_8f30_859f_59a9));
     }
 
+    fn private_signature(container: u64, id: u64) -> Vec<u8> {
+        let mut body = Vec::new();
+        varint_field(&mut body, 1, container);
+        varint_field(&mut body, 2, id);
+        let mut signature = Vec::new();
+        bytes_field(&mut signature, 2, &body);
+        signature
+    }
+
+    #[test]
+    fn a_file_local_signature_records_its_container_and_id() {
+        // A fake override of a local class is file-local, named by its container and the hash of
+        // its mangle (`-5` here is a counter-sized stand-in for such an id as a signed value).
+        let public = public_signature();
+        let property = private_signature(0, 11);
+        let getter = private_signature(1, (-5_i64) as u64);
+        let entries = [public.as_slice(), property.as_slice(), getter.as_slice()];
+        let strings = ["fixture".to_owned(), "probe".to_owned()];
+
+        let mut table = SignatureTable::new(7, &entries, &strings);
+        let symbol = table.symbol(2 << 8).expect("the getter is a valid symbol");
+        assert_eq!(
+            symbol.signature,
+            KlibIrSignature::FileLocal { file: 7, slot: 2 }
+        );
+        let origins = table.take_origins();
+        let getter = origins
+            .get(&KlibIrSignature::FileLocal { file: 7, slot: 2 })
+            .expect("the getter records its origin");
+        assert_eq!(getter.id, -5);
+        assert_eq!(
+            getter.container,
+            KlibIrSignature::FileLocal { file: 7, slot: 1 }
+        );
+        let property = origins
+            .get(&KlibIrSignature::FileLocal { file: 7, slot: 1 })
+            .expect("the container's own origin is recorded when it is decoded");
+        assert_eq!(property.id, 11);
+        assert!(matches!(property.container, KlibIrSignature::Public(_)));
+        assert_eq!(origins.len(), 2);
+    }
+
     #[test]
     fn ordinary_ir_and_non_file_composites_remain_file_local() {
         let file = [0x3a, 0x00];
@@ -358,13 +586,25 @@ mod tests {
         ];
         let strings = ["fixture".to_owned(), "probe".to_owned()];
 
-        let ordinary = SignatureTable::new(7, &entries, &strings)
+        let mut table = SignatureTable::new(7, &entries, &strings);
+        let ordinary = table
             .symbol(3 << 8)
             .expect("the ordinary composite is valid");
         assert_eq!(
             ordinary.signature,
             KlibIrSignature::FileLocal { file: 7, slot: 3 }
         );
+        table
+            .symbol(4 << 8)
+            .expect("the ordinary non-file composite is valid");
+        // The file composite keeps its exact inner public identity beside its file-local one;
+        // the composite in another container scopes no public identity to a file.
+        let identities = table.take_file_private_identities();
+        assert_eq!(identities.len(), 1);
+        let identity = &identities[&KlibIrSignature::FileLocal { file: 7, slot: 3 }];
+        assert_eq!(identity.package().segments(), ["fixture"]);
+        assert_eq!(identity.declaration().segments(), ["probe"]);
+        assert_eq!(identity.member_id(), Some(0x14ab_8f30_859f_59a9));
 
         let prepared_local = SignatureTable::prepared_inline(7, &entries, &strings)
             .symbol(4 << 8)

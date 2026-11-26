@@ -71,7 +71,9 @@ fn runtime_jars() -> Option<(PathBuf, PathBuf, PathBuf)> {
     if jars.is_none() && std::env::var_os("KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE").is_some() {
         panic!(
             "required pinned serialization runtime {} could not be provisioned; check network access or KRUSTY_DEPS_CACHE",
-            krusty::toolchain::SERIALIZATION_VERSION
+            krusty::conformance::plugin_corpus::named("serialization")
+                .runtime_version("kotlinx-serialization-core-jvm")
+                .expect("the serialization corpus pins its runtime")
         );
     }
     jars

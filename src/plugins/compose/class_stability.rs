@@ -520,9 +520,14 @@ impl Inference<'_> {
         {
             return Ok(true);
         }
-        Ok(self
-            .annotations(annotation)?
-            .contains(&type_name(STABLE_MARKER)))
+        // An annotation class the compiling module cannot see is no marker, as in kotlinc, which
+        // reads its annotations from a stub.
+        Ok(self.runtime.classifier(annotation).is_some_and(|declared| {
+            declared
+                .annotations
+                .iter()
+                .any(|applied| applied.annotation == type_name(STABLE_MARKER))
+        }))
     }
 
     /// Whether `name` or one of its supertypes other than `Any` applies a stable marker (kotlinc's
@@ -889,9 +894,10 @@ impl Inference<'_> {
 fn mentions_type_parameter(ty: Ty) -> bool {
     match ty.kind() {
         TyKind::TyParam(..) => true,
-        TyKind::Obj(_, arguments) | TyKind::Intersection(arguments) => arguments
+        TyKind::Obj(_, arguments) => arguments
             .iter()
             .any(|&argument| mentions_type_parameter(argument)),
+        TyKind::Intersection(parts) => parts.iter().any(|&part| mentions_type_parameter(part)),
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
         | TyKind::MutabilityFlexible(inner)

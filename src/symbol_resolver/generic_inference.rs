@@ -15,6 +15,10 @@ pub(crate) use common_supertype::{
     common_super_types, published_declaration_type, reified_runtime_type, ReifiedDeclarations,
 };
 mod conditional_result;
+mod declaration_comparison;
+pub(crate) use declaration_comparison::generic_declaration_accepts_parameters_of;
+mod intersection_fixation;
+pub(crate) use intersection_fixation::with_intersection_upper_types;
 mod postponed_result;
 mod receiver_constraints;
 pub(crate) use receiver_constraints::unify_receiver_from_symbols;
@@ -33,7 +37,9 @@ pub(crate) use call_constraints::{
     seed_denotable_upper_placeholders, AssignabilityConstraints, GenericBoundViolation,
 };
 pub(crate) use call_site_variables::{CallSiteVariableMap, CallSiteVariables};
-pub(crate) use conditional_result::generic_return_expectation_from_sibling;
+pub(crate) use conditional_result::{
+    generic_return_expectation_from_sibling, has_result_only_formal,
+};
 pub(crate) use postponed_result::{
     completed_constructor_result_arguments, instantiate_unconstrained_result,
     nested_result_from_concrete_parameter, solved_constructor_type_arguments,
@@ -642,6 +648,7 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
                 _ => None,
             };
             if let Some(TyKind::Obj(_, targs)) = projected.map(Ty::kind) {
+                let targs = star_bounded_arguments(source, name, &targs[..]);
                 for (a, t) in args.iter().zip(targs.iter()) {
                     unify_ty_impl(source, *a, *t, binds);
                 }
@@ -669,6 +676,26 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
             unify_ty_impl(source, inner, actual, binds);
         }
         _ => {}
+    }
+}
+
+/// The arguments of an actual application of `classifier`, each decoder-placeholder star read as
+/// the star of its declared bound, as members and supertypes read it: Java's `Class<?>` is a
+/// `Class<*>` of `Class`'s own `T`, whose bound is `Any!`, not the placeholder `Any?`.
+fn star_bounded_arguments(
+    source: Option<&dyn SymbolSource>,
+    classifier: TypeName,
+    arguments: &[Ty],
+) -> Vec<Ty> {
+    if !crate::libraries::has_placeholder_star(arguments) {
+        return arguments.to_vec();
+    }
+    match source.and_then(|source| source.classifier(classifier)) {
+        Some(declaration) => crate::libraries::application_arguments_with_star_bounds(
+            &declaration.type_parameters,
+            arguments,
+        ),
+        None => arguments.to_vec(),
     }
 }
 
@@ -1386,6 +1413,7 @@ pub(super) fn unify_inferred_ty_impl(
                 _ => None,
             };
             if let Some(TyKind::Obj(_, actual_arguments)) = projected.map(Ty::kind) {
+                let actual_arguments = star_bounded_arguments(source, name, &actual_arguments[..]);
                 for (argument, actual) in arguments.iter().zip(actual_arguments.iter()) {
                     unify_inferred_ty_impl(source, *argument, *actual, binds);
                 }
@@ -1510,10 +1538,10 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     }
     let merged = merge_inferred_ty(Some(current), actual);
     let Some(source) = source else { return merged };
-    if !merged.is_erased_top() || !current.is_reference() || !actual.is_reference() {
+    if !merged.is_erased_top() {
         return merged;
     }
-    // Two reference lower bounds join at their common supertype, as kotlinc's does: every
+    // Two lower bounds join at their common supertype, as kotlinc's does: every
     // most-specific classifier both hierarchies share, however far up each one sits, with type
     // arguments joined by declaration variance (`Inv<A>` and `Inv<B>` join at `Inv<out C>`, `C` the
     // common supertype of `A` and `B`), and an intersection when several incomparable classifiers

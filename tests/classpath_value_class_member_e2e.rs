@@ -103,3 +103,34 @@ fn classpath_value_class_member_property_reads_through_impl_accessor() {
         None => eprintln!("skipping: box runner unavailable"),
     }
 }
+
+/// A dependency's generic property setter declares its parameter as the type variable, a reference
+/// slot, so a consumer-side value class assigned through it is stored as its box. The setter's
+/// selected declaration, not its descriptor, supplies that boundary; reading the property back
+/// proves the box came out as the value class and not as a primitive wrapper.
+#[test]
+fn a_generic_dependency_property_setter_boxes_a_value_class_argument() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let Some(libout) = common::compile_lib(
+        "genericpropertysetter",
+        "package lib\n\
+         class Holder<T>(var value: T)\n",
+    ) else {
+        return;
+    };
+    let cp = vec![libout.clone(), stdlib.clone()];
+    let main = "import lib.Holder\n\
+        @JvmInline value class Token(val bits: Int)\n\
+        fun box(): String {\n\
+        \x20 val holder = Holder(Token(0))\n\
+        \x20 holder.value = Token(7)\n\
+        \x20 return if (holder.value.bits == 7) \"OK\" else \"fail: ${holder.value.bits}\"\n\
+        }\n";
+    let classes = common::compile_in_process(main, "Main", &cp, Some(jdk.as_path()))
+        .expect("krusty failed to compile a value-class assignment to a generic property");
+    match common::run_box(&classes, "MainKt", &[libout, stdlib]) {
+        Some(output) => assert_eq!(output.trim(), "OK", "box() = {output:?}"),
+        None => eprintln!("skipping: box runner unavailable"),
+    }
+}
