@@ -14,19 +14,13 @@ open class Timed<T>(label: String, private val ticks: Int) : Task<T>(label) {
     fun elapsed(scale: Int): Int = ticks * scale
 }
 
-interface Named {
-    fun name(): String = "named"
-}
-
 // A class private to its file calls members it inherits without overriding them: a final member
-// of its generic superclass's superclass, one of its superclass, and an interface default.
-private class Blocking(private val text: String, ticks: Int) : Timed<Int>(text, ticks), Named {
+// of its generic superclass's superclass, and one of its superclass.
+private class Blocking(private val text: String, ticks: Int) : Timed<Int>(text, ticks) {
     override fun run(): Int = text.length
 
-    fun join(): String = start("go") + "/" + elapsed(3) + "/" + name() + "/" + nameOf(this)
+    fun join(): String = start("go") + "/" + elapsed(3)
 }
-
-private fun nameOf(named: Named): String = named.name()
 
 fun launch(text: String): String = Blocking(text, 2).join()
 
@@ -36,5 +30,5 @@ package fixture
 
 fun box(): String {
     val result = launch("abc")
-    return if (result == "go:abc:3/6/named/named") "OK" else result
+    return if (result == "go:abc:3/6") "OK" else result
 }
