@@ -1742,6 +1742,7 @@ impl<'a> Body<'a> {
                 ctor_params,
                 external_target,
                 defaults,
+                default_prefix_count,
                 ..
             } => {
                 self.new_object(
@@ -1750,7 +1751,10 @@ impl<'a> Body<'a> {
                     &args,
                     ctor_params.as_deref(),
                     external_target,
-                    &defaults,
+                    dependency_exports::OmittedArguments {
+                        ordinals: &defaults,
+                        prefix: default_prefix_count,
+                    },
                 )?;
             }
             IrExpr::EnumConstant {
