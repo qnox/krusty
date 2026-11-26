@@ -47,7 +47,7 @@ impl Emitter<'_> {
         } else if static_storage(self.ir, class_decl) {
             // A static-storage object field has no instance operand. Evaluate a non-trivial
             // receiver only for its effects.
-            if !self.reads_local_value(receiver) {
+            if !self.reads_local_value(receiver) && !self.reads_singleton_receiver(receiver) {
                 self.emit_value(receiver, code);
                 code.pop();
             }

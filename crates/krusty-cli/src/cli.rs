@@ -180,6 +180,9 @@ pub struct Options {
     /// `-Xexplicit-api=strict|warning|disable`: kotlinc's explicit API mode, applied to the
     /// language settings once they are built.
     pub explicit_api: Option<String>,
+    /// `-XXexplicit-return-types=strict|warning|disable`: only the return-type checks of explicit
+    /// API mode.
+    pub explicit_return_types: Option<String>,
     /// `-Xassertions=always-enable|always-disable|legacy`: the `assert(...)` mode, applied to the
     /// language settings once they are built.
     pub assertions: Option<String>,
@@ -213,8 +216,7 @@ impl Default for Options {
             common_sources: Vec::new(),
             source_fragments: std::collections::HashMap::new(),
             module_name: "main".to_string(),
-            // Parsing replaces this once it knows the selected release. Building it must not fix the
-            // process-wide reference version, which `-Xkotlin-reference-version` may still choose.
+            // Parsing replaces this once it knows the selected release.
             language_settings: LanguageSettings::for_release(
                 KotlinVersion::newest(),
                 krusty::language_version::LanguageVersion::default(),
@@ -252,6 +254,7 @@ impl Default for Options {
             no_receiver_assertions: false,
             plugins: PluginConfig::default(),
             explicit_api: None,
+            explicit_return_types: None,
             assertions: None,
             inline_string_concat: false,
             inline_scopes_numbers: false,
@@ -632,7 +635,12 @@ impl Options {
         api_version: Option<LanguageVersion>,
         feature_settings: &[krusty::features::FeatureSetting],
     ) -> Result<(), String> {
-        let settings = LanguageSettings::new(language_version, api_version, feature_settings)?;
+        let settings = LanguageSettings::for_release(
+            self.language_settings.features.release(),
+            language_version,
+            api_version,
+            feature_settings,
+        )?;
         self.install_language_settings(settings);
         Ok(())
     }
@@ -644,12 +652,16 @@ impl Options {
         if let Some(mode) = &self.explicit_api {
             settings.features.apply_explicit_api_mode(mode);
         }
+        if let Some(mode) = &self.explicit_return_types {
+            settings.features.apply_explicit_return_types_mode(mode);
+        }
         if let Some(mode) = &self.assertions {
             settings.features.apply_assertions_mode(mode);
         }
         for marker in &self.opt_in {
             settings.features.opt_in(marker);
         }
+        settings.features = settings.features.with_defects(self.kotlinc_defects);
         self.language_settings = settings;
     }
 }

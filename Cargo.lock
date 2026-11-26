@@ -832,8 +832,9 @@ dependencies = [
  "dhat",
  "flate2",
  "krusty-cli",
+ "krusty-core",
+ "krusty-download",
  "krusty-jvm",
- "krusty-names",
  "krusty-native",
  "krusty-plugin-allopen",
  "krusty-plugin-api",
@@ -883,6 +884,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "krusty-core"
+version = "0.0.1"
+dependencies = [
+ "ahash",
+]
+
+[[package]]
+name = "krusty-download"
+version = "0.0.1"
+
+[[package]]
 name = "krusty-jvm"
 version = "0.0.1"
 dependencies = [
@@ -905,13 +917,6 @@ dependencies = [
  "sha2",
  "url",
  "zip",
-]
-
-[[package]]
-name = "krusty-names"
-version = "0.0.1"
-dependencies = [
- "ahash",
 ]
 
 [[package]]
@@ -938,7 +943,7 @@ dependencies = [
 name = "krusty-plugin-api"
 version = "0.0.1"
 dependencies = [
- "krusty-names",
+ "krusty-core",
 ]
 
 [[package]]
@@ -952,6 +957,7 @@ dependencies = [
 name = "krusty-plugin-host"
 version = "0.0.1"
 dependencies = [
+ "krusty-download",
  "krusty-plugin-api",
  "sha2",
  "zip",

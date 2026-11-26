@@ -69,10 +69,7 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
     ) -> Vec<ReceiverCandidateSource> {
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let receivers = self
             .signature_dispatch_receivers(scope)
             .into_iter()
@@ -226,10 +223,7 @@ impl ProductionSignatureSemantics<'_> {
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let owner = selected.owner.ok_or_else(Self::failure)?;
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let classifier = source.classifier(owner).ok_or_else(Self::failure)?;
         let selected = crate::symbol_resolver::selected_constructor::capture(
             selected.clone(),
@@ -256,10 +250,7 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
     ) -> Result<Option<crate::types::TypeName>, crate::fir::DiagnosticId> {
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let selected =
             crate::symbol_resolver::bound_inner_classifier_in_source(&source, receiver, spelling);
         match selected {

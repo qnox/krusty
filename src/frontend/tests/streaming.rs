@@ -2,6 +2,7 @@ use super::*;
 use crate::types::TyKind;
 
 mod actualized_expect_defaults;
+mod inferred_member_extension;
 mod local_class_provenance;
 
 /// The JVM provider over the toolchain classpath a box directive (`// WITH_STDLIB`) selects.
@@ -210,36 +211,12 @@ fn inferred_signature_reports_a_missing_member_during_pass_one() {
     );
     assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
     assert_eq!(diagnostics.diags[0].file, 0);
-    let expected = crate::diagnostic_wording::unresolved_reference_on("missing", Some("String"));
-    assert_eq!(diagnostics.diags[0].msg, expected);
-}
-
-#[test]
-fn inferred_member_extension_result_keeps_dispatch_type_arguments() {
-    let inputs = [SourceInput::kotlin(
-        "class Wrapper<T>(val value: T)\n\
-         open class Container<T>(private val value: T) {\n\
-             val String.wrapped get() = Wrapper(value)\n\
-         }\n\
-         class StringContainer(value: String) : Container<String>(value) {\n\
-             fun read(token: String): Int = token.wrapped.value.length\n\
-         }\n",
-    )
-    .with_file_stem("AppliedMemberExtension")];
-    let mut diagnostics = DiagSink::new();
-    let analysis = analyze_source_set_with_features_and_prepare(
-        &inputs,
-        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
-        &LangFeatures::new(),
-        |_, _| {},
-        &mut diagnostics,
+    let expected = crate::diagnostic_wording::unresolved_reference_on(
+        crate::features::ReferenceProfile::default(),
+        "missing",
+        Some("String"),
     );
-
-    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-    assert!(analysis.streamed.is_some());
-    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
-    assert!(census.failures.is_empty(), "{:?}", census.failures);
-    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+    assert_eq!(diagnostics.diags[0].msg, expected);
 }
 
 #[test]

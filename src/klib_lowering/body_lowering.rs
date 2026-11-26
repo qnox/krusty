@@ -25,6 +25,7 @@ mod compiler_blocks;
 mod conditionals;
 mod constructions;
 mod elvis_blocks;
+mod enum_members;
 mod instance_storage;
 mod loops;
 mod object_literals;
@@ -37,6 +38,7 @@ mod try_catch;
 mod type_operators;
 
 pub(super) use blocks::{lower_parameter_defaults, publish_parameter_defaults};
+pub(super) use enum_members::ImplicitEnumMember;
 
 use super::decline::KlibBodyDeclineReason;
 use super::function_lowering::FunctionHeader;
@@ -149,6 +151,17 @@ pub(super) trait CallLinker {
         &self,
         _callee: &crate::libraries::KlibDeclarationSignature,
     ) -> Lowered<Option<super::primitive_calls::CommonPrimitiveCall>> {
+        Ok(None)
+    }
+
+    /// The enum class whose implicit `values`, `valueOf` or `entries` getter a call of
+    /// `callee` names, which the linker has materialized, and that member. Template linkers keep
+    /// the call's ordinary declaration boundary.
+    fn implicit_enum_member(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<(TypeName, ImplicitEnumMember)>> {
         Ok(None)
     }
 
@@ -345,6 +358,16 @@ pub(super) trait CallLinker {
         unsupported("a call of a file-private constructor")
     }
 
+    /// The member a call of the file-local `callee` inherits when `callee` is a fake override of
+    /// a class private to its file, which no declaration defines: the call is one of that member,
+    /// dispatched on its receiver. `None` for any other callee; template linkers find none.
+    fn inherited_member(
+        &self,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Option<crate::metadata::klib_ir::KlibIrSignature> {
+        None
+    }
+
     /// The function a file-local call invokes: a top-level function private to the lowered
     /// body's file, or a member of a file-local class. Template linkers keep the refusal.
     /// The getter of an inherited property that a call of the fake override `callee` of a local
@@ -401,17 +424,6 @@ pub(super) trait CallLinker {
         _entry: &KlibPublicIdSignature,
     ) -> Lowered<(TypeName, String)> {
         unsupported("an enum entry")
-    }
-
-    /// The dependency enum class whose compiler-generated `values()` or `valueOf` the public
-    /// declaration `callee` is, with which of the two. `None` for any other callee, which links
-    /// as an ordinary call; a linker that materializes no enum class knows none.
-    fn enum_static_member(
-        &mut self,
-        _ir: &mut IrFile,
-        _callee: &KlibPublicIdSignature,
-    ) -> Lowered<Option<(TypeName, super::enum_classes::EnumStaticMember)>> {
-        Ok(None)
     }
 
     /// `sub` as the class `owner` it is a subtype of, with the type arguments its hierarchy applies

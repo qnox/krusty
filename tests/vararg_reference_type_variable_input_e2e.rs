@@ -8,7 +8,7 @@
 //! one binding. This test runs it with every input and assertion kept and also returns its `describe()`, pinning which
 //! binding the reference release chooses.
 
-use krusty::kotlin_version::{Quirk, Quirks};
+use krusty::kotlin_version::Quirk;
 
 use super::common;
 
@@ -54,7 +54,9 @@ fn expected(element: bool) -> String {
 
 #[test]
 fn a_type_variable_input_binds_the_vararg_as_the_reference_release_does() {
-    let element = Quirks::target().has(Quirk::VarargReferenceTakesTypeVariableInputAsElement);
+    let element =
+        krusty::kotlin_version::Quirks::of_release(krusty::kotlin_version::environment_release())
+            .has(Quirk::VarargReferenceTakesTypeVariableInputAsElement);
     let source = source();
     let reference = common::kotlinc_box_result(&source);
     assert_eq!(reference, expected(element), "kotlinc");

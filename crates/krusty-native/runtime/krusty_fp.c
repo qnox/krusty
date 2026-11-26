@@ -558,3 +558,34 @@ kt_float kt_mod_float(kt_float a, kt_float b) {
     }
     return r;
 }
+
+/* `nextUp` and `nextDown`: the adjacent representable value toward positive or negative infinity.
+   A finite value's bits step by one, away from zero when the direction matches its sign and toward
+   it otherwise; either zero steps to the smallest subnormal of the direction's own sign; an
+   infinity already pointing in the direction stays, and a NaN is returned as it came. Written on
+   the bits because the zeros and the infinities are the whole of what a library `nextafter` would
+   have to special-case anyway, and because it needs no libm on a freestanding target. */
+static kt_double fp_next_double(kt_double value, int up) {
+    uint64_t bits = fp_bits_of_double(value);
+    uint64_t magnitude = bits & 0x7FFFFFFFFFFFFFFFull;
+    if (magnitude > 0x7FF0000000000000ull) return value;
+    int negative = (int)(bits >> 63);
+    if (magnitude == 0) return fp_double_of_bits(up ? 1ull : (1ull << 63) | 1ull);
+    if (magnitude == 0x7FF0000000000000ull && negative == !up) return value;
+    return fp_double_of_bits(negative == !up ? bits + 1 : bits - 1);
+}
+
+static kt_float fp_next_float(kt_float value, int up) {
+    uint32_t bits = fp_bits_of_float(value);
+    uint32_t magnitude = bits & 0x7FFFFFFFu;
+    if (magnitude > 0x7F800000u) return value;
+    int negative = (int)(bits >> 31);
+    if (magnitude == 0) return fp_float_of_bits(up ? 1u : (1u << 31) | 1u);
+    if (magnitude == 0x7F800000u && negative == !up) return value;
+    return fp_float_of_bits(negative == !up ? bits + 1 : bits - 1);
+}
+
+kt_double kt_next_up_double(kt_double value) { return fp_next_double(value, 1); }
+kt_double kt_next_down_double(kt_double value) { return fp_next_double(value, 0); }
+kt_float kt_next_up_float(kt_float value) { return fp_next_float(value, 1); }
+kt_float kt_next_down_float(kt_float value) { return fp_next_float(value, 0); }

@@ -1977,18 +1977,34 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                                 sibling.get(),
                                 joined.get(),
                             );
+                                // A dependency call that left a result-only formal open
+                                // (`emptyMap()`) is completed, not symbolic; its recorded
+                                // selection says so and names the sibling face it takes.
+                                let open =
+                                    call_selection_origin(graph, operand).and_then(|origin| {
+                                        semantics.open_result_expectation(scope, origin, sibling)
+                                    });
                                 // A `Nothing` sibling (`?: throw`, a `return` arm) is only the
                                 // trivial lower constraint of the join's variable. As an
                                 // expectation it would instead cap the branch's own variables at
                                 // `Nothing` and override what its inputs proved.
                                 if current == sibling
                                     || sibling.get() == Ty::Nothing
-                                    || (!current.get().mentions_ty_param() && joined != current)
+                                    || (!current.get().mentions_ty_param()
+                                        && open.is_none()
+                                        && joined != current)
                                 {
                                     continue;
                                 }
+                                let expectation = open.unwrap_or(sibling);
                                 let Some(Ok(rebound)) = evaluate_expression_with_expected(
-                                    semantics, operand, sibling, graph, demand, memo, computing,
+                                    semantics,
+                                    operand,
+                                    expectation,
+                                    graph,
+                                    demand,
+                                    memo,
+                                    computing,
                                 ) else {
                                     continue;
                                 };

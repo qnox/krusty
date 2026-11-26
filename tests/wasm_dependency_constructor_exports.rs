@@ -388,7 +388,7 @@ fn compile_against_official_producer(
             compilation_target,
             Box::new(libraries.for_compilation()),
         ),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "box", &mut diags);
