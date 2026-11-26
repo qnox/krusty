@@ -431,7 +431,8 @@ pub(super) fn emit_dependencies<B: Backend>(
         .with_authorized_member_edges(authorized_member_edges)
         .with_read_classes(read_classes)
         .with_enum_entries_factory(entries_factory.clone())
-        .with_target_classifiers(&target_represents_classifier);
+        .with_target_classifiers(&target_represents_classifier)
+        .with_expansion_copies(facts.inline_bodies());
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,
