@@ -296,7 +296,7 @@ impl CallableRegistry {
                     external_target: Some(target),
                     defaults,
                     ..
-                } if defaults.is_empty() => {
+                } => {
                     let Some(identity) = callables
                         .callable(*target)
                         .and_then(|callable| callable.dependency_callable.as_ref())
@@ -306,12 +306,24 @@ impl CallableRegistry {
                     let Some(&index) = self.dependencies.get(identity) else {
                         continue;
                     };
+                    // A construction leaving arguments out is realized only through the default
+                    // entry its module exports under the constructor's identity.
+                    let default_entry = self.dependency_defaults.get(identity).copied();
+                    if !defaults.is_empty() && default_entry.is_none() {
+                        continue;
+                    }
                     targets.external.insert(*target, index);
                     let signature = self.signatures.get(identity).ok_or_else(|| {
                         "an emitted dependency constructor without its declared signature"
                             .to_owned()
                     })?;
                     targets.signatures.insert(*target, signature.clone());
+                    if let Some(entry) = default_entry {
+                        targets.external_defaults.insert(*target, entry);
+                        targets
+                            .external_default_signatures
+                            .insert(*target, signature.clone());
+                    }
                     continue;
                 }
                 IrExpr::Checked(operation) => {

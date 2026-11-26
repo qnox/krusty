@@ -199,7 +199,13 @@ impl Body<'_> {
         // The shared default-argument lowering rewrites every construction with omitted
         // arguments it can realize to construct through its constructor's entry.
         if !defaults.is_empty() {
-            return Err("a constructor call with omitted arguments".to_string());
+            // Only another module's constructor is reached through its own default entry.
+            return match external
+                .and_then(|target| self.dependency_construction(target, internal, args, defaults))
+            {
+                Some(constructed) => constructed,
+                None => Err("a constructor call with omitted arguments".to_string()),
+            };
         }
         let Some((declaration, kind, message)) = external
             .and_then(|target| self.callables.callable(target))
@@ -220,8 +226,8 @@ impl Body<'_> {
             {
                 return self.string_builder_construction(target, args);
             }
-            if let Some(constructed) =
-                external.and_then(|target| self.dependency_construction(target, internal, args))
+            if let Some(constructed) = external
+                .and_then(|target| self.dependency_construction(target, internal, args, defaults))
             {
                 return constructed;
             }
