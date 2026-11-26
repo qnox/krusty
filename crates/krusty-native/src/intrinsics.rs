@@ -2028,6 +2028,16 @@ pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'stati
             _ => {}
         }
     }
+    // The `build()` ending a `buildList` block, which the library declares on `ArrayList` itself.
+    if signature
+        .owner
+        .classifier_matches("kotlin/collections/ArrayList")
+    {
+        return match (signature.name, signature.params) {
+            ("build", []) => Some("kt_mutable_list_build"),
+            _ => None,
+        };
+    }
     if signature
         .owner
         .classifier_matches("kotlin/text/StringBuilder")
@@ -2044,6 +2054,7 @@ pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'stati
             ("append", [_, Ty::Int, Ty::Int]) => Some("kt_string_builder_append_range"),
             ("appendLine", [_]) => Some("kt_string_builder_append_line"),
             ("appendLine", []) => Some("kt_string_builder_append_new_line"),
+            ("reverse", []) => Some("kt_string_builder_reverse"),
             _ => None,
         };
     }

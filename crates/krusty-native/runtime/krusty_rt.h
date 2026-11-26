@@ -515,6 +515,8 @@ extern const KType kt_type_mutable_list;
 kt_boolean kt_is_mutable_list(KRef value);
 KRef kt_mutable_list_new(void);
 KRef kt_mutable_list_with_capacity(kt_int capacity);
+/* `ArrayList.build()`: the list a `buildList` block filled. */
+KRef kt_mutable_list_build(KRef self);
 /* A growable list holding a COPY of an array's elements. */
 KRef kt_mutable_list_of(KRef elements);
 /* `ArrayList(elements)`: a growable list holding a copy of any collection's elements. */
@@ -1001,6 +1003,7 @@ KRef kt_string_builder_append_range(KRef self, KRef value, KRef start_index, KRe
 
 /* `sb.setLength(n)`, by UTF-16 unit as Kotlin counts: shorter truncates, longer pads with NUL. */
 void kt_string_builder_set_length(KRef self, kt_int length);
+KRef kt_string_builder_reverse(KRef self);
 
 /* Whether a value is one, for the entry points that serve both shapes. */
 kt_boolean kt_is_string_builder(KRef value);

@@ -1393,6 +1393,34 @@ void kt_string_builder_set_length(KRef self, kt_int length) {
     builder->byte_length += padding;
 }
 
+/* `sb.reverse()`, by CHARACTER like Java's: the whole byte run is reversed and each multi-byte
+   encoding is then turned back, so a surrogate pair stays together. Answers the builder itself. */
+KRef kt_string_builder_reverse(KRef self) {
+    KStringBuilder *builder = (KStringBuilder *)self;
+    char *bytes = kt_bytes_of((KByteArray *)builder->storage);
+    kt_int length = builder->byte_length;
+    for (kt_int low = 0, high = length - 1; low < high; low++, high--) {
+        char swap = bytes[low];
+        bytes[low] = bytes[high];
+        bytes[high] = swap;
+    }
+    for (kt_int at = 0; at < length;) {
+        /* After the reversal an encoding's continuation bytes (10xxxxxx) precede its lead byte. */
+        kt_int end = at;
+        while (end < length && ((unsigned char)bytes[end] & 0xC0u) == 0x80u) {
+            end++;
+        }
+        kt_int stop = end < length ? end + 1 : end;
+        for (kt_int low = at, high = stop - 1; low < high; low++, high--) {
+            char swap = bytes[low];
+            bytes[low] = bytes[high];
+            bytes[high] = swap;
+        }
+        at = stop;
+    }
+    return self;
+}
+
 /* Whether `bytes` is the three-byte encoding of a surrogate code unit, and which half: `ED A0..AF`
    starts a HIGH (leading) one, `ED B0..BF` a LOW (trailing) one. */
 static kt_boolean kt_is_encoded_surrogate(const char *bytes, unsigned char second_high_bits) {
