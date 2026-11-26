@@ -411,7 +411,7 @@ fn a_float_converted_to_an_unsigned_type_is_declined() {
          \x20   return if (d.toUInt() == 0u) \"OK\" else \"fail\"\n\
          }\n",
         "FloatToUnsigned",
-        "toUInt",
+        "kotlin.doubleToUInt",
     );
 }
 
