@@ -3,6 +3,7 @@ package krusty.analysis;
 import java.nio.file.Path;
 import ksp.com.intellij.openapi.Disposable;
 import ksp.com.intellij.openapi.project.Project;
+import ksp.com.intellij.openapi.util.Disposer;
 import ksp.com.intellij.mock.MockApplication;
 import ksp.org.jetbrains.kotlin.analysis.api.impl.base.permissions.KaBaseAnalysisPermissionRegistry;
 import ksp.org.jetbrains.kotlin.analysis.api.permissions.KaAnalysisPermissionRegistry;
@@ -27,7 +28,7 @@ import kotlin.Unit;
  * compiler's FIR and once by krusty's provider.
  */
 final class StandaloneSession implements AutoCloseable {
-    private final Disposable disposable = () -> { };
+    private final Disposable disposable = Disposer.newDisposable("krusty standalone session");
     final StandaloneAnalysisAPISession session;
     final KaSourceModule module;
 
@@ -82,6 +83,8 @@ final class StandaloneSession implements AutoCloseable {
 
     @Override
     public void close() {
-        StandaloneAnalysisAPISessionBuilderKt.disposeGlobalStandaloneApplicationServices();
+        // Only this session's own services: the application services are JVM-wide and shared by
+        // every other session of the process, so a later session must still find them running.
+        Disposer.dispose(disposable);
     }
 }

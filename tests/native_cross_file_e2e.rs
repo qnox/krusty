@@ -345,8 +345,8 @@ fn a_package_value_class_property_is_stored_as_its_value() {
                 "defs",
                 r#"
                 package demo
-                @JvmInline value class Meters(val value: Int)
-                @JvmInline value class Name(val text: String)
+                OPTIONAL_JVM_INLINE_ANNOTATION value class Meters(val value: Int)
+                OPTIONAL_JVM_INLINE_ANNOTATION value class Name(val text: String)
                 var distance: Meters = Meters(40)
                 val owner: Name = Name("OK")
                 fun meters(value: Int): Meters = Meters(value)
@@ -579,8 +579,8 @@ fn a_value_class_typed_member_is_carried_as_its_value() {
             "defs",
             r#"
                 package demo
-                @JvmInline value class Meters(val value: Int)
-                @JvmInline value class Name(val text: String)
+                OPTIONAL_JVM_INLINE_ANNOTATION value class Meters(val value: Int)
+                OPTIONAL_JVM_INLINE_ANNOTATION value class Name(val text: String)
                 class Track(val length: Meters, var owner: Name)
                 fun track(): Track = Track(Meters(41), Name("FAIL: unassigned"))
                 fun name(text: String): Name = Name(text)
@@ -886,7 +886,7 @@ fn a_value_class_constructed_in_another_file_is_its_value() {
             "defs",
             r#"
                 package demo
-                @JvmInline
+                OPTIONAL_JVM_INLINE_ANNOTATION
                 value class Name(val text: String)
                 class Tag(val name: Name)
                 fun text(name: Name): String = name.text
@@ -1133,7 +1133,7 @@ fn a_value_class_member_function_takes_the_value() {
             "defs",
             r#"
                 package demo
-                @JvmInline
+                OPTIONAL_JVM_INLINE_ANNOTATION
                 value class Meters(val amount: Int) {
                     fun plus(other: Meters): Meters = Meters(amount + other.amount)
                     fun render(): String = "${amount}m"

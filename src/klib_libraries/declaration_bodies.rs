@@ -1032,6 +1032,58 @@ impl KlibDeclarationBodies {
         module: &str,
         signature: &KlibPublicIdSignature,
     ) -> Option<(String, &KlibIrArena, Vec<&KlibIrFunction>)> {
+        let (owner, arena, class) = self.unique_public_class(module, signature)?;
+        let functions = class
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                KlibIrMember::Function(function) => {
+                    Some(arena.function(*function)).filter(|function| !function.constructor)
+                }
+                _ => None,
+            })
+            .collect();
+        Some((owner, arena, functions))
+    }
+
+    /// The getter of the direct member property `name` of the one public class `signature` in
+    /// `module`'s producer graph, with the module that serializes it. `None` unless exactly one
+    /// class has the signature and it declares exactly one such property with a getter.
+    pub(crate) fn public_class_member_getter(
+        &self,
+        module: &str,
+        signature: &KlibPublicIdSignature,
+        name: &str,
+    ) -> Option<KlibDependencyCallable> {
+        let (owner, arena, class) = self.unique_public_class(module, signature)?;
+        let mut getters = class.members.iter().filter_map(|member| match member {
+            KlibIrMember::Property(property) if property.name == name => Some(property.getter),
+            _ => None,
+        });
+        let getter = getters.next()??;
+        if getters.next().is_some() {
+            return None;
+        }
+        let getter = arena.function(getter);
+        if getter.dispatch_receiver.is_none() || getter.extension_receiver.is_some() {
+            return None;
+        }
+        let KlibIrSignature::Accessor(accessor) = &getter.base.symbol.signature else {
+            return None;
+        };
+        Some(KlibDependencyCallable {
+            module: owner,
+            declaration: KlibDeclarationSignature::Accessor(accessor.clone()),
+        })
+    }
+
+    /// The one class serialized under `signature` in `module`'s producer graph, with the module
+    /// that serializes it.
+    fn unique_public_class(
+        &self,
+        module: &str,
+        signature: &KlibPublicIdSignature,
+    ) -> Option<(String, &KlibIrArena, &KlibIrClass)> {
         let wanted = KlibIrSignature::Public(signature.clone());
         let mut found = None;
         for owner in self.body_provider_modules(module) {
@@ -1044,18 +1096,7 @@ impl KlibDeclarationBodies {
                 }
             }
         }
-        let (owner, arena, class) = found?;
-        let functions = class
-            .members
-            .iter()
-            .filter_map(|member| match member {
-                KlibIrMember::Function(function) => {
-                    Some(arena.function(*function)).filter(|function| !function.constructor)
-                }
-                _ => None,
-            })
-            .collect();
-        Some((owner, arena, functions))
+        found
     }
 
     /// The class in `module`'s producer graph that directly declares `signature`.

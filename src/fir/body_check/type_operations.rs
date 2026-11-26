@@ -14,6 +14,9 @@ impl BodyFirChecker<'_> {
         ty: &TypeRef,
         negated: bool,
     ) -> Result<FirExprKind, BodyCheckFailure> {
+        self.info.resolved_type(ty).ok_or_else(|| {
+            self.failure(Some(ty.span), BodyCheckFailureKind::UnresolvedTypeSyntax)
+        })?;
         let (runtime_target, same_erased_upper_bound) = match self.info.expr_lowers.get(&expression)
         {
             Some(ExprLowering::RuntimeTypeTest {
@@ -22,9 +25,6 @@ impl BodyFirChecker<'_> {
             }) => (*target, *same_erased_upper_bound),
             _ => panic!("checked type test must publish its runtime plan"),
         };
-        self.info.resolved_type(ty).ok_or_else(|| {
-            self.failure(Some(ty.span), BodyCheckFailureKind::UnresolvedTypeSyntax)
-        })?;
         let plan = FirTypeTestPlan {
             same_erased_upper_bound,
         };

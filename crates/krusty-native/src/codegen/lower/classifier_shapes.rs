@@ -202,7 +202,7 @@ pub(super) fn is_enum_entries(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/enums/EnumEntries"])
 }
 
-fn standard_interface_descriptor(internal: TypeName) -> Option<&'static str> {
+pub(super) fn standard_interface_descriptor(internal: TypeName) -> Option<&'static str> {
     Some(if internal == krusty::types::wk::function_root() {
         "kt_type_function"
     } else if is_comparable(internal) {
@@ -491,6 +491,9 @@ pub(super) fn class_runtime_interface_descriptors(
     class: ClassId,
     local_interfaces: &[ClassId],
 ) -> Vec<&'static str> {
+    // The interfaces a library superclass reaches (an enum's `kotlin.Enum` is a `Comparable`) are
+    // implemented by the class as its own are.
+    let inherited = classifiers.inherited_interfaces(ir.classes[class as usize].fq_name_id());
     let external_roots = ir.classes[class as usize]
         .interfaces
         .iter()
@@ -499,6 +502,7 @@ pub(super) fn class_runtime_interface_descriptors(
                 .iter()
                 .flat_map(|interface| ir.classes[*interface as usize].interfaces.iter()),
         )
+        .chain(inherited)
         .filter(|interface| ir.class_id_by_name(*interface).is_none());
     let mut descriptors = runtime_interface_descriptors(classifiers, external_roots);
     let function_roles = std::iter::once(class)
@@ -708,6 +712,11 @@ impl<'a> FileLowering<'a> {
                 !class.is_interface && !class.is_abstract && answered_by_arm(id)
             })
             .count()
+    }
+
+    /// Whether `class` is an enum class, whose base storage the runtime owns.
+    pub(super) fn is_enum_class(&self, class: ClassId) -> bool {
+        super::super::super::classes::is_enum(&self.ir.classes[class as usize])
     }
 
     /// Whether a concrete class of this file can be an instance of `internal`.

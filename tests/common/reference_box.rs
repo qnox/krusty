@@ -13,6 +13,9 @@ pub fn kotlinc_box_result(source: &str) -> String {
 /// Compile one `Main.kt` fixture with kotlinc against caller-supplied dependencies and run its
 /// `box()` result on the shared JVM. The fixture's `// LANGUAGE:` directives become kotlinc flags.
 pub fn kotlinc_box_result_with_classpath(source: &str, classpath: &[PathBuf]) -> String {
+    let prepared =
+        krusty::conformance::prepare_test_source(source, krusty::conformance::TestTarget::Jvm);
+    let source = prepared.as_str();
     let work = common::scratch_dir().expect("cannot allocate reference-runtime fixture");
     let source_paths = write_fixture_sources(&work, &[("Main.kt", source)]);
     let output = work.join("out");

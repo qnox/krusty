@@ -62,6 +62,7 @@ const KType kt_type_any = {KT_NAMED("kotlin.", "Any"),
    is `Comparable` and not `Number` either (it is a value class, not a `java.lang.Number`). */
 KT_MARKER_TYPE(kt_type_number, "kotlin.", "Number")
 KT_MARKER_TYPE(kt_type_comparable, "kotlin.", "Comparable")
+KT_MARKER_TYPE(kt_type_enum, "kotlin.", "Enum")
 
 /* `kotlin.CharSequence` is the same kind of thing: no instances of its own, and TWO types point at
    it — a `String` and a `StringBuilder`. Both are needed. Answering this question with
@@ -290,6 +291,22 @@ typedef struct KEnum {
 /* Kotlin's `Enum.toString()` is the constant's name, and `kotlin.Any`'s identity rendering is not.
    This sits in the `toString` slot of every enum class's table. */
 KRef kt_enum_to_string(KRef self) { return ((KEnum *)self)->name; }
+
+/* Every enum class's descriptor has `kt_type_enum` as its `super`, the storage owner, so this walks
+   the chain a constant's own class and its entry bodies share. */
+kt_boolean kt_is_enum_constant(KRef object) {
+    for (const KType *type = object->header.type; type != NULL; type = type->super) {
+        if (type == &kt_type_enum) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* `Enum.compareTo`: the difference of the ordinals, as Kotlin declares it. */
+kt_int kt_enum_compare_to(KRef self, KRef other) {
+    return ((KEnum *)self)->ordinal - ((KEnum *)other)->ordinal;
+}
 
 /* An exhaustive `when` used as a value has no `else` to fall into. Kotlin's own answer for the
    case its exhaustiveness check missed -- an enum constant or a sealed subclass added after the

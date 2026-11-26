@@ -1037,7 +1037,23 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
             }
             (None, None) => return Err(msg.error("expression has no operation")),
         };
-        let kind = self.operation(number, &operation)?;
+        let mut kind = self.operation(number, &operation)?;
+        if let KlibIrExprKind::FunctionReference {
+            access,
+            reflection_target,
+        } = &kind
+        {
+            let signatures = &mut self.file.signatures;
+            if let Some(rich) = super::reference_upgrade::upgrade(
+                &mut self.arena,
+                ty,
+                access,
+                reflection_target.as_ref(),
+                &mut || signatures.synthetic_local(),
+            ) {
+                kind = rich;
+            }
+        }
         Ok(self.push(ty, kind))
     }
 

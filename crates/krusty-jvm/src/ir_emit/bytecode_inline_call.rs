@@ -1059,7 +1059,16 @@ impl Emitter<'_> {
             (true, Some(line)) => Some(line.min(u32::from(u16::MAX)) as u16),
             _ => code.current_line(),
         };
-        let call_line = caller_line.unwrap_or(1);
+        // A call inside code copied from a same-module inline function is mapped under the
+        // outermost expansion's call, as kotlinc's inliner remaps the nested call site when the
+        // enclosing body is inlined; the mark above is only that copy's own mapped line.
+        let call_line = self
+            .ir
+            .inline_copy_provenance(call_expression)
+            .and_then(|frames| frames.iter().rev().find_map(|frame| frame.call_line))
+            .and_then(|line| u16::try_from(line).ok())
+            .or(caller_line)
+            .unwrap_or(1);
         let claimable = self.claimable_lines();
         let bodies = self.bodies;
         // The body is numbered from the method's scopes so far, its own scope at the call's line
@@ -1165,6 +1174,7 @@ impl Emitter<'_> {
         for lease in leases {
             self.release_temporary(lease);
         }
+        self.frame.note_reach(code.max_locals);
         self.frame.rewind_to(argument_frame);
         Ok(())
     }
@@ -1280,9 +1290,11 @@ impl Emitter<'_> {
             } else {
                 Supply::Stored
             };
-            // kotlinc never stores an inline suspend callee's continuation: the body reads the
-            // caller's own continuation local, as every suspension point in the caller does. A
-            // suspend lambda's continuation is the lambda itself, `this` cast where it is read.
+            // kotlinc does not store an inline suspend callee's continuation that is the caller's
+            // own continuation local: the body reads that local, as every suspension point in the
+            // caller does. An inline lambda's body reads its continuation as a value, which the
+            // callee's parameter keeps in a local of its own (`$completion$iv`). A suspend
+            // lambda's continuation is the lambda itself, `this` cast where it is read.
             // Suspend lowering records the operand it inserted; with an omitted default argument
             // that is before the `$default` mask and marker, not the last operand.
             let lambda_continuation = index
@@ -1292,7 +1304,9 @@ impl Emitter<'_> {
                         .is_continuation(call_expression, argument_index)
                 })
                 && self.cast_local_operand(argument).is_some();
-            if self.reads_continuation_local(argument) || lambda_continuation {
+            let own_continuation =
+                self.reads_continuation_local(argument) && !self.continuation_is_lambda_value();
+            if own_continuation || lambda_continuation {
                 supplies.push(Supply::CallerLocal);
                 continue;
             }

@@ -204,6 +204,8 @@ void *kt_gc_allocate(const KType *type, uint32_t size);
 
 /* Run a collection now. Automatic collections happen inside kt_gc_allocate. */
 void kt_gc_collect(void);
+/* The standard library's `GC.collect`, by the symbol its `@GCUnsafeCall` names. */
+void Kotlin_native_internal_GC_collect(void *receiver);
 
 /* Register a global slot that may hold a reference, so it is treated as a root. Static storage
    is not scanned — a freestanding program has no portable way to find its own data section. The
@@ -334,6 +336,12 @@ void kt_index_out_of_bounds(kt_int index, kt_int size);
 
 /* `Enum.toString()`: the constant's name, read from the storage `kotlin.Enum` contributes. */
 KRef kt_enum_to_string(KRef self);
+
+/* The `kotlin.Enum` marker every enum class descriptor has as its `super`, whether an object is one
+   of an enum's constants (or an entry body of one), and `Enum.compareTo` over two of them. */
+extern const KType kt_type_enum;
+kt_boolean kt_is_enum_constant(KRef object);
+kt_int kt_enum_compare_to(KRef self, KRef other);
 
 /* An exhaustive `when` none of whose branches matched after all: Kotlin's
    `NoWhenBranchMatchedException`, raised and returned from. */

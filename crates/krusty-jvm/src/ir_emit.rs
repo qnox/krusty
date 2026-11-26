@@ -4478,6 +4478,10 @@ struct Emitter<'a> {
     /// The operand binding of a same-module inline call being emitted: kotlinc stores the operand
     /// into its parameter slot without marking a line.
     copied_operand_binding: Option<ExprId>,
+    /// The same-module callee frames that have opened but not yet reached their frame marker,
+    /// innermost last. A default evaluated ahead of the marker can run an inline call of its own,
+    /// so each expansion keeps its own entry.
+    pending_copied_frames: Vec<block_scope::PendingCopiedFrame>,
     /// The `&&`/`||` operand whose line is marked again before the jump that consumes it.
     short_circuit_operand_line: Option<ExprId>,
     /// A plain local operand of an unsigned bitwise member is being loaded, so it records no line.
@@ -4608,6 +4612,7 @@ impl<'a> Emitter<'a> {
             render_initializer_boundaries: false,
             inside_condition: false,
             copied_operand_binding: None,
+            pending_copied_frames: Vec::new(),
             short_circuit_operand_line: None,
             suppress_unsigned_local_line: false,
             this_uninitialized: false,

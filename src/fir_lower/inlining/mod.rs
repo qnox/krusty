@@ -191,6 +191,11 @@ impl BodyLowering<'_> {
             named: true,
         });
         self.ir.call_operand_bindings.insert(declaration);
+        // The declaration stands on the default's own line, as kotlinc's `$default` body does.
+        if let Some(line) = self.ir.source_line(copy).filter(|line| *line != 0) {
+            self.ir.set_source_line(declaration, line);
+            self.ir.set_statement_line(declaration, line);
+        }
         Some((declaration, cloned))
     }
 
@@ -483,6 +488,18 @@ impl BodyLowering<'_> {
             splice_lambda[index] = matches!(plan, InlineOperandPlan::Splice);
             plans.push(plan);
         }
+        // A call that omits an argument runs the callee's default-argument body, whose extension
+        // receiver parameter the backend names after that body.
+        if plans
+            .iter()
+            .any(|plan| matches!(plan, InlineOperandPlan::Default))
+        {
+            for operand in &mut parameter_names {
+                if operand.local_role == IrInlineLocalRole::ExtensionReceiver {
+                    operand.local_role = IrInlineLocalRole::DefaultBodyExtensionReceiver;
+                }
+            }
+        }
         let mut operand_declarations = Vec::new();
         let mut defaulted = Vec::new();
         let mut staging_failed = false;
@@ -583,16 +600,25 @@ impl BodyLowering<'_> {
                 operand_types[index],
                 (&bindings, &reified_bindings),
             )?;
-            default_copies.extend(cloned);
-            if let Some(parameter) = parameter_names.get(index) {
-                if let Some(source_name) = parameter.source_name.clone() {
-                    self.ir.value_names.insert(declaration, source_name);
-                }
-                self.ir.set_debug_local_provenance(
-                    declaration,
-                    IrDebugLocalProvenance::inline_value(parameter.local_role, 1),
-                );
+            // The default is the callee's own code: its lines map through the callee's source
+            // like the body's.
+            let mut copied = cloned.values().copied().collect::<Vec<_>>();
+            copied.sort_unstable();
+            for copy in copied {
+                frame.record_copy(self.ir, copy, function);
             }
+            frame.record_copy(self.ir, declaration, function);
+            default_copies.extend(cloned);
+            if let Some(source_name) = parameter_names
+                .get(index)
+                .and_then(|parameter| parameter.source_name.clone())
+            {
+                self.ir.value_names.insert(declaration, source_name);
+            }
+            self.ir.set_debug_local_provenance(
+                declaration,
+                IrDebugLocalProvenance::inline_value(IrInlineLocalRole::DefaultedValue, 1),
+            );
             operand_declarations.push(declaration);
         }
         crate::trace_compiler!(
@@ -753,12 +779,12 @@ impl BodyLowering<'_> {
                     self.ir.expr(copy).clone(),
                     self.ir.checked_return_depths.get(&copy).copied(),
                 ) {
+                    crate::inline_expansion::leaves_inline_frame(self.ir, copy);
                     returns.push(InlineReturn {
                         returned: copy,
                         value,
                         nested: true,
                     });
-                    self.ir.checked_return_depths.remove(&copy);
                 }
                 continue;
             }
@@ -809,18 +835,18 @@ impl BodyLowering<'_> {
                 IrExpr::Return(value) => Some(value),
                 _ => None,
             };
+            // A return that leaves this frame is represented by the block that replaces it, in
+            // EITHER shape, and its sparse depth fact is consumed with it: left on the
+            // replacement, an enclosing inline-lambda template would consume the same return a
+            // second time. A deeper one stays a return, one lexical frame nearer its target.
             if let Some(value) = returned {
-                returns.push(InlineReturn {
-                    returned: copy,
-                    value,
-                    nested: false,
-                });
-                // This return has crossed its checked callable boundary and will be represented by
-                // the block that replaces it, in EITHER shape. The sparse depth fact belongs to the
-                // old `Return` node; leaving it on the replacement makes an enclosing inline-lambda
-                // template try to consume the same return a second time. Removing it is a fact
-                // about the node, not a commitment to the loop shape, so it happens here.
-                self.ir.checked_return_depths.remove(&copy);
+                if crate::inline_expansion::leaves_inline_frame(self.ir, copy) {
+                    returns.push(InlineReturn {
+                        returned: copy,
+                        value,
+                        nested: false,
+                    });
+                }
             }
         }
         // An escaping lambda keeps its own implementation method. Specializing only the inline

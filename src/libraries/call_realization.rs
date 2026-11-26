@@ -21,24 +21,46 @@ pub struct KlibDependencyCallable {
     pub declaration: KlibDeclarationSignature,
 }
 
-/// A C ABI entry published by an exact Native interop declaration.
+/// A C ABI entry published by an exact Native declaration.
 ///
 /// The symbol is physical provider data. It is never lookup input: source resolution selects the
 /// declaration's opaque identity first, and a Native backend consumes this target only afterward.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirectCFunction {
     symbol: Box<str>,
+    abi: CFunctionAbi,
+}
+
+/// Which side of the Native boundary defines the C function, and so what may cross it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CFunctionAbi {
+    /// A cinterop declaration's C function: only values whose machine carrier is already a C
+    /// scalar cross, and there is no dispatch receiver.
+    Interop,
+    /// An entry of the Kotlin/Native runtime the standard library declares `external` through
+    /// `@GCUnsafeCall`: a dispatch receiver is the first argument and references cross as the
+    /// pointers they are.
+    Runtime,
 }
 
 impl DirectCFunction {
     pub(crate) fn new(symbol: &str) -> Self {
+        Self::with_abi(symbol, CFunctionAbi::Interop)
+    }
+
+    pub(crate) fn with_abi(symbol: &str, abi: CFunctionAbi) -> Self {
         Self {
             symbol: symbol.into(),
+            abi,
         }
     }
 
     pub fn symbol(&self) -> &str {
         &self.symbol
+    }
+
+    pub fn abi(&self) -> CFunctionAbi {
+        self.abi
     }
 }
 
