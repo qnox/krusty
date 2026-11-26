@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use super::server_pool::{self, server_pool_cap};
+use super::server_pool::{self, kotlinc_pool_cap};
 use super::{
     byte_dump, die_with_parent, java_home, kotlinc_lib_dir, protocol_jvm_log_args,
     read_exact_deadline, spawn_owned, ProfGuard,
@@ -402,7 +402,7 @@ impl KotlincServer {
 
 /// Pools of persistent compiler servers, one per classpath and JVM-property set. Callers claim a
 /// server, then compile outside the pool lock, so overlapping compiles use distinct JVMs up to
-/// [`server_pool_cap`].
+/// [`kotlinc_pool_cap`].
 type KotlincPools = Mutex<HashMap<String, Arc<server_pool::Pool<KotlincServer>>>>;
 
 /// Compile with the reference compiler via the persistent server. `args` are ordinary `kotlinc` CLI
@@ -593,7 +593,7 @@ pub fn kotlinc_compile_for_target(
     let admission = Instant::now();
     let spawning = Cell::new(Duration::ZERO);
     pool.with_server(
-        server_pool_cap(),
+        kotlinc_pool_cap(),
         || {
             let started = Instant::now();
             let server = KotlincServer::new(&java, &cp, &compiler, &properties);
