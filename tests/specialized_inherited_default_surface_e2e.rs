@@ -1,7 +1,8 @@
 //! A sub-interface republishes an inherited default member as its applied supertype substitutes
 //! it, as kotlinc does: `interface C<T> : A<T, Int>` writes `C$DefaultImpls.foo(C, Object, int)`
 //! with its generic `Signature`, and its `access$foo$jd` bridge takes the same shape, boxing the
-//! `int` and casting it to the erased `Number` slot of `A.foo` it calls.
+//! `int` and casting it to the erased `Number` slot of `A.foo` it calls. A class implementing the
+//! sub-interface forwards to that republished shape.
 
 use super::common;
 
@@ -13,6 +14,10 @@ interface Base<T, U : Number> {\n\
 interface Narrowed<T> : Base<T, Int>\n\
 \n\
 interface Closed : Base<String, Long>\n\
+\n\
+class Impl : Narrowed<String>\n\
+\n\
+class ClosedImpl : Closed\n\
 ";
 
 #[test]
@@ -22,6 +27,8 @@ fn sub_interfaces_republish_inherited_defaults_with_substituted_shapes() {
         "Narrowed$DefaultImpls",
         "Closed",
         "Closed$DefaultImpls",
+        "Impl",
+        "ClosedImpl",
     ] {
         let Some(result) = common::byte_diff_against_kotlinc_cp(
             "SpecializedInheritedDefaultSurface",
