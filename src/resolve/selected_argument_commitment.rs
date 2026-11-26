@@ -339,6 +339,14 @@ impl Checker<'_> {
                 inferred.unwrap_or(array_or_parameter)
             };
             let vararg_element = call_sig.vararg_index == Some(parameter) && !whole_array;
+            let declared_parameter = declared_params[parameter];
+            let declared = if vararg_element {
+                declared_parameter
+                    .array_read_elem()
+                    .unwrap_or(declared_parameter)
+            } else {
+                declared_parameter
+            };
             // A nested generic call is completed against its parameter only once that parameter
             // is a type of this site. Until the enclosing call solves the selected call's open
             // variables, the nested call keeps its own and joins that enclosing system instead.
@@ -358,6 +366,7 @@ impl Checker<'_> {
                     "lambda_apply",
                     "defer selected argument={argument:?} expected={expected:?}",
                 );
+                self.record_committed_lambda_argument(call, argument, declared);
                 argument_bindings.push(self.finalized_selected_argument_binding(
                     scope,
                     argument,
@@ -371,14 +380,6 @@ impl Checker<'_> {
                 ));
                 continue;
             }
-            let declared_parameter = declared_params[parameter];
-            let declared = if call_sig.vararg_index == Some(parameter) && !whole_array {
-                declared_parameter
-                    .array_read_elem()
-                    .unwrap_or(declared_parameter)
-            } else {
-                declared_parameter
-            };
             // A lambda whose written parameter names no type, bound to a bare type variable that
             // only its own arity-probe gave a shape, is still unshaped: the selection took the
             // probe's function type for the variable, which would hide the missing inference.
@@ -386,10 +387,8 @@ impl Checker<'_> {
                 .lambda_bound_only_the_callee_variable(&unshaped_lambdas::LambdaParameterBinding {
                     call,
                     argument,
-                    parameter,
                     probed_actual,
                     expected,
-                    declared_parameters: declared_params,
                     declared,
                 })
                 .unwrap_or(expected);
@@ -404,6 +403,7 @@ impl Checker<'_> {
                 },
                 implicit_lambda_label.as_deref(),
             );
+            self.record_committed_lambda_argument(call, argument, declared);
             if whole_array {
                 self.expect_whole_array_vararg_arg(
                     Some(scope),

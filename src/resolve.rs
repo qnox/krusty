@@ -30045,7 +30045,6 @@ impl<'a> Checker<'a> {
         ) {
             return HashMap::default();
         }
-        self.record_lambda_type_variable_formals(call, selected, args, argument_names);
         let Some(function) = self.source_function_decl(selected) else {
             return HashMap::default();
         };

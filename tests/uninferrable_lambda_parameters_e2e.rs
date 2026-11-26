@@ -116,3 +116,42 @@ fn a_function_shape_of_any_that_the_receiver_supplies_is_not_a_missing_inference
         0,
     );
 }
+
+#[test]
+fn a_function_shape_of_any_from_the_expected_type_is_not_a_missing_inference() {
+    assert_same(
+        "expected_any_shape",
+        "fun <T> id(x: T): T = x\n\
+         val g: (Any) -> Unit = id { x -> }\n",
+        0,
+    );
+}
+
+#[test]
+fn a_safe_call_argument_is_reported_as_an_argument() {
+    assert_same(
+        "safe_call",
+        "class Box {\n\
+         \x20   fun <T> pick(x: T): T = x\n\
+         }\n\
+         fun f(b: Box?) {\n\
+         \x20   b?.pick { y -> }\n\
+         }\n",
+        2,
+    );
+}
+
+#[test]
+fn a_sam_converted_lambda_takes_its_parameter_types_from_the_interface() {
+    assert_same(
+        "sam_shape",
+        "fun interface Action {\n\
+         \x20   fun run(x: String)\n\
+         }\n\
+         fun use(a: Action) {}\n\
+         fun f() {\n\
+         \x20   use { z -> }\n\
+         }\n",
+        0,
+    );
+}

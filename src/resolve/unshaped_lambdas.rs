@@ -7,12 +7,14 @@
 
 use super::*;
 
-/// The lambdas analysed without a shape for a written parameter, and the call and type variable
-/// each of them was bound to as a bare parameter of its callee.
+/// The lambdas analysed without a shape for a written parameter, the lambdas a selected call
+/// committed as its arguments, and the call and type variable each unshaped argument was bound to
+/// as a bare parameter of its callee.
 #[derive(Default)]
 pub(super) struct UnshapedLambdas {
-    pub(super) lambdas: crate::fx_hash::HashSet<ExprId>,
-    pub(super) formals: crate::fx_hash::HashMap<ExprId, (ExprId, String)>,
+    lambdas: crate::fx_hash::HashSet<ExprId>,
+    arguments: crate::fx_hash::HashSet<ExprId>,
+    formals: crate::fx_hash::HashMap<ExprId, (ExprId, String)>,
 }
 
 /// The type of a written lambda parameter that names none: the error type where nothing can
@@ -52,16 +54,13 @@ pub(super) fn argument_signature_parameters(
 }
 
 /// How a lambda argument stands to the selected parameter it fills.
-pub(super) struct LambdaParameterBinding<'a> {
+pub(super) struct LambdaParameterBinding {
     pub(super) call: ExprId,
     pub(super) argument: ExprId,
-    pub(super) parameter: usize,
     /// The argument's type from its probe, and the parameter's type the selection expects.
     pub(super) probed_actual: Ty,
     pub(super) expected: Ty,
-    /// The selected callee's declared parameters, and this argument's parameter as declared (its
-    /// element type for a vararg).
-    pub(super) declared_parameters: &'a [Ty],
+    /// This argument's parameter as declared (its element type for a vararg).
     pub(super) declared: Ty,
 }
 
@@ -147,7 +146,7 @@ impl Checker<'_> {
                         ),
                     );
                 }
-                let as_argument = self.file.is_call_argument(lambda);
+                let as_argument = self.unshaped_lambdas.arguments.contains(&lambda);
                 self.report_uninferrable_lambda_parameters(lambda, as_argument);
             }
         }
@@ -165,132 +164,67 @@ impl Checker<'_> {
         uninferrable
     }
 
-    /// Remember, for each lambda argument whose parameter is a bare type variable of the
-    /// callee, that variable's name: should the lambda stay unshaped, the call cannot infer it.
-    pub(super) fn record_lambda_type_variable_formals(
+    /// Record that a selected call committed `argument` to its parameter `declared` (the element
+    /// type for a vararg). A lambda that stays unshaped is then reported as an argument its callee
+    /// could not shape, and, when `declared` is a bare type variable of the callee that no explicit
+    /// type argument gives, the call owes that variable's report as well.
+    pub(super) fn record_committed_lambda_argument(
         &mut self,
         call: ExprId,
-        selected: &crate::libraries::FunctionInfo,
-        args: &[ExprId],
-        argument_names: Option<&[Option<String>]>,
+        argument: ExprId,
+        declared: Ty,
     ) {
-        let explicit_type_argument_count = self
-            .file
-            .call_type_args
-            .get(&call.0)
-            .map_or(0, |syntax| syntax.arguments.len());
-        let Some(signature) = selected.generic_sig.as_ref() else {
+        if !matches!(self.file.expr(argument), Expr::Lambda { .. }) {
             return;
-        };
-        let Some(parameters) = argument_signature_parameters(
-            selected,
-            args,
-            argument_names,
-            self.file.call_has_trailing_lambda.contains(&call.0),
-        ) else {
+        }
+        self.unshaped_lambdas.arguments.insert(argument);
+        if !self.unshaped_lambdas.lambdas.contains(&argument)
+            || self.file.call_type_args.contains_key(&call.0)
+        {
             return;
-        };
-        for (parameter, argument) in parameters {
-            if !self.unshaped_lambdas.lambdas.contains(&argument) {
-                continue;
-            }
-            let Some(TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) =
-                signature.params.get(parameter).map(|ty| ty.kind())
-            else {
-                continue;
-            };
-            let Some(index) = signature
+        }
+        if let TyKind::TyParam(formal, _) | TyKind::Var(formal, _) = declared.kind() {
+            let name = crate::types::type_parameter_source_name(formal.as_str());
+            self.unshaped_lambdas
                 .formals
-                .iter()
-                .position(|candidate| candidate == formal)
-            else {
-                continue;
-            };
-            if index >= explicit_type_argument_count {
-                let name = crate::types::type_parameter_source_name(formal.as_str());
-                self.unshaped_lambdas
-                    .formals
-                    .insert(argument, (call, name.to_string()));
-            }
+                .insert(argument, (call, name.to_string()));
         }
     }
 
-    /// Whether a lambda's probe type gave its parameters no type of their own: selection then took
-    /// the lambda's written arity for the whole shape.
-    fn probe_binds_no_parameter(&self, probed: Ty) -> bool {
-        matches!(
-            probed.kind(),
-            TyKind::Fun(signature)
-                if signature.params.iter().all(|&parameter| parameter == Ty::obj("kotlin/Any"))
-        )
-    }
-
-    /// Whether the call's receiver already carries `ty` as a type argument: the variable it fills
-    /// was then bound by the receiver, and the same function type is no probe's guess.
-    fn receiver_already_holds(&self, call: ExprId, ty: Ty) -> bool {
-        let receiver = match self.file.expr(call) {
-            Expr::Call { callee, .. } => match self.file.expr(*callee) {
-                Expr::Member { receiver, .. } => *receiver,
-                _ => return false,
-            },
-            Expr::SafeCall { receiver, .. } => *receiver,
-            _ => return false,
-        };
-        matches!(
-            self.expr_types[receiver.0 as usize].non_null().kind(),
-            TyKind::Obj(_, arguments) if arguments.contains(&ty)
-        )
-    }
-
     /// The declared parameter of a lambda argument whose selection left it no function shape. A
-    /// lambda with a written parameter that names no type is probed by its arity alone; when the
-    /// selected parameter is a bare type variable that no other parameter mentions and nothing
-    /// else constrained, the selection binds the variable to that probe, which is no inference:
-    /// the lambda is analysed as a standalone literal under the variable's own bound, and the call
-    /// owes the variable's report. A variable the receiver already bound, or one another argument
-    /// shares, is not inferred from the lambda.
+    /// lambda with a written parameter that names no type is probed without a shape, so its
+    /// parameters carry the error type. When the selected parameter is a bare type variable and
+    /// the selection bound it to exactly that probe, nothing else constrained the variable: the
+    /// lambda is analysed as a standalone literal under the variable's own bound, and the call owes
+    /// the variable's report. A shape another constraint supplied (the receiver's arguments, the
+    /// expected type, another argument) names its parameters, so the selection never equals the
+    /// probe.
     pub(super) fn lambda_bound_only_the_callee_variable(
         &mut self,
-        binding: &LambdaParameterBinding<'_>,
+        binding: &LambdaParameterBinding,
     ) -> Option<Ty> {
         let LambdaParameterBinding {
             call,
             argument,
-            parameter,
             probed_actual,
             expected,
-            declared_parameters,
             declared,
         } = *binding;
+        let probe_left_a_parameter_untyped = matches!(
+            probed_actual.kind(),
+            TyKind::Fun(signature) if signature.params.iter().any(|parameter| parameter.mentions_error())
+        );
         if !matches!(self.file.expr(argument), Expr::Lambda { .. })
             || !self
                 .untyped_named_lambda_parameters(argument)
                 .contains(&true)
+            || !probe_left_a_parameter_untyped
             || expected != probed_actual
             || self.file.call_type_args.contains_key(&call.0)
+            || !matches!(declared.kind(), TyKind::TyParam(..) | TyKind::Var(..))
         {
             return None;
         }
-        let (TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) = declared.kind() else {
-            return None;
-        };
-        let shared = declared_parameters
-            .iter()
-            .enumerate()
-            .any(|(index, other)| {
-                index != parameter
-                    && crate::types::ty_mentions_param(*other, std::slice::from_ref(&formal))
-            });
-        if shared
-            || !self.probe_binds_no_parameter(probed_actual)
-            || self.receiver_already_holds(call, probed_actual)
-        {
-            return None;
-        }
-        let name = crate::types::type_parameter_source_name(formal.as_str());
-        self.unshaped_lambdas
-            .formals
-            .insert(argument, (call, name.to_string()));
         // The probe analysed the lambda under no real shape; that analysis is void, so the
         // unshaped path owes it again.
         self.expr_lowers.remove(&argument);
