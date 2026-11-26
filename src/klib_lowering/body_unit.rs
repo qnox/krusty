@@ -763,11 +763,16 @@ impl DependencyBodyUnit {
 
     /// A unit that reads the enum constants and object instances of `classes`, which earlier
     /// units materialized, through their exports.
-    pub(crate) fn reading_realized_classes(classes: impl IntoIterator<Item = TypeName>) -> Self {
-        Self {
+    pub(crate) fn reading_realized_classes(
+        classes: impl IntoIterator<Item = TypeName>,
+        reference: crate::kotlin_version::ReferenceProfile,
+    ) -> Self {
+        let mut unit = Self {
             realized_classes: classes.into_iter().collect(),
             ..Self::default()
-        }
+        };
+        unit.ir.reference = reference;
+        unit
     }
 
     /// This unit for a target that lays out a class an earlier unit realized from that unit's
@@ -1473,6 +1478,30 @@ impl<'s> CallLinker for Linker<'_, 's> {
         fake_overrides::inherited_getter(self, callee)
     }
 
+    fn inherited_member(&self, callee: &KlibIrSignature) -> Option<KlibIrSignature> {
+        let &KlibIrSignature::FileLocal { file, slot } = callee else {
+            return None;
+        };
+        let signature = KlibDeclarationSignature::FileLocal { file, slot };
+        match self
+            .sources
+            .bodies
+            .linked_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(KlibDependencyCallable {
+                declaration: KlibDeclarationSignature::Public(member),
+                ..
+            }) => Some(KlibIrSignature::Public(member)),
+            KlibCalleeOrigin::Exact(KlibDependencyCallable {
+                declaration: KlibDeclarationSignature::Accessor(member),
+                ..
+            }) => Some(KlibIrSignature::Accessor(member)),
+            KlibCalleeOrigin::Exact(_)
+            | KlibCalleeOrigin::Missing
+            | KlibCalleeOrigin::Ambiguous => None,
+        }
+    }
+
     fn link_local_function(
         &mut self,
         ir: &mut IrFile,
@@ -1495,8 +1524,17 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .bodies
             .linked_origin(&self.active_module, &signature)
         {
-            KlibCalleeOrigin::Exact(identity) => self.link_file_private(ir, signature, identity),
-            KlibCalleeOrigin::Missing => self.link_local_member(ir, callee),
+            KlibCalleeOrigin::Exact(
+                identity @ KlibDependencyCallable {
+                    declaration: KlibDeclarationSignature::FileLocal { .. },
+                    ..
+                },
+            ) => self.link_file_private(ir, signature, identity),
+            // A fake override links to the member it inherits only as a call of that member
+            // (`inherited_member`); any other use of it names no declaration of this module.
+            KlibCalleeOrigin::Exact(_) | KlibCalleeOrigin::Missing => {
+                self.link_local_member(ir, callee)
+            }
             KlibCalleeOrigin::Ambiguous => Err(KlibBodyDeclineReason::SignatureMismatch(
                 "a file-private call names two top-level declarations".to_owned(),
             )),

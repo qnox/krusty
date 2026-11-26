@@ -1650,7 +1650,7 @@ fn declaration_owner(signature: &KlibIrSignature) -> Option<TypeName> {
     Some(identity)
 }
 
-fn ir_signature(declaration: &KlibDeclarationSignature) -> KlibIrSignature {
+pub(super) fn ir_signature(declaration: &KlibDeclarationSignature) -> KlibIrSignature {
     match declaration {
         KlibDeclarationSignature::Public(signature) => KlibIrSignature::Public(signature.clone()),
         KlibDeclarationSignature::Accessor(signature) => {

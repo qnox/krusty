@@ -104,10 +104,7 @@ impl ProductionSignatureSemantics<'_> {
         let completed_is_valid = member.generic_sig.as_ref().is_none_or(|signature| {
             let module =
                 crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-            let source = crate::symbol_source::CompositeSource::new(vec![
-                &module as &dyn crate::symbol_source::SymbolSource,
-                &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-            ]);
+            let source = self.source_over(&module);
             let oracle = crate::symbol_resolver::SourceOracle(&source);
             crate::symbol_resolver::generic_bindings_satisfy_bounds(
                 signature,
@@ -136,10 +133,7 @@ impl ProductionSignatureSemantics<'_> {
             })
             .collect::<Vec<_>>();
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
             &source,
             owner,

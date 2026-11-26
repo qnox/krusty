@@ -250,7 +250,7 @@ impl<'s> Linker<'_, 's> {
             .inherited_implementations_of(&prepared.key.module, &prepared.key.signature)
             .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?;
         for (body, implemented) in &inherited {
-            self.record_inherited_implementation(ir, prepared.classifier, body, None, implemented)?;
+            self.declare_inherited_implementation(ir, prepared.classifier, body, implemented)?;
         }
         let constructor = super::super::same_library_class::LocalConstructor {
             declaration: prepared.declaration.clone(),

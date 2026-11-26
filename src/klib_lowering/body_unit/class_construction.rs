@@ -949,6 +949,30 @@ impl<'u, 's> Linker<'u, 's> {
         Ok(())
     }
 
+    /// Record that the class `owner`, private to its library, implements `implemented` with the
+    /// inherited member `body`, declaring `body` first when this unit has not: no other unit
+    /// exports the class, so an interface default only dispatch reaches is declared here.
+    pub(super) fn declare_inherited_implementation(
+        &mut self,
+        ir: &mut IrFile,
+        owner: crate::types::TypeName,
+        body: &KlibDependencyCallable,
+        implemented: &[KlibDependencyCallable],
+    ) -> Result<(), KlibBodyDeclineReason> {
+        if self.declared_member(body).is_none() {
+            if let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) {
+                let selected = callables[0];
+                let (arena, function) = self.sources.bodies.function(body).ok_or_else(|| {
+                    KlibBodyDeclineReason::SignatureMismatch(
+                        "an inherited body has no serialized declaration".to_owned(),
+                    )
+                })?;
+                self.declare(ir, body, Some(selected), arena, function)?;
+            }
+        }
+        self.record_inherited_implementation(ir, owner, body, None, implemented)
+    }
+
     /// The method this unit declared for the member `body`: a member of a class it materialized,
     /// or of a same-library class it installed.
     fn declared_member(&self, body: &KlibDependencyCallable) -> Option<FunId> {

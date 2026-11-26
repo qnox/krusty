@@ -28,6 +28,8 @@
 //!   every constant of the body, not where its block closes.
 //! - An enum's declared functions intern before its synthesized `values`/`valueOf`/`getEntries`,
 //!   and its fields, entry constants included, intern where a body first references them.
+//! - An enum declaring only secondary constructors interns each one's header and locals at its own
+//!   place; there is no synthesized primary to visit ahead of them.
 //! - An enum's `$values` helper interns after its lifted local functions, which kotlinc visits first.
 //! - A descriptor a removed unboxing interned in one method is placed where a later member's header
 //!   first names it, after what earlier code already interned.
@@ -44,6 +46,8 @@
 //!   read interns its name at `<clinit>`'s store, since fields are written after methods.
 //! - A data object's synthesized `equals` interns its `this` and `other` locals with its body,
 //!   before `<clinit>`.
+//! - A suspend local function's re-entry accessor follows the accessors the source's references
+//!   need: its continuation class carries no source position.
 //!
 //! Each case asserts that the named classes are byte-identical to kotlinc's. The fixtures use
 //! neutral names only.
@@ -443,6 +447,40 @@ object Counter {
 }
 "#,
         &["Counter", "ElidedInstanceKt"],
+    );
+}
+
+/// An enum declaring only secondary constructors has no primary constructor: kotlinc visits the
+/// declared members in order, so a constructor's header interns after the property before it.
+#[test]
+fn an_enum_with_only_secondary_constructors_interns_them_at_their_declarations() {
+    assert_identical(
+        "EnumSecondaries",
+        "enum class Gate {\n\
+         \x20   Open(\"x\"), Shut;\n\
+         \n\
+         \x20   val label: String\n\
+         \n\
+         \x20   constructor(label: String) { this.label = label }\n\
+         \x20   constructor() : this(\"\")\n\
+         }\n",
+        &["Gate"],
+    );
+}
+
+#[test]
+fn a_suspend_local_function_s_reentry_accessor_follows_the_source_ordered_accessors() {
+    assert_identical_with_stdlib(
+        "SuspendReentry",
+        r#"fun box(): String {
+    fun plain(x: Any) {}
+    suspend fun suspending() {}
+
+    val reference = ::plain as Any
+    return "OK"
+}
+"#,
+        &["SuspendReentryKt"],
     );
 }
 

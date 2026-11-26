@@ -1412,6 +1412,22 @@ fn native(
                 Ty::Double,
             )
         }
+        // `areEqualByValue(first: T, second: T): Boolean` compares two operands of one integral
+        // scalar by value, which is the scalar's own equality.
+        ("ARE_EQUAL_BY_VALUE", crate::libraries::CallablePlacement::Package(package))
+            if package == type_name("kotlin/native/internal") =>
+        {
+            let operand = integral_scalar_pair(declaration)?;
+            return Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::ScalarInstruction(ScalarInstruction::Compare(
+                    ScalarComparison::Equal,
+                )),
+                kind: ExternalCallableKind::TopLevel,
+                receiver: None,
+                params: vec![operand, operand],
+                ret: Ty::Boolean,
+            });
+        }
         _ => return None,
     };
     Some(KlibIntrinsicShape {
@@ -1420,6 +1436,26 @@ fn native(
         receiver: shape.1,
         params: shape.2,
         ret: shape.3,
+    })
+}
+
+/// The one integral scalar both parameters of `declaration` are, when it answers `Boolean`.
+fn integral_scalar_pair(declaration: &KotlinFunction) -> Option<Ty> {
+    let [first, second] = declaration.params.as_slice() else {
+        return None;
+    };
+    if !exact_type(&declaration.ret, "kotlin/Boolean") {
+        return None;
+    }
+    [
+        ("kotlin/Byte", Ty::Byte),
+        ("kotlin/Short", Ty::Short),
+        ("kotlin/Int", Ty::Int),
+        ("kotlin/Long", Ty::Long),
+    ]
+    .into_iter()
+    .find_map(|(classifier, scalar)| {
+        (exact_type(first, classifier) && exact_type(second, classifier)).then_some(scalar)
     })
 }
 
@@ -1936,6 +1972,101 @@ mod tests {
             ),
         )
         .is_none());
+    }
+
+    #[test]
+    fn native_are_equal_by_value_requires_one_integral_scalar_and_a_boolean_result() {
+        let internal =
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/native/internal"));
+        let native = Some(TargetIntrinsicPlatform::Native);
+        for (name, scalar) in [
+            ("kotlin/Byte", Ty::Byte),
+            ("kotlin/Short", Ty::Short),
+            ("kotlin/Int", Ty::Int),
+            ("kotlin/Long", Ty::Long),
+        ] {
+            let exact = declaration(
+                "areEqualByValue",
+                &[name, name],
+                "kotlin/Boolean",
+                native_annotation("ARE_EQUAL_BY_VALUE"),
+            );
+            assert_eq!(
+                authenticate(native, internal, &exact),
+                Some(KlibIntrinsicShape {
+                    operation: CompilerIntrinsic::ScalarInstruction(ScalarInstruction::Compare(
+                        ScalarComparison::Equal
+                    )),
+                    kind: ExternalCallableKind::TopLevel,
+                    receiver: None,
+                    params: vec![scalar, scalar],
+                    ret: Ty::Boolean,
+                }),
+                "{name}"
+            );
+        }
+        for (rejected, why) in [
+            (
+                declaration(
+                    "areEqualByValue",
+                    &["kotlin/Int", "kotlin/Long"],
+                    "kotlin/Boolean",
+                    native_annotation("ARE_EQUAL_BY_VALUE"),
+                ),
+                "both operands have one type",
+            ),
+            (
+                declaration(
+                    "areEqualByValue",
+                    &["kotlin/Float", "kotlin/Float"],
+                    "kotlin/Boolean",
+                    native_annotation("ARE_EQUAL_BY_VALUE"),
+                ),
+                "a floating value is equal by its bits, not by this scalar comparison",
+            ),
+            (
+                declaration(
+                    "areEqualByValue",
+                    &["kotlin/Int"],
+                    "kotlin/Boolean",
+                    native_annotation("ARE_EQUAL_BY_VALUE"),
+                ),
+                "two operands",
+            ),
+            (
+                declaration(
+                    "areEqualByValue",
+                    &["kotlin/Int", "kotlin/Int"],
+                    "kotlin/Int",
+                    native_annotation("ARE_EQUAL_BY_VALUE"),
+                ),
+                "a Boolean result",
+            ),
+        ] {
+            assert!(authenticate(native, internal, &rejected).is_none(), "{why}");
+        }
+        let exact = declaration(
+            "areEqualByValue",
+            &["kotlin/Int", "kotlin/Int"],
+            "kotlin/Boolean",
+            native_annotation("ARE_EQUAL_BY_VALUE"),
+        );
+        assert!(
+            authenticate(
+                native,
+                crate::libraries::CallablePlacement::Package(type_name("spoof")),
+                &exact
+            )
+            .is_none(),
+            "only the platform package authenticates the intrinsic"
+        );
+        assert!(
+            authenticate(Some(TargetIntrinsicPlatform::Wasm), internal, &exact).is_none(),
+            "another target's stdlib does not carry the Native intrinsic"
+        );
+        let mut bodyful = exact;
+        bodyful.is_external = false;
+        assert!(authenticate(native, internal, &bodyful).is_none());
     }
 
     #[test]

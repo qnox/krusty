@@ -151,6 +151,11 @@ pub struct ResolvedDelegatedPropertyDeclaration {
     pub setter_value: Option<crate::fir::ResolvedParameterIdentity>,
     pub interface: bool,
     pub depth: u32,
+    /// The overridden getter has a body (an interface default accessor): kotlinc's forwarder then
+    /// records its own getter as non-default. A provider-normalized declaration fact.
+    pub getter_has_body: bool,
+    /// As [`Self::getter_has_body`], for the overridden setter of a `var`.
+    pub setter_has_body: bool,
 }
 
 /// The call one generated forwarder makes on the delegate value's own static type.

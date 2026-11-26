@@ -21,6 +21,7 @@ mod declaration_facts;
 mod declaration_validation;
 mod declared_classifier_inventory;
 mod generated_classifier_names;
+mod jvm_name;
 mod member_signatures;
 mod plugin_member_signatures;
 mod referenced_type_names;
@@ -42,6 +43,7 @@ pub(in crate::resolve) use declaration_facts::*;
 pub(in crate::resolve) use declaration_validation::*;
 pub(in crate::resolve) use declared_classifier_inventory::*;
 use generated_classifier_names::*;
+use jvm_name::*;
 pub(in crate::resolve) use member_signatures::*;
 use plugin_member_signatures::*;
 use referenced_type_names::*;
@@ -76,6 +78,7 @@ pub fn collect_signatures_with_cp(
         files,
         libraries,
         NativePlugins::none(),
+        crate::kotlin_version::ReferenceProfile::default(),
         CompilationTarget::Jvm,
         diags,
     )
@@ -83,8 +86,11 @@ pub fn collect_signatures_with_cp(
 
 /// The plugins as the reference compiler bundles them: one activated without a jar naming its own
 /// release follows the release this compilation is checked against.
-fn with_reference_release(native_plugins: NativePlugins) -> NativePlugins {
-    native_plugins.with_reference_release(crate::kotlin_version::target().to_string())
+fn with_reference_release(
+    native_plugins: NativePlugins,
+    reference: crate::kotlin_version::ReferenceProfile,
+) -> NativePlugins {
+    native_plugins.with_reference_release(reference.release().to_string())
 }
 
 /// [`collect_signatures_with_cp`] with the native compiler plugins the compilation runs: they add
@@ -94,6 +100,7 @@ pub(crate) fn collect_signatures_with_cp_and_plugins(
     files: &[File],
     libraries: Box<dyn SemanticPlatform>,
     native_plugins: NativePlugins,
+    reference: crate::kotlin_version::ReferenceProfile,
     target: CompilationTarget,
     diags: &mut DiagSink,
 ) -> SymbolTable {
@@ -101,11 +108,12 @@ pub(crate) fn collect_signatures_with_cp_and_plugins(
     // per-operand recursion over the body), so a deep expression recurses here BEFORE any wrapped
     // check runs — it needs the same grown stack segment (see [`crate::wide_stack`]).
     crate::wide_stack::on_wide_stack(move || {
-        let native_plugins = with_reference_release(native_plugins);
+        let native_plugins = with_reference_release(native_plugins, reference);
         let host = native_plugins.host("main");
         let mut table =
             collect_signatures_with_cp_impl(files, libraries, &host, diags, None, None, target);
         table.native_plugins = native_plugins;
+        table.reference = reference;
         table
     })
 }
@@ -174,30 +182,39 @@ pub(crate) fn collect_signatures_with_cp_headers(
     })
 }
 
+/// What the compact-header entry reads of Pass 1: the streamed headers and the lexical classifier
+/// contexts extracted from the same sources.
+#[derive(Clone, Copy)]
+pub(crate) struct PassOneHeaders<'a> {
+    pub(crate) headers: &'a crate::fir::StreamedHeaderModule,
+    pub(crate) local_contexts: &'a [PassOneLocalClassContext],
+}
+
 /// Production compact-header entry with body-derived lexical classifier context extracted while
 /// each source was the active Pass-1 parse. The context owns no expression or statement identity.
 pub(crate) fn collect_signatures_with_cp_headers_and_local_contexts(
     files: &[File],
-    headers: &crate::fir::StreamedHeaderModule,
-    local_contexts: &[PassOneLocalClassContext],
+    pass_one: PassOneHeaders<'_>,
     libraries: Box<dyn SemanticPlatform>,
     native_plugins: NativePlugins,
+    reference: crate::kotlin_version::ReferenceProfile,
     target: CompilationTarget,
     diags: &mut DiagSink,
 ) -> SymbolTable {
     crate::wide_stack::on_wide_stack(move || {
-        let native_plugins = with_reference_release(native_plugins);
+        let native_plugins = with_reference_release(native_plugins, reference);
         let host = native_plugins.host("main");
         let mut table = collect_signatures_with_cp_impl(
             files,
             libraries,
             &host,
             diags,
-            Some(headers),
-            Some(local_contexts),
+            Some(pass_one.headers),
+            Some(pass_one.local_contexts),
             target,
         );
         table.native_plugins = native_plugins;
+        table.reference = reference;
         table
     })
 }
