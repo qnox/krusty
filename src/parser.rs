@@ -4111,6 +4111,16 @@ fn unquote_char(raw: &str) -> u16 {
     decode_char_literal_content(inner).unwrap_or(0)
 }
 
+/// The value of verbatim raw-string text. kotlinc reads `\r\n` and a lone `\r` as `\n`, so a raw
+/// string written across such line breaks holds `\n`.
+fn raw_string_value(text: &str) -> KtString {
+    if text.contains('\r') {
+        KtString::from(crate::diag::kotlinc_offsets::kotlinc_text(text).as_str())
+    } else {
+        KtString::from(text)
+    }
+}
+
 /// Unescape a literal chunk of a string template (no surrounding quotes).
 fn unescape_chunk(inner: &str) -> KtString {
     let mut out = KtStringBuf::with_capacity(inner.len());
@@ -4195,7 +4205,7 @@ fn unquote(raw: &str) -> KtString {
             .strip_prefix("\"\"\"")
             .and_then(|s| s.strip_suffix("\"\"\""))
             .unwrap_or(raw);
-        return KtString::from(inner);
+        return raw_string_value(inner);
     }
     let inner = raw
         .strip_prefix('"')
