@@ -810,7 +810,6 @@ inlineClass/defaultEquals.kt
 inlineClass/nestedInlineClasses.kt
 inlineClass/secondaryConstructorWithGenerics.kt
 inlineClasses/UIntArraySortExampleGeneric.kt
-inlineClasses/anonymousObjectAsDefaultParamFull.kt
 inlineClasses/anySuperCall.kt
 inlineClasses/anySuperCallGeneric.kt
 inlineClasses/boxImplDoesNotExecuteInSecondaryConstructorGeneric.kt
@@ -1051,7 +1050,6 @@ multiplatform/k2/defaultArguments/inheritedInExpectedDeclarations.kt
 multiplatform/k2/defaultArguments/inlineFunctionWithDefaultLambda.kt
 multiplatform/k2/defaultArguments/kt23239.kt
 multiplatform/k2/defaultArguments/kt67488.kt
-multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/defaultArguments/withTypeParameter.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
@@ -1860,7 +1858,6 @@ regressions/kt2060.kt
 regressions/kt32949.kt
 regressions/kt5056.kt
 regressions/kt6434.kt
-regressions/kt68727.kt
 regressions/lambdaWrongReturnType.kt
 regressions/multimodule/inlineAssertFailsWithBlock.kt
 regressions/multimodule/inlineAssertFailsWithCompletedBlock.kt
