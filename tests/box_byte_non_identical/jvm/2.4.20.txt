@@ -389,7 +389,6 @@ contextParameters/classCastException.kt
 contextParameters/classMemberAndTopLevelExtensionWithContext.kt
 contextParameters/contextOnInvokeResolve.kt
 contextParameters/contextualAnonymousFunAsAnExpression.kt
-contextParameters/contextualInlineCall.kt
 contextParameters/explicitPassing.kt
 contextParameters/functionalType.kt
 contextParameters/inlineAnonymousParameter.kt
@@ -450,7 +449,6 @@ controlStructures/forInIterableWithIndex/forInListWithIndexWithExplicitlyTypedIn
 controlStructures/forInSequenceWithIndex/forInSequenceWithIndexWithExplicitlyTypedIndexVariable.kt
 controlStructures/forNullableCharInString.kt
 controlStructures/inRangeConditionsInWhen.kt
-controlStructures/kt14839.kt
 controlStructures/kt1742.kt
 controlStructures/kt2291.kt
 controlStructures/kt2416.kt
@@ -1285,7 +1283,6 @@ inline/changingCapturedLocal.kt
 inline/classDeclarationInsideInline.kt
 inline/coercionToUnit.kt
 inline/crossModuleTypeOf.kt
-inline/defaultArgs.kt
 inline/defaultArgsLateinitLowering.kt
 inline/defaultArgsLowering.kt
 inline/defaultArgsLoweringWithIntraModuleInliner.kt
@@ -1296,7 +1293,6 @@ inline/inline24.kt
 inline/inline26.kt
 inline/inline5.kt
 inline/inlineCallInsideStringTemplate.kt
-inline/inlineDefaultArgument.kt
 inline/inlineFunctionInLambda.kt
 inline/inlineInInlineWithLambdaPrivate.kt
 inline/inlineLambdaWithCapture.kt
@@ -1752,7 +1748,6 @@ nameBasedDestructuring/shortFormLoopsAndLambdas.kt
 nonLocalReturns/returnInsideTwoLambdas.kt
 nonLocalReturns/suspendConversion.kt
 nullCheckOptimization/kt22410.kt
-nullCheckOptimization/kt7774.kt
 objectExpression/expr2.kt
 objects/anonymousObjectPropertyInitialization.kt
 objects/companionObjectAccess/companionObjectInitOrderWithSuperclass.kt
@@ -2183,6 +2178,7 @@ regressions/inlineCallsInInitializerLambda.kt
 regressions/inlineCompiledSuspendObjects.kt
 regressions/inlineCrossinlineLambdaAcrossFiles.kt
 regressions/inlineDefaultCallsFilePrivate.kt
+regressions/inlineDefaultEvaluatesNestedInlineCall.kt
 regressions/inlineDefaultLambdaCapturedByClosure.kt
 regressions/inlineDefaultStubRun.kt
 regressions/inlineJvmStaticDefaultStub.kt
