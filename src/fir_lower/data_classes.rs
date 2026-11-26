@@ -87,7 +87,10 @@ fn data_property_fields(
                     index: field_index,
                     name: property.name.clone(),
                     ty: field.ty,
-                    generic: field.type_param.is_some(),
+                    nullable_parameter: field
+                        .type_param
+                        .as_deref()
+                        .is_some_and(|parameter| parameter_admits_null(ir, class, parameter)),
                     getter: through_getters.then_some(declared.ty),
                 },
             ))
@@ -108,12 +111,24 @@ fn data_property_fields(
     Ok(properties.into_iter().map(|(_, field)| field).collect())
 }
 
+/// Whether a class type parameter admits `null`: its first declared bound decides (`T : Any`,
+/// `T : Box<J>` exclude it); an unbounded one is bounded by `Any?`.
+fn parameter_admits_null(ir: &IrFile, class: ClassId, parameter: &str) -> bool {
+    ir.classes[class as usize]
+        .type_param_bounds
+        .iter()
+        .find(|(name, _)| name == parameter)
+        .is_none_or(|(_, bound)| bound.upper_bound_admits_null())
+}
+
 #[derive(Clone)]
 struct DataField {
     index: u32,
     name: String,
     ty: Ty,
-    generic: bool,
+    /// The property is typed by a class type parameter none of whose bounds excludes `null`, so
+    /// its generated members guard the value.
+    nullable_parameter: bool,
     /// The property's type when generated members read it through its getter rather than its
     /// field.
     getter: Option<Ty>,
@@ -460,7 +475,7 @@ fn field_hash(class: ClassId, field: &DataField, ir: &mut IrFile) -> ExprId {
         field.read(ir, class, this)
     };
     let value = read(ir);
-    if !field.ty.is_nullable() && !field.generic {
+    if !field.ty.is_nullable() && !field.nullable_parameter {
         return intrinsic(
             ir,
             crate::ir::IrIntrinsic::GeneratedPropertyHash { ty: field.ty },
