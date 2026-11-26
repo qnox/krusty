@@ -1022,6 +1022,10 @@ pub struct DependencyCallableShape {
     pub synthetic_parameters: Box<[Ty]>,
     /// Per logical parameter, whether its declared type is a `@Composable` function type.
     pub composable_parameters: crate::libraries::ParamFlags,
+    /// Per value parameter, context parameters included and the extension receiver excluded, the
+    /// `noinline`/`crossinline` modifier the declaration wrote. An inline function's call splices
+    /// the lambda of a parameter that is not `noinline`.
+    pub inline_modifiers: Box<[crate::types::InlineParameterModifier]>,
 }
 
 /// A construct a native plugin does not implement, reported as an error at `span`.

@@ -1236,6 +1236,118 @@ fn a_function_parameter_aligns_by_the_erasure_its_producer_emitted() {
     assert_eq!(compiled.code, Some(0));
 }
 
+/// A call of an inline composable function of a library the reference compiler and its plugin
+/// compiled, with a composable lambda, is placed in its caller: the lambda's body runs between
+/// source-information markers, and the class is the one kotlinc emits.
+#[test]
+fn an_inline_library_composable_places_its_lambda_in_the_caller() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let switches = vec![format!("-Xplugin={}", compose.display())];
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let producer = Probe::new(
+        "compose-inline-library",
+        "package lib\nimport androidx.compose.runtime.Composable\n\
+         @Composable fun Leaf(name: String) {}\n\
+         @Composable inline fun Row(content: @Composable () -> Unit) {\ncontent()\n}\n",
+    );
+    producer.kotlinc_classes(&classpath, &switches);
+    classpath.push(producer.dir.join("kotlinc"));
+    let probe = Probe::new(
+        "compose-inline-library-caller",
+        "package probe\nimport androidx.compose.runtime.Composable\n\
+         import lib.Leaf\nimport lib.Row\n\
+         @Composable fun Screen(name: String) {\nRow {\nLeaf(name)\nLeaf(\"fixed\")\n}\n}\n",
+    );
+    let reference = probe.kotlinc_classes(&classpath, &switches);
+    let compiled = probe.krusty(&classpath, &switches);
+    let partial = PluginDiagnostic::PartialSubstitution {
+        plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
+    }
+    .message();
+    assert_eq!(compiled.stderr, format!("info: {partial}\n"));
+    assert_eq!(compiled.code, Some(0));
+    assert_eq!(compiled.classes, reference);
+    for class in &reference {
+        assert_eq!(
+            std::fs::read(probe.dir.join("krusty").join(class)).expect("krusty's class"),
+            std::fs::read(probe.dir.join("kotlinc").join(class)).expect("kotlinc's class"),
+            "{class} differs from kotlinc's"
+        );
+    }
+}
+
+/// Compiles `library` with kotlinc and its Compose plugin, then `declarations` against it with
+/// krusty, which must decline them with `error` and emit no class.
+fn assert_inline_library_call_rejects(name: &str, library: &str, declarations: &str, error: &str) {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let switches = vec![format!("-Xplugin={}", compose.display())];
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let producer = Probe::new(
+        &format!("{name}-lib"),
+        &format!("package lib\nimport androidx.compose.runtime.Composable\n{library}"),
+    );
+    producer.kotlinc_classes(&classpath, &switches);
+    classpath.push(producer.dir.join("kotlinc"));
+    let probe = Probe::new(
+        name,
+        &format!("package probe\nimport androidx.compose.runtime.Composable\n{declarations}"),
+    );
+    let compiled = probe.krusty(&classpath, &switches);
+    let partial = PluginDiagnostic::PartialSubstitution {
+        plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
+    }
+    .message();
+    assert_eq!(
+        compiled.stderr,
+        format!(
+            "info: {partial}\n{}:{error}; compile this module with kotlinc\nkrusty: 1 error(s)\n",
+            probe.source.display()
+        )
+    );
+    assert_eq!(compiled.code, Some(3));
+    assert_eq!(compiled.classes, Vec::<String>::new());
+}
+
+/// A lambda an inline library composable places in its caller is invoked with its captures
+/// alone, so a composable lambda that takes a parameter or has a receiver is declined.
+#[test]
+fn an_inline_library_composable_declines_a_lambda_with_parameters_or_a_receiver() {
+    assert_inline_library_call_rejects(
+        "compose-inline-library-lambda-parameter",
+        "@Composable inline fun Each(content: @Composable (Int) -> Unit) {\ncontent(1)\n}\n",
+        "import lib.Each\n@Composable fun Leaf() {}\n@Composable fun Screen() {\nEach { _ -> Leaf() }\n}\n",
+        "6:1: error: krusty's Compose compiler plugin does not support a call to an inline \
+         library composable function with a composable lambda that takes parameters or has a \
+         receiver yet",
+    );
+    assert_inline_library_call_rejects(
+        "compose-inline-library-lambda-receiver",
+        "class Scope\n@Composable inline fun Within(content: @Composable Scope.() -> Unit) {\nScope().content()\n}\n",
+        "import lib.Within\n@Composable fun Leaf() {}\n@Composable fun Screen() {\nWithin { Leaf() }\n}\n",
+        "6:1: error: krusty's Compose compiler plugin does not support a call to an inline \
+         library composable function with a composable lambda that takes parameters or has a \
+         receiver yet",
+    );
+}
+
+/// The declaration says which lambdas an inline library composable inlines: one passed to a
+/// `noinline` parameter is a value the callee receives, not a body placed in the caller, and the
+/// pass declines the call.
+#[test]
+fn an_inline_library_composable_declines_a_lambda_for_a_noinline_parameter() {
+    assert_inline_library_call_rejects(
+        "compose-inline-library-noinline-lambda",
+        "@Composable inline fun Keep(noinline content: @Composable () -> Unit) {\ncontent()\n}\n",
+        "import lib.Keep\n@Composable fun Leaf() {}\n@Composable fun Screen() {\nKeep { Leaf() }\n}\n",
+        "6:1: error: krusty's Compose compiler plugin does not support a call to an inline \
+         library composable function with a lambda passed to a `noinline` parameter yet",
+    );
+}
+
 fn assert_compose_rejects(name: &str, declarations: &str, others: &[(&str, &str)], error: &str) {
     let compose = reference_plugin_jar("compose-compiler-plugin.jar");
     let source =

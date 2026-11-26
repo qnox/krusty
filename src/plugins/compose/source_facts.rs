@@ -18,6 +18,8 @@ use super::restart_groups::SLOTS_PER_INT;
 use super::runtime::ComposeRuntime;
 use super::{ComposeOptions, COMPOSABLE};
 
+mod inline_library_calls;
+
 /// The Compose facts of one file.
 pub struct ComposeFileFacts {
     pub(super) functions: Vec<RestartableFunction>,
@@ -105,6 +107,9 @@ pub(super) struct ComposableLambda {
     pub(super) opening_line: u32,
     /// Its body's direct composable calls, in source order.
     pub(super) calls: Vec<ComposableCallSite>,
+    /// The form of the body an inline call places, for an [`Memoization::Inline`] lambda; its calls
+    /// are `calls`.
+    pub(super) inline_template: Option<ExprId>,
 }
 
 impl ComposableLambda {
@@ -126,6 +131,9 @@ pub(super) enum Memoization {
     /// It captures values: `rememberComposableLambda` keeps it in the composition of `caller`,
     /// whose group creates it, and updates the block it calls.
     Remembered { caller: FunId },
+    /// It is passed to an inline library composable, which places its body in the caller: no value
+    /// is created, and the body runs between source-information markers in the caller's group.
+    Inline { caller: FunId },
     /// It captures values in a function that is not composable, which has no composition to keep
     /// it in: `composableLambdaInstance` wraps it where `caller` passes it.
     Instance { caller: FunId },
@@ -606,6 +614,7 @@ refusal: true,
                 path: &path,
                 qualified: &qualified,
                 caller: declaration.function,
+                caller_parameters: parameter_count,
                 direct: &passing,
                 arguments: &lambda_arguments,
                 composable: true,
@@ -772,6 +781,7 @@ refusal: true,
                 path: &path,
                 qualified: &qualified,
                 caller: declaration.function,
+                caller_parameters: ir.functions[declaration.function as usize].params.len() as u32,
                 direct: &direct,
                 arguments: &lambda_arguments,
                 composable: false,
@@ -1664,6 +1674,8 @@ struct LambdaIdentity<'a> {
     key: i32,
     memoization: Memoization,
     qualified_caller: &'a str,
+    /// The values of the lambda's caller that are its parameters.
+    caller_parameters: u32,
     /// The path of the scope that passes the lambda, its callee and the number of that callee's
     /// calls before the lambda's, which key what the lambda's body passes in turn.
     path: &'a KeyPath<'a>,
@@ -1730,6 +1742,8 @@ struct LambdaOwner<'a> {
     path: &'a KeyPath<'a>,
     qualified: &'a str,
     caller: FunId,
+    /// The values of the caller that are its parameters.
+    caller_parameters: u32,
     /// The composable calls directly in its body, in order.
     direct: &'a [ExprId],
     /// The lambdas those calls pass to composable lambda parameters.
@@ -1777,12 +1791,19 @@ impl BodyScope<'_> {
                 sibling,
                 argument.parameter,
             );
-            let memoization = match (argument.captures, owner.composable) {
-                (false, _) => Memoization::Singleton,
-                (true, true) => Memoization::Remembered {
+            let memoization = match (
+                self.places_lambda(ir, argument.call, argument.lambda),
+                argument.captures,
+                owner.composable,
+            ) {
+                (true, _, _) => Memoization::Inline {
                     caller: owner.caller,
                 },
-                (true, false) => Memoization::Instance {
+                (false, false, _) => Memoization::Singleton,
+                (false, true, true) => Memoization::Remembered {
+                    caller: owner.caller,
+                },
+                (false, true, false) => Memoization::Instance {
                     caller: owner.caller,
                 },
             };
@@ -1793,6 +1814,7 @@ impl BodyScope<'_> {
                     key,
                     memoization,
                     qualified_caller: owner.qualified,
+                    caller_parameters: owner.caller_parameters,
                     path: owner.path,
                     callee,
                     sibling,
@@ -1884,6 +1906,10 @@ impl BodyScope<'_> {
                 let (_, argument) = supplied.next()?;
                 // A composable lambda is memoized, the same value in every execution.
                 if matches!(ir.exprs[argument as usize], IrExpr::Lambda { .. }) {
+                    // The body an inline call places is no value the callee can compare.
+                    if self.places_lambda(ir, call, argument) {
+                        return Some(ArgumentState::Uncertain);
+                    }
                     return composable_lambda_parameter(
                         ir,
                         self.source,
@@ -1940,6 +1966,7 @@ impl BodyScope<'_> {
     ) -> Option<&'static str> {
         let IrExpr::Call {
             callee,
+            args,
             dispatch_receiver,
             ..
         } = &ir.exprs[call as usize]
@@ -1960,9 +1987,7 @@ impl BodyScope<'_> {
                 "a call to a library composable function the compilation does not declare",
             );
         };
-        if shape.inline {
-            Some("a call to an inline library composable function")
-        } else if shape.context_parameters
+        if shape.context_parameters
             || extension_receiver_parameter.is_some()
             || dispatch_receiver.is_some() != shape.extension
         {
@@ -1980,6 +2005,28 @@ impl BodyScope<'_> {
             Some(
                 "a call to a library composable function with a function-typed parameter that is \
                  not a composable function type",
+            )
+        } else if supplied_arguments(callee, args).any(|(parameter, argument)| {
+            // A placed lambda is invoked with its captures alone: its own parameters and its
+            // receiver have no values in its caller to place.
+            self.places_lambda(ir, call, argument)
+                && params.get(parameter as usize).is_some_and(|ty| {
+                    matches!(ty.kind(), TyKind::Fun(signature) if !signature.params.is_empty())
+                })
+        }) {
+            Some(
+                "a call to an inline library composable function with a composable lambda that \
+                 takes parameters or has a receiver",
+            )
+        } else if shape.inline
+            && supplied_arguments(callee, args).any(|(_, argument)| {
+                matches!(ir.exprs[argument as usize], IrExpr::Lambda { .. })
+                    && !self.places_lambda(ir, call, argument)
+            })
+        {
+            Some(
+                "a call to an inline library composable function with a lambda passed to a \
+                 `noinline` parameter",
             )
         } else if !matches!(ret.kind(), TyKind::Unit) {
             Some("a call to a library composable function with a result")
@@ -2008,8 +2055,28 @@ impl BodyScope<'_> {
             key,
             memoization,
             qualified_caller,
-            ..
+            caller_parameters,
+            path,
+            callee,
+            sibling,
         } = identity;
+        if matches!(memoization, Memoization::Inline { .. }) {
+            return self.placed_lambda(
+                ir,
+                argument,
+                LambdaIdentity {
+                    key,
+                    memoization,
+                    qualified_caller,
+                    caller_parameters,
+                    path,
+                    callee,
+                    sibling,
+                },
+                direct_calls,
+                rejections,
+            );
+        }
         let IrExpr::Lambda { captures, .. } = &ir.exprs[argument.lambda as usize] else {
             unreachable!("a lambda argument is a lambda");
         };
@@ -2091,6 +2158,7 @@ impl BodyScope<'_> {
             Memoization::Remembered { .. } | Memoization::Instance { .. } => {
                 qualified_caller.to_string()
             }
+            Memoization::Inline { .. } => unreachable!("a placed lambda returned above"),
         };
         let qualified = format!("{inner_owner}.<anonymous>");
         let within = KeyPath {
@@ -2105,6 +2173,8 @@ impl BodyScope<'_> {
                 path: &within,
                 qualified: &qualified,
                 caller: argument.implementation,
+                caller_parameters: ir.functions[argument.implementation as usize].params.len()
+                    as u32,
                 direct: &direct,
                 arguments: &nested,
                 composable: true,
@@ -2186,9 +2256,9 @@ impl BodyScope<'_> {
         // kotlinc names a singleton after its property, and a remembered lambda after its caller.
         let owner = match memoization {
             Memoization::Singleton => format!("{}.lambda${key}", self.singletons),
-            Memoization::Remembered { .. } | Memoization::Instance { .. } => {
-                qualified_caller.to_string()
-            }
+            Memoization::Remembered { .. }
+            | Memoization::Instance { .. }
+            | Memoization::Inline { .. } => qualified_caller.to_string(),
         };
         Some(ComposableLambda {
             lambda: argument.lambda,
@@ -2214,6 +2284,7 @@ impl BodyScope<'_> {
             key_meta: self.options.function_key_meta,
             opening_line: positions.line(span.lo) + 1,
             calls,
+            inline_template: None,
         })
     }
 }
