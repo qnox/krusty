@@ -29,6 +29,9 @@ mod library_enums;
 #[path = "klib_closure_frames_e2e/member_function_references.rs"]
 mod member_function_references;
 
+#[path = "klib_closure_frames_e2e/private_member_function_references.rs"]
+mod private_member_function_references;
+
 #[path = "klib_closure_frames_e2e/file_private_function_receivers.rs"]
 mod file_private_function_receivers;
 

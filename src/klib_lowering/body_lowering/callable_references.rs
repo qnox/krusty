@@ -1,5 +1,6 @@
 //! Declaration references use the ordinary common-IR reference value and invocation adapter.
 
+use super::LinkedReferenceTarget;
 use super::*;
 use crate::ir::{IrCallableReference, IrCallableReferenceTarget};
 use crate::types::TyKind;
@@ -65,7 +66,6 @@ impl BodyLowering<'_> {
         {
             return unsupported("an adapted, generic or receiver-bearing declaration reference");
         }
-        let declaration = linked.declaration;
         let declaration_parameters = header.params()[receiver_slot.max(bound_count)..]
             .to_vec()
             .into_boxed_slice();
@@ -132,9 +132,22 @@ impl BodyLowering<'_> {
         Ok(self
             .ir
             .add_expr(IrExpr::CallableReference(Box::new(IrCallableReference {
-                target: IrCallableReferenceTarget::External {
-                    declaration,
-                    receiver: receiver_type,
+                target: match linked.target {
+                    LinkedReferenceTarget::External(declaration) => {
+                        IrCallableReferenceTarget::External {
+                            declaration,
+                            receiver: receiver_type,
+                        }
+                    }
+                    LinkedReferenceTarget::PrivateMember {
+                        owner,
+                        name,
+                        function,
+                    } => IrCallableReferenceTarget::Local {
+                        owner: Some(owner),
+                        name,
+                        function,
+                    },
                 },
                 adapter,
                 captures: Vec::new(),

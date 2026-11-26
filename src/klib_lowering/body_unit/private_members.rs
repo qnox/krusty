@@ -193,3 +193,33 @@ fn private_class_member_header<'b>(
     )?;
     Ok((member.arena, member.function, header, member.formals))
 }
+
+/// A reference to the private class member `identity`, which the unit emits as `call` invokes it.
+pub(super) fn private_member_reference(
+    bodies: &KlibDeclarationBodies,
+    identity: &KlibDependencyCallable,
+    call: LinkedCallee,
+) -> Result<LinkedCallableReference, KlibBodyDeclineReason> {
+    let (Callee::Local(function), Some(receiver)) = (&call.callee, call.receiver) else {
+        return Err(KlibBodyDeclineReason::SignatureMismatch(
+            "a private member reference reaches no emitted member".to_owned(),
+        ));
+    };
+    let (crate::types::TyKind::Obj(owner, _), Some((_, declaration))) =
+        (receiver.kind(), bodies.function(identity))
+    else {
+        return Err(KlibBodyDeclineReason::SignatureMismatch(
+            "a private member reference has no class receiver".to_owned(),
+        ));
+    };
+    Ok(LinkedCallableReference {
+        target: super::super::body_lowering::LinkedReferenceTarget::PrivateMember {
+            owner,
+            name: declaration.name.as_str().into(),
+            function: *function,
+        },
+        kind: crate::libraries::ExternalCallableKind::Member,
+        extension_receiver_parameter: None,
+        call,
+    })
+}
