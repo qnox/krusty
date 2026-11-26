@@ -103,7 +103,6 @@ impl ProductionSignatureSemantics<'_> {
         expected: Option<crate::fir::ResolvedTy>,
         result: Ty,
         member: Option<crate::libraries::LibraryMember>,
-        source: Option<(u32, u32)>,
         source_declaration: Option<crate::fir::DeclarationId>,
         argument_types: Vec<Ty>,
         publication: CompactSelectedResultPublication,
@@ -159,52 +158,32 @@ impl ProductionSignatureSemantics<'_> {
                 &argument_types,
             );
         }
-        if let Some(source) = source {
-            if let Some(signature) =
-                self.demanded_source_signature(None, source_declaration, demand)?
-            {
-                let ty = self.apply_demanded_source_callable(
-                    source,
-                    Some(receiver.get()),
-                    &signature,
-                    &argument_types,
-                    None,
-                    type_arguments,
-                    expected.map(crate::fir::ResolvedTy::get),
-                )?;
-                self.record_source_selected_publication(
-                    origin,
-                    publication,
-                    &signature,
-                    ty,
-                    inputs,
-                );
-                return Ok(crate::fir::ResolvedMemberCall {
-                    ty: Some(ty),
-                    declaration: source_declaration,
-                });
-            }
-        }
-        let declaration = member
-            .and_then(|member| member.stable_declaration)
-            .or(source_declaration);
-        // A selection without a provider call shape (a member extension imported from an object)
-        // still owns its signature: demand it instead of leaving the result unexplained.
-        let Some(ty) = crate::fir::ResolvedTy::new(result).ok() else {
-            let declaration = declaration.ok_or_else(Self::failure)?;
+        if let Some(declaration) = source_declaration {
+            // A selected source extension is typed from its own demanded signature, located by its
+            // stable identity: a member extension imported from an object has no top-level key.
             let signature = demand(declaration)?;
-            let ty = signature.result;
+            let call = super::demanded_source_call::DemandedSourceCall {
+                receiver: Some(receiver.get()),
+                signature: &signature,
+                arguments: &argument_types,
+                argument_kinds: None,
+                explicit_type_arguments: type_arguments,
+                expected: expected.map(crate::fir::ResolvedTy::get),
+            };
+            let ty = self.apply_demanded_declared_callable(declaration, call)?;
             self.record_source_selected_publication(origin, publication, &signature, ty, inputs);
             return Ok(crate::fir::ResolvedMemberCall {
                 ty: Some(ty),
                 declaration: Some(declaration),
             });
-        };
+        }
+        let declaration = member.and_then(|member| member.stable_declaration);
+        let ty = crate::fir::ResolvedTy::new(result).ok();
+        if ty.is_none() && declaration.is_none() {
+            return Err(Self::failure());
+        }
         self.record_selected_result_publication(origin, publication, inputs);
-        Ok(crate::fir::ResolvedMemberCall {
-            ty: Some(ty),
-            declaration,
-        })
+        Ok(crate::fir::ResolvedMemberCall { ty, declaration })
     }
 }
 
