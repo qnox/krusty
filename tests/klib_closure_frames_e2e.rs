@@ -53,6 +53,9 @@ mod thread_local_objects;
 #[path = "klib_closure_frames_e2e/top_level_properties.rs"]
 mod top_level_properties;
 
+#[path = "klib_closure_frames_e2e/reference_array_literals.rs"]
+mod reference_array_literals;
+
 const LIBRARY: &str = include_str!("fixtures/klib_closure_frames/Library.kt");
 
 const CONSUMER: &str = include_str!("fixtures/klib_closure_frames/Consumer.kt");
