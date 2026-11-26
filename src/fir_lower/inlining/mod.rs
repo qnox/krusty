@@ -753,12 +753,12 @@ impl BodyLowering<'_> {
                     self.ir.expr(copy).clone(),
                     self.ir.checked_return_depths.get(&copy).copied(),
                 ) {
+                    crate::inline_expansion::leaves_inline_frame(self.ir, copy);
                     returns.push(InlineReturn {
                         returned: copy,
                         value,
                         nested: true,
                     });
-                    self.ir.checked_return_depths.remove(&copy);
                 }
                 continue;
             }
@@ -809,18 +809,18 @@ impl BodyLowering<'_> {
                 IrExpr::Return(value) => Some(value),
                 _ => None,
             };
+            // A return that leaves this frame is represented by the block that replaces it, in
+            // EITHER shape, and its sparse depth fact is consumed with it: left on the
+            // replacement, an enclosing inline-lambda template would consume the same return a
+            // second time. A deeper one stays a return, one lexical frame nearer its target.
             if let Some(value) = returned {
-                returns.push(InlineReturn {
-                    returned: copy,
-                    value,
-                    nested: false,
-                });
-                // This return has crossed its checked callable boundary and will be represented by
-                // the block that replaces it, in EITHER shape. The sparse depth fact belongs to the
-                // old `Return` node; leaving it on the replacement makes an enclosing inline-lambda
-                // template try to consume the same return a second time. Removing it is a fact
-                // about the node, not a commitment to the loop shape, so it happens here.
-                self.ir.checked_return_depths.remove(&copy);
+                if crate::inline_expansion::leaves_inline_frame(self.ir, copy) {
+                    returns.push(InlineReturn {
+                        returned: copy,
+                        value,
+                        nested: false,
+                    });
+                }
             }
         }
         // An escaping lambda keeps its own implementation method. Specializing only the inline
