@@ -215,6 +215,8 @@ pub(super) fn standard_interface_descriptor(internal: TypeName) -> Option<&'stat
         "kt_type_closed_range"
     } else if is_closed_floating_range(internal) {
         "kt_type_closed_floating_point_range"
+    } else if is_lazy(internal) {
+        "kt_type_lazy"
     } else if is_identity(internal, &["kotlin/reflect/KCallable"]) {
         "kt_type_kcallable"
     } else if is_identity(internal, &["kotlin/reflect/KProperty"]) {

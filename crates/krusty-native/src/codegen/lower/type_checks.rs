@@ -217,6 +217,14 @@ impl<'a> FileLowering<'a> {
             {
                 "kt_type_kclass"
             }
+            // A `Lazy` is the runtime's own object over `kt_type_lazy` unless a class of the
+            // program implements it, and that class names the same marker among its interfaces.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_lazy) =>
+            {
+                "kt_type_lazy"
+            }
             // `EnumEntries` is sealed, so the runtime's `EnumEntriesList` is every instance there
             // is, and it names this descriptor among its interfaces.
             _ if target
