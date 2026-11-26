@@ -145,6 +145,8 @@ pub struct Regeneration<'a> {
     /// The inlined callee is the call site's module's, whose nested objects a copy reuses unless
     /// it must specialize them (kotlinc's `sameModule`).
     pub same_module: bool,
+    /// The reference release's defects the copy reproduces.
+    pub quirks: crate::kotlin_version::Quirks,
 }
 
 /// How a `$$forInline` method of the original becomes its copy's method with a state machine.
@@ -638,7 +640,8 @@ pub fn regenerate(
     // A field of a nested object's type is declared with the copy's type once the copy exists. The
     // releases with `InlineObjectFieldKeepsOriginalNestedType` declare every field before they
     // regenerate the objects a method creates, so it keeps the original's.
-    let fields_follow_nested_copies = !crate::kotlin_version::Quirks::target()
+    let fields_follow_nested_copies = !regeneration
+        .quirks
         .has(crate::kotlin_version::Quirk::InlineObjectFieldKeepsOriginalNestedType);
     for (index, (desc, signature)) in declared_fields
         .iter()

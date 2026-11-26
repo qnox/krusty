@@ -454,6 +454,7 @@ impl AnonymousObjects for CallObjects<'_> {
                 reified: &self.reified,
                 continuation: None,
                 same_module: self.same_module,
+                quirks: self.ir.reference.quirks(),
             },
             object_names,
         )
