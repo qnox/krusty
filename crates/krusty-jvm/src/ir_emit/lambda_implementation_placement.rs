@@ -89,7 +89,12 @@ pub(crate) fn reparent_lambda_impls(ir: &mut IrFile) {
             facade_roots.extend(function.body);
         }
     }
-    for property in &ir.statics {
+    // A static owned by a class, as a companion block's storage is, is initialized in that class.
+    for property in ir
+        .statics
+        .iter()
+        .filter(|property| property.owner.is_none())
+    {
         facade_roots.extend(property.init);
     }
     // A direct specialized call is not an implementation-value site. In particular, a consumed
@@ -131,6 +136,12 @@ pub(crate) fn reparent_lambda_impls(ir: &mut IrFile) {
             }
             roots.extend(class.init_body);
             roots.extend(ir.companion_clinit_body(class.fq_name));
+            roots.extend(
+                ir.statics
+                    .iter()
+                    .filter(|property| property.owner == Some(class.fq_name))
+                    .filter_map(|property| property.init),
+            );
             roots.extend(class.super_arg_prelude.iter().copied());
             roots.extend(class.super_args.iter().copied());
             for constructor in &class.secondary_ctors {
