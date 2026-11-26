@@ -840,7 +840,7 @@ impl super::Emitter<'_> {
                         self.emit_enum_values(*classifier, code);
                     }
                     krusty::ir::IrIntrinsic::EnumEntries { classifier } => {
-                        self.emit_enum_entries(*classifier, code);
+                        self.emit_enum_entries(e, *classifier, code);
                     }
                     krusty::ir::IrIntrinsic::EnumValueOf { classifier } => {
                         self.emit_enum_value_of(e, *classifier, args[0], code);

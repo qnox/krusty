@@ -42,7 +42,12 @@ impl Emitter<'_> {
         }
     }
 
-    pub(super) fn emit_enum_entries(&mut self, classifier: Ty, code: &mut CodeBuilder) {
+    pub(super) fn emit_enum_entries(
+        &mut self,
+        call: ExprId,
+        classifier: Ty,
+        code: &mut CodeBuilder,
+    ) {
         {
             let classifier = classifier.non_null();
             match classifier.kind() {
@@ -54,6 +59,9 @@ impl Emitter<'_> {
                     code.invokestatic(method, 0, 1);
                 }
                 TyKind::TyParam(identity, _) => {
+                    // The reified read is the stdlib's inline template, so kotlinc marks the call
+                    // site before the marker the call site's copy later specializes.
+                    self.mark_inline_call_site_line(call, code);
                     self.emit_reified_enum_marker(identity.as_str(), code);
                     code.aconst_null();
                     let class = self.cw.class_ref("kotlin/enums/EnumEntries");

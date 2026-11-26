@@ -9,7 +9,7 @@
 
 use super::*;
 use krusty::jvm::classfile::InnerClassSpec;
-use krusty::jvm::reified_arguments::{EnumEntriesRead, EnumEntriesReads};
+use krusty::jvm::reified_arguments::{EnumEntriesRead, EnumEntriesReads, EnumEntriesSource};
 
 /// kotlinc's `JvmLoweredDeclarationOrigin.ENUM_MAPPINGS_FOR_ENTRIES` class for an inlined
 /// intrinsic names its class `EntriesIntrinsicMappings`.
@@ -150,6 +150,16 @@ pub(super) struct CallEnumEntries<'e> {
 impl EnumEntriesReads for CallEnumEntries<'_> {
     fn entries(
         &mut self,
+        classifier: krusty::types::TypeName,
+        internal: &str,
+    ) -> Option<EnumEntriesRead> {
+        self.entries_read(classifier, internal)
+    }
+}
+
+impl EnumEntriesSource for CallEnumEntries<'_> {
+    fn entries_read(
+        &self,
         classifier: krusty::types::TypeName,
         internal: &str,
     ) -> Option<EnumEntriesRead> {

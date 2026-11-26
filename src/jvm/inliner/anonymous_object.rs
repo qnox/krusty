@@ -115,6 +115,8 @@ pub struct Regeneration<'a> {
     pub prior_classes: &'a [(String, String)],
     /// The call's reified arguments, which specialize `reifiedOperationMarker` in the copy.
     pub reified: &'a crate::jvm::reified_arguments::ReifiedArguments,
+    /// How the copy reads the entries of an enum its reified markers name.
+    pub enum_entries: &'a dyn crate::jvm::reified_arguments::EnumEntriesSource,
     /// The caller's class-file major version.
     pub major: u16,
     /// The `@Metadata` stamp the caller writes.
@@ -330,8 +332,7 @@ pub fn regenerate(
     }
     let call_desc = constructor.desc.as_str();
     let mut constructor_code = constructor_code.clone();
-    let mut reified_parameters_remain =
-        specialize_copied(&mut constructor_code, regeneration.reified)?;
+    let mut reified_parameters_remain = specialize_copied(&mut constructor_code, regeneration)?;
     let declared: Vec<DeclaredCapture<'_>> = original
         .fields
         .iter()
@@ -433,7 +434,7 @@ pub fn regenerate(
         }
         let mut method = method.clone();
         if let Some(code) = &mut method.code {
-            reified_parameters_remain |= specialize_copied(code, regeneration.reified)?;
+            reified_parameters_remain |= specialize_copied(code, regeneration)?;
             if method.name == "<clinit>" {
                 // kotlinc's copy of a class whose own type names a reified parameter initializes
                 // its singleton unguarded: the site that loads it carries the marker when a
@@ -693,12 +694,12 @@ fn add_spill_fields(cw: &mut ClassWriter, original: &ClassNode, machine: &Contin
 /// function to specialize in turn.
 fn specialize_copied(
     body: &mut MethodNode,
-    reified: &crate::jvm::reified_arguments::ReifiedArguments,
+    regeneration: &Regeneration<'_>,
 ) -> Result<bool, RegenerationError> {
     super::reified::specialize(
         body,
-        reified,
-        &mut crate::jvm::reified_arguments::NoEnumEntriesReads,
+        regeneration.reified,
+        &mut crate::jvm::reified_arguments::SharedEnumEntriesReads(regeneration.enum_entries),
     )
     .map_err(|error| RegenerationError::Inlining(Box::new(error)))?;
     Ok(super::reified::has_reified_markers(body))
