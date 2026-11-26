@@ -24,3 +24,21 @@ fn a_discarded_value_class_result_is_popped_as_the_slot_holds_it() {
     );
     common::expect_box_same_as_kotlinc(&source, "ValueClassDiscardedResultRun");
 }
+
+const SUSPEND_CARRIER_READ: &str =
+    include_str!("box_regressions/valueClassDiscardedSuspendCarrierRead.kt");
+
+/// A discarded carrier read of a suspend call keeps the cast to the carrier before the pop.
+#[test]
+fn a_discarded_carrier_read_of_a_suspend_call_keeps_its_cast() {
+    let source = krusty::conformance::prepare_test_source(
+        SUSPEND_CARRIER_READ,
+        krusty::conformance::TestTarget::Jvm,
+    );
+    common::assert_class_matches_kotlinc(
+        "ValueClassDiscardedSuspendCarrierRead",
+        &source,
+        "ValueClassDiscardedSuspendCarrierReadKt$box$1",
+    );
+    common::expect_box_same_as_kotlinc(&source, "ValueClassDiscardedSuspendCarrierReadRun");
+}
