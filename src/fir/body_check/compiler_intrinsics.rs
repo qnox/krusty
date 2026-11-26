@@ -29,6 +29,8 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::ScalarInstruction(_)
         | CompilerIntrinsic::FloatingIsNaN { .. }
         | CompilerIntrinsic::FloatingIsInfinite { .. }
+        | CompilerIntrinsic::FloatingAdjacent { .. }
+        | CompilerIntrinsic::CharIsSurrogate(_)
         | CompilerIntrinsic::RadixToString { .. }
         | CompilerIntrinsic::StringRangeEquals
         | CompilerIntrinsic::StringIndexOf { .. }

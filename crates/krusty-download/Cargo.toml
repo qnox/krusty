@@ -1,0 +1,9 @@
+[package]
+name = "krusty-download"
+version = "0.0.1"
+edition = "2021"
+description = "Bounded, paced downloads of Maven artifacts with the system curl, shared by the compiler's test support and the plugin host"
+license = "Apache-2.0"
+repository = "https://github.com/qnox/krusty"
+
+[dependencies]

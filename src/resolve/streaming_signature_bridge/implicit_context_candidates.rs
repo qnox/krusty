@@ -40,10 +40,7 @@ impl ProductionSignatureSemantics<'_> {
         expected: Option<Ty>,
     ) -> crate::symbol_resolver::GSigBinds {
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let receivers = self.implicit_receivers(scope);
         let signature = candidate.semantic_signature();
         let context_count = candidate.context_count.min(signature.params.len());
@@ -95,10 +92,7 @@ impl ProductionSignatureSemantics<'_> {
         Vec<crate::libraries::FunctionInfo>,
     ) {
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let receivers = self.implicit_receivers(scope);
         let mut available = Vec::new();
         let mut unavailable = Vec::new();

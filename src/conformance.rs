@@ -302,7 +302,7 @@ class ResultContinuation : Continuation<Any?> {
 /// and Wasm always expand it to nothing because their `value class` needs no JVM annotation.
 pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
     let full_value_classes =
-        crate::features::LangFeatures::from_source(src).has("FullValueClasses");
+        crate::features::LangFeatures::from_source_in_environment(src).has("FullValueClasses");
     let (value_class_annotation, backend) = match target {
         TestTarget::Jvm if !full_value_classes => ("@JvmInline", "\"JVM_IR\""),
         TestTarget::Jvm => ("", "\"JVM_IR\""),

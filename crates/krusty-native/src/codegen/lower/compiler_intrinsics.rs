@@ -39,6 +39,50 @@ impl<'a> BodyLowering<'a, '_, '_> {
         Ok(Some(self.bits_of(value, clif)))
     }
 
+    /// Whether a `Char` code unit lies in one half of the UTF-16 surrogate block: one unsigned
+    /// comparison of its offset from the half's first code unit.
+    fn char_is_surrogate(
+        &mut self,
+        half: krusty::libraries::SurrogateHalf,
+        operand: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(value) = self.coerce(operand, Ty::Char)? else {
+            return Err("a surrogate test of `Unit`".into());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let units = half.code_units();
+        let offset = self
+            .builder
+            .ins()
+            .iadd_imm_s(value, -i64::from(*units.start()));
+        let width = i64::from(units.end() - units.start());
+        Ok(Some(self.builder.ins().icmp_imm_u(
+            IntCC::UnsignedLessThanOrEqual,
+            offset,
+            width,
+        )))
+    }
+
+    /// An authenticated one-operand intrinsic the runtime answers: `symbol` takes `value` at its
+    /// own width `operand` and returns `ret`.
+    fn scalar_runtime_call(
+        &mut self,
+        symbol: &'static str,
+        operand: Ty,
+        value: u32,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(argument) = self.coerce(value, operand)? else {
+            return Err("an exact runtime-answered intrinsic with a `Unit` operand".into());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        self.runtime_call(symbol, &[operand], ret, &[argument])
+    }
+
     fn primitive_unary(
         &mut self,
         operation: krusty::backend::BackendCompilerIntrinsic,
@@ -216,6 +260,17 @@ impl<'a> BodyLowering<'a, '_, '_> {
                     }
                     self.primitive_hash_code(operand)
                 }
+                DependencyOperation::ScalarEquality => {
+                    let (None, [left, right], None) =
+                        (receiver, args, extension_receiver_parameter)
+                    else {
+                        return Some(Err("a malformed scalar equality".into()));
+                    };
+                    if ret != Ty::Boolean {
+                        return Some(Err("a scalar equality with a non-Boolean result".into()));
+                    }
+                    self.binary(site, IrBinOp::Eq, *left, *right)
+                }
                 // The iteration protocol's own member: the member path realizes it through the
                 // receiver's runtime descriptor, exactly as it realizes a source call of it.
                 DependencyOperation::PrimitiveIteratorNext => return None,
@@ -288,7 +343,7 @@ impl<'a> BodyLowering<'a, '_, '_> {
             };
             return Some(self.primitive_unary(operation, operand, ret));
         }
-        let floating_extension_operand = |operand: Ty| {
+        let scalar_extension_operand = |operand: Ty| {
             let value = exact_extension_operand(receiver, args, extension_receiver_parameter)?;
             (self.checked_type(value).map(Ty::non_null) == Some(operand)).then_some(value)
         };
@@ -476,7 +531,7 @@ impl<'a> BodyLowering<'a, '_, '_> {
                 })());
             }
             Some(krusty::backend::BackendCompilerIntrinsic::FloatingIsNaN { operand }) => {
-                let Some(value) = floating_extension_operand(operand) else {
+                let Some(value) = scalar_extension_operand(operand) else {
                     return Some(Err(
                         "an exact floating-point `isNaN` with malformed operands".into(),
                     ));
@@ -491,8 +546,50 @@ impl<'a> BodyLowering<'a, '_, '_> {
                     value,
                 ));
             }
+            Some(krusty::backend::BackendCompilerIntrinsic::CharIsSurrogate(half)) => {
+                let Some(value) = scalar_extension_operand(Ty::Char) else {
+                    return Some(Err(
+                        "an exact `Char` surrogate test with malformed operands".into(),
+                    ));
+                };
+                if ret != Ty::Boolean {
+                    return Some(Err(
+                        "an exact `Char` surrogate test with a non-Boolean result".into(),
+                    ));
+                }
+                return Some(self.char_is_surrogate(half, value));
+            }
+            Some(krusty::backend::BackendCompilerIntrinsic::FloatingAdjacent {
+                operand,
+                direction,
+            }) => {
+                let Some(value) = scalar_extension_operand(operand) else {
+                    return Some(Err(
+                        "an exact adjacent floating-point value with malformed operands".into(),
+                    ));
+                };
+                if ret != operand {
+                    return Some(Err(
+                        "an exact adjacent floating-point value with a mismatched result".into(),
+                    ));
+                }
+                let symbol = match (operand, direction) {
+                    (Ty::Float, krusty::libraries::AdjacentDirection::Up) => "kt_next_up_float",
+                    (Ty::Float, krusty::libraries::AdjacentDirection::Down) => "kt_next_down_float",
+                    (Ty::Double, krusty::libraries::AdjacentDirection::Up) => "kt_next_up_double",
+                    (Ty::Double, krusty::libraries::AdjacentDirection::Down) => {
+                        "kt_next_down_double"
+                    }
+                    _ => {
+                        return Some(Err(
+                            "an exact adjacent floating-point value of another type".into(),
+                        ))
+                    }
+                };
+                return Some(self.scalar_runtime_call(symbol, operand, value, ret));
+            }
             Some(krusty::backend::BackendCompilerIntrinsic::FloatingIsInfinite { operand }) => {
-                let Some(value) = floating_extension_operand(operand) else {
+                let Some(value) = scalar_extension_operand(operand) else {
                     return Some(Err(
                         "an exact floating-point `isInfinite` with malformed operands".into(),
                     ));

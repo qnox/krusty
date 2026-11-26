@@ -11,6 +11,11 @@ pub fn lex(src: &str, diags: &mut DiagSink) -> Vec<Token> {
     lexer(src, diags).run()
 }
 
+pub(crate) fn file_header(src: &str, diags: &mut DiagSink) -> crate::token::file_header::Header {
+    let mut lexer = lexer(src, diags);
+    crate::token::file_header::read(src, || lexer.next_token())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NameTokenKind {
     Ident,
@@ -420,12 +425,17 @@ impl<'a> Lexer<'a> {
 
     fn run_names(mut self) -> Vec<NameToken> {
         let mut names = Vec::new();
+        let source = self.s;
+        let header = crate::token::file_header::read(source, || self.next_token());
+        let mut prefix = header.prefix.into_iter();
         loop {
-            let token = self.next_token();
+            let token = prefix.next().unwrap_or_else(|| self.next_token());
             let kind = match token.kind {
+                TokenKind::Ident if header.import_starts.binary_search(&token.span.lo).is_ok() => {
+                    Some(NameTokenKind::Import)
+                }
                 TokenKind::Ident => Some(NameTokenKind::Ident),
                 TokenKind::KwPackage => Some(NameTokenKind::Package),
-                TokenKind::KwImport => Some(NameTokenKind::Import),
                 TokenKind::At => Some(NameTokenKind::At),
                 TokenKind::Dot => Some(NameTokenKind::Dot),
                 TokenKind::Plus
@@ -1691,6 +1701,28 @@ mod tests {
                 (StrChunk, "]\"\""),
                 (TemplateEnd, ""),
                 (Eof, ""),
+            ]
+        );
+        assert!(!diagnostics.has_errors());
+    }
+
+    /// Only import-list positions in the file preamble receive the directive role.
+    #[test]
+    fn only_a_preamble_import_is_a_directive_name_token() {
+        let source = "package p; import q.Semi\nimport q.Shown\nval import = q.import\n";
+        let mut diagnostics = DiagSink::new();
+        let names = lex_name_tokens(source, &mut diagnostics)
+            .into_iter()
+            .filter(|token| token.text(source) == "import")
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                NameTokenKind::Import,
+                NameTokenKind::Import,
+                NameTokenKind::Ident,
+                NameTokenKind::Ident,
             ]
         );
         assert!(!diagnostics.has_errors());

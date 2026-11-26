@@ -49,9 +49,13 @@ impl<'u, 's> Linker<'u, 's> {
                         value_member: Some(active),
                     },
                 )?;
-                // It is a member of its class like any other, one no subclass overrides.
-                ir.set_method_visibility(function, crate::types::Visibility::Private);
-                register_class_method(ir, class, function);
+                // It is a member of its class like any other, one no subclass overrides. An
+                // inline one is expanded into every call and never dispatched, so the class
+                // carries no method for it.
+                if !ir.inline_only_fns.contains(&function) {
+                    ir.set_method_visibility(function, crate::types::Visibility::Private);
+                    register_class_method(ir, class, function);
+                }
                 function
             }
         };
@@ -135,7 +139,7 @@ impl<'u, 's> Linker<'u, 's> {
             return Ok(None);
         };
         let callees: &'s super::super::KlibCalleeFacts<'s> = self.sources.callees;
-        let Some(object) = callees.read_object(classifier) else {
+        let Some(object) = callees.read_class(classifier) else {
             return Ok(None);
         };
         let header = super::super::class_headers::authenticate_private_member(
