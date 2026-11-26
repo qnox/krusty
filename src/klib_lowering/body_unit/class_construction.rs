@@ -919,11 +919,7 @@ impl<'u, 's> Linker<'u, 's> {
                     if crate::metadata::semantic::class_kind(class.base.flags)
                         == crate::libraries::TypeKind::Class
             );
-            // An interface default that implements only itself is carried by the class too.
-            let implements_itself = contract.modality
-                == crate::metadata::semantic::KotlinModality::Final
-                && implemented.as_slice() == std::slice::from_ref(body);
-            if (from_class || implements_itself) && self.declared_member(body).is_none() {
+            if from_class && self.declared_member(body).is_none() {
                 if let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) {
                     let selected = callables[0];
                     // A superclass an earlier unit realized keeps its members there: this unit's

@@ -806,9 +806,6 @@ fn initialization_callees(
         // A materialized superclass is initialized first, through its own constructor.
         .chain(superclass)
         .chain(entries_factory(plan, callees).cloned())
-        // The interface defaults the class carries for itself are reached with it, so the checker
-        // freezes the edges of what they call.
-        .chain(inherited_chain(plan, bodies))
         .collect()
 }
 
@@ -1004,59 +1001,22 @@ fn dispatched_members(
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    for body in inherited_dispatched_bodies(plan, bodies)? {
-        if !members.contains(&body) {
+    // A member the class inherits implements the interface declarations it reaches only through
+    // its supertypes (`Itr.remove` for `MutableIterator.remove` under a subclass), so dispatch
+    // through the interface runs the inherited body, which is emitted with the class.
+    for (body, _) in inherited_implementations(plan, bodies)? {
+        // Only a body a superclass declares: an interface's default is inherited by its own
+        // mechanism.
+        let from_class = matches!(
+            bodies.member_owner(&body),
+            crate::klib_libraries::LocatedMember::One { class, .. }
+                if class_kind(class.base.flags) == TypeKind::Class
+        );
+        if from_class && !members.contains(&body) {
             members.push(body);
         }
     }
     Ok(members)
-}
-
-/// Whether the class carries the interface defaults it inherits for itself: an object or a final
-/// class, whose instances are exactly its own, and not an open or abstract class, whose subclass
-/// inherits them through its own layout.
-fn carries_inherited_defaults(plan: &ClassInitialization<'_, '_>) -> bool {
-    plan.header.contract.kind != TypeKind::Class
-        || plan.header.contract.modality == KotlinModality::Final
-}
-
-/// The inherited bodies reached with an admitted class. An enum class's own members come with its
-/// entries, so what it inherits from `Enum` is not walked here.
-fn inherited_chain(
-    plan: &ClassInitialization<'_, '_>,
-    bodies: &KlibDeclarationBodies,
-) -> Vec<KlibDependencyCallable> {
-    if plan.header.contract.kind == TypeKind::Enum {
-        return Vec::new();
-    }
-    inherited_dispatched_bodies(plan, bodies).unwrap_or_default()
-}
-
-/// The bodies an admitted class inherits that dispatch reaches and the class carries.
-///
-/// A member the class inherits implements the interface declarations it reaches only through its
-/// supertypes (`Itr.remove` for `MutableIterator.remove` under a subclass), so dispatch through
-/// the interface runs the inherited body, which is emitted with the class. That is a body a
-/// superclass declares, or an interface default that implements only itself for the class; an
-/// interface default another declaration overrides is inherited by its own mechanism.
-fn inherited_dispatched_bodies(
-    plan: &ClassInitialization<'_, '_>,
-    bodies: &KlibDeclarationBodies,
-) -> Result<Vec<KlibDependencyCallable>, KlibBodyDeclineReason> {
-    Ok(inherited_implementations(plan, bodies)?
-        .into_iter()
-        .filter(|(body, implemented)| {
-            let from_class = matches!(
-                bodies.member_owner(body),
-                crate::klib_libraries::LocatedMember::One { class, .. }
-                    if class_kind(class.base.flags) == TypeKind::Class
-            );
-            from_class
-                || (carries_inherited_defaults(plan)
-                    && implemented.as_slice() == std::slice::from_ref(body))
-        })
-        .map(|(body, _)| body)
-        .collect())
 }
 
 /// The bodies an admitted class inherits that implement interface members it reaches only through
