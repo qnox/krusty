@@ -172,85 +172,6 @@ pub(crate) fn direct_supertypes(source: &dyn SymbolSource, ty: Ty) -> Vec<Ty> {
     applied
 }
 
-/// The direct supertypes of `ty` as an extension receiver binds its formals from them. A Java
-/// class writes its own type variables as flexible supertype arguments (`class Sub<T> extends
-/// J<T>` is `J<T!>`), so binding `T` to a not-null type keeps the interval `String!` instead of
-/// fixing the argument to `String`. The provider records the occurrence as the template variable's
-/// platform bound, and only a Java declaration's template carries it: a Kotlin declaration, a mapped
-/// builtin included, states its own nullability, and so does a pure implementation's pure supertype.
-/// Only this consumer reads the interval: the shared
-/// hierarchy keeps the fixed binding, so the platform wrapper does not spread through supertypes and
-/// source-declared generic operations.
-pub(crate) fn direct_supertypes_with_flexible_arguments(
-    source: &dyn SymbolSource,
-    ty: Ty,
-) -> Vec<Ty> {
-    let applied = direct_supertypes(source, ty);
-    let Some(classifier) = ty
-        .kotlin_class_internal()
-        .and_then(|internal| source.classifier(internal))
-    else {
-        return applied;
-    };
-    if classifier.supertype_templates.len() != applied.len() {
-        return applied;
-    }
-    classifier
-        .supertype_templates
-        .iter()
-        .zip(applied)
-        .map(|(template, applied)| {
-            // A pure implementation states its arguments rigidly through its pure supertype.
-            if classifier.purely_implemented.is_some_and(|kind| {
-                applied
-                    .obj_internal()
-                    .and_then(|supertype| source.classifier(supertype))
-                    .and_then(|supertype| supertype.mapped_collection)
-                    .is_some_and(|mapped| mapped.kind == kind)
-            }) {
-                applied
-            } else {
-                retain_flexible_arguments(*template, applied)
-            }
-        })
-        .collect()
-}
-
-/// A supertype argument that is a Java type variable (a declared bound that is platform-nullable)
-/// and was bound to a not-null reference type stays flexible. A nullable binding, or one the
-/// substitution left a type variable, already says everything it can.
-fn retain_flexible_arguments(template: Ty, applied: Ty) -> Ty {
-    let (TyKind::Obj(name, template_arguments), TyKind::Obj(applied_name, applied_arguments)) =
-        (template.kind(), applied.kind())
-    else {
-        return applied;
-    };
-    if name != applied_name || template_arguments.len() != applied_arguments.len() {
-        return applied;
-    }
-    let arguments = template_arguments
-        .iter()
-        .zip(applied_arguments.iter())
-        .map(|(declared, bound)| {
-            let flexible_variable = matches!(
-                declared.kind(),
-                TyKind::TyParam(_, declared_bound) if declared_bound.is_platform_nullable()
-            );
-            if flexible_variable
-                && !bound.is_nullable()
-                && !bound.is_platform_nullable()
-                && bound.is_reference()
-                && !bound.is_ty_param()
-            {
-                Ty::platform_nullable(*bound)
-            } else {
-                *bound
-            }
-        })
-        .collect::<Vec<_>>();
-    Ty::obj_args_name(name, &arguments)
-}
-
 /// Applied semantic hierarchy in breadth-first order. Providers expose only direct declarations;
 /// core owns the transitive walk and generic substitution for every declaration origin.
 pub(crate) fn applied_hierarchy(source: &dyn SymbolSource, root: Ty) -> Vec<(TypeName, Ty, usize)> {
@@ -441,25 +362,6 @@ impl super::SymbolResolver<'_> {
 }
 
 pub(super) fn receiver_hierarchy(source: &dyn SymbolSource, receiver: Ty) -> Vec<(Ty, u32)> {
-    receiver_hierarchy_through(receiver, &|ty| direct_supertypes(source, ty))
-}
-
-/// The supertype of `actual` that names `owner`, read with Java's flexible type-variable arguments
-/// retained, for inference that binds a declaration's variables from it.
-pub(super) fn flexible_supertype_with_classifier(
-    source: &dyn SymbolSource,
-    actual: Ty,
-    owner: TypeName,
-) -> Option<Ty> {
-    receiver_hierarchy_through(actual, &|ty| {
-        direct_supertypes_with_flexible_arguments(source, ty)
-    })
-    .into_iter()
-    .map(|(ty, _)| ty)
-    .find(|ty| ty.obj_internal() == Some(owner))
-}
-
-fn receiver_hierarchy_through(receiver: Ty, parents: &dyn Fn(Ty) -> Vec<Ty>) -> Vec<(Ty, u32)> {
     let mut queue = std::collections::VecDeque::from([(receiver, 0)]);
     let mut seen = crate::fx_hash::HashSet::default();
     let mut hierarchy = Vec::new();
@@ -476,7 +378,7 @@ fn receiver_hierarchy_through(receiver: Ty, parents: &dyn Fn(Ty) -> Vec<Ty>) -> 
         }
         hierarchy.push((current, depth));
         queue.extend(
-            parents(current)
+            direct_supertypes(source, current)
                 .into_iter()
                 .map(|supertype| (supertype, depth + 1)),
         );

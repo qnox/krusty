@@ -2386,12 +2386,6 @@ pub struct LibraryType {
     /// Published by the provider that owns that map; `false` for every other classifier,
     /// including a platform class that merely shares a builtin's package.
     pub mapped_builtin: bool,
-    /// The Kotlin mutable collection this platform class implements *purely*, as the platform's
-    /// pure-implementation map pairs them (`java/util/ArrayList` purely implements `MutableList`).
-    /// A pure implementation states its type arguments rigidly through that supertype, where its
-    /// own Java supertypes write them flexibly. Published by the provider that owns the map; `None`
-    /// for every other classifier.
-    pub purely_implemented: Option<crate::types::CollectionKind>,
     /// For an annotation classifier: each element that declares a default, as the provider's
     /// declaration format records it. A module annotation publishes none; its defaults are
     /// checked default expressions.
@@ -2523,7 +2517,6 @@ impl LibraryType {
             annotation_targets: None,
             mapped_collection: None,
             mapped_builtin: false,
-            purely_implemented: None,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         }
@@ -2881,7 +2874,6 @@ mod tests {
             annotation_targets: None,
             mapped_collection: None,
             mapped_builtin: false,
-            purely_implemented: None,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         };

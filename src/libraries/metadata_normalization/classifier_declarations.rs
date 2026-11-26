@@ -296,7 +296,6 @@ pub(crate) fn classifier_shape(
         annotation_targets: (kind == TypeKind::Annotation).then(|| declared_targets(class)),
         mapped_collection: None,
         mapped_builtin: false,
-        purely_implemented: None,
         annotation_element_defaults: Vec::new(),
         deprecation: None,
     })

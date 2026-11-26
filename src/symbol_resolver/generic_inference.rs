@@ -1,6 +1,5 @@
 //! Generic call and constructor constraint collection, solving, and substitution.
 
-use super::hierarchy_projection::flexible_supertype_with_classifier;
 use super::*;
 use crate::types::TyKind;
 
@@ -637,7 +636,13 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
                     })
                     .or_else(|| {
                         source.and_then(|source| {
-                            flexible_supertype_with_classifier(source, actual, name)
+                            receiver_hierarchy(source, actual)
+                                .into_iter()
+                                .map(|(ty, _)| ty)
+                                .find(|ty| {
+                                    ty.obj_internal()
+                                        .is_some_and(|actual_name| name == actual_name)
+                                })
                         })
                     }),
                 _ => None,
@@ -1396,7 +1401,13 @@ pub(super) fn unify_inferred_ty_impl(
                     })
                     .or_else(|| {
                         source.and_then(|source| {
-                            flexible_supertype_with_classifier(source, actual, name)
+                            receiver_hierarchy(source, actual)
+                                .into_iter()
+                                .map(|(ty, _)| ty)
+                                .find(|ty| {
+                                    ty.obj_internal()
+                                        .is_some_and(|actual_name| name == actual_name)
+                                })
                         })
                     }),
                 _ => None,

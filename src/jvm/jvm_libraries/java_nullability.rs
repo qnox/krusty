@@ -99,7 +99,7 @@ pub(super) fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>
 /// putting that wrapper into the shared semantic type would leak a Java provider detail through
 /// Kotlin collection supertypes and source-declared generic operations. Use-site variance stays a
 /// projection whose interior is flexible.
-pub(super) fn java_type_argument_nullability(ty: Ty) -> Ty {
+fn java_type_argument_nullability(ty: Ty) -> Ty {
     match ty.kind() {
         TyKind::TyParam(name, bound) => {
             Ty::ty_param(name.as_str(), java_type_nullability(bound, None))
@@ -113,6 +113,77 @@ pub(super) fn java_type_argument_nullability(ty: Ty) -> Ty {
         TyKind::StarProjection(_) => ty,
         _ => java_type_nullability(ty, None),
     }
+}
+
+/// A class's direct supertype templates with the nullability its declaration states for their
+/// arguments. A JAVA class's supertype arguments carry Java's flexible nullability, exactly as its
+/// member signatures do: `class Document implements Map<String, Object>` exposes
+/// `MutableMap<String!, Any!>`, so `doc["k"] = null` is legal, and `class Sub<T> extends J<T>`
+/// writes the flexible `J<T!>`, whose occurrence keeps its platform bound for substitution to read.
+/// A Kotlin class states its own nullability in `@Metadata` and keeps it. A mapped Kotlin builtin
+/// (`MutableList` over `java.util.List`) is a Kotlin declaration in Kotlin's scope, and a pure
+/// implementation (`ArrayList` of `MutableList`) states its arguments rigidly through its pure
+/// supertype: those edges name the class's own type variables, not flexible Java occurrences.
+pub(super) fn supertype_template_nullability(
+    templates: Vec<Ty>,
+    class: TypeName,
+    is_mapped_builtin: bool,
+    has_kotlin_metadata: bool,
+) -> Vec<Ty> {
+    if is_mapped_builtin {
+        return templates
+            .into_iter()
+            .map(rigid_type_variable_arguments)
+            .collect();
+    }
+    if has_kotlin_metadata {
+        return templates;
+    }
+    let purely_implemented = crate::jvm::pure_implementations::purely_implemented_supertype(class);
+    templates
+        .into_iter()
+        .map(|template| match template.kind() {
+            TyKind::Obj(name, _)
+                if purely_implemented.is_some_and(|kind| {
+                    crate::jvm::jvm_class_map::mapped_collection(name)
+                        .is_some_and(|mapped| mapped.kind == kind)
+                }) =>
+            {
+                rigid_type_variable_arguments(template)
+            }
+            TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+                name,
+                &arguments
+                    .iter()
+                    .map(|argument| java_type_argument_nullability(*argument))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => template,
+        })
+        .collect()
+}
+
+/// A supertype template whose type-variable arguments are rigid: each reads its declared Java bound
+/// as the nullable upper end of that flexible bound (`E: Any!` becomes `E: Any?`), so substitution
+/// reads the applied argument exactly as written, a flexible `String!` included.
+fn rigid_type_variable_arguments(template: Ty) -> Ty {
+    let TyKind::Obj(name, arguments) = template.kind() else {
+        return template;
+    };
+    if arguments.is_empty() {
+        return template;
+    }
+    let arguments = arguments
+        .iter()
+        .map(|argument| match argument.kind() {
+            TyKind::TyParam(variable, bound) => Ty::ty_param(
+                variable.as_str(),
+                Ty::nullable(bound.platform_lower_bound()),
+            ),
+            _ => *argument,
+        })
+        .collect::<Vec<_>>();
+    Ty::obj_args_name(name, &arguments)
 }
 
 /// The enhancement a Java method's result starts from, before any overridden declaration is known.
