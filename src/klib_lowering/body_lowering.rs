@@ -609,6 +609,9 @@ pub(super) struct BodyLowering<'a> {
     member_return: Option<KlibIrSymbol>,
     /// The result type of [`Self::member_return`].
     member_result: Option<Ty>,
+    /// The declarations enclosing this closure whose `return`s its body may name, innermost last,
+    /// with their result types: a non-local return, valid only where the closure is inlined.
+    enclosing_returns: Vec<(KlibIrSymbol, Ty)>,
 }
 
 impl<'a> BodyLowering<'a> {
@@ -640,6 +643,7 @@ impl<'a> BodyLowering<'a> {
             member_return: None,
             member_result: None,
             object_members: HashMap::default(),
+            enclosing_returns: Vec::new(),
         }
     }
 
@@ -1392,7 +1396,7 @@ impl<'a> BodyLowering<'a> {
             .as_ref()
             .is_some_and(|member| member == target);
         if !member && target != self.function.symbol {
-            return Err(KlibBodyDeclineReason::ForeignReturnTarget);
+            return self.non_local_return(target, value);
         }
         let expected = self.member_result.unwrap_or(self.header.body_result());
         let mut value = if !member && self.header.erases_result() {
@@ -1410,6 +1414,26 @@ impl<'a> BodyLowering<'a> {
         let returned = self.ir.add_expr(IrExpr::Return(Some(value)));
         // The function's own return leaves the innermost callable.
         self.ir.checked_return_depths.insert(returned, 0);
+        Ok(returned)
+    }
+
+    /// A closure's `return` from the enclosing declaration `target`, which checked FIR lowering
+    /// records as a return as many lexical frames out as the closures it crosses. Inline expansion
+    /// moves it a frame nearer at each one.
+    fn non_local_return(&mut self, target: &KlibIrSymbol, value: KlibIrExprId) -> Lowered<ExprId> {
+        let Some((frames, &(_, result))) = self
+            .enclosing_returns
+            .iter()
+            .rev()
+            .enumerate()
+            .find(|(_, (symbol, _))| symbol == target)
+        else {
+            return Err(KlibBodyDeclineReason::ForeignReturnTarget);
+        };
+        let value = self.operand(value, result)?;
+        let returned = self.ir.add_expr(IrExpr::Return(Some(value)));
+        let depth = u32::try_from(frames + 1).expect("a closure nesting fits u32");
+        self.ir.checked_return_depths.insert(returned, depth);
         Ok(returned)
     }
 

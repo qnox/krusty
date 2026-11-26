@@ -112,6 +112,23 @@ fn tail_statement_block_chain(
     }
 }
 
+/// Whether the return `returned`, copied into an inline frame, leaves that frame. A return of
+/// depth 0, or one with no checked depth, belongs to the inlined body and exits its frame; its
+/// depth is consumed. A deeper return names a declaration enclosing the frame: it stays a return,
+/// one lexical frame nearer its target.
+pub(crate) fn leaves_inline_frame(ir: &mut IrFile, returned: ExprId) -> bool {
+    match ir.checked_return_depths.get(&returned).copied() {
+        Some(depth) if depth > 0 => {
+            ir.checked_return_depths.insert(returned, depth - 1);
+            false
+        }
+        _ => {
+            ir.checked_return_depths.remove(&returned);
+            true
+        }
+    }
+}
+
 /// The statements that leave inline-return frame `label` with `value`: store it as the frame's
 /// result, then `break`. A return in the frame's own body stores by the result's value index; one
 /// in a nested lambda's template names the frame instead. With no result, the value still runs.

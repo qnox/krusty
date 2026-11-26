@@ -23,6 +23,9 @@ mod library_enums;
 #[path = "klib_closure_frames_e2e/file_private_function_receivers.rs"]
 mod file_private_function_receivers;
 
+#[path = "klib_closure_frames_e2e/non_local_returns.rs"]
+mod non_local_returns;
+
 #[path = "klib_closure_frames_e2e/local_superclass_arguments.rs"]
 mod local_superclass_arguments;
 
