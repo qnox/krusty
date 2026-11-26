@@ -49,7 +49,7 @@ use krusty::kotlin_version::KotlinVersion;
 use super::box_inventory;
 use super::box_jvm_compile::{compile_box_case, CompileFailure, COROUTINE_HELPERS};
 use super::box_ratchet;
-use super::box_reference_classes::{self, strip_diagnostic_markers, ReferenceFailure};
+use super::box_reference_classes::{self, refusals, strip_diagnostic_markers, ReferenceFailure};
 use super::common;
 use super::krusty_case_workers::{serve, Reply, Workers};
 
@@ -80,6 +80,8 @@ enum Verdict {
     Accepted,
     /// Rejected, with the errors the compiler reported.
     Rejected(Vec<String>),
+    /// Refused the command line the case selects before reading a source, with these messages.
+    Refused(Vec<String>),
     /// Neither: the compilation could not be built or did not finish.
     Failed(String),
 }
@@ -94,6 +96,9 @@ enum Outcome {
     FalseReject(String),
     /// krusty neither accepted nor rejected.
     KrustyFailed(String),
+    /// One compiler refused the command line the case selects and the other did not refuse it
+    /// in the same words: what each did.
+    CommandLineMismatch(String),
     /// Not scored, for this reason.
     NotScored(String),
 }
@@ -306,6 +311,9 @@ fn kotlinc_verdict(compiled: Result<(), ReferenceFailure>) -> Result<Verdict, St
         Err(failure @ ReferenceFailure::Rejected { .. }) => {
             Ok(Verdict::Rejected(vec![failure.to_string()]))
         }
+        Err(ReferenceFailure::CommandLineRefused { diagnostics, .. }) => {
+            Ok(Verdict::Refused(refusals(&diagnostics)))
+        }
         Err(
             failure @ (ReferenceFailure::KotlincNoVerdict { .. } | ReferenceFailure::NoVerdict(_)),
         ) => Ok(Verdict::Failed(failure.to_string())),
@@ -328,6 +336,7 @@ fn krusty(
     match compiled {
         Ok(Ok(_)) => Verdict::Accepted,
         Ok(Err(CompileFailure::Rejected { errors, .. })) => Verdict::Rejected(errors),
+        Ok(Err(CompileFailure::CommandLineRefused(messages))) => Verdict::Refused(messages),
         Ok(Err(CompileFailure::Harness(reason))) => Verdict::Failed(reason),
         Err(panic) => Verdict::Failed(format!("panicked: {}", panic_message(&panic))),
     }
@@ -369,9 +378,13 @@ fn worker_verdict(root: &Path, jdks: &BoxJdkRoots, file: &Path) -> String {
     match krusty(&prepared, stem, &classpath, jdk) {
         Verdict::Accepted => "A".to_string(),
         Verdict::Rejected(errors) => format!("R\t{}", errors.first().cloned().unwrap_or_default()),
+        Verdict::Refused(messages) => format!("C\t{}", messages.join(REFUSAL_SEPARATOR)),
         Verdict::Failed(reason) => format!("F\t{reason}"),
     }
 }
+
+/// Separates the messages of a refused command line on a worker's reply line.
+const REFUSAL_SEPARATOR: &str = "\u{1f}";
 
 /// krusty's verdict on the case at `file`, from this thread's worker.
 fn krusty_in_worker(workers: &Workers, file: &Path) -> Verdict {
@@ -379,6 +392,12 @@ fn krusty_in_worker(workers: &Workers, file: &Path) -> Verdict {
         Reply::Line(line) => match line.split_once('\t') {
             None if line == "A" => Verdict::Accepted,
             Some(("R", error)) => Verdict::Rejected(vec![error.to_string()]),
+            Some(("C", messages)) => Verdict::Refused(
+                messages
+                    .split(REFUSAL_SEPARATOR)
+                    .map(str::to_string)
+                    .collect(),
+            ),
             Some(("F", reason)) => Verdict::Failed(reason.to_string()),
             _ => panic!("a worker replied {line:?}"),
         },
@@ -484,6 +503,12 @@ fn run_case(
             Outcome::NotScored(format!("kotlinc failed: {}", first_line(reason)))
         }
         (_, Verdict::Failed(reason)) => Outcome::KrustyFailed(reason),
+        (Verdict::Refused(expected), Verdict::Refused(actual)) if *expected == actual => {
+            Outcome::Agree
+        }
+        (expected @ Verdict::Refused(_), actual) | (expected, actual @ Verdict::Refused(_)) => {
+            Outcome::CommandLineMismatch(format!("kotlinc: {expected:?}; krusty: {actual:?}"))
+        }
         (Verdict::Rejected(errors), Verdict::Accepted) => {
             Outcome::FalseAccept(errors.first().cloned().unwrap_or_default())
         }
@@ -626,6 +651,7 @@ fn krusty_rejects_what_kotlinc_rejects_in_its_diagnostics_test_data() {
             Outcome::Agree => {}
             Outcome::FalseAccept(_) => false_accepts += 1,
             Outcome::FalseReject(_) => false_rejects += 1,
+            Outcome::CommandLineMismatch(_) => {}
             Outcome::KrustyFailed(reason) => {
                 *krusty_failed
                     .entry(first_line(reason).to_string())
@@ -715,6 +741,14 @@ fn judge(
         .iter()
         .map(|Fatal { key, reason }| format!("{key}: the harness could not observe it ({reason})"))
         .collect();
+    // A command line one compiler refuses must be refused by the other in the same words.
+    problems.extend(cases.iter().filter_map(|case| match &case.outcome {
+        Outcome::CommandLineMismatch(what) => Some(format!(
+            "{}: command line refusals differ ({what})",
+            case.key
+        )),
+        _ => None,
+    }));
     // A key a fatal observation kept from scoring is reported as that observation only.
     let unobserved: BTreeSet<&String> = fatal.iter().map(|fatal| &fatal.key).collect();
     let found: BTreeMap<&String, &String> = cases
