@@ -85,6 +85,11 @@ pub enum CompilerIntrinsic {
     /// authenticated declaration fixes its operand and result types. Checked FIR and common IR
     /// keep its call an ordinary call; only the target emitter replaces it with the instruction.
     ScalarInstruction(super::ScalarInstruction),
+    /// Native's `kotlin.concurrent` atomic access through a property reference: an external
+    /// `TypedIntrinsic` extension of `KMutableProperty0<V>` whose operands are `V`. The property
+    /// reference is not a value the call consumes; the target emitter realizes the access on the
+    /// storage the reference names. Checked FIR and common IR keep the call an ordinary call.
+    AtomicFieldAccess(AtomicOperation),
     /// Native's exact `GCUnsafeCall` floating-point predicate declaration. The provider
     /// authenticates the runtime entry and complete extension-receiver shape while it still owns
     /// the platform KLIB; target lowering consumes only this operation and scalar type.

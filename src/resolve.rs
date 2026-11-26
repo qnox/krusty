@@ -26279,7 +26279,9 @@ struct LambdaCheckMode {
 }
 
 type InnerOwnerTypeParameter = (String, String, Ty, Vec<Ty>);
-type StableReceiverCallableKey = (Ty, String, Vec<TypeName>);
+/// The receiver, the name, the lexical classes and whether `@Suppress` hides invisible members:
+/// the inventory keeps only the extensions the scope may see, so that scope is part of the key.
+type StableReceiverCallableKey = (Ty, String, Vec<TypeName>, bool);
 type DemandReject<'a> = &'a dyn Fn(&str, Span) -> bool;
 type FlowNarrowing = (NarrowPath, Ty);
 type DeclinedFlowNarrowing = (String, Ty);

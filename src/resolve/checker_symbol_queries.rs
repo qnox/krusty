@@ -17,6 +17,7 @@ impl Checker<'_> {
             self.access_context_class_names(),
         )
         .with_eager_lambda_results(self.file.language.eager_lambda_analysis)
+        .with_visibility_suppression(self.visibility_access_suppressed())
         .with_member_access(self)
     }
 
@@ -36,6 +37,7 @@ impl Checker<'_> {
             self.file_index,
             self.lexical_source_class_names(),
         )
+        .with_visibility_suppression(self.visibility_access_suppressed())
         .with_member_access(self)
     }
 
@@ -85,7 +87,12 @@ impl Checker<'_> {
         if self.resolved_index.is_none() {
             return self.resolver().receiver_callables(receiver, name);
         }
-        let key = (receiver, name.to_owned(), self.lexical_source_class_names());
+        let key = (
+            receiver,
+            name.to_owned(),
+            self.lexical_source_class_names(),
+            self.visibility_access_suppressed(),
+        );
         if let Some(callables) = self.stable_receiver_callable_cache.borrow().get(&key) {
             return callables.clone();
         }

@@ -55,6 +55,70 @@ impl BodyLowering<'_, '_, '_> {
         Ok(self.atomic_access(operation, clif, address, &values))
     }
 
+    /// The atomic access `operation` through the property reference `reference` to the storage of a
+    /// top-level property, which the reference names but this call never materializes: the
+    /// operands are evaluated in order and the instruction touches the property's own word.
+    pub(super) fn atomic_property_access(
+        &mut self,
+        operation: AtomicOperation,
+        reference: u32,
+        operands: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        if operands.len() != operation.operands() {
+            return Err("an atomic property access without its operation's operands".into());
+        }
+        let IrExpr::Checked(checked) = self.file.ir.expr(reference) else {
+            return Err(
+                "an atomic access through another receiver than a property reference".into(),
+            );
+        };
+        let IrCheckedOperation::PropertyReference {
+            target:
+                krusty::fir::FirPropertyReferenceTarget::Module(property)
+                | krusty::fir::FirPropertyReferenceTarget::SpecializedModule { property, .. },
+            dispatch_receiver: None,
+            extension_receiver: None,
+            ..
+        } = &**checked
+        else {
+            return Err(
+                "an atomic access through a property reference that does not name top-level storage"
+                    .into(),
+            );
+        };
+        let property = *property;
+        let super::statics::TopLevel::Slot(index) = self.top_level(&property, true)? else {
+            return Err("an atomic access to a property that is not a plain storage slot".into());
+        };
+        let ty = self.file.ir.statics[index as usize].ty;
+        let clif = match self.carrier(ty) {
+            Carrier::Scalar(clif, _) if clif.is_int() => clif,
+            Carrier::Ref => types::I64,
+            Carrier::Scalar(..) | Carrier::Void => {
+                return Err(
+                    "an atomic access to a property that is not integral or a reference".into(),
+                )
+            }
+        };
+        if operation == AtomicOperation::FetchAndAdd && matches!(self.carrier(ty), Carrier::Ref) {
+            return Err("an atomic addition to a reference property".into());
+        }
+        let mut values = Vec::with_capacity(operands.len());
+        for &operand in operands {
+            let Some(value) = self.coerce(operand, ty)? else {
+                return Ok(None);
+            };
+            values.push(value);
+        }
+        if self.terminated {
+            return Ok(None);
+        }
+        self.initialize_static_owner(index)?;
+        let slot = self.file.statics[index as usize];
+        let address = self.data_address(slot);
+        Ok(self.atomic_access(operation, clif, address, &values))
+    }
+
     /// The atomic access `operation` to the word of width `clif` at `address`, with `values` its
     /// operation's operands: what it answers, or nothing for a store.
     pub(super) fn atomic_access(

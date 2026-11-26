@@ -1077,6 +1077,9 @@ fn realize_expressions(
             Some(krusty::libraries::CompilerIntrinsic::ScalarInstruction(_)) => {
                 unreachable!("a target KLIB scalar instruction cannot reach JVM call realization")
             }
+            Some(krusty::libraries::CompilerIntrinsic::AtomicFieldAccess(_)) => {
+                unreachable!("a Native atomic field access cannot reach JVM call realization")
+            }
             Some(
                 krusty::libraries::CompilerIntrinsic::CurrentContinuation
                 | krusty::libraries::CompilerIntrinsic::ReturnIfSuspended,

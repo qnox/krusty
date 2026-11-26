@@ -708,6 +708,11 @@ pub(super) fn authenticate(
             return Some(shape);
         }
     }
+    if platform == Some(TargetIntrinsicPlatform::Native) {
+        if let Some(shape) = native_atomic_field(placement, declaration) {
+            return Some(shape);
+        }
+    }
     if declaration.context_count != 0
         || !declaration.context_kinds.is_empty()
         || declaration.is_suspend
@@ -731,6 +736,104 @@ pub(super) fn authenticate(
             .or_else(|| wasm_intercepted_continuation(placement, declaration)),
         (TargetIntrinsicPlatform::Native, false) => None,
     }
+}
+
+/// Native's `kotlin.concurrent` atomic field accesses as the serialized metadata declares them: an
+/// external `TypedIntrinsic` extension of `KMutableProperty0<V>` whose operands are `V`. `V` is the
+/// declaration's one type parameter, or the scalar an addition is specialized to.
+fn native_atomic_field(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    if !declaration.is_external
+        || placement != crate::libraries::CallablePlacement::Package(type_name("kotlin/concurrent"))
+        || declaration.context_count != 0
+        || !declaration.context_kinds.is_empty()
+        || declaration.is_suspend
+        || declaration.is_inline
+        || declaration.vararg.is_some()
+    {
+        return None;
+    }
+    let operation = match string_annotation(
+        &declaration.annotation_applications,
+        type_name("kotlin/native/internal/TypedIntrinsic"),
+        "kind",
+    )? {
+        "ATOMIC_GET_FIELD" => AtomicOperation::Load,
+        "ATOMIC_SET_FIELD" => AtomicOperation::Store,
+        "GET_AND_SET_FIELD" => AtomicOperation::Exchange,
+        "COMPARE_AND_SET_FIELD" => AtomicOperation::CompareAndSet,
+        "COMPARE_AND_EXCHANGE_FIELD" => AtomicOperation::CompareAndExchange,
+        "GET_AND_ADD_FIELD" => AtomicOperation::FetchAndAdd,
+        _ => return None,
+    };
+    let KotlinType::Class {
+        internal,
+        args,
+        nullable: false,
+        ..
+    } = declaration.receiver.as_ref()?
+    else {
+        return None;
+    };
+    let [value] = args.as_slice() else {
+        return None;
+    };
+    if internal != "kotlin/reflect/KMutableProperty0" {
+        return None;
+    }
+    // The value type: the declaration's one type parameter, or a scalar when it declares none.
+    let carried = match declaration.formals.as_slice() {
+        [parameter] => {
+            if parameter.reified
+                || !parameter.bounds.iter().all(is_nullable_any)
+                || !matches!(value, KotlinType::Param { id, nullable: false, .. } if *id == parameter.id)
+            {
+                return None;
+            }
+            Ty::ty_param(
+                &parameter.name,
+                Ty::nullable(Ty::obj_name(crate::types::wk::any())),
+            )
+        }
+        [] if operation == AtomicOperation::FetchAndAdd => [
+            ("kotlin/Byte", Ty::Byte),
+            ("kotlin/Short", Ty::Short),
+            ("kotlin/Int", Ty::Int),
+            ("kotlin/Long", Ty::Long),
+        ]
+        .into_iter()
+        .find_map(|(classifier, ty)| exact_type(value, classifier).then_some(ty))?,
+        _ => return None,
+    };
+    if declaration.params.len() != operation.operands()
+        || declaration
+            .params
+            .iter()
+            .any(|parameter| parameter != value)
+    {
+        return None;
+    }
+    let ret = match operation {
+        AtomicOperation::Store => {
+            exact_type(&declaration.ret, "kotlin/Unit").then_some(Ty::Unit)?
+        }
+        AtomicOperation::CompareAndSet => {
+            exact_type(&declaration.ret, "kotlin/Boolean").then_some(Ty::Boolean)?
+        }
+        AtomicOperation::Load
+        | AtomicOperation::Exchange
+        | AtomicOperation::CompareAndExchange
+        | AtomicOperation::FetchAndAdd => (declaration.ret == *value).then_some(carried)?,
+    };
+    Some(KlibIntrinsicShape {
+        operation: CompilerIntrinsic::AtomicFieldAccess(operation),
+        kind: ExternalCallableKind::Extension,
+        receiver: Some(Ty::obj_args("kotlin/reflect/KMutableProperty0", &[carried])),
+        params: vec![carried; operation.operands()],
+        ret,
+    })
 }
 
 /// Native's two continuation intrinsics in `kotlin.native.internal`, which kotlinc's
