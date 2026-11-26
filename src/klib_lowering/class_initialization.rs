@@ -160,6 +160,9 @@ fn admit<'a, 'b>(
             match modality {
                 _ if function.base.origin == "FAKE_OVERRIDE" => {}
                 KotlinModality::Abstract => dispatched.push(function),
+                // A member bound to a runtime entry is realized there, so it does not keep its
+                // class on the target's side of the boundary.
+                _ if crate::klib_libraries::is_runtime_entry_ir(header.arena, function) => {}
                 _ => return false,
             }
         } else if !function.overridden.is_empty() || (open && modality != KotlinModality::Final) {
