@@ -318,12 +318,8 @@ module=6:stdlib public package=2[6:kotlin,4:math] declaration=1[5:log10] member=
 module=6:stdlib public package=2[6:kotlin,4:math] declaration=1[5:log10] member=7077268533810606095 mask=0
 module=6:stdlib public package=2[6:kotlin,4:math] declaration=1[5:round] member=14480982603584829723 mask=0
 module=6:stdlib public package=2[6:kotlin,4:math] declaration=1[5:round] member=8869478556114314105 mask=0
-module=6:stdlib public package=2[6:kotlin,4:math] declaration=1[6:nextUp] member=16299345272303728944 mask=0
-module=6:stdlib public package=2[6:kotlin,4:math] declaration=1[6:nextUp] member=2172016050241036233 mask=0
 module=6:stdlib public package=2[6:kotlin,4:math] declaration=1[7:IEEErem] member=5124011709508336959 mask=0
 module=6:stdlib public package=2[6:kotlin,4:math] declaration=1[7:IEEErem] member=7431005492303784907 mask=0
-module=6:stdlib public package=2[6:kotlin,4:math] declaration=1[8:nextDown] member=13662163520929050588 mask=0
-module=6:stdlib public package=2[6:kotlin,4:math] declaration=1[8:nextDown] member=4412866732435976146 mask=0
 module=6:stdlib public package=2[6:kotlin,4:math] declaration=1[8:withSign] member=15505329312181616443 mask=0
 module=6:stdlib public package=2[6:kotlin,4:math] declaration=1[8:withSign] member=3760283456254916017 mask=0
 module=6:stdlib public package=2[6:kotlin,4:test] declaration=2[19:AsserterContributor,10:contribute] member=5291997857330358466 mask=0

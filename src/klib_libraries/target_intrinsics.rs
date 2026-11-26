@@ -8,8 +8,9 @@
 use std::collections::HashMap;
 
 use crate::libraries::{
-    AtomicOperation, CompilerIntrinsic, ExternalCallableKind, KlibDeclarationSignature,
-    KlibDependencyCallable, ScalarClass, ScalarComparison, ScalarInstruction, SurrogateHalf,
+    AdjacentDirection, AtomicOperation, CompilerIntrinsic, ExternalCallableKind,
+    KlibDeclarationSignature, KlibDependencyCallable, ScalarClass, ScalarComparison,
+    ScalarInstruction, SurrogateHalf,
 };
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrExprKind, KlibIrFunction, KlibIrNullability, KlibIrType,
@@ -1089,6 +1090,35 @@ fn char_is_surrogate(
     })
 }
 
+/// `Float.nextUp()` / `Double.nextDown()` and the other two: an extension in `kotlin.math` with
+/// no parameters whose result is its receiver's own type.
+fn adjacent_floating(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+    operand: Ty,
+    direction: AdjacentDirection,
+) -> Option<KlibIntrinsicShape> {
+    let classifier = match operand {
+        Ty::Float => "kotlin/Float",
+        Ty::Double => "kotlin/Double",
+        _ => return None,
+    };
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/math"))
+        && declaration.params.is_empty()
+        && declaration
+            .receiver
+            .as_ref()
+            .is_some_and(|receiver| exact_type(receiver, classifier))
+        && exact_type(&declaration.ret, classifier))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::FloatingAdjacent { operand, direction },
+        kind: ExternalCallableKind::Extension,
+        receiver: Some(operand),
+        params: vec![operand],
+        ret: operand,
+    })
+}
+
 fn native(
     placement: crate::libraries::CallablePlacement,
     declaration: &KotlinFunction,
@@ -1125,6 +1155,28 @@ fn native(
                 },
                 Ty::Double,
             ),
+            "Kotlin_math_Float_nextUp" => {
+                return adjacent_floating(placement, declaration, Ty::Float, AdjacentDirection::Up)
+            }
+            "Kotlin_math_Double_nextUp" => {
+                return adjacent_floating(placement, declaration, Ty::Double, AdjacentDirection::Up)
+            }
+            "Kotlin_math_Float_nextDown" => {
+                return adjacent_floating(
+                    placement,
+                    declaration,
+                    Ty::Float,
+                    AdjacentDirection::Down,
+                )
+            }
+            "Kotlin_math_Double_nextDown" => {
+                return adjacent_floating(
+                    placement,
+                    declaration,
+                    Ty::Double,
+                    AdjacentDirection::Down,
+                )
+            }
             "Kotlin_Char_isHighSurrogate" => {
                 return char_is_surrogate(placement, declaration, SurrogateHalf::High)
             }
@@ -2091,6 +2143,97 @@ mod tests {
             &exact,
         )
         .is_none());
+    }
+
+    #[test]
+    fn native_gc_unsafe_scalar_answers_require_the_exact_entry_package_and_shape() {
+        let gc_unsafe = |callee: &str| AnnotationApplication {
+            identity: type_name("kotlin/native/internal/GCUnsafeCall"),
+            arguments: vec![(
+                "callee".to_owned(),
+                AnnotationArgument::String(callee.to_owned()),
+            )],
+        };
+        let native = Some(TargetIntrinsicPlatform::Native);
+        let package = |name: &str| crate::libraries::CallablePlacement::Package(type_name(name));
+        let extension = |name: &str, entry: &str, receiver: &str, ret: &str| {
+            let mut function = declaration(name, &[], ret, gc_unsafe(entry));
+            function.receiver = Some(KotlinType::class(receiver));
+            function
+        };
+        for (name, entry, receiver, operand, direction) in [
+            (
+                "nextUp",
+                "Kotlin_math_Float_nextUp",
+                "kotlin/Float",
+                Ty::Float,
+                AdjacentDirection::Up,
+            ),
+            (
+                "nextUp",
+                "Kotlin_math_Double_nextUp",
+                "kotlin/Double",
+                Ty::Double,
+                AdjacentDirection::Up,
+            ),
+            (
+                "nextDown",
+                "Kotlin_math_Float_nextDown",
+                "kotlin/Float",
+                Ty::Float,
+                AdjacentDirection::Down,
+            ),
+            (
+                "nextDown",
+                "Kotlin_math_Double_nextDown",
+                "kotlin/Double",
+                Ty::Double,
+                AdjacentDirection::Down,
+            ),
+        ] {
+            let exact = extension(name, entry, receiver, receiver);
+            assert_eq!(
+                authenticate(native, package("kotlin/math"), &exact),
+                Some(KlibIntrinsicShape {
+                    operation: CompilerIntrinsic::FloatingAdjacent { operand, direction },
+                    kind: ExternalCallableKind::Extension,
+                    receiver: Some(operand),
+                    params: vec![operand],
+                    ret: operand,
+                })
+            );
+            assert!(
+                authenticate(native, package("spoof"), &exact).is_none(),
+                "another package's declaration is not the stdlib's"
+            );
+            assert!(
+                authenticate(
+                    native,
+                    package("kotlin/math"),
+                    &extension(name, "User_math_nextUp", receiver, receiver)
+                )
+                .is_none(),
+                "the runtime entry is the evidence"
+            );
+            assert!(
+                authenticate(
+                    native,
+                    package("kotlin/math"),
+                    &extension(name, entry, "kotlin/Int", receiver)
+                )
+                .is_none(),
+                "the receiver must be the entry's own width"
+            );
+            assert!(
+                authenticate(
+                    native,
+                    package("kotlin/math"),
+                    &extension(name, entry, receiver, "kotlin/Int")
+                )
+                .is_none(),
+                "the result must be the receiver's own type"
+            );
+        }
     }
 
     #[test]
