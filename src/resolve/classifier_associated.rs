@@ -285,6 +285,11 @@ impl Checker<'_> {
             AssociatedCall::Inapplicable(candidates) => candidates,
             AssociatedCall::Absent => return None,
         };
+        let applicability =
+            self.callable_rung_applicability(scope, call, args, &explicit_type_args, &candidates);
+        if self.settle_deferred_constructor_failure(scope, call, args, applicability) {
+            return Some(Ty::Error);
+        }
         let reported = call_diagnostics::report_inapplicable_callable_candidates(
             InapplicableTopLevelCall {
                 call,

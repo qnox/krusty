@@ -36,7 +36,10 @@ mod class_capture_discovery;
 mod class_names;
 mod common_supertype;
 use class_capture_discovery::*;
+mod constructor_rung_failure;
 mod declaration_type_inference;
+mod source_constructor_failure;
+use source_constructor_failure::ConstructorValueParameters;
 mod symbol_table;
 use common_supertype::*;
 use declaration_type_inference::*;
@@ -3579,14 +3582,6 @@ struct DispatchPropertyProvenance {
     selected_receiver: Option<(usize, usize)>,
 }
 
-/// The value-parameter list a constructor-arity diagnostic is written against.
-struct ConstructorValueParameters<'a> {
-    types: &'a [Ty],
-    names: &'a [String],
-    defaults: &'a [bool],
-    vararg: Option<usize>,
-}
-
 /// The selected formal a committed argument is checked against.
 struct SelectedFormal<'a> {
     signature: &'a CallSig,
@@ -5284,6 +5279,14 @@ impl<'a> Checker<'a> {
                 &[],
             )
             .is_some_and(|symbol| !symbol.overloads().is_empty());
+        let applicability = if has_candidates {
+            self.callable_rung_applicability(scope, call, args, &type_args, &candidates)
+        } else {
+            constructor_rung_failure::RungApplicability::NoCandidate
+        };
+        if self.settle_deferred_constructor_failure(scope, call, args, applicability) {
+            return ClassifierValueCall::Checked(Ty::Error);
+        }
         self.diags.error(
             self.call_callee_name_span(call),
             if has_candidates {
@@ -7945,18 +7948,25 @@ impl<'a> Checker<'a> {
                             InvokeResolution::Inapplicable(_) | InvokeResolution::Absent => {}
                         }
                     }
-                    if !self.report_source_constructor_mapping_error(
-                        call,
-                        args,
-                        &arguments,
-                        &candidates,
-                        &qname,
-                    ) && !self.call_already_has_argument_diagnostic(call, args)
-                    {
-                        self.diags
-                            .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                    // The later rungs of a classifier qualifier (`C`'s associated, companion and
+                    // static callables) still name `Name`; they settle this failure.
+                    let trailing_lambda = arguments.trailing_lambda;
+                    let failure = constructor_rung_failure::DeferredConstructorFailure::source(
+                        arguments,
+                        candidates,
+                        qname,
+                        trailing_lambda,
+                    );
+                    self.defer_constructor_failure(call, failure);
+                    if !matches!(receiver_qualifier, Ok(ResolvedQualifier::Classifier(_))) {
+                        self.settle_deferred_constructor_failure(
+                            scope,
+                            call,
+                            args,
+                            constructor_rung_failure::RungApplicability::NoCandidate,
+                        );
+                        return Ty::Error;
                     }
-                    return Ty::Error;
                 }
                 // CLASSPATH nested-class constructor `Outer.Nested(args)` (a sealed subclass
                 // `Subject.User("x")`, or any nested class), OR a FULLY-QUALIFIED constructor via a package
@@ -7965,6 +7975,7 @@ impl<'a> Checker<'a> {
                 {
                     if let Ok(ResolvedQualifier::Classifier(internal)) = member_qualifier {
                         let mut constructor_mapping_error = None;
+                        let mut rejected_constructors = None;
                         match self.record_resolved_library_constructor(
                             scope,
                             call,
@@ -7998,7 +8009,9 @@ impl<'a> Checker<'a> {
                                 self.report_invisible_constructor(call, &invisible);
                                 return Ty::Error;
                             }
-                            Ok(LibraryConstructorSelection::NoMatch(_)) => {}
+                            Ok(LibraryConstructorSelection::NoMatch(rejected)) => {
+                                rejected_constructors = rejected;
+                            }
                             Err(error) => {
                                 constructor_mapping_error = Some(error);
                             }
@@ -8021,13 +8034,20 @@ impl<'a> Checker<'a> {
                                 InvokeResolution::Inapplicable(_) | InvokeResolution::Absent => {}
                             }
                         }
-                        if let Some(error) = constructor_mapping_error {
-                            self.report_library_constructor_failure(scope, call, args, error);
-                        } else if !self.call_already_has_argument_diagnostic(call, args) {
-                            self.diags
-                                .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                        let failure = constructor_rung_failure::DeferredConstructorFailure::library(
+                            constructor_mapping_error,
+                            rejected_constructors.as_deref(),
+                        );
+                        self.defer_constructor_failure(call, failure);
+                        if !matches!(receiver_qualifier, Ok(ResolvedQualifier::Classifier(_))) {
+                            self.settle_deferred_constructor_failure(
+                                scope,
+                                call,
+                                args,
+                                constructor_rung_failure::RungApplicability::NoCandidate,
+                            );
+                            return Ty::Error;
                         }
-                        return Ty::Error;
                     }
                 }
                 if let Ok(ResolvedQualifier::Package(package)) = receiver_qualifier {
@@ -8476,6 +8496,17 @@ impl<'a> Checker<'a> {
                     // The one candidate whose parameters the arguments map onto owns the failure,
                     // as for a member call: `J.a(null)` against `a(@NotNull String)` is that
                     // candidate's argument mismatch, not an unresolved static.
+                    let applicability = self.callable_rung_applicability(
+                        scope,
+                        call,
+                        args,
+                        &explicit_type_args,
+                        &rejected_candidates,
+                    );
+                    if self.settle_deferred_constructor_failure(scope, call, args, applicability) {
+                        self.set(receiver, classifier_receiver);
+                        return Ty::Error;
+                    }
                     let call_diagnostics = self.diags.diags.len();
                     if let Some(rejected) = self.report_single_mapped_candidate_type_errors(
                         scope,
@@ -8529,6 +8560,15 @@ impl<'a> Checker<'a> {
                         }
                         return Ty::Error;
                     }
+                }
+                // A deferred constructor rung with no later classifier rung owns the failure.
+                if self.settle_deferred_constructor_failure(
+                    scope,
+                    call,
+                    args,
+                    constructor_rung_failure::RungApplicability::NoCandidate,
+                ) {
+                    return Ty::Error;
                 }
                 let receiver_diag_mark = self.diags.diags.len();
                 let mut rt = self.expr(scope, receiver);
@@ -23670,6 +23710,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_expression_intersections: HashMap::default(),
         selected_value_smartcasts: HashMap::default(),
         selected_numeric_conversions: HashMap::default(),
+        deferred_constructor_failures: HashMap::default(),
         selected_function_value_conversions: HashMap::default(),
         narrowed_this_member: HashMap::default(),
         script_receiver_members: HashSet::default(),
@@ -25776,6 +25817,9 @@ struct Checker<'a> {
         HashMap<ExprId, intersection_inference::InferredIntersection>,
     selected_value_smartcasts: HashMap<ExprId, Ty>,
     selected_numeric_conversions: HashMap<ExprId, Ty>,
+    /// A qualified call's inapplicable nested-constructor rung, kept while its later rungs select.
+    deferred_constructor_failures:
+        HashMap<ExprId, constructor_rung_failure::DeferredConstructorFailure>,
     selected_function_value_conversions: HashMap<ExprId, (Ty, Ty)>,
     narrowed_this_member: HashMap<ExprId, TypeName>,
     /// Bare member reads and calls whose implicit receiver is a script's own instance. Once their
@@ -28144,6 +28188,30 @@ impl<'a> Checker<'a> {
         type_args: &[Ty],
         overloads: &[crate::libraries::FunctionInfo],
     ) -> Option<(CallArgMappingFailure, crate::libraries::FunctionInfo)> {
+        let mut failures =
+            self.callable_mapping_failures(scope, call, args, type_args, overloads)?;
+        let same_mapping_shape = failures.first().is_some_and(|(_, first)| {
+            failures
+                .iter()
+                .skip(1)
+                .all(|(_, candidate)| Self::same_argument_mapping_shape(first, candidate))
+        });
+        if !same_mapping_shape {
+            return None;
+        }
+        take_unanimous_mapping_error(&mut failures)
+    }
+
+    /// Each visible candidate's argument-mapping failure, or `None` when a candidate maps the
+    /// source argument list.
+    fn callable_mapping_failures(
+        &self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        args: &[ExprId],
+        type_args: &[Ty],
+        overloads: &[crate::libraries::FunctionInfo],
+    ) -> Option<Vec<(CallArgMappingFailure, crate::libraries::FunctionInfo)>> {
         let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let mut failures = Vec::new();
@@ -28173,16 +28241,7 @@ impl<'a> Checker<'a> {
                 Err(failure) => failures.push((failure, candidate.clone())),
             }
         }
-        let same_mapping_shape = failures.first().is_some_and(|(_, first)| {
-            failures
-                .iter()
-                .skip(1)
-                .all(|(_, candidate)| Self::same_argument_mapping_shape(first, candidate))
-        });
-        if !same_mapping_shape {
-            return None;
-        }
-        take_unanimous_mapping_error(&mut failures)
+        Some(failures)
     }
 
     // Call-site sugar over the ONE resolution entry point [`SymbolResolver::resolve_symbol`]: each
@@ -30915,115 +30974,6 @@ impl<'a> Checker<'a> {
             });
         }
         candidates
-    }
-
-    /// Preserve the concrete part of a declared generic constructor parameter instead of reducing
-    /// "mentions a type variable" to a boolean. `<T>` itself is inference-only, a function containing
-    /// `T` still constrains its outer shape, and a constructed type such as `List<T>` still constrains
-    /// its argument by the `List` head.
-    /// Report WHY no source constructor accepted the call, when every candidate agrees on the reason.
-    ///
-    /// `select_source_constructor` answers only yes/no, so the reason was dropped and the caller fell back
-    /// to the generic "none of the following candidates is applicable:" list — `Point()` on
-    /// `class Point(val x: Int)` said that instead of "no value passed for parameter 'x'.", which is what
-    /// every other callable origin reports for the same mistake. Re-run the argument mapping over the
-    /// candidates to recover it. Returns whether a canonical error was reported.
-    fn report_source_constructor_mapping_error(
-        &mut self,
-        call: ExprId,
-        args: &[ExprId],
-        arguments: &CtorDelegationCall,
-        candidates: &[CtorDelegationCandidate],
-        class_name: &str,
-    ) -> bool {
-        let names: Option<&[Option<String>]> = arguments
-            .names
-            .iter()
-            .any(Option::is_some)
-            .then_some(&arguments.names);
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-        let mut failures = Vec::new();
-        for (index, candidate) in candidates.iter().enumerate() {
-            let params = crate::libraries::ParamList {
-                visibility: Visibility::Public,
-                names: candidate.param_names.clone(),
-                defaults: candidate.defaults.as_slice().into(),
-                types: candidate.target.params().to_vec(),
-                recv_fun: candidate.lambda_receivers.as_slice().into(),
-                vararg: candidate.vararg,
-                annotation: None,
-            };
-            if let Err(failure) = map_param_list_args(args, names, &params, trailing_lambda) {
-                failures.push((failure, index));
-            }
-        }
-        match take_unanimous_mapping_error(&mut failures) {
-            Some((failure, index)) => {
-                if let Some(candidate) = candidates.get(index) {
-                    if self.report_constructor_too_many_arguments(
-                        call,
-                        args,
-                        &failure,
-                        class_name,
-                        ConstructorValueParameters {
-                            types: candidate.target.params(),
-                            names: &candidate.param_names,
-                            defaults: &candidate.defaults,
-                            vararg: candidate.vararg,
-                        },
-                    ) {
-                        return true;
-                    }
-                }
-                self.report_call_arg_mapping_error(call, args, failure);
-                true
-            }
-            None => false,
-        }
-    }
-
-    fn report_constructor_too_many_arguments(
-        &mut self,
-        call: ExprId,
-        args: &[ExprId],
-        failure: &CallArgMappingFailure,
-        class_name: &str,
-        parameters: ConstructorValueParameters<'_>,
-    ) -> bool {
-        let ConstructorValueParameters {
-            types: params,
-            names,
-            defaults,
-            vararg,
-        } = parameters;
-        if !matches!(
-            failure.errors.as_slice(),
-            [CallArgMappingError::TooManyArguments { .. }]
-        ) || names.len() != params.len()
-        {
-            return false;
-        }
-        let rendered = names
-            .iter()
-            .zip(params)
-            .enumerate()
-            .map(|(index, (name, ty))| {
-                let default = if defaults.get(index).copied().unwrap_or(false) {
-                    " = ..."
-                } else {
-                    ""
-                };
-                let vararg = if vararg == Some(index) { "vararg " } else { "" };
-                format!("{vararg}{name}: {}{default}", ty.source_name())
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let span = self.arity_diagnostic_span(call, args, names.len());
-        self.diags.error(
-            span,
-            format!("too many arguments for 'constructor({rendered}): {class_name}'."),
-        );
-        true
     }
 
     fn select_source_constructor(
@@ -46596,6 +46546,13 @@ impl<'a> Checker<'a> {
         } = call_args;
         let selected = match selection {
             None => {
+                if !overloads.is_empty() {
+                    let applicability =
+                        self.callable_rung_applicability(scope, e, args, type_args, &overloads);
+                    if self.settle_deferred_constructor_failure(scope, e, args, applicability) {
+                        return Some(Ty::Error);
+                    }
+                }
                 if let Some((failure, candidate)) =
                     self.unanimous_callable_mapping_failure(scope, e, args, type_args, &overloads)
                 {
