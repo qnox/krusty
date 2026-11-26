@@ -1219,55 +1219,82 @@ tasks.register<JavaExec>("runJvm") {
             .join("model/build/classes/kotlin/main/model/Point$$serializer.class")
             .is_file());
 
-        // A native plugin pass's refusal of the module is krusty's exit status 3 (the recording
-        // proxy stands in for it here; `cli_compiler_plugin_e2e` pins the real one). Only that
-        // task's Kotlin compile reruns, on kotlinc, and the build logs why; the refused krusty
-        // compile is the only one that ran.
+        // A krusty compile that does not compile the module never fails the build: only that
+        // task's Kotlin compile reruns, on kotlinc, and the build logs why with the failure's kind.
+        // The recording proxy stands in for krusty's exit status and report here;
+        // `cli_compiler_plugin_e2e` pins the real refusal status.
         let point = root.join("model/src/main/kotlin/model/Point.kt");
         let source = std::fs::read_to_string(&point).expect("Point.kt");
-        std::fs::write(&point, format!("{source}\n// refused\n")).expect("edit Point.kt");
-        std::fs::write(root.join("refuse-compile"), "3").expect("refusal marker");
-        clear_invocation_log(log);
-        clear_invocation_log(&fixture.probes);
-        let _ = std::fs::remove_dir_all(root.join("model/build/classes/kotlin"));
-        let output = fixture
-            .build()
-            .tasks([":model:compileKotlin"])
-            .run_output()
-            .unwrap_or_else(|error| panic!("a plugin refusal is handed to kotlinc: {error}"));
-        let header =
-            "krusty: task ':model:compileKotlinWithKrusty' is handed to kotlinc: a krusty \
-                      compiler plugin does not implement everything the module uses";
-        let lines = output.lines().collect::<Vec<_>>();
-        let at = lines
-            .iter()
-            .position(|line| *line == header)
-            .unwrap_or_else(|| panic!("{header}\n{output}"));
-        assert_eq!(lines[at + 1], format!("  {REFUSAL}"), "{output}");
-        let text = read_invocation_log(log).expect("invocation log");
-        assert_eq!(invocations(&text).len(), 1, "{text}");
-        assert!(root
-            .join("model/build/classes/kotlin/main/model/Point.class")
-            .is_file());
-
-        // Any other krusty failure stays a build failure: kotlinc does not run.
-        std::fs::write(&point, format!("{source}\n// failed\n")).expect("edit Point.kt");
-        std::fs::write(root.join("refuse-compile"), "1").expect("failure marker");
-        let _ = std::fs::remove_dir_all(root.join("model/build/classes/kotlin"));
-        let failure = fixture
-            .build()
-            .tasks([":model:compileKotlin"])
-            .run_output()
-            .expect_err("a krusty compile error fails the build");
-        let failure = task_failure(&failure.to_string(), ":model:compileKotlinWithKrusty");
-        assert_eq!(failure.len(), 1, "{failure:?}");
-        assert!(
-            failure[0].ends_with("exited with 1 for :model:compileKotlinWithKrusty"),
-            "{failure:?}"
-        );
-        assert!(!root
-            .join("model/build/classes/kotlin/main/model/Point.class")
-            .exists());
+        let refusal = format!("  {REFUSAL}");
+        let internal_error = "error: krusty: internal compiler panic: no slot for Point.x";
+        for (round, (status, report, reason, detail)) in [
+            // Status 3: every error is a construct krusty does not implement yet.
+            (
+                "3",
+                None,
+                "krusty does not implement everything the module uses",
+                refusal.as_str(),
+            ),
+            // Any other compile error, which kotlinc compiles past: an error kotlinc does not report.
+            ("1", None, "krusty reported errors", refusal.as_str()),
+            // A crash, whatever its status.
+            (
+                "101",
+                Some(format!("{internal_error}\n")),
+                "krusty failed with an internal error",
+                "  error: krusty: internal compiler panic: no slot for Point.x",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            std::fs::write(&point, format!("{source}\n// handed off {round}\n"))
+                .expect("edit Point.kt");
+            std::fs::write(root.join("refuse-compile"), status).expect("status marker");
+            let stderr = root.join("refuse-compile.stderr");
+            match &report {
+                Some(report) => std::fs::write(&stderr, report).expect("report marker"),
+                None => {
+                    let _ = std::fs::remove_file(&stderr);
+                }
+            }
+            clear_invocation_log(log);
+            clear_invocation_log(&fixture.probes);
+            let _ = std::fs::remove_dir_all(root.join("model/build/classes/kotlin"));
+            let output = fixture
+                .build()
+                .tasks([":model:compileKotlin"])
+                .run_output()
+                .unwrap_or_else(|error| {
+                    panic!("exit status {status} is handed to kotlinc: {error}")
+                });
+            let header =
+                format!("krusty: task ':model:compileKotlin' is left to kotlinc: {reason}");
+            let lines = output.lines().collect::<Vec<_>>();
+            let at = lines
+                .iter()
+                .position(|line| *line == header)
+                .unwrap_or_else(|| panic!("{header}\n{output}"));
+            let details = lines[at + 1..]
+                .iter()
+                .take_while(|line| line.starts_with("  "))
+                .copied()
+                .collect::<Vec<_>>();
+            assert_eq!(details, [detail], "{output}");
+            assert_eq!(
+                std::fs::read_to_string(root.join("model/build/krusty/compileKotlin/handoff.txt"))
+                    .expect("handoff record"),
+                format!("{reason}\n{}\n", detail.trim_start()),
+                "{output}"
+            );
+            let text = read_invocation_log(log).expect("invocation log");
+            assert_eq!(invocations(&text).len(), 1, "{text}");
+            assert!(root
+                .join("model/build/classes/kotlin/main/model/Point.class")
+                .is_file());
+        }
+        let _ = std::fs::remove_file(root.join("refuse-compile"));
+        let _ = std::fs::remove_file(root.join("refuse-compile.stderr"));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1288,8 +1315,8 @@ tasks.register<JavaExec>("runJvm") {
             .tasks([":compileKotlin"])
             .run_output()
             .unwrap_or_else(|error| panic!("a Compose refusal is handed to kotlinc: {error}"));
-        let header = "krusty: task ':compileKotlinWithKrusty' is handed to kotlinc: a krusty \
-                      compiler plugin does not implement everything the module uses";
+        let header = "krusty: task ':compileKotlin' is left to kotlinc: krusty does not implement \
+                      everything the module uses";
         let lines = output.lines().collect::<Vec<_>>();
         let at = lines
             .iter()
@@ -2457,7 +2484,7 @@ if [ "$1" = refusals ] || [ "$1" = classpath-fingerprint ]; then
   exec 'ACTUAL' "$@"
 fi
 if [ -f 'REFUSALMARKER' ]; then
-  echo "REFUSALTEXT" >&2
+  if [ -f 'REFUSALMARKER.stderr' ]; then cat 'REFUSALMARKER.stderr' >&2; else echo "REFUSALTEXT" >&2; fi
   exit "$(cat 'REFUSALMARKER')"
 fi
 diagnostics="DIAGNOSTICSPATH.$$"
