@@ -292,6 +292,13 @@ kt_int kt_compare_any(KRef a, KRef b) {
         return 0;
     }
     const KType *type = a->header.type;
+    if (kt_is_enum_constant(a)) {
+        if (!kt_is_enum_constant(b)) {
+            kt_fail_cast(b, type);
+            return 0;
+        }
+        return kt_enum_compare_to(a, b);
+    }
     if (type != b->header.type) {
         kt_fail_cast(b, type);
         return 0;

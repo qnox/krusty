@@ -337,6 +337,12 @@ void kt_index_out_of_bounds(kt_int index, kt_int size);
 /* `Enum.toString()`: the constant's name, read from the storage `kotlin.Enum` contributes. */
 KRef kt_enum_to_string(KRef self);
 
+/* The `kotlin.Enum` marker every enum class descriptor has as its `super`, whether an object is one
+   of an enum's constants (or an entry body of one), and `Enum.compareTo` over two of them. */
+extern const KType kt_type_enum;
+kt_boolean kt_is_enum_constant(KRef object);
+kt_int kt_enum_compare_to(KRef self, KRef other);
+
 /* An exhaustive `when` none of whose branches matched after all: Kotlin's
    `NoWhenBranchMatchedException`, raised and returned from. */
 void kt_no_when_branch_matched(void);

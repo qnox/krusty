@@ -1176,12 +1176,23 @@ impl BodyLowering<'_, '_, '_> {
         if carried.len() != args.len() + 1 {
             return None;
         }
-        let declared = self.file.implementors_of(internal);
+        let mut declared = self.file.implementors_of(internal);
+        // The runtime orders the constants of an enum by their ordinals, whose storage it owns, so
+        // an enum is no implementor of its own to dispatch to.
+        if super::super::super::intrinsics::is_comparable_compare_to(signature) {
+            declared.retain(|&class| !self.file.is_enum_class(class));
+        }
         let implementors: Vec<ImplementorArm> = declared
             .iter()
             .filter_map(|&class| self.external_override_slot(class, target, signature.params))
             .collect();
-        if implementors.is_empty() || implementors.len() != declared.len() {
+        if implementors.len() != declared.len() {
+            return None;
+        }
+        // With no class of the file left to tell apart, the runtime's order answers alone.
+        if implementors.is_empty()
+            && !super::super::super::intrinsics::is_comparable_compare_to(signature)
+        {
             return None;
         }
         let runtime = RuntimeEntry {

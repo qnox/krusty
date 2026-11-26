@@ -97,14 +97,14 @@ pub(super) fn declares_its_own_comparable(ir: &IrFile) -> bool {
             )
             .any(super::super::super::intrinsics::is_comparable_supertype)
     };
-    ir.classes
-        .iter()
-        .any(|class| !class.enum_entries.is_empty() || class.is_enum_entry || named(class))
-        || ir.function_overrides.values().flatten().any(|edge| {
-            matches!(
-                edge.overridden,
-                krusty::fir::ResolvedFunctionOverrideTarget::External(_)
-            ) && edge.overridden_semantic_role
-                == Some(krusty::types::SemanticCallRole::KotlinComparableCompareTo)
-        })
+    ir.classes.iter().any(|class| {
+        // The runtime orders an enum's constants by their ordinals, its own storage.
+        !(super::super::super::classes::is_enum(class) || class.is_enum_entry) && named(class)
+    }) || ir.function_overrides.values().flatten().any(|edge| {
+        matches!(
+            edge.overridden,
+            krusty::fir::ResolvedFunctionOverrideTarget::External(_)
+        ) && edge.overridden_semantic_role
+            == Some(krusty::types::SemanticCallRole::KotlinComparableCompareTo)
+    })
 }
