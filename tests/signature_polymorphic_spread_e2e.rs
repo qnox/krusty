@@ -73,3 +73,20 @@ fn spread_in_an_ordinary_vararg_call_is_accepted() {
         vec![],
     );
 }
+
+/// The body of an `inline` function stays in the retained syntax after the bodies before it are
+/// dropped, so the spread span follows the argument through that renumbering.
+#[test]
+fn spread_in_a_retained_inline_body_is_rejected_at_the_star() {
+    assert_diagnostics(
+        "import java.lang.invoke.MethodHandle\n\
+         fun plain(mh: MethodHandle) {\n\
+         \x20   val unused = listOf(1, 2, 3).map { it + 1 }\n\
+         \x20   mh.invokeExact(\"1\")\n\
+         }\n\
+         inline fun retained(mh: MethodHandle) {\n\
+         \x20   mh.invoke(*arrayOf(\"A\"))\n\
+         }\n",
+        vec![diagnostic(7, 15)],
+    );
+}
