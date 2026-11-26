@@ -16,7 +16,13 @@ impl Emitter<'_> {
         let pending = self
             .pending_copied_frames
             .pop_if(|frame| frame.block_depth == self.block_depth);
-        let defaulted = pending.as_ref().is_some_and(|frame| frame.defaulted);
+        let default = pending.as_ref().and_then(|frame| frame.default);
+        if let Some(enclosing) = pending.as_ref().map(|frame| frame.enclosing_peak) {
+            let reached = self.frame.end_peak(enclosing);
+            if default.is_some() {
+                self.frame.reserve_through(reached);
+            }
+        }
         let frame_start = pending
             .and_then(|frame| frame.start)
             .or_else(|| u16::try_from(code.bytes.len()).ok())
@@ -24,9 +30,18 @@ impl Emitter<'_> {
         let slot = self
             .frame
             .enter(FrameKey::InlineFrameMarker(declaration), Ty::Int);
+        if let Some(default) = default {
+            // The stub calls the real body on the default's line: an inline call evaluated inside
+            // the default left no line in effect, so the call writes it again.
+            if code.line_forgotten() {
+                if let Some(line) = self.ir.source_line(default) {
+                    self.mark_expression_line(default, line, code);
+                }
+            }
+        }
         code.push_int(0, self.cw);
         store(Ty::Int, slot, code);
-        if defaulted {
+        if default.is_some() {
             code.forget_line();
         }
         if !self.record_locals {

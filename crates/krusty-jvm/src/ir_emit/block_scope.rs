@@ -4,6 +4,7 @@ use krusty::fx_hash::{HashMap, HashSet};
 
 use super::declaration_types::jvm_is_erased_top;
 use super::frame_map::{FrameKey, Mark, TempRole, TempSlot};
+use super::local_variable_representation::is_defaulted_parameter;
 use super::{ir_ty_to_jvm, CodeBuilder, Emitter, Label, Ty};
 use krusty::ir::{IrDebugLocalProvenance, IrExpr, IrInlineLocalRole};
 
@@ -239,6 +240,7 @@ impl Emitter<'_> {
                 self.enter_copied_function_frame(
                     copied_caller.is_some().then_some(block),
                     statement,
+                    &stmts[index..],
                     &mut copied_frame_open,
                     code,
                 );
@@ -1018,6 +1020,7 @@ impl Emitter<'_> {
         &mut self,
         copied_function: Option<u32>,
         statement: u32,
+        following: &[u32],
         frame_open: &mut bool,
         code: &mut CodeBuilder,
     ) {
@@ -1054,16 +1057,15 @@ impl Emitter<'_> {
             self.mark_expression_line(block, line, code);
             code.nop();
         }
+        let default = is_defaulted_parameter(self.ir, statement).then_some(statement);
+        if default.is_some() {
+            self.reserve_defaulted_parameter_slots(following);
+        }
         self.pending_copied_frames.push(PendingCopiedFrame {
             block_depth: self.block_depth,
             start: u16::try_from(code.bytes.len()).ok(),
-            defaulted: matches!(
-                self.ir.debug_local_provenance(statement),
-                Some(IrDebugLocalProvenance::InlineValue {
-                    role: IrInlineLocalRole::DefaultedValue,
-                    ..
-                })
-            ),
+            default,
+            enclosing_peak: self.frame.begin_peak(),
         });
     }
 
@@ -1439,6 +1441,7 @@ impl Emitter<'_> {
             self.enter_copied_function_frame(
                 copied_function,
                 statement,
+                &stmts[index..],
                 &mut copied_frame_open,
                 code,
             );
@@ -2288,8 +2291,11 @@ pub(super) struct PendingCopiedFrame {
     /// Where the frame opened, once an omitted parameter's default has begun it ahead of the
     /// marker; the supplied operands' debug ranges start there.
     pub(super) start: Option<u16>,
-    /// Whether the frame opened at an omitted parameter's default. kotlinc inlines the callee's
-    /// real body inside its `$default` stub, so the line mapper has forgotten the default's line
-    /// when the body begins and writes it again.
-    pub(super) defaulted: bool,
+    /// The first omitted parameter's declaration, when the frame opened at its default. kotlinc
+    /// inlines the callee's real body inside its `$default` stub, so the line mapper has forgotten
+    /// the default's line when the body begins and writes it again.
+    pub(super) default: Option<u32>,
+    /// The frame's measurement of how far the callee's defaults reached, which the real body's
+    /// marker lies above: the stub's locals keep their slots to its end.
+    pub(super) enclosing_peak: u16,
 }

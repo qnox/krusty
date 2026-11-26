@@ -1059,7 +1059,16 @@ impl Emitter<'_> {
             (true, Some(line)) => Some(line.min(u32::from(u16::MAX)) as u16),
             _ => code.current_line(),
         };
-        let call_line = caller_line.unwrap_or(1);
+        // A call inside code copied from a same-module inline function is mapped under the
+        // outermost expansion's call, as kotlinc's inliner remaps the nested call site when the
+        // enclosing body is inlined; the mark above is only that copy's own mapped line.
+        let call_line = self
+            .ir
+            .inline_copy_provenance(call_expression)
+            .and_then(|frames| frames.iter().rev().find_map(|frame| frame.call_line))
+            .and_then(|line| u16::try_from(line).ok())
+            .or(caller_line)
+            .unwrap_or(1);
         let claimable = self.claimable_lines();
         let bodies = self.bodies;
         // The body is numbered from the method's scopes so far, its own scope at the call's line
@@ -1165,6 +1174,7 @@ impl Emitter<'_> {
         for lease in leases {
             self.release_temporary(lease);
         }
+        self.frame.note_reach(code.max_locals);
         self.frame.rewind_to(argument_frame);
         Ok(())
     }

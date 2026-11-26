@@ -8,7 +8,11 @@ use super::common;
 const LIB: &str = "package lib\n\
                    \n\
                    inline fun inlineFoo1(a: Int, vararg b: String, c: Int = 0) = 0\n\
-                   inline fun Int.inlineFoo2(vararg b: String, c: Int = 0) = 0\n";
+                   inline fun Int.inlineFoo2(vararg b: String, c: Int = 0) = 0\n\
+                   inline fun nested() = 7\n\
+                   inline fun withNestedDefault(a: Int = nested()) = a + 1\n\
+                   inline fun readsSuppliedOperand(a: Int, b: Int = nested() + a) = a + b\n\
+                   inline fun twoNestedDefaults(a: Int = nested(), b: Int = nested() + a) = a + b\n";
 
 fn assert_matches_kotlinc(main: &str) {
     let classes = common::classes_against_kotlinc_module(&[("lib.kt", LIB), ("main.kt", main)]);
@@ -49,6 +53,48 @@ fn an_inline_adapted_reference_that_fills_a_default_matches_kotlincs_lines() {
          \x20   defaultAndVarargConversion(::inlineFoo1)\n\
          \x20   defaultAndVarargConversion(Int::inlineFoo2)\n\
          \x20   defaultVarargAndReceiverConversion(Int::inlineFoo2)\n\
+         }\n",
+    );
+}
+
+#[test]
+fn an_inline_call_whose_omitted_default_is_itself_an_inline_call_matches_kotlincs_classes() {
+    assert_matches_kotlinc(
+        "package main\n\
+         \n\
+         import lib.withNestedDefault\n\
+         \n\
+         fun t(): Int {\n\
+         \x20   val x = withNestedDefault()\n\
+         \x20   return x\n\
+         }\n",
+    );
+}
+
+#[test]
+fn an_inline_call_with_two_omitted_nested_inline_defaults_matches_kotlincs_classes() {
+    assert_matches_kotlinc(
+        "package main\n\
+         \n\
+         import lib.twoNestedDefaults\n\
+         \n\
+         fun t(): Int {\n\
+         \x20   val x = twoNestedDefaults()\n\
+         \x20   return x\n\
+         }\n",
+    );
+}
+
+#[test]
+fn a_nested_inline_default_reading_a_supplied_operand_matches_kotlincs_classes() {
+    assert_matches_kotlinc(
+        "package main\n\
+         \n\
+         import lib.readsSuppliedOperand\n\
+         \n\
+         fun t(): Int {\n\
+         \x20   val x = readsSuppliedOperand(1)\n\
+         \x20   return x\n\
          }\n",
     );
 }
