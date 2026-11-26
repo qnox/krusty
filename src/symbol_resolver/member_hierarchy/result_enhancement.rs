@@ -18,27 +18,33 @@ use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind};
 
 /// The head nullability qualifier one overridden declaration contributes to an override's result
-/// (`AbstractSignatureParts.nullabilityQualifier`): a nullable result is `NULLABLE`, a flexible one
-/// contributes none, and any other result is `NOT_NULL`.
+/// or parameter (`AbstractSignatureParts.nullabilityQualifier`): a nullable type is `NULLABLE`, a
+/// flexible one contributes none, and any other type is `NOT_NULL`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NullabilityQualifier {
+pub(super) enum NullabilityQualifier {
     NotNull,
     Nullable,
 }
 
-fn result_qualifier(declaration: &FunctionInfo) -> Option<NullabilityQualifier> {
-    match declaration.ret.apply(declaration.callable.ret).kind() {
+/// The head qualifier of an overridden declaration's type `ty` as the receiver sees it;
+/// `declared_flexible` says the declaration itself publishes that type as Java's flexible one.
+pub(super) fn head_qualifier(ty: Ty, declared_flexible: bool) -> Option<NullabilityQualifier> {
+    match ty.kind() {
         TyKind::PlatformNullable(_) | TyKind::Error | TyKind::Pending => None,
         TyKind::Nullable(_) => Some(NullabilityQualifier::Nullable),
-        _ if matches!(
-            declaration.call_sig.result_enhancement,
-            ResultEnhancement::Flexible(_) | ResultEnhancement::MappedFlexible(_)
-        ) =>
-        {
-            None
-        }
+        _ if declared_flexible => None,
         _ => Some(NullabilityQualifier::NotNull),
     }
+}
+
+fn result_qualifier(declaration: &FunctionInfo) -> Option<NullabilityQualifier> {
+    head_qualifier(
+        declaration.ret.apply(declaration.callable.ret),
+        matches!(
+            declaration.call_sig.result_enhancement,
+            ResultEnhancement::Flexible(_) | ResultEnhancement::MappedFlexible(_)
+        ),
+    )
 }
 
 /// Record the rigid result a flexible declared result (`T!`) is enhanced to, specialized for the
