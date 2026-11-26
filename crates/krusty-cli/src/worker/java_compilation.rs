@@ -41,9 +41,10 @@ impl JavaCompilation {
         options.push("UTF-8".to_string());
         if let Some(target) = &self.jvm_target {
             match target_release(target) {
+                // javac's `--release` takes the feature number only: `1.8` is refused, `8` is not.
                 Some(release) if release != javac_release => {
                     options.push("--release".to_string());
-                    options.push(target.clone());
+                    options.push(release.to_string());
                 }
                 _ => {
                     options.extend(["-source".to_string(), target.clone()]);
@@ -278,14 +279,7 @@ mod tests {
         );
         assert_eq!(
             compilation(Some("1.8")).options(25),
-            [
-                "-g",
-                "-deprecation",
-                "-encoding",
-                "UTF-8",
-                "--release",
-                "1.8"
-            ]
+            ["-g", "-deprecation", "-encoding", "UTF-8", "--release", "8"]
         );
         assert_eq!(
             compilation(None).options(25),
