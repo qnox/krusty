@@ -96,15 +96,11 @@ fn preview_shape(bytes: &[u8]) -> (u16, Vec<krusty::jvm::classreader::InnerClass
     (minor_version(bytes), info.inner_classes)
 }
 
-/// The newest `-jvm-target` the reference kotlinc accepts, and the one before it. kotlinc 2.5.0-RC
-/// is the first to know target 28, where the identity flag begins; earlier ones stop at 26, so
-/// there the same comparison covers the newest target without it.
+/// The newest `-jvm-target` the reference kotlinc accepts, and the one before it. The supported
+/// releases stop at 26, below target 28 where the identity flag begins.
 fn newest_targets() -> (&'static str, &'static str) {
     use krusty::kotlin_version::KotlinVersion;
-    common::for_reference(&[
-        (KotlinVersion::V2_4_0, ("26", "25")),
-        (KotlinVersion::V2_5_0_RC, ("28", "27")),
-    ])
+    common::for_reference(&[(KotlinVersion::V2_4_0, ("26", "25"))])
 }
 
 fn assert_matches_kotlinc(arguments: &[&str], preview: bool) {
