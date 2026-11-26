@@ -448,6 +448,22 @@ releases (`IrFileImpl` takes its module as a constructor argument from 2.4.20), 
 source lives under `adapter/compat/<first release>/`, and `adapter.rs` lists the exact releases each
 set builds for; a Kotlin version no set lists has no adapter.
 
+### The session's declarations
+
+An Analysis API host reads the session as an `AnalysisSession` (`krusty_plugin_api::analysis`, plain
+data like the module's IR): every source file of the session in compilation order, each with its
+path and its named declarations in source order. A declaration carries its kind (classifier kinds,
+enum entry, function, property, type alias), its simple name, the range of its name, the range of
+the whole declaration, and the index of the declaration it is declared in, which always precedes it.
+Local and anonymous declarations are not part of a file's structure.
+
+Offsets are kotlinc's, as in the module's IR: UTF-16 code units into the text kotlinc reads, where
+`\r\n` and a lone `\r` are each one `\n`. A host maps a `PsiElement` offset to a declaration with
+`AnalysisFile::declaration_at`, the innermost declaration whose range contains it, and converts
+nothing. krusty builds the session from its parsed files' declaration outline
+(`analysis_round::analysis_round`), the same outline that serves the language server and the KSP
+round, so positions are never recovered by re-reading the source.
+
 ## Drop-in extension management — two layers, like kotlinc
 
 Extensions have **two registration layers**, mirroring kotlinc exactly:
@@ -608,7 +624,6 @@ Landed on `master`, each round reviewed (cavecrew-reviewer), TDD:
 | Reliable diagnostics (native-sub / hosted / **unsupported=error**) | done | `plugins/registry.rs` |
 | Serialization native plugin: `$serializer`+members, `serializer()`, per-field `childSerializers`, ABI-from-classpath | done (decl/shape) | `plugins/serialization.rs` |
 | Annotation capture from source → plugin activates end-to-end | done | `parser.rs`, `plugins/mod.rs`, `tests/plugins_e2e.rs` |
-| Analysis API round view: each source file's declarations as kotlinc-offset ranges (kind, name, name range, whole range, container) | done | `analysis_round.rs`, `crates/krusty-plugin-api/src/analysis.rs` |
 | KSP round view over the resolved declaration headers | done (classifiers, annotations, modifiers, type parameters, supertypes; functions, properties, constructors, type aliases and the language's data and enum members, with their resolved types, in KSP's order; annotation arguments and defaults, use-site targets, parameter annotations, property accessors) | `ksp_round.rs`, `ksp_round/` |
 | KSP host: KSP's API in a JVM over krusty's round view, multi-round, refusal of unserved members; classpath classes asked for by name during a round, from the library provider's declaration headers; Kotlin/JVM name mapping by kotlinc's class map; JVM signatures and names of source declarations | in progress | `crates/krusty-plugin-host/src/ksp/`, `crates/krusty-plugin-host/ksp-adapter/` |
 | Real annotation-processor-**from-jar** run (codegen-host mechanism) | done (APT) | `tests/codegen_host_e2e.rs` |
