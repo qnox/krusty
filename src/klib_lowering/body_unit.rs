@@ -1594,6 +1594,11 @@ impl<'s> CallLinker for Linker<'_, 's> {
         callee: &KlibPublicIdSignature,
     ) -> Result<LinkedCallableReference, KlibBodyDeclineReason> {
         let identity = self.callee_identity(callee)?;
+        // A private member of a class this unit lowers has no provider declaration; the unit
+        // emits it with the class, and the reference names that emitted member.
+        if let Some(call) = self.private_class_member(ir, &identity)? {
+            return private_members::private_member_reference(self.sources.bodies, &identity, call);
+        }
         let (declaration, callable) = self.sources.callees.reference_declaration(&identity)?;
         let call = self.link(ir, callee)?;
         Ok(LinkedCallableReference::new(declaration, callable, call))

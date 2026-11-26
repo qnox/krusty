@@ -88,10 +88,23 @@ pub(super) struct LinkedCallee {
 }
 
 pub(super) struct LinkedCallableReference {
-    pub(super) declaration: crate::fir::ExternalCallableId,
+    pub(super) target: LinkedReferenceTarget,
     pub(super) kind: crate::libraries::ExternalCallableKind,
     pub(super) extension_receiver_parameter: Option<usize>,
     pub(super) call: LinkedCallee,
+}
+
+/// The declaration a callable reference names.
+pub(super) enum LinkedReferenceTarget {
+    /// A dependency declaration its provider records.
+    External(crate::fir::ExternalCallableId),
+    /// A private member of a class the unit lowers, which no provider records: the unit emits it
+    /// as `function`, a member of `owner` named `name`.
+    PrivateMember {
+        owner: TypeName,
+        name: Box<str>,
+        function: FunId,
+    },
 }
 
 impl LinkedCallableReference {
@@ -101,7 +114,7 @@ impl LinkedCallableReference {
         call: LinkedCallee,
     ) -> Self {
         Self {
-            declaration,
+            target: LinkedReferenceTarget::External(declaration),
             kind: callable.kind(),
             extension_receiver_parameter: callable.parameter_identities().iter().position(|role| {
                 matches!(
