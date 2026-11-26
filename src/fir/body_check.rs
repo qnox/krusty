@@ -596,6 +596,10 @@ struct BodyFirChecker<'a> {
     /// Whether an anonymous-super argument is being evaluated in its enclosing scope.
     hoist_anonymous_super_argument: bool,
     construction_site_receiver_frames: Vec<crate::ast::DeclId>,
+    /// The `in` expression whose range builder is being constructed. Its published type-argument
+    /// record belongs to the `contains` call that shares the expression key, so the range call
+    /// must not read it.
+    range_builder_expression: Option<ExprId>,
 }
 
 impl BodyFirChecker<'_> {
@@ -975,6 +979,7 @@ impl BodyFirChecker<'_> {
             constructor_prefix_capture_access: false,
             hoist_anonymous_super_argument: false,
             construction_site_receiver_frames: Vec::new(),
+            range_builder_expression: None,
         }
     }
 
