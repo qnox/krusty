@@ -706,7 +706,6 @@ inference/integerLiteralTypeInLamdaReturnType.kt
 inference/kt39824.kt
 inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
-inference/pcla/builderCallAsReturnTypeInLocalClass.kt
 inference/pcla/callableReferenceAndCoercionToUnit.kt
 inference/pcla/callableReferencesProperCompletion.kt
 inference/pcla/issues/kt42139.kt
