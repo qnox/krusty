@@ -2844,6 +2844,16 @@ impl IrFile {
             .insert(expression, (owner, underlying));
     }
 
+    /// The value class a construction expression erased to its underlying value, which is the
+    /// class the expression's unboxed result belongs to whatever type its `constructor-impl`
+    /// function declares (`Level(val id: Id)` constructs a `Level` through a function returning
+    /// `Id`).
+    pub fn erased_value_construction(&self, expression: ExprId) -> Option<TypeName> {
+        self.erased_value_constructions
+            .get(&expression)
+            .map(|(owner, _)| *owner)
+    }
+
     /// The in-IR (same-file) `ClassId` for `internal`, or `None` when the name is an external/other-module
     /// class not compiled in this file. The bridge from the unified [`IrExpr::New`]'s owner name back to a
     /// `ClassId` for consumers that need the in-IR class (emit, function/property-reference detection).

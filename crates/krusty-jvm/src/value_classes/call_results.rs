@@ -27,6 +27,7 @@ pub(super) struct CallTypes<'a> {
     property_declarations: &'a HashMap<u32, Ty>,
     statics: &'a [krusty::ir::IrStatic],
     joins: &'a HashMap<u32, Ty>,
+    constructions: &'a krusty::ir::IrFile,
 }
 
 impl<'a> CallTypes<'a> {
@@ -37,7 +38,14 @@ impl<'a> CallTypes<'a> {
             property_declarations: &ir.property_declaration_types,
             statics: &ir.statics,
             joins: &ir.whens.exhaustive,
+            constructions: ir,
         }
+    }
+
+    /// The value class the construction at `id` produces, whose unboxed result is that class's
+    /// carrier even when the constructor function it calls declares the carrier's own type.
+    pub(super) fn constructed_value_class(&self, id: u32) -> Option<TypeName> {
+        self.constructions.erased_value_construction(id)
     }
 
     /// The realized JVM merge type of the exhaustive `when` at `id`, if it is one.
@@ -177,6 +185,7 @@ mod tests {
             property_declarations: &declared,
             statics: &[],
             joins: &declared,
+            constructions: &logical,
         };
         let absent = krusty::ir::IrFile::default();
         assert!(matches!(

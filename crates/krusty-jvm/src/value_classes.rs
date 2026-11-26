@@ -4066,6 +4066,12 @@ fn repr(context: &ReprCtx<'_>, id: ExprId) -> Repr {
             };
             value_class_name(*owner, under).map_or(Repr::NotVc, repr)
         }
+        // A construction that omitted defaulted arguments is a call of the class's own
+        // `constructor-impl`, which declares the carrier's type: a carrier that is itself a value
+        // class (`Level(val id: Id = ..)`) must not make the result an `Id`.
+        IrExpr::Call { .. } if types.constructed_value_class(id).is_some() => types
+            .constructed_value_class(id)
+            .map_or(Repr::NotVc, Repr::Unboxed),
         // Any already-selected call whose declaration returns a value class yields that declaration's
         // physical representation. This includes index-resolved `MethodCall`s (interface/class members),
         // not only `Call::source_function`; omitting them made `source.get()!!` look non-value-class and
