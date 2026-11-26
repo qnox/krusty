@@ -192,8 +192,11 @@ impl ModuleSlotPlan {
                     callable,
                     parameters,
                     result,
-                    ..
-                } => vec![(PlanKey::function(*callable), (parameters.clone(), *result))],
+                    suspend,
+                } => vec![(
+                    PlanKey::function(*callable),
+                    carried(parameters, *result, *suspend),
+                )],
                 ModuleMember::Property {
                     property,
                     accessor_parameters,
@@ -449,14 +452,17 @@ impl Planner<'_> {
                     callable,
                     parameters,
                     result,
-                    ..
-                } => self.function(
-                    class,
-                    *callable,
-                    (parameters, *result),
-                    &mut entries,
-                    &mut slots,
-                )?,
+                    suspend,
+                } => {
+                    let (parameters, result) = carried(parameters, *result, *suspend);
+                    self.function(
+                        class,
+                        *callable,
+                        (&parameters, result),
+                        &mut entries,
+                        &mut slots,
+                    )?
+                }
                 ModuleMember::Property {
                     property,
                     getter,
