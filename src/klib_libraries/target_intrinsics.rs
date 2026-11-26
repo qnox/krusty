@@ -1119,6 +1119,30 @@ fn adjacent_floating(
     })
 }
 
+/// The external `countLeadingZeroBits(value: Int): Int` and `(value: Long): Int` in `kotlin` that
+/// the public `Int.countLeadingZeroBits()` and `Long.countLeadingZeroBits()` extensions call.
+fn count_leading_zero_bits(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+    operand: Ty,
+) -> Option<KlibIntrinsicShape> {
+    let classifier = match operand {
+        Ty::Int => "kotlin/Int",
+        Ty::Long => "kotlin/Long",
+        _ => return None,
+    };
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin"))
+        && declaration.receiver.is_none()
+        && exact_signature(declaration, classifier, "kotlin/Int"))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::CountLeadingZeroBits { operand },
+        kind: ExternalCallableKind::TopLevel,
+        receiver: None,
+        params: vec![operand],
+        ret: Ty::Int,
+    })
+}
+
 fn native(
     placement: crate::libraries::CallablePlacement,
     declaration: &KotlinFunction,
@@ -1176,6 +1200,12 @@ fn native(
                     Ty::Double,
                     AdjacentDirection::Down,
                 )
+            }
+            "Kotlin_Int_countLeadingZeroBits" => {
+                return count_leading_zero_bits(placement, declaration, Ty::Int)
+            }
+            "Kotlin_Long_countLeadingZeroBits" => {
+                return count_leading_zero_bits(placement, declaration, Ty::Long)
             }
             "Kotlin_Char_isHighSurrogate" => {
                 return char_is_surrogate(placement, declaration, SurrogateHalf::High)
@@ -2232,6 +2262,54 @@ mod tests {
                 )
                 .is_none(),
                 "the result must be the receiver's own type"
+            );
+        }
+        let counter = |entry: &str, parameter: &str, result: &str| {
+            let mut function = declaration(
+                "countLeadingZeroBits",
+                &[parameter],
+                result,
+                gc_unsafe(entry),
+            );
+            function.receiver = None;
+            function
+        };
+        for (entry, parameter, operand) in [
+            ("Kotlin_Int_countLeadingZeroBits", "kotlin/Int", Ty::Int),
+            ("Kotlin_Long_countLeadingZeroBits", "kotlin/Long", Ty::Long),
+        ] {
+            let exact = counter(entry, parameter, "kotlin/Int");
+            assert_eq!(
+                authenticate(native, package("kotlin"), &exact),
+                Some(KlibIntrinsicShape {
+                    operation: CompilerIntrinsic::CountLeadingZeroBits { operand },
+                    kind: ExternalCallableKind::TopLevel,
+                    receiver: None,
+                    params: vec![operand],
+                    ret: Ty::Int,
+                })
+            );
+            assert!(
+                authenticate(native, package("spoof"), &exact).is_none(),
+                "another package's declaration is not the stdlib's"
+            );
+            assert!(
+                authenticate(
+                    native,
+                    package("kotlin"),
+                    &counter(entry, "kotlin/Short", "kotlin/Int")
+                )
+                .is_none(),
+                "the parameter must be the entry's own width"
+            );
+            assert!(
+                authenticate(
+                    native,
+                    package("kotlin"),
+                    &counter(entry, parameter, "kotlin/Long")
+                )
+                .is_none(),
+                "the count is an `Int`"
             );
         }
     }

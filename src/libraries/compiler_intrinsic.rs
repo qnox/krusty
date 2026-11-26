@@ -129,6 +129,11 @@ pub enum CompilerIntrinsic {
         operand: crate::types::Ty,
         direction: AdjacentDirection,
     },
+    /// Native's exact `GCUnsafeCall` `countLeadingZeroBits` declaration of `Int` or `Long`: the
+    /// zero bits above the highest set one, the whole width for zero.
+    CountLeadingZeroBits {
+        operand: crate::types::Ty,
+    },
     /// Native's exact `GCUnsafeCall` `Char` surrogate predicate declaration. A target answers it
     /// with a range test of the receiver's code unit.
     CharIsSurrogate(SurrogateHalf),
