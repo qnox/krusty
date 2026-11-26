@@ -1886,6 +1886,17 @@ fn wasm_runtime_list_iterator_is_a_list_iterator() {
     );
 }
 
+// PLATFORM-SPECIFIC: Native does not yet lower `StringBuilder.reverse`; that gap is reported, not
+// excused, and the same program moves to `box_regressions/` with the Native member so every lane
+// covers it. The Wasm runtime lays the builder out itself, so its units are reversed there.
+#[test]
+fn wasm_string_builder_reverse_keeps_surrogate_pairs_whole() {
+    expect_wasm_box(
+        include_str!("wasm_regressions/StringBuilderReverse.kt"),
+        "wasmStringBuilderReverse",
+    );
+}
+
 #[path = "wasm_unsigned_decimal.rs"]
 mod unsigned_decimal;
 
