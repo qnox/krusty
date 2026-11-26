@@ -173,6 +173,7 @@ pub(super) fn declarations(
             })
             .map(|root| root.identity().clone())
             .collect(),
+        reemitted: HashSet::default(),
         capabilities,
     };
     // An object the emitted source reads as a value is materialized as one a body reads.
@@ -186,7 +187,12 @@ pub(super) fn declarations(
         )?;
     }
     while let Some((identity, member_class)) = state.pending.pop_front() {
-        if !visited.insert(identity.clone()) {
+        // A member walked as a leaf before dispatch reached it is walked once more as an emitted
+        // member, whose body's callees the unit now needs; its declaration is already frozen.
+        let first_visit = visited.insert(identity.clone());
+        if !first_visit
+            && !(state.dispatched.contains(&identity) && state.reemitted.insert(identity.clone()))
+        {
             continue;
         }
         // A private member of a materialized class has no provider declaration; the member calling it
@@ -418,7 +424,7 @@ pub(super) fn declarations(
         // source call. A target which realizes no other declaration outside its emitted bodies
         // has no other such leaf: body lowering declines a call of one, as it declines any
         // unmodelled form.
-        let emitted_default = state.emitted_defaults.contains(&identity);
+        let emitted_default = state.emitted_defaults.contains(&identity) || dispatched_member;
         let outside_edge = if member
             || (!emitted_default && is_outside_units(platform, bodies, &facts, selected)?)
         {
@@ -501,7 +507,9 @@ pub(super) fn declarations(
                     .map(|callee| (callee, member_class.clone())),
             );
         }
-        state.declarations.push((declaration_target, realization));
+        if first_visit {
+            state.declarations.push((declaration_target, realization));
+        }
     }
     Ok(FrozenClosure {
         declarations: state.declarations,
@@ -538,6 +546,8 @@ struct ClosureState<'c, 'u> {
     /// Interface default bodies a class of the file inherits, emitted for its dispatch record
     /// though no support unit materializes the interface.
     emitted_defaults: HashSet<KlibDependencyCallable>,
+    /// The members walked again as emitted members after they were first walked as leaves.
+    reemitted: HashSet<KlibDependencyCallable>,
     capabilities: &'c super::DependencyLeafCapabilities<'u>,
 }
 

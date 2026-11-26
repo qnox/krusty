@@ -806,6 +806,9 @@ fn initialization_callees(
         // A materialized superclass is initialized first, through its own constructor.
         .chain(superclass)
         .chain(entries_factory(plan, callees).cloned())
+        // The inherited bodies the class carries are reached with it, so the checker freezes the
+        // edges of what they call.
+        .chain(inherited_dispatched_bodies(plan, bodies).unwrap_or_default())
         .collect()
 }
 
@@ -1001,24 +1004,37 @@ fn dispatched_members(
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    // A member the class inherits implements the interface declarations it reaches only through
-    // its supertypes (`Itr.remove` for `MutableIterator.remove` under a subclass), so dispatch
-    // through the interface runs the inherited body, which is emitted with the class.
-    for (body, implemented) in inherited_implementations(plan, bodies)? {
-        // A body a superclass declares, or an interface default that implements only itself for
-        // the class: the class carries it however dispatch reaches it. An interface default
-        // another declaration overrides is inherited by its own mechanism.
-        let from_class = matches!(
-            bodies.member_owner(&body),
-            crate::klib_libraries::LocatedMember::One { class, .. }
-                if class_kind(class.base.flags) == TypeKind::Class
-        );
-        let implements_itself = implemented.as_slice() == std::slice::from_ref(&body);
-        if (from_class || implements_itself) && !members.contains(&body) {
+    for body in inherited_dispatched_bodies(plan, bodies)? {
+        if !members.contains(&body) {
             members.push(body);
         }
     }
     Ok(members)
+}
+
+/// The bodies an admitted class inherits that dispatch reaches and the class carries.
+///
+/// A member the class inherits implements the interface declarations it reaches only through its
+/// supertypes (`Itr.remove` for `MutableIterator.remove` under a subclass), so dispatch through
+/// the interface runs the inherited body, which is emitted with the class. That is a body a
+/// superclass declares, or an interface default that implements only itself for the class; an
+/// interface default another declaration overrides is inherited by its own mechanism.
+fn inherited_dispatched_bodies(
+    plan: &ClassInitialization<'_, '_>,
+    bodies: &KlibDeclarationBodies,
+) -> Result<Vec<KlibDependencyCallable>, KlibBodyDeclineReason> {
+    Ok(inherited_implementations(plan, bodies)?
+        .into_iter()
+        .filter(|(body, implemented)| {
+            let from_class = matches!(
+                bodies.member_owner(body),
+                crate::klib_libraries::LocatedMember::One { class, .. }
+                    if class_kind(class.base.flags) == TypeKind::Class
+            );
+            from_class || implemented.as_slice() == std::slice::from_ref(body)
+        })
+        .map(|(body, _)| body)
+        .collect())
 }
 
 /// The bodies an admitted class inherits that implement interface members it reaches only through
