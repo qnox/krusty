@@ -103,10 +103,13 @@ impl KlibIntrinsicFacts {
         // `GCUnsafeCall` predicates are exact Native realizations, not operations shared by KLIB
         // body lowering. Keep them on the published callable fact so Native consumes them at the
         // ordinary external-call boundary. Reinterpretation and scalar instructions are the common
-        // operations used while closing a serialized wrapper body.
+        // operations used while closing a serialized wrapper body, and so are the assertion
+        // switches the stdlib's bodies read.
         if !matches!(
             shape.operation,
-            CompilerIntrinsic::ReinterpretBits | CompilerIntrinsic::ScalarInstruction(_)
+            CompilerIntrinsic::ReinterpretBits
+                | CompilerIntrinsic::ScalarInstruction(_)
+                | CompilerIntrinsic::AssertionSwitch
         ) {
             return;
         }
@@ -596,6 +599,41 @@ fn wasm_scalar_instruction(operation: &str) -> Option<(ScalarInstruction, Scalar
         "F64_PROMOTE_F32" => (Promote, Float32),
         _ => return None,
     })
+}
+
+/// Whether the serialized function `function` is bound to a Kotlin/Native runtime entry by its
+/// `@GCUnsafeCall("callee")`. It fills the same [`super::direct_c_calls::RuntimeEntryShape`] the
+/// metadata view does, so both views share one definition of the binding.
+pub(crate) fn is_runtime_entry_ir(
+    arena: &KlibIrArena,
+    function: &crate::metadata::klib_ir::tree::KlibIrFunction,
+) -> bool {
+    use crate::metadata::function_flags::{IS_EXPECT, IS_EXTERNAL, IS_INLINE, IS_SUSPEND};
+    let flags = function.base.flags;
+    let parameters = &function.regular_parameters;
+    super::direct_c_calls::RuntimeEntryShape {
+        external: flags & IS_EXTERNAL != 0,
+        suspend: flags & IS_SUSPEND != 0,
+        inline: flags & IS_INLINE != 0,
+        expect: flags & IS_EXPECT != 0,
+        vararg: parameters
+            .iter()
+            .any(|parameter| parameter.vararg_element_type.is_some()),
+        context_parameters: !function.context_parameters.is_empty(),
+        type_parameters: !function.type_parameters.is_empty(),
+        defaulted_parameters: parameters
+            .iter()
+            .any(|parameter| parameter.default_value.is_some()),
+        callee: ir_string_annotation(
+            arena,
+            &function.base.annotations,
+            &["kotlin", "native", "internal"],
+            &["GCUnsafeCall", "<init>"],
+        ),
+    }
+    .callee()
+    .is_some()
+        && function.body.is_none()
 }
 
 fn ir_string_annotation<'a>(
@@ -1147,6 +1185,9 @@ fn native(
     placement: crate::libraries::CallablePlacement,
     declaration: &KotlinFunction,
 ) -> Option<KlibIntrinsicShape> {
+    if let Some(shape) = assertion_switch(placement, declaration) {
+        return Some(shape);
+    }
     // Native's typed intrinsics are declarations without a Kotlin implementation. Wasm's
     // instruction wrappers deliberately have an `implementedAsIntrinsic` body instead, so this
     // representation check belongs to Native rather than the shared authentication gate.
@@ -1436,6 +1477,36 @@ fn native(
         receiver: shape.1,
         params: shape.2,
         ret: shape.3,
+    })
+}
+
+/// The two assertion switches of the Native stdlib's `kotlin` package: `internal fun
+/// isAssertionThrowingErrorEnabled(): Boolean` and `isAssertionArgumentEvaluationEnabled()`. Their
+/// bodies throw `NotImplementedError("Implemented as intrinsic")`; the compiler answers them for
+/// the build, so a call never enters the body.
+fn assertion_switch(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    if placement != crate::libraries::CallablePlacement::Package(type_name("kotlin"))
+        || !matches!(
+            declaration.name.as_str(),
+            "isAssertionThrowingErrorEnabled" | "isAssertionArgumentEvaluationEnabled"
+        )
+        || declaration.visibility != crate::types::Visibility::Internal
+        || declaration.is_external
+        || declaration.receiver.is_some()
+        || !declaration.params.is_empty()
+        || !exact_type(&declaration.ret, "kotlin/Boolean")
+    {
+        return None;
+    }
+    Some(KlibIntrinsicShape {
+        operation: CompilerIntrinsic::AssertionSwitch,
+        kind: ExternalCallableKind::TopLevel,
+        receiver: None,
+        params: Vec::new(),
+        ret: Ty::Boolean,
     })
 }
 
@@ -2173,6 +2244,62 @@ mod tests {
             &exact,
         )
         .is_none());
+    }
+
+    #[test]
+    fn native_assertion_switches_require_the_exact_internal_declaration() {
+        let native = Some(TargetIntrinsicPlatform::Native);
+        let kotlin = crate::libraries::CallablePlacement::Package(type_name("kotlin"));
+        let switch = |name: &str| {
+            let mut declaration = declaration(
+                name,
+                &[],
+                "kotlin/Boolean",
+                AnnotationApplication {
+                    identity: type_name("kotlin/PublishedApi"),
+                    arguments: Vec::new(),
+                },
+            );
+            declaration.visibility = Visibility::Internal;
+            declaration.is_external = false;
+            declaration
+        };
+        for name in [
+            "isAssertionThrowingErrorEnabled",
+            "isAssertionArgumentEvaluationEnabled",
+        ] {
+            assert_eq!(
+                authenticate(native, kotlin, &switch(name)),
+                Some(KlibIntrinsicShape {
+                    operation: CompilerIntrinsic::AssertionSwitch,
+                    kind: ExternalCallableKind::TopLevel,
+                    receiver: None,
+                    params: Vec::new(),
+                    ret: Ty::Boolean,
+                }),
+                "{name}"
+            );
+        }
+
+        let exact = switch("isAssertionThrowingErrorEnabled");
+        assert!(authenticate(
+            native,
+            crate::libraries::CallablePlacement::Package(type_name("spoof")),
+            &exact,
+        )
+        .is_none());
+        assert!(authenticate(Some(TargetIntrinsicPlatform::Wasm), kotlin, &exact).is_none());
+        assert!(authenticate(None, kotlin, &exact).is_none());
+        let mut public = switch("isAssertionThrowingErrorEnabled");
+        public.visibility = Visibility::Public;
+        assert!(authenticate(native, kotlin, &public).is_none());
+        let mut parameterized = switch("isAssertionThrowingErrorEnabled");
+        parameterized.params = vec![KotlinType::class("kotlin/Int")];
+        assert!(authenticate(native, kotlin, &parameterized).is_none());
+        let mut wrong_result = switch("isAssertionThrowingErrorEnabled");
+        wrong_result.ret = KotlinType::class("kotlin/Int");
+        assert!(authenticate(native, kotlin, &wrong_result).is_none());
+        assert!(authenticate(native, kotlin, &switch("isAssertionEnabled")).is_none());
     }
 
     #[test]

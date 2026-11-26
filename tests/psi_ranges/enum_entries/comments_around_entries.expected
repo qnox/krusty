@@ -1,0 +1,6 @@
+A	A, // trailing a
+B	// own line b\n    B,
+C	// after blank\n    C,
+D	/* block */ D,
+E1	/** kdoc */\n\n    E1, // t
+F	F // t2\n    ;

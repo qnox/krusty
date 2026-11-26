@@ -274,6 +274,18 @@ impl<'a> BodyLowering<'a, '_, '_> {
                 // The iteration protocol's own member: the member path realizes it through the
                 // receiver's runtime descriptor, exactly as it realizes a source call of it.
                 DependencyOperation::PrimitiveIteratorNext => return None,
+                DependencyOperation::AssertionSwitch => {
+                    if receiver.is_some()
+                        || extension_receiver_parameter.is_some()
+                        || !args.is_empty()
+                        || ret != Ty::Boolean
+                    {
+                        return Some(Err("an assertion switch with malformed operands".into()));
+                    }
+                    // kotlinc-native enables assertions only under `-ea`, and this target has no
+                    // such option, so both switches answer the default build: off.
+                    Ok(Some(self.builder.ins().iconst(types::I8, 0)))
+                }
                 DependencyOperation::ResultFailureException => {
                     let (Some(failure), [], None) = (receiver, args, extension_receiver_parameter)
                     else {

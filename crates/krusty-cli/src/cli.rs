@@ -508,6 +508,7 @@ impl Options {
             classpath: &classpath,
             module_name: &self.module_name,
             codegen_host: false,
+            module_ir_host: false,
         });
         let (errors, notes) = resolved
             .diagnostics
