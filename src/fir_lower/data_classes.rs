@@ -111,14 +111,16 @@ fn data_property_fields(
     Ok(properties.into_iter().map(|(_, field)| field).collect())
 }
 
-/// Whether a class type parameter admits `null`: its first declared bound decides (`T : Any`,
-/// `T : Box<J>` exclude it); an unbounded one is bounded by `Any?`.
+/// Whether a class type parameter admits `null`: when any of its bounds does (`T : Any?`), or it
+/// has none and is bounded by `Any?`. `T : Any` and `T : Box<J>` exclude it.
 fn parameter_admits_null(ir: &IrFile, class: ClassId, parameter: &str) -> bool {
-    ir.classes[class as usize]
+    let mut bounds = ir.classes[class as usize]
         .type_param_bounds
         .iter()
-        .find(|(name, _)| name == parameter)
-        .is_none_or(|(_, bound)| bound.upper_bound_admits_null())
+        .filter(|(name, _)| name == parameter)
+        .map(|(_, bound)| bound)
+        .peekable();
+    bounds.peek().is_none() || bounds.any(|bound| bound.upper_bound_admits_null())
 }
 
 #[derive(Clone)]
@@ -126,8 +128,8 @@ struct DataField {
     index: u32,
     name: String,
     ty: Ty,
-    /// The property is typed by a class type parameter none of whose bounds excludes `null`, so
-    /// its generated members guard the value.
+    /// The property is typed by a class type parameter that admits `null` (see
+    /// [`parameter_admits_null`]), so its generated members guard the value.
     nullable_parameter: bool,
     /// The property's type when generated members read it through its getter rather than its
     /// field.
@@ -286,7 +288,9 @@ fn synthesize_components_and_copy(
         ir.functions[copy as usize].param_checks = fields
             .iter()
             .map(|field| {
-                (field.ty.is_reference() && !field.ty.upper_bound_admits_null())
+                (field.ty.is_reference()
+                    && !field.ty.upper_bound_admits_null()
+                    && !field.nullable_parameter)
                     .then_some(crate::ir::IrParameterCheck::NonNull)
             })
             .collect();

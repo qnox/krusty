@@ -8,7 +8,8 @@ const SOURCE: &str = "interface Marker<J>\n\
                       data class Nullable<J : Any?>(val a: J)\n\
                       data class AnyBound<J : Any>(val a: J)\n\
                       data class InterfaceBound<J, T : Marker<J>>(val a: J, val b: T)\n\
-                      data class SecondBound<T>(val a: T) where T : Any?, T : Marker<*>\n";
+                      data class SecondBound<T>(val a: T) where T : Any?, T : Marker<*>\n\
+                      data class FirstBound<T>(val a: T) where T : Marker<*>, T : Any?\n";
 
 #[test]
 fn a_data_class_hashes_a_bounded_parameter_property_without_a_null_branch() {
@@ -18,6 +19,7 @@ fn a_data_class_hashes_a_bounded_parameter_property_without_a_null_branch() {
         "AnyBound",
         "InterfaceBound",
         "SecondBound",
+        "FirstBound",
     ] {
         common::byte_diff_against_kotlinc_cp(
             "DataClassBoundedParameterHash",
