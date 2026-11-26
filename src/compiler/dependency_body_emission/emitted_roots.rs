@@ -201,6 +201,7 @@ pub(super) fn declarations(
             .and_then(|caller| private_member_class(platform, bodies, &identity, caller))
         {
             let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
+            state.note_inherited_defaults(&emitted);
             state.pending.extend(
                 emitted
                     .callables
@@ -222,6 +223,7 @@ pub(super) fn declarations(
         // instead, an exact external edge which keeps its declaration authentication below.
         if bodies.is_library_private(&identity) && !externals.contains_key(&identity) {
             let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
+            state.note_inherited_defaults(&emitted);
             state
                 .pending
                 .extend(emitted.callables.into_iter().map(|callee| (callee, None)));
@@ -259,6 +261,7 @@ pub(super) fn declarations(
                 Some(declaration) => declaration,
                 None if raw_header_capability && known_target.is_none() => {
                     let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
+                    state.note_inherited_defaults(&emitted);
                     state
                         .pending
                         .extend(emitted.callables.into_iter().map(|callee| (callee, None)));
@@ -485,6 +488,7 @@ pub(super) fn declarations(
                 walk_declared_instances(platform, bodies, &facts, class, &mut state)?;
             }
             let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
+            state.note_inherited_defaults(&emitted);
             read_values(platform, bodies, &facts, &emitted.objects, &mut state)?;
             let member_class = selected
                 .class_contract()
@@ -1264,6 +1268,18 @@ fn walk_value_class_overrides(
         }
     }
     Ok(())
+}
+
+impl ClosureState<'_, '_> {
+    /// The interface defaults the local classes an emitted body constructs inherit are emitted with
+    /// those classes, as the members a materialized class dispatches to are: no walked body calls
+    /// them, and the target does not realize them as leaves.
+    fn note_inherited_defaults(&mut self, emitted: &crate::klib_libraries::EmittedBody) {
+        for default in &emitted.inherited_defaults {
+            self.dispatched.insert(default.clone());
+            self.emitted_defaults.insert(default.clone());
+        }
+    }
 }
 
 #[cfg(test)]
