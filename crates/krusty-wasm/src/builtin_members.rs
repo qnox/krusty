@@ -138,6 +138,8 @@ enum BuilderMember {
     /// `get(Int)`, which throws the runtime `IndexOutOfBoundsException` whose struct is
     /// `index_out_of_bounds` for an index outside the units in use.
     Get { index_out_of_bounds: u32 },
+    /// `subSequence(Int, Int)`, which copies the range of the units in use out as a string.
+    SubSequence,
 }
 
 impl Runtime {
@@ -219,6 +221,9 @@ impl Runtime {
         }
         match builder {
             Some(Ok(operation)) => {
+                if matches!(operation, Operation::Builder(BuilderMember::SubSequence)) {
+                    self.units_sub_sequence(module, classifiers)?;
+                }
                 let function =
                     self.define_implementation(module, member, Receiver::Runtime, operation)?;
                 self.objects
@@ -380,6 +385,17 @@ impl Runtime {
                     BuilderMember::Length => {
                         code.call(builders.length);
                     }
+                    BuilderMember::SubSequence => {
+                        let slice = self
+                            .defined_units_sub_sequence()
+                            .ok_or("a builder slice implemented before its function")?;
+                        code.call(builders.units)
+                            .local_get(0)
+                            .call(builders.length)
+                            .local_get(1)
+                            .local_get(2)
+                            .call(slice);
+                    }
                     BuilderMember::Get {
                         index_out_of_bounds,
                     } => {
@@ -455,6 +471,13 @@ fn builder_operation(
             Some(BuilderMember::Get {
                 index_out_of_bounds: index_out_of_bounds()?,
             })
+        }
+        ("subSequence", [Ty::Int, Ty::Int])
+            if declaration.ret == Ty::obj_name(krusty::types::wk::char_sequence())
+                && params[1..] == [ValType::I32, ValType::I32]
+                && *results == reference =>
+        {
+            Some(BuilderMember::SubSequence)
         }
         _ => None,
     };

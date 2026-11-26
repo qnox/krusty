@@ -66,6 +66,8 @@ pub(super) struct Runtime {
     string_compare: Option<u32>,
     /// `String.subSequence(Int, Int)`, once a call needs it.
     string_sub_sequence: Option<u32>,
+    /// The range-checked copy of the units in use of a string or a builder, once a slice needs it.
+    units_sub_sequence: Option<u32>,
     /// `Double.toString()` and `Float.toString()`, once a conversion needs them.
     floating_strings: floating_strings::FloatingStrings,
     pub(super) object_equals: u32,
@@ -179,6 +181,7 @@ impl Runtime {
             string_equals: module.declare(),
             string_compare: None,
             string_sub_sequence: None,
+            units_sub_sequence: None,
             floating_strings: Default::default(),
             object_equals,
             string_concat,
