@@ -57,6 +57,7 @@ mod constructor_accessors;
 mod constructor_defaults;
 mod constructor_initialization;
 mod constructor_signatures;
+mod enum_primary_constructor;
 use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
 mod companion_field;
 mod copied_code;
@@ -3096,19 +3097,17 @@ fn emit_enum_class(
 
     let field_tys = field_jvm_tys(&c.fields);
     // (bridges emitted after the methods below — `emit_bridges` references emitted method refs)
-    let all_param_tys = class_ctor_jvm_tys(ir, c);
-    let ctor_params: Vec<Ty> = [Ty::String, Ty::Int]
-        .into_iter()
-        .chain(all_param_tys.iter().copied())
-        .collect();
-    let ctor_desc = method_descriptor(&ctor_params, Ty::Unit);
-    let ctor_sig = constructor_signatures::enum_constructor_signature(&signature_formatter, ir, c)
-        .expect("an enum constructor always signs its source parameters");
-    let ctor_parameters = if env.java_parameters {
-        super::method_parameters::enum_constructor(c).to_vec()
-    } else {
-        Vec::new()
-    };
+    let owner = c.fq_name();
+    let primary_constructor = enum_primary_constructor::EnumPrimaryConstructor::new(
+        ir,
+        c,
+        env,
+        facade,
+        &owner,
+        &signature_formatter,
+    );
+    let all_param_tys = &primary_constructor.all_param_tys;
+    let ctor_desc = &primary_constructor.descriptor;
     // Property backing fields are private (kotlinc), reached through the synthesized `getX()`/`setX()`
     // accessors — for both the primary-constructor fields and body member-property fields
     // (`enum class E { A; val x = … }`), initialized in the constructor via `init_body`.
@@ -3137,22 +3136,7 @@ fn emit_enum_class(
     }
     // `$$delegatedProperties` follows `Companion`, as in an ordinary class.
     delegated_property_array::declare(env, c.fq_name, &mut cw);
-    // kotlinc visits the whole CONSTRUCTOR before the entry constants — name, descriptor, its generic
-    // `Signature` (the two synthetic `Enum` params are erased, leaving `()V`), then its
-    // LocalVariableTable strings. `add_field` would otherwise claim those slots for the first entry.
-    cw.reserve_method_pool_with_annotations(
-        "<init>",
-        &ctor_desc,
-        Some(&ctor_sig),
-        &[],
-        &krusty::ir::DeclarationAnnotations::default(),
-        &ctor_parameters,
-    );
-    // The source parameters' annotations follow the constructor header, before its body. A private
-    // enum constructor carries no nullability annotations.
-    cw.reserve_method_parameter_annotation_pool(None, &c.ctor_param_annotations, &[], false);
-    // The ctor BODY's `super(name, ordinal)` call resolves before its LocalVariableTable strings.
-    cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
+    primary_constructor.reserve_header(&mut cw);
     // The property backing fields are visited after the methods: each name interns where the
     // constructor body first stores it, after that body's own constants.
     for (field_index, (f, t)) in c.fields.iter().zip(&field_tys).enumerate() {
@@ -3211,125 +3195,8 @@ fn emit_enum_class(
     // fields above, next to `Companion`, where kotlinc puts them; this binding is the one `<clinit>`
     // below initializes.
     // Private constructor `(Ljava/lang/String;I<user params>)V` → `super(name, ordinal)` then store the
-    // property params / run the body-property initializers. The user params are ALL primary-ctor params
-    // (from `ctor_args`) — a `val`/`var` param backs a field, a plain param is an argument only (in scope
-    // for a body-property initializer), so `all_param_tys` can be wider than the property fields.
-    let ctor_words: u16 = ctor_params.iter().map(|t| slot_words(*t)).sum();
-    let mut ctor = CodeBuilder::new(1 + ctor_words);
-    ctor.aload(0);
-    ctor.aload(1);
-    load(Ty::Int, 2, &mut ctor);
-    let super_init = cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
-    ctor.invokespecial(super_init, 2, 0);
-    // kotlinc maps the `super(name, ordinal)` call to where the declaration starts (annotations
-    // included), then maps each property store to that property's own declaration line.
-    let mut store_lines = initializer_lines::ConstructorInitializerLines::default();
-    let mut max_locals = 1 + ctor_words;
-    // Store constructor-property parameters unless lowering already represented those stores in the
-    // init body. The existence of a body property is not that contract: an init body can contain
-    // only body-property stores while leaving `explicit_param_stores` false.
-    if !c.explicit_param_stores {
-        let mut slot = 3u16;
-        let mut field_i = 0usize;
-        for (argument, ty) in c.ctor_args.iter().zip(&all_param_tys) {
-            if argument.is_field {
-                let name = instance_field_jvm_name(ir, env.run, c, field_i);
-                if let Some(line) = property_line(ir, c, field_i as u32) {
-                    store_lines.push((ctor.bytes.len() as u16, line));
-                }
-                ctor.aload(0);
-                load(*ty, slot, &mut ctor);
-                let field = cw.fieldref(&fq, &name, &type_descriptor(*ty));
-                ctor.putfield(field, slot_words(*ty) as i32);
-                field_i += 1;
-            }
-            slot += slot_words(*ty);
-        }
-    }
-    // Emit body-property stores and `init` statements through the standard IR emitter, mapping value
-    // ids onto the enum's slot layout: `this` at 0, then every user parameter at slots 3+ after the
-    // synthetic name and ordinal. A pure SetField block retains each store's source line.
-    if let Some(init_body) = c.init_body {
-        let marks_before = ctor.line_marks().len();
-        let mut e = Emitter::new(
-            ir,
-            &mut cw,
-            env,
-            EmitterOwner {
-                static_owner: Some(StaticOwner::Class(c.fq_name)),
-                owner: &fq,
-                facade,
-            },
-            Ty::Unit,
-            [init_body],
-        );
-        let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj_name(c.fq_name));
-        e.slots.insert(0, (receiver, Ty::obj_name(c.fq_name)));
-        // The synthetic name and ordinal come first; no semantic value names them.
-        e.frame.enter(FrameKey::Parameter(0), Ty::String);
-        e.frame.enter(FrameKey::Parameter(1), Ty::Int);
-        for (i, t) in all_param_tys.iter().enumerate() {
-            let value = i as u32 + 1;
-            let s = e.frame.enter(FrameKey::Value(value), *t);
-            e.slots.insert(value, (s, *t));
-        }
-        e.render_initializer_boundaries = true;
-        e.emit_constructor_init_body(c, init_body, &mut ctor, &mut store_lines);
-        e.render_initializer_boundaries = false;
-        max_locals = max_locals.max(e.frame.max());
-        store_lines.record_restored(&ctor, marks_before);
-    }
-    // The `return` maps to the primary constructor's start; a pending closing `init` line owns a
-    // `nop` before that transition.
-    let return_line = primary_constructor_line(ir, c);
-    if return_line != 0 && !store_lines.is_empty() {
-        ctor.mark_line(return_line);
-    }
-    let ctor_return_pc = ctor.bytes.len() as u16;
-    ctor.ret_void();
-    ctor.ensure_locals(max_locals);
-    ctor.link();
-    // An enum's ctor is `private`: an entry subclass reaches it via its marker accessor or `$default`.
-    let base_ctor_acc = 0x0002;
-    // kotlinc's `Signature` on the enum ctor lists only the USER params, without the synthetic
-    // leading `(String, int)`: `()V` for a plain enum, `(I)V` for `E(val n: Int)`.
-    // An enum declaring ONLY secondary constructors has no primary to emit: every entry names one
-    // of the secondaries. Registering the synthesized primary anyway collided with a no-argument
-    // secondary — both are `(String, int)V` — and the class failed to load with a
-    // `ClassFormatError: Duplicate method name "<init>"`. Its bytes are still built above so the
-    // constant pool interns in kotlinc's order.
-    seed_enum_constructor_locals(ir, c, &self_desc, &mut cw);
-    let emits_primary_ctor = c.has_primary_ctor || c.secondary_ctors.is_empty();
-    if emits_primary_ctor {
-        cw.add_method_sig(
-            base_ctor_acc | method_access::primary_constructor_varargs(c),
-            "<init>",
-            &ctor_desc,
-            &ctor,
-            Some(&ctor_sig),
-        );
-        cw.set_method_parameters("<init>", &ctor_desc, &ctor_parameters);
-        // The synthetic `(String, int)` prefix is not annotable: the attributes count only the
-        // source parameters.
-        cw.set_annotable_method_param_annotations("<init>", &ctor_desc, &c.ctor_param_annotations);
-    }
-    if emits_primary_ctor {
-        let header = c.decl_line;
-        let start = if c.decl_start_line == 0 {
-            header
-        } else {
-            c.decl_start_line
-        };
-        if header != 0 {
-            // Each retained store maps to its property's line and the `return` to the constructor
-            // start. A missing line is not reconstructed in the backend.
-            let entries = store_lines.method_entries(
-                (0, start),
-                (ctor_return_pc, primary_constructor_line(ir, c)),
-            );
-            cw.set_method_lines("<init>", &ctor_desc, &entries);
-        }
-    }
+    // property params / run the body-property initializers.
+    primary_constructor.emit(&self_desc, &mut cw);
     if let Some(defaults) = crate::default_wrappers::primary_constructor(ir, c) {
         constructor_defaults::emit_ctor_default_stub_with_prefix(
             ir,
@@ -3339,7 +3206,7 @@ fn emit_enum_class(
                 facade,
                 prefix: &[Ty::String, Ty::Int],
                 logical_prefix_count: 0,
-                real_params: &all_param_tys,
+                real_params: all_param_tys,
                 defaults,
                 secondary_lines: None,
                 target_uses_marker_accessor: false,
@@ -3697,7 +3564,9 @@ fn emit_enum_class(
             &mut cw,
             opts.param_assertions,
             synth_debug_tables::PrimaryConstructorDebug {
-                method: emits_primary_ctor.then_some((ctor_desc.as_str(), 0)),
+                method: primary_constructor
+                    .is_emitted()
+                    .then_some((ctor_desc.as_str(), 0)),
                 ..Default::default()
             },
         );
