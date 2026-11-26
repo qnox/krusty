@@ -1170,6 +1170,10 @@ struct Linker<'u, 's> {
 }
 
 impl<'s> CallLinker for Linker<'_, 's> {
+    fn is_suspend_callable(&self, target: ExternalCallableId) -> bool {
+        self.external_is_suspend(target)
+    }
+
     fn atomic_field(
         &self,
         callee: &KlibPublicIdSignature,
@@ -2091,17 +2095,7 @@ impl<'s> Linker<'_, 's> {
         declaration: &'s KlibIrFunction,
     ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
         let selected = selected_callable_for_header(selected, None, arena, declaration)?;
-        let function = match self.functions.get(identity) {
-            Some(function) => {
-                // The function was declared under another lowering's selection, or from its
-                // header alone; this lowering's selection must describe it too.
-                if let Some(selected) = selected {
-                    function_header(Some(selected), arena, declaration)?;
-                }
-                *function
-            }
-            None => self.declare(ir, identity, selected, arena, declaration)?,
-        };
+        let function = self.top_level_callee(ir, identity, selected, arena, declaration)?;
         let parameter_defaults = parameter_defaults(declaration);
         let declaration = &ir.functions[function as usize];
         Ok(LinkedCallee {
@@ -2386,7 +2380,7 @@ impl<'s> Linker<'_, 's> {
                 body_header(Some(selected), arena, declaration, self.sources.bodies)?;
                 function
             }
-            None => self.declare(ir, identity, Some(selected), arena, declaration)?,
+            None => self.declare_callee(ir, identity, Some(selected), arena, declaration)?,
         };
         let declared = &ir.functions[function as usize];
         let (Some(receiver), params) = (
@@ -2591,6 +2585,7 @@ impl<'s> Linker<'_, 's> {
         let declared = declare_function(ir, &header);
         let callee = inline_functions::Candidate::new(declared, function, &header, selected);
         callee.declare(ir, self.root, identity, &mut |name| self.is_interface(name))?;
+        callee.register_suspension(ir);
         self.functions.insert(identity.clone(), declared);
         if let Some(formals) = self.private_members.get_mut(identity) {
             *formals = header.own_formals(function);
