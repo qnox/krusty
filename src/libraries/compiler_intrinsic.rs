@@ -357,3 +357,23 @@ pub enum IndicesReceiver {
     Collection,
     CharSequence,
 }
+
+impl IndicesReceiver {
+    /// The property `IndicesHandler` bounds a loop over the indices of this receiver kind with.
+    pub fn bound_property(self) -> &'static str {
+        match self {
+            Self::Array | Self::Collection => crate::types::wk::SIZE,
+            Self::CharSequence => crate::types::wk::CHAR_SEQUENCE_LENGTH,
+        }
+    }
+
+    /// The one class declaring that property for every receiver of this kind. An array kind
+    /// spans many array classes, so none names it.
+    pub fn bound_class(self) -> Option<crate::types::TypeName> {
+        match self {
+            Self::Array => None,
+            Self::Collection => Some(crate::types::wk::collection()),
+            Self::CharSequence => Some(crate::types::wk::char_sequence()),
+        }
+    }
+}
