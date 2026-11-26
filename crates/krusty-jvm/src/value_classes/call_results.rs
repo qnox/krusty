@@ -42,12 +42,6 @@ impl<'a> CallTypes<'a> {
         }
     }
 
-    /// The value class the construction at `id` produces, whose unboxed result is that class's
-    /// carrier even when the constructor function it calls declares the carrier's own type.
-    pub(super) fn constructed_value_class(&self, id: u32) -> Option<TypeName> {
-        self.constructions.erased_value_construction(id)
-    }
-
     /// The realized JVM merge type of the exhaustive `when` at `id`, if it is one.
     pub(super) fn join_result(&self, id: u32) -> Option<Ty> {
         self.joins.get(&id).copied()
@@ -90,7 +84,14 @@ impl<'a> CallTypes<'a> {
     /// The call's declared result as the JVM realizes it. A type parameter whose erased upper bound
     /// is a value class is declared as that value class (`T : X?` returns what `X?` returns); any
     /// other type parameter stays generic.
+    ///
+    /// A construction that omitted defaulted arguments calls the class's own `constructor-impl`,
+    /// which declares the carrier's type: the result is the constructed class, not a carrier that
+    /// is itself a value class (`Level(val id: Id = ..)` constructs a `Level`, not an `Id`).
     pub(super) fn declared_result(&self, id: u32, under: &Under) -> Option<Ty> {
+        if let Some(class) = self.constructions.erased_value_construction(id) {
+            return Some(Ty::obj_name(class));
+        }
         self.declared
             .get(&id)
             .map(|declared| super::member_names::value_class_bound_occurrence(*declared, under))
