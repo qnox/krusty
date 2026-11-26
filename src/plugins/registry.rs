@@ -56,6 +56,17 @@ pub struct Activation<'a> {
     pub module_ir_host: bool,
 }
 
+/// A plugin jar the driver's module-IR host runs, and the registrars of it the host runs.
+///
+/// The registrars are only those no registered extension answers to. A registrar krusty
+/// substitutes natively is left out, so a bundle jar never runs its substituted plugin twice: the
+/// host must load exactly [`HostedJar::registrars`] from the jar and no other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedJar {
+    pub jar: String,
+    pub registrars: Vec<String>,
+}
+
 /// Builds the native `IrPlugin` for an extension, configured from the activation context and the
 /// release of the compiler-plugin jar that activated it (see [`declared_release`]), when one did.
 /// The options are the ones configuring that extension, from either syntax.
@@ -383,7 +394,7 @@ pub struct Resolved {
     pub ksp_active: bool,
     /// The plugin jars, in request order, that declare a plugin neither reimplemented nor
     /// substituted: the driver's module-IR host loads them. Empty where the driver runs no such host.
-    pub hosted_jars: Vec<String>,
+    pub hosted_jars: Vec<HostedJar>,
     pub diagnostics: Vec<PluginDiagnostic>,
 }
 
@@ -768,18 +779,28 @@ impl PluginRegistry {
         // identify — fail rather than silently mis-compile.
         let mut hosted_jars = Vec::new();
         for (jar, registrars) in &jars {
-            let understood = registrars.as_ref().is_some_and(|registrars| {
+            let unknown: Option<Vec<String>> = registrars.as_ref().map(|registrars| {
                 registrars
                     .iter()
-                    .all(|registrar| self.extensions.iter().any(|ext| ext.registrar == registrar))
+                    .filter(|registrar| {
+                        !self
+                            .extensions
+                            .iter()
+                            .any(|ext| ext.registrar == registrar.as_str())
+                    })
+                    .cloned()
+                    .collect()
             });
-            if understood {
+            if unknown.as_ref().is_some_and(|unknown| unknown.is_empty()) {
                 continue;
             }
             // A jar the driver's module-IR host can run is one krusty read: it declared a registrar
             // no extension answers to. One that cannot be read has nothing for a host to load.
-            if act.module_ir_host && registrars.is_some() {
-                hosted_jars.push(jar.to_string());
+            if let Some(unknown) = unknown.filter(|_| act.module_ir_host) {
+                hosted_jars.push(HostedJar {
+                    jar: jar.to_string(),
+                    registrars: unknown,
+                });
                 diagnostics.push(PluginDiagnostic::HostedModuleIr {
                     jar: jar.to_string(),
                 });
@@ -1339,7 +1360,13 @@ mod tests {
         };
         let resolved = PluginRegistry::with_builtins().resolve(&act);
         assert!(resolved.native.is_empty());
-        assert_eq!(resolved.hosted_jars, vec![jar.clone()]);
+        assert_eq!(
+            resolved.hosted_jars,
+            vec![HostedJar {
+                jar: jar.clone(),
+                registrars: vec![WIDGET_REGISTRAR.to_string()],
+            }]
+        );
         assert_eq!(
             resolved.diagnostics,
             vec![PluginDiagnostic::HostedModuleIr { jar }]
@@ -1348,7 +1375,9 @@ mod tests {
     }
 
     /// One jar may declare a plugin krusty substitutes beside one it does not implement: the first is
-    /// substituted, and the jar still goes to the host for the second.
+    /// substituted, and the jar goes to the host for the second only. The hosted entry names just the
+    /// unknown registrar, because the host loads every registrar a jar declares unless told which, and
+    /// the substituted plugin would otherwise run twice.
     #[test]
     fn a_jar_declaring_a_substituted_and_an_unknown_registrar_is_both_substituted_and_hosted() {
         let jar = plugin_jar(
@@ -1362,7 +1391,13 @@ mod tests {
         };
         let resolved = PluginRegistry::with_builtins().resolve(&act);
         assert_eq!(resolved.native.plugin_ids(), vec![SERIALIZATION_PLUGIN_ID]);
-        assert_eq!(resolved.hosted_jars, vec![jar.clone()]);
+        assert_eq!(
+            resolved.hosted_jars,
+            vec![HostedJar {
+                jar,
+                registrars: vec![WIDGET_REGISTRAR.to_string()],
+            }]
+        );
         assert!(!resolved.has_errors());
     }
 
