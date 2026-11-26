@@ -1049,8 +1049,14 @@ static kt_int kt_render_char(kt_char unit, char *buffer) {
    encodes to, as every lone unit of a string is. `chars` is a root in the caller's frame across
    the allocation. */
 KRef kt_string_from_char_array(KRef chars, kt_int start, kt_int size) {
-    /* Three bytes bound a unit, and a pair's four bytes fit within the six its two units bound. */
-    KByteArray *text = kt_bytes_new(size * 3);
+    /* Three bytes bound a unit, and a pair's four bytes fit within the six its two units bound.
+       Multiplied out in 64 bits: a slice of more than a third of the largest array would wrap the
+       capacity, and text longer than any array can hold is memory the runtime cannot provide. */
+    uint64_t capacity = (uint64_t)size * 3u;
+    if (capacity > (uint64_t)INT32_MAX) {
+        kt_fail_oom();
+    }
+    KByteArray *text = kt_bytes_new((kt_int)capacity);
     char *out = kt_bytes_of(text);
     const kt_char *units = (const kt_char *)((const KArray *)kt_array_storage(chars) + 1) + start;
     kt_int written = 0;
