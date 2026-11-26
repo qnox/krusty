@@ -47,7 +47,8 @@ pub(crate) fn arg_fits(parameter: &Ty, argument: &Ty) -> bool {
                 || crate::types::same(name, crate::types::wk::java_object()))
                 && !matches!(argument.kind(), TyKind::Null | TyKind::Nullable(_)))
         || matches!((parameter.fun_arity(), argument.fun_arity()), (Some(expected), Some(actual)) if expected == actual)
-        || matches!((parameter.kind(), argument.kind()), (TyKind::Obj(expected, _), TyKind::Obj(actual, _)) if expected == actual)
+        // A Java parameter's platform type `C<…>!` names the same classifier as `C<…>`.
+        || matches!((parameter.platform_lower_bound().kind(), argument.kind()), (TyKind::Obj(expected, _), TyKind::Obj(actual, _)) if expected == actual)
 }
 
 /// Whether a function-shaped argument can adapt to a functional-interface parameter.
