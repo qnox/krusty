@@ -205,10 +205,18 @@ impl JdkApi {
                     ct_sym_release: Some(release),
                 }))
             }
-            None => Err(unavailable(format!(
-                "'-Xjdk-release={release}' option is not supported by used JDK: {}",
-                home.display()
-            ))),
+            None => Err(unavailable(match releases.last() {
+                // Before JDK 12 the archive keeps module descriptors in `<release>-modules`
+                // folders, and kotlinc names the missing signatures rather than the option.
+                Some(&own) if own < 12 => format!(
+                    "can't find modules signatures in `ct.sym` file for `-Xjdk-release={release}` in {}",
+                    symbols.display()
+                ),
+                _ => format!(
+                    "'-Xjdk-release={release}' option is not supported by used JDK: {}",
+                    home.display()
+                ),
+            })),
         }
     }
 }
@@ -528,6 +536,49 @@ mod tests {
             inventory.effective_classpath(),
             explicit,
             "an unrecognized JDK home must not invent classpath entries"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A JDK before 12 stores module descriptors apart, and kotlinc then reports the missing
+    /// signatures in `ct.sym` instead of an unsupported option.
+    #[test]
+    fn a_release_a_jdk_before_12_does_not_describe_names_the_missing_module_signatures() {
+        let root = std::env::temp_dir().join(format!(
+            "krusty-jvm-jdk-release-old-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("lib")).expect("mkdir");
+        std::fs::write(root.join("lib/modules"), b"jimage").expect("modules");
+        let symbols = root.join("lib/ct.sym");
+        let file = std::fs::File::create(&symbols).expect("create ct.sym");
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, bytes) in [
+            ("8/java/lang/Object.sig", b"unread".as_slice()),
+            ("9A/java/lang/Object.sig", b"unread".as_slice()),
+            ("9A-modules/java.base/module-info.sig", b"unread".as_slice()),
+            ("B/java/lang/Object.sig", b"unread".as_slice()),
+            ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0".as_slice()),
+        ] {
+            archive.start_file(name, options).expect("start entry");
+            std::io::Write::write_all(&mut archive, bytes).expect("write entry");
+        }
+        archive.finish().expect("finish ct.sym");
+        assert_eq!(
+            JdkApi::for_release(Some(&root), Some(12)),
+            Err(vec![
+                JdkReleaseError::kotlinc("module java.base cannot be found in the module graph"),
+                JdkReleaseError::kotlinc(format!(
+                    "can't find modules signatures in `ct.sym` file for `-Xjdk-release=12` in {}",
+                    symbols.display()
+                )),
+            ])
         );
         let _ = std::fs::remove_dir_all(root);
     }
