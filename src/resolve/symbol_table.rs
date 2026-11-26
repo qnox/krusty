@@ -1,5 +1,8 @@
 use super::*;
 
+mod plugin_runtime;
+pub(crate) use plugin_runtime::PluginRuntimeInventory;
+
 /// A collected TOP-LEVEL extension property: its declared type, mutability, and the source
 /// declaration key (file index, decl id) — how the backend's facade-metadata builder matches a
 /// declaration to its record without guessing by name (same-name properties may differ by receiver).
@@ -375,7 +378,7 @@ pub(crate) struct PassTwoSymbols {
     pub(super) compilation_id: u64,
     pub(super) libraries: std::rc::Rc<dyn SemanticPlatform>,
     coroutine_runtime: Option<crate::ir::IrCoroutineRuntime>,
-    plugin_runtime: super::PluginRuntimeInventory,
+    plugin_runtime: PluginRuntimeInventory,
     char_sequence_protocol: Option<crate::fir::CharSequenceProtocol>,
     enum_entries_factory: Option<crate::fir::EnumEntriesFactory>,
     pub(super) native_plugins: crate::plugins::registry::NativePlugins,
@@ -392,7 +395,7 @@ impl PassTwoSymbols {
     }
 
     /// The runtime functions the enabled plugins declared, frozen with their provider declarations.
-    pub(crate) fn plugin_runtime(&self) -> &super::PluginRuntimeInventory {
+    pub(crate) fn plugin_runtime(&self) -> &PluginRuntimeInventory {
         &self.plugin_runtime
     }
 
@@ -421,7 +424,7 @@ impl PassTwoSymbols {
 impl SymbolTable {
     pub(crate) fn into_pass_two_symbols(self) -> PassTwoSymbols {
         let coroutine_runtime = coroutine_runtime::selected(&*self.libraries);
-        let plugin_runtime = super::PluginRuntimeInventory::freeze(
+        let plugin_runtime = PluginRuntimeInventory::freeze(
             &*self.libraries,
             &self.native_plugins.runtime_requirements(),
         );

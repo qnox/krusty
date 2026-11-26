@@ -45,7 +45,7 @@ use symbol_table::{
     TopLevelPropertySelection, VisibilitySuppressions,
 };
 pub use symbol_table::{ExtPropSig, ResolvedPropertyAccess, SourcePropertySig, SymbolTable};
-pub(crate) use symbol_table::{MissingContextParameter, PassTwoSymbols};
+pub(crate) use symbol_table::{MissingContextParameter, PassTwoSymbols, PluginRuntimeInventory};
 mod class_signature;
 use callable_signature::extract_ctor_default;
 pub use callable_signature::{
@@ -69,8 +69,6 @@ mod argument_parameter_mapping;
 mod builtin_implementation;
 mod char_sequence_protocol;
 mod coroutine_runtime;
-mod plugin_runtime;
-pub(crate) use plugin_runtime::PluginRuntimeInventory;
 mod enum_entries_factory;
 mod selected_external_members;
 use argument_parameter_mapping::{
