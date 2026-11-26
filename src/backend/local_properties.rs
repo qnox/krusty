@@ -107,35 +107,32 @@ pub fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess>, Prop
             } if context_parameters.is_empty()
         );
         // A module accessor call keeps its declaration's parameter vector (contexts, receiver,
-        // value), the checked fact an ordinary call carries for representation boundaries.
+        // value), the checked fact an ordinary call carries for representation boundaries. A getter
+        // call also yields its declaration's result, as any other call of that accessor does; a
+        // generic `T` merely specialized at this read stays the declared one.
         if let IrExpr::Call { callee, .. } = &replacement {
-            if let Callee::Virtual {
-                params: Some((parameters, _)),
-                ..
-            } = &**callee
-            {
-                ir.call_declared_params
-                    .insert(operation, parameters.clone().into_boxed_slice());
-            }
-        }
-        // A getter call of a module accessor yields its declaration's result, as any other call of
-        // that accessor does; a generic `T` merely specialized at this read stays the declared one.
-        if let IrExpr::Call { callee, .. } = &replacement {
-            let declared = match &**callee {
+            match &**callee {
                 Callee::Virtual {
                     params: Some((parameters, ret)),
                     ..
-                } => Some((parameters.clone(), *ret)),
-                callee => callee.source_function().map(|getter| {
-                    let getter = &ir.functions[getter as usize];
-                    (getter.params.clone(), getter.ret)
-                }),
-            };
-            if let (true, Some((parameters, ret))) = (read, declared) {
-                ir.call_declared_ret.insert(operation, ret);
-                ir.call_declared_params
-                    .entry(operation)
-                    .or_insert_with(|| parameters.into_boxed_slice());
+                } => {
+                    ir.call_declared_params
+                        .insert(operation, parameters.clone().into_boxed_slice());
+                    if read {
+                        ir.call_declared_ret.insert(operation, *ret);
+                    }
+                }
+                callee if read => {
+                    if let Some(getter) = callee.source_function() {
+                        let getter = &ir.functions[getter as usize];
+                        let (parameters, ret) = (getter.params.clone(), getter.ret);
+                        ir.call_declared_ret.insert(operation, ret);
+                        ir.call_declared_params
+                            .entry(operation)
+                            .or_insert_with(|| parameters.into_boxed_slice());
+                    }
+                }
+                _ => {}
             }
         }
         let first_operand = match &replacement {
