@@ -1004,15 +1004,17 @@ fn dispatched_members(
     // A member the class inherits implements the interface declarations it reaches only through
     // its supertypes (`Itr.remove` for `MutableIterator.remove` under a subclass), so dispatch
     // through the interface runs the inherited body, which is emitted with the class.
-    for (body, _) in inherited_implementations(plan, bodies)? {
-        // Only a body a superclass declares: an interface's default is inherited by its own
-        // mechanism.
+    for (body, implemented) in inherited_implementations(plan, bodies)? {
+        // A body a superclass declares, or an interface default that implements only itself for
+        // the class: the class carries it however dispatch reaches it. An interface default
+        // another declaration overrides is inherited by its own mechanism.
         let from_class = matches!(
             bodies.member_owner(&body),
             crate::klib_libraries::LocatedMember::One { class, .. }
                 if class_kind(class.base.flags) == TypeKind::Class
         );
-        if from_class && !members.contains(&body) {
+        let implements_itself = implemented.as_slice() == std::slice::from_ref(&body);
+        if (from_class || implements_itself) && !members.contains(&body) {
             members.push(body);
         }
     }
