@@ -142,7 +142,7 @@ impl BodyLowering<'_> {
     /// smart cast the declaring compilation proved, which checked FIR lowering lowers as a cast
     /// to a non-null reference type and as a coercion to a nullable or primitive one: a counted
     /// loop's inlined `Any?` element read back as `Int` is such a coercion. One of a primitive
-    /// value from its nullable type is a coercion. Any other implicit cast declines.
+    /// value from its nullable type is a coercion. One of a value to another application of a supertype classifier of it is the upcast to the classifier. Any other implicit cast declines.
     fn implicit_cast(&mut self, target: Ty, argument: KlibIrExprId, ty: Ty) -> Lowered<ExprId> {
         if target != ty {
             return Err(mismatch("an implicit cast is typed apart from its target"));
@@ -180,7 +180,9 @@ impl BodyLowering<'_> {
                 IrTypeOp::ImplicitCoercion
             }
         } else {
-            return Err(KlibBodyDeclineReason::ImplicitConversion);
+            return self
+                .retyped_supertype_arguments(arg, actual, target)
+                .ok_or(KlibBodyDeclineReason::ImplicitConversion);
         };
         let cast = self.ir.add_expr(IrExpr::TypeOp {
             op,
@@ -228,6 +230,33 @@ impl BodyLowering<'_> {
                     .iter()
                     .any(|supertype| self.narrows(*supertype, target))
             })
+    }
+
+    /// `arg`, of the type `actual`, as a value of `target`, a type of one of its supertype
+    /// classifiers that applies other type arguments than `actual`'s hierarchy does: the cast
+    /// the declaring compilation proved (`Int` as `Comparable<Any?>`, a use of the contravariant
+    /// `Comparable` through a wider argument). Type arguments are erased, so it is as the upcast
+    /// to the classifier is: the value itself, or the coercion that boxes or unboxes it.
+    fn retyped_supertype_arguments(
+        &mut self,
+        arg: ExprId,
+        actual: Ty,
+        target: Ty,
+    ) -> Option<ExprId> {
+        let supertype = Self::star_projected(target);
+        if !self.is_supertype_of(supertype, actual) {
+            return None;
+        }
+        Some(
+            if actual.is_nullable() == target.is_nullable()
+                && actual.is_reference() == target.is_reference()
+            {
+                arg
+            } else {
+                let coerced = self.coercion(arg, target);
+                self.typed(coerced, target)
+            },
+        )
     }
 
     /// `ty`'s classifier with every type argument a star projection.
