@@ -88,10 +88,23 @@ pub(super) struct LinkedCallee {
 }
 
 pub(super) struct LinkedCallableReference {
-    pub(super) declaration: crate::fir::ExternalCallableId,
+    pub(super) target: LinkedReferenceTarget,
     pub(super) kind: crate::libraries::ExternalCallableKind,
     pub(super) extension_receiver_parameter: Option<usize>,
     pub(super) call: LinkedCallee,
+}
+
+/// The declaration a callable reference names.
+pub(super) enum LinkedReferenceTarget {
+    /// A dependency declaration its provider records.
+    External(crate::fir::ExternalCallableId),
+    /// A private member of a class the unit lowers, which no provider records: the unit emits it
+    /// as `function`, a member of `owner` named `name`.
+    PrivateMember {
+        owner: TypeName,
+        name: Box<str>,
+        function: FunId,
+    },
 }
 
 impl LinkedCallableReference {
@@ -101,7 +114,7 @@ impl LinkedCallableReference {
         call: LinkedCallee,
     ) -> Self {
         Self {
-            declaration,
+            target: LinkedReferenceTarget::External(declaration),
             kind: callable.kind(),
             extension_receiver_parameter: callable.parameter_identities().iter().position(|role| {
                 matches!(
@@ -112,6 +125,12 @@ impl LinkedCallableReference {
             call,
         }
     }
+}
+
+/// The getter bounding a counted loop over indices, with the type its declaration answers.
+pub(super) struct IndicesBound {
+    pub(super) accessor: crate::metadata::id_signature::KlibAccessorIdSignature,
+    pub(super) ty: Ty,
 }
 
 /// The declared shape of a member a range literal's membership calls.
@@ -246,6 +265,16 @@ pub(super) trait CallLinker {
         &self,
         _getter: &crate::metadata::id_signature::KlibAccessorIdSignature,
     ) -> Lowered<Option<crate::libraries::IndicesReceiver>> {
+        Ok(None)
+    }
+
+    /// The getter of the receiver property that bounds a counted loop over the indices `getter`
+    /// is: a collection's `size` or a text's `length`. `None` when the bound is no member read
+    /// (an array's intrinsic size), or the linker does not model it.
+    fn indices_bound(
+        &self,
+        _getter: &crate::metadata::id_signature::KlibAccessorIdSignature,
+    ) -> Lowered<Option<IndicesBound>> {
         Ok(None)
     }
 

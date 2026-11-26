@@ -254,6 +254,12 @@ impl PackageInventory {
                     crate::libraries::CallablePlacement::Package(identity),
                     &signed.declaration,
                 );
+                signed.direct_c_function = super::direct_c_calls::runtime_entry_unless_realized(
+                    intrinsic_platform,
+                    &signed.declaration,
+                    signed.direct_c_function.take(),
+                    signed.target_intrinsic.is_some(),
+                );
                 inventory.intrinsics.insert(&signed);
                 inventory.private_externals.push((identity, signed));
             }
@@ -280,6 +286,13 @@ impl PackageInventory {
                             crate::libraries::CallablePlacement::Package(identity),
                             &signed.declaration,
                         );
+                        signed.direct_c_function =
+                            super::direct_c_calls::runtime_entry_unless_realized(
+                                intrinsic_platform,
+                                &signed.declaration,
+                                signed.direct_c_function.take(),
+                                signed.target_intrinsic.is_some(),
+                            );
                         Ok(signed)
                     })
                 })
@@ -367,6 +380,13 @@ impl PackageInventory {
                         member,
                         &function.declaration,
                     );
+                    function.direct_c_function =
+                        super::direct_c_calls::runtime_entry_unless_realized(
+                            intrinsic_platform,
+                            &function.declaration,
+                            function.direct_c_function.take(),
+                            function.target_intrinsic.is_some(),
+                        );
                     inventory.intrinsics.insert(function);
                 }
                 for function in &mut signed.associated_functions {
@@ -388,6 +408,13 @@ impl PackageInventory {
                         associated,
                         &function.declaration,
                     );
+                    function.direct_c_function =
+                        super::direct_c_calls::runtime_entry_unless_realized(
+                            intrinsic_platform,
+                            &function.declaration,
+                            function.direct_c_function.take(),
+                            function.target_intrinsic.is_some(),
+                        );
                     inventory.intrinsics.insert(function);
                 }
                 let selected = inventory
