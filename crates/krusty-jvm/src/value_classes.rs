@@ -1111,6 +1111,7 @@ pub(crate) fn lower_value_classes(
                     owner,
                     name,
                     params: Some((params, ret)),
+                    target,
                     ..
                 } = &mut **call_callee
                 {
@@ -1122,7 +1123,7 @@ pub(crate) fn lower_value_classes(
                         && !cls_by_name.contains_key(owner)
                         && !vc_getters
                             .get(owner)
-                            .is_some_and(|getter| is_underlying_getter(getter, name))
+                            .is_some_and(|getter| is_underlying_getter(getter, name, *target))
                     {
                         let impl_name =
                             vc_member_impl_name(name, params, ret, &callable_under, is_suspend);
@@ -1933,11 +1934,12 @@ pub(crate) fn lower_value_classes(
                 owner,
                 name,
                 params,
+                target,
                 ..
             } = &**call_callee
                 && (vc_getters
                     .get(owner)
-                    .is_some_and(|getter| is_underlying_getter(getter, name))) =>
+                    .is_some_and(|getter| is_underlying_getter(getter, name, *target))) =>
             {
                 value_class_name(*owner, &under).map(|owner| Rw::Prop {
                     receiver: *receiver,
@@ -3885,10 +3887,19 @@ impl ReprCtx<'_> {
 
 /// Whether the JVM method `name` is the getter of a value class's underlying property, whose
 /// plain spelling is `getter`. A property typed as another value class has its getter mangled
-/// with the hash of that type (`getId-eEFUqEU`), which is still the same getter.
-fn is_underlying_getter(getter: &str, name: &str) -> bool {
-    name.strip_prefix(getter)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+/// with the hash of that type (`getId-eEFUqEU`); that spelling is the getter only when the
+/// checker selected a property getter, because an ordinary `fun getId(other: Id)` mangles to the
+/// same prefix.
+fn is_underlying_getter(
+    getter: &str,
+    name: &str,
+    target: Option<krusty::ir::IrVirtualTarget>,
+) -> bool {
+    name == getter
+        || name.strip_prefix(getter).is_some_and(|rest| {
+            rest.starts_with('-')
+                && matches!(target, Some(krusty::ir::IrVirtualTarget::PropertyGetter(_)))
+        })
 }
 
 /// Whether a NON-NULL value-class type's unboxed underlying can hold null (so a `checkNotNullParameter`
