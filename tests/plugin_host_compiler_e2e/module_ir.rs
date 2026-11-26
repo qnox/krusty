@@ -11,6 +11,7 @@ use krusty_plugin_api::ir::{
     ExpressionIr, ExpressionKind, FileIr, FunctionIr, ModuleIr, ParameterIr, Span, StatementIr,
     TypeIdentity, ValueId, VariableIr, Visibility,
 };
+use krusty_plugin_api::ModuleIrPlugin;
 use krusty_plugin_host::{Host, HostError, HostRuntime, SessionRequest};
 
 #[path = "../../crates/krusty-plugin-host/tests/support/mod.rs"]
@@ -376,6 +377,18 @@ fn the_host_returns_the_module_its_plugins_leave() {
     assert_eq!(returned, rewritten_sample());
 }
 
+#[test]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+fn the_host_is_a_module_ir_plugin_that_returns_the_module_its_plugins_leave() {
+    let (runtime, _) = runtime();
+    let mut host = host_with(&runtime, &[rewrite_plugin(&runtime)], &[]);
+    let plugin: &mut dyn ModuleIrPlugin = &mut host;
+    let returned = plugin
+        .transform(&sample())
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(returned, rewritten_sample());
+}
+
 /// IR a plugin leaves that the plugin IR cannot carry back refuses the module by what it is, rather
 /// than returning the module without it.
 #[test]
@@ -498,7 +511,7 @@ fn krusty_ir_at(
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         krusty::frontend::PlatformProvider::jvm(platform),
-        &krusty::features::LangFeatures::from_source(&text),
+        &krusty::features::LangFeatures::from_source_in_environment(&text),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
     );

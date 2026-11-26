@@ -132,7 +132,12 @@ impl Emitter<'_> {
                 .is_some_and(|class| class.fq_name == access_owner),
             _ => false,
         };
-        if !self.operand_runs_no_code(receiver) && !initializes_owner {
+        // Inside the owner the instance is already published, so naming it is not initializing it.
+        let inside_owner = matches!(
+            self.static_owner,
+            Some(crate::private_static_access::StaticOwner::Class(owner)) if owner == access_owner
+        );
+        if !self.operand_runs_no_code(receiver) && (!initializes_owner || inside_owner) {
             self.emit_value(receiver, code);
             code.pop();
         }

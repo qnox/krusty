@@ -397,12 +397,16 @@ struct TabledClass<'t> {
     laid_out: Option<(TypeName, &'t LaidOutSuperclass)>,
 }
 
-/// Whether class `id` is local to a body, so no other file can name or extend it.
-fn is_local(ir: &IrFile, id: ClassId) -> bool {
+/// Whether class `id` is declared in executable code: a local or anonymous class, or the copy of an
+/// anonymous object an inline expansion specialized for its call. No other file names or extends
+/// one, and every file that expands an inline function declaring one realizes it again under the
+/// same name, so its descriptor and members stay inside the object.
+pub fn is_declared_in_executable_code(ir: &IrFile, id: ClassId) -> bool {
     let class = &ir.classes[id as usize];
     class.is_local_class
         || class.is_anonymous_object
         || ir.local_class_name_provenance.contains_key(&id)
+        || ir.specialized_anonymous_classes.contains_key(&id)
 }
 
 /// The superclasses of `ir`'s classes that no class of `ir` declares and another file laid out.
@@ -459,7 +463,7 @@ fn class_tables(
                     planned,
                     plan.interfaces(),
                 )?,
-                Some(Err(reason)) if laid_out.is_some() && !is_local(ir, id) => {
+                Some(Err(reason)) if laid_out.is_some() && !is_declared_in_executable_code(ir, id) => {
                     return Err(format!(
                         "a class extending one of another file with no module-wide layout (`{}`): {reason}",
                         class.fq_name()

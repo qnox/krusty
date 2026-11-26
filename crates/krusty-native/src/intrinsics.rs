@@ -262,6 +262,20 @@ pub(super) fn throwable_descriptor(owner: krusty::types::TypeName) -> Option<&'s
     })
 }
 
+/// Whether the runtime's entry point for this `Map` member applies the special bridge itself.
+///
+/// `kt_map_get`, `kt_map_contains_key` and `kt_map_contains_value` reach a program class through
+/// its `KType.map_members` thunks, which answer the bridge's neutral result for an argument that is
+/// not the override's type. A call through `Map` to such an object therefore needs no bridge of its
+/// own at the call site, unlike the other members `has_special_bridge` names.
+pub(super) fn map_thunk_guards_bridge(
+    collection: krusty::types::MappedCollection,
+    name: &str,
+) -> bool {
+    collection.kind == krusty::types::CollectionKind::Map
+        && matches!(name, "get" | "containsKey" | "containsValue")
+}
+
 /// The one member of a functional interface the RUNTIME knows, or `None` for any other.
 ///
 /// A `fun interface` declared in this file becomes an object wearing that interface's table, so a
@@ -2028,6 +2042,15 @@ pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'stati
             // The range form, `append(value: CharSequence?, startIndex, endIndex)`, the builder's one
             // three-operand `append`: its bounds cross boxed like every operand here.
             ("append", [_, Ty::Int, Ty::Int]) => Some("kt_string_builder_append_range"),
+            // `appendRange(value: CharSequence, startIndex, endIndex)` is what that `append` calls
+            // with `value ?: "null"`: the same bounds checks and copy, of a value never null. The
+            // `CharArray` overload copies an array instead and is not this function.
+            ("appendRange", [value, Ty::Int, Ty::Int])
+                if matches!(value.kind(), TyKind::Obj(owner, _)
+                    if classifier_matches(owner, "kotlin/CharSequence")) =>
+            {
+                Some("kt_string_builder_append_range")
+            }
             ("appendLine", [_]) => Some("kt_string_builder_append_line"),
             ("appendLine", []) => Some("kt_string_builder_append_new_line"),
             _ => None,
@@ -2681,6 +2704,24 @@ mod tests {
                 function(appendable(), "append", &[text, Ty::Int, Ty::Int], answer)
             ),
             Some("kt_string_builder_append_range")
+        );
+    }
+
+    /// `appendRange` of a `CharSequence` is the range `append` without its `null` case; the
+    /// `CharArray` overload copies an array and has no runtime function.
+    #[test]
+    fn the_builder_realizes_only_the_char_sequence_append_range() {
+        let builder = || member("kotlin/text/StringBuilder");
+        let answer = Ty::obj("kotlin/text/StringBuilder");
+        let sequence = [Ty::obj("kotlin/CharSequence"), Ty::Int, Ty::Int];
+        let array = [Ty::obj("kotlin/CharArray"), Ty::Int, Ty::Int];
+        assert_eq!(
+            runtime_member(function(builder(), "appendRange", &sequence, answer)),
+            Some("kt_string_builder_append_range")
+        );
+        assert_eq!(
+            runtime_member(function(builder(), "appendRange", &array, answer)),
+            None
         );
     }
 

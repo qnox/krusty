@@ -26,7 +26,7 @@ fn ordinary_function_values_invoke_their_checked_signature_through_the_shared_pr
 
 fn expect_function_program(source: &str, stem: &str) {
     let releases = KotlinVersion::supported();
-    let release = krusty::kotlin_version::target();
+    let release = krusty::kotlin_version::environment_release();
     assert!(
         releases.contains(&release),
         "Wasm closure execution reads a supported release, got {release} from {releases:?}"

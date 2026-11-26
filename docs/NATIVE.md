@@ -87,8 +87,13 @@ linker; each limit below is a decision, not an omission.
   multiple of the architecture's maximum page size (`Arch::max_page_size` in
   `src/native/target_contract.rs`: 4 KiB on x86_64 and riscv64, 64 KiB on AArch64) in the file and
   in memory, so file offset and address stay congruent and no kernel page size puts both segments
-  in one page. Both segments are aligned to that size. No PIC or section headers. The whole image
-  must fit the 4 GiB the small code models address.
+  in one page. Both segments are aligned to that size. No PIC, and no section headers unless
+  `KRUSTY_NATIVE_SYMBOL_TABLE` is set: that appends a `.symtab` of every function and data symbol
+  at its final address, after the loaded segments, together with `.text`, `.data` and `.bss`
+  sections that describe them. A symbol belongs to the section containing its address and is
+  absolute (`SHN_ABS`) only when no loaded segment contains it. So `gdb`/`nm` can name a crashing
+  program's functions without moving anything that loads. The whole image must fit the 4 GiB the
+  small code models address.
 - **Imports from shared libraries** (`src/native/linker/{dynamic,libraries}.rs`; design below in
   "Importing from shared libraries"). A program that references functions it
   does not define, which an `ImportLibrary` exports, is linked dynamically. The output adds

@@ -55,9 +55,14 @@ mod condition_emission;
 mod constant_emission;
 mod constructor_accessors;
 mod constructor_defaults;
+mod constructor_descriptors;
 mod constructor_initialization;
 mod constructor_signatures;
+mod enum_primary_constructor;
 use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
+use constructor_descriptors::{
+    ctor_field_descs, primary_ctor_descriptor, primary_ctor_parameter_descs,
+};
 mod companion_field;
 mod copied_code;
 mod coroutine_machine;
@@ -196,6 +201,7 @@ use class_metadata::build_class_metadata;
 #[cfg(test)]
 use class_metadata::build_class_metadata_with_facts;
 mod constructor_delegation_arguments;
+mod jvm_overloads;
 pub(super) mod jvm_static_members;
 mod method_copies;
 mod method_placement;
@@ -521,6 +527,8 @@ pub(super) struct EmitEnv<'a> {
     /// The `@kotlin.Metadata` `mv` (`-language-version`, or [`DEFAULT_METADATA_VERSION`]) and
     /// pre-release flag this emission writes.
     metadata_stamp: krusty::jvm::classfile::MetadataStamp,
+    /// The kotlinc profile the compilation reproduces.
+    quirks: krusty::kotlin_version::Quirks,
 }
 
 use crate::override_results::boxes_sam_result;
@@ -540,26 +548,6 @@ fn lambda_mode_for(
         None if is_high_arity_function(arity) => LambdaMode::Class,
         None => modes.lambdas,
     }
-}
-
-/// The primary constructor's JVM descriptor: every constructor argument, property-backed or plain.
-fn primary_ctor_descriptor(ir: &IrFile, c: &IrClass) -> String {
-    format!("({})V", primary_ctor_parameter_descs(ir, c))
-}
-
-fn primary_ctor_parameter_descs(ir: &IrFile, c: &IrClass) -> String {
-    class_ctor_jvm_tys(ir, c)
-        .into_iter()
-        .map(krusty::jvm::names::type_descriptor)
-        .collect()
-}
-
-fn ctor_field_descs(ir: &IrFile, c: &IrClass) -> String {
-    let fields = c.fields.iter().take(c.ctor_param_count as usize).collect();
-    capture_order::physical_fields(ir, c, fields)
-        .into_iter()
-        .map(|f| krusty::jvm::names::type_descriptor(f.ty))
-        .collect()
 }
 
 /// Physical JVM realization of one exact common data-class declaration. The role was bound to its
@@ -1223,7 +1211,8 @@ fn emit_pass(
         emitted.then_some(i)
     });
     let facade_functions: Vec<u32> = facade_functions.collect();
-    let main_bridge = main_bridge::MainBridge::plan(ir, env, &facade_functions);
+    let mut main_bridge = main_bridge::PendingMainBridge::plan(ir, env, &facade_functions);
+    let mut overloaded = Vec::new();
     for member in member_schedule::facade_source_ordered_members(ir, facade_functions.into_iter()) {
         let i = match member {
             member_schedule::FacadeMember::Function(function) => function as usize,
@@ -1240,6 +1229,9 @@ fn emit_pass(
                 continue;
             }
         };
+        main_bridge.before_function(ir, i as u32, facade, &mut cw, |cw| {
+            jvm_overloads::emit_pending_facade_overloads(ir, &mut overloaded, facade, cw, env)
+        });
         let f = &ir.functions[i];
         let rescued = lambdas.rescued.contains(&(i as u32));
         if rescued {
@@ -1280,12 +1272,7 @@ fn emit_pass(
             &mut cw,
         );
         facade_has_method = true;
-        if let Some(bridge) = main_bridge
-            .as_ref()
-            .filter(|bridge| bridge.follows(i as u32))
-        {
-            bridge.emit(ir, facade, &mut cw);
-        }
+        overloaded.push(i as u32);
         // A top-level function (or extension) with parameter defaults gets kotlinc's
         // `foo$default(params…, int mask, Object marker)` synthetic (dispatches to the real method,
         // filling the masked slots from the defaults), so an omitted-argument caller — same-file or
@@ -1321,6 +1308,11 @@ fn emit_pass(
             );
         }
     }
+    main_bridge.finish(ir, facade, &mut cw, |cw| {
+        jvm_overloads::emit_pending_facade_overloads(ir, &mut overloaded, facade, cw, env)
+    });
+    // `@JvmOverloads` overloads follow every member the file declares.
+    jvm_overloads::emit_pending_facade_overloads(ir, &mut overloaded, facade, &mut cw, env);
     // A multifile facade forwards to the part's declared members and their `$default` stubs,
     // never to the synthetic accessors emitted below.
     if env.multifile_facade.is_some() {
@@ -2506,7 +2498,30 @@ fn emit_class(
             !ir.lifted_functions.contains_key(&function)
                 && ir.functions[function as usize].name == "main"
         });
+    // The members a lowering adds later (the lifted functions and lambdas) follow `@JvmOverloads`.
+    let mut after_primary = after_primary;
+    let lifted = after_primary.split_off(
+        after_primary
+            .iter()
+            .position(|member| matches!(member, SourceOrderedMember::Function(function) if ir.lifted_functions.contains_key(function)))
+            .unwrap_or(after_primary.len()),
+    );
+    let overload_sites = jvm_overloads::sites(&after_primary);
     for member in after_primary {
+        emit_scheduled_member(&member_emission, member, &mut cw);
+    }
+    jvm_overloads::emit_class_overloads(
+        ir,
+        c,
+        jvm_overloads::PrimaryOverloads {
+            access: ctor_access,
+            owner: &fq_name,
+        },
+        &overload_sites,
+        &mut cw,
+        env,
+    );
+    for member in lifted {
         if script_main
             && matches!(member, SourceOrderedMember::Function(function) if ir.lifted_functions.contains_key(&function))
         {
@@ -2518,89 +2533,7 @@ fn emit_class(
     if script_main {
         script_main::emit(&fq_name, opts.param_assertions, &mut cw);
     }
-    // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
-    // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a full
-    // mask — AFTER the declared methods (kotlinc's member order), at the primary's declared
-    // visibility (a PROTECTED primary gets a protected convenience ctor; one hidden behind its
-    // marker accessor for a value-class parameter is still public). A declared constructor without
-    // value parameters already is that `<init>()`, so kotlinc's JvmDefaultConstructorLowering adds
-    // none beside it.
-    let declares_no_arg_ctor = c.secondary_ctors.iter().any(|sc| sc.params.is_empty());
-    if c.has_primary_ctor && !declares_no_arg_ctor {
-        let param_tys = class_ctor_jvm_tys(ir, c);
-        let ctor_access = if is_continuation || c.is_anonymous_object {
-            0x0000
-        } else if c.is_singleton() || c.is_value || c.is_sealed {
-            0x0002
-        } else {
-            match ir.ctor_visibilities.get(&c.fq_name_id()) {
-                Some(krusty::types::Visibility::Protected) => 0x0004,
-                Some(krusty::types::Visibility::Private) => 0x0002,
-                _ => 0x0001,
-            }
-        };
-        if let Some(defaults) = ir.class_ctor_defaults(&fq_name) {
-            if !param_tys.is_empty()
-                && defaults.len() == param_tys.len()
-                && defaults.iter().all(Option::is_some)
-                && !c.is_sealed
-                && (ctor_access == 0x0001 || ctor_access == 0x0004)
-            {
-                // ASM interns a method's name and descriptor at its header visit, before its body.
-                cw.reserve_method_name("<init>");
-                cw.reserve_descriptor("()V");
-                let mut z = CodeBuilder::new(1);
-                z.aload(0);
-                for &t in &param_tys {
-                    push_zero(t, &mut z, &mut cw);
-                }
-                for mask in full_default_masks(param_tys.len()) {
-                    z.push_int(mask, &mut cw);
-                }
-                z.aconst_null();
-                let mut stub_params = param_tys.clone();
-                stub_params.extend(std::iter::repeat_n(
-                    Ty::Int,
-                    default_mask_count(param_tys.len()),
-                ));
-                stub_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-                let aw: i32 = 1 + stub_params
-                    .iter()
-                    .map(|t| slot_words(*t) as i32)
-                    .sum::<i32>();
-                let m = cw.methodref(
-                    &fq_name,
-                    "<init>",
-                    &method_descriptor(&stub_params, Ty::Unit),
-                );
-                z.invokespecial(m, aw, 0);
-                z.ret_void();
-                z.ensure_locals(1);
-                z.link();
-                cw.add_method(ctor_access, "<init>", "()V", &z);
-                // kotlinc gives the convenience ctor a `this` LocalVariableTable (no line table).
-                cw.set_method_debug(
-                    "<init>",
-                    "()V",
-                    None,
-                    &[("this".to_string(), format!("L{fq_name};"), 0)],
-                );
-                // The convenience ctor STANDS IN for the declared primary, so kotlinc repeats the
-                // primary's declared annotations on it (the `$default` overload between them, being
-                // synthetic, gets none). Their descriptors already interned at the primary.
-                let annotations = &c.primary_ctor_annotations;
-                if !annotations.retains_none() {
-                    cw.set_method_annotations("<init>", "()V", annotations);
-                    if annotations.deprecated() {
-                        cw.mark_method_deprecated("<init>", "()V");
-                    }
-                    if function_annotations::hidden_realization_is_synthetic(annotations) {
-                        cw.set_method_synthetic("<init>", "()V");
-                    }
-                }
-            }
-        }
-    }
+    jvm_overloads::emit_default_constructor(ir, c, &fq_name, is_continuation, &mut cw);
     // The child-serializer cache follows both constructors (kotlinc's order), outside the schedule.
     let deferred = accessor_emission_order::deferred_cache_accessor(ir, c);
     for &fid in c
@@ -3060,7 +2993,7 @@ fn emit_interface_class(
         });
         // A compiler-generated implementation class carries the minimal synthetic-class metadata
         // record. Kotlin reflection and downstream metadata readers rely on `k=3` to classify it.
-        let xi = synthetic_class_xi(SYNTHETIC_PUBLIC);
+        let xi = synthetic_class_xi(env.quirks, SYNTHETIC_PUBLIC);
         di.set_kotlin_metadata(3, opts.metadata_stamp(), xi, &[], &[]);
         extra.push((holder, env.run.finish_class(di)));
     }
@@ -3150,21 +3083,17 @@ fn emit_enum_class(
 
     let field_tys = field_jvm_tys(&c.fields);
     // (bridges emitted after the methods below — `emit_bridges` references emitted method refs)
-    let n_params = c.ctor_param_count as usize;
-    let user_tys: Vec<Ty> = field_tys[..n_params].to_vec();
-    let all_param_tys = class_ctor_jvm_tys(ir, c);
-    let ctor_params: Vec<Ty> = [Ty::String, Ty::Int]
-        .into_iter()
-        .chain(all_param_tys.iter().copied())
-        .collect();
-    let ctor_desc = method_descriptor(&ctor_params, Ty::Unit);
-    let ctor_sig = constructor_signatures::enum_constructor_signature(&signature_formatter, ir, c)
-        .expect("an enum constructor always signs its source parameters");
-    let ctor_parameters = if env.java_parameters {
-        super::method_parameters::enum_constructor(c).to_vec()
-    } else {
-        Vec::new()
-    };
+    let owner = c.fq_name();
+    let primary_constructor = enum_primary_constructor::EnumPrimaryConstructor::new(
+        ir,
+        c,
+        env,
+        facade,
+        &owner,
+        &signature_formatter,
+    );
+    let all_param_tys = &primary_constructor.all_param_tys;
+    let ctor_desc = &primary_constructor.descriptor;
     // Property backing fields are private (kotlinc), reached through the synthesized `getX()`/`setX()`
     // accessors — for both the primary-constructor fields and body member-property fields
     // (`enum class E { A; val x = … }`), initialized in the constructor via `init_body`.
@@ -3193,22 +3122,7 @@ fn emit_enum_class(
     }
     // `$$delegatedProperties` follows `Companion`, as in an ordinary class.
     delegated_property_array::declare(env, c.fq_name, &mut cw);
-    // kotlinc visits the whole CONSTRUCTOR before the entry constants — name, descriptor, its generic
-    // `Signature` (the two synthetic `Enum` params are erased, leaving `()V`), then its
-    // LocalVariableTable strings. `add_field` would otherwise claim those slots for the first entry.
-    cw.reserve_method_pool_with_annotations(
-        "<init>",
-        &ctor_desc,
-        Some(&ctor_sig),
-        &[],
-        &krusty::ir::DeclarationAnnotations::default(),
-        &ctor_parameters,
-    );
-    // The source parameters' annotations follow the constructor header, before its body. A private
-    // enum constructor carries no nullability annotations.
-    cw.reserve_method_parameter_annotation_pool(None, &c.ctor_param_annotations, &[], false);
-    // The ctor BODY's `super(name, ordinal)` call resolves before its LocalVariableTable strings.
-    cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
+    primary_constructor.reserve_header(&mut cw);
     // The property backing fields are visited after the methods: each name interns where the
     // constructor body first stores it, after that body's own constants.
     for (field_index, (f, t)) in c.fields.iter().zip(&field_tys).enumerate() {
@@ -3267,125 +3181,8 @@ fn emit_enum_class(
     // fields above, next to `Companion`, where kotlinc puts them; this binding is the one `<clinit>`
     // below initializes.
     // Private constructor `(Ljava/lang/String;I<user params>)V` → `super(name, ordinal)` then store the
-    // property params / run the body-property initializers. The user params are ALL primary-ctor params
-    // (from `ctor_args`) — a `val`/`var` param backs a field, a plain param is an argument only (in scope
-    // for a body-property initializer), so `all_param_tys` can be wider than the `n_params` fields.
-    let ctor_words: u16 = ctor_params.iter().map(|t| slot_words(*t)).sum();
-    let mut ctor = CodeBuilder::new(1 + ctor_words);
-    ctor.aload(0);
-    ctor.aload(1);
-    load(Ty::Int, 2, &mut ctor);
-    let super_init = cw.methodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
-    ctor.invokespecial(super_init, 2, 0);
-    // kotlinc maps the `super(name, ordinal)` call to where the declaration starts (annotations
-    // included), then maps each property store to that property's own declaration line.
-    let mut store_lines = initializer_lines::ConstructorInitializerLines::default();
-    let mut max_locals = 1 + ctor_words;
-    // Store constructor-property parameters unless lowering already represented those stores in the
-    // init body. The existence of a body property is not that contract: an init body can contain
-    // only body-property stores while leaving `explicit_param_stores` false.
-    if !c.explicit_param_stores {
-        let mut slot = 3u16;
-        let mut field_i = 0usize;
-        for (argument, ty) in c.ctor_args.iter().zip(&all_param_tys) {
-            if argument.is_field {
-                let name = instance_field_jvm_name(ir, env.run, c, field_i);
-                if let Some(line) = property_line(ir, c, field_i as u32) {
-                    store_lines.push((ctor.bytes.len() as u16, line));
-                }
-                ctor.aload(0);
-                load(*ty, slot, &mut ctor);
-                let field = cw.fieldref(&fq, &name, &type_descriptor(*ty));
-                ctor.putfield(field, slot_words(*ty) as i32);
-                field_i += 1;
-            }
-            slot += slot_words(*ty);
-        }
-    }
-    // Emit body-property stores and `init` statements through the standard IR emitter, mapping value
-    // ids onto the enum's slot layout: `this` at 0, then every user parameter at slots 3+ after the
-    // synthetic name and ordinal. A pure SetField block retains each store's source line.
-    if let Some(init_body) = c.init_body {
-        let marks_before = ctor.line_marks().len();
-        let mut e = Emitter::new(
-            ir,
-            &mut cw,
-            env,
-            EmitterOwner {
-                static_owner: Some(StaticOwner::Class(c.fq_name)),
-                owner: &fq,
-                facade,
-            },
-            Ty::Unit,
-            [init_body],
-        );
-        let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj_name(c.fq_name));
-        e.slots.insert(0, (receiver, Ty::obj_name(c.fq_name)));
-        // The synthetic name and ordinal come first; no semantic value names them.
-        e.frame.enter(FrameKey::Parameter(0), Ty::String);
-        e.frame.enter(FrameKey::Parameter(1), Ty::Int);
-        for (i, t) in all_param_tys.iter().enumerate() {
-            let value = i as u32 + 1;
-            let s = e.frame.enter(FrameKey::Value(value), *t);
-            e.slots.insert(value, (s, *t));
-        }
-        e.render_initializer_boundaries = true;
-        e.emit_constructor_init_body(c, init_body, &mut ctor, &mut store_lines);
-        e.render_initializer_boundaries = false;
-        max_locals = max_locals.max(e.frame.max());
-        store_lines.record_restored(&ctor, marks_before);
-    }
-    // The `return` maps to the primary constructor's start; a pending closing `init` line owns a
-    // `nop` before that transition.
-    let return_line = primary_constructor_line(ir, c);
-    if return_line != 0 && !store_lines.is_empty() {
-        ctor.mark_line(return_line);
-    }
-    let ctor_return_pc = ctor.bytes.len() as u16;
-    ctor.ret_void();
-    ctor.ensure_locals(max_locals);
-    ctor.link();
-    // An enum's ctor is `private`: an entry subclass reaches it via its marker accessor or `$default`.
-    let base_ctor_acc = 0x0002;
-    // kotlinc's `Signature` on the enum ctor lists only the USER params, without the synthetic
-    // leading `(String, int)`: `()V` for a plain enum, `(I)V` for `E(val n: Int)`.
-    // An enum declaring ONLY secondary constructors has no primary to emit: every entry names one
-    // of the secondaries. Registering the synthesized primary anyway collided with a no-argument
-    // secondary — both are `(String, int)V` — and the class failed to load with a
-    // `ClassFormatError: Duplicate method name "<init>"`. Its bytes are still built above so the
-    // constant pool interns in kotlinc's order.
-    seed_enum_constructor_locals(ir, c, &self_desc, &mut cw);
-    let emits_primary_ctor = c.has_primary_ctor || c.secondary_ctors.is_empty();
-    if emits_primary_ctor {
-        cw.add_method_sig(
-            base_ctor_acc | method_access::primary_constructor_varargs(c),
-            "<init>",
-            &ctor_desc,
-            &ctor,
-            Some(&ctor_sig),
-        );
-        cw.set_method_parameters("<init>", &ctor_desc, &ctor_parameters);
-        // The synthetic `(String, int)` prefix is not annotable: the attributes count only the
-        // source parameters.
-        cw.set_annotable_method_param_annotations("<init>", &ctor_desc, &c.ctor_param_annotations);
-    }
-    if emits_primary_ctor {
-        let header = c.decl_line;
-        let start = if c.decl_start_line == 0 {
-            header
-        } else {
-            c.decl_start_line
-        };
-        if header != 0 {
-            // Each retained store maps to its property's line and the `return` to the constructor
-            // start. A missing line is not reconstructed in the backend.
-            let entries = store_lines.method_entries(
-                (0, start),
-                (ctor_return_pc, primary_constructor_line(ir, c)),
-            );
-            cw.set_method_lines("<init>", &ctor_desc, &entries);
-        }
-    }
+    // property params / run the body-property initializers.
+    primary_constructor.emit(&self_desc, &mut cw);
     if let Some(defaults) = crate::default_wrappers::primary_constructor(ir, c) {
         constructor_defaults::emit_ctor_default_stub_with_prefix(
             ir,
@@ -3395,7 +3192,7 @@ fn emit_enum_class(
                 facade,
                 prefix: &[Ty::String, Ty::Int],
                 logical_prefix_count: 0,
-                real_params: &all_param_tys,
+                real_params: all_param_tys,
                 defaults,
                 secondary_lines: None,
                 target_uses_marker_accessor: false,
@@ -3405,26 +3202,6 @@ fn emit_enum_class(
             &mut cw,
             env,
         );
-    }
-
-    // The constructors' LocalVariableTable strings follow their bodies, and the property accessors
-    // (`getTag`, its descriptor, its `@NotNull`) come next, each at its method visit.
-    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
-        cw.reserve_method_name(&property_getter_name(&f.name));
-        cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
-        // A parameterized getter's generic `Signature` interns at its method visit, before the
-        // nullability annotation.
-        if let Some(getter) =
-            property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref()).getter
-        {
-            cw.reserve_descriptor(&getter);
-        }
-        // The nullability comes from the declared type; `t` is its erased JVM form.
-        match field_nullability_kind(f.ty) {
-            1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
-            2 => cw.reserve_descriptor("Lorg/jetbrains/annotations/Nullable;"),
-            _ => {}
-        }
     }
 
     let markers = member_schedule::property_annotation_marker_fids(ir, c);
@@ -3447,11 +3224,14 @@ fn emit_enum_class(
         byte_parity: false,
         owner_prefix: &OwnerConstructorPrefix::enum_class(),
     };
-    for member in source_ordered_members(ir, c, None) {
-        if matches!(member, SourceOrderedMember::Function(function) if !schedule.declared.contains(&function))
-        {
-            continue;
-        }
+    let enum_members = source_ordered_members(ir, c, None)
+        .into_iter()
+        .filter(|member| {
+            !matches!(member, SourceOrderedMember::Function(function) if !schedule.declared.contains(function))
+        })
+        .collect::<Vec<_>>();
+    let overload_sites = jvm_overloads::sites(&enum_members);
+    for member in enum_members {
         emit_scheduled_member(&declared_members, member, &mut cw);
     }
     let emit_members = |cw: &mut ClassWriter, members: &[u32]| {
@@ -3553,7 +3333,6 @@ fn emit_enum_class(
         &synthetic_enum_fields.entries,
         "Lkotlin/enums/EnumEntries;",
     );
-    cw.reserve_method_name("$values");
     // values(): `$VALUES.clone()` cast back to the array type.
     let mut vals = CodeBuilder::new(0);
     let valref = cw.fieldref(&fq, &synthetic_enum_fields.values, &arr_desc);
@@ -3601,7 +3380,20 @@ fn emit_enum_class(
         &gent,
         Some(&format!("()Lkotlin/enums/EnumEntries<L{fq};>;")),
     );
+    // `@JvmOverloads` follows the synthesized members: kotlinc's enum lowering runs before it.
+    jvm_overloads::emit_class_overloads(
+        ir,
+        c,
+        jvm_overloads::PrimaryOverloads {
+            access: 0x0002,
+            owner: &fq,
+        },
+        &overload_sites,
+        &mut cw,
+        env,
+    );
     emit_members(&mut cw, &schedule.local_functions);
+    cw.reserve_method_name("$values");
     // $values(): build the backing array — `new E[n]` filled with each entry constant (kotlinc factors
     // this out of `<clinit>`). Private static final synthetic, returning `E[]`.
     let mut vbuild = CodeBuilder::new(1);
@@ -3758,7 +3550,9 @@ fn emit_enum_class(
             &mut cw,
             opts.param_assertions,
             synth_debug_tables::PrimaryConstructorDebug {
-                method: emits_primary_ctor.then_some((ctor_desc.as_str(), 0)),
+                method: primary_constructor
+                    .is_emitted()
+                    .then_some((ctor_desc.as_str(), 0)),
                 ..Default::default()
             },
         );
@@ -4684,6 +4478,10 @@ struct Emitter<'a> {
     /// The operand binding of a same-module inline call being emitted: kotlinc stores the operand
     /// into its parameter slot without marking a line.
     copied_operand_binding: Option<ExprId>,
+    /// The same-module callee frames that have opened but not yet reached their frame marker,
+    /// innermost last. A default evaluated ahead of the marker can run an inline call of its own,
+    /// so each expansion keeps its own entry.
+    pending_copied_frames: Vec<block_scope::PendingCopiedFrame>,
     /// The `&&`/`||` operand whose line is marked again before the jump that consumes it.
     short_circuit_operand_line: Option<ExprId>,
     /// A plain local operand of an unsigned bitwise member is being loaded, so it records no line.
@@ -4814,6 +4612,7 @@ impl<'a> Emitter<'a> {
             render_initializer_boundaries: false,
             inside_condition: false,
             copied_operand_binding: None,
+            pending_copied_frames: Vec::new(),
             short_circuit_operand_line: None,
             suppress_unsigned_local_line: false,
             this_uninitialized: false,
