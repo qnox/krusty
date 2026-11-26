@@ -1255,19 +1255,6 @@ fn builtin_inc_dec_result(operand: Ty) -> Option<Ty> {
 /// `callableReference/property/extensionPropertyWithExtensionType.kt` covers it.
 const CALLABLE_INVOKE_OPERATOR: &str = "invoke";
 
-/// The augmented-assignment operator name for a binary op (`+=` → `plusAssign`, etc.). Only the five
-/// arithmetic compound operators have an `…Assign` form.
-fn assign_op_name(op: BinOp) -> Option<&'static str> {
-    Some(match op {
-        BinOp::Add => "plusAssign",
-        BinOp::Sub => "minusAssign",
-        BinOp::Mul => "timesAssign",
-        BinOp::Div => "divAssign",
-        BinOp::Rem => "remAssign",
-        _ => return None,
-    })
-}
-
 fn delegated_getvalue_ret_for_signature(
     file: &File,
     table: &SymbolTable,
