@@ -368,6 +368,7 @@ fn extends_target(
 /// The local-variable names of a protected property accessor's parameters: the setter's value is
 /// named as its declaration names it.
 fn protected_property_parameter_names(
+    quirks: krusty::kotlin_version::Quirks,
     property: &krusty::ir::IrModuleProperty,
     write: bool,
     accessor: &str,
@@ -377,9 +378,14 @@ fn protected_property_parameter_names(
     if write {
         let setter = property.setter_parameter.as_ref().map(std::slice::from_ref);
         names.push(setter.and_then(|identity| {
-            crate::parameter_names::resolved_local_variables(identity, &[property.ty], accessor)
-                .pop()
-                .flatten()
+            crate::parameter_names::resolved_local_variables(
+                quirks,
+                identity,
+                &[property.ty],
+                accessor,
+            )
+            .pop()
+            .flatten()
         }));
     }
     names
@@ -684,8 +690,12 @@ pub(super) fn cross_owner_member_calls(
                         if *write {
                             target_parameters.push(property.ty);
                         }
-                        let parameter_names =
-                            protected_property_parameter_names(property, *write, &name);
+                        let parameter_names = protected_property_parameter_names(
+                            ir.reference.quirks(),
+                            property,
+                            *write,
+                            &name,
+                        );
                         // A `@JvmField` property has no accessor: kotlinc's bridge reads or writes
                         // the field itself and is named after the accessor with a `$p` suffix.
                         let field = crate::module_calls::instance_jvm_field_owner(property)

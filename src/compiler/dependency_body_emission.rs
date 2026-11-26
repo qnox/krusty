@@ -201,8 +201,15 @@ pub(super) fn emit_dependencies<B: Backend>(
             &program_facts
         }
     };
+    // The checker froze the selected `enumEntries` as the edge of every synthetic `entries` body;
+    // a unit emits that call only for a target whose enums build `entries` by it.
+    let entries_factory = backend
+        .common_ir_preparation()
+        .filter(|preparation| preparation.enums.builds_entries_by_factory())
+        .and_then(|_| checked_facts.enum_entries_factory().cloned());
     let callees = KlibCalleeFacts::new(selected.iter().copied())
         .with_checked_dependency_facts(checked_facts)
+        .with_enum_entries_factory(entries_factory.clone())
         .with_target_classifiers(&target_represents_classifier);
     let mut roots: Vec<crate::libraries::KlibBodyCallable<'_>> = Vec::new();
     for callable in selected.iter().copied().filter(|callable| {
@@ -284,6 +291,13 @@ pub(super) fn emit_dependencies<B: Backend>(
     // Category ownership is a declaration capability, not an emission-success test. An intrinsic
     // wrapper whose unsupported body transaction declines must not be retried as an ordinary body.
     let intrinsic_roots: HashSet<_> = roots.iter().map(|root| root.identity()).collect();
+    // A function a source module of this program declares and exports is called, never lowered a
+    // second time from the body its own KLIB also records.
+    let source_exports: HashSet<&KlibDependencyCallable> = uses
+        .iter()
+        .flat_map(|use_| use_.file.dependency_exports.callables())
+        .map(|(_, identity)| identity)
+        .collect();
     ordinary.retain(|root| {
         let intrinsic_owned = intrinsic_roots.contains(root.identity());
         if intrinsic_owned {
@@ -294,6 +308,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             );
         }
         !intrinsic_owned
+            && !source_exports.contains(root.identity())
             && !support_state.emitted.contains_key(root.identity())
             && !support_state.in_progress.contains_key(root.identity())
     });
@@ -365,6 +380,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                 .keys()
                 .chain(support_state.materializing_classes.keys())
                 .copied(),
+            symbols.reference(),
         )
         .presetting_constant_statics(backend.presets_constant_top_level_initializers())
         .adding_members_to_realized_classes(backend.adds_members_to_realized_classes());
@@ -400,7 +416,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         let emitted_roots::FrozenClosure {
             declarations,
             authorized_member_edges,
-            read_objects,
+            read_classes,
             dispatched,
         } = closure;
         let callees = KlibCalleeFacts::with_reference_declarations(
@@ -413,8 +429,10 @@ pub(super) fn emit_dependencies<B: Backend>(
         )
         .with_checked_dependency_facts(checked_facts)
         .with_authorized_member_edges(authorized_member_edges)
-        .with_read_objects(read_objects)
-        .with_target_classifiers(&target_represents_classifier);
+        .with_read_classes(read_classes)
+        .with_enum_entries_factory(entries_factory.clone())
+        .with_target_classifiers(&target_represents_classifier)
+        .with_expansion_copies(facts.inline_bodies());
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,
@@ -458,7 +476,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         }
         for object in root_objects {
             let class = callees
-                .read_object(object.classifier)
+                .read_class(object.classifier)
                 .expect("the closure froze the objects the source reads");
             if let Err(decline) =
                 unit.lower_object(class, bodies, &callees, intrinsics, &externals, platform)
@@ -867,6 +885,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                 platform,
                 preparation,
                 symbols.coroutine_runtime(),
+                symbols.enum_entries_factory(),
                 &dispatched_classes,
             ) {
                 release_unit_reservations(support_state, &published, &materialized, &statics);
@@ -1052,6 +1071,14 @@ fn prepare_bodyless_externals(
     diags: &mut DiagSink,
 ) -> bool {
     let mut pending = walked_from.into_iter().collect::<VecDeque<_>>();
+    // An object a body reads is materialized with the members its initialization reaches.
+    match emitted_roots::read_class_initializations(platform, bodies, capabilities.callees) {
+        Ok(edges) => pending.extend(edges),
+        Err(error) => {
+            diags.error(Span::new(0, 0), format!("internal error: {error}"));
+            return false;
+        }
+    }
     let mut visited = HashSet::default();
     while let Some(identity) = pending.pop_front() {
         if !visited.insert(identity.clone()) {

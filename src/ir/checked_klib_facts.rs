@@ -18,6 +18,9 @@ pub(crate) struct CheckedKlibDependencyFacts {
     member_edges: HashMap<crate::libraries::KlibDependencyCallable, CheckedMemberCallEdge>,
     type_hierarchy: Option<CheckedKlibTypeFacts>,
     sam_declarations: HashMap<super::KlibSamKey, super::CheckedKlibSamDeclaration>,
+    /// The selected `kotlin.enums.enumEntries(Array)`: the checked edge of an enum's synthetic
+    /// `entries` body, which Kotlin builds from the enum's `values()` on every target.
+    enum_entries_factory: Option<crate::libraries::KlibDependencyCallable>,
     /// Owning tests observe exact constructor reachability without reimplementing the graph walk.
     #[cfg(test)]
     reached_constructors: crate::fx_hash::HashSet<crate::libraries::KlibDependencyCallable>,
@@ -37,6 +40,7 @@ impl CheckedKlibDependencyFacts {
             member_edges,
             type_hierarchy,
             sam_declarations: HashMap::default(),
+            enum_entries_factory: None,
             #[cfg(test)]
             reached_constructors: crate::fx_hash::HashSet::default(),
         }
@@ -48,6 +52,18 @@ impl CheckedKlibDependencyFacts {
     ) -> Self {
         self.sam_declarations = declarations;
         self
+    }
+
+    pub(crate) fn with_enum_entries_factory(
+        mut self,
+        factory: Option<crate::libraries::KlibDependencyCallable>,
+    ) -> Self {
+        self.enum_entries_factory = factory;
+        self
+    }
+
+    pub(crate) fn enum_entries_factory(&self) -> Option<&crate::libraries::KlibDependencyCallable> {
+        self.enum_entries_factory.as_ref()
     }
 
     pub(crate) fn sam_declarations(

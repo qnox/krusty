@@ -36,8 +36,8 @@ use crate::types::TypeName;
 pub use archives::OpenedKlibLibraries;
 pub use archives::{KlibLibrariesOpenError, KlibLibraryInput, KlibStdlibSemantics};
 pub(crate) use declaration_bodies::{
-    member_signature, EmittedBody, KlibCalleeOrigin, KlibEnumEntryClass, LocatedClass,
-    LocatedMember, LocatedStaticField,
+    member_signature, EmittedBody, KlibCalleeOrigin, LocatedClass, LocatedMember,
+    LocatedStaticField,
 };
 pub use declaration_bodies::{KlibBodyLibrary, KlibDeclarationBodies, KlibDeclarationBodiesError};
 pub use declaration_signatures::KlibLibraryError;
@@ -283,9 +283,9 @@ impl SymbolSource for KlibLibraries {
                 } else {
                     property.getter.external_identity?
                 }
-            } else {
-                let (owner, classifier, constructor) =
-                    self.inventory.dependency_constructor(identity)?;
+            } else if let Some((owner, classifier, constructor)) =
+                self.inventory.dependency_constructor(identity)
+            {
                 classifier_records::published_constructor(
                     &self.identities,
                     owner,
@@ -293,6 +293,18 @@ impl SymbolSource for KlibLibraries {
                     constructor,
                 )
                 .external_identity?
+            } else {
+                // An enum class's implicit `values`, `valueOf` or `entries` getter, normalized
+                // exactly as the class publishes it.
+                let (owner, classifier) = self.inventory.dependency_enum_member(identity)?;
+                classifier_records::enum_class_members(&self.identities, owner, classifier)
+                    .into_iter()
+                    .filter_map(|(_, member)| member.external_identity)
+                    .find(|&external| {
+                        self.external_callable(external).is_some_and(|realization| {
+                            realization.dependency_callable.as_ref() == Some(identity)
+                        })
+                    })?
             };
         let realization = self.external_callable(external)?;
         (realization.dependency_callable.as_ref() == Some(identity))
@@ -303,7 +315,7 @@ impl SymbolSource for KlibLibraries {
         &self,
         identity: &crate::libraries::KlibDependencyCallable,
     ) -> bool {
-        match &identity.declaration {
+        let declared = match &identity.declaration {
             crate::libraries::KlibDeclarationSignature::Accessor(_) => self
                 .inventory
                 .dependency_property(identity)
@@ -316,7 +328,12 @@ impl SymbolSource for KlibLibraries {
                     .dependency_constructor(identity)
                     .is_some_and(|(_, classifier, _)| classifier.compiler_builtin_owner),
             },
-        }
+        };
+        declared
+            || self
+                .inventory
+                .dependency_enum_member(identity)
+                .is_some_and(|(_, classifier)| classifier.compiler_builtin_owner)
     }
 
     fn external_property(

@@ -54,6 +54,10 @@ impl CharSequenceAppends {
         self.reads.is_some()
     }
 
+    pub(super) fn reads(&self) -> Option<SequenceReads> {
+        self.reads
+    }
+
     pub(super) fn record_reads(&mut self, reads: SequenceReads) {
         self.reads.get_or_insert(reads);
     }

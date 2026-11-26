@@ -146,7 +146,7 @@ impl BodyLowering<'_> {
 
     /// Whether `expression` is a loop whose condition is the constant `true` and whose lowered
     /// body contains no `break` naming that loop.
-    fn loops_forever(&self, expression: KlibIrExprId) -> bool {
+    pub(super) fn loops_forever(&self, expression: KlibIrExprId) -> bool {
         let (KlibIrExprKind::While(serialized) | KlibIrExprKind::DoWhile(serialized)) =
             &self.arena.expr(expression).kind
         else {

@@ -126,6 +126,16 @@ pub(super) fn emit_program<B: Backend>(
             checked.push((retained.raw_source, state, file));
         }
     }
+    if backend
+        .common_ir_preparation()
+        .is_some_and(|preparation| preparation.enums.builds_entries_by_factory())
+    {
+        let mut programs = checked
+            .iter_mut()
+            .map(|(_, _, file)| (&mut file.ir, &mut file.dependency_exports))
+            .collect::<Vec<_>>();
+        crate::backend::enums::withdraw_unread_entries(&mut programs);
+    }
     let uses = checked
         .iter()
         .map(|(_, state, file)| dependency_body_emission::DependencyUse {
