@@ -439,6 +439,7 @@ mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
 mod super_calls;
+use super_calls::is_super_qualifier;
 pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
 mod type_parameter_owners;
@@ -536,10 +537,6 @@ const MAX_OVERLOAD_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES: usize = 4 * 1024 * 1024;
 const CONFLICTING_OVERLOAD_PREFIX: &str = "conflicting overloads:";
 const INAPPLICABLE_OVERLOAD_PREFIX: &str = "none of the following candidates is applicable:";
-
-fn is_super_qualifier(spelling: &str) -> bool {
-    spelling == "super" || spelling.starts_with("super<") || spelling.starts_with("super@")
-}
 
 fn lexical_receiver_label(file: &File, reference: &TypeRef) -> String {
     file.alias_spellings
@@ -39974,11 +39971,8 @@ impl<'a> Checker<'a> {
         argument: ExprId,
         ty: Ty,
     ) -> CallArgKind {
-        if self.file.collection_literal_calls.contains(&argument.0) {
-            return CallArgKind::CollectionLiteral {
-                provisional: ty,
-                factory_classifiers: std::sync::Arc::from([]),
-            };
+        if let Some(literal) = self.unpostponed_collection_literal_kind(argument, ty) {
+            return literal;
         }
         if let Some(function) = self.expression_function_type(scope, argument, ty) {
             if function != ty {
