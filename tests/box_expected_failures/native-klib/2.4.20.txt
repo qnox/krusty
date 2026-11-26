@@ -834,7 +834,6 @@ inlineClasses/callableReferences/inlineClassInternalPrimaryVal.kt
 inlineClasses/callableReferences/inlineClassInternalPrimaryValGeneric.kt
 inlineClasses/callableReferences/inlineClassPrivatePrimaryVal.kt
 inlineClasses/callableReferences/inlineClassPrivatePrimaryValGeneric.kt
-inlineClasses/defaultParameterValues/kt26554.kt
 inlineClasses/dnnInValue.kt
 inlineClasses/funInterface/kt51121.kt
 inlineClasses/funInterface/kt51121_2.kt
