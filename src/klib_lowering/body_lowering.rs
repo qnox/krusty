@@ -373,6 +373,19 @@ pub(super) trait CallLinker {
         unsupported("a file-private object value")
     }
 
+    /// Declare, on the object literal `owner` this library's body serializes at `signature`, the
+    /// members it inherits without overriding them, interface defaults among them, so dispatch
+    /// through the interface members they implement reaches them. A linker that cannot declare
+    /// a dependency body refuses an object literal that inherits one.
+    fn implement_inherited_members(
+        &mut self,
+        _ir: &mut IrFile,
+        _signature: &crate::metadata::klib_ir::KlibIrSignature,
+        _owner: crate::types::TypeName,
+    ) -> Lowered<()> {
+        unsupported("an object literal inheriting a member body")
+    }
+
     /// Whether `signature` names a non-public interface of the library of the body being lowered.
     fn is_local_interface(&self, _signature: &crate::metadata::klib_ir::KlibIrSignature) -> bool {
         false

@@ -237,6 +237,7 @@ pub(super) fn declarations(
                 &emitted.objects,
                 &mut state,
             )?;
+            hold_local_class_defaults(&mut state, emitted.inherited_defaults);
             continue;
         }
         // A top-level function private to its file, or a member of a class private to its
@@ -262,6 +263,7 @@ pub(super) fn declarations(
                 &emitted.objects,
                 &mut state,
             )?;
+            hold_local_class_defaults(&mut state, emitted.inherited_defaults);
             continue;
         }
         // Positive common-lowering capability, never a missing-provider fallback. Earlier emitted
@@ -299,6 +301,7 @@ pub(super) fn declarations(
                         &emitted.objects,
                         &mut state,
                     )?;
+                    hold_local_class_defaults(&mut state, emitted.inherited_defaults);
                     continue;
                 }
                 None => {
@@ -533,7 +536,7 @@ pub(super) fn declarations(
             for target in emitted
                 .super_callables
                 .iter()
-                .filter(|target| is_interface_default(bodies, target))
+                .filter(|target| bodies.is_interface_default(target))
             {
                 if state.object_defaults.insert(target.clone()) {
                     state.emitted_defaults.insert(target.clone());
@@ -541,6 +544,7 @@ pub(super) fn declarations(
                     state.pending.push_back((target.clone(), None));
                 }
             }
+            hold_local_class_defaults(&mut state, emitted.inherited_defaults);
             let member_class = selected
                 .class_contract()
                 .filter(|class| class.emits_members())
@@ -600,12 +604,12 @@ struct ClosureState<'c, 'u> {
     /// Interface default bodies a class of the file inherits, emitted for its dispatch record
     /// though no support unit materializes the interface.
     emitted_defaults: HashSet<KlibDependencyCallable>,
-    /// Interface defaults a materialized object inherits, each with the object that emits it, not
-    /// yet released: a default is dispatched to only once a walked body calls a declaration it
+    /// Interface defaults a materialized object or local class inherits, each with the object
+    /// that emits it (none for a local class), not yet released: a default is dispatched to only once a walked body calls a declaration it
     /// implements, so reaching it earlier would walk a body nothing can run.
     inherited_defaults: Vec<(
         crate::klib_lowering::InheritedDefault,
-        crate::libraries::KlibBodyClassContract,
+        Option<crate::libraries::KlibBodyClassContract>,
     )>,
     /// The inherited defaults released, whose bodies their object emits.
     object_defaults: HashSet<KlibDependencyCallable>,
@@ -734,9 +738,25 @@ fn next_pending(
             state.emitted_defaults.insert(default.body.clone());
             state.object_defaults.insert(default.body.clone());
             state.dispatched.insert(default.body.clone());
-            state.pending.push_back((default.body, Some(class)));
+            state.pending.push_back((default.body, class));
         }
     }
+}
+
+/// Hold the interface defaults the local classes of a walked body inherit until a walked body
+/// calls a declaration one implements, as an object's are held.
+fn hold_local_class_defaults(
+    state: &mut ClosureState<'_, '_>,
+    defaults: Vec<(KlibDependencyCallable, Vec<KlibDependencyCallable>)>,
+) {
+    state
+        .inherited_defaults
+        .extend(defaults.into_iter().map(|(body, implemented)| {
+            (
+                crate::klib_lowering::InheritedDefault { body, implemented },
+                None,
+            )
+        }));
 }
 
 fn walk_declared_instances(
@@ -769,7 +789,7 @@ fn walk_declared_instances(
             .object_inherited_defaults(&class, bodies)
             .map_err(|reason| format!("an invalid object member: {reason:?}"))?
             .into_iter()
-            .map(|default| (default, class.clone())),
+            .map(|default| (default, Some(class.clone()))),
     );
     for overridden in facts
         .declared_instances_overridden_declarations(&class, bodies)
@@ -1384,17 +1404,6 @@ fn walk_value_class_overrides(
         }
     }
     Ok(())
-}
-
-/// Whether `target` is a member with a body of an interface: a default a `super` call names.
-fn is_interface_default(bodies: &KlibDeclarationBodies, target: &KlibDependencyCallable) -> bool {
-    bodies.function_has_body(target) == Some(true)
-        && matches!(
-            bodies.member_owner(target),
-            crate::klib_libraries::LocatedMember::One { class, .. }
-                if crate::metadata::semantic::class_kind(class.base.flags)
-                    == crate::libraries::TypeKind::Interface
-        )
 }
 
 #[cfg(test)]

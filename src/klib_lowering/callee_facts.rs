@@ -48,7 +48,7 @@ pub struct KlibCalleeFacts<'a> {
     /// The prepared-inline copies of the loaded libraries' inline functions, which a call of a
     /// suspend inline function expands from.
     expansion_copies: Option<&'a crate::klib_libraries::KlibDeclarationBodies>,
-    /// The interface defaults a materialized object declares and emits.
+    /// The interface defaults a materialized object or local class declares and emits.
     object_defaults: Rc<HashSet<KlibDependencyCallable>>,
 }
 
@@ -205,7 +205,8 @@ impl<'a> KlibCalleeFacts<'a> {
         self
     }
 
-    /// Whether the closure released `identity`, an interface default an object inherits.
+    /// Whether the closure released `identity`, an interface default an object or a local class
+    /// inherits.
     pub(crate) fn is_object_default(&self, identity: &KlibDependencyCallable) -> bool {
         self.object_defaults.contains(identity)
     }
