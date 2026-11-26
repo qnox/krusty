@@ -571,7 +571,8 @@ pub(super) struct LinkedAccessor {
 }
 
 /// The value of a serialized constant typed `ty`, and the type the lowered constant has: `null`
-/// is the null value, typed `Nothing?`; any other constant has its value's own type.
+/// is the null value, typed `Nothing?`; an unsigned constant is typed its unsigned type; any other
+/// constant has its value's own type.
 pub(super) fn constant_value(constant: &KlibIrConstant, ty: Ty) -> Lowered<(IrConst, Ty)> {
     let (value, constant_ty) = match constant {
         KlibIrConstant::Null => {
@@ -591,8 +592,16 @@ pub(super) fn constant_value(constant: &KlibIrConstant, ty: Ty) -> Lowered<(IrCo
         KlibIrConstant::String(value) => (IrConst::String(value.as_str().into()), Ty::String),
     };
     if constant_ty != ty {
-        // An unsigned constant, for one, is serialized as its signed value typed `UInt`.
-        return unsupported("a constant of another type than its value's");
+        // An unsigned constant is serialized as its signed value of the same width, typed
+        // `UByte`, `UShort`, `UInt` or `ULong`: the bits are the unsigned value's.
+        let unsigned = match (&value, ty) {
+            (IrConst::Byte(bits), Ty::UByte) => IrConst::UByte(*bits as u8),
+            (IrConst::Short(bits), Ty::UShort) => IrConst::UShort(*bits as u16),
+            (IrConst::Int(bits), Ty::UInt) => IrConst::UInt(*bits as u32),
+            (IrConst::Long(bits), Ty::ULong) => IrConst::ULong(*bits as u64),
+            _ => return unsupported("a constant of another type than its value's"),
+        };
+        return Ok((unsigned, ty));
     }
     Ok((value, ty))
 }
