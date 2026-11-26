@@ -202,10 +202,12 @@ pub(super) fn is_enum_entries(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/enums/EnumEntries"])
 }
 
-pub(super) fn standard_interface_descriptor(internal: TypeName) -> Option<&'static str> {
-    Some(if internal == krusty::types::wk::function_root() {
-        "kt_type_function"
-    } else if is_comparable(internal) {
+/// The descriptor of an interface the runtime provides instances of, or marks its own objects
+/// with. This is the one table: a type check against the interface and the interface markers of a
+/// program class that implements it both read it, so a runtime object and a program object answer
+/// the same test.
+pub(super) fn runtime_interface_descriptor(internal: TypeName) -> Option<&'static str> {
+    Some(if is_comparable(internal) {
         "kt_type_comparable"
     } else if is_char_sequence(internal) {
         "kt_type_char_sequence"
@@ -217,6 +219,21 @@ pub(super) fn standard_interface_descriptor(internal: TypeName) -> Option<&'stat
         "kt_type_closed_floating_point_range"
     } else if is_lazy(internal) {
         "kt_type_lazy"
+    } else if is_kclass(internal) {
+        "kt_type_kclass"
+    } else if is_enum_entries(internal) {
+        "kt_type_enum_entries_interface"
+    } else {
+        return None;
+    })
+}
+
+pub(super) fn standard_interface_descriptor(internal: TypeName) -> Option<&'static str> {
+    if let Some(symbol) = runtime_interface_descriptor(internal) {
+        return Some(symbol);
+    }
+    Some(if internal == krusty::types::wk::function_root() {
+        "kt_type_function"
     } else if is_identity(internal, &["kotlin/reflect/KCallable"]) {
         "kt_type_kcallable"
     } else if is_identity(internal, &["kotlin/reflect/KProperty"]) {
