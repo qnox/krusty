@@ -9,7 +9,8 @@ use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantic
 
 const LIBRARY: &str = include_str!("box_regressions/libraryAnonymousObjectInheritedDefault.kt");
 
-const CONSUMER: &str = "fun box(): String = if (named() == \"OK\") \"OK\" else \"wrong\"\n";
+const CONSUMER: &str =
+    "fun box(): String = if (named() == \"OK\" && chained() == \"K\") \"OK\" else \"wrong\"\n";
 
 #[test]
 fn an_anonymous_object_carries_the_interface_default_only_dispatch_reaches() {

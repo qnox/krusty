@@ -744,19 +744,26 @@ fn next_pending(
 }
 
 /// Hold the interface defaults the local classes of a walked body inherit until a walked body
-/// calls a declaration one implements, as an object's are held.
+/// calls a declaration one implements, as an object's are held. A default already held or
+/// released is held once: a default constructing a class that inherits it reaches itself.
 fn hold_local_class_defaults(
     state: &mut ClosureState<'_, '_>,
     defaults: Vec<(KlibDependencyCallable, Vec<KlibDependencyCallable>)>,
 ) {
-    state
-        .inherited_defaults
-        .extend(defaults.into_iter().map(|(body, implemented)| {
-            (
-                crate::klib_lowering::InheritedDefault { body, implemented },
-                None,
-            )
-        }));
+    for (body, implemented) in defaults {
+        if state.object_defaults.contains(&body)
+            || state
+                .inherited_defaults
+                .iter()
+                .any(|(held, _)| held.body == body)
+        {
+            continue;
+        }
+        state.inherited_defaults.push((
+            crate::klib_lowering::InheritedDefault { body, implemented },
+            None,
+        ));
+    }
 }
 
 fn walk_declared_instances(
