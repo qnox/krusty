@@ -110,6 +110,9 @@ pub(super) struct SignatureTable<'a> {
     /// The public identity inside each file-local `Composite(File, Public)` signature decoded so
     /// far, by the file-local signature it decodes to.
     file_private: std::collections::HashMap<KlibIrSignature, KlibPublicIdSignature>,
+    /// The slot the next decoder-synthesized local declaration takes, counting down from the top
+    /// of the slot space so it never meets a serialized slot.
+    synthetic: u32,
 }
 
 impl<'a> SignatureTable<'a> {
@@ -140,6 +143,24 @@ impl<'a> SignatureTable<'a> {
             prepared_inline,
             origins: std::collections::HashMap::new(),
             file_private: std::collections::HashMap::new(),
+            synthetic: u32::MAX,
+        }
+    }
+
+    /// A fresh identity, private to this file, for a declaration the decoder itself synthesizes
+    /// (the invocation function of an upgraded function reference). Its slot lies above every
+    /// serialized slot, so it never names a table entry, and no two synthesized declarations of
+    /// one file share it.
+    pub(super) fn synthetic_local(&mut self) -> KlibIrSignature {
+        let slot = self.synthetic;
+        assert!(
+            slot as usize >= self.entries.len(),
+            "synthesized local declarations exhausted the slots above the signature table"
+        );
+        self.synthetic -= 1;
+        KlibIrSignature::FileLocal {
+            file: self.file,
+            slot,
         }
     }
 
