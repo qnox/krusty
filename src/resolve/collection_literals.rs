@@ -13,14 +13,6 @@ use crate::types::{type_name, Ty, TypeName};
 
 use super::Checker;
 
-/// See [`Checker::collection_literal_bound`].
-pub(super) enum LiteralBound {
-    /// The literal was not passed for a type variable, or nothing else bounds it.
-    Unbounded,
-    Single(Ty),
-    Ambiguous,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct StandardCollectionFactory {
     pub(super) package: TypeName,
@@ -124,42 +116,48 @@ impl Checker<'_> {
         bounds
     }
 
-    /// What the bounds of the type variable a literal was passed for say about its type. An
-    /// ambiguity is decided when the literal's call selection wins; it is reported once, here.
-    pub(super) fn collection_literal_bound(&mut self, call: ExprId, span: Span) -> LiteralBound {
+    /// The type a literal is built as: the one literal-constructing bound of the type variable it
+    /// was passed for, else `expected`. Several such bounds leave it ambiguous, which is reported
+    /// here and answers `None`. The bounds were decided when the literal's call selection won.
+    /// A check repeated for the same literal reports the same diagnostic again, and the
+    /// compilation collapses the duplicates, so a discarded scratch pass cannot hide the report.
+    pub(super) fn collection_literal_expectation(
+        &mut self,
+        call: ExprId,
+        span: Span,
+        expected: Option<Ty>,
+    ) -> Option<Option<Ty>> {
         let Some(bounds) = self
             .collection_literal_ambiguities
             .borrow()
             .get(&call)
             .cloned()
         else {
-            return LiteralBound::Unbounded;
+            return Some(expected);
         };
-        let [bound] = bounds[..] else {
-            if self.reported_ambiguous_literals.insert(call) {
-                let mut message = "type of collection literal is ambiguous. Multiple candidates \
-                                   declare operator 'of':"
-                    .to_string();
-                for bound in bounds {
-                    message.push('\n');
-                    message.push_str(
-                        &self.literal_candidate_declaration(
-                            bound
-                                .non_null()
-                                .kotlin_class_internal()
-                                .expect("a literal bound names a classifier"),
-                        ),
-                    );
-                }
-                self.diags.error_named(
-                    span,
-                    crate::diag::names::AMBIGUOUS_COLLECTION_LITERAL,
-                    message,
-                );
-            }
-            return LiteralBound::Ambiguous;
-        };
-        LiteralBound::Single(bound)
+        if let [bound] = bounds[..] {
+            return Some(Some(bound.non_null()));
+        }
+        let mut message =
+            "type of collection literal is ambiguous. Multiple candidates declare operator 'of':"
+                .to_string();
+        for bound in bounds {
+            message.push('\n');
+            message.push_str(
+                &self.literal_candidate_declaration(
+                    bound
+                        .non_null()
+                        .kotlin_class_internal()
+                        .expect("a literal bound names a classifier"),
+                ),
+            );
+        }
+        self.diags.error_named(
+            span,
+            crate::diag::names::AMBIGUOUS_COLLECTION_LITERAL,
+            message,
+        );
+        None
     }
 
     /// The classifier the way kotlinc's declaration renderer prints a candidate: its keyword,

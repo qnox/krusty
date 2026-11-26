@@ -133,3 +133,20 @@ fn source_classifiers_are_listed_with_their_supertypes_and_data_modifier() {
         2,
     );
 }
+
+#[test]
+fn an_ambiguous_literal_in_an_anonymous_object_body_is_reported() {
+    // The object's member body is checked in a scratch pass whose diagnostics are discarded before
+    // the authoritative check; the report must survive to that check.
+    assert_same(
+        "ambiguous_in_object",
+        "fun <T> select(vararg x: T): T = x[0]\n\
+         interface X { fun g() }\n\
+         fun f(): X = object : X {\n\
+         \x20   override fun g() {\n\
+         \x20       val a: Set<*> = select(mutableSetOf<Int>(), [1])\n\
+         \x20   }\n\
+         }\n",
+        1,
+    );
+}

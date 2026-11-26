@@ -1834,11 +1834,15 @@ impl Checker<'_> {
             selected.callable.default_realization.is_some(),
             selected.callable.descriptor,
         );
-        for (argument, classifiers) in &selected.ambiguous_literals {
-            self.collection_literal_ambiguities
-                .borrow_mut()
-                .insert(args[*argument], classifiers.clone());
+        // Each commit of the call replaces what an earlier commit published for its literals.
+        let mut ambiguities = self.collection_literal_ambiguities.borrow_mut();
+        for argument in args {
+            ambiguities.remove(argument);
         }
+        for (argument, classifiers) in &selected.ambiguous_literals {
+            ambiguities.insert(args[*argument], classifiers.clone());
+        }
+        drop(ambiguities);
         Some(if missing_context {
             CallableCandidateSelection::MissingContext(Box::new(selected))
         } else {
