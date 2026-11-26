@@ -528,7 +528,6 @@ inlineClasses/inlineClassCollection/inlineMutableCollectionBulkAdd.kt
 inlineClasses/kt25771.kt
 inlineClasses/kt27096.kt
 inlineClasses/kt27096Generic.kt
-inlineClasses/kt27113.kt
 inlineClasses/kt27140Generic.kt
 inlineClasses/kt33119Generic.kt
 inlineClasses/kt47762Generic.kt
@@ -554,7 +553,6 @@ ir/recursiveGeneric.kt
 ir/recursiveGeneric2.kt
 ir/serializationRegressions/anonFakeOverride.kt
 ir/serializationRegressions/useImportedMember.kt
-jdk/noStringToCharArray.kt
 jsAstOptimizations/inlineEmptyFunction.kt
 jvm8/defaults/enable/kt55083_indyLambdaForFunInterface.kt
 ktype/ktype1_basics1.kt

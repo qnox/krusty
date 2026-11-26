@@ -413,6 +413,120 @@ fn authenticate_ir(
     )
 }
 
+/// A member of a `kotlin.wasm.internal` GC array class (`WasmCharArray`, ...) that the stdlib
+/// declares as one array instruction: `len()` is `@WasmOp(ARRAY_LEN)`, `get(index)` is
+/// `ARRAY_GET`, `ARRAY_GET_S` or `ARRAY_GET_U`, and `set(index, value)` is `ARRAY_SET`. The
+/// element type is the declaration's own: the value `get` answers and `set` stores.
+fn wasm_array_member(owner: TypeName, declaration: &KotlinFunction) -> Option<KlibIntrinsicShape> {
+    if owner.parent() != Some(type_name("kotlin/wasm/internal"))
+        || declaration.receiver.is_some()
+        || !declaration.formals.is_empty()
+    {
+        return None;
+    }
+    let operation = string_annotation(
+        &declaration.annotation_applications,
+        type_name("kotlin/wasm/internal/WasmOp"),
+        "name",
+    )?;
+    let element = |ty: &KotlinType| {
+        [
+            ("kotlin/Boolean", Ty::Boolean),
+            ("kotlin/Byte", Ty::Byte),
+            ("kotlin/Short", Ty::Short),
+            ("kotlin/Char", Ty::Char),
+            ("kotlin/Int", Ty::Int),
+            ("kotlin/Long", Ty::Long),
+            ("kotlin/Float", Ty::Float),
+            ("kotlin/Double", Ty::Double),
+        ]
+        .into_iter()
+        .find_map(|(classifier, element)| exact_type(ty, classifier).then_some(element))
+        .or_else(|| {
+            is_nullable_any(ty).then(|| Ty::nullable(Ty::obj_name(crate::types::wk::any())))
+        })
+    };
+    let (operation, params, ret) = match (operation, declaration.params.as_slice()) {
+        ("ARRAY_LEN", []) if exact_type(&declaration.ret, "kotlin/Int") => {
+            (CompilerIntrinsic::ArrayStorageLength, vec![], Ty::Int)
+        }
+        ("ARRAY_GET" | "ARRAY_GET_S" | "ARRAY_GET_U", [index])
+            if exact_type(index, "kotlin/Int") =>
+        {
+            (
+                CompilerIntrinsic::ArrayStorageGet,
+                vec![Ty::Int],
+                element(&declaration.ret)?,
+            )
+        }
+        ("ARRAY_SET", [index, value])
+            if exact_type(index, "kotlin/Int") && exact_type(&declaration.ret, "kotlin/Unit") =>
+        {
+            (
+                CompilerIntrinsic::ArrayStorageSet,
+                vec![Ty::Int, element(value)?],
+                Ty::Unit,
+            )
+        }
+        _ => return None,
+    };
+    Some(KlibIntrinsicShape {
+        operation,
+        kind: ExternalCallableKind::Member,
+        receiver: Some(Ty::obj_name(owner)),
+        params,
+        ret,
+    })
+}
+
+/// The two functions of `kotlin` through which the Wasm stdlib moves between a `String` and the
+/// code units of a `WasmCharArray`: `WasmCharArray.createString(): String` and
+/// `String.getChars(): WasmCharArray`, each an internal extension with no other operand. The
+/// stdlib declares their actual per target over its own `String` layout; a target that lays out
+/// strings itself answers both from its own.
+fn wasm_string_storage(
+    package: TypeName,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    const STORAGE: &str = "kotlin/wasm/internal/WasmCharArray";
+    let receiver = declaration.receiver.as_ref()?;
+    if package != type_name("kotlin")
+        || !declaration.params.is_empty()
+        || !declaration.formals.is_empty()
+        || declaration.is_suspend
+    {
+        return None;
+    }
+    let (operation, receiver, ret) = match declaration.name.as_str() {
+        "createString"
+            if exact_type(receiver, STORAGE) && exact_type(&declaration.ret, "kotlin/String") =>
+        {
+            (
+                CompilerIntrinsic::StringFromCharArrayStorage,
+                Ty::obj(STORAGE),
+                Ty::obj_name(crate::types::wk::string()),
+            )
+        }
+        "getChars"
+            if exact_type(receiver, "kotlin/String") && exact_type(&declaration.ret, STORAGE) =>
+        {
+            (
+                CompilerIntrinsic::StringCharArrayStorage,
+                Ty::obj_name(crate::types::wk::string()),
+                Ty::obj(STORAGE),
+            )
+        }
+        _ => return None,
+    };
+    Some(KlibIntrinsicShape {
+        operation,
+        kind: ExternalCallableKind::Extension,
+        receiver: None,
+        params: vec![receiver],
+        ret,
+    })
+}
+
 /// The packages whose `WasmOp` declarations the Wasm stdlib realizes as one instruction: the
 /// instruction wrappers of `kotlin.wasm.internal` and the public and `@PublishedApi` declarations
 /// of `kotlin` (bit counts, unsigned arithmetic and conversions). Primitive members are the
@@ -1639,9 +1753,15 @@ fn wasm(
     placement: crate::libraries::CallablePlacement,
     declaration: &KotlinFunction,
 ) -> Option<KlibIntrinsicShape> {
+    if let crate::libraries::CallablePlacement::Member { owner, .. } = placement {
+        return wasm_array_member(owner, declaration);
+    }
     let crate::libraries::CallablePlacement::Package(package) = placement else {
         return None;
     };
+    if let Some(shape) = wasm_string_storage(package, declaration) {
+        return Some(shape);
+    }
     // The metadata spelling of `WASM_OPERATION_PACKAGES`.
     if package != type_name("kotlin") && package != type_name("kotlin/wasm/internal") {
         return None;
@@ -2730,6 +2850,171 @@ mod tests {
             gc_unsafe("Kotlin_Int_toStringRadix"),
         );
         assert!(authenticate(native, text, &swapped).is_none());
+    }
+
+    #[test]
+    fn a_wasm_array_classs_members_are_its_array_instructions() {
+        let wasm = Some(TargetIntrinsicPlatform::Wasm);
+        let member = |owner: &str| crate::libraries::CallablePlacement::Member {
+            owner: type_name(owner),
+            owner_is_interface: false,
+        };
+        let storage = "kotlin/wasm/internal/WasmCharArray";
+        let shape = |operation, params: Vec<Ty>, ret| KlibIntrinsicShape {
+            operation,
+            kind: ExternalCallableKind::Member,
+            receiver: Some(Ty::obj(storage)),
+            params,
+            ret,
+        };
+        assert_eq!(
+            authenticate(
+                wasm,
+                member(storage),
+                &declaration("len", &[], "kotlin/Int", wasm_annotation("ARRAY_LEN"))
+            ),
+            Some(shape(
+                CompilerIntrinsic::ArrayStorageLength,
+                vec![],
+                Ty::Int
+            ))
+        );
+        for operation in ["ARRAY_GET", "ARRAY_GET_S", "ARRAY_GET_U"] {
+            assert_eq!(
+                authenticate(
+                    wasm,
+                    member(storage),
+                    &declaration(
+                        "get",
+                        &["kotlin/Int"],
+                        "kotlin/Char",
+                        wasm_annotation(operation)
+                    )
+                ),
+                Some(shape(
+                    CompilerIntrinsic::ArrayStorageGet,
+                    vec![Ty::Int],
+                    Ty::Char
+                ))
+            );
+        }
+        assert_eq!(
+            authenticate(
+                wasm,
+                member(storage),
+                &declaration(
+                    "set",
+                    &["kotlin/Int", "kotlin/Char"],
+                    "kotlin/Unit",
+                    wasm_annotation("ARRAY_SET")
+                )
+            ),
+            Some(shape(
+                CompilerIntrinsic::ArrayStorageSet,
+                vec![Ty::Int, Ty::Char],
+                Ty::Unit
+            ))
+        );
+        // Another operation, another shape, another package or another platform is no array
+        // instruction.
+        let length = declaration("len", &[], "kotlin/Int", wasm_annotation("ARRAY_LEN"));
+        assert_eq!(
+            authenticate(wasm, member("other/WasmCharArray"), &length),
+            None
+        );
+        assert_eq!(
+            authenticate(
+                Some(TargetIntrinsicPlatform::Native),
+                member(storage),
+                &length
+            ),
+            None
+        );
+        assert_eq!(
+            authenticate(
+                wasm,
+                member(storage),
+                &declaration("len", &[], "kotlin/Long", wasm_annotation("ARRAY_LEN"))
+            ),
+            None
+        );
+        assert_eq!(
+            authenticate(
+                wasm,
+                member(storage),
+                &declaration("len", &[], "kotlin/Int", wasm_annotation("ARRAY_NEW"))
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_wasm_stdlibs_string_storage_functions_are_authenticated_by_their_whole_shape() {
+        let wasm = Some(TargetIntrinsicPlatform::Wasm);
+        let kotlin = crate::libraries::CallablePlacement::Package(type_name("kotlin"));
+        let storage = "kotlin/wasm/internal/WasmCharArray";
+        let extension = |name: &str, receiver: &str, ret: &str| {
+            let mut function = declaration(name, &[], ret, wasm_annotation("UNRELATED"));
+            function.receiver = Some(KotlinType::class(receiver));
+            function.annotation_applications.clear();
+            function
+        };
+        assert_eq!(
+            authenticate(
+                wasm,
+                kotlin,
+                &extension("createString", storage, "kotlin/String")
+            ),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::StringFromCharArrayStorage,
+                kind: ExternalCallableKind::Extension,
+                receiver: None,
+                params: vec![Ty::obj(storage)],
+                ret: Ty::obj("kotlin/String"),
+            })
+        );
+        assert_eq!(
+            authenticate(
+                wasm,
+                kotlin,
+                &extension("getChars", "kotlin/String", storage)
+            ),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::StringCharArrayStorage,
+                kind: ExternalCallableKind::Extension,
+                receiver: None,
+                params: vec![Ty::obj("kotlin/String")],
+                ret: Ty::obj(storage),
+            })
+        );
+        assert_eq!(
+            authenticate(
+                wasm,
+                kotlin,
+                &extension("createString", "kotlin/String", "kotlin/String")
+            ),
+            None
+        );
+        assert_eq!(
+            authenticate(wasm, kotlin, &extension("getChars", storage, storage)),
+            None
+        );
+        assert_eq!(
+            authenticate(
+                Some(TargetIntrinsicPlatform::Native),
+                kotlin,
+                &extension("createString", storage, "kotlin/String")
+            ),
+            None
+        );
+        assert_eq!(
+            authenticate(
+                wasm,
+                crate::libraries::CallablePlacement::Package(type_name("other")),
+                &extension("createString", storage, "kotlin/String")
+            ),
+            None
+        );
     }
 
     #[test]

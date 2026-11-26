@@ -40,6 +40,11 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::ArraySet
         | CompilerIntrinsic::ArraySize
         | CompilerIntrinsic::ArrayStorageCopy
+        | CompilerIntrinsic::ArrayStorageLength
+        | CompilerIntrinsic::ArrayStorageGet
+        | CompilerIntrinsic::ArrayStorageSet
+        | CompilerIntrinsic::StringFromCharArrayStorage
+        | CompilerIntrinsic::StringCharArrayStorage
         | CompilerIntrinsic::CharCode
         | CompilerIntrinsic::StringLength
         | CompilerIntrinsic::StringGet

@@ -164,6 +164,21 @@ pub enum CompilerIntrinsic {
     /// length)`, an `@ExcludedFromCodegen` declaration kotlinc lowers to `array.copy` over the
     /// two storage arrays.
     ArrayStorageCopy,
+    /// The Wasm stdlib's `len()` of a `@WasmArrayOf` GC array class, `@WasmOp(ARRAY_LEN)`: one
+    /// `array.len` of the receiver.
+    ArrayStorageLength,
+    /// The Wasm stdlib's `get(index)` of a `@WasmArrayOf` GC array class,
+    /// `@WasmOp(ARRAY_GET)`, `ARRAY_GET_S` or `ARRAY_GET_U`: one `array.get`, sign- or
+    /// zero-extending a packed element as the operation names.
+    ArrayStorageGet,
+    /// The Wasm stdlib's `set(index, value)` of a `@WasmArrayOf` GC array class,
+    /// `@WasmOp(ARRAY_SET)`: one `array.set`.
+    ArrayStorageSet,
+    /// The Wasm stdlib's `WasmCharArray.createString()`, the one place its code units become a
+    /// `String`. A target that lays out strings itself builds its own from the units.
+    StringFromCharArrayStorage,
+    /// The Wasm stdlib's `String.getChars()`, the code units of a string as a `WasmCharArray`.
+    StringCharArrayStorage,
     CharCode,
     StringLength,
     /// `String.get(Int): Char`, the index operator on a string.
