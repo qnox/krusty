@@ -2635,7 +2635,9 @@ mod tests {
         lower_file(
             FileInput {
                 module_facts,
-                array_range_checks: super::super::super::array_access::default_range_checks(),
+                array_range_checks: super::super::super::array_access::default_range_checks(
+                    ir.reference.release(),
+                ),
                 classifiers,
                 ir,
                 properties,

@@ -958,6 +958,11 @@ fn a_floating_remainder_is_exact_and_a_nan_comes_back_quiet() {
 }
 
 #[test]
+fn the_adjacent_floating_value_steps_one_representable_value_in_the_asked_direction() {
+    run_driver("fp_neighbour_known_answers");
+}
+
+#[test]
 fn an_array_too_large_for_the_allocator_is_out_of_memory() {
     run_driver_expecting_failure("array_new_overflow", "krusty: out of memory\n");
 }

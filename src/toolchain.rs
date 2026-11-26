@@ -109,7 +109,7 @@ fn jdk_home_from(java_home: Option<OsString>, reference_home: Option<OsString>) 
 
 /// The reference version whose provisioned toolchain this process uses: the one it reproduces.
 fn reference_version() -> String {
-    crate::kotlin_version::target().to_string()
+    crate::kotlin_version::environment_release().to_string()
 }
 
 /// The `<version>.txt` outcome lists in one directory, as seen by the reference version this
@@ -124,7 +124,7 @@ pub struct ReleaseList {
 }
 
 pub fn release_list(directory: &Path) -> ReleaseList {
-    let version = crate::kotlin_version::target();
+    let version = crate::kotlin_version::environment_release();
     let path_of = |release| directory.join(format!("{release}.txt"));
     let own = path_of(version);
     ReleaseList {
@@ -293,7 +293,7 @@ fn maven_version_from_build_number(build: &str) -> Option<&str> {
 
 /// The Kotlin version to pin Maven fallbacks to — from the dist `build.txt` (e.g.
 /// `1.9.24-release-822` → `1.9.24`, but `2.4.20-RC2-release-17` → `2.4.20-RC2`) or a located
-/// versioned stdlib jar, defaulting to the process-wide reference target. Dependency provisioning
+/// versioned stdlib jar, defaulting to the environment-selected reference release. Dependency provisioning
 /// must not alias one configured compiler release to another.
 pub fn kotlin_version() -> String {
     if let Some(lib) = kotlinc_lib_dir() {

@@ -1,6 +1,8 @@
 //! Positive declaration capabilities shared by dependency planning and Native emission.
 
-use krusty::libraries::{CompilerIntrinsic, ListStorageConstruction};
+use krusty::libraries::{
+    CompilerIntrinsic, ListStorageConstruction, ScalarComparison, ScalarInstruction,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DependencyOperation {
@@ -17,6 +19,8 @@ pub(super) enum DependencyOperation {
     /// The stdlib's assertion switches, which the build answers: off, as in kotlinc-native's
     /// default build.
     AssertionSwitch,
+    /// One integral scalar's own equality of two operands of the same type.
+    ScalarEquality,
 }
 
 pub(super) fn operation_plan(operation: CompilerIntrinsic) -> Option<DependencyOperation> {
@@ -34,6 +38,9 @@ pub(super) fn operation_plan(operation: CompilerIntrinsic) -> Option<DependencyO
             Some(DependencyOperation::ResultFailureException)
         }
         CompilerIntrinsic::AssertionSwitch => Some(DependencyOperation::AssertionSwitch),
+        CompilerIntrinsic::ScalarInstruction(ScalarInstruction::Compare(
+            ScalarComparison::Equal,
+        )) => Some(DependencyOperation::ScalarEquality),
         _ => None,
     }
 }

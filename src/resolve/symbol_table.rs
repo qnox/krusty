@@ -303,6 +303,8 @@ pub struct SymbolTable {
     pub libraries: Box<dyn SemanticPlatform>,
     /// The native compiler plugins this compilation runs (none unless the driver selects them).
     pub(super) native_plugins: crate::plugins::registry::NativePlugins,
+    /// What this compilation reproduces of kotlinc, for the phases that have no file in hand.
+    pub(crate) reference: crate::kotlin_version::ReferenceProfile,
     /// The annotation-configured conventions of the native plugins this compilation runs
     /// ([`crate::symbol_source::SymbolSource::annotation_conventions`]).
     pub(crate) annotation_conventions: crate::symbol_source::AnnotationConventions,
@@ -378,6 +380,7 @@ pub(crate) struct PassTwoSymbols {
     char_sequence_protocol: Option<crate::fir::CharSequenceProtocol>,
     enum_entries_factory: Option<crate::fir::EnumEntriesFactory>,
     pub(super) native_plugins: crate::plugins::registry::NativePlugins,
+    reference: crate::kotlin_version::ReferenceProfile,
 }
 
 impl PassTwoSymbols {
@@ -410,6 +413,11 @@ impl PassTwoSymbols {
     pub(crate) fn native_plugins(&self) -> &crate::plugins::registry::NativePlugins {
         &self.native_plugins
     }
+
+    /// What the compilation these symbols belong to reproduces of kotlinc.
+    pub(crate) fn reference(&self) -> crate::kotlin_version::ReferenceProfile {
+        self.reference
+    }
 }
 
 impl SymbolTable {
@@ -424,6 +432,7 @@ impl SymbolTable {
             char_sequence_protocol,
             enum_entries_factory,
             native_plugins: self.native_plugins,
+            reference: self.reference,
         }
     }
 }
@@ -465,6 +474,7 @@ impl Default for SymbolTable {
             toplevel_jvm_names: HashMap::default(),
             libraries: Box::new(EmptySymbolSource),
             native_plugins: Default::default(),
+            reference: Default::default(),
             annotation_conventions: Default::default(),
             ext_funs: HashMap::default(),
             source_ext_funs: HashMap::default(),

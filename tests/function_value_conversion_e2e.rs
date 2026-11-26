@@ -53,7 +53,7 @@ fn accepted_like_kotlinc(source: &str) -> bool {
         common::krusty_error_ledger_with_args(&sources, &reference_args),
         expected,
         "krusty's ledger against kotlinc {}",
-        krusty::kotlin_version::target()
+        krusty::kotlin_version::environment_release()
     );
     expected.is_empty()
 }
@@ -434,7 +434,7 @@ fn an_already_suspend_value_unit_converts_to_a_suspend_parameter() {
         backend.first().map(String::as_str),
         Some("exit code 2"),
         "kotlinc {} fails internally after accepting the argument: {backend:?}",
-        krusty::kotlin_version::target()
+        krusty::kotlin_version::environment_release()
     );
     assert_eq!(
         common::expect_box_run_with_stdlib(&source, "SuspendUnitValueRun"),
