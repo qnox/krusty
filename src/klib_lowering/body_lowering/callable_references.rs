@@ -30,29 +30,47 @@ impl BodyLowering<'_> {
             super::super::function_lowering::reference_header(self.arena, &reference, self.header)?;
         let linked = self.linker.link_reference(self.ir, reference.target)?;
         let declared = &linked.call;
-        let kind_matches = matches!(
-            (reference.receiver.is_some(), linked.kind),
-            (false, crate::libraries::ExternalCallableKind::TopLevel)
-                | (true, crate::libraries::ExternalCallableKind::Extension)
-        );
+        let member = linked.kind == crate::libraries::ExternalCallableKind::Member;
+        let kind_matches = reference.dispatch.is_none_or(|dispatch| dispatch == member)
+            && matches!(
+                (member, reference.receiver.is_some(), linked.kind),
+                (
+                    false,
+                    false,
+                    crate::libraries::ExternalCallableKind::TopLevel
+                ) | (
+                    false,
+                    true,
+                    crate::libraries::ExternalCallableKind::Extension
+                ) | (true, _, crate::libraries::ExternalCallableKind::Member)
+            );
+        // A member takes its dispatch receiver apart from its parameters, in the wrapper's first
+        // slot; a top-level function or extension declares every wrapper parameter itself.
+        let (receiver_slot, declared_receiver, extension_receiver) = if member {
+            (1, header.params().first().copied(), None)
+        } else {
+            (0, None, reference.receiver.as_ref().map(|_| 0))
+        };
         if !kind_matches
             || header.params()[bound_count..] != arguments[..reference.arity]
             || header.result() != arguments[reference.arity]
-            || declared.params != header.params()
+            || declared.params != header.params()[receiver_slot..]
             || declared.ret != header.result()
-            || declared.receiver.is_some()
+            || declared.receiver != declared_receiver
             || declared.context_count != 0
             || declared.singleton_dispatch.is_some()
             || !declared.type_parameters.is_empty()
             || !declared.class_type_parameters.is_empty()
-            || linked.extension_receiver_parameter != reference.receiver.as_ref().map(|_| 0)
+            || linked.extension_receiver_parameter != extension_receiver
         {
             return unsupported("an adapted, generic or receiver-bearing declaration reference");
         }
         let declaration = linked.declaration;
-        let declaration_parameters = declared.params[bound_count..].to_vec().into_boxed_slice();
+        let declaration_parameters = header.params()[receiver_slot.max(bound_count)..]
+            .to_vec()
+            .into_boxed_slice();
         let declaration_result = declared.ret;
-        let receiver_type = reference.receiver.as_ref().map(|_| header.params()[0]);
+        let receiver_type = (member || reference.receiver.is_some()).then(|| header.params()[0]);
         let bound_receiver = if let Some(receiver) = &reference.receiver {
             let actual = self.ty(
                 self.arena.expr(receiver.operand),
