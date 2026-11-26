@@ -17,7 +17,9 @@
 #   3. ONE cargo build of every test binary the later steps run, so the compiler is built once;
 #   4. the lib tests of krusty and of the backend crates;
 #   5. the e2e modules (`tests/*_e2e.rs`) this change touches, and those that name a plugin whose
-#      source (`src/plugins/<name>/`) it touches;
+#      source (`src/plugins/<name>/`) it touches, then the build-tools packaging
+#      (`scripts/package-build-tools.sh`: compile, test, jar twice) for every supported Kotlin
+#      release when it touches `tools/krusty-build-tools` or that script;
 #   6. the conformance entries CI runs for the lanes this change can affect (see select_lanes), in
 #      parallel jobs, on the newest Kotlin version, and on the others too if it fails: per lane
 #      (JVM, Native, wasm-js, wasm-wasi) an even sample of the box corpus and the owned regressions
@@ -188,6 +190,22 @@ if [ "${#e2e_modules[@]}" -gt 0 ]; then
   run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$(binary e2e test)" "${e2e_modules[@]}"
 fi
 
+# CI builds and tests the Build Tools API implementation once per supported Kotlin release, and a
+# release's API can differ from the newest one's (an option constructor, a missing option), so a
+# change there runs the same packaging for each release.
+if [ -n "$(changed 'tools/krusty-build-tools/*' 'scripts/package-build-tools.sh')" ]; then
+  if [ -z "${KRUSTY_BIN:-}" ]; then
+    cargo build --profile gate -p krusty-cli --bin krusty
+    export KRUSTY_BIN="${CARGO_TARGET_DIR:-$repo_root/target}/gate/krusty"
+  fi
+  packaged="$(mktemp -d)"
+  while IFS= read -r release; do
+    step "build-tools packaging for Kotlin $release"
+    scripts/package-build-tools.sh 0.0.0-smoke "$release" "$KRUSTY_BIN" "$packaged/$release"
+  done < <(just kotlin-versions)
+  rm -rf "$packaged"
+fi
+
 if [ -z "$lanes" ]; then
   step "no conformance lane is affected by this change"
   step "passed"
@@ -325,7 +343,10 @@ run_versions() {
     # Each step is checked on its own: an assignment's status is not reliably seen by `set -e`.
     kc="$(just kotlinc "$v")" || exit 1
     bc="$(just box-corpus "$v")" || exit 1
-    just plugin-corpus serialization "$v" >/dev/null || exit 1
+    # Every plugin that has a box corpus, as the conformance entries need all of them.
+    while read -r plugin; do
+      just plugin-corpus "$plugin" "$v" >/dev/null || exit 1
+    done < <(just plugin-corpora)
     kotlinc_of[$v]="$kc"
     box_of[$v]="$bc"
     case " $lanes " in

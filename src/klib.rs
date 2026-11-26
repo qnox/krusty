@@ -29,6 +29,7 @@
 
 pub mod backend;
 mod inline_ir;
+mod ir_tables;
 pub mod write;
 
 use std::collections::BTreeMap;

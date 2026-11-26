@@ -7,9 +7,9 @@ const RANGE_CHECKS: ReleaseRecords<bool> = ReleaseRecords::new(&[
     (KotlinVersion::V2_4_20, true),
 ]);
 
-pub(super) fn default_range_checks() -> bool {
+pub(super) fn default_range_checks(release: KotlinVersion) -> bool {
     *RANGE_CHECKS
-        .get(krusty::kotlin_version::target())
+        .get(release)
         .expect("every supported Kotlin release has a Wasm bounds default")
 }
 

@@ -107,6 +107,25 @@ impl Checker<'_> {
     }
 
     /// Open the policies of a declaration's annotations. Returns the depth to truncate back to.
+    /// Open the policies of the type-use annotations written on the type reference starting at
+    /// `start` (`: @Suppress("DEPRECATION_ERROR") Old(...)`).
+    pub(super) fn push_type_use_policies(&mut self, scope: &CheckerScope<'_>, start: u32) -> usize {
+        let Some(annotations) = self.file.type_annotations.get(&start).cloned() else {
+            return self.active_lexical_policies.len();
+        };
+        let arguments = annotations
+            .iter()
+            .map(|annotation| {
+                self.file
+                    .type_annotation_arguments
+                    .get(&(annotation.span.lo, annotation.span.hi))
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        self.push_declaration_policies(scope, &annotations, &arguments)
+    }
+
     pub(super) fn push_declaration_policies(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -114,6 +133,29 @@ impl Checker<'_> {
         arguments: &[Vec<ExprId>],
     ) -> usize {
         self.push_selected_declaration_policies(scope, annotations, arguments, &|_| true)
+    }
+
+    /// Run `operation` inside the policies of `parameter`'s annotations, then close them. They
+    /// hold for everything written in its declaration: its type reference and its default value.
+    pub(super) fn with_parameter_policies<R>(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        parameter: super::parameter_defaults::DeclaredParameter<'_>,
+        operation: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let depth = self.push_parameter_policies(scope, parameter);
+        let result = operation(self);
+        self.active_lexical_policies.truncate(depth);
+        result
+    }
+
+    /// Open the policies of `parameter`'s annotations. Returns the depth to truncate back to.
+    pub(super) fn push_parameter_policies(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        parameter: super::parameter_defaults::DeclaredParameter<'_>,
+    ) -> usize {
+        self.push_declaration_policies(scope, parameter.annotations, parameter.annotation_args)
     }
 
     /// [`Self::push_declaration_policies`] for only the applications `include` selects. An

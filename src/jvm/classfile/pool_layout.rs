@@ -164,8 +164,30 @@ impl<'a> Layout<'a> {
         }
         let mut parts: Vec<[Vec<u16>; 4]> = relaid.iter().map(|_| Default::default()).collect();
         let mut rewritten_reach = vec![false; count];
+        // The rewritten method that interned each entry, and whether that same method's code still
+        // names it: another rewritten method naming it does not keep it where its owner left it.
+        let mut owner: Vec<Option<usize>> = vec![None; count];
+        for method in relaid {
+            for index in method.added.clone().chain(method.interned.clone()) {
+                if let Some(entry_owner) = owner.get_mut(usize::from(index)) {
+                    *entry_owner = Some(method.index);
+                }
+            }
+        }
+        let mut owner_reach = vec![false; count];
         for slot in &read.slots {
             reach(read, slot.index, &mut kept);
+            if let Holder::Code(method, _) = slot.holder {
+                if by_method.contains_key(&method) {
+                    let mut named = vec![false; count];
+                    reach(read, slot.index, &mut named);
+                    for (index, named) in named.into_iter().enumerate() {
+                        if named && owner[index] == Some(method) {
+                            owner_reach[index] = true;
+                        }
+                    }
+                }
+            }
             let rewritten = match slot.holder {
                 Holder::Code(method, part) => by_method.get(&method).map(|&at| (at, part)),
                 Holder::Class
@@ -231,7 +253,7 @@ impl<'a> Layout<'a> {
             .map(|index| {
                 owned[index]
                     && kept[index]
-                    && !rewritten_reach[index]
+                    && !owner_reach[index]
                     && !leading[index]
                     // A class signature is visited with the class header by ASM. It may fall into
                     // the first method's coarse pool range, but that method never owns it.
@@ -478,10 +500,16 @@ fn orphan_anchors(
                     // an orphaned descriptor in a later NameAndType belongs after its fresh name.
                     settle(&mut pending, index, &mut anchored);
                 }
-                seen[index] = true;
-                if !orphaned[index] && matches!(slot.holder, Holder::Class | Holder::Parameter(_)) {
+                // Only a header entry the visit interns itself places what is pending after it; a
+                // name or descriptor an earlier method's code already interned leaves the orphan
+                // pending until the method's code interns its first fresh entry.
+                if !orphaned[index]
+                    && !seen[index]
+                    && matches!(slot.holder, Holder::Class | Holder::Parameter(_))
+                {
                     header_max = header_max.max(index);
                 }
+                seen[index] = true;
             }
             if matches!(slot.holder, Holder::Code(..)) {
                 header_max = 0;
@@ -489,8 +517,10 @@ fn orphan_anchors(
             continue;
         };
         if method != Some(at) {
-            // What is pending now the header named: it follows the header's own entries.
-            settle(&mut pending, header_max + 1, &mut anchored);
+            // What is pending now the header named: it follows the header's own fresh entries.
+            if header_max > 0 {
+                settle(&mut pending, header_max + 1, &mut anchored);
+            }
             method = Some(at);
             named_max = header_max;
         }

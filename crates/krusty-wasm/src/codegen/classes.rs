@@ -451,6 +451,9 @@ impl FileClasses {
         let mut records = Vec::new();
         for &id in &self.tables.order {
             let class = &ir.classes[id as usize];
+            if class.ownership == krusty::ir::ClassOwnership::EarlierUnit {
+                continue;
+            }
             let (Some(structure), Some(table_type)) = (
                 self.forms[id as usize].structure,
                 self.forms[id as usize].table_type,
@@ -931,6 +934,7 @@ pub(super) fn declare(
         &WasmRepresentation { classifiers },
         ir,
         plan,
+        &mut module_tables.extended,
         &|superclass| {
             laid_out
                 .get(superclass)
@@ -981,6 +985,20 @@ pub(super) fn declare(
     for &id in &tables.order {
         let class = &ir.classes[id as usize];
         if class.is_interface {
+            continue;
+        }
+        if class.ownership == krusty::ir::ClassOwnership::EarlierUnit {
+            // An earlier unit laid this class out and owns its struct and table: this unit adds
+            // functions over that layout and declares nothing of its own.
+            let record = laid_out.get(class.fq_name).ok_or_else(|| {
+                format!(
+                    "a class of an earlier unit with no layout (`{}`)",
+                    class.fq_name()
+                )
+            })?;
+            let form = &mut forms[id as usize];
+            form.structure = Some(record.structure);
+            form.table_type = Some(record.table_type);
             continue;
         }
         let table = tables.table(id);
@@ -1095,7 +1113,7 @@ pub(super) fn declare(
     let mut refusals: Vec<Option<Unsupported>> = vec![None; ir.classes.len()];
     for &id in &tables.order {
         let class = &ir.classes[id as usize];
-        if class.is_interface {
+        if class.is_interface || class.ownership == krusty::ir::ClassOwnership::EarlierUnit {
             continue;
         }
         let mut ancestors = Vec::new();

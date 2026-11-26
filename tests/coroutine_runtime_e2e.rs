@@ -75,7 +75,7 @@ fn handoff(
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &[krusty::source::SourceInput::kotlin(source).with_file_stem("Main")],
         krusty::frontend::PlatformProvider::new(target, Box::new(libraries.for_compilation())),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
 
@@ -113,6 +113,10 @@ fn handoff(
                         }
                         _ => unreachable!("this probe only visits Native and Wasm targets"),
                     },
+                    property_reference_values: matches!(
+                        self.target,
+                        CompilationTarget::WasmJs | CompilationTarget::WasmWasi
+                    ),
                 })
         }
 

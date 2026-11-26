@@ -6,9 +6,12 @@
 
 mod declarations;
 mod names;
+mod property_accessors;
 
 pub(super) use declarations::Declaration;
 use names::ReferenceNames;
+use property_accessors::PropertyAccessors;
+pub(crate) use property_accessors::{AccessorShape, PropertyAccess};
 
 use krusty::backend::DependencyExportSignatures;
 use krusty::fx_hash::HashMap;
@@ -54,6 +57,7 @@ pub(super) struct CallableReferences {
     declarations: declarations::Declarations,
     kinds: HashMap<Kind, i32>,
     names: ReferenceNames,
+    accessors: PropertyAccessors,
 }
 
 impl CallableReferences {
@@ -186,6 +190,7 @@ impl CallableReferences {
             declarations: Default::default(),
             kinds: HashMap::default(),
             names: ReferenceNames::default(),
+            accessors: PropertyAccessors::default(),
         }
     }
 

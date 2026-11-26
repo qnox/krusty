@@ -131,3 +131,52 @@ fn kclass_annotation_hash_matches_kotlinc() {
         .parse::<i32>()
         .unwrap_or_else(|_| panic!("kotlinc hash is not an Int: {reference}"));
 }
+
+fn field_abi(bytes: &[u8]) -> Vec<(String, u16, String, Option<String>)> {
+    krusty::jvm::classreader::parse_class(bytes)
+        .expect("parse annotation implementation")
+        .fields
+        .into_iter()
+        .map(|field| (field.name, field.access, field.descriptor, field.signature))
+        .collect()
+}
+
+/// The implementation's `Class` fields keep their type argument as a generic `Signature`, in the
+/// field table's declaration order, for every projection of the member's `KClass`.
+#[test]
+fn kclass_annotation_impl_fields_carry_kotlincs_generic_signature() {
+    let source = "import kotlin.reflect.KClass\n\
+         annotation class Mark(\n\
+             val k: KClass<*>,\n\
+             val ks: Array<KClass<*>>,\n\
+             val out: KClass<out Number>,\n\
+             val inn: KClass<in String>,\n\
+             val exact: KClass<String>,\n\
+             val primitive: KClass<Int>,\n\
+             val any: KClass<Any>,\n\
+             val plain: String,\n\
+         )\n\
+         fun make() = Mark(\n\
+             String::class, arrayOf(String::class), Int::class, String::class,\n\
+             String::class, Int::class, Any::class, \"x\",\n\
+         )\n";
+    let class_name = "KClassFieldSignatureKt$annotationImpl$Mark$0";
+    let pairs = common::compile_with_kotlinc("KClassFieldSignature", source, &[], &[class_name]);
+    let (reference, _) = &pairs[0];
+    let classes = common::compile_in_process(
+        source,
+        "KClassFieldSignature",
+        &[common::stdlib_jar()],
+        Some(common::jdk_modules().as_path()),
+    )
+    .expect("emit a KClass annotation instantiation");
+    let (_, actual) = classes
+        .iter()
+        .find(|(name, _)| name.contains("$annotationImpl$"))
+        .expect("annotation implementation class");
+    assert_eq!(
+        field_abi(actual),
+        field_abi(reference),
+        "annotation implementation fields diverge from kotlinc"
+    );
+}

@@ -161,6 +161,11 @@ pub(super) fn planned_class_table(
                     "a planned setter of a dependency property (`{qualified}`)"
                 ))
             }
+            PlannedSlot::Member(PlanKey::Installed(_)) => {
+                return Err(format!(
+                    "an installed interface member planned as a class slot (`{qualified}`)"
+                ))
+            }
             PlannedSlot::Bridge {
                 declared,
                 target_slot,
@@ -265,6 +270,9 @@ pub(super) fn planned_class_table(
             },
             PlanKey::DependencySetter(property) => {
                 SlotKey::Setter(ResolvedPropertyOverrideTarget::External(property))
+            }
+            PlanKey::Installed(_) => {
+                return Err("an installed interface member planned as a class slot".into())
             }
         };
         slots.insert(key, slot);

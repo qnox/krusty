@@ -258,11 +258,11 @@ impl Lane for NativeLane {
             .with_entry(Entry::Box)
             .with_entry_module(entry_module.name.clone())
             .verified();
-        let features = krusty::features::LangFeatures::from_source(directive_source);
+        let features = krusty::features::LangFeatures::from_source_in_environment(directive_source);
         let metadata = match krusty::klib::backend::KlibBackend::new(
             krusty::klib::write::KlibPlatform::Native,
             krusty::klib::write::KlibStamp::new(
-                krusty::kotlin_version::target(),
+                krusty::kotlin_version::environment_release(),
                 features.language_version(),
             ),
         )
@@ -479,6 +479,131 @@ fn native_reference_runner_calls_the_packaged_final_module_box() {
         Outcome::Pass,
         "the Native oracle and product must both call the final module's declared box"
     );
+}
+
+// PLATFORM-SPECIFIC: official Kotlin/Native KLIB production and linking exercise the import of a
+// library body. The complete portable Kotlin input is the shared multi-module regression.
+//
+/// A library function that tests a value against a file-private interface of its library and calls
+/// that interface's member is lowered from the official producer's body: the interface is
+/// installed in the unit, so the type test and the member call dispatch through it.
+#[test]
+fn native_official_dependency_file_private_interface_dispatches_through_its_installed_class() {
+    run_native_against_official_producer(
+        include_str!(
+            "box_regressions/multimodule/dependencyInstalledInterfaceTypeTestAndMemberCall.kt"
+        ),
+        "dependencyInstalledInterfaceTypeTestAndMemberCall",
+    );
+}
+
+// PLATFORM-SPECIFIC: official Kotlin/Native KLIB production and linking, as above. The complete
+// portable Kotlin input is the shared multi-module regression.
+//
+/// Two files of the consumer each install a different file-private interface of the library:
+/// their members take distinct module-wide numbers, so each call reaches its own member.
+#[test]
+fn native_official_dependency_interfaces_installed_by_two_files_keep_distinct_numbers() {
+    run_native_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyInstalledInterfacesInTwoFiles.kt"),
+        "dependencyInstalledInterfacesInTwoFiles",
+    );
+}
+
+/// Run the shared two-module program's consumer against the library the pinned kotlinc-native
+/// produces, after kotlinc has established the program's result.
+fn run_native_against_official_producer(source: &str, stem: &str) {
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole producer and consumer");
+    let Some(target) = host() else {
+        if std::env::var_os("KRUSTY_REQUIRE_NATIVE_CONFORMANCE").is_some() {
+            panic!("required Native target/KLIB setup is unavailable");
+        }
+        return;
+    };
+    let modules = krusty::conformance::split_modules(source).expect("the two-module program");
+    let [producer, consumer] = modules.as_slice() else {
+        panic!("producer and consumer modules")
+    };
+    assert_eq!(consumer.deps, std::slice::from_ref(&producer.name));
+    let [(producer_stem, producer_text)] = producer.files.as_slice() else {
+        panic!("one complete producer")
+    };
+    let work = super::common::scratch_dir().expect("official producer directory");
+    let producer_file = work.join(format!("{producer_stem}.kt"));
+    std::fs::write(&producer_file, producer_text).expect("write the producer source");
+    let Some((produced, library)) = crate::reference_invocation_support::run_reference(
+        krusty::compilation_target::CompilationTarget::Native,
+        &work,
+        &[producer_file],
+        &["-nopack".to_owned()],
+        false,
+    ) else {
+        if std::env::var_os("KRUSTY_REQUIRE_NATIVE_CONFORMANCE").is_some() {
+            panic!("KRUSTY_KOTLIN_NATIVE is required for the official producer");
+        }
+        return;
+    };
+    assert_eq!(produced.status, 0, "official producer: {}", produced.stderr);
+    let stdlib = krusty::toolchain::kotlin_stdlib_klib(
+        krusty::compilation_target::CompilationTarget::Native,
+    )
+    .expect("the Native stdlib KLIB");
+    let (libraries, native_imports) = krusty_native::NativeKlibInputs::open(
+        &[
+            krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+                stdlib,
+                krusty::klib_libraries::KlibStdlibSemantics::Native,
+            ),
+            krusty::klib_libraries::KlibLibraryInput::dependency(library),
+        ],
+        target,
+    )
+    .map(krusty_native::NativeKlibInputs::into_parts)
+    .expect("the official producer artifact and the Native stdlib");
+    let stems = consumer
+        .files
+        .iter()
+        .map(|(stem, _)| stem.clone())
+        .collect::<Vec<_>>();
+    let inputs = consumer
+        .files
+        .iter()
+        .zip(&stems)
+        .map(|((_, text), stem)| krusty::source::SourceInput::kotlin(text).with_file_stem(stem))
+        .collect::<Vec<_>>();
+    let mut diags = krusty::diag::DiagSink::new();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &inputs,
+        krusty::frontend::PlatformProvider::new(
+            krusty::compilation_target::CompilationTarget::Native,
+            Box::new(libraries.for_compilation()),
+        ),
+        &krusty::features::LangFeatures::from_environment(),
+        &mut diags,
+    );
+    let backend = CraneliftBackend::new(target)
+        .with_entry(Entry::Box)
+        .with_entry_module(consumer.name.clone())
+        .verified();
+    let artifacts =
+        krusty::compiler::emit_analyzed(analysis, &stems, &backend, &consumer.name, &mut diags);
+    assert!(diags.diags.is_empty(), "{:#?}", diags.diags);
+    let outcome = NativeLane {
+        target: Some(target),
+    }
+    .run_artifacts(
+        &work,
+        stem,
+        "import",
+        source,
+        box_lane::CompiledProgram {
+            artifacts,
+            native_imports,
+        },
+    );
+    assert_eq!(outcome, Outcome::Pass);
+    std::fs::remove_dir_all(work).expect("remove the producer directory");
 }
 
 #[test]

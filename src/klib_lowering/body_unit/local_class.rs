@@ -60,30 +60,25 @@ impl<'s> Linker<'_, 's> {
                     }
                 };
                 let params = declaration.declared_parameters().to_vec();
-                if params.len() != superclass.operands.len() {
+                if params.len() != superclass.arguments.len() {
                     return Err(KlibBodyDeclineReason::SignatureMismatch(
                         "a superclass delegation passes another number of arguments".to_owned(),
                     ));
                 }
-                let args = superclass
-                    .operands
-                    .iter()
-                    .zip(&params)
-                    .map(|(&slot, &ty)| {
-                        let value = ir.add_expr(IrExpr::GetValue(slot));
-                        ir.set_logical_type(value, ty);
-                        value
-                    })
-                    .collect::<Vec<_>>();
-                Some((declaration.classifier, params, args))
+                Some((declaration.classifier, params))
             }
             None => None,
         };
+        // The class's own library's non-public interfaces are installed before it, so its members
+        // name the members they override.
+        for interface in &prepared.local_interfaces {
+            self.install_local_interface(ir, interface)?;
+        }
         let mut class = super::super::same_library_class::installed_class(&prepared);
-        if let Some((name, params, args)) = superclass {
+        // The initializer lowers the arguments the constructor passes, as its body reads them.
+        if let Some((name, params)) = superclass {
             class.superclass = name;
             class.super_ctor_params = params;
-            class.super_args = args;
         }
         let class_id = ir.add_class(class);
         if let Some(naming) = prepared.naming.clone() {
@@ -96,8 +91,8 @@ impl<'s> Linker<'_, 's> {
         ir.note_class_method(class_id, init);
         let receiver = ir.add_expr(IrExpr::GetValue(0));
         ir.set_logical_type(receiver, prepared.self_type);
-        // The initialization takes the constructor's value parameters, after an outer instance.
-        let prefix = usize::from(prepared.outer.is_some());
+        // The initialization takes the constructor's parameters, an outer instance among them,
+        // at the slots the constructor numbers them.
         let args = prepared
             .init_header
             .params()
@@ -105,7 +100,7 @@ impl<'s> Linker<'_, 's> {
             .enumerate()
             .map(|(index, ty)| {
                 let value = ir.add_expr(IrExpr::GetValue(
-                    u32::try_from(index + 1 + prefix).expect("a value index fits u32"),
+                    u32::try_from(index + 1).expect("a value index fits u32"),
                 ));
                 ir.set_logical_type(value, *ty);
                 Some(value)
@@ -139,6 +134,10 @@ impl<'s> Linker<'_, 's> {
                     fields: prepared.stored.clone(),
                     steps: prepared.steps,
                     outer: prepared.outer,
+                    superclass_arguments: prepared
+                        .superclass
+                        .map(|superclass| superclass.arguments)
+                        .unwrap_or_default(),
                 },
             )),
             static_initialization: None,
@@ -235,6 +234,13 @@ impl<'s> Linker<'_, 's> {
                 self.sources.externals,
                 self.sources.declarations,
             )?;
+            self.record_installed_overrides(
+                ir,
+                class_id,
+                function,
+                &prepared.key.module,
+                &member.installed_overrides,
+            )?;
         }
         // A member the class inherits from a superclass this unit installed or materialized
         // implements the interface declarations the class reaches only through its supertypes.
@@ -244,7 +250,7 @@ impl<'s> Linker<'_, 's> {
             .inherited_implementations_of(&prepared.key.module, &prepared.key.signature)
             .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?;
         for (body, implemented) in &inherited {
-            self.record_inherited_implementation(ir, prepared.classifier, body, None, implemented);
+            self.declare_inherited_implementation(ir, prepared.classifier, body, implemented)?;
         }
         let constructor = super::super::same_library_class::LocalConstructor {
             declaration: prepared.declaration.clone(),
@@ -269,6 +275,46 @@ impl<'s> Linker<'_, 's> {
             },
         );
         Ok(constructor)
+    }
+
+    /// Record that `function`, a method of the installed class `class`, overrides each member of
+    /// an installed interface of `module` that `overridden` names. The interface member and the
+    /// override share one signature: a member whose signature differs would need a bridge, which
+    /// an installed interface does not have.
+    fn record_installed_overrides(
+        &self,
+        ir: &mut IrFile,
+        class: crate::ir::ClassId,
+        function: crate::ir::FunId,
+        module: &str,
+        overridden: &[KlibIrSignature],
+    ) -> Result<(), KlibBodyDeclineReason> {
+        for signature in overridden {
+            let key = super::super::same_library_class::LocalIdentity {
+                module: module.to_owned(),
+                signature: signature.clone(),
+            };
+            let Some(member) = self.local_functions.get(&key) else {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "an overridden non-public interface member was not installed".to_owned(),
+                ));
+            };
+            let declared = &ir.functions[member.function as usize];
+            let implementation = &ir.functions[function as usize];
+            if declared.params != implementation.params || declared.ret != implementation.ret {
+                return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
+                    "an override of a non-public interface member with another signature",
+                ));
+            }
+            let edge = crate::ir::IrInstalledOverride {
+                implementation: function,
+                overridden: member.function,
+            };
+            ir.classes[class as usize]
+                .installed_interface_overrides
+                .push(edge);
+        }
+        Ok(())
     }
 
     /// The constructor a file-local construction invokes: one of a class already installed for

@@ -788,6 +788,21 @@ impl Body<'_> {
             {
                 return self.dispatch_function(class, function, receiver, args);
             }
+            // An abstract member of an interface a KLIB lowering unit installed has no class
+            // slot and no source callable: it is numbered after the module's members, and a call
+            // through it goes to the stub of that number.
+            if self.ir.classes[class as usize].is_interface {
+                let installed = PlanKey::Installed(function);
+                let numbers = &tables.numbers;
+                if let Some(number) = numbers.number(installed) {
+                    let (params, result) = numbers
+                        .function_carriers(installed)
+                        .ok_or("an installed interface member with no carriers")?;
+                    let (params, result) = (params.to_vec(), result);
+                    let call = self.numbered_member(number, params, result)?;
+                    return self.interface_call(call, receiver, args);
+                }
+            }
         }
         self.direct_member_call(function, receiver, args)
     }
@@ -1338,25 +1353,6 @@ impl Body<'_> {
             .then_some(name)
     }
 
-    /// Whether the runtime's `ArrayList`, whose class the program does not declare, is below the
-    /// library interface `interface`, by the frontend's supertype traversal.
-    fn runtime_array_list_is_below(&self, interface: TypeName) -> bool {
-        let Some(array_list) = Ty::obj("kotlin/collections/ArrayList").obj_internal() else {
-            return false;
-        };
-        self.classifiers.is_subclassifier(array_list, interface)
-    }
-
-    /// Whether the runtime's list iterator, whose class the program does not declare, is below the
-    /// library interface `interface`: it is a `MutableListIterator`, as `ArrayList`'s own is.
-    fn runtime_array_list_iterator_is_below(&self, interface: TypeName) -> bool {
-        let Some(iterator) = Ty::obj("kotlin/collections/MutableListIterator").obj_internal()
-        else {
-            return false;
-        };
-        self.classifiers.is_subclassifier(iterator, interface)
-    }
-
     /// Replace the reference on the stack with whether it is an instance of the library interface
     /// `interface` — or null, when `nullable`. Its instances are the program's classes below it and
     /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
@@ -1370,8 +1366,6 @@ impl Body<'_> {
             string_builder: self
                 .classifiers
                 .is_subclassifier(krusty::types::wk::string_builder(), interface),
-            array_list: self.runtime_array_list_is_below(interface),
-            array_list_iterator: self.runtime_array_list_iterator_is_below(interface),
         };
         self.runtime
             .builtin_instances(interface, subtypes, laid_out);

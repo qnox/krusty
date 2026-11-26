@@ -18,6 +18,7 @@ mod control_forms;
 mod demo_package;
 mod elvis_blocks;
 mod enum_entries;
+mod enum_entry_frames;
 mod for_loop_bindings;
 mod generic_receiver_hierarchy;
 mod inline_calls;
@@ -2067,7 +2068,9 @@ fn wasm_numbers_bodies_link_their_internal_wasm_op_by_exact_intrinsic_identity()
             .filter(|symbol| {
                 let facts = libraries.intrinsic_facts();
                 match &symbol.signature {
-                    KlibIrSignature::FileLocal { .. } => false,
+                    KlibIrSignature::FileLocal { .. } | KlibIrSignature::TypeParameter { .. } => {
+                        false
+                    }
                     KlibIrSignature::Public(signature) => {
                         let intrinsic = facts.get(&KlibDependencyCallable {
                             module: callable.identity().module.clone(),

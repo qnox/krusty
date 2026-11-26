@@ -322,6 +322,44 @@ fn a_default_reads_an_earlier_parameter_and_its_own_locals_move_past_the_masks()
 }
 
 #[test]
+fn an_entry_receives_a_shared_cell_parameter_as_the_declaration_does() {
+    let mut ir = IrFile::default();
+    let read = ir.add_expr(IrExpr::GetValue(0));
+    let function = declare(
+        &mut ir,
+        "local",
+        vec![Ty::Int, Ty::Int],
+        Ty::Int,
+        Some(read),
+        None,
+    );
+    let default = int(&mut ir, 7);
+    with_defaults(&mut ir, function, vec![None, Some(default)]);
+    ir.shared_capture_parameters.insert((function, 0), Ty::Int);
+    let supplied = int(&mut ir, 5);
+    let call = ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::LocalWithDefaults {
+            function,
+            defaults: Box::new([1]),
+        }),
+        dispatch_receiver: None,
+        args: vec![supplied],
+    });
+    declare(&mut ir, "caller", Vec::new(), Ty::Int, Some(call), None);
+
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+    );
+
+    let entry = ir.default_entries[&function];
+    assert_eq!(ir.shared_capture_parameters[&(entry, 0)], Ty::Int);
+    assert!(!ir.shared_capture_parameters.contains_key(&(entry, 1)));
+}
+
+#[test]
 fn a_call_site_passes_every_parameter_and_constant_mask_words() {
     let mut ir = IrFile::default();
     let unit = ir.add_expr(IrExpr::Block {

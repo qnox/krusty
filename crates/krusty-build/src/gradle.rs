@@ -236,6 +236,7 @@ mod tests {
     mod android_compose;
     mod body_only_dependents;
     mod compiler_options;
+    mod compiler_slice;
 
     #[test]
     fn failed_gradle_output_keeps_stderr_and_stdout_tails_separate() {
@@ -319,7 +320,8 @@ mod tests {
     #[test]
     #[ignore = "downloads Gradle and the Kotlin Gradle plugin"]
     fn kotlin_compiler_slice_compiles_through_krusty() {
-        let fixture = IntegrationFixture::new("krusty-kotlin-slice", write_compiler_slice);
+        let fixture =
+            IntegrationFixture::new("krusty-kotlin-slice", compiler_slice::write_compiler_slice);
         let root = fixture.root.clone();
         let log = fixture.log.clone();
         let kgp = fixture.kgp.clone();
@@ -815,27 +817,15 @@ mod tests {
             1,
             "{output}"
         );
-        // Gradle 7's kotlin-dsl compiles plugins blocks with its own task type; from Gradle 8 on,
-        // `compilePluginsBlocks` is a KotlinJvmCompile without a source set.
-        let gradle = std::env::var("KRUSTY_GRADLE_VERSION").unwrap_or_else(|_| "8.14.3".into());
-        let sourceless_compiles = usize::from(!gradle.starts_with("7."));
-        for (expected, count) in [
-            (
-                "krusty: task ':buildSrc:compileKotlin' is left to kotlinc: its project applies kotlin-dsl",
-                1,
-            ),
-            (
-                "krusty: task ':buildSrc:compileTestKotlin' is left to kotlinc: its project applies kotlin-dsl",
-                1,
-            ),
-            (
-                "krusty: task ':buildSrc:compilePluginsBlocks' is left to kotlinc: it belongs to no source set",
-                sourceless_compiles,
-            ),
+        // kotlin-dsl's `compilePluginsBlocks` is a KotlinJvmCompile without a source set.
+        for expected in [
+            "krusty: task ':buildSrc:compileKotlin' is left to kotlinc: its project applies kotlin-dsl",
+            "krusty: task ':buildSrc:compileTestKotlin' is left to kotlinc: its project applies kotlin-dsl",
+            "krusty: task ':buildSrc:compilePluginsBlocks' is left to kotlinc: it belongs to no source set",
         ] {
             assert_eq!(
                 output.lines().filter(|line| line.trim() == expected).count(),
-                count,
+                1,
                 "{expected}\n{output}"
             );
         }
@@ -1609,7 +1599,6 @@ fun main() {
     /// plugin classpath, which declares no compiler-plugin registrar, and no options. krusty then
     /// compiles the Kotlin and Java sources the processor generated, exactly as kotlinc would, and
     /// the application runs. A compiler plugin krusty cannot run still fails the task beside KSP.
-    /// KSP's Gradle plugin does not load on Gradle 7.6, so CI runs this on the Gradle 8+ lanes.
     #[test]
     #[ignore = "downloads Gradle, the Kotlin Gradle plugin and KSP"]
     fn ksp2_generated_sources_compile_through_krusty() {
@@ -2044,8 +2033,7 @@ fun main() {
     /// named by `KRUSTY_GRADLE_TEST_BIN`.
     /// Gradle integration builds share one Gradle user home, which each fixture installs through
     /// the process-wide `GRADLE_USER_HOME`. libtest runs tests on parallel threads, so concurrent
-    /// fixtures race on that variable and on the shared daemon registry: under Gradle 7.6.3 the
-    /// daemons time out connecting. One fixture runs at a time, so its builds reuse one daemon
+    /// fixtures race on that variable and on the shared daemon registry. One fixture runs at a time, so its builds reuse one daemon
     /// that the previous fixture left idle instead of starting a JVM per build.
     static GRADLE_INTEGRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -2503,7 +2491,7 @@ exit "$status"
             return bin;
         }
         let version =
-            std::env::var("KRUSTY_GRADLE_VERSION").unwrap_or_else(|_| "8.14.3".to_owned());
+            std::env::var("KRUSTY_GRADLE_VERSION").unwrap_or_else(|_| "8.14.8".to_owned());
         let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/cache");
         let bin = cache.join(format!("gradle-{version}/bin/gradle"));
         if bin.is_file() {
@@ -2736,255 +2724,5 @@ dependencies {
             "src/main/kotlin/app/Job.kt",
             "package app\n\nimport com.google.auto.service.AutoService\n\n@AutoService(Runnable::class)\nclass Job : Runnable {\n    override fun run() {}\n}\n",
         );
-    }
-
-    fn write_compiler_slice(root: &Path, plugin_version: &str, kgp_version: &str) {
-        let write = |rel: &str, body: &str| {
-            let path = root.join(rel);
-            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-            let body = body
-                .replace("PLUGIN_VERSION", plugin_version)
-                .replace("KGP_VERSION", kgp_version);
-            std::fs::write(path, body).expect("write");
-        };
-        write(
-            "settings.gradle.kts",
-            r#"
-pluginManagement {
-    repositories {
-        providers.gradleProperty("krusty.plugin.repository").orNull?.let {
-            maven { url = uri(it) }
-        }
-        gradlePluginPortal()
-        mavenCentral()
-    }
-}
-
-rootProject.name = "kotlin-compiler-slice"
-include(":core:util.runtime")
-include(":compiler:util")
-"#,
-        );
-        // The Kotlin Gradle plugin is requested once, at the root: Kotlin 2.5 fails a build that
-        // loads it in several subprojects' classloaders.
-        write(
-            "build.gradle.kts",
-            r#"
-plugins {
-    kotlin("jvm") version "KGP_VERSION" apply false
-    kotlin("plugin.assignment") version "KGP_VERSION" apply false
-}
-
-subprojects {
-    repositories {
-        mavenCentral()
-    }
-}
-"#,
-        );
-        write(
-            "core/util.runtime/build.gradle.kts",
-            r#"
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode
-import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
-import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
-import org.gradle.api.tasks.compile.JavaCompile
-
-plugins {
-    kotlin("jvm")
-    id("dev.krustythecompiler") version "PLUGIN_VERSION"
-    `java-library`
-}
-
-val krustyNegative = providers.gradleProperty("krusty.negative").orNull
-
-// A source directory added by path, its generator wired onto the Kotlin task alone.
-val generateStamp by tasks.registering {
-    val out = layout.buildDirectory.file("generated/stamp/org/jetbrains/kotlin/util/Stamp.kt")
-    outputs.file(out)
-    doLast {
-        out.get().asFile.apply {
-            parentFile.mkdirs()
-            writeText("package org.jetbrains.kotlin.util\nconst val STAMP = \"stamp\"\n")
-        }
-    }
-}
-
-kotlin {
-    sourceSets.named("main") {
-        kotlin.srcDir("src")
-        kotlin.srcDir(layout.buildDirectory.dir("generated/stamp"))
-    }
-}
-
-tasks.named("compileKotlin") { dependsOn(generateStamp) }
-
-sourceSets.named("main") {
-    java.setSrcDirs(listOf("src"))
-}
-
-tasks.withType<KotlinJvmCompile>().configureEach {
-    compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_17)
-        moduleName.set("kotlin-util-runtime")
-        languageVersion.set(KotlinVersion.KOTLIN_2_4)
-        apiVersion.set(KotlinVersion.KOTLIN_2_4)
-        jvmDefault.set(JvmDefaultMode.NO_COMPATIBILITY)
-        javaParameters.set(true)
-        freeCompilerArgs.add("-Xconsistent-data-class-copy-visibility")
-    }
-}
-
-tasks.withType<JavaCompile>().configureEach {
-    options.release.set(if (krustyNegative == "jvm-target") 11 else 17)
-}
-"#,
-        );
-        write(
-            "core/util.runtime/src/org/jetbrains/kotlin/util/Runtime.kt",
-            "package org.jetbrains.kotlin.util\nfun runtimeMarker() = \"runtime\"\n",
-        );
-        write(
-            "core/util.runtime/src/org/jetbrains/kotlin/util/RuntimeJava.java",
-            "package org.jetbrains.kotlin.util;\npublic class RuntimeJava { public static String marker() { return \"java\"; } }\n",
-        );
-        write(
-            "compiler/util/build.gradle.kts",
-            r#"
-@file:OptIn(
-    org.jetbrains.kotlin.buildtools.api.ExperimentalBuildToolsApi::class,
-    org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi::class,
-)
-
-import org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
-import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
-import org.gradle.api.DefaultTask
-import org.gradle.api.file.DirectoryProperty
-import org.gradle.api.tasks.OutputDirectory
-import org.gradle.api.tasks.TaskAction
-import org.gradle.api.tasks.compile.JavaCompile
-
-plugins {
-    kotlin("jvm")
-    id("dev.krustythecompiler") version "PLUGIN_VERSION"
-    `java-library`
-}
-
-dependencies {
-    api(project(":core:util.runtime"))
-}
-
-val krustyNegative = providers.gradleProperty("krusty.negative").orNull
-
-if (krustyNegative == "compiler-plugin") {
-    pluginManager.apply("org.jetbrains.kotlin.plugin.assignment")
-}
-
-abstract class GenerateKotlin : DefaultTask() {
-    @get:OutputDirectory
-    abstract val outputDirectory: DirectoryProperty
-
-    @TaskAction
-    fun generate() {
-        outputDirectory.get().file("org/jetbrains/kotlin/util/Generated.kt").asFile.apply {
-            parentFile.mkdirs()
-            writeText("package org.jetbrains.kotlin.util\nclass Generated\n")
-        }
-    }
-}
-
-val generateKotlin = tasks.register<GenerateKotlin>("generateKotlin") {
-    outputDirectory.set(layout.buildDirectory.dir("generated/krusty"))
-}
-
-kotlin {
-    sourceSets.named("main") {
-        kotlin.srcDir("src")
-        kotlin.srcDir("other-src")
-        kotlin.srcDir(generateKotlin.flatMap { it.outputDirectory })
-    }
-    sourceSets.named("test") {
-        kotlin.srcDir("test-src")
-    }
-}
-
-sourceSets.named("main") {
-    java.setSrcDirs(listOf("src"))
-    resources.srcDir("resources")
-}
-
-tasks.withType<KotlinJvmCompile>().configureEach {
-    compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_17)
-        moduleName.set("kotlin-compiler-util")
-        languageVersion.set(KotlinVersion.KOTLIN_2_4)
-        apiVersion.set(KotlinVersion.KOTLIN_2_4)
-        jvmDefault.set(JvmDefaultMode.NO_COMPATIBILITY)
-        javaParameters.set(true)
-        optIn.set(
-            listOf(
-                "krusty.fixture.ExperimentalFirstApi",
-                "krusty.fixture.ExperimentalSecondApi",
-            ),
-        )
-        freeCompilerArgs.add("-Xconsistent-data-class-copy-visibility")
-        freeCompilerArgs.add("-Xskip-prerelease-check")
-        when (krustyNegative) {
-            "structured-option" -> extraWarnings.set(true)
-            "all-warnings-as-errors" -> allWarningsAsErrors.set(true)
-            "plugin-free-argument" -> freeCompilerArgs.add("-Xplugin=forbidden.jar")
-            "explicit-api-bad-mode" -> freeCompilerArgs.add("-Xexplicit-api=sideways")
-            "old-api-version" -> apiVersion.set(KotlinVersion.fromVersion("1.9"))
-            "module-name-free-argument" -> freeCompilerArgs.add("-module-name=overridden")
-            "release-specific-argument-boundary" -> freeCompilerArgs.addAll(
-                "-Xescaping-functions",
-                "-d=forbidden",
-            )
-            "jspecify-free-argument" -> freeCompilerArgs.add("-Xjspecify-annotations=strict")
-        }
-    }
-}
-
-tasks.withType<JavaCompile>().configureEach {
-    options.release.set(17)
-}
-"#,
-        );
-        write(
-            "compiler/util/src/org/jetbrains/kotlin/util/Util.kt",
-            "package org.jetbrains.kotlin.util\nfun compilerMarker() = runtimeMarker() + RuntimeJava.marker() + JavaOnly.marker()\n",
-        );
-        write(
-            "compiler/util/src/org/jetbrains/kotlin/util/Other.kt",
-            "package org.jetbrains.kotlin.util\ninternal fun otherMarker() = 1\n",
-        );
-        write(
-            "compiler/util/src/first/Same.kt",
-            "package first\nclass Same\n",
-        );
-        write(
-            "compiler/util/other-src/second/Same.kt",
-            "package second\nclass Same\n",
-        );
-        write(
-            "compiler/util/test-src/org/jetbrains/kotlin/util/Friend.kt",
-            "package org.jetbrains.kotlin.util\nfun friendMarker() = otherMarker()\n",
-        );
-        write(
-            "compiler/util/src/org/jetbrains/kotlin/util/Skip.kts",
-            "println(\"script\")\n",
-        );
-        write(
-            "compiler/util/src/org/jetbrains/kotlin/util/JavaOnly.java",
-            "package org.jetbrains.kotlin.util;\npublic class JavaOnly { public static int marker() { return 1; } }\n",
-        );
-        write(
-            "compiler/util/src/org/jetbrains/kotlin/util/JavaUsesKotlin.java",
-            "package org.jetbrains.kotlin.util;\npublic class JavaUsesKotlin { public static String marker() { return UtilKt.compilerMarker(); } }\n",
-        );
-        write("compiler/util/resources/notice.txt", "notice\n");
     }
 }

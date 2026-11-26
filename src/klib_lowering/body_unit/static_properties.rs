@@ -352,11 +352,11 @@ fn field_declaration(
         KlibIrSignature::FileLocal { file, slot } => {
             Ok(KlibDeclarationSignature::FileLocal { file, slot })
         }
-        KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_) => {
-            Err(KlibBodyDeclineReason::SignatureMismatch(
-                "a top-level backing field without a file-local identity".to_owned(),
-            ))
-        }
+        KlibIrSignature::Public(_)
+        | KlibIrSignature::Accessor(_)
+        | KlibIrSignature::TypeParameter { .. } => Err(KlibBodyDeclineReason::SignatureMismatch(
+            "a top-level backing field without a file-local identity".to_owned(),
+        )),
     }
 }
 

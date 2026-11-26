@@ -181,6 +181,7 @@ impl Emitter<'_> {
         // for its effects; the value then runs on a clean stack. A property's own initializer store
         // has no receiver in kotlinc, so its `this` loads nothing.
         if !self.reads_local_value(receiver)
+            && !self.reads_singleton_receiver(receiver)
             && !self.ir.property_initializer_stores.contains(&statement)
         {
             self.emit_value(receiver, code);

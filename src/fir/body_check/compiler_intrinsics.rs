@@ -2,7 +2,7 @@
 
 use crate::fir::{FirBinaryOperation, FirIntrinsic};
 use crate::libraries::CompilerIntrinsic;
-use crate::types::{AssertionMode, Ty};
+use crate::types::{AssertionCompilation, Ty};
 
 pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinaryOperation> {
     Some(match intrinsic {
@@ -29,6 +29,9 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::ScalarInstruction(_)
         | CompilerIntrinsic::FloatingIsNaN { .. }
         | CompilerIntrinsic::FloatingIsInfinite { .. }
+        | CompilerIntrinsic::FloatingAdjacent { .. }
+        | CompilerIntrinsic::CountLeadingZeroBits { .. }
+        | CompilerIntrinsic::CharIsSurrogate(_)
         | CompilerIntrinsic::RadixToString { .. }
         | CompilerIntrinsic::StringRangeEquals
         | CompilerIntrinsic::StringIndexOf { .. }
@@ -50,7 +53,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::PrimitiveHashCode
         | CompilerIntrinsic::PrimitiveEquals
         | CompilerIntrinsic::PrimitiveBitNot
-        | CompilerIntrinsic::Assert
+        | CompilerIntrinsic::Assert { .. }
         | CompilerIntrinsic::AssertFailsWith
         | CompilerIntrinsic::Print
         | CompilerIntrinsic::Println
@@ -111,15 +114,21 @@ pub(super) fn binary_semantics(
 ///
 /// Selection and authentication have already happened at the provider boundary. A target-stdlib
 /// intrinsic is not one of these: its call stays an ordinary call the target emitter realizes.
+///
+/// `assert` takes the file's explicit `-Xassertions` mode, else its platform's default. Under
+/// [`AssertionCompilation::Legacy`] it is no intrinsic: the call stays an ordinary inline call.
 pub(super) fn selected_top_level(
     operation: Option<CompilerIntrinsic>,
-    assertion_mode: AssertionMode,
+    assertions: Option<AssertionCompilation>,
     callee: &str,
 ) -> Option<FirIntrinsic> {
     match operation {
-        Some(CompilerIntrinsic::Assert) => Some(FirIntrinsic::Assert {
-            mode: assertion_mode,
-        }),
+        Some(CompilerIntrinsic::Assert { platform_default }) => {
+            match assertions.unwrap_or(platform_default) {
+                AssertionCompilation::Legacy => None,
+                AssertionCompilation::Checked(mode) => Some(FirIntrinsic::Assert { mode }),
+            }
+        }
         Some(CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn) => {
             Some(FirIntrinsic::SuspendCoroutineUninterceptedOrReturn {
                 callee: callee.into(),
