@@ -322,6 +322,20 @@ kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source);
    overlap within one array. */
 void kt_array_copy_range(KRef source, kt_int from, KRef destination, kt_int to, kt_int count);
 
+/* Kotlin/Native's `arrayFill`: write `value` to `from until to` of `array`. A range outside the
+   array raises `IndexOutOfBoundsException`, and a start past the end `IllegalArgumentException`,
+   before anything is written.
+   One function per array kind; `kt_array_fill_range` is the reference array's. */
+void kt_array_fill_range(KRef array, kt_int from, kt_int to, KRef value);
+void kt_boolean_array_fill_range(KRef array, kt_int from, kt_int to, kt_boolean value);
+void kt_byte_array_fill_range(KRef array, kt_int from, kt_int to, kt_byte value);
+void kt_char_array_fill_range(KRef array, kt_int from, kt_int to, kt_char value);
+void kt_short_array_fill_range(KRef array, kt_int from, kt_int to, kt_short value);
+void kt_int_array_fill_range(KRef array, kt_int from, kt_int to, kt_int value);
+void kt_long_array_fill_range(KRef array, kt_int from, kt_int to, kt_long value);
+void kt_float_array_fill_range(KRef array, kt_int from, kt_int to, kt_float value);
+void kt_double_array_fill_range(KRef array, kt_int from, kt_int to, kt_double value);
+
 /* An index outside `0 until size`: raises Kotlin's `IndexOutOfBoundsException`, with the JVM's
    wording, and returns; the caller returns too. */
 void kt_index_out_of_bounds(kt_int index, kt_int size);
