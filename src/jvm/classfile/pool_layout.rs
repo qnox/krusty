@@ -469,20 +469,19 @@ fn orphan_anchors(
     // Orphans with one anchor keep the order the visit reached them in: a method header's
     // descriptor before the entries its code names.
     let mut visits = 0..;
-    let mut settle = |pending: &mut Vec<(usize, bool)>,
-                      before: usize,
-                      anchored: &mut [Option<Anchor>]| {
-        for (orphan, header) in pending.drain(..) {
-            if before > orphan {
-                let visit = visits.next().expect("an unbounded range");
-                anchored[orphan] = Some(Anchor {
-                    before,
-                    visit,
-                    header,
-                });
+    let mut settle =
+        |pending: &mut Vec<(usize, bool)>, before: usize, anchored: &mut [Option<Anchor>]| {
+            for (orphan, header) in pending.drain(..) {
+                if before > orphan {
+                    let visit = visits.next().expect("an unbounded range");
+                    anchored[orphan] = Some(Anchor {
+                        before,
+                        visit,
+                        header,
+                    });
+                }
             }
-        }
-    };
+        };
     let mut named = Reach::new(read);
     for (position, slot) in read.visit_order().enumerate() {
         let code = match slot.holder {
