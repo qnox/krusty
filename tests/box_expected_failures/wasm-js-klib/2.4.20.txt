@@ -243,13 +243,10 @@ constants/comparisonFalse.kt
 constants/divisionByZero.kt
 constants/float.kt
 constants/kt9532.kt
-contextParameters/contextPropertyInInterface.kt
 contextParameters/contextualCallableReference.kt
 contextParameters/explicitPassing.kt
 contextParameters/kt51863.kt
 contextParameters/kt65953.kt
-contextParameters/propertyCompoundAssignment.kt
-contextParameters/substitutedContextReceivers.kt
 contextParameters/suspendContextParemetersWithExtension.kt
 contracts/contractForCast.kt
 contracts/isNullString.kt
@@ -615,7 +612,6 @@ extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/extensionFunctionInValueClass.kt
 extensionFunctions/extensionFunctionWithExtensionAsAReceiver.kt
 extensionFunctions/thisMethodInObjectLiteral.kt
-extensionProperties/contextPropertyInInterface.kt
 extensionProperties/extensionPropertyDifferentReceiver.kt
 extensionProperties/extensionPropertyWithExtensionAsReceiver.kt
 extensionProperties/genericContextOverride.kt

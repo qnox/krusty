@@ -193,7 +193,6 @@ compileKotlinAgainstKotlin/useDeserializedFunInterface.kt
 constants/comparisonFalse.kt
 constants/comparisonTrue.kt
 constants/float.kt
-contextParameters/contextPropertyInInterface.kt
 contextParameters/explicitPassing.kt
 contextParameters/inlineAnonymousParameter.kt
 contextParameters/kt51863.kt
@@ -510,7 +509,6 @@ exceptions/catch1.kt
 exceptions/catch2.kt
 exceptions/rethrow.kt
 exceptions/throw_from_catch.kt
-extensionProperties/contextPropertyInInterface.kt
 extensionProperties/extensionPropertyDifferentReceiver.kt
 fakeOverride/intersectionInLocal.kt
 fakeOverride/privateFakeOverrides0.kt
