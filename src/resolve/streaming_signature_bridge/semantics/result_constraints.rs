@@ -34,10 +34,7 @@ impl ProductionSignatureSemantics<'_> {
             return result;
         }
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let semantic_source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let semantic_source = self.source_over(&module);
         let oracle = crate::symbol_resolver::SourceOracle(&semantic_source);
         let admits = |actual: Ty, bound: Ty| {
             crate::assignable::is_assignable(

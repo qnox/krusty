@@ -1636,7 +1636,7 @@ fn stdlib_calls_reach_header_declared_callees() {
     // mints, so three more bodies reach past one and decline at a member call. One body that
     // declined at an implicit conversion now passes it and declines at an enum value whose class
     // its closure did not read.
-    let expected = if crate::kotlin_version::target()
+    let expected = if crate::kotlin_version::environment_release()
         >= crate::kotlin_version::KotlinVersion::V2_4_20
     {
         vec![

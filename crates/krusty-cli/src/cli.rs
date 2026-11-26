@@ -216,8 +216,7 @@ impl Default for Options {
             common_sources: Vec::new(),
             source_fragments: std::collections::HashMap::new(),
             module_name: "main".to_string(),
-            // Parsing replaces this once it knows the selected release. Building it must not fix the
-            // process-wide reference version, which `-Xkotlin-reference-version` may still choose.
+            // Parsing replaces this once it knows the selected release.
             language_settings: LanguageSettings::for_release(
                 KotlinVersion::newest(),
                 krusty::language_version::LanguageVersion::default(),
@@ -636,7 +635,12 @@ impl Options {
         api_version: Option<LanguageVersion>,
         feature_settings: &[krusty::features::FeatureSetting],
     ) -> Result<(), String> {
-        let settings = LanguageSettings::new(language_version, api_version, feature_settings)?;
+        let settings = LanguageSettings::for_release(
+            self.language_settings.features.release(),
+            language_version,
+            api_version,
+            feature_settings,
+        )?;
         self.install_language_settings(settings);
         Ok(())
     }
@@ -657,6 +661,7 @@ impl Options {
         for marker in &self.opt_in {
             settings.features.opt_in(marker);
         }
+        settings.features = settings.features.with_defects(self.kotlinc_defects);
         self.language_settings = settings;
     }
 }

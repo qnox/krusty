@@ -33,7 +33,7 @@ fn compile(src: &str) -> (Vec<String>, bool) {
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         krusty::frontend::PlatformProvider::jvm(platform),
-        &krusty::features::LangFeatures::from_source(src),
+        &krusty::features::LangFeatures::from_source_in_environment(src),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut d,
     );

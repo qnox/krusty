@@ -675,7 +675,6 @@ inference/pcla/issues/kt49887.kt
 inference/pcla/issues/kt64066.kt
 inference/pcla/issues/kt66229.kt
 inference/pcla/issues/kt74819e.kt
-inference/pcla/memberScope.kt
 inference/pcla/nestedNonExhaustiveIf.kt
 inference/pcla/substituteStubTypeIntoCR.kt
 inference/pcla/substitutelambdaExtensionReceiverType.kt

@@ -1341,6 +1341,12 @@ kt_double kt_rem_double(kt_double a, kt_double b);
    so is not the sign bit. */
 kt_float  kt_mod_float(kt_float a, kt_float b);
 kt_double kt_mod_double(kt_double a, kt_double b);
+/* `kotlin.math.nextUp` and `nextDown`: the adjacent representable value toward positive or negative
+   infinity. Defined in `krusty_fp.c`. */
+kt_float  kt_next_up_float(kt_float value);
+kt_float  kt_next_down_float(kt_float value);
+kt_double kt_next_up_double(kt_double value);
+kt_double kt_next_down_double(kt_double value);
 
 kt_int kt_compare_float(kt_float a, kt_float b);
 kt_int kt_compare_double(kt_double a, kt_double b);
