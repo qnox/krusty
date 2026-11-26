@@ -132,6 +132,21 @@ step "rustfmt"
 just fmt-check
 step "legacy baseline"
 just legacy-baseline-check
+# The legacy cap is global: a branch that fits under it on its own base can exceed it once the
+# merges that landed since are combined with it, which is what the merge queue builds. Check the
+# merge of this branch with origin/master in a throwaway worktree.
+step "legacy baseline on the merge with origin/master"
+merge_tree="$(git merge-tree --write-tree HEAD origin/master)" || {
+  echo "smoke: this branch does not merge cleanly into origin/master; resolve the conflict first" >&2
+  exit 1
+}
+merge_commit="$(git commit-tree "$merge_tree" -p HEAD -p origin/master -m 'smoke merge')"
+merge_dir="$(mktemp -d)"
+git worktree add --quiet --detach "$merge_dir" "$merge_commit"
+trap 'git worktree remove --force "$merge_dir" >/dev/null 2>&1 || true' EXIT
+(cd "$merge_dir" && just legacy-baseline-check)
+git worktree remove --force "$merge_dir"
+trap - EXIT
 if [ "${KRUSTY_SMOKE_SKIP_CLIPPY:-}" != 1 ] && [ -n "$(affected '*.rs')" ]; then
   step "clippy baseline"
   just clippy-baseline-check
