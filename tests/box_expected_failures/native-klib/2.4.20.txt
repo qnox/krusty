@@ -104,6 +104,7 @@ collections/clashWithInternalMapMethod.kt
 collections/inheritFromAbstractMutableListInt.kt
 companionBlocksAndExtensions/abstractClasses.kt
 companionBlocksAndExtensions/basicBlockAndExtension.kt
+companionBlocksAndExtensions/callableReferences_block.kt
 companionBlocksAndExtensions/companionBlock.kt
 companionBlocksAndExtensions/ebf.kt
 companionBlocksAndExtensions/initializersBlocksAndEnum.kt
@@ -339,14 +340,12 @@ coroutines/unsafeTransform.kt
 coroutines/varSpilling/fakeInlinerVariables.kt
 coroutines/varSpilling/kt75926.kt
 delegatedProperty/callableReferenceAsSecondArgumentOfDelegate.kt
-delegatedProperty/correctFieldsOrder.kt
 delegatedProperty/delegateForExtPropertyInClass.kt
 delegatedProperty/delegateToAnother/kt79979_memberExtension.kt
 delegatedProperty/delegateToAnother/memberExtensionWithBoundReceiver.kt
 delegatedProperty/delegateToAnother/memberExtensionWithBoundReceiverSameType.kt
 delegatedProperty/delegatedOverride.kt
 delegatedProperty/genericDelegateUncheckedCast1.kt
-delegatedProperty/lazy.kt
 delegatedProperty/local/localDelegatedPropertyCall.kt
 delegatedProperty/map.kt
 delegatedProperty/optimizedDelegatedProperties/mixedArgumentSizes.kt
@@ -546,8 +545,6 @@ properties/lazyInitializationMultiModule.kt
 properties/lazyInitializationOrder.kt
 properties/lazyInitializationSplitPerModule.kt
 ranges/contains/evaluationOrderForComparableRange.kt
-ranges/contains/evaluationOrderForDownTo.kt
-ranges/contains/evaluationOrderForDownToReversed.kt
 ranges/contains/generated/doubleRangeTo.kt
 ranges/contains/generated/floatRangeTo.kt
 ranges/contains/generated/uintUntil.kt
@@ -556,7 +553,6 @@ ranges/contains/inComparableRange.kt
 ranges/contains/inCustomObjectRange.kt
 ranges/contains/inDoubleRangeLiteralVsComparableRangeLiteral.kt
 ranges/contains/inExtensionRange.kt
-ranges/contains/inOptimizableFloatRange.kt
 ranges/contains/inRangeWithCustomContains.kt
 ranges/forInCharSequenceWithCustomIterator.kt
 ranges/forInCharSequenceWithMultipleGetFunctions.kt
@@ -747,9 +743,7 @@ regressions/multimodule/inlineAssertFailsWithBlock.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 reified/callableReferenceInlinedFun.kt
 reified/callableReferenceInlinedFunFromOtherModule.kt
-reified/extensionLambda.kt
 reified/filterIsInstance.kt
-reified/lambdaNameClash.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 sam/constructors/comparator.kt
 sam/constructors/nonLiteralComparator.kt
@@ -762,7 +756,6 @@ sam/kt64116.kt
 secondaryConstructors/enums.kt
 secondaryConstructors/innerClassesInheritance.kt
 secondaryConstructors/localClasses.kt
-serialization/deserializedMembers.kt
 specialBuiltins/bridgeNotEmptyMap.kt
 specialBuiltins/bridges.kt
 specialBuiltins/emptyList.kt
