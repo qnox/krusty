@@ -124,6 +124,8 @@ pub(super) struct FrameMap {
     size: u16,
     /// The highest `size` has reached.
     max: u16,
+    /// The highest `size` has reached since the last [`FrameMap::begin_peak`].
+    peak: u16,
     /// The physically live entries, in entry order.
     entries: Vec<Entry>,
     /// Keyed locals declared outside the physical frame until their first store.
@@ -135,6 +137,32 @@ impl FrameMap {
     /// The next free slot.
     pub(super) fn size(&self) -> u16 {
         self.size
+    }
+
+    fn record_growth(&mut self) {
+        self.max = self.max.max(self.size);
+        self.peak = self.peak.max(self.size);
+    }
+
+    /// Start measuring how far the cursor reaches, returning the enclosing measurement to restore
+    /// with [`FrameMap::end_peak`].
+    pub(super) fn begin_peak(&mut self) -> u16 {
+        std::mem::replace(&mut self.peak, self.size)
+    }
+
+    /// The highest the cursor reached since the matching [`FrameMap::begin_peak`], with the
+    /// enclosing measurement carried on.
+    pub(super) fn end_peak(&mut self, enclosing: u16) -> u16 {
+        let reached = self.peak;
+        self.peak = enclosing.max(reached);
+        reached
+    }
+
+    /// A spliced inline body laid its locals out below `top`: they count toward how far the cursor
+    /// has reached, though the cursor itself stays where the call's frame leaves it.
+    pub(super) fn note_reach(&mut self, top: u16) {
+        self.max = self.max.max(top);
+        self.peak = self.peak.max(top);
     }
 
     /// The width every local handed out so far fits under.
@@ -212,7 +240,7 @@ impl FrameMap {
         self.size = slot
             .checked_add(entry.words)
             .expect("a local slot index does not fit in u16");
-        self.max = self.max.max(self.size);
+        self.record_growth();
         slot
     }
 
@@ -349,7 +377,7 @@ impl FrameMap {
     /// out above its base, and the frame learns only how far they reach.
     pub(super) fn reserve_through(&mut self, top: u16) {
         self.size = self.size.max(top);
-        self.max = self.max.max(self.size);
+        self.record_growth();
     }
 
     fn push(&mut self, occupant: Occupant, ty: Ty) -> (u32, u16) {
@@ -364,7 +392,7 @@ impl FrameMap {
             words,
         });
         self.size += words;
-        self.max = self.max.max(self.size);
+        self.record_growth();
         (id, slot)
     }
 

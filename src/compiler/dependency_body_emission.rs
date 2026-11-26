@@ -416,8 +416,10 @@ pub(super) fn emit_dependencies<B: Backend>(
         let emitted_roots::FrozenClosure {
             declarations,
             authorized_member_edges,
+            indices_bounds,
             read_classes,
             dispatched,
+            private_member_classes,
         } = closure;
         let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
@@ -429,7 +431,9 @@ pub(super) fn emit_dependencies<B: Backend>(
         )
         .with_checked_dependency_facts(checked_facts)
         .with_authorized_member_edges(authorized_member_edges)
+        .with_indices_bounds(indices_bounds)
         .with_read_classes(read_classes)
+        .with_private_member_classes(private_member_classes)
         .with_enum_entries_factory(entries_factory.clone())
         .with_target_classifiers(&target_represents_classifier)
         .with_expansion_copies(facts.inline_bodies());

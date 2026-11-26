@@ -113,6 +113,11 @@ enum Operation {
     StringGet,
     /// The order of a string and another (`String.compareTo`).
     StringCompare,
+    /// The characters of a string between two indices (`String.subSequence`).
+    StringSubSequence,
+    /// The builder's entry for a member it does not realize while no builder exists: nothing can
+    /// call it, and a program constructing a builder declines a call through the member.
+    Unreachable,
     /// The order of the value a box holds and the value another box of its class holds
     /// (`Int.compareTo(Int)`).
     Compare,
@@ -133,6 +138,8 @@ enum BuilderMember {
     /// `get(Int)`, which throws the runtime `IndexOutOfBoundsException` whose struct is
     /// `index_out_of_bounds` for an index outside the units in use.
     Get { index_out_of_bounds: u32 },
+    /// `subSequence(Int, Int)`, which copies the range of the units in use out as a string.
+    SubSequence,
 }
 
 impl Runtime {
@@ -203,6 +210,9 @@ impl Runtime {
             }
         }
         if let Some(operation) = string {
+            if matches!(operation, Operation::StringSubSequence) {
+                self.string_sub_sequence(module, classifiers)?;
+            }
             let function =
                 self.define_implementation(module, member, Receiver::String, operation)?;
             self.objects
@@ -211,13 +221,27 @@ impl Runtime {
         }
         match builder {
             Some(Ok(operation)) => {
+                if matches!(operation, Operation::Builder(BuilderMember::SubSequence)) {
+                    self.units_sub_sequence(module, classifiers)?;
+                }
                 let function =
                     self.define_implementation(module, member, Receiver::Runtime, operation)?;
                 self.objects
                     .interfaces
                     .implement(self.string_builders.class, member, function)?;
             }
-            Some(Err(reason)) => self.unanswered_builder_member(member, reason),
+            Some(Err(reason)) => {
+                let function = self.define_implementation(
+                    module,
+                    member,
+                    Receiver::Runtime,
+                    Operation::Unreachable,
+                )?;
+                self.objects
+                    .interfaces
+                    .implement(self.string_builders.class, member, function)?;
+                self.unanswered_builder_member(member, reason);
+            }
             None => {}
         }
         let index = self.builtin_members.members.len();
@@ -336,6 +360,18 @@ impl Runtime {
                     .local_get(1)
                     .array_get_u(self.chars);
             }
+            (Receiver::String, Operation::StringSubSequence) => {
+                let slice = self
+                    .defined_string_sub_sequence()
+                    .ok_or("a string slice implemented before its function")?;
+                code.ref_cast(false, HeapType::Concrete(self.string))
+                    .local_get(1)
+                    .local_get(2)
+                    .call(slice);
+            }
+            (Receiver::Runtime, Operation::Unreachable) => {
+                code.unreachable();
+            }
             (Receiver::Runtime, Operation::Builder(builder)) => {
                 let builders = &self.string_builders;
                 match builder {
@@ -348,6 +384,17 @@ impl Runtime {
                     }
                     BuilderMember::Length => {
                         code.call(builders.length);
+                    }
+                    BuilderMember::SubSequence => {
+                        let slice = self
+                            .defined_units_sub_sequence()
+                            .ok_or("a builder slice implemented before its function")?;
+                        code.call(builders.units)
+                            .local_get(0)
+                            .call(builders.length)
+                            .local_get(1)
+                            .local_get(2)
+                            .call(slice);
                     }
                     BuilderMember::Get {
                         index_out_of_bounds,
@@ -425,6 +472,13 @@ fn builder_operation(
                 index_out_of_bounds: index_out_of_bounds()?,
             })
         }
+        ("subSequence", [Ty::Int, Ty::Int])
+            if declaration.ret == Ty::obj_name(krusty::types::wk::char_sequence())
+                && params[1..] == [ValType::I32, ValType::I32]
+                && *results == reference =>
+        {
+            Some(BuilderMember::SubSequence)
+        }
         _ => None,
     };
     let appends = matches!(
@@ -490,6 +544,13 @@ fn operation(
                 && *results == [ValType::I32] =>
         {
             Ok(Operation::StringCompare)
+        }
+        (Representation::String, Some(BackendCompilerIntrinsic::StringSubSequence))
+            if *declaration.params == [Ty::Int, Ty::Int]
+                && params[1..] == [ValType::I32, ValType::I32]
+                && *results == [crate::objects::REFERENCE] =>
+        {
+            Ok(Operation::StringSubSequence)
         }
         (_, Some(operation)) => Err(format!(
             "a library member {} overrides as {operation:?}",

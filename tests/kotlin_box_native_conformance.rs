@@ -427,6 +427,39 @@ fn expect_native_klib_box(source: &str, stem: &str) {
     assert_eq!(outcome, Outcome::Pass, "{stem}");
 }
 
+/// PLATFORM-SPECIFIC: `kotlin.native.runtime.GC` exists only on Native, so there is no JVM oracle.
+/// `GC.collect` is `external`, bound to the runtime by `@GCUnsafeCall`; every object reachable
+/// from the program must survive the collection it requests.
+#[test]
+fn native_a_collection_keeps_every_reachable_object() {
+    let source = "@file:OptIn(kotlin.native.runtime.NativeRuntimeApi::class)\n\
+         import kotlin.native.runtime.GC\n\
+         class Node(val next: Node?, val value: Int)\n\
+         fun box(): String {\n\
+         \x20   var list: Node? = null\n\
+         \x20   for (i in 1..1000) list = Node(list, i)\n\
+         \x20   GC.collect()\n\
+         \x20   var sum = 0\n\
+         \x20   var node = list\n\
+         \x20   while (node != null) {\n\
+         \x20       sum += node.value\n\
+         \x20       node = node.next\n\
+         \x20   }\n\
+         \x20   return if (sum == 500500) \"OK\" else \"sum=\" + sum\n\
+         }\n";
+    let target = host().expect("Native KLIB/runtime is required for this test");
+    let lane = NativeLane {
+        target: Some(target),
+    };
+    let outcome = lane.compile_and_run(
+        &std::env::temp_dir(),
+        "nativeGcCollect",
+        &[("nativeGcCollect.kt".to_string(), source.to_string())],
+        source,
+    );
+    assert_eq!(outcome, Outcome::Pass, "nativeGcCollect");
+}
+
 /// The receiver-reuse program starts its suspend lambda through the stdlib KLIB's `startCoroutine`.
 #[test]
 fn native_apply_receiver_single_store_runs() {

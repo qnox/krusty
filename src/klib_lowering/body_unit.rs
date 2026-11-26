@@ -357,6 +357,23 @@ pub(super) struct MemberClass<'a> {
     /// The class's properties with a backing field, each with that field.
     pub(super) properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
     pub(super) contract: &'a crate::libraries::KlibBodyClassContract,
+    /// An inner class's outer instance, which its bodies read from the field after `fields`.
+    pub(super) outer: Option<super::same_library_class::OuterInstance<'a>>,
+}
+
+impl<'a> MemberClass<'a> {
+    /// The outer instance of the class `header` declares, kept after its declared `fields`.
+    fn outer_instance(
+        header: &super::class_headers::ClassMemberHeader<'_, 'a>,
+        fields: &[&'a KlibIrField],
+    ) -> Option<super::same_library_class::OuterInstance<'a>> {
+        header
+            .outer
+            .map(|outer| super::same_library_class::OuterInstance {
+                symbol: outer.this,
+                field: u32::try_from(fields.len()).expect("a field list fits u32"),
+            })
+    }
 }
 
 impl DependencyBodyUnit {
@@ -1075,6 +1092,7 @@ impl DependencyBodyUnit {
                                 member.properties.clone(),
                                 member.contract.is_value,
                             )
+                            .reading_outer_instance(member.class, member.outer)
                             .body(body.statements),
                         None => lowering.body(body.statements),
                     }
@@ -1367,25 +1385,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         &self,
         getter: &KlibAccessorIdSignature,
     ) -> Result<Option<crate::libraries::IndicesReceiver>, KlibBodyDeclineReason> {
-        let signature = KlibDeclarationSignature::Accessor(getter.clone());
-        let identity = match self
-            .sources
-            .bodies
-            .callee_origin(&self.active_module, &signature)
-        {
-            KlibCalleeOrigin::Exact(identity) => identity,
-            // Dependency preparation omitted this getter's edge: the loop is not one this unit counts.
-            KlibCalleeOrigin::Missing => {
-                return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                    "a `for` loop over an `indices` getter without a provider declaration",
-                ))
-            }
-            KlibCalleeOrigin::Ambiguous => {
-                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
-                    getter.property().clone(),
-                )))
-            }
-        };
+        let identity = self.indices_getter_identity(getter)?;
         Ok(self
             .sources
             .declarations
@@ -1393,6 +1393,34 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .and_then(|(_, realization)| {
                 super::for_loops::indices_receiver(realization.klib_body_callable()?)
             }))
+    }
+
+    fn indices_bound(
+        &self,
+        getter: &KlibAccessorIdSignature,
+    ) -> Result<Option<super::body_lowering::IndicesBound>, KlibBodyDeclineReason> {
+        let identity = self.indices_getter_identity(getter)?;
+        let Some(bound) = self.sources.callees.indices_bound(&identity) else {
+            return Ok(None);
+        };
+        let KlibDeclarationSignature::Accessor(accessor) = &bound.declaration else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an `indices` bound is not a property accessor".to_owned(),
+            ));
+        };
+        let selected = match self.sources.callees.get(bound) {
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for an `indices` bound".to_owned(),
+                ))
+            }
+            None => return Err(KlibBodyDeclineReason::Unjoined),
+        };
+        Ok(Some(super::body_lowering::IndicesBound {
+            accessor: accessor.clone(),
+            ty: selected.ret(),
+        }))
     }
 
     fn reverses_progression(
@@ -1566,6 +1594,11 @@ impl<'s> CallLinker for Linker<'_, 's> {
         callee: &KlibPublicIdSignature,
     ) -> Result<LinkedCallableReference, KlibBodyDeclineReason> {
         let identity = self.callee_identity(callee)?;
+        // A private member of a class this unit lowers has no provider declaration; the unit
+        // emits it with the class, and the reference names that emitted member.
+        if let Some(call) = self.private_class_member(ir, &identity)? {
+            return private_members::private_member_reference(self.sources.bodies, &identity, call);
+        }
         let (declaration, callable) = self.sources.callees.reference_declaration(&identity)?;
         let call = self.link(ir, callee)?;
         Ok(LinkedCallableReference::new(declaration, callable, call))
@@ -2354,6 +2387,29 @@ impl<'s> Linker<'_, 's> {
                     "a member realized outside the unit has no frozen call edge".to_owned(),
                 )
             })
+    }
+
+    /// The exact declaration of the `indices` getter a loop calls, which dependency preparation
+    /// reached as the loop's edge.
+    fn indices_getter_identity(
+        &self,
+        getter: &KlibAccessorIdSignature,
+    ) -> Result<KlibDependencyCallable, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Accessor(getter.clone());
+        match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => Ok(identity),
+            // Dependency preparation omitted this getter's edge: the loop is not one this unit counts.
+            KlibCalleeOrigin::Missing => Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a `for` loop over an `indices` getter without a provider declaration",
+            )),
+            KlibCalleeOrigin::Ambiguous => Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(
+                Box::new(getter.property().clone()),
+            )),
+        }
     }
 
     /// Whether `identity` is an abstract accessor of a class an earlier unit realized and this

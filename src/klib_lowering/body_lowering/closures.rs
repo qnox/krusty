@@ -141,6 +141,18 @@ impl BodyLowering<'_> {
             .get_mut(&implementation)
             .expect("a closure publishes its parameters")
             .captured_receivers = receivers;
+        // The body may return from this declaration when the closure is inlined into it. An
+        // inline function's own body is expanded before the closures it passes, so a return from
+        // it stays unsupported; so does one from an object literal's member, or from a body whose
+        // result is not its declared one.
+        let mut enclosing_returns = self.enclosing_returns.clone();
+        if self.member_return.is_none()
+            && !self.ir.inline_only_fns.contains(&self.function.function)
+            && !self.header.erases_result()
+            && self.header.body_result() == self.header.result()
+        {
+            enclosing_returns.push((self.function.symbol.clone(), self.header.result()));
+        }
         let mut lowering = BodyLowering::new(
             self.arena,
             LoweredFunction {
@@ -156,6 +168,7 @@ impl BodyLowering<'_> {
             .instance_storage
             .as_ref()
             .and_then(super::instance_storage::InstanceStorageFrame::nested_initializer);
+        lowering.enclosing_returns = enclosing_returns;
         let body = lowering.body(statements)?;
         self.ir.functions[implementation as usize].body = Some(body);
         Ok(self.ir.add_expr(IrExpr::Lambda {

@@ -8,12 +8,7 @@ use crate::diag::Span;
 /// newline index for every span lookup, so the whole arena costs one pass over `src` plus lookups.
 pub(super) fn attach(file: &mut File, src: &str) {
     // `line_starts[k]` = byte offset where line (k+1) begins; line 1 starts at 0.
-    let mut line_starts = vec![0u32];
-    for (i, b) in src.bytes().enumerate() {
-        if b == b'\n' {
-            line_starts.push(i as u32 + 1);
-        }
-    }
+    let line_starts = crate::diag::line_breaks::line_starts(src);
     file.source_line_count = line_starts.len() as u32;
     let line_at = |off: u32| -> u32 {
         // 1-based line: index of the last start <= off.
