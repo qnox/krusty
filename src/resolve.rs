@@ -247,6 +247,7 @@ mod generic_call_bindings;
 mod if_expression;
 mod implicit_receiver_calls;
 mod implicit_rungs;
+mod imported_singleton_members;
 mod inline_access;
 mod inline_parameter_usage;
 mod inner_constructor_calls;
@@ -5484,63 +5485,6 @@ impl<'a> Checker<'a> {
         };
         self.expr_lowers.insert(expression, lowering);
         Some(ty)
-    }
-
-    /// Explicit import of a member declared on a singleton classifier. The import scope has already
-    /// resolved the owner path and alias to stable identities; this only supplies the ordinary value
-    /// receiver used by member/property selection.
-    fn imported_singleton_member(
-        &self,
-        name: &str,
-    ) -> Option<(ImplicitReceiver, String, SingletonValue)> {
-        let mut candidates = self
-            .function_import_scope
-            .explicit_targets(name)
-            .into_iter()
-            .filter_map(|(namespace, declared_name)| {
-                crate::trace_compiler!(
-                    "resolve",
-                    "imported singleton candidate name={name} target={namespace:?}.{declared_name}"
-                );
-                let crate::symbol_source::SymbolNamespace::Classifier(classifier) = namespace
-                else {
-                    return None;
-                };
-                let singleton = self.classifier_singleton_value(classifier)?;
-                // The import names a member only when the object declares one under that name; a
-                // nested classifier of the object is imported through the classifier namespace.
-                crate::symbol_resolver::imported_object_member_symbols(
-                    &self.fed_source(),
-                    classifier,
-                    &declared_name,
-                )?;
-                (singleton.classifier == classifier).then_some((
-                    ImplicitReceiver {
-                        receiver_role: None,
-                        ty: Ty::obj_name(classifier),
-                        declared_ty: Ty::obj_name(classifier),
-                        identity: (0, 0),
-                        extension_receiver: None,
-                        class_receiver: false,
-                        current: false,
-                        receiver_depth: 0,
-                        dsl_shadowed: false,
-                    },
-                    declared_name,
-                    singleton,
-                ))
-            })
-            .collect::<Vec<_>>();
-        if candidates.len() != 1 {
-            return None;
-        }
-        let (receiver, declared_name, singleton) = candidates.pop()?;
-        crate::trace_compiler!(
-            "resolve",
-            "imported singleton classifier={:?} storage={singleton:?}",
-            singleton.classifier
-        );
-        Some((receiver, declared_name, singleton))
     }
 
     /// A classifier contributed by a star-import level can denote a value when it is an object or
