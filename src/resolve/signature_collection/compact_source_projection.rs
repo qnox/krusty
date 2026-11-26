@@ -239,7 +239,21 @@ pub(in crate::resolve) fn compact_declaration_lexical_class_names(
             break;
         }
         stable_chain.push(candidate);
-        current = context.anonymous_owners.get(&candidate).copied();
+        // An anonymous object belongs to the classifier whose body constructs it. Any other
+        // declaration sits in its header owner: a local classifier in the function or property that
+        // declares it, which sits in its own classifier. Walking through those non-classifier owners
+        // keeps every enclosing classifier's body scope, so a local class in a member function sees
+        // that class's nested classifiers.
+        current = context
+            .anonymous_owners
+            .get(&candidate)
+            .copied()
+            .or_else(|| {
+                headers
+                    .declarations
+                    .anchor(candidate)
+                    .and_then(|anchor| anchor.owner)
+            });
     }
 
     let mut classes = Vec::new();
