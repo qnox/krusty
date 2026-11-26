@@ -1,6 +1,8 @@
 //! Positive declaration capabilities shared by dependency planning and Native emission.
 
-use krusty::libraries::{CompilerIntrinsic, ListStorageConstruction};
+use krusty::libraries::{
+    CompilerIntrinsic, ListStorageConstruction, ScalarComparison, ScalarInstruction,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DependencyOperation {
@@ -14,6 +16,8 @@ pub(super) enum DependencyOperation {
     /// protocol answers it through the receiver's descriptor, as it answers `Iterator.next`.
     PrimitiveIteratorNext,
     ResultFailureException,
+    /// One integral scalar's own equality of two operands of the same type.
+    ScalarEquality,
 }
 
 pub(super) fn operation_plan(operation: CompilerIntrinsic) -> Option<DependencyOperation> {
@@ -30,6 +34,9 @@ pub(super) fn operation_plan(operation: CompilerIntrinsic) -> Option<DependencyO
         CompilerIntrinsic::ResultFailureException => {
             Some(DependencyOperation::ResultFailureException)
         }
+        CompilerIntrinsic::ScalarInstruction(ScalarInstruction::Compare(
+            ScalarComparison::Equal,
+        )) => Some(DependencyOperation::ScalarEquality),
         _ => None,
     }
 }

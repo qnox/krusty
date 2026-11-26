@@ -172,14 +172,14 @@ fn ordinary_and_value_companion_properties_publish_the_official_accessor_identit
             CompilationTarget::Native,
             Box::new(libraries.for_compilation()),
         ),
-        &krusty::features::LangFeatures::from_source(SOURCE),
+        &krusty::features::LangFeatures::from_source_in_environment(SOURCE),
         &mut diags,
     );
     let backend = ObserveExports {
         backend: KlibBackend::new(
             KlibPlatform::Native,
             KlibStamp::new(
-                krusty::kotlin_version::target(),
+                krusty::kotlin_version::environment_release(),
                 krusty::language_version::LanguageVersion::V2_4,
             ),
         ),

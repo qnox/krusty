@@ -62,7 +62,7 @@ fn compile(source: &str) -> (Vec<Artifact>, Vec<String>) {
     );
     let inputs = vec![SourceInput::kotlin(source).with_file_stem("Main")];
     let mut diags = DiagSink::new();
-    let mut features = krusty::features::LangFeatures::new();
+    let mut features = krusty::features::LangFeatures::from_environment();
     features.apply_source_directives(source);
     let backend = CraneliftBackend::new(target).verified();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(

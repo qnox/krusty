@@ -477,7 +477,7 @@ fn diagnostics_krusty_worker() {
 #[ignore = "compiles ten thousand cases with krusty and kotlinc; long on a cold kotlinc cache"]
 fn krusty_rejects_what_kotlinc_rejects_in_its_diagnostics_test_data() {
     let root = box_inventory::kotlin_checkout(CORPORA[0]);
-    let version = krusty::kotlin_version::target();
+    let version = krusty::kotlin_version::environment_release();
     let jdks = box_jdks(&root);
     let workers = Workers {
         test: "kotlin_diagnostics_jvm_conformance::diagnostics_krusty_worker",
@@ -595,7 +595,7 @@ fn judge(
     bless: bool,
     record: &mut dyn FnMut(&'static str, &BTreeSet<String>),
 ) -> Vec<String> {
-    let version = krusty::kotlin_version::target();
+    let version = krusty::kotlin_version::environment_release();
     let mut problems: Vec<String> = fatal
         .iter()
         .map(|Fatal { key, reason }| format!("{key}: the harness could not observe it ({reason})"))

@@ -163,7 +163,7 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         order_libraries_for_native_linker(
             &mut libraries,
             &friend_paths,
-            krusty::kotlin_version::target(),
+            krusty::kotlin_version::environment_release(),
         );
 
         // Only the arguments are used: the persistent server runs the compiler.
@@ -478,9 +478,11 @@ mod tests {
             },
         ];
         assert_eq!(modules, expected);
-        let flag = krusty::features::FeatureTable::for_version(krusty::kotlin_version::target())
-            .expect("the pinned feature table")
-            .language_argument("+CompanionBlocksAndExtensions");
+        let flag = krusty::features::FeatureTable::for_version(
+            krusty::kotlin_version::environment_release(),
+        )
+        .expect("the pinned feature table")
+        .language_argument("+CompanionBlocksAndExtensions");
         assert_eq!(arguments, vec![flag]);
     }
 

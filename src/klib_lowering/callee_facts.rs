@@ -39,6 +39,9 @@ pub struct KlibCalleeFacts<'a> {
     read_classes: Rc<HashMap<crate::types::TypeName, crate::libraries::KlibBodyClassContract>>,
     /// The checked edge of an enum's synthetic `entries` body: the selected `enumEntries`.
     enum_entries_factory: Option<KlibDependencyCallable>,
+    /// The prepared-inline copies of the loaded libraries' inline functions, which a call of a
+    /// suspend inline function expands from.
+    expansion_copies: Option<&'a crate::klib_libraries::KlibDeclarationBodies>,
 }
 
 #[derive(Clone)]
@@ -239,6 +242,35 @@ impl<'a> KlibCalleeFacts<'a> {
     ) -> Self {
         self.target_classifiers = Some(represents);
         self
+    }
+
+    /// Expand a call of a suspend inline function from its prepared copy in `copies`.
+    pub(crate) fn with_expansion_copies(
+        mut self,
+        copies: &'a crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Self {
+        self.expansion_copies = Some(copies);
+        self
+    }
+
+    /// The prepared copy of `declaration`, the ordinary serialized `identity`, that a call of it
+    /// expands from: kotlinc links a call of a suspend inline function by inlining the copy its
+    /// library prepared, whose suspension intrinsics are already lowered to the continuation
+    /// operations. `None` for any other declaration.
+    pub(super) fn expansion_copy(
+        &self,
+        identity: &KlibDependencyCallable,
+        declaration: &crate::metadata::klib_ir::tree::KlibIrFunction,
+    ) -> Option<(
+        &'a crate::metadata::klib_ir::tree::KlibIrArena,
+        &'a crate::metadata::klib_ir::tree::KlibIrFunction,
+    )> {
+        use crate::metadata::function_flags::{IS_INLINE, IS_SUSPEND};
+        let flags = declaration.base.flags;
+        if flags & IS_INLINE == 0 || flags & IS_SUSPEND == 0 {
+            return None;
+        }
+        self.expansion_copies?.function(identity)
     }
 
     /// Whether the target owns the representation of `classifier`, which a body then reads as the

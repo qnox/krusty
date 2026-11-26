@@ -32,6 +32,9 @@ mod private_inline_members;
 #[path = "klib_closure_frames_e2e/file_private_inherited_members.rs"]
 mod file_private_inherited_members;
 
+#[path = "klib_closure_frames_e2e/suspend_function_bodies.rs"]
+mod suspend_function_bodies;
+
 #[path = "klib_closure_frames_e2e/thread_local_objects.rs"]
 mod thread_local_objects;
 
@@ -643,7 +646,7 @@ fn assert_official_dependency_sources_produced_with(
             krusty::compilation_target::CompilationTarget::Native,
             Box::new(libraries.for_compilation()),
         ),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
     let target = krusty_native::NativeTarget::host().expect("host Native target");
