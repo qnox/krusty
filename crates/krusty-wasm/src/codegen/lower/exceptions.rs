@@ -194,14 +194,14 @@ impl Body<'_> {
         args: &[u32],
         params: Option<&[Ty]>,
         external: Option<ExternalCallableId>,
-        defaults: &[u32],
+        omitted: super::dependency_exports::OmittedArguments<'_>,
     ) -> Result<(), Unsupported> {
         // The shared default-argument lowering rewrites every construction with omitted
         // arguments it can realize to construct through its constructor's entry.
-        if !defaults.is_empty() {
+        if !omitted.ordinals.is_empty() {
             // Only another module's constructor is reached through its own default entry.
             return match external
-                .and_then(|target| self.dependency_construction(target, internal, args, defaults))
+                .and_then(|target| self.dependency_construction(target, internal, args, omitted))
             {
                 Some(constructed) => constructed,
                 None => Err("a constructor call with omitted arguments".to_string()),
@@ -227,7 +227,7 @@ impl Body<'_> {
                 return self.string_builder_construction(target, args);
             }
             if let Some(constructed) = external
-                .and_then(|target| self.dependency_construction(target, internal, args, defaults))
+                .and_then(|target| self.dependency_construction(target, internal, args, omitted))
             {
                 return constructed;
             }

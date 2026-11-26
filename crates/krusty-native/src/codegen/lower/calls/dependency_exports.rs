@@ -426,19 +426,17 @@ impl BodyLowering<'_, '_, '_> {
         Some((|| {
             let parameters = export.signature.parameters().to_vec();
             let result = export.signature.result();
-            if default_prefix_count != 0 {
-                return Err(declined!(
-                    "a dependency construction omitting arguments after a compiler prefix"
-                ));
-            }
             if parameters.len() != args.len() + defaults.len() {
                 return Err(
                     "a dependency construction whose operands disagree with its constructor".into(),
                 );
             }
+            // The ordinals number the source parameters, which follow the compiler's leading
+            // operands; the masks number the source parameters alone.
+            let prefix = default_prefix_count as usize;
             let omitted = defaults
                 .iter()
-                .map(|&ordinal| ordinal as usize)
+                .map(|&ordinal| ordinal as usize + prefix)
                 .collect::<Vec<_>>();
             let supplied = parameters
                 .iter()
@@ -464,8 +462,8 @@ impl BodyLowering<'_, '_, '_> {
                         }
                     }
                     for mask in krusty::backend::default_arguments::omission_masks(
-                        parameters.len(),
-                        omitted.iter().copied(),
+                        parameters.len() - prefix,
+                        omitted.iter().map(|&position| position - prefix),
                     ) {
                         operands.push(
                             self.builder
@@ -476,7 +474,7 @@ impl BodyLowering<'_, '_, '_> {
                     let mut signature = parameters.clone();
                     signature.extend(std::iter::repeat_n(
                         Ty::Int,
-                        krusty::backend::default_arguments::mask_words(parameters.len()),
+                        krusty::backend::default_arguments::mask_words(parameters.len() - prefix),
                     ));
                     (entry, signature, operands)
                 }
