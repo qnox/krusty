@@ -1520,6 +1520,16 @@ impl CheckedBackendCallables {
             .or_else(|| self.sam_declarations.get(&identity))
     }
 
+    /// The getters of the dependency properties that store their value class's underlying value,
+    /// as their providers normalized them.
+    pub fn value_class_storage_getters(&self) -> crate::fx_hash::HashSet<ExternalCallableId> {
+        self.properties
+            .values()
+            .filter(|property| property.declares_value_class_storage)
+            .map(|property| property.getter)
+            .collect()
+    }
+
     /// The fact for a dependency property identity this file's IR holds. `None` means the identity
     /// is not one of this file's.
     pub fn property(&self, identity: ExternalPropertyId) -> Option<&BackendPropertyFact> {

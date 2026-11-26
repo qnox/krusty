@@ -56,6 +56,7 @@ pub(crate) use declaration_inventory::ModuleValueClasses;
 mod tail_boxing;
 mod type_operation_roles;
 mod unboxing_rewrites;
+mod underlying_getter;
 mod value_boundaries;
 use tail_boxing::{box_nullable_vc_tail, box_ref_tail, box_tail, restore_boxed_suspension_tails};
 mod value_members;
@@ -163,6 +164,7 @@ pub(crate) fn lower_value_classes(
     let ModuleValueClasses {
         underlying: module_value_classes,
         readable: module_readable_value_classes,
+        storage_getters,
     } = module;
     krusty::trace_compiler!(
         "value_classes",
@@ -560,23 +562,13 @@ pub(crate) fn lower_value_classes(
         }
     }
 
-    // Each source value class's getter name keyed by its internal name (`A2` → `getValue`) — to
-    // recognize the legacy call-shaped form. Semantic property nodes use the source property-name map
-    // below and never derive meaning from a JVM getter spelling.
-    let mut vc_getters: HashMap<TypeName, String> = ir
-        .classes
-        .iter()
-        .filter(|c| c.is_value)
-        .filter_map(|c| {
-            c.fields
-                .first()
-                .map(|f| (c.fq_name, property_getter_name(&f.name)))
-        })
-        .collect();
-    vc_getters.extend(
-        external_underlying_properties
-            .iter()
-            .map(|(owner, property)| (*owner, property_getter_name(property))),
+    // The getters that read a value class's underlying property, to recognize the call-shaped form.
+    // Semantic property nodes use the source property-name map below and never derive meaning from
+    // a JVM getter spelling.
+    let vc_getters = underlying_getter::UnderlyingGetters::new(
+        ir,
+        &external_underlying_properties,
+        storage_getters,
     );
     let mut vc_properties: HashMap<TypeName, String> = ir
         .classes
@@ -1104,7 +1096,7 @@ pub(crate) fn lower_value_classes(
             if let IrExpr::Call {
                 callee: call_callee,
                 dispatch_receiver,
-                args,
+                ..
             } = e
             {
                 if let Callee::Virtual {
@@ -1121,9 +1113,7 @@ pub(crate) fn lower_value_classes(
                     if dispatch_receiver.is_some()
                         && module_value_classes.contains_key(owner)
                         && !cls_by_name.contains_key(owner)
-                        && !vc_getters.get(owner).is_some_and(|getter| {
-                            is_underlying_getter(getter, name, *target, args.is_empty())
-                        })
+                        && !vc_getters.reads(owner, name, *target)
                     {
                         let impl_name =
                             vc_member_impl_name(name, params, ret, &callable_under, is_suspend);
@@ -1929,7 +1919,7 @@ pub(crate) fn lower_value_classes(
             IrExpr::Call {
                 callee: call_callee,
                 dispatch_receiver: Some(receiver),
-                args,
+                ..
             } if let Callee::Virtual {
                 owner,
                 name,
@@ -1937,9 +1927,7 @@ pub(crate) fn lower_value_classes(
                 target,
                 ..
             } = &**call_callee
-                && (vc_getters.get(owner).is_some_and(|getter| {
-                    is_underlying_getter(getter, name, *target, args.is_empty())
-                })) =>
+                && vc_getters.reads(owner, name, *target) =>
             {
                 value_class_name(*owner, &under).map(|owner| Rw::Prop {
                     receiver: *receiver,
@@ -3883,25 +3871,6 @@ impl ReprCtx<'_> {
         }
         (id, self.repr(id))
     }
-}
-
-/// Whether the JVM method `name` is the getter of a value class's underlying property, whose
-/// plain spelling is `getter`. A property typed as another value class has its getter mangled
-/// with the hash of that type (`getId-eEFUqEU`); that spelling is the getter only when the
-/// checker selected a property getter and the call passes no arguments, because an ordinary
-/// `fun getId(other: Id)` and a context-parameter property's getter mangle to the same prefix.
-fn is_underlying_getter(
-    getter: &str,
-    name: &str,
-    target: Option<krusty::ir::IrVirtualTarget>,
-    no_arguments: bool,
-) -> bool {
-    name == getter
-        || name.strip_prefix(getter).is_some_and(|rest| {
-            rest.starts_with('-')
-                && no_arguments
-                && matches!(target, Some(krusty::ir::IrVirtualTarget::PropertyGetter(_)))
-        })
 }
 
 /// Whether a NON-NULL value-class type's unboxed underlying can hold null (so a `checkNotNullParameter`

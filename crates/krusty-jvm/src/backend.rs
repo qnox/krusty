@@ -386,12 +386,14 @@ fn run_backend_passes_after_plugins(
         &facts.property_realizations,
         facts.jvm_default,
     );
+    let storage_getters = callables.value_class_storage_getters();
     if !crate::value_classes::lower_value_classes(
         ir,
         classifiers,
         crate::value_classes::ModuleValueClasses {
             underlying: module_value_classes,
             readable: module_readable_value_classes,
+            storage_getters: &storage_getters,
         },
         &inherited_default_statics,
         &mut facts.bridge_adaptations,
