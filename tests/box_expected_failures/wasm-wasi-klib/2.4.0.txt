@@ -1138,7 +1138,6 @@ unsignedTypes/forInUnsignedUntil.kt
 unsignedTypes/generic.kt
 unsignedTypes/inUnsignedDownTo.kt
 unsignedTypes/inUnsignedRange.kt
-unsignedTypes/kt47716.kt
 unsignedTypes/unsignedIntCompare.kt
 unsignedTypes/unsignedLiteralsForMaxLongValue.kt
 unsignedTypes/unsignedLongCompare.kt
