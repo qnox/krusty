@@ -1187,8 +1187,6 @@ ranges/contains/evaluationOrderForRangeLiteral.kt
 ranges/contains/evaluationOrderForRangeLiteralReversed.kt
 ranges/contains/evaluationOrderForUntil.kt
 ranges/contains/evaluationOrderForUntilReversed.kt
-ranges/contains/generated/intDownTo.kt
-ranges/contains/generated/longDownTo.kt
 ranges/contains/generated/uintDownTo.kt
 ranges/contains/generated/uintRangeTo.kt
 ranges/contains/generated/uintRangeUntil.kt
