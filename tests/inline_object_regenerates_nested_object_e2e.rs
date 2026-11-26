@@ -15,7 +15,9 @@ const PROGRAM: &str = include_str!("box_regressions/inlineObjectRegeneratesNeste
 /// `value`: kotlinc before 2.5 declares the field with the original nested class's type
 /// ([`Quirk::InlineObjectFieldKeepsOriginalNestedType`]), and krusty reproduces that by default.
 fn jvm_answer(stem: &str) -> String {
-    if Quirks::of_release(krusty::kotlin_version::environment_release()).has(Quirk::InlineObjectFieldKeepsOriginalNestedType) {
+    if Quirks::of_release(krusty::kotlin_version::environment_release())
+        .has(Quirk::InlineObjectFieldKeepsOriginalNestedType)
+    {
         format!(
             "ERROR:NoSuchFieldError:Class {stem}Kt$box$$inlined$wrap$1 does not have member field \
              '{stem}Kt$box$$inlined$wrap$1$1 value'"

@@ -17,7 +17,9 @@ const PROGRAM: &str = include_str!("box_regressions/InlineObjectPropertyBridge.k
 fn an_inline_object_copy_bridges_its_narrowed_property_getter() {
     // kotlinc before 2.5 declares the copy's `value` field with the original nested class's type
     // ([`Quirk::InlineObjectFieldKeepsOriginalNestedType`]), which krusty reproduces by default.
-    let expected = if Quirks::of_release(krusty::kotlin_version::environment_release()).has(Quirk::InlineObjectFieldKeepsOriginalNestedType) {
+    let expected = if Quirks::of_release(krusty::kotlin_version::environment_release())
+        .has(Quirk::InlineObjectFieldKeepsOriginalNestedType)
+    {
         "ERROR:NoSuchFieldError:Class MainKt$box$$inlined$wrap$1 does not have member field \
          'MainKt$box$$inlined$wrap$1$1 value'"
     } else {
