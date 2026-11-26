@@ -235,8 +235,9 @@ pub struct FileInput<'a> {
     /// The exported entry answering each object instance and enum constant another file
     /// realizes.
     pub dependency_instances: &'a HashMap<krusty::backend::instance_links::InstanceEntry, String>,
-    /// Stable dependency-member numbers shared by every file in the source module.
-    pub dependency_interface_numbers: &'a mut HashMap<Vec<u8>, u32>,
+    /// The interface member numbers beyond the module's own, shared by every file in the source
+    /// module: installed interfaces' members and the dependency members its files call.
+    pub dependency_interface_numbers: &'a mut ModuleInterfaceNumbers,
     /// Dependency interface members a library default implements without a lowered body, with
     /// the reason; shared by the whole emission session.
     pub unimplementable_interface_members: &'a mut HashMap<Vec<u8>, String>,
@@ -287,7 +288,13 @@ pub fn lower_file(
         module_facts,
         laid_out,
     } = input;
-    let class_model = model::build(ir, value_classes, slot_plan, laid_out)?;
+    let class_model = model::build(
+        ir,
+        value_classes,
+        slot_plan,
+        &mut dependency_interface_numbers.extended,
+        laid_out,
+    )?;
     let extended = extended_elsewhere(
         ir,
         unit_kind,
@@ -356,7 +363,8 @@ pub fn lower_file(
         extension_tables: HashMap::default(),
         published_dependency_bridges: HashMap::default(),
         module: &mut module,
-        symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
+        runtime_symbols,
+        symbols: super::super::symbols::symbols(ir, module_name, source, runtime_symbols.clone()),
         model: class_model,
         functions: Vec::new(),
         imports: imported_functions::ImportedFunctions::new(imported_abis),
@@ -504,7 +512,7 @@ fn extended_elsewhere(
     let classes = module_facts.classes();
     let support = unit_kind != krusty::backend::CheckedIrUnitKind::Source;
     for (id, class) in ir.classes.iter().enumerate() {
-        if class.is_interface || ir.local_class_name_provenance.contains_key(&(id as u32)) {
+        if class.is_interface || krusty::backend::is_declared_in_executable_code(ir, id as u32) {
             continue;
         }
         // A local class of a later file, which no header names, may extend any class open to
@@ -548,6 +556,8 @@ fn extended_elsewhere(
 
 struct FileLowering<'a> {
     ir: &'a IrFile,
+    /// The global symbols the linked runtime defines.
+    runtime_symbols: &'a krusty::fx_hash::HashSet<String>,
     /// This file's stable module identity, used to distinguish a declaration copied into the
     /// module-reference table from one that is genuinely owned by another file.
     source: krusty::fir::SourceFileId,
@@ -669,10 +679,10 @@ struct FileLowering<'a> {
     /// Dependency interface members this file calls, numbered after the module's own interfaces.
     /// The identity bytes are what a dependent implementation records itself under.
     dependency_interface_calls: Vec<(u32, Vec<u8>)>,
-    /// Module-wide numbers for imported interface identities. The local vector above is only
-    /// this file's emitted identity records; the shared map prevents a second file from reusing
-    /// one stub number for another dependency member.
-    dependency_interface_numbers: &'a mut krusty::fx_hash::HashMap<Vec<u8>, u32>,
+    /// Module-wide numbers for imported interface identities and installed interfaces' members.
+    /// The local vector above is only this file's emitted identity records; the shared numbering
+    /// prevents a second file from reusing one stub number for another member.
+    dependency_interface_numbers: &'a mut ModuleInterfaceNumbers,
     /// See [`FileInput::unimplementable_interface_members`].
     unimplementable_interface_members: &'a mut krusty::fx_hash::HashMap<Vec<u8>, String>,
     /// The exported entry answering each object instance and enum constant another file
@@ -794,7 +804,7 @@ impl<'a> FileLowering<'a> {
                             .dispatch_receiver
                             .and_then(|owner| self.ir.class_id_by_name(owner))
                             .is_some_and(|class| {
-                                self.ir.local_class_name_provenance.contains_key(&class)
+                                krusty::backend::is_declared_in_executable_code(self.ir, class)
                             }) =>
                     {
                         Linkage::Local
@@ -2067,8 +2077,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 value,
             } => self.ref_set(holder, elem, value),
             // The shared enum lowering realized every enum this file declares; what is left names
-            // an enum another file declares, whose constants live there. A constant, `values()`
-            // and `valueOf` are each reached through the entry the declaring file exports.
+            // an enum another file declares, whose constants live there. A constant, `values()`,
+            // `valueOf` and `entries` are each reached through the entry the declaring file
+            // exports.
             IrExpr::EnumEntry { classifier, name } => {
                 self.dependency_enum_constant(classifier, &name)
             }
@@ -2084,10 +2095,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 krusty::backend::enums::StaticMember::ValueOf,
                 Some(arg),
             ),
-            IrExpr::EnumEntries { classifier } => Err(declined!(
-                "the `entries` of an enum another file declares (`{}`)",
-                classifier.render()
-            )),
+            IrExpr::EnumEntries { classifier } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::Entries,
+                None,
+            ),
             IrExpr::EnumConstant {
                 name,
                 ordinal,
@@ -2958,4 +2970,14 @@ mod tests {
         assert!(!isa_for(target, false).unwrap().flags().enable_verifier());
         assert!(isa_for(target, true).unwrap().flags().enable_verifier());
     }
+}
+
+/// The interface member numbers one source module's files take beyond the module's own, shared
+/// by every file of it: what keeps one stub number naming one member module-wide.
+#[derive(Debug, Default)]
+pub(crate) struct ModuleInterfaceNumbers {
+    /// The numbers installed interfaces' members and dependency members draw from.
+    pub(crate) extended: krusty::backend::class_tables::module_interfaces::ExtendedNumbers,
+    /// The number of each dependency interface member a file calls, by its interface identity.
+    pub(crate) dependency: HashMap<Vec<u8>, u32>,
 }

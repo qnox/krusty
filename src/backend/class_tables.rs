@@ -281,14 +281,16 @@ pub fn build_numbered(
     representation: &dyn Representation,
     ir: &IrFile,
     plan: &module_slots::ModuleSlotPlan,
+    extended: &mut module_interfaces::ExtendedNumbers,
     laid_out: &dyn Fn(TypeName) -> Option<LaidOutSuperclass>,
 ) -> Result<NumberedClassTables, Unsupported> {
     let superclasses = laid_out_superclasses(ir, laid_out);
     let (mut tables, order, interfaces) = class_tables(representation, ir, plan, &superclasses)?;
+    let numbers = plan.interfaces().with_installed(ir, extended)?;
     let interface_tables = planned_itable::interface_tables(
         representation,
         ir,
-        plan.interfaces(),
+        &numbers,
         &order,
         &tables,
         &superclasses,
@@ -312,6 +314,7 @@ pub fn build_numbered(
         interfaces,
         interface_tables,
         members,
+        numbers,
     })
 }
 
@@ -367,6 +370,8 @@ pub struct NumberedClassTables {
     pub interface_tables: planned_itable::InterfaceTables,
     /// Each class's [`LaidOutSuperclass::members`]. Indexed by `ClassId`.
     pub members: Vec<HashMap<module_slots::PlanKey, u32>>,
+    /// The module's interface numbers, extended with the interfaces this file's IR installed.
+    pub numbers: module_interfaces::ModuleInterfaces,
 }
 
 impl NumberedClassTables {
@@ -392,12 +397,16 @@ struct TabledClass<'t> {
     laid_out: Option<(TypeName, &'t LaidOutSuperclass)>,
 }
 
-/// Whether class `id` is local to a body, so no other file can name or extend it.
-fn is_local(ir: &IrFile, id: ClassId) -> bool {
+/// Whether class `id` is declared in executable code: a local or anonymous class, or the copy of an
+/// anonymous object an inline expansion specialized for its call. No other file names or extends
+/// one, and every file that expands an inline function declaring one realizes it again under the
+/// same name, so its descriptor and members stay inside the object.
+pub fn is_declared_in_executable_code(ir: &IrFile, id: ClassId) -> bool {
     let class = &ir.classes[id as usize];
     class.is_local_class
         || class.is_anonymous_object
         || ir.local_class_name_provenance.contains_key(&id)
+        || ir.specialized_anonymous_classes.contains_key(&id)
 }
 
 /// The superclasses of `ir`'s classes that no class of `ir` declares and another file laid out.
@@ -454,7 +463,7 @@ fn class_tables(
                     planned,
                     plan.interfaces(),
                 )?,
-                Some(Err(reason)) if laid_out.is_some() && !is_local(ir, id) => {
+                Some(Err(reason)) if laid_out.is_some() && !is_declared_in_executable_code(ir, id) => {
                     return Err(format!(
                         "a class extending one of another file with no module-wide layout (`{}`): {reason}",
                         class.fq_name()

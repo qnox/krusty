@@ -5,6 +5,24 @@ use super::{ClassSig, SymbolTable};
 use crate::types::{Ty, TypeName};
 
 impl SymbolTable {
+    /// The applied supertype of `actual` declared by `owner`, with its arguments: the hierarchy
+    /// view publication binds declared parameters through.
+    pub(in crate::resolve) fn applied_supertype(
+        &self,
+        actual: Ty,
+        owner: TypeName,
+    ) -> Option<(Ty, Vec<Ty>)> {
+        let applied = self
+            .applied_hierarchy(actual)
+            .into_iter()
+            .find(|(candidate, _, _)| *candidate == owner)
+            .map(|(_, applied, _)| applied)?;
+        let crate::types::TyKind::Obj(applied_owner, arguments) = applied.non_null().kind() else {
+            return None;
+        };
+        (applied_owner == owner).then(|| (applied, arguments.to_vec()))
+    }
+
     /// `class`'s direct parents applied under `bindings`, in declaration order: the superclass
     /// keeps its written slot among the interfaces.
     pub(crate) fn applied_source_parents(

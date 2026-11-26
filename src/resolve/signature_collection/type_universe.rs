@@ -124,6 +124,7 @@ pub(in crate::resolve) fn source_type_universe(
     libraries: &dyn SemanticPlatform,
     diags: &mut DiagSink,
     compact_headers: Option<&crate::fir::StreamedHeaderModule>,
+    generated_classifiers: &[GeneratedSourceClassifier],
 ) -> SourceTypeUniverse {
     let file_type_aliases = compact_headers.map_or_else(
         || {
@@ -297,6 +298,13 @@ pub(in crate::resolve) fn source_type_universe(
             }
         }
     }
+    // A plugin-generated nested classifier binds like a declared one, but it is no source
+    // declaration: `user_defined` stays the set of classifiers this module's sources declare.
+    let mut bootstrap_declarations = user_defined.clone();
+    for generated in generated_classifiers {
+        bootstrap_declarations.insert(generated.identity);
+        class_names.insert_name(generated.source_name.clone(), generated.identity);
+    }
     // (The library set's `seed` already merged the intrinsic Kotlin built-in → target class mapping,
     // e.g. the ported `JavaToKotlinClassMap`, beneath any classpath/user declarations.)
 
@@ -315,7 +323,7 @@ pub(in crate::resolve) fn source_type_universe(
             HashMap::default();
         let source_count = compact_headers.map_or(files.len(), |headers| headers.sources.len());
         let mut imports_by_file = Vec::with_capacity(source_count);
-        let enclosing_names = bootstrap_enclosing_names(&user_defined, &source_aliases);
+        let enclosing_names = bootstrap_enclosing_names(&bootstrap_declarations, &source_aliases);
         for file_index in 0..source_count {
             let mut imap: HashMap<String, Vec<String>> = HashMap::default();
             for import in source_imports[file_index]
@@ -329,7 +337,7 @@ pub(in crate::resolve) fn source_type_universe(
                 }
             }
             let source = BootstrapSymbolSource {
-                declarations: &user_defined,
+                declarations: &bootstrap_declarations,
                 aliases: &source_aliases,
                 enclosing_names: &enclosing_names,
                 libraries,

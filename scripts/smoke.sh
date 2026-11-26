@@ -17,7 +17,9 @@
 #   3. ONE cargo build of every test binary the later steps run, so the compiler is built once;
 #   4. the lib tests of krusty and of the backend crates;
 #   5. the e2e modules (`tests/*_e2e.rs`) this change touches, and those that name a plugin whose
-#      source (`src/plugins/<name>/`) it touches;
+#      source (`src/plugins/<name>/`) it touches, then the build-tools packaging
+#      (`scripts/package-build-tools.sh`: compile, test, jar twice) for every supported Kotlin
+#      release when it touches `tools/krusty-build-tools` or that script;
 #   6. the conformance entries CI runs for the lanes this change can affect (see select_lanes), in
 #      parallel jobs, on the newest Kotlin version, and on the others too if it fails: per lane
 #      (JVM, Native, wasm-js, wasm-wasi) an even sample of the box corpus and the owned regressions
@@ -130,6 +132,21 @@ step "rustfmt"
 just fmt-check
 step "legacy baseline"
 just legacy-baseline-check
+# The legacy cap is global: a branch that fits under it on its own base can exceed it once the
+# merges that landed since are combined with it, which is what the merge queue builds. Check the
+# merge of this branch with origin/master in a throwaway worktree.
+step "legacy baseline on the merge with origin/master"
+merge_tree="$(git merge-tree --write-tree HEAD origin/master)" || {
+  echo "smoke: this branch does not merge cleanly into origin/master; resolve the conflict first" >&2
+  exit 1
+}
+merge_commit="$(git commit-tree "$merge_tree" -p HEAD -p origin/master -m 'smoke merge')"
+merge_dir="$(mktemp -d)"
+git worktree add --quiet --detach "$merge_dir" "$merge_commit"
+trap 'git worktree remove --force "$merge_dir" >/dev/null 2>&1 || true' EXIT
+(cd "$merge_dir" && just legacy-baseline-check)
+git worktree remove --force "$merge_dir"
+trap - EXIT
 if [ "${KRUSTY_SMOKE_SKIP_CLIPPY:-}" != 1 ] && [ -n "$(affected '*.rs')" ]; then
   step "clippy baseline"
   just clippy-baseline-check
@@ -186,6 +203,30 @@ if [ "${#e2e_modules[@]}" -gt 0 ]; then
     export KRUSTY_BIN="$target_root/gate/krusty"
   fi
   run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$(binary e2e test)" "${e2e_modules[@]}"
+fi
+
+# CI builds and tests the Build Tools API implementation once per supported Kotlin release, and a
+# release's API can differ from the newest one's (an option constructor, a missing option), so a
+# change there runs the same packaging for each release.
+if [ -n "$(changed 'tools/krusty-build-tools/*' 'scripts/package-build-tools.sh')" ]; then
+  if [ -z "${KRUSTY_BIN:-}" ]; then
+    cargo build --profile gate -p krusty-cli --bin krusty
+    export KRUSTY_BIN="${CARGO_TARGET_DIR:-$repo_root/target}/gate/krusty"
+  fi
+  packaged="$(mktemp -d)"
+  while IFS= read -r release; do
+    step "build-tools packaging for Kotlin $release"
+    scripts/package-build-tools.sh 0.0.0-smoke "$release" "$KRUSTY_BIN" "$packaged/$release"
+  done < <(just kotlin-versions)
+  rm -rf "$packaged"
+fi
+
+# The Analysis API adapter is a Gradle build whose tests drive real KSP2 sessions, and the fixtures
+# under tests/psi_ranges are shared with krusty's parser tests; CI runs it as its own job.
+if [ -n "$(changed 'tools/krusty-analysis-api/*' 'tests/psi_ranges/*')" ]; then
+  step "analysis-api tests"
+  run_with_deadline "${KRUSTY_ANALYSIS_API_TIMEOUT_SECONDS:-1800}" \
+    tools/krusty-analysis-api/gradlew --no-daemon -p tools/krusty-analysis-api test
 fi
 
 if [ -z "$lanes" ]; then
@@ -262,6 +303,8 @@ run_lane() {
   esac
   local require=()
   [ -z "$infix" ] || require=("KRUSTY_REQUIRE_${infix}CONFORMANCE=1")
+  # The JVM lane also scores byte identity, so a case that newly diverges from kotlinc fails here.
+  [ "$lane" != jvm ] || require+=("KRUSTY_JVM_BYTE_REPORT=$logdir/jvm-byte-report")
   if [ "$limit" -gt 0 ]; then
     echo "$lane: $limit sampled corpus cases"
     run_with_deadline "$deadline" env "${require[@]}" "KRUSTY_${infix}BOX_LIMIT=$limit" \
@@ -325,7 +368,10 @@ run_versions() {
     # Each step is checked on its own: an assignment's status is not reliably seen by `set -e`.
     kc="$(just kotlinc "$v")" || exit 1
     bc="$(just box-corpus "$v")" || exit 1
-    just plugin-corpus serialization "$v" >/dev/null || exit 1
+    # Every plugin that has a box corpus, as the conformance entries need all of them.
+    while read -r plugin; do
+      just plugin-corpus "$plugin" "$v" >/dev/null || exit 1
+    done < <(just plugin-corpora)
     kotlinc_of[$v]="$kc"
     box_of[$v]="$bc"
     case " $lanes " in

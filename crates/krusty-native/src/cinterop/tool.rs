@@ -124,7 +124,7 @@ pub fn build_interop_library(options: &CinteropOptions) -> Result<PathBuf, Cinte
         target: options.target,
         system_dirs: system_include_dirs(options.target),
         sysroot: Some(PathBuf::from("/")),
-        stamp: KlibStamp::new(kotlin_version::target(), LanguageVersion::V2_4),
+        stamp: KlibStamp::new(kotlin_version::environment_release(), LanguageVersion::V2_4),
         extra_headers: options.headers.clone(),
         extra_compiler_options: options.compiler_options.clone(),
     })?;

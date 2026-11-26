@@ -47,7 +47,7 @@ pub fn compile_in_process_files_metadata_version(
         jdk_modules,
         None,
         metadata_version,
-        &krusty::language_settings::LanguageSettings::default(),
+        &krusty::language_settings::LanguageSettings::from_environment(),
     )
 }
 
@@ -86,7 +86,7 @@ pub fn compile_in_process_files_common(
         jdk_modules,
         None,
         None,
-        &krusty::language_settings::LanguageSettings::default(),
+        &krusty::language_settings::LanguageSettings::from_environment(),
     )
 }
 
@@ -450,7 +450,7 @@ fn krusty_cli_diagnostics_in_process(
             friend_paths.to_vec(),
         ))
     };
-    let settings = LanguageSettings::default();
+    let settings = LanguageSettings::from_environment();
     let libraries = JvmLibraries::new(cp.clone())
         .map(|libraries| libraries.with_api_version(settings.api_version));
     let mut diags = DiagSink::new();
@@ -532,7 +532,7 @@ fn krusty_cli_diagnostics_in_process(
 /// where it changes ([`krusty::kotlin_version::ReleaseRecords`]): the newest row at or below the
 /// target.
 pub fn for_reference<T: Copy>(rows: &[(krusty::kotlin_version::KotlinVersion, T)]) -> T {
-    let target = krusty::kotlin_version::target();
+    let target = krusty::kotlin_version::environment_release();
     rows.iter()
         .rev()
         .find(|(release, _)| *release <= target)
@@ -564,12 +564,12 @@ pub fn assert_sources_accepted_like_kotlinc(sources: &[(&str, &str)], reference_
         krusty_error_ledger_with_args(sources, reference_args),
         expected,
         "krusty's ledger against kotlinc {}",
-        krusty::kotlin_version::target()
+        krusty::kotlin_version::environment_release()
     );
     assert!(
         expected.is_empty(),
         "kotlinc {} accepts the fixture",
-        krusty::kotlin_version::target()
+        krusty::kotlin_version::environment_release()
     );
 }
 
@@ -603,7 +603,7 @@ pub fn assert_errors_match_kotlinc(sources: &[(&str, &str)], reference_args: &[S
         krusty_error_ledger_with_args(sources, reference_args),
         expected,
         "krusty's ledger against kotlinc {}",
-        krusty::kotlin_version::target()
+        krusty::kotlin_version::environment_release()
     );
 }
 
@@ -646,7 +646,7 @@ pub fn assert_error_blocks_match_kotlinc(sources: &[(&str, &str)], reference_arg
         krusty_error_blocks_with_args(sources, reference_args),
         expected,
         "krusty's complete errors against kotlinc {}",
-        krusty::kotlin_version::target()
+        krusty::kotlin_version::environment_release()
     );
 }
 
@@ -680,7 +680,7 @@ pub fn assert_messages_match_kotlinc(source: &str) {
         front_end_diagnostics_with_stdlib(source),
         expected,
         "krusty's messages against kotlinc {}",
-        krusty::kotlin_version::target()
+        krusty::kotlin_version::environment_release()
     );
 }
 
@@ -724,7 +724,7 @@ pub fn front_end_diagnostics_inputs(
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         inputs,
         common::with_native_plugins(CompilationTarget::Jvm, platform),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         |_, _| {},
         &mut diagnostics,
     );
@@ -757,7 +757,7 @@ pub fn front_end_named_input_result(
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &[input],
         common::with_native_plugins(CompilationTarget::Jvm, platform),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         |_, _| {},
         &mut diagnostics,
     );

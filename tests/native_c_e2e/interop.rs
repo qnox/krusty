@@ -187,7 +187,7 @@ fn a_real_interop_klib_publishes_and_calls_its_exact_direct_c_target() {
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
         krusty::frontend::PlatformProvider::new(backend.compilation_target(), Box::new(libraries)),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
     let artifacts =
@@ -258,7 +258,7 @@ fn an_authenticated_direct_c_pointer_declines_its_nullable_boxed_carrier_exactly
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
         krusty::frontend::PlatformProvider::new(backend.compilation_target(), Box::new(libraries)),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
     let artifacts =
@@ -429,7 +429,7 @@ fn a_program_against_a_krusty_built_interop_klib_links_and_calls_its_shared_libr
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
         krusty::frontend::PlatformProvider::new(backend.compilation_target(), Box::new(libraries)),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
     let artifacts =

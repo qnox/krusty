@@ -290,6 +290,7 @@ impl JvmLibraries {
                             // rebuilding a callable without the fact makes a later specialized
                             // `Object` return indistinguishable from a genuinely boxed generic slot.
                             declared_ret: m.declared_ret,
+                            result_alias: m.result_alias,
                             declared_params: m.generic_sig.as_ref().map(|signature| {
                                 signature.parameters_with_receiver(m.context_count)
                             }),

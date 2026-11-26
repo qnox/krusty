@@ -1977,18 +1977,34 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                                 sibling.get(),
                                 joined.get(),
                             );
+                                // A dependency call that left a result-only formal open
+                                // (`emptyMap()`) is completed, not symbolic; its recorded
+                                // selection says so and names the sibling face it takes.
+                                let open =
+                                    call_selection_origin(graph, operand).and_then(|origin| {
+                                        semantics.open_result_expectation(scope, origin, sibling)
+                                    });
                                 // A `Nothing` sibling (`?: throw`, a `return` arm) is only the
                                 // trivial lower constraint of the join's variable. As an
                                 // expectation it would instead cap the branch's own variables at
                                 // `Nothing` and override what its inputs proved.
                                 if current == sibling
                                     || sibling.get() == Ty::Nothing
-                                    || (!current.get().mentions_ty_param() && joined != current)
+                                    || (!current.get().mentions_ty_param()
+                                        && open.is_none()
+                                        && joined != current)
                                 {
                                     continue;
                                 }
+                                let expectation = open.unwrap_or(sibling);
                                 let Some(Ok(rebound)) = evaluate_expression_with_expected(
-                                    semantics, operand, sibling, graph, demand, memo, computing,
+                                    semantics,
+                                    operand,
+                                    expectation,
+                                    graph,
+                                    demand,
+                                    memo,
+                                    computing,
                                 ) else {
                                     continue;
                                 };
@@ -2227,6 +2243,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             result: approximated.published,
             inferred_body_result: approximated.inferred_body_result,
             result_abbreviation,
+            declared_result_alias: None,
         })
     }
 
@@ -2256,6 +2273,12 @@ fn result_abbreviation<S: SignatureSemantics>(
     match graph.expr(expression)? {
         SigExpr::Call { target, .. } => {
             semantics.call_result_abbreviation(graph.callable_selection(target)?.origin)
+        }
+        SigExpr::Value(selection) => {
+            semantics.call_result_abbreviation(graph.value_selection(selection)?.origin)
+        }
+        SigExpr::Member { origin, .. } | SigExpr::MemberCall { origin, .. } => {
+            semantics.call_result_abbreviation(origin)
         }
         SigExpr::ClassLiteral {
             classifier: Some(classifier),

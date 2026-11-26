@@ -7,7 +7,9 @@ use crate::klib_libraries::KlibDeclarationBodies;
 use crate::libraries::{
     KlibAccessorRole, KlibBodyCallable, KlibBodyClassContract, KlibBodyClassParameters,
 };
-use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrClass, KlibIrFunction, KlibIrVariance};
+use crate::metadata::klib_ir::tree::{
+    KlibIrArena, KlibIrClass, KlibIrFunction, KlibIrTypeParameter, KlibIrVariance,
+};
 use crate::metadata::klib_ir::KlibIrSymbolKind;
 use crate::metadata::klib_ir::{
     tree::{KlibIrNullability, KlibIrType},
@@ -22,6 +24,16 @@ pub(super) struct ClassMemberHeader<'a, 'b> {
     pub(super) class: &'b KlibIrClass,
     pub(super) types: KlibTypeParameters,
     pub(super) formals: Vec<String>,
+    /// The outer instance an inner class's instance holds.
+    pub(super) outer: Option<OuterClass<'b>>,
+}
+
+/// The class enclosing an inner class: its `this`, which the inner class's bodies read, and its
+/// instance type, with the type parameters the inner class captures.
+#[derive(Clone, Copy)]
+pub(super) struct OuterClass<'b> {
+    pub(super) this: &'b crate::metadata::klib_ir::KlibIrSymbol,
+    pub(super) ty: Ty,
 }
 
 fn mismatch(detail: &str) -> KlibBodyDeclineReason {
@@ -108,8 +120,8 @@ pub(super) fn authenticate<'a, 'b>(
                 "the serialized class header has a non-class symbol",
             ));
         }
-        let (types, formals) =
-            bind_class_parameters(&class.parameters, member.arena, member.class)?;
+        let (types, formals, outer) =
+            bind_class_parameters(class, bodies, member.arena, member.class)?;
         return Ok(ClassMemberHeader {
             contract: class,
             arena: member.arena,
@@ -117,6 +129,7 @@ pub(super) fn authenticate<'a, 'b>(
             class: member.class,
             types,
             formals,
+            outer,
         });
     }
     // A singleton member can be serialized as the function itself. Its dispatch receiver names
@@ -133,6 +146,7 @@ pub(super) fn authenticate<'a, 'b>(
             class: receiver_named_class(),
             types: KlibTypeParameters::default(),
             formals: Vec::new(),
+            outer: None,
         });
     }
     Err(mismatch(
@@ -202,7 +216,15 @@ pub(super) fn authenticate_private_member<'a, 'b>(
         ));
     }
     authenticate_receiver(class, member.arena, member.function)?;
-    let (types, formals) = bind_class_parameters(&class.parameters, member.arena, member.class)?;
+    let (mut types, formals, outer) =
+        bind_class_parameters(class, bodies, member.arena, member.class)?;
+    super::private_signature_classes::bind(
+        &mut types,
+        bodies,
+        &class.module,
+        member.arena,
+        member.function,
+    )?;
     Ok(ClassMemberHeader {
         contract: class,
         arena: member.arena,
@@ -210,53 +232,54 @@ pub(super) fn authenticate_private_member<'a, 'b>(
         class: member.class,
         types,
         formals,
+        outer,
     })
 }
 
-/// The raw header of the private primary constructor of the object `class`, which no provider
-/// records: an object's instance is created only by its own declaration. The constructor must be
-/// a direct member of that exact class header, private, and take no value.
-pub(super) fn authenticate_object_constructor<'a, 'b>(
+/// The raw header of the private primary constructor of `class`, an object or an enum class,
+/// which no provider records: the class's own declaration creates every instance of it. The
+/// constructor must be a direct member of that exact class header and private; an object's takes
+/// no value.
+pub(super) fn authenticate_declared_instances_constructor<'a, 'b>(
     class: &'a KlibBodyClassContract,
     bodies: &'b KlibDeclarationBodies,
 ) -> Result<Option<ClassMemberHeader<'a, 'b>>, KlibBodyDeclineReason> {
     let Some(primary) = class
         .primary_constructor
         .as_ref()
-        .filter(|_| class.kind == crate::libraries::TypeKind::Object)
+        .filter(|_| class.declares_instances())
     else {
         return Ok(None);
     };
     if class.signature.member_id().is_some()
         || classifier_name(&class.signature)? != class.classifier
     {
-        return Err(mismatch(
-            "an object's identity disagrees with its classifier",
-        ));
+        return Err(mismatch("a class's identity disagrees with its classifier"));
     }
     let identity = crate::libraries::KlibDependencyCallable {
         module: class.module.clone(),
         declaration: crate::libraries::KlibDeclarationSignature::Public(primary.clone()),
     };
-    // An object of a module compiled from source alongside has no serialized declaration: its
-    // own file lays it out, never a support unit.
+    // A class of a module compiled from source alongside has no serialized declaration: its own
+    // file lays it out, never a support unit.
     let Some(member) = bodies
         .class_member_header(&identity, &class.signature, Some(KlibAccessorRole::Getter))
         .map_err(mismatch)?
     else {
         return Ok(None);
     };
+    let object = class.kind == crate::libraries::TypeKind::Object;
     if member.class.base.symbol.kind != KlibIrSymbolKind::Class
         || !member.function.constructor
         || crate::metadata::semantic::declaration_visibility(member.function.base.flags)
             != crate::types::Visibility::Private
-        || !member.function.regular_parameters.is_empty()
+        || (object && !member.function.regular_parameters.is_empty())
     {
         return Err(mismatch(
-            "an object's primary constructor is not its private constructor taking no value",
+            "a primary constructor is not its class's private constructor, taking no value for an object",
         ));
     }
-    let (types, formals) = bind_class_parameters(&class.parameters, member.arena, member.class)?;
+    let (types, formals, outer) = bind_class_parameters(class, bodies, member.arena, member.class)?;
     Ok(Some(ClassMemberHeader {
         contract: class,
         arena: member.arena,
@@ -264,23 +287,36 @@ pub(super) fn authenticate_object_constructor<'a, 'b>(
         class: member.class,
         types,
         formals,
+        outer,
     }))
 }
 
-fn bind_class_parameters(
-    parameters: &KlibBodyClassParameters,
-    arena: &KlibIrArena,
-    raw_class: &KlibIrClass,
-) -> Result<(KlibTypeParameters, Vec<String>), KlibBodyDeclineReason> {
+type BoundClass<'b> = (KlibTypeParameters, Vec<String>, Option<OuterClass<'b>>);
+
+fn bind_class_parameters<'b>(
+    class: &KlibBodyClassContract,
+    bodies: &'b KlibDeclarationBodies,
+    arena: &'b KlibIrArena,
+    raw_class: &'b KlibIrClass,
+) -> Result<BoundClass<'b>, KlibBodyDeclineReason> {
+    let parameters = &class.parameters;
     let formals = class_parameter_identities(parameters)?;
-    let count = formals.len();
-    if raw_class.type_parameters.len() != count {
+    let outer = if class.is_inner {
+        Some(
+            enclosing_class(class, bodies)?
+                .ok_or_else(|| mismatch("an inner class's enclosing class is not serialized"))?,
+        )
+    } else {
+        None
+    };
+    let scope = serialized_class_scope(class, bodies, arena, raw_class)?;
+    if scope.len() != formals.len() {
         return Err(mismatch(
             "the serialized class formals are not parallel to the provider contract",
         ));
     }
     let mut types = KlibTypeParameters::default();
-    for (index, parameter) in raw_class.type_parameters.iter().enumerate() {
+    for (index, (_, parameter)) in scope.iter().enumerate() {
         let variance = match parameters.variances[index] {
             TypeVariance::Invariant => KlibIrVariance::Invariant,
             TypeVariance::In => KlibIrVariance::In,
@@ -294,7 +330,7 @@ fn bind_class_parameters(
             return Err(mismatch("the serialized class formal identity, variance or reification disagrees with its provider"));
         }
     }
-    for (index, parameter) in raw_class.type_parameters.iter().enumerate() {
+    for (index, (arena, parameter)) in scope.iter().enumerate() {
         let bounds = parameter
             .supertypes
             .iter()
@@ -311,7 +347,81 @@ fn bind_class_parameters(
             return Err(mismatch("a class repeats a semantic formal identity"));
         }
     }
-    Ok((types, formals))
+    super::foreign_type_parameters::bind(&mut types, arena, bodies, &class.module)?;
+    let outer = match outer {
+        Some((outer_arena, outer)) => {
+            let this = outer
+                .this_receiver
+                .as_ref()
+                .ok_or_else(|| mismatch("an outer class has no instance receiver"))?;
+            Some(OuterClass {
+                this: &this.base.symbol,
+                ty: semantic_type(outer_arena, &types, this.ty)?,
+            })
+        }
+        None => None,
+    };
+    Ok((types, formals, outer))
+}
+
+/// The serialized class directly enclosing the nested class `class`, which its module declares.
+fn enclosing_class<'b>(
+    class: &KlibBodyClassContract,
+    bodies: &'b KlibDeclarationBodies,
+) -> Result<Option<(&'b KlibIrArena, &'b KlibIrClass)>, KlibBodyDeclineReason> {
+    let Some(outer) = class.classifier.nested_owner() else {
+        return Ok(None);
+    };
+    bodies
+        .class_header(
+            &class.module,
+            &crate::metadata::id_signature::KlibPublicIdSignature::classifier(outer),
+        )
+        .map_err(mismatch)
+}
+
+/// The serialized type parameters a class puts in scope, in the provider's formal order: its own,
+/// then, for an `inner` class, every one its enclosing class puts in scope. Kotlin serializes only
+/// a class's own parameters on it; an inner class's body names its outer classes' parameters by
+/// their declarations, so they bind to the formals the class captures.
+fn serialized_class_scope<'a>(
+    class: &KlibBodyClassContract,
+    bodies: &'a KlibDeclarationBodies,
+    arena: &'a KlibIrArena,
+    raw_class: &'a KlibIrClass,
+) -> Result<Vec<(&'a KlibIrArena, &'a KlibIrTypeParameter)>, KlibBodyDeclineReason> {
+    let count = class.parameters.formals.len();
+    let mut scope = raw_class
+        .type_parameters
+        .iter()
+        .map(|parameter| (arena, parameter))
+        .collect::<Vec<_>>();
+    if scope.len() != class.parameters.own_count || (!class.is_inner && scope.len() != count) {
+        return Err(mismatch(
+            "the serialized class formals are not parallel to the provider contract",
+        ));
+    }
+    let mut classifier = class.classifier;
+    while scope.len() < count {
+        let outer = classifier
+            .nested_owner()
+            .ok_or_else(|| mismatch("an inner class captures formals of no enclosing class"))?;
+        let (outer_arena, outer_class) = bodies
+            .class_header(
+                &class.module,
+                &crate::metadata::id_signature::KlibPublicIdSignature::classifier(outer),
+            )
+            .map_err(mismatch)?
+            .ok_or_else(|| mismatch("an inner class's enclosing class is not serialized"))?;
+        scope.extend(
+            outer_class
+                .type_parameters
+                .iter()
+                .map(|parameter| (outer_arena, parameter)),
+        );
+        classifier = outer;
+    }
+    Ok(scope)
 }
 
 /// The provider's class formals are also the declared frame for an already emitted initializer.
@@ -320,9 +430,9 @@ pub(super) fn class_parameter_identities(
     parameters: &KlibBodyClassParameters,
 ) -> Result<Vec<String>, KlibBodyDeclineReason> {
     let count = parameters.formals.len();
-    if parameters.own_count != count {
-        return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-            "captured class type parameters",
+    if parameters.own_count > count {
+        return Err(mismatch(
+            "a class declares more formals than it puts in scope",
         ));
     }
     if parameters.bounds.len() != count || parameters.variances.len() != count {

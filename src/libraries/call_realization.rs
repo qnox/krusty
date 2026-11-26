@@ -21,24 +21,46 @@ pub struct KlibDependencyCallable {
     pub declaration: KlibDeclarationSignature,
 }
 
-/// A C ABI entry published by an exact Native interop declaration.
+/// A C ABI entry published by an exact Native declaration.
 ///
 /// The symbol is physical provider data. It is never lookup input: source resolution selects the
 /// declaration's opaque identity first, and a Native backend consumes this target only afterward.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirectCFunction {
     symbol: Box<str>,
+    abi: CFunctionAbi,
+}
+
+/// Which side of the Native boundary defines the C function, and so what may cross it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CFunctionAbi {
+    /// A cinterop declaration's C function: only values whose machine carrier is already a C
+    /// scalar cross, and there is no dispatch receiver.
+    Interop,
+    /// An entry of the Kotlin/Native runtime the standard library declares `external` through
+    /// `@GCUnsafeCall`: a dispatch receiver is the first argument and references cross as the
+    /// pointers they are.
+    Runtime,
 }
 
 impl DirectCFunction {
     pub(crate) fn new(symbol: &str) -> Self {
+        Self::with_abi(symbol, CFunctionAbi::Interop)
+    }
+
+    pub(crate) fn with_abi(symbol: &str, abi: CFunctionAbi) -> Self {
         Self {
             symbol: symbol.into(),
+            abi,
         }
     }
 
     pub fn symbol(&self) -> &str {
         &self.symbol
+    }
+
+    pub fn abi(&self) -> CFunctionAbi {
+        self.abi
     }
 }
 
@@ -341,6 +363,22 @@ impl<'a> KlibBodyCallable<'a> {
     /// Whether two selected edges describe the same dependency declaration before their
     /// call-site singleton dispatch is applied. A KLIB identity names one declaration, while
     /// inherited object selections may legitimately contribute several receiver variants.
+    /// This edge with its accessor facet as `accessor` numbers its property: every provider
+    /// numbers the properties it declares itself, so one program's support names each property
+    /// in the numbering of the provider it lowers with.
+    pub(crate) fn with_accessor<'b>(
+        self,
+        accessor: &'b super::KlibBodyAccessor,
+    ) -> KlibBodyCallable<'b>
+    where
+        'a: 'b,
+    {
+        KlibBodyCallable {
+            accessor: Some(accessor),
+            ..self
+        }
+    }
+
     pub(crate) fn same_declaration_contract(self, other: Self) -> bool {
         self.accessor == other.accessor
             && self.name == other.name
@@ -587,6 +625,7 @@ impl LibraryCallable {
             nonvirtual_realization: None,
             overridden_call_realizations: Box::new([]),
             declared_ret: None,
+            result_alias: None,
             overridden_results: Box::new([]),
             enhanced_result: crate::libraries::EnhancedResult::NONE,
         }

@@ -38,10 +38,7 @@ impl ProductionSignatureSemantics<'_> {
             }
         }
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let rules = SignatureReferenceRules {
             oracle: crate::symbol_resolver::SourceOracle(&source),
             context: crate::assignable::TyCtx::new(),
@@ -53,6 +50,7 @@ impl ProductionSignatureSemantics<'_> {
             receiver.get(),
             unbound,
             Some(expected),
+            self.table.reference.quirks(),
             &rules,
         ) else {
             return Err(Self::failure());
@@ -127,10 +125,7 @@ impl ProductionSignatureSemantics<'_> {
             candidates_with_finalized_signatures.push(candidate);
         }
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         let context = crate::assignable::TyCtx::new();
         let binds_contexts = self.headers.scopes.binds_reference_contexts(scope.source);
@@ -141,7 +136,7 @@ impl ProductionSignatureSemantics<'_> {
             .filter_map(|mut candidate| {
                 let bound_contexts = candidate.context_count * usize::from(binds_contexts);
                 let specialized = reference_selection::specialize_candidate(
-                    &source,
+                    reference_selection::ReferenceSource::new(&source, self.table.reference),
                     &mut candidate,
                     bound_contexts,
                     None,
@@ -180,21 +175,19 @@ impl ProductionSignatureSemantics<'_> {
                 } else {
                     expected.ret
                 };
-                Some(Ty::fun_with_shape(
-                    parameters,
-                    result,
-                    expected.context_count,
-                    expected.has_receiver,
-                    expected.suspend,
+                Some((
+                    crate::symbol_resolver::scope_level(&candidate),
+                    Ty::fun_with_shape(
+                        parameters,
+                        result,
+                        expected.context_count,
+                        expected.has_receiver,
+                        expected.suspend,
+                    ),
                 ))
             })
             .collect::<Vec<_>>();
-        Ok(selected.into_iter().fold(Vec::new(), |mut unique, ty| {
-            if !unique.contains(&ty) {
-                unique.push(ty);
-            }
-            unique
-        }))
+        Ok(crate::symbol_resolver::nearest_level_distinct(selected))
     }
 
     pub(super) fn applied_source_alias_expansion(
@@ -236,7 +229,7 @@ impl ProductionSignatureSemantics<'_> {
         if alias.explicit_arguments.is_empty() {
             self.selected_calls.record_inferred_abbreviation(
                 origin,
-                super::selected_call_facts::InferredAbbreviation {
+                crate::resolve::selected_result_aliases::InferredAbbreviation {
                     formals: alias.formals.into_boxed_slice(),
                     expansion: alias.expansion,
                 },
@@ -260,10 +253,7 @@ impl ProductionSignatureSemantics<'_> {
     )> {
         let (formals, expansion) = (alias.formals.as_slice(), alias.expansion);
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let mut bindings = crate::symbol_resolver::GSigBinds::default();
         crate::symbol_resolver::unify_ty(expansion, underlying_result, &mut bindings);
         if let (Some(argument), Some(sam)) = (
@@ -301,10 +291,8 @@ impl ProductionSignatureSemantics<'_> {
         } else {
             Some(alias.explicit_arguments.clone().into_boxed_slice())
         };
-        let abbreviation = arguments.map(|arguments| crate::fir::ResolvedTypeAbbreviation {
-            alias: alias.identity,
-            arguments,
-            argument_path: Box::new([]),
+        let abbreviation = arguments.map(|arguments| {
+            crate::fir::ResolvedTypeAbbreviation::root(alias.identity, arguments, false)
         });
         Some((result, abbreviation))
     }
@@ -357,10 +345,7 @@ impl ProductionSignatureSemantics<'_> {
         };
         let classifier = expansion.obj_internal()?;
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         let context = crate::assignable::TyCtx::new();
         let assignable =

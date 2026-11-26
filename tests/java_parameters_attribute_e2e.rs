@@ -110,7 +110,7 @@ fn compile_java_parameters(
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         common::with_native_plugins(krusty::compilation_target::CompilationTarget::Jvm, platform),
-        &krusty::features::LangFeatures::default(),
+        &krusty::features::LangFeatures::from_environment(),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
     );
@@ -794,5 +794,18 @@ fn java_parameters_reuses_names_interned_earlier() {
             "demo/Caller$test$1",
             "demo/Caller$lifted$1",
         ],
+    );
+}
+
+/// The static bridge of a companion property's compiler-default setter names its value parameter
+/// like the accessor it forwards to, including on an interface, which has no function behind it.
+#[test]
+fn java_parameters_names_a_companion_property_bridge_parameter() {
+    assert_parameter_parity(
+        "CompanionPropertyBridge",
+        "package demo\n\
+         interface I { companion object { @JvmStatic var b: String = \"\"; @JvmStatic fun f(x: Int) = x } }\n\
+         class C { companion object { @JvmStatic var b: String = \"\"; @JvmStatic fun f(x: Int) = x } }\n",
+        &["demo/I", "demo/C"],
     );
 }

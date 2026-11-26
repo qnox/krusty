@@ -60,6 +60,24 @@ pub(super) fn module_property_setter_symbol(
     )
 }
 
+/// Symbol of a source-written accessor of an extension or context property no other file of the
+/// module calls (another file reaches none of them). The accessor is a function of the declaring
+/// file, but its name is the checked property identity: the spelling `getX` alone is shared by
+/// every overload of `x` and by same-named properties of the module's other files, which are
+/// lowered without seeing this one and would otherwise export the same strong symbol.
+fn module_property_accessor_symbol(
+    module_name: &str,
+    property: krusty::fir::PropertyId,
+    setter: bool,
+) -> String {
+    format!(
+        "kt_modprop_{}_{}_{}",
+        if setter { "setter" } else { "getter" },
+        module_namespace(module_name),
+        property.raw()
+    )
+}
+
 /// The declaration identity every reference to a module property shares, whichever of the
 /// module's files writes it.
 pub(super) fn property_reference_symbol(
@@ -202,7 +220,12 @@ fn module_class_symbol_base(module_name: &str, fq_name: &str) -> String {
     base
 }
 
-pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>) -> Symbols {
+pub(super) fn symbols(
+    ir: &IrFile,
+    module_name: &str,
+    source: krusty::fir::SourceFileId,
+    reserved: HashSet<String>,
+) -> Symbols {
     // The runtime's own symbols are taken before any of the program's are handed out. A Kotlin
     // `fun cast(value: Any)` would otherwise be named `kt_cast`, which the runtime already defines,
     // and the link fails with a duplicate symbol that says nothing about the Kotlin name behind it.
@@ -223,7 +246,7 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
         if let Some(owner) = declared.dispatch_receiver {
             let named = ir
                 .class_id_by_name(owner)
-                .is_some_and(|class| !ir.local_class_name_provenance.contains_key(&class));
+                .is_some_and(|class| !krusty::backend::is_declared_in_executable_code(ir, class));
             if !named {
                 continue;
             }
@@ -263,6 +286,25 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
     {
         taken.insert(module_property_getter_symbol(module_name, *property));
         taken.insert(module_property_setter_symbol(module_name, *property));
+    }
+    // A top-level accessor is named by the property it realizes, which is unique in the module.
+    for (property, layout) in &ir.local_property_layouts {
+        let krusty::ir::IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } = layout
+        else {
+            continue;
+        };
+        let accessors =
+            std::iter::once((*getter, false)).chain(setter.map(|setter| (setter, true)));
+        for (function, is_setter) in accessors {
+            let Some(slot) = functions.get_mut(function as usize) else {
+                continue;
+            };
+            if slot.is_empty() {
+                let symbol = module_property_accessor_symbol(module_name, *property, is_setter);
+                taken.insert(symbol.clone());
+                *slot = symbol;
+            }
+        }
     }
     let mut unique = |base: String, family: &dyn Fn(&str) -> Vec<String>| -> String {
         let mut candidate = base.clone();
@@ -351,14 +393,20 @@ pub(super) fn symbols(ir: &IrFile, module_name: &str, reserved: HashSet<String>)
             continue;
         }
         // Local and compiler-generated functions have no checked callable identity. They still
-        // belong to one source module: independently analyzed dependencies restart their local
-        // function ids and may otherwise export identical strong symbols at the final link.
+        // belong to one source file of one source module: independently analyzed dependencies
+        // restart their local function ids, and two files of a module are lowered without seeing
+        // each other, so a lambda an inline function declares and the copy of it expanded into a
+        // caller in another file would otherwise export identical strong symbols at the link.
+        let file = source.raw();
         let base = match &package {
             Some(package) => format!(
-                "kt_modlocal_{namespace}_{package}_{}",
+                "kt_modlocal_{namespace}_{file}_{package}_{}",
                 c_identifier(&function.name)
             ),
-            None => format!("kt_modlocal_{namespace}_{}", c_identifier(&function.name)),
+            None => format!(
+                "kt_modlocal_{namespace}_{file}_{}",
+                c_identifier(&function.name)
+            ),
         };
         functions[index] = unique(base, &|name| vec![name.to_string()]);
     }
@@ -374,6 +422,10 @@ mod tests {
     use super::*;
     use krusty::ir::IrFunction;
     use krusty::types::Ty;
+
+    fn file(index: u32) -> krusty::fir::SourceFileId {
+        krusty::fir::SourceFileId::from_raw(index)
+    }
 
     fn fallback_function(name: &str) -> IrFile {
         let mut ir = IrFile::default();
@@ -404,16 +456,63 @@ mod tests {
         let second_file = member("sample/Second");
         assert!(first_file.classes[0].methods.is_empty());
         assert!(second_file.classes[0].methods.is_empty());
-        let first = symbols(&first_file, "shared-module", HashSet::default());
-        let second = symbols(&second_file, "shared-module", HashSet::default());
+        let first = symbols(&first_file, "shared-module", file(0), HashSet::default());
+        let second = symbols(&second_file, "shared-module", file(0), HashSet::default());
         assert_ne!(
             first.functions[0], second.functions[0],
             "generated member names must not collide across files of the same module"
         );
         // Multiple generated entries of the same class still use the shared collision allocator.
         first_file.functions.push(first_file.functions[0].clone());
-        let repeated = symbols(&first_file, "shared-module", HashSet::default());
+        let repeated = symbols(&first_file, "shared-module", file(0), HashSet::default());
         assert_ne!(repeated.functions[0], repeated.functions[1]);
+    }
+
+    #[test]
+    fn top_level_accessors_are_named_by_their_property_across_source_files() {
+        let accessor_file = |property: u32| {
+            let mut ir = fallback_function("getSize");
+            ir.functions.push(ir.functions[0].clone());
+            ir.functions[1].name = "setSize".to_string();
+            ir.local_property_layouts.insert(
+                krusty::fir::PropertyId::from_raw(property),
+                krusty::ir::IrLocalPropertyLayout::TopLevelAccessor {
+                    getter: 0,
+                    setter: Some(1),
+                    receiver: Some(Ty::Int),
+                    context_parameters: Vec::new(),
+                    delegate: None,
+                },
+            );
+            ir
+        };
+        let first = symbols(
+            &accessor_file(3),
+            "shared-module",
+            file(0),
+            HashSet::default(),
+        );
+        let second = symbols(
+            &accessor_file(4),
+            "shared-module",
+            file(0),
+            HashSet::default(),
+        );
+        assert_eq!(
+            first.functions,
+            [
+                "kt_modprop_getter_shared_2d_module_3",
+                "kt_modprop_setter_shared_2d_module_3"
+            ]
+        );
+        assert_eq!(
+            second.functions,
+            [
+                "kt_modprop_getter_shared_2d_module_4",
+                "kt_modprop_setter_shared_2d_module_4"
+            ]
+        );
+        assert_eq!(first.cross_file, [false, false]);
     }
 
     #[test]
@@ -421,21 +520,32 @@ mod tests {
         let first = symbols(
             &fallback_function("local"),
             "first-module",
+            file(0),
             HashSet::default(),
         );
         let second = symbols(
             &fallback_function("local"),
             "second-module",
+            file(0),
             HashSet::default(),
         );
 
         assert_eq!(
             first.functions,
-            ["kt_modlocal_first_2d_module_sample_local"]
+            ["kt_modlocal_first_2d_module_0_sample_local"]
         );
         assert_eq!(
             second.functions,
-            ["kt_modlocal_second_2d_module_sample_local"]
+            ["kt_modlocal_second_2d_module_0_sample_local"]
         );
+    }
+
+    #[test]
+    fn local_functions_of_one_module_are_named_by_their_source_file() {
+        // An inline function's lambda and its expansion in a caller's file carry one name.
+        let lambda = fallback_function("baz$fir$2$0$3");
+        let declaring = symbols(&lambda, "shared-module", file(0), HashSet::default());
+        let expanded = symbols(&lambda, "shared-module", file(1), HashSet::default());
+        assert_ne!(declaring.functions, expanded.functions);
     }
 }

@@ -319,6 +319,7 @@ fn a_lateinit_package_property_throws_until_assigned() {
         (
             "box",
             r#"
+                    @file:Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
                     package demo
                     fun box(): String {
                         try {
@@ -555,6 +556,7 @@ fn a_lateinit_member_throws_until_assigned() {
         (
             "box",
             r#"
+                @file:Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER")
                 package demo
                 fun box(): String {
                     val held = holder()

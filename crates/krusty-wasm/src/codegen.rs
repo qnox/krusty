@@ -28,7 +28,9 @@ pub const DECLINE_PREFIX: &str = "krusty: the wasm backend does not support ";
 pub struct WasmBackend {
     target: WasmTarget,
     entry: krusty::backend::ProgramEntry,
-    array_range_checks: bool,
+    /// An explicit `-Xwasm-enable-array-range-checks`; otherwise each file's reference release
+    /// decides.
+    array_range_checks: Option<bool>,
 }
 
 impl WasmBackend {
@@ -36,7 +38,7 @@ impl WasmBackend {
         Self {
             target,
             entry: krusty::backend::ProgramEntry::new(Entry::Main),
-            array_range_checks: super::array_access::default_range_checks(),
+            array_range_checks: None,
         }
     }
 
@@ -56,7 +58,7 @@ impl WasmBackend {
     /// Explicit `-Xwasm-enable-array-range-checks` semantics. This is a code-generation option;
     /// it does not change frontend array types, overload selection or dependency identities.
     pub fn with_array_range_checks(mut self, enabled: bool) -> Self {
-        self.array_range_checks = enabled;
+        self.array_range_checks = Some(enabled);
         self
     }
 }
@@ -95,13 +97,6 @@ struct Started {
 }
 
 impl Started {
-    /// The module's bytes, once every slot the runtime declared has a body.
-    fn encode(&mut self) -> Vec<u8> {
-        self.runtime
-            .define_unreachable_list_value_members(&mut self.module);
-        self.module.encode()
-    }
-
     fn new(target: WasmTarget) -> Self {
         let mut module = Module::default();
         // The object model's types come first, so their indices are the ones `lower` names.
@@ -135,6 +130,10 @@ impl Backend for WasmBackend {
         true
     }
 
+    fn adds_members_to_realized_classes(&self) -> bool {
+        true
+    }
+
     fn capability_decline(&self, construct: &str) -> String {
         format!("{DECLINE_PREFIX}{construct} yet")
     }
@@ -143,6 +142,10 @@ impl Backend for WasmBackend {
         Some(krusty::backend::CommonIrPreparation {
             counted_loops: COUNTED_LOOPS,
             enums: krusty::backend::enums::Contract::KotlinWasm,
+            // Every reference object is a function value (`crate::callable_references`), a
+            // `KProperty` one included: its entry reads the property, and its `get` forwards to
+            // that entry.
+            property_reference_values: true,
         })
     }
 
@@ -164,31 +167,19 @@ impl Backend for WasmBackend {
             || classifier == krusty::types::wk::kotlin_enum()
             || classifier == krusty::types::wk::unit()
             || lower::is_string_builder(classifier)
-            || lower::is_array_list(classifier)
             || lower::runtime_lays_out(classifier)
     }
 
     /// The runtime's `StringBuilder` answers the `Appendable` and `CharSequence` members it
-    /// overrides, and its `ArrayList` the collection members (`crate::builtin_members`).
+    /// overrides (`crate::builtin_members`).
     fn dispatched_dependency_classes(&self) -> Vec<krusty::backend::DependencyClassifier> {
-        vec![
-            crate::string_builders::class(),
-            krusty::types::Ty::obj("kotlin/collections/ArrayList")
-                .obj_internal()
-                .expect("a classifier type"),
-        ]
+        vec![crate::string_builders::class()]
     }
 
     /// Both stdlibs read an appended sequence's `length`: the WASI one copies that many indexed
     /// `Char`s, and the JS one checks `appendRange`'s bounds against it before it appends the
     /// sequence's `toString` (`crate::char_sequence_appends`).
     fn appends_char_sequences_by_index(&self) -> bool {
-        true
-    }
-
-    /// The runtime's `ArrayList` walks a collection argument with its `iterator()` and asks it
-    /// `contains`, whatever class it is (`crate::array_lists`).
-    fn reads_collections_through_interfaces(&self) -> bool {
         true
     }
 
@@ -204,7 +195,9 @@ impl Backend for WasmBackend {
         &self,
         signature: krusty::backend::DependencyGetterSignature<'_>,
     ) -> bool {
+        // An enum constant answers `kotlin.Enum`'s `name` and `ordinal` from its `$Enum` fields.
         lower::realizes_storage_getter(signature)
+            || krusty::backend::enums::getter_base_member(signature).is_some()
     }
 
     fn emitted_constructor_initializer(
@@ -322,6 +315,8 @@ impl Backend for WasmBackend {
             // The table types are built from the plan, so they are that module's too, except a
             // dependency class's, which is the whole program's.
             started.tables.enter_plan(
+                (file.kind == krusty::backend::CheckedIrUnitKind::Source)
+                    .then_some(file.module_name),
                 file.classifiers.module().classes(),
                 &file.classifiers,
                 &started.classes,
@@ -335,7 +330,9 @@ impl Backend for WasmBackend {
                 properties: &properties,
                 callables: &file.callables,
                 classifiers: &file.classifiers,
-                array_range_checks: self.array_range_checks,
+                array_range_checks: self.array_range_checks.unwrap_or_else(|| {
+                    super::array_access::default_range_checks(file.ir.reference.release())
+                }),
                 dependency_exports: &file.dependency_exports,
                 module_name: file.module_name,
                 plan,
@@ -455,7 +452,7 @@ impl Backend for WasmBackend {
         );
         started.module.export_function("_start", start);
         vec![
-            (format!("{module_name}.wasm"), started.encode()),
+            (format!("{module_name}.wasm"), started.module.encode()),
             (
                 format!("{module_name}.mjs"),
                 started.host.loader(module_name).into_bytes(),
@@ -527,10 +524,10 @@ mod tests {
         sources: &[&str],
     ) -> (Vec<Artifact>, Vec<String>) {
         use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
-        let path = krusty::toolchain::kotlin_stdlib_klib(
+        let path = krusty::toolchain::kotlin_stdlib_klib_or_reason(
             krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
         )
-        .expect("the exact target stdlib must be provisioned");
+        .unwrap_or_else(|reason| panic!("the exact target stdlib must be provisioned: {reason}"));
         let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
             path,
             KlibStdlibSemantics::Wasm,
@@ -589,10 +586,12 @@ mod tests {
         use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
         let source = include_str!("../../../tests/box_regressions/delegateCaptureDiscovery.kt");
         for target in WasmTarget::ALL {
-            let path = krusty::toolchain::kotlin_stdlib_klib(
+            let path = krusty::toolchain::kotlin_stdlib_klib_or_reason(
                 krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
             )
-            .expect("the exact target stdlib must be provisioned");
+            .unwrap_or_else(|reason| {
+                panic!("the exact target stdlib must be provisioned: {reason}")
+            });
             let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
                 path,
                 KlibStdlibSemantics::Wasm,
@@ -1008,10 +1007,12 @@ mod tests {
         use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
 
         for target in WasmTarget::ALL {
-            let path = krusty::toolchain::kotlin_stdlib_klib(
+            let path = krusty::toolchain::kotlin_stdlib_klib_or_reason(
                 krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
             )
-            .expect("the exact target stdlib must be provisioned");
+            .unwrap_or_else(|reason| {
+                panic!("the exact target stdlib must be provisioned: {reason}")
+            });
             let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
                 path,
                 KlibStdlibSemantics::Wasm,
@@ -1080,10 +1081,12 @@ mod tests {
         use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
 
         for target in WasmTarget::ALL {
-            let path = krusty::toolchain::kotlin_stdlib_klib(
+            let path = krusty::toolchain::kotlin_stdlib_klib_or_reason(
                 krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
             )
-            .expect("the exact target stdlib must be provisioned");
+            .unwrap_or_else(|reason| {
+                panic!("the exact target stdlib must be provisioned: {reason}")
+            });
             let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
                 path,
                 KlibStdlibSemantics::Wasm,
@@ -1243,7 +1246,7 @@ mod tests {
         let metadata = krusty::klib::backend::KlibBackend::new(
             platform,
             krusty::klib::write::KlibStamp::new(
-                krusty::kotlin_version::target(),
+                krusty::features::LangFeatures::new().release(),
                 krusty::features::LangFeatures::new().language_version(),
             ),
         );

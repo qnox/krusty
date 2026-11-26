@@ -353,6 +353,7 @@ impl Checker<'_> {
                             Some(receiver),
                             expected_values.as_deref()?,
                             expected.ret,
+                            0,
                         )?,
                         None => (signature.params.clone(), signature.ret),
                     };

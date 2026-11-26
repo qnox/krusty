@@ -1,0 +1,3 @@
+in	`in`,
+is	`is`(1),
+fun	@Deprecated("x") `fun`

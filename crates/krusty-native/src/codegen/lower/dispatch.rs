@@ -61,7 +61,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             || fact.source_receiver.is_some()
             || fact.member_realization != krusty::libraries::MemberRealization::Dispatch
             || fact.compiler_intrinsic.is_some()
-            || fact.direct_c_function.is_some()
+            || fact
+                .direct_c_function
+                .as_ref()
+                .is_some_and(|function| function.abi() == krusty::libraries::CFunctionAbi::Interop)
             // A final member has no consumer-side override and no slot of its own.
             || fact
                 .klib_body_declaration_modifiers
@@ -283,7 +286,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return self.direct_method_call(function, receiver, args);
         }
         let key = super::super::super::classes::function_key(self.file.ir, class, function);
-        let Some(slot) = self.file.model.slot(class, &key) else {
+        let Some(through) = self.file.dispatch_of(class, &key) else {
             return Err(declined!(
                 "a member of `{}` with no slot",
                 owner.render().replace('/', ".")
@@ -301,7 +304,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.terminated {
             return Ok(None);
         }
-        self.dispatch(object, slot, &params, ret, &arguments)
+        self.dispatch_through(object, through, &params, ret, &arguments)
     }
 
     /// A call through the receiver's vtable: `receiver.type.vtable[slot](receiver, args…)`.

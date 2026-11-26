@@ -17,7 +17,7 @@
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
+use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
 /// A program's own `Iterator`, reached through the type it implements.
 #[test]
@@ -113,20 +113,19 @@ fn a_member_with_arguments_dispatches_on_the_receiver_too() {
     expect_native_box(source, "ArgumentedImplementedMember", "OK");
 }
 
-/// A member Kotlin gives a SPECIAL BRIDGE declines, argument or no argument.
+/// A member Kotlin gives a SPECIAL BRIDGE is answered through the bridge's guard.
 ///
 /// `Map<Any, Any>.get(key: Any)` is declared with a NON-NULL parameter, and a caller holding the
-/// same object as a `Map<Any?, Any?>` may pass `null`. Kotlin does not call the override there — it
+/// same object as a `Map<Any?, Any?>` may pass `null`. Kotlin does not call the override there: it
 /// answers the member's default, `null` for `get`, because the argument cannot be what the
-/// declaration accepts. The receiver dispatch has no bridge to put in front of an implementor's
-/// arm, so it declines rather than calling an override Kotlin would have skipped.
+/// declaration accepts. The receiver dispatch puts that guard in front of the implementor's arm,
+/// and a `null` is rejected even where the override and the declaration name the same reference.
 ///
-/// The two-sided conformance gate is what found this: dispatching these turned four corpus cases
+/// The two-sided conformance gate found this first: dispatching these turned four corpus cases
 /// from declines into wrong answers, one of them a SIGILL.
 #[test]
-fn a_member_with_a_special_bridge_declines() {
-    expect_native_decline(
-        "object NotEmptyMap : MutableMap<Any, Any> {\n\
+fn a_member_with_a_special_bridge_rejects_a_null_the_override_excludes() {
+    let source = "object NotEmptyMap : MutableMap<Any, Any> {\n\
          \x20   override fun containsKey(key: Any): Boolean = true\n\
          \x20   override fun containsValue(value: Any): Boolean = true\n\
          \x20   override fun get(key: Any): Any? = Any()\n\
@@ -143,8 +142,7 @@ fn a_member_with_a_special_bridge_declines() {
          fun box(): String {\n\
          \x20   val n = NotEmptyMap as MutableMap<Any?, Any?>\n\
          \x20   return if (n.get(null) == null) \"OK\" else \"fail\"\n\
-         }\n",
-        "SpecialBridgeMember",
-        "get",
-    );
+         }\n";
+    expect_box_ok_with_stdlib(source, "SpecialBridgeMember");
+    expect_native_box(source, "SpecialBridgeMember", "OK");
 }

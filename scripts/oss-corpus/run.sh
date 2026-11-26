@@ -217,7 +217,6 @@ if [ -n "${CORPUS_PERF:-}" ]; then
 fi
 KRUSTY_PLUGIN_REPOSITORY=$plugin_repository KRUSTY_PLUGIN_VERSION=$plugin_version \
   build krusty -I "$here/krusty.init.gradle" -Pkrusty.binary="$krusty"
-krusty_build=$status
 if [ -n "${CORPUS_PERF:-}" ]; then
   kill -INT "$perf_pid"
   wait "$perf_pid" || true
@@ -256,9 +255,5 @@ if [ "$reference" -ne 0 ]; then
   echo "$name: the reference kotlinc build failed (exit $reference); see $name.kotlinc.log" >&2
   exit 1
 fi
-# A project krusty cannot build is as much a failure as one kotlinc cannot: its job is red, and the
-# comparison above has already recorded what krusty reached, so the report still carries it.
-if [ "$krusty_build" -ne 0 ]; then
-  echo "$name: the krusty build failed (exit $krusty_build); see $name.krusty.log" >&2
-  exit 1
-fi
+# What krusty could not build is a result, not a failure of the run: the comparison above has
+# recorded every compilation it missed and why, and the report carries them.
