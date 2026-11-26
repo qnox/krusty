@@ -1,5 +1,4 @@
-//! The string of a range of a char array: `CharArray.concatToString` and the `String(CharArray)`
-//! factories of `kotlin.text`.
+//! The string of a range of a char array: `CharArray.concatToString` of `kotlin.text`.
 //!
 //! The function checks the range as the stdlib does, throwing before it copies anything, then
 //! copies the units into a new array that is the string's storage. A module carries one function
@@ -12,8 +11,8 @@ use krusty::types::Ty;
 
 impl Runtime {
     /// The function `(chars: CharArray storage, a: Int, b: Int) -> String` for `range`, defined on
-    /// first use. `a` and `b` are ignored for the whole array, `startIndex` and `endIndex` for a
-    /// start-end range, and `offset` and `length` for an offset-length one.
+    /// first use. `a` and `b` are ignored for the whole array and are `startIndex` and `endIndex`
+    /// for a start-end range.
     pub(crate) fn char_array_to_string(
         &mut self,
         module: &mut Module,
@@ -23,7 +22,6 @@ impl Runtime {
         let slot = match range {
             CharArrayRange::Whole => 0,
             CharArrayRange::StartEnd => 1,
-            CharArrayRange::OffsetLength => 2,
         };
         if let Some(function) = self.char_array_text[slot] {
             return Ok(function);
@@ -76,37 +74,6 @@ impl Runtime {
                     .op(GT_S32)
                     .if_(BlockType::Empty);
                 self.throw_new(&mut code, illegal_argument)?;
-            }
-            CharArrayRange::OffsetLength => {
-                code.local_get(first)
-                    .local_set(start)
-                    .local_get(first)
-                    .local_get(second)
-                    .op(ADD32)
-                    .local_set(end);
-                // `offset < 0 || length < 0 || offset > size || length > size - offset`, which
-                // cannot overflow where `offset + length` could.
-                code.local_get(first)
-                    .i32_const(0)
-                    .op(LT_S32)
-                    .local_get(second)
-                    .i32_const(0)
-                    .op(LT_S32)
-                    .op(OR32)
-                    .local_get(first)
-                    .local_get(units)
-                    .array_len()
-                    .op(GT_S32)
-                    .op(OR32)
-                    .local_get(second)
-                    .local_get(units)
-                    .array_len()
-                    .local_get(first)
-                    .op(SUB32)
-                    .op(GT_S32)
-                    .op(OR32)
-                    .if_(BlockType::Empty);
-                self.throw_new(&mut code, out_of_bounds)?;
             }
         }
         code.local_get(end)

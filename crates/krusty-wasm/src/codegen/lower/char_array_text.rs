@@ -1,4 +1,4 @@
-//! `CharArray.concatToString` and the `String(CharArray)` factories on a char array this target
+//! `CharArray.concatToString` on a char array this target
 //! lays out itself: the runtime function checks the range as the stdlib does and copies the units.
 
 use krusty::libraries::CharArrayRange;
@@ -15,9 +15,7 @@ impl Body<'_> {
     ) -> Result<(), Unsupported> {
         let (array, indices) = match (range, args) {
             (CharArrayRange::Whole, [array]) => (*array, None),
-            (CharArrayRange::StartEnd | CharArrayRange::OffsetLength, [array, first, second]) => {
-                (*array, Some((*first, *second)))
-            }
+            (CharArrayRange::StartEnd, [array, first, second]) => (*array, Some((*first, *second))),
             _ => {
                 return Err("an authenticated char array conversion with malformed operands".into())
             }

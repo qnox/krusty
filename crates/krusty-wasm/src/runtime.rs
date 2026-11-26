@@ -69,9 +69,9 @@ pub(super) struct Runtime {
     string_sub_sequence: Option<u32>,
     /// The range-checked copy of the units in use of a string or a builder, once a slice needs it.
     units_sub_sequence: Option<u32>,
-    /// `CharArray.concatToString` and `String(CharArray)` for a whole array, a start-end range and
-    /// an offset-length range, once a call needs each.
-    char_array_text: [Option<u32>; 3],
+    /// `CharArray.concatToString` for a whole array and for a start-end range, once a call needs
+    /// each.
+    char_array_text: [Option<u32>; 2],
     /// `Double.toString()` and `Float.toString()`, once a conversion needs them.
     floating_strings: floating_strings::FloatingStrings,
     pub(super) object_equals: u32,
@@ -186,7 +186,7 @@ impl Runtime {
             string_compare: None,
             string_sub_sequence: None,
             units_sub_sequence: None,
-            char_array_text: [None; 3],
+            char_array_text: [None; 2],
             floating_strings: Default::default(),
             object_equals,
             string_concat,
