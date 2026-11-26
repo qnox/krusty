@@ -38,10 +38,7 @@ impl ProductionSignatureSemantics<'_> {
             }
         }
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let rules = SignatureReferenceRules {
             oracle: crate::symbol_resolver::SourceOracle(&source),
             context: crate::assignable::TyCtx::new(),
@@ -53,6 +50,7 @@ impl ProductionSignatureSemantics<'_> {
             receiver.get(),
             unbound,
             Some(expected),
+            self.table.reference.quirks(),
             &rules,
         ) else {
             return Err(Self::failure());
@@ -127,10 +125,7 @@ impl ProductionSignatureSemantics<'_> {
             candidates_with_finalized_signatures.push(candidate);
         }
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         let context = crate::assignable::TyCtx::new();
         let binds_contexts = self.headers.scopes.binds_reference_contexts(scope.source);
@@ -141,7 +136,7 @@ impl ProductionSignatureSemantics<'_> {
             .filter_map(|mut candidate| {
                 let bound_contexts = candidate.context_count * usize::from(binds_contexts);
                 let specialized = reference_selection::specialize_candidate(
-                    &source,
+                    reference_selection::ReferenceSource::new(&source, self.table.reference),
                     &mut candidate,
                     bound_contexts,
                     None,
@@ -258,10 +253,7 @@ impl ProductionSignatureSemantics<'_> {
     )> {
         let (formals, expansion) = (alias.formals.as_slice(), alias.expansion);
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let mut bindings = crate::symbol_resolver::GSigBinds::default();
         crate::symbol_resolver::unify_ty(expansion, underlying_result, &mut bindings);
         if let (Some(argument), Some(sam)) = (
@@ -353,10 +345,7 @@ impl ProductionSignatureSemantics<'_> {
         };
         let classifier = expansion.obj_internal()?;
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let oracle = crate::symbol_resolver::SourceOracle(&source);
         let context = crate::assignable::TyCtx::new();
         let assignable =

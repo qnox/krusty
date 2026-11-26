@@ -643,7 +643,7 @@ fn assert_official_dependency_sources_produced_with(
             krusty::compilation_target::CompilationTarget::Native,
             Box::new(libraries.for_compilation()),
         ),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
     let target = krusty_native::NativeTarget::host().expect("host Native target");

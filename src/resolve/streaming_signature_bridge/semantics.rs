@@ -25,6 +25,17 @@ pub(super) use constructor_expectations::ReceiverLevelCall;
 use result_constraints::signature_call_result_constraint;
 
 impl ProductionSignatureSemantics<'_> {
+    /// The symbols a file's body signatures resolve against: its module, then the libraries.
+    pub(super) fn source_over<'a>(
+        &'a self,
+        module: &'a crate::module_symbols::ModuleSymbols<'_>,
+    ) -> crate::symbol_source::CompositeSource<'a> {
+        crate::symbol_source::CompositeSource::new(vec![
+            module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ])
+    }
+
     /// Capture storage visible from a compact inferred member signature. Pass-1 capture discovery
     /// has already selected the lexical value and its semantic type; evaluating the dependency
     /// must consume that fact directly instead of pretending the generated field is a Kotlin
@@ -72,10 +83,7 @@ impl ProductionSignatureSemantics<'_> {
         };
 
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let receiver_has_value = |receiver: Ty| {
             !crate::symbol_resolver::declared_member_callables(&source, receiver, root)
                 .properties()
@@ -832,10 +840,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             return Err(Self::failure());
         }
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
+        let source = self.source_over(&module);
         let crate::symbol_resolver::InheritedNestedClassifier::Found(classifier) =
             super::super::context_sensitive_resolution::expected_nested_classifier(
                 &source,
@@ -906,10 +911,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .collect::<Vec<_>>();
             let module =
                 crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-            let source = crate::symbol_source::CompositeSource::new(vec![
-                &module as &dyn crate::symbol_source::SymbolSource,
-                &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-            ]);
+            let source = self.source_over(&module);
             let mut applicable = Vec::new();
             for declaration in entry_candidates {
                 let signature = demand(declaration)?;
@@ -1942,10 +1944,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         if arguments.len() == 1 {
             let module =
                 crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-            let source = crate::symbol_source::CompositeSource::new(vec![
-                &module as &dyn crate::symbol_source::SymbolSource,
-                &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-            ]);
+            let source = self.source_over(&module);
             let lexical_classifier = self.bound_or_scoped_classifier(scope, spelling, classifier);
             let sam_interface = self
                 .with_resolver(scope, |resolver| {
@@ -2425,10 +2424,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 };
                 let module =
                     crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-                let source = crate::symbol_source::CompositeSource::new(vec![
-                    &module as &dyn crate::symbol_source::SymbolSource,
-                    &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-                ]);
+                let source = self.source_over(&module);
                 if let Some(sam) = crate::symbol_resolver::semantic_sam_signature(
                     &source,
                     Ty::obj_name(classifier),
@@ -2541,10 +2537,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             }) {
                 let module =
                     crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-                let source = crate::symbol_source::CompositeSource::new(vec![
-                    &module as &dyn crate::symbol_source::SymbolSource,
-                    &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-                ]);
+                let source = self.source_over(&module);
                 let declaration = crate::symbol_source::SymbolSource::classifier(&source, nested)
                     .ok_or_else(Self::failure)?;
                 let expected_function =
@@ -2766,10 +2759,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         self.table,
                         scope.source.raw(),
                     );
-                    let source = crate::symbol_source::CompositeSource::new(vec![
-                        &module as &dyn crate::symbol_source::SymbolSource,
-                        &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-                    ]);
+                    let source = self.source_over(&module);
                     if matches!(
                         crate::symbol_resolver::apply_inner_alias_outer_in_source(
                             &source,
@@ -2832,10 +2822,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             if let Some(expected) = expected {
                 let module =
                     crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-                let source = crate::symbol_source::CompositeSource::new(vec![
-                    &module as &dyn crate::symbol_source::SymbolSource,
-                    &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-                ]);
+                let source = self.source_over(&module);
                 let oracle = crate::symbol_resolver::SourceOracle(&source);
                 if !crate::assignable::is_subtype(
                     &crate::assignable::TyCtx::new(),
@@ -2880,14 +2867,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             }
             let module =
                 crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-            let source = crate::symbol_source::CompositeSource::new(vec![
-                &module as &dyn crate::symbol_source::SymbolSource,
-                &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-            ]);
+            let source = self.source_over(&module);
             let oracle = crate::symbol_resolver::SourceOracle(&source);
             let context = crate::assignable::TyCtx::new();
             let selected = reference_selection::select_adapted_instance_candidate(
-                &source,
+                reference_selection::ReferenceSource::new(&source, self.table.reference),
                 &members,
                 self.headers.scopes.binds_reference_contexts(scope.source),
                 unbound.then(|| receiver.get()),

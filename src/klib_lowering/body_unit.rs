@@ -763,11 +763,16 @@ impl DependencyBodyUnit {
 
     /// A unit that reads the enum constants and object instances of `classes`, which earlier
     /// units materialized, through their exports.
-    pub(crate) fn reading_realized_classes(classes: impl IntoIterator<Item = TypeName>) -> Self {
-        Self {
+    pub(crate) fn reading_realized_classes(
+        classes: impl IntoIterator<Item = TypeName>,
+        reference: crate::kotlin_version::ReferenceProfile,
+    ) -> Self {
+        let mut unit = Self {
             realized_classes: classes.into_iter().collect(),
             ..Self::default()
-        }
+        };
+        unit.ir.reference = reference;
+        unit
     }
 
     /// This unit for a target that lays out a class an earlier unit realized from that unit's

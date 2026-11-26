@@ -127,7 +127,8 @@ fn kotlinc_language_options(
         "-api-version".to_owned(),
         language_settings.api_version.to_string(),
     ];
-    let baseline = krusty::features::LangFeatures::for_versions(
+    let baseline = krusty::features::LangFeatures::for_release(
+        language_settings.features.release(),
         language_settings.language_version,
         language_settings.api_version,
     );
@@ -610,7 +611,7 @@ fn compile_scripts_with_definition(
         Some(jdk_modules),
         None,
         None,
-        &krusty::language_settings::LanguageSettings::default(),
+        &krusty::language_settings::LanguageSettings::from_environment(),
     )
 }
 

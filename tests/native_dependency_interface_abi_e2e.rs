@@ -120,7 +120,7 @@ fn a_declared_generic_slot_converts_int_long_and_value_class_arguments_and_resul
             krusty::compilation_target::CompilationTarget::Native,
             Box::new(libraries),
         ),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
     let backend = krusty_native::CraneliftBackend::new(target)

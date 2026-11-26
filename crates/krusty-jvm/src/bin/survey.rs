@@ -59,7 +59,7 @@ fn first_diagnostic(stage: &str, diagnostics: &DiagSink, sources: &[(&str, &str)
 /// with a stage prefix for the
 /// silent lower/emit bailouts that carry no diagnostic).
 fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str, frontend_only: bool) -> Option<String> {
-    let features = krusty::features::LangFeatures::from_source(src);
+    let features = krusty::features::LangFeatures::from_source_in_environment(src);
     first_error_blocks(
         &[(stem.to_string(), src.to_string())],
         &[],
@@ -362,7 +362,7 @@ fn first_error_module(
         };
         add_frontend_directive_helpers(src, &mut support.files);
     }
-    let features = krusty::features::LangFeatures::from_source(src);
+    let features = krusty::features::LangFeatures::from_source_in_environment(src);
     let uid = UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!("krusty_survey_mod_{}_{uid}", std::process::id()));
     let mut dirmap: HashMap<String, PathBuf> = HashMap::default();
@@ -638,7 +638,7 @@ fn survey_parse_file(file: &Path) -> ParseSurveyOutcome {
             }
         }
     };
-    let features = krusty::features::LangFeatures::from_source(&source);
+    let features = krusty::features::LangFeatures::from_source_in_environment(&source);
     let mut failures = Vec::new();
     for block in &blocks {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -782,7 +782,7 @@ fn survey_file(
                 if frontend_only {
                     add_frontend_directive_helpers(&src, &mut blocks);
                 }
-                let features = krusty::features::LangFeatures::from_source(&src);
+                let features = krusty::features::LangFeatures::from_source_in_environment(&src);
                 if common_lowering_only {
                     common_lowering_error(&blocks, &java_blocks, 0, &cp, &features)
                 } else {
@@ -791,7 +791,7 @@ fn survey_file(
                 }
             } else {
                 if common_lowering_only {
-                    let features = krusty::features::LangFeatures::from_source(&src);
+                    let features = krusty::features::LangFeatures::from_source_in_environment(&src);
                     common_lowering_error(
                         &[(stem.to_string(), src.to_string())],
                         &[],
@@ -1246,8 +1246,9 @@ mod tests {
                     .to_string(),
             ),
         ];
-        let features =
-            krusty::features::LangFeatures::from_source("// LANGUAGE: +MultiPlatformProjects");
+        let features = krusty::features::LangFeatures::from_source_in_environment(
+            "// LANGUAGE: +MultiPlatformProjects",
+        );
         let out = first_error_blocks(&blocks, &[], 0, &cp, &features, false);
         assert!(
             out.is_ok(),
@@ -1264,7 +1265,7 @@ mod tests {
             "Alias".to_string(),
             "typealias Greeting = String\n".to_string(),
         )];
-        let features = krusty::features::LangFeatures::from_source("");
+        let features = krusty::features::LangFeatures::from_source_in_environment("");
         let out = first_error_blocks(&blocks, &[], 0, &cp, &features, false);
         assert!(
             out.is_ok(),
@@ -1291,8 +1292,9 @@ mod tests {
             "class Holder { companion object { @kotlin.js.JsStatic fun value() = \"OK\" } }"
                 .to_string(),
         )];
-        let features =
-            krusty::features::LangFeatures::from_source("// LANGUAGE: +MultiPlatformProjects");
+        let features = krusty::features::LangFeatures::from_source_in_environment(
+            "// LANGUAGE: +MultiPlatformProjects",
+        );
         let libraries = JvmLibraries::new(cp.clone()).expect("JVM provider initialization");
         assert!(
             krusty::libraries::SemanticPlatform::is_optional_expectation(
@@ -1318,7 +1320,7 @@ mod tests {
             "Main".to_string(),
             "@JvmInline value class Token(val value: String)".to_string(),
         )];
-        let features = krusty::features::LangFeatures::from_source("");
+        let features = krusty::features::LangFeatures::from_source_in_environment("");
         let libraries = JvmLibraries::new(cp.clone()).expect("JVM provider initialization");
         assert!(
             !krusty::libraries::SemanticPlatform::is_optional_expectation(
