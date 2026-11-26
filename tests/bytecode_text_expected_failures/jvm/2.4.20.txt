@@ -69,7 +69,6 @@ inline/syntheticPropertyReference.kt
 inlineClasses/boxUnboxInlineClassFromMethodReturnType.kt
 inlineClasses/boxUnboxOnInlinedParameters.kt
 inlineClasses/boxingForNonLocalAndLabeledReturnsOfInlineClasses.kt
-inlineClasses/defaultParametersDontBox.kt
 inlineClasses/equalsIsCalledByInlineClass.kt
 inlineClasses/isCheckForInlineClass.kt
 inlineClasses/noManglingForFunctionsWithJvmName.kt
