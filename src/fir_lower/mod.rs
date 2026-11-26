@@ -34,6 +34,7 @@ mod constant_folding;
 mod construction_target_tests;
 mod constructors;
 mod data_classes;
+mod delegate_inline;
 mod delegated_properties;
 mod dependency_templates;
 #[cfg(test)]

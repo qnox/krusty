@@ -341,6 +341,17 @@ impl NativePlugins {
         !self.enabled.is_empty() && self.host("").passes_transformed_entry_defaults(entry)
     }
 
+    /// The runtime functions the enabled plugins may call. The module name only mangles a plugin's
+    /// output, so it plays no part in what a plugin requires.
+    pub fn runtime_requirements(
+        &self,
+    ) -> Vec<crate::plugins::runtime_declarations::RuntimeRequirement> {
+        if self.is_empty() {
+            return Vec::new();
+        }
+        self.host("").runtime_requirements()
+    }
+
     /// Build this compilation's plugin host. `module_name` reaches plugins whose output is
     /// module-mangled (serialization's `write$Self$<module>`).
     pub fn host(&self, module_name: &str) -> PluginHost {

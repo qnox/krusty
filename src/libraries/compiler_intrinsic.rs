@@ -209,6 +209,10 @@ pub enum CompilerIntrinsic {
         platform_default: crate::types::AssertionCompilation,
     },
     AssertFailsWith,
+    /// The Native/Wasm stdlib's `isAssertionThrowingErrorEnabled()` and
+    /// `isAssertionArgumentEvaluationEnabled()`, which the compiler answers for the whole build.
+    /// Both answer the assertion switch of kotlinc's default build, which is off.
+    AssertionSwitch,
     Print,
     Println,
     StartCoroutine,
