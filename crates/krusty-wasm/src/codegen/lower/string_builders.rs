@@ -56,6 +56,8 @@ enum Member {
     AppendRangeOf(Ty),
     Length,
     Get,
+    /// `reverse()`: the builder's units in the opposite order, its surrogate pairs kept whole.
+    Reverse,
 }
 
 /// The parameter type an `append` overload declares, as what it appends.
@@ -92,6 +94,7 @@ fn member(fact: &BackendCallableFact) -> Option<Member> {
         }
         ("<get-length>", []) if fact.ret == Ty::Int => Some(Member::Length),
         ("get", [Ty::Int]) if fact.ret == Ty::Char => Some(Member::Get),
+        ("reverse", []) if fact.ret == builder_type() => Some(Member::Reverse),
         _ => None,
     }
 }
@@ -178,11 +181,12 @@ impl Body<'_> {
         }
         self.value(receiver, builder_type())?;
         let builders = &self.runtime.string_builders;
-        let (append_string, append_char, length, get) = (
+        let (append_string, append_char, length, get, reverse) = (
             builders.append_string,
             builders.append_char,
             builders.length,
             builders.get,
+            builders.reverse,
         );
         match (member, args) {
             (Member::Append(Appended::String), [value]) => {
@@ -234,6 +238,9 @@ impl Body<'_> {
             }
             (Member::Length, []) => {
                 self.code.call(length);
+            }
+            (Member::Reverse, []) => {
+                self.code.call(reverse);
             }
             (Member::Get, [index]) => {
                 // `StringBuilder.get` throws for an index outside the units in use.

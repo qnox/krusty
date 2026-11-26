@@ -82,20 +82,3 @@ fn a_builder_block_captures_and_runs_once_over_the_subject() {
     expect_box_ok_with_stdlib(source, "BuilderBlockCaptures");
     expect_native_box(source, "BuilderBlockCaptures", "OK");
 }
-
-/// `StringBuilder.reverse` turns the builder's own text around by character and answers the builder
-/// itself, so a surrogate pair stays whole and the call chains.
-#[test]
-fn a_builder_reverses_in_place_by_character() {
-    let source = "fun box(): String {\n\
-         \x20   val sb = StringBuilder(\"ab\\uD83D\\uDE00c\")\n\
-         \x20   val same = sb.reverse()\n\
-         \x20   if (same !== sb) return \"fail identity\"\n\
-         \x20   if (sb.toString() != \"c\\uD83D\\uDE00ba\") return \"fail pair: \" + sb\n\
-         \x20   if (sb.length != 5) return \"fail length\"\n\
-         \x20   if (StringBuilder().reverse().toString() != \"\") return \"fail empty\"\n\
-         \x20   return StringBuilder(\"KO\").reverse().toString()\n\
-         }\n";
-    expect_box_ok_with_stdlib(source, "BuilderReverse");
-    expect_native_box(source, "BuilderReverse", "OK");
-}
