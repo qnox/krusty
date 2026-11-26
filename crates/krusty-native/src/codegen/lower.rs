@@ -363,7 +363,7 @@ pub fn lower_file(
         extension_tables: HashMap::default(),
         published_dependency_bridges: HashMap::default(),
         module: &mut module,
-        symbols: super::super::symbols::symbols(ir, module_name, runtime_symbols.clone()),
+        symbols: super::super::symbols::symbols(ir, module_name, source, runtime_symbols.clone()),
         model: class_model,
         functions: Vec::new(),
         imports: imported_functions::ImportedFunctions::new(imported_abis),
@@ -511,7 +511,7 @@ fn extended_elsewhere(
     let classes = module_facts.classes();
     let support = unit_kind != krusty::backend::CheckedIrUnitKind::Source;
     for (id, class) in ir.classes.iter().enumerate() {
-        if class.is_interface || ir.local_class_name_provenance.contains_key(&(id as u32)) {
+        if class.is_interface || krusty::backend::is_declared_in_executable_code(ir, id as u32) {
             continue;
         }
         // A local class of a later file, which no header names, may extend any class open to
@@ -801,7 +801,7 @@ impl<'a> FileLowering<'a> {
                             .dispatch_receiver
                             .and_then(|owner| self.ir.class_id_by_name(owner))
                             .is_some_and(|class| {
-                                self.ir.local_class_name_provenance.contains_key(&class)
+                                krusty::backend::is_declared_in_executable_code(self.ir, class)
                             }) =>
                     {
                         Linkage::Local

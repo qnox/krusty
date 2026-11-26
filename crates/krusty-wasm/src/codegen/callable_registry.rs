@@ -185,7 +185,9 @@ impl CallableRegistry {
                 let file_local = ir.functions[function]
                     .dispatch_receiver
                     .and_then(|owner| ir.class_id_by_name(owner))
-                    .is_some_and(|class| ir.local_class_name_provenance.contains_key(&class));
+                    .is_some_and(|class| {
+                        krusty::backend::is_declared_in_executable_code(ir, class)
+                    });
                 if file_local {
                     for target in &targets {
                         if self
