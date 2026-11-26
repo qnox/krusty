@@ -195,6 +195,14 @@ impl<'a> FileLowering<'a> {
             {
                 "kt_type_enum_entries_interface"
             }
+            // `RandomAccess` is a marker with no members: every runtime list wears it, and so
+            // does a class of the program that implements it.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_random_access) =>
+            {
+                "kt_type_random_access_interface"
+            }
             // `Unit` reaches a type check spelled as the object it is rather than as the carrier
             // `Ty::Unit` names, and it is one type either way.
             _ if target

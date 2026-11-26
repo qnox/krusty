@@ -137,31 +137,36 @@ fn add_all_answers_whether_the_receiver_changed() {
 /// A dependency subtype of `Collection` that declares its own `size` and mutators: the selected
 /// declarations are `ArrayDeque`'s, not the interface's, so none of them enters the runtime's
 /// collection entry points — the runtime does not make an `ArrayDeque` and would read a header
-/// that is not there. Each declines at its own declaration.
+/// that is not there. Each runs the library's own body instead.
 #[test]
 fn a_dependency_subtypes_own_size_is_not_the_collections() {
-    expect_native_decline(
-        "fun count(values: ArrayDeque<String>): Int = values.size\n\
-         fun box(): String = \"OK\"\n",
-        "DependencySubtypeSize",
-        "kotlin/collections/ArrayDeque.size",
-    );
+    let source = "fun count(values: ArrayDeque<String>): Int = values.size\n\
+         fun box(): String {\n\
+         \x20   val values = ArrayDeque<String>()\n\
+         \x20   if (count(values) != 0) return \"fail empty\"\n\
+         \x20   values.addLast(\"a\")\n\
+         \x20   values.addFirst(\"b\")\n\
+         \x20   if (count(values) != 2) return \"fail size\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "DependencySubtypeSize");
+    expect_native_box(source, "DependencySubtypeSize", "OK");
 }
 
 #[test]
 fn a_dependency_subtypes_own_mutators_are_not_the_collections() {
-    expect_native_decline(
-        "fun wipe(values: ArrayDeque<String>) = values.clear()\n\
-         fun box(): String = \"OK\"\n",
-        "DependencySubtypeClear",
-        "ArrayDeque.clear",
-    );
-    expect_native_decline(
-        "fun grow(values: ArrayDeque<String>) = values.add(\"x\")\n\
-         fun box(): String = \"OK\"\n",
-        "DependencySubtypeAdd",
-        "ArrayDeque.add",
-    );
+    let source = "fun wipe(values: ArrayDeque<String>) = values.clear()\n\
+         fun grow(values: ArrayDeque<String>) = values.add(\"x\")\n\
+         fun box(): String {\n\
+         \x20   val values = ArrayDeque<String>()\n\
+         \x20   if (!grow(values) || !grow(values)) return \"fail add\"\n\
+         \x20   if (values.size != 2 || values.first() != \"x\") return \"fail content: $values\"\n\
+         \x20   wipe(values)\n\
+         \x20   if (values.size != 0 || values.isNotEmpty()) return \"fail clear: $values\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "DependencySubtypeMutators");
+    expect_native_box(source, "DependencySubtypeMutators", "OK");
 }
 
 #[test]
@@ -178,4 +183,23 @@ fn dependency_map_and_set_subtypes_do_not_borrow_runtime_properties() {
         "DependencySubtypeSetSize",
         "kotlin/collections/AbstractCollection.size",
     );
+}
+
+/// `RandomAccess` is a marker with no members: every list the runtime makes wears it, and the
+/// dependency `ArrayDeque`, which is not one, does not.
+#[test]
+fn a_type_check_against_random_access_asks_the_marker() {
+    let source = "fun box(): String {\n\
+         \x20   val arrayList: Any = ArrayList<String>()\n\
+         \x20   if (arrayList !is RandomAccess) return \"fail array list\"\n\
+         \x20   val built: Any = listOf(1, 2)\n\
+         \x20   if (built !is RandomAccess) return \"fail list\"\n\
+         \x20   val deque: Any = ArrayDeque<String>()\n\
+         \x20   if (deque is RandomAccess) return \"fail deque\"\n\
+         \x20   val set: Any = setOf(1)\n\
+         \x20   if (set is RandomAccess) return \"fail set\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "RandomAccessCheck");
+    expect_native_box(source, "RandomAccessCheck", "OK");
 }

@@ -1056,6 +1056,17 @@ fn cross_check(
         }
         let chosen = &selected.parameter_identities()[selected_index];
         if let Some(identity) = identity.filter(|identity| identity != chosen) {
+            // The metadata of a setter whose visibility differs from its property's records the
+            // value parameter under a placeholder name, though the producer generated the accessor
+            // and its serialized declaration says the value has none. The declaration is the
+            // authority on a generated accessor, so its unnamed value is the identity.
+            if function.base.origin == DEFAULT_PROPERTY_ACCESSOR
+                && identity == ResolvedParameterIdentity::setter_value(None)
+                && matches!(chosen, ResolvedParameterIdentity::Source(_))
+            {
+                checked.push(identity);
+                continue;
+            }
             return Err(mismatch(format!(
                 "parameter {index} is {identity:?} serialized and {chosen:?} selected"
             )));
