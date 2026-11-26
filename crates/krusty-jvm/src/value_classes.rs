@@ -164,7 +164,7 @@ pub(crate) fn lower_value_classes(
     let ModuleValueClasses {
         underlying: module_value_classes,
         readable: module_readable_value_classes,
-        storage_getters,
+        storage_properties,
     } = module;
     krusty::trace_compiler!(
         "value_classes",
@@ -568,7 +568,7 @@ pub(crate) fn lower_value_classes(
     let vc_getters = underlying_getter::UnderlyingGetters::new(
         ir,
         &external_underlying_properties,
-        storage_getters,
+        storage_properties,
     );
     let mut vc_properties: HashMap<TypeName, String> = ir
         .classes

@@ -264,6 +264,8 @@ pub struct BackendModuleFacts {
     /// only the identity prevents an accidental lookup of a same-named dependency classifier.
     body_local_classifiers: HashSet<TypeName>,
     source_value_classes: HashMap<TypeName, Ty>,
+    /// The property each source value class declares as its underlying storage.
+    source_value_storage: HashSet<crate::fir::ResolvedPropertyOverrideTarget>,
     metadata_readable_value_classes: HashSet<TypeName>,
     /// Finalized inherited-interface defaults of named source classifiers. These records retain
     /// the exact selected declaration identities and applied types, so every Pass-2 file can make
@@ -322,6 +324,7 @@ impl BackendModuleFacts {
         let mut declaration_names = HashMap::default();
         let mut body_local_classifiers = HashSet::default();
         let mut source_value_classes = HashMap::default();
+        let mut source_value_storage = HashSet::default();
         let mut metadata_readable_value_classes = HashSet::default();
         let mut inherited_defaults = HashMap::default();
         let mut source_declarations = HashMap::default();
@@ -504,6 +507,10 @@ impl BackendModuleFacts {
                     {
                         continue;
                     }
+                    if let Some(property) = index.property_for_declaration(child) {
+                        source_value_storage
+                            .insert(crate::fir::ResolvedPropertyOverrideTarget::Module(property));
+                    }
                     let signature =
                         index
                             .signature(child)
@@ -609,6 +616,7 @@ impl BackendModuleFacts {
                 .serialization_generated_member_statuses(),
             body_local_classifiers,
             source_value_classes,
+            source_value_storage,
             metadata_readable_value_classes,
             inherited_defaults,
             source_declarations,
@@ -665,6 +673,7 @@ impl BackendModuleFacts {
             serialization_generated_member_statuses: None,
             body_local_classifiers: body_local_classifiers.into_iter().collect(),
             source_value_classes,
+            source_value_storage: HashSet::default(),
             metadata_readable_value_classes,
             inherited_defaults: HashMap::default(),
             source_declarations: HashMap::default(),
@@ -765,6 +774,11 @@ impl BackendModuleFacts {
 
     pub fn source_value_classes(&self) -> &HashMap<TypeName, Ty> {
         &self.source_value_classes
+    }
+
+    /// The properties source value classes declare as their underlying storage.
+    pub fn source_value_storage(&self) -> &HashSet<crate::fir::ResolvedPropertyOverrideTarget> {
+        &self.source_value_storage
     }
 
     pub fn source_member_annotations(

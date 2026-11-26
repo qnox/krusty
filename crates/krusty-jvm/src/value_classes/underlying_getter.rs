@@ -1,26 +1,26 @@
 //! Recognition of a call that reads a value class's underlying property.
 
-use krusty::fir::{ExternalCallableId, ResolvedPropertyOverrideTarget};
+use krusty::fir::ResolvedPropertyOverrideTarget;
 use krusty::fx_hash::{HashMap, HashSet};
 use krusty::ir::{IrFile, IrVirtualTarget};
 use krusty::jvm::names::property_getter_name;
 use krusty::types::TypeName;
 
 /// The getters that read each value class's underlying property, which is the carrier itself
-/// rather than a member of the boxed class. A source class's getter is its plain spelling. A
-/// dependency getter is the exact declaration its provider normalized as the class's storage,
-/// because a getter typed as another value class is mangled with a hash, and an ordinary function
-/// or a context-parameter getter mangles to the same prefix.
+/// rather than a member of the boxed class: the plain getter spelling, or the property the
+/// class's declaration or its provider normalized as the class's storage. A getter typed as
+/// another value class is mangled with a hash, and an ordinary function or a context-parameter
+/// getter mangles to the same prefix, so identity decides.
 pub(super) struct UnderlyingGetters<'a> {
     plain: HashMap<TypeName, String>,
-    storage: &'a HashSet<ExternalCallableId>,
+    storage: &'a HashSet<ResolvedPropertyOverrideTarget>,
 }
 
 impl<'a> UnderlyingGetters<'a> {
     pub(super) fn new(
         ir: &IrFile,
         external: &HashMap<TypeName, String>,
-        storage: &'a HashSet<ExternalCallableId>,
+        storage: &'a HashSet<ResolvedPropertyOverrideTarget>,
     ) -> Self {
         let mut plain: HashMap<TypeName, String> = ir
             .classes
@@ -52,9 +52,8 @@ impl<'a> UnderlyingGetters<'a> {
             || (self.plain.contains_key(owner)
                 && matches!(
                     target,
-                    Some(IrVirtualTarget::PropertyGetter(
-                        ResolvedPropertyOverrideTarget::External(id)
-                    )) if self.storage.contains(&id)
+                    Some(IrVirtualTarget::PropertyGetter(property))
+                        if self.storage.contains(&property)
                 ))
     }
 }

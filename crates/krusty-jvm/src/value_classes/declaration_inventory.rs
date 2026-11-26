@@ -234,6 +234,6 @@ pub(crate) struct ModuleValueClasses<'a> {
     /// Subset whose stable declaration headers describe a value-class shape supported by metadata
     /// emission. No sibling body or source coordinate is retained.
     pub(crate) readable: &'a HashSet<TypeName>,
-    /// The dependency getters that read a value class's underlying value.
-    pub(crate) storage_getters: &'a HashSet<krusty::fir::ExternalCallableId>,
+    /// The properties, source and dependency, that store a value class's underlying value.
+    pub(crate) storage_properties: &'a HashSet<krusty::fir::ResolvedPropertyOverrideTarget>,
 }
