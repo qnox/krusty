@@ -1408,6 +1408,34 @@ mod tests {
 
     /// Public `-language-version` selects source semantics. `-Xmetadata-version` remains an
     /// independent internal emission override on the same bounded 2.0–2.4 version domain.
+    /// Recorded from kotlinc: a level the release declares but no longer accepts is refused in
+    /// its own words, naming the first level still accepted; the language level alone when both
+    /// are retired, and only when every given level is a declared one.
+    #[test]
+    fn a_retired_language_or_api_version_names_the_first_accepted_one() {
+        let compiler = krusty::kotlin_version::environment_release();
+        let policy = krusty::features::LanguageVersionPolicy::for_release(compiler).unwrap();
+        let first = policy.supported()[0];
+        let retired = LanguageVersion::new(1, 9);
+        assert!(policy.language(retired).unwrap().unsupported);
+        let language = parse_args(&["-language-version", "1.9", "f.kt"]);
+        assert_eq!(
+            language.errors,
+            [format!(
+                "language version 1.9 is no longer supported; use version {first} or greater instead."
+            )]
+        );
+        let api = parse_args(&["-api-version", "1.9", "f.kt"]);
+        assert_eq!(
+            api.errors,
+            [format!(
+                "API version 1.9 is no longer supported; use version {first} or greater instead."
+            )]
+        );
+        let both = parse_args(&["-language-version", "1.9", "-api-version", "1.9", "f.kt"]);
+        assert_eq!(both.errors, language.errors);
+    }
+
     #[test]
     fn language_version_selects_semantics_and_the_stamp_override_stays_internal() {
         let current = parse_args(&["-language-version", "2.4", "f.kt"]);
