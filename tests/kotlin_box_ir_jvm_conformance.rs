@@ -1509,6 +1509,13 @@ fn kotlin_codegen_box_conformance() {
                                     Err(CompileFailure::Rejected { report, .. }) => {
                                         eprintln!("{report}")
                                     }
+                                    Err(CompileFailure::CommandLineRefused(refusals)) => {
+                                        eprintln!(
+                                            "{}: command line refused: {}",
+                                            file.display(),
+                                            refusals.join("; ")
+                                        )
+                                    }
                                     Err(CompileFailure::Harness(reason)) => {
                                         eprintln!("{}: {reason}", file.display())
                                     }
