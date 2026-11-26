@@ -474,13 +474,24 @@ fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
     let Some(target) = host() else {
         return Outcome::Harness("required Native target/KLIB setup is unavailable".into());
     };
-    let Some(answer) =
-        super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(source)
-    else {
-        return Outcome::Harness(
-            "required pinned kotlinc-native module oracle is unavailable".into(),
-        );
-    };
+    let answer =
+        match super::kotlin_native_multimodule_support::kotlin_native_multimodule_outcome(source) {
+            Some(super::kotlin_native_multimodule_support::NativeModulesOutcome::Answer(
+                answer,
+            )) => answer,
+            Some(super::kotlin_native_multimodule_support::NativeModulesOutcome::Rejected(
+                reason,
+            )) => {
+                return Outcome::Harness(format!(
+                    "the pinned kotlinc-native module oracle rejected the final module: {reason}"
+                ));
+            }
+            None => {
+                return Outcome::Harness(
+                    "required pinned kotlinc-native module oracle is unavailable".into(),
+                );
+            }
+        };
     assert_eq!(
         answer, "OK",
         "{}: pinned kotlinc-native must run the exact KLIB module graph as OK",
