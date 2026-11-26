@@ -321,6 +321,19 @@ impl Checker<'_> {
             }
             _ => (cond, ReturnsValue::Bool(truth)),
         };
+        self.contract_result_narrowings(scope, call, result, out, declined);
+    }
+
+    /// Smart casts the resolved callable's contract proves when `call` returns `result`: the
+    /// conclusion of each `returns(…) implies …` effect whose value is `result`.
+    pub(super) fn contract_result_narrowings(
+        &self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        result: crate::contracts::ReturnsValue,
+        out: &mut Vec<(NarrowPath, Ty)>,
+        declined: &mut Vec<(String, Ty)>,
+    ) {
         let Some(contract) = self.contract_for_call(call) else {
             return;
         };

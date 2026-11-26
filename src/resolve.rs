@@ -94,7 +94,6 @@ use annotation_bindings::{BoundAnnotation, BoundAnnotations};
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
 mod backing_field_binding;
-mod boolean_implications;
 mod dependency_annotation_defaults;
 mod dependency_body_call_edges;
 pub(crate) use anonymous_object_capture::discover_inline_anonymous_object_captures;
@@ -174,6 +173,7 @@ mod collection_literals;
 mod common_classifier_views;
 mod compound_assignments;
 mod condition_exclusions;
+mod condition_narrowings;
 mod conditional_branch;
 mod constant_evaluation;
 mod constructor_arguments;
@@ -448,6 +448,7 @@ mod type_argument_arity;
 mod uninferred_call_results;
 mod upper_bound_violations;
 mod value_class_declaration;
+mod value_implications;
 mod variance_conflicts;
 mod when_comparison;
 mod when_exhaustiveness;
@@ -13808,8 +13809,8 @@ impl<'a> Checker<'a> {
         // An explicitly typed callable-reference local has already adapted to its target shape.
         // Keep that shape instead of reopening the raw reference and undoing the adaptation.
         // Computed before the val is declared: `val x = x != null` talks about the OUTER `x`.
-        let boolean_implications = (!is_var)
-            .then(|| self.boolean_val_implications(scope, init, bound_ty))
+        let value_implications = (!is_var)
+            .then(|| self.value_implications(scope, init, bound_ty))
             .flatten();
         let flow_identity = if let Some(function_type) = declared
             .filter(|ty| ty.is_fun())
@@ -13839,8 +13840,11 @@ impl<'a> Checker<'a> {
         if let Some(origin) = safe_call_origin {
             self.attach_safe_call_origin(scope, &name, origin);
         }
-        if let Some(implications) = boolean_implications {
-            scope.record_boolean_implications(flow_identity, implications);
+        if let Some(implications) = value_implications {
+            scope.record_value_implications(
+                NarrowPath::root_only(scope::PathRoot::Value(flow_identity)),
+                implications,
+            );
         }
         if declared.is_none() && !is_var {
             if let Some(path) = self.visible_value_path(scope, &name) {
@@ -14156,6 +14160,9 @@ impl<'a> Checker<'a> {
                             ty,
                             stable: true,
                         });
+                    if let Some(implications) = self.value_implications(scope, value, ty) {
+                        scope.record_value_implications(path.clone(), implications);
+                    }
                     if let Some(narrowed) =
                         self.assignment_narrowing(&name, ty, vt, self.span(value))
                     {
@@ -32953,124 +32960,6 @@ impl<'a> Checker<'a> {
             declined,
         );
         out
-    }
-
-    fn condition_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        cond: ExprId,
-        truth: bool,
-    ) -> (Vec<FlowNarrowing>, Vec<DeclinedFlowNarrowing>) {
-        let mut candidates = Vec::new();
-        let mut declined = Vec::new();
-        self.collect_condition_narrowings(scope, cond, truth, &mut candidates, &mut declined);
-        let nonnull: crate::fx_hash::HashSet<NarrowPath> = candidates
-            .iter()
-            .filter_map(|(path, ty)| (!ty.is_nullable()).then_some(path.clone()))
-            .collect();
-        let mut result: Vec<(NarrowPath, Ty)> = Vec::new();
-        for (path, ty) in candidates {
-            let ty = match ty.kind() {
-                TyKind::Nullable(inner) if nonnull.contains(&path) && !inner.is_unsigned() => inner,
-                _ => ty,
-            };
-            let matching = result
-                .iter()
-                .enumerate()
-                .filter_map(|(index, (existing, current))| {
-                    (*existing == path).then_some((index, *current))
-                })
-                .collect::<Vec<_>>();
-            if matching.is_empty() {
-                result.push((path, ty));
-                continue;
-            }
-            let context = crate::assignable::TyCtx::new();
-            // Keep the minimal set of proven types. Comparable facts collapse to the narrower one;
-            // unrelated facts form a real flow intersection and must both survive. Treating that
-            // case as a conflict discarded `A & B` entirely and made every member unresolved.
-            if matching
-                .iter()
-                .any(|(_, current)| crate::assignable::is_subtype(&context, self, *current, ty))
-            {
-                continue;
-            }
-            let dominated = matching
-                .into_iter()
-                .filter_map(|(index, current)| {
-                    crate::assignable::is_subtype(&context, self, ty, current).then_some(index)
-                })
-                .collect::<crate::fx_hash::HashSet<_>>();
-            if !dominated.is_empty() {
-                result = result
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(index, entry)| (!dominated.contains(&index)).then_some(entry))
-                    .collect();
-            }
-            result.push((path, ty));
-        }
-        (result, declined)
-    }
-
-    fn collect_condition_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        cond: ExprId,
-        truth: bool,
-        out: &mut Vec<(NarrowPath, Ty)>,
-        declined: &mut Vec<(String, Ty)>,
-    ) {
-        // `!cond` flips the branch facts: the narrowings of `cond`-false hold when `!cond` is true
-        // (and vice versa). Recursing with a flipped `truth` also yields De Morgan for `!(a && b)` /
-        // `!(a || b)` through the combine rule below.
-        if let Expr::Unary {
-            op: UnOp::Not,
-            operand,
-        } = self.file.expr(cond).clone()
-        {
-            self.collect_condition_narrowings(scope, operand, !truth, out, declined);
-            return;
-        }
-        if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
-            if matches!(op, BinOp::Eq | BinOp::Ne) {
-                for (condition, literal) in [(lhs, rhs), (rhs, lhs)] {
-                    let Expr::BoolLit(literal) = self.file.expr(literal) else {
-                        continue;
-                    };
-                    if self.expr_types[condition.0 as usize].non_null() != Ty::Boolean {
-                        continue;
-                    }
-                    let condition_truth = if (op == BinOp::Eq) == truth {
-                        *literal
-                    } else {
-                        !*literal
-                    };
-                    self.collect_condition_narrowings(
-                        scope,
-                        condition,
-                        condition_truth,
-                        out,
-                        declined,
-                    );
-                    // Projecting the Boolean value must not discard facts established by the
-                    // equality expression itself. In particular, a true `x?.p == true` also
-                    // proves that the safe-call receiver `x` was non-null.
-                    out.extend(self.smartcast_narrowings(scope, cond, !truth, declined));
-                    return;
-                }
-            }
-            let combines = (truth && op == BinOp::And) || (!truth && op == BinOp::Or);
-            if combines {
-                self.collect_condition_narrowings(scope, lhs, truth, out, declined);
-                self.collect_condition_narrowings(scope, rhs, truth, out, declined);
-                return;
-            }
-        }
-        self.contract_condition_narrowings(scope, cond, truth, out, declined);
-        self.implied_condition_narrowings(scope, cond, truth, out, declined);
-        out.extend(self.smartcast_narrowings(scope, cond, !truth, declined));
-        self.as_cast_narrowings(scope, cond, out);
     }
 
     /// Bring the narrowings a condition proves into scope for a guarded region. The single
