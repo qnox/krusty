@@ -182,7 +182,7 @@ pub(super) fn score_with_declaration(
         // A nested call whose own inputs solved every type argument (`T` of
         // `BuilderNode().apply {}` from its receiver) has real lower bounds, so an expectation
         // may only widen its result, never replace it; an unsolved variable is still open.
-        let contextual_call_result = if checker.nested_call_type_arguments_solved(argument) {
+        let contextual_call_result = if checker.nested_call_type_arguments_solved(scope, argument) {
             checker.argument_result_may_bind_expected(scope, argument, expected)
         } else {
             checker.call_result_can_bind_expected(argument, expected)
