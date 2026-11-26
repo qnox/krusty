@@ -117,6 +117,7 @@ fn platform_compiler_configuration_for_release(
 /// | `// ALLOW_KOTLIN_PACKAGE`, or a `package kotlin…` declaration | `-Xallow-kotlin-package` |
 /// | `// JVM_TARGET: X` | `-jvm-target X` |
 /// | `// ENABLE_JVM_PREVIEW` | `-Xjvm-enable-preview` |
+/// | `// JVM_EXPOSE_BOXED` | `-Xjvm-expose-boxed` |
 /// | `// STRING_CONCAT: X` | `-Xstring-concat=X` |
 /// | `// ASSERTIONS_MODE: X` | `-Xassertions=X` |
 /// | `// WHEN_EXPRESSIONS: X` | `-Xwhen-expressions=x` |
@@ -203,6 +204,9 @@ fn case_cli_arguments(
         }
         if directive(src, "ENABLE_JVM_PREVIEW") {
             arguments.push("-Xjvm-enable-preview".to_string());
+        }
+        if directive(src, "JVM_EXPOSE_BOXED") {
+            arguments.push("-Xjvm-expose-boxed".to_string());
         }
         if let Some(mode) = last_value(src, "STRING_CONCAT") {
             arguments.push(format!("-Xstring-concat={mode}"));
@@ -545,6 +549,20 @@ mod tests {
         );
         assert_eq!(
             arguments("package kotlinx.foo\nfun box() = \"OK\"\n"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn the_expose_boxed_directive_passes_the_compiler_flag() {
+        assert_eq!(
+            arguments(
+                "// WITH_STDLIB\n// JVM_EXPOSE_BOXED\n\n@JvmInline value class P(val n: Int)\n"
+            ),
+            ["-Xjvm-expose-boxed"]
+        );
+        assert_eq!(
+            arguments("@JvmExposeBoxed\n@JvmInline value class P(val n: Int)\n"),
             Vec::<String>::new()
         );
     }
