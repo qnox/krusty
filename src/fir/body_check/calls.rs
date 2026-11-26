@@ -2310,6 +2310,23 @@ impl BodyFirChecker<'_> {
         Ok((target, substitutions))
     }
 
+    /// The range operator call of `a..b` inside `x in a..b`. The expression IS the `contains` call,
+    /// which owns the expression's generic-call record, so the range builder carries none.
+    pub(super) fn source_range_operator_call(
+        &mut self,
+        expression: ExprId,
+        convention: &str,
+        receiver: ExprId,
+        operands: &[ExprId],
+    ) -> Result<FirExprKind, BodyCheckFailure> {
+        let mut range =
+            self.source_member_operator_call(expression, convention, receiver, operands)?;
+        if let FirExprKind::Call(call) = &mut range {
+            call.substitutions = Box::default();
+        }
+        Ok(range)
+    }
+
     pub(super) fn source_member_operator_call(
         &mut self,
         expression: ExprId,

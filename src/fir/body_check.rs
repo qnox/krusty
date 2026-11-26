@@ -1700,7 +1700,7 @@ impl BodyFirChecker<'_> {
                                 declaration: self.selected_range_declaration(expression, operator),
                             }
                         } else {
-                            self.source_member_operator_call(expression, operator, *start, &[*end])?
+                            self.source_range_operator_call(expression, operator, *start, &[*end])?
                         };
                         let range_ty = self
                             .info
