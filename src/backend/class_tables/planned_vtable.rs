@@ -213,12 +213,14 @@ pub(super) fn planned_class_table(
             PlannedSlot::AccessorBridge {
                 declared,
                 implemented,
+                ref operands,
                 setter,
                 target_slot,
+                ..
             } => Slot::AccessorBridge {
                 declared,
                 implemented,
-                receiver: None,
+                operands: operands.clone(),
                 setter,
                 target_slot,
             },

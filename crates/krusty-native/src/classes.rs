@@ -294,7 +294,8 @@ pub(super) enum Slot {
     AccessorBridge {
         declared: Ty,
         implemented: Ty,
-        receiver: Option<(Ty, Ty)>,
+        /// The operands between the receiver and the value, on each side.
+        operands: Vec<(Ty, Ty)>,
         setter: bool,
         target_slot: u32,
     },
@@ -365,13 +366,13 @@ impl Slot {
             class_tables::Slot::AccessorBridge {
                 declared,
                 implemented,
-                receiver,
+                operands,
                 setter,
                 target_slot,
             } => Self::AccessorBridge {
                 declared,
                 implemented,
-                receiver,
+                operands,
                 setter,
                 target_slot,
             },

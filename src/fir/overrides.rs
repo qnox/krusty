@@ -106,6 +106,11 @@ pub struct ResolvedPropertyOverride {
     /// for a member property. Like the types, a target backend erases these for its accessors.
     pub declared_receiver: Option<ResolvedTy>,
     pub implementation_receiver: Option<ResolvedTy>,
+    /// The context parameters of a property with them, on each side of the edge. They are the
+    /// accessors' leading operands after the dispatch receiver, so a representation backend
+    /// carries them across a bridge; empty for a property without context parameters.
+    pub declared_contexts: Vec<ResolvedTy>,
+    pub implementation_contexts: Vec<ResolvedTy>,
     /// The overridden setter's value parameter, or `None` when the overridden property is a `val`.
     /// A setter bridge names its parameter after it, as a function bridge names its parameters
     /// after the overridden function's.

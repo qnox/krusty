@@ -23,6 +23,9 @@ pub struct IrPropertyOverride {
     /// Member-extension receivers, as on `ResolvedPropertyOverride`.
     pub declared_receiver: Option<Ty>,
     pub implementation_receiver: Option<Ty>,
+    /// Context parameters on each side, as on `ResolvedPropertyOverride`.
+    pub declared_contexts: Vec<Ty>,
+    pub implementation_contexts: Vec<Ty>,
     /// As on `ResolvedPropertyOverride`: `None` when the overridden property is a `val`.
     pub overridden_setter_value: Option<crate::fir::ResolvedParameterIdentity>,
     pub implementation_mutable: bool,

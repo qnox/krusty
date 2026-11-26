@@ -1097,6 +1097,8 @@ impl<'a> BodyLowering<'a> {
                     implementation_type: ty,
                     declared_receiver: None,
                     implementation_receiver: None,
+                    declared_contexts: Vec::new(),
+                    implementation_contexts: Vec::new(),
                     overridden_setter_value: None,
                     implementation_mutable: false,
                     has_kotlin_superclass_override: false,
