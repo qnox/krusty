@@ -121,6 +121,8 @@ pub(super) struct FrozenClosure {
     /// empty edge is the authorization the provider call consumes.
     pub(super) authorized_member_edges:
         HashMap<KlibDependencyCallable, crate::klib_lowering::CallEdge>,
+    /// The getter that bounds a counted loop over the indices each reached `indices` getter is.
+    pub(super) indices_bounds: HashMap<KlibDependencyCallable, KlibDependencyCallable>,
     /// The library objects whose values the closure's bodies read, which the unit materializes.
     pub(super) read_classes: Vec<crate::libraries::KlibBodyClassContract>,
     /// Members of a materialized class or object that dispatch reaches, whose bodies the unit
@@ -154,6 +156,7 @@ pub(super) fn declarations(
     let root_objects = roots.objects;
     let mut visited = HashSet::default();
     let mut authorized_member_edges = HashMap::default();
+    let mut indices_bounds = HashMap::default();
     let mut state = ClosureState {
         pending: roots
             .callables
@@ -323,6 +326,14 @@ pub(super) fn declarations(
             state.pending.push_back((member, None));
             state.declarations.push((declaration_target, realization));
             continue;
+        }
+        // A counted loop over a collection's or text's indices reads the receiver's size, which
+        // the loop's lowering calls in its place.
+        if let Some(member) = crate::klib_lowering::indices_bound_member(selected, bodies)
+            .map_err(|reason| format!("an invalid indices bound: {reason:?}"))?
+        {
+            indices_bounds.insert(identity.clone(), member.clone());
+            state.pending.push_back((member, None));
         }
         let retained = externals
             .get(&identity)
@@ -517,6 +528,7 @@ pub(super) fn declarations(
     Ok(FrozenClosure {
         declarations: state.declarations,
         authorized_member_edges,
+        indices_bounds,
         read_classes: state.read_classes,
         dispatched: state.dispatched.into_iter().collect(),
         private_member_classes: state.private_member_classes,

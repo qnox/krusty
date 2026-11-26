@@ -1385,25 +1385,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         &self,
         getter: &KlibAccessorIdSignature,
     ) -> Result<Option<crate::libraries::IndicesReceiver>, KlibBodyDeclineReason> {
-        let signature = KlibDeclarationSignature::Accessor(getter.clone());
-        let identity = match self
-            .sources
-            .bodies
-            .callee_origin(&self.active_module, &signature)
-        {
-            KlibCalleeOrigin::Exact(identity) => identity,
-            // Dependency preparation omitted this getter's edge: the loop is not one this unit counts.
-            KlibCalleeOrigin::Missing => {
-                return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                    "a `for` loop over an `indices` getter without a provider declaration",
-                ))
-            }
-            KlibCalleeOrigin::Ambiguous => {
-                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
-                    getter.property().clone(),
-                )))
-            }
-        };
+        let identity = self.indices_getter_identity(getter)?;
         Ok(self
             .sources
             .declarations
@@ -1411,6 +1393,34 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .and_then(|(_, realization)| {
                 super::for_loops::indices_receiver(realization.klib_body_callable()?)
             }))
+    }
+
+    fn indices_bound(
+        &self,
+        getter: &KlibAccessorIdSignature,
+    ) -> Result<Option<super::body_lowering::IndicesBound>, KlibBodyDeclineReason> {
+        let identity = self.indices_getter_identity(getter)?;
+        let Some(bound) = self.sources.callees.indices_bound(&identity) else {
+            return Ok(None);
+        };
+        let KlibDeclarationSignature::Accessor(accessor) = &bound.declaration else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an `indices` bound is not a property accessor".to_owned(),
+            ));
+        };
+        let selected = match self.sources.callees.get(bound) {
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for an `indices` bound".to_owned(),
+                ))
+            }
+            None => return Err(KlibBodyDeclineReason::Unjoined),
+        };
+        Ok(Some(super::body_lowering::IndicesBound {
+            accessor: accessor.clone(),
+            ty: selected.ret(),
+        }))
     }
 
     fn reverses_progression(
@@ -2364,6 +2374,29 @@ impl<'s> Linker<'_, 's> {
                     "a member realized outside the unit has no frozen call edge".to_owned(),
                 )
             })
+    }
+
+    /// The exact declaration of the `indices` getter a loop calls, which dependency preparation
+    /// reached as the loop's edge.
+    fn indices_getter_identity(
+        &self,
+        getter: &KlibAccessorIdSignature,
+    ) -> Result<KlibDependencyCallable, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Accessor(getter.clone());
+        match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => Ok(identity),
+            // Dependency preparation omitted this getter's edge: the loop is not one this unit counts.
+            KlibCalleeOrigin::Missing => Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a `for` loop over an `indices` getter without a provider declaration",
+            )),
+            KlibCalleeOrigin::Ambiguous => Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(
+                Box::new(getter.property().clone()),
+            )),
+        }
     }
 
     /// Whether `identity` is an abstract accessor of a class an earlier unit realized and this
