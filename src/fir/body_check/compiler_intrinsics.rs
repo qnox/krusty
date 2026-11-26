@@ -43,6 +43,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::ArrayStorageLength
         | CompilerIntrinsic::ArrayStorageGet
         | CompilerIntrinsic::ArrayStorageSet
+        | CompilerIntrinsic::EnumOrdinalCompare
         | CompilerIntrinsic::StringFromCharArrayStorage
         | CompilerIntrinsic::StringCharArrayStorage
         | CompilerIntrinsic::CharCode

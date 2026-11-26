@@ -24,10 +24,14 @@ use super::builtin_order;
 use super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::interface_dispatch::MemberRef;
 use super::numeric_conversions;
+use super::objects::ENUM_NAME_FIELD;
 use super::runtime::Runtime;
 
 /// `i32.ge_u`.
 const I32_GE_U: u8 = 0x4f;
+
+/// `i32.sub`.
+const I32_SUB: u8 = 0x6b;
 
 /// A function's wasm parameters (the receiver first) and results.
 type Signature = (Vec<ValType>, Vec<ValType>);
@@ -89,6 +93,8 @@ enum Representation {
     Box(Ty),
     /// The runtime's `StringBuilder`.
     StringBuilder,
+    /// An enum constant, which every enum class lays out over the runtime's `kotlin.Enum` base.
+    Enum,
 }
 
 impl Representation {
@@ -98,6 +104,7 @@ impl Representation {
             Self::String => "a `String`".to_string(),
             Self::Box(boxed) => format!("a boxed `{boxed:?}`"),
             Self::StringBuilder => "a `StringBuilder`".to_string(),
+            Self::Enum => "an enum constant".to_string(),
         }
     }
 }
@@ -123,6 +130,8 @@ enum Operation {
     Compare,
     /// A builder member the runtime realizes (`StringBuilder.append(Char)`).
     Builder(BuilderMember),
+    /// The difference of two enum constants' ordinals (`Enum.compareTo`).
+    EnumOrdinalCompare,
 }
 
 /// A `StringBuilder` override the runtime realizes, as a direct call of it does
@@ -171,10 +180,13 @@ impl Runtime {
         let mut boxes = Vec::new();
         let mut string = None;
         let mut builder = None;
+        let mut constants = None;
         for implementation in implementations {
             let receiver = implementation.receiver;
             let representation = if receiver == Ty::String {
                 Representation::String
+            } else if receiver.obj_internal() == Some(krusty::types::wk::kotlin_enum()) {
+                Representation::Enum
             } else if receiver
                 .obj_internal()
                 .is_some_and(super::string_builders::lays_out)
@@ -201,6 +213,9 @@ impl Runtime {
                         },
                     ));
                 }
+                Representation::Enum => {
+                    constants = Some(operation(representation, implementation, signature)?);
+                }
                 Representation::Box(boxed) => {
                     let identity = boxed
                         .obj_internal()
@@ -218,6 +233,13 @@ impl Runtime {
             self.objects
                 .interfaces
                 .implement_representation(member, self.string, function)?;
+        }
+        if let Some(operation) = constants {
+            let function = self.define_implementation(module, member, Receiver::Enum, operation)?;
+            let base = self.objects.enum_base;
+            self.objects
+                .interfaces
+                .implement_representation(member, base, function)?;
         }
         match builder {
             Some(Ok(operation)) => {
@@ -338,6 +360,16 @@ impl Runtime {
                 locals.extend([key, key]);
                 builtin_order::emit_key_order(&mut code, key, left, right);
             }
+            (Receiver::Enum, Operation::EnumOrdinalCompare) => {
+                let base = self.objects.enum_base;
+                let ordinal = ENUM_NAME_FIELD + 1;
+                code.ref_cast(false, HeapType::Concrete(base))
+                    .struct_get(base, ordinal)
+                    .local_get(1)
+                    .ref_cast(false, HeapType::Concrete(base))
+                    .struct_get(base, ordinal)
+                    .op(I32_SUB);
+            }
             (Receiver::String, Operation::StringCompare) => {
                 let compare = self.string_compare(module);
                 code.ref_cast(false, HeapType::Concrete(self.string))
@@ -436,6 +468,8 @@ impl Runtime {
 #[derive(Clone, Copy)]
 enum Receiver {
     String,
+    /// An enum constant, read through the runtime's `kotlin.Enum` base.
+    Enum,
     /// An instance of a class the runtime lays out, which its functions take as a reference.
     Runtime,
     /// The box of a builtin classifier.
@@ -506,6 +540,11 @@ fn operation(
         ));
     };
     match (representation, declaration.operation) {
+        (Representation::Enum, Some(BackendCompilerIntrinsic::EnumOrdinalCompare))
+            if params.len() == 2 && *results == [ValType::I32] =>
+        {
+            Ok(Operation::EnumOrdinalCompare)
+        }
         (Representation::Box(boxed), Some(BackendCompilerIntrinsic::NumericConversion))
             if declaration.params.is_empty()
                 && params.len() == 1
