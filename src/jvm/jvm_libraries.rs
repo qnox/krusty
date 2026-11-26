@@ -2198,9 +2198,24 @@ impl JvmLibraries {
                         .map(|(_, _, supertypes)| supertypes)
                 })
                 .unwrap_or_default();
+            let purely_implemented = super::pure_implementations::purely_implemented_supertype(
+                internal_name,
+                &ci.annotations,
+                &type_params,
+                &type_param_bounds,
+            );
+            // kotlinc gives a pure implementation the interface it purely implements as a supertype
+            // of its own, where no Java edge already names that interface.
+            if let Some(interface) = purely_implemented.and_then(Ty::obj_internal) {
+                if !supertypes.iter_ids().any(|supertype| {
+                    super::jvm_class_map::type_names_map_to_same_jvm_internal(supertype, interface)
+                }) {
+                    supertypes.push_name(interface);
+                }
+            }
             let declared_supertype_templates = supertype_template_nullability(
                 declared_supertype_templates,
-                internal_name,
+                purely_implemented,
                 is_mapped_builtin,
                 has_kotlin_metadata,
             );

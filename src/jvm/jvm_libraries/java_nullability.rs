@@ -120,13 +120,13 @@ fn java_type_argument_nullability(ty: Ty) -> Ty {
 /// member signatures do: `class Document implements Map<String, Object>` exposes
 /// `MutableMap<String!, Any!>`, so `doc["k"] = null` is legal, and `class Sub<T> extends J<T>`
 /// writes the flexible `J<T!>`, whose occurrence keeps its platform bound for substitution to read.
-/// A Kotlin class states its own nullability in `@Metadata` and keeps it. A mapped Kotlin builtin
-/// (`MutableList` over `java.util.List`) is a Kotlin declaration in Kotlin's scope, and a pure
-/// implementation (`ArrayList` of `MutableList`) states its arguments rigidly through its pure
-/// supertype: those edges name the class's own type variables, not flexible Java occurrences.
+/// A pure implementation's rigid `purely_implemented` supertype replaces the Java edge to the same
+/// collection interface. A Kotlin class states its own nullability in `@Metadata` and keeps it, and
+/// a mapped Kotlin builtin (`MutableList` over `java.util.List`) is a Kotlin declaration in
+/// Kotlin's scope, whose edges name its own type variables rigidly.
 pub(super) fn supertype_template_nullability(
     templates: Vec<Ty>,
-    class: TypeName,
+    purely_implemented: Option<Ty>,
     is_mapped_builtin: bool,
     has_kotlin_metadata: bool,
 ) -> Vec<Ty> {
@@ -139,18 +139,16 @@ pub(super) fn supertype_template_nullability(
     if has_kotlin_metadata {
         return templates;
     }
-    let purely_implemented = crate::jvm::pure_implementations::purely_implemented_supertype(class);
+    let collection = |ty: Ty| {
+        ty.obj_internal()
+            .and_then(crate::jvm::jvm_class_map::mapped_collection)
+            .map(|mapped| mapped.kind)
+    };
+    let pure_collection = purely_implemented.and_then(collection);
     templates
         .into_iter()
+        .filter(|template| pure_collection.is_none() || collection(*template) != pure_collection)
         .map(|template| match template.kind() {
-            TyKind::Obj(name, _)
-                if purely_implemented.is_some_and(|kind| {
-                    crate::jvm::jvm_class_map::mapped_collection(name)
-                        .is_some_and(|mapped| mapped.kind == kind)
-                }) =>
-            {
-                rigid_type_variable_arguments(template)
-            }
             TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
                 name,
                 &arguments
@@ -160,6 +158,7 @@ pub(super) fn supertype_template_nullability(
             ),
             _ => template,
         })
+        .chain(purely_implemented)
         .collect()
 }
 

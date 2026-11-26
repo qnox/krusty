@@ -4,7 +4,8 @@
 //! receiver that is the supertype itself, `J<String>`, binds the variable to the strict `String`.
 //! A pure implementation states its arguments rigidly through its pure supertype, so
 //! `ArrayList<String>` is a `MutableList<String>`, while a Java subclass of it, `Items<String>`,
-//! reaches `MutableList<String!>` through its own flexible `ArrayList<T!>`.
+//! reaches `MutableList<String!>` through its own flexible `ArrayList<T!>`. A class annotated
+//! `@PurelyImplements` gains the interface it names as such a rigid supertype.
 
 use super::common;
 
@@ -27,6 +28,11 @@ fun pure(list: java.util.ArrayList<String>) {
 fun javaSubclass(items: Items<String>) {
     items.put(null)
 }
+
+fun declaredPure(own: Own<String>) {
+    own.put(null)
+    val nullable: MutableList<String?> = own
+}
 ";
 
 fn library() -> std::path::PathBuf {
@@ -43,8 +49,12 @@ fn library() -> std::path::PathBuf {
             "Items.java".to_string(),
             "public class Items<T> extends java.util.ArrayList<T> {}\n".to_string(),
         ),
+        (
+            "Own.java".to_string(),
+            "@kotlin.jvm.PurelyImplements(\"kotlin.collections.MutableList\")\npublic class Own<T> extends java.util.AbstractList<T> { public T get(int index) { return null; } public int size() { return 0; } }\n".to_string(),
+        ),
     ];
-    common::javac_compile(&java, &[])
+    common::javac_compile(&java, &[common::stdlib_jar()])
         .map(|(dir, _)| dir)
         .expect("javac must build the Java fixture")
 }
@@ -77,6 +87,8 @@ fn a_subclass_receiver_binds_the_variable_of_its_java_supertype_flexibly() {
         [
             "Use.kt:10:15: null cannot be a value of a non-null type 'String'.",
             "Use.kt:14:14: null cannot be a value of a non-null type 'String'.",
+            "Use.kt:22:13: null cannot be a value of a non-null type 'String'.",
+            "Use.kt:23:40: initializer type mismatch: expected 'MutableList<String?>', actual 'Own<String>'.",
         ]
     );
 }
