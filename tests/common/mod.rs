@@ -32,7 +32,7 @@ pub mod source_set_compile;
 #[allow(unused_imports)]
 pub use native_backend::{
     expect_native_box, expect_native_decline, expect_native_exit, expect_native_sources,
-    expect_native_sources_decline, native_analysis, native_decline,
+    expect_native_sources_decline, native_decline,
 };
 pub use source_set_compile::compile_in_process_files;
 
