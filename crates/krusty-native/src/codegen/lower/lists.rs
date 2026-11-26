@@ -1189,9 +1189,12 @@ impl BodyLowering<'_, '_, '_> {
         if implementors.len() != declared.len() {
             return None;
         }
-        // With no class of the file left to tell apart, the runtime's order answers alone.
+        // With no class of the program left to tell apart, the runtime's order answers alone. A
+        // `Comparable` another unit of the program declares is not among this file's implementors,
+        // so the table dispatch stays.
         if implementors.is_empty()
-            && !super::super::super::intrinsics::is_comparable_compare_to(signature)
+            && !(super::super::super::intrinsics::is_comparable_compare_to(signature)
+                && !self.file.declares_its_own_comparable)
         {
             return None;
         }
