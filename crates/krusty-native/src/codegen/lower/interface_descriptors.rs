@@ -114,7 +114,7 @@ impl FileLowering<'_> {
                         .is_some_and(|fact| fact.klib_identity.is_some() || fact.role.is_some())
             })
             .collect::<Vec<_>>();
-        let mut pending = declared
+        let pending = declared
             .interfaces
             .iter()
             .chain(
@@ -125,6 +125,15 @@ impl FileLowering<'_> {
             .chain(inherited)
             .filter(|name| self.ir.class_id_by_name(*name).is_none())
             .collect::<Vec<_>>();
+        self.dependency_interface_closure(pending)
+    }
+
+    /// The runtime descriptors of the dependency interfaces `pending` names and of every interface
+    /// they extend: what an instance of all of them is a member of.
+    pub(super) fn dependency_interface_closure(
+        &mut self,
+        mut pending: Vec<krusty::types::TypeName>,
+    ) -> Result<Vec<DataId>, Unsupported> {
         let mut visited = krusty::fx_hash::HashSet::default();
         let mut descriptors = Vec::new();
         while let Some(name) = pending.pop() {
