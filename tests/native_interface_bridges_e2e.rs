@@ -51,7 +51,7 @@ fn an_interface_method_implemented_at_another_representation_is_bridged() {
 /// make the declaration disappear when the bridge planner resolves the concrete implementation.
 #[test]
 fn a_final_implementation_supplies_an_inherited_value_class_bridge() {
-    let source = "@JvmInline value class Payload(val value: Int)\n\
+    let source = "OPTIONAL_JVM_INLINE_ANNOTATION value class Payload(val value: Int)\n\
          interface Root<T> { fun echo(value: T): T }\n\
          abstract class Specialized : Root<Payload>\n\
          class Implementation : Specialized() {\n\
