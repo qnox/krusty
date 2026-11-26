@@ -1120,7 +1120,9 @@ pub(crate) fn lower_value_classes(
                     if dispatch_receiver.is_some()
                         && module_value_classes.contains_key(owner)
                         && !cls_by_name.contains_key(owner)
-                        && vc_getters.get(owner) != Some(name)
+                        && !vc_getters
+                            .get(owner)
+                            .is_some_and(|getter| is_underlying_getter(getter, name))
                     {
                         let impl_name =
                             vc_member_impl_name(name, params, ret, &callable_under, is_suspend);
@@ -1933,7 +1935,9 @@ pub(crate) fn lower_value_classes(
                 params,
                 ..
             } = &**call_callee
-                && (vc_getters.get(owner).is_some_and(|g| g == name)) =>
+                && (vc_getters
+                    .get(owner)
+                    .is_some_and(|getter| is_underlying_getter(getter, name))) =>
             {
                 value_class_name(*owner, &under).map(|owner| Rw::Prop {
                     receiver: *receiver,
@@ -3877,6 +3881,14 @@ impl ReprCtx<'_> {
         }
         (id, self.repr(id))
     }
+}
+
+/// Whether the JVM method `name` is the getter of a value class's underlying property, whose
+/// plain spelling is `getter`. A property typed as another value class has its getter mangled
+/// with the hash of that type (`getId-eEFUqEU`), which is still the same getter.
+fn is_underlying_getter(getter: &str, name: &str) -> bool {
+    name.strip_prefix(getter)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
 }
 
 /// Whether a NON-NULL value-class type's unboxed underlying can hold null (so a `checkNotNullParameter`
