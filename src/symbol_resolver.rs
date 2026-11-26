@@ -73,8 +73,8 @@ mod top_level_selection;
 use argument_compatibility::arg_fits;
 use argument_compatibility::{arg_fits_platform, arg_fits_source, untyped_lambda_pertinent};
 pub(crate) use argument_compatibility::{
-    function_input_types, resolution_subtype, sam_arg_matches, sam_parameters_admit,
-    sam_return_matches,
+    function_input_types, lambda_input_types, resolution_subtype, sam_arg_matches,
+    sam_parameters_admit, sam_return_matches,
 };
 pub(crate) use call_argument::{
     expected_result_keeps_call_evidence, CallArgKind, ProvisionalResult,
