@@ -192,6 +192,11 @@ pub(super) fn is_enum_entries(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/enums/EnumEntries"])
 }
 
+/// `kotlin.collections.RandomAccess`, the marker every runtime list wears.
+pub(super) fn is_random_access(internal: TypeName) -> bool {
+    is_identity(internal, &["kotlin/collections/RandomAccess"])
+}
+
 fn standard_interface_descriptor(internal: TypeName) -> Option<&'static str> {
     Some(if internal == krusty::types::wk::function_root() {
         "kt_type_function"
@@ -199,6 +204,8 @@ fn standard_interface_descriptor(internal: TypeName) -> Option<&'static str> {
         "kt_type_comparable"
     } else if is_char_sequence(internal) {
         "kt_type_char_sequence"
+    } else if is_random_access(internal) {
+        "kt_type_random_access_interface"
     } else if is_identity(internal, &["kotlin/reflect/KCallable"]) {
         "kt_type_kcallable"
     } else if is_identity(internal, &["kotlin/reflect/KProperty"]) {
