@@ -404,16 +404,20 @@ fn a_signed_value_converts_to_an_unsigned_one_by_its_own_signedness() {
     );
 }
 
-/// A FLOAT converted to an unsigned type answers the library's own conversion: `Double.toUInt()`
-/// saturates at zero for a negative where the signed conversion reinterpreted would answer a huge
-/// positive. The saturation is the library's `doubleToUInt` body, whose unsigned constants the KLIB
-/// serializes as their signed bits.
+/// A FLOAT converted to an unsigned type still declines, and that is the rule rather than an
+/// oversight: `Double.toUInt()` saturates at zero for a negative where the signed conversion
+/// reinterpreted would answer a huge positive. It is a different rule, so it is a different change,
+/// and this pins that the backend refuses it instead of answering it wrongly.
 #[test]
-fn a_float_converted_to_an_unsigned_type_saturates() {
-    let source = include_str!("box_regressions/floatToUnsignedSaturates.kt");
-    assert_eq!(kotlinc_box_result(source), "OK", "FloatToUnsigned: kotlinc");
-    expect_box_ok_with_stdlib(source, "FloatToUnsigned");
-    expect_native_box(source, "FloatToUnsigned", "OK");
+fn a_float_converted_to_an_unsigned_type_is_declined() {
+    expect_native_decline(
+        "fun box(): String {\n\
+         \x20   val d: Double = -1.5\n\
+         \x20   return if (d.toUInt() == 0u) \"OK\" else \"fail\"\n\
+         }\n",
+        "FloatToUnsigned",
+        "toUInt",
+    );
 }
 
 /// An unsigned array renders as the value class it is, `UIntArray(storage=[…])`: the storage is
