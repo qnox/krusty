@@ -90,7 +90,15 @@ impl Drift {
     }
 
     pub fn report(&self, lane: &str, version: KotlinVersion) -> String {
-        let list = path(lane, version);
+        self.report_for(&path(lane, version), lane, version)
+    }
+
+    /// The report for the list `version` reads. A stale row can be dropped mechanically only from
+    /// the release's own list: an inherited list is read by every later release without a file of
+    /// its own, so one release's result cannot say the row is stale for all of them.
+    fn report_for(&self, list: &std::path::Path, lane: &str, version: KotlinVersion) -> String {
+        let own =
+            list.file_name().and_then(|name| name.to_str()) == Some(&format!("{version}.txt"));
         let mut text = format!(
             "{lane} byte identity disagrees with {} (Kotlin {version}):\n",
             list.display()
@@ -101,9 +109,15 @@ impl Drift {
             ));
         }
         for case in &self.now_identical {
-            text.push_str(&format!(
-                "  {case}: expected different bytes, got byte-identical; remove it from the list\n"
-            ));
+            if own {
+                text.push_str(&format!(
+                    "  {case}: expected different bytes, got byte-identical; remove it from the list\n"
+                ));
+            } else {
+                text.push_str(&format!(
+                    "  {case}: expected different bytes, got byte-identical; the list is inherited, so remove it by hand once every release that reads it agrees\n"
+                ));
+            }
         }
         text
     }
@@ -171,4 +185,33 @@ fn identity_needs_every_byte() {
         matched: 3,
         total: 4
     }));
+}
+
+#[test]
+fn only_a_releases_own_list_invites_the_mechanical_removal() {
+    let version = KotlinVersion::parse("2.4.21").expect("a release");
+    let drift = compare(
+        &["a"].iter().map(|item| item.to_string()).collect(),
+        &BTreeSet::new(),
+    );
+
+    let own = drift.report_for(
+        std::path::Path::new("tests/box_byte_non_identical/jvm/2.4.21.txt"),
+        "jvm",
+        version,
+    );
+    let inherited = drift.report_for(
+        std::path::Path::new("tests/box_byte_non_identical/jvm/2.4.20.txt"),
+        "jvm",
+        version,
+    );
+
+    assert_eq!(
+        own,
+        "jvm byte identity disagrees with tests/box_byte_non_identical/jvm/2.4.21.txt (Kotlin 2.4.21):\n  a: expected different bytes, got byte-identical; remove it from the list\n"
+    );
+    assert_eq!(
+        inherited,
+        "jvm byte identity disagrees with tests/box_byte_non_identical/jvm/2.4.20.txt (Kotlin 2.4.21):\n  a: expected different bytes, got byte-identical; the list is inherited, so remove it by hand once every release that reads it agrees\n"
+    );
 }
