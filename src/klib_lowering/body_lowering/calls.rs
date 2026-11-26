@@ -854,22 +854,42 @@ impl BodyLowering<'_> {
                 .ir
                 .overridable_method(*function)
                 .map(|slot| (slot, receiver)),
-            (Callee::LocalWithDefaults { function, .. }, Some(_))
-                if self.ir.overridable_method(*function).is_some() =>
-            {
-                return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                    "a dispatched call leaving arguments to their defaults",
-                ));
-            }
+            (Callee::LocalWithDefaults { function, .. }, Some(receiver)) => self
+                .ir
+                .overridable_method(*function)
+                .map(|slot| (slot, receiver)),
             _ => None,
         };
         let call = match overridable {
-            Some(((class, index), receiver)) => self.ir.add_expr(IrExpr::MethodCall {
-                class,
-                index,
-                receiver,
-                args: args.into_iter().map(Some).collect(),
-            }),
+            // A dispatched call leaving arguments to their defaults leaves their places empty: the
+            // shared default-argument lowering fills them in the declaration's entry, which then
+            // dispatches through the slot, as kotlinc's `$default` entry does.
+            Some(((class, index), receiver)) => {
+                let args = match &callee {
+                    Callee::LocalWithDefaults { defaults, .. } => {
+                        let mut supplied = args.into_iter();
+                        let count = supplied.len() + defaults.len();
+                        (0..count)
+                            .map(|ordinal| {
+                                if u32::try_from(ordinal)
+                                    .is_ok_and(|ordinal| defaults.contains(&ordinal))
+                                {
+                                    None
+                                } else {
+                                    supplied.next()
+                                }
+                            })
+                            .collect()
+                    }
+                    _ => args.into_iter().map(Some).collect(),
+                };
+                self.ir.add_expr(IrExpr::MethodCall {
+                    class,
+                    index,
+                    receiver,
+                    args,
+                })
+            }
             None => self.ir.add_expr(IrExpr::Call {
                 callee: Box::new(callee),
                 dispatch_receiver,

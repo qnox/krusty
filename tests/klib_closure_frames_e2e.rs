@@ -11,6 +11,9 @@ mod companion_private_members;
 #[path = "klib_closure_frames_e2e/constructor_defaults.rs"]
 mod constructor_defaults;
 
+#[path = "klib_closure_frames_e2e/dispatched_member_defaults.rs"]
+mod dispatched_member_defaults;
+
 #[path = "klib_closure_frames_e2e/elvis_blocks.rs"]
 mod elvis_blocks;
 
