@@ -223,7 +223,13 @@ fn realize_expressions(
                     callable.physical_ret,
                 );
                 // The static construction takes its arguments as the checked constructor declares
-                // them.
+                // them. A static `constructor-impl` belongs to a value class, which has no
+                // enclosing instance or captures, so its default prefix is always empty and the
+                // default positions below index the physical parameters directly.
+                debug_assert_eq!(
+                    default_prefix_count, 0,
+                    "a static value-class construction has no default prefix"
+                );
                 let declared_parameters = ir.construction_declared_params(expression).map(
                     |declared| -> Box<[krusty::types::Ty]> {
                         if defaults.is_empty() {
