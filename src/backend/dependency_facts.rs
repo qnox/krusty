@@ -121,6 +121,9 @@ pub struct BackendCallableFact {
     /// Qualified identities of the annotations the provider recorded on this declaration. A
     /// compiler plugin keys its own calling convention on them (Compose's `@Composable`).
     pub annotations: Box<[TypeName]>,
+    /// The JVM resolves a call to this declaration against the call site's descriptor
+    /// (`MethodHandle.invoke`), as the provider recorded from the declaration.
+    pub signature_polymorphic: bool,
 }
 
 impl BackendCallableFact {
@@ -384,6 +387,7 @@ mod tests {
             declares_parameter_defaults: false,
             composable_parameters: Default::default(),
             annotations: Box::new([]),
+            signature_polymorphic: false,
         }
     }
 
@@ -846,6 +850,7 @@ mod tests {
             declares_parameter_defaults: false,
             composable_parameters: Default::default(),
             annotations: Box::new([]),
+            signature_polymorphic: false,
         };
         assert!(fact.matches_dependency_body_call(&[Ty::Int], None, true));
         assert!(!fact.matches_dependency_body_call(&[Ty::Int], None, false));
@@ -1424,6 +1429,7 @@ impl CheckedBackendCallables {
                 let declares_parameter_defaults = realization.declares_parameter_defaults;
                 let composable_parameters = realization.composable_parameters;
                 let callable = realization.callable;
+                let signature_polymorphic = callable.signature_polymorphic;
                 let annotations = callable.annotations.into_boxed_slice();
                 slot.insert(BackendCallableFact {
                     name: callable.name,
@@ -1471,6 +1477,7 @@ impl CheckedBackendCallables {
                     declares_parameter_defaults,
                     composable_parameters,
                     annotations,
+                    signature_polymorphic,
                 })
             }
         };

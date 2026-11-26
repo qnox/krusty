@@ -56,6 +56,7 @@ fn declaration() -> BackendCallableFact {
         declares_parameter_defaults: false,
         composable_parameters: Default::default(),
         annotations: Box::new([]),
+        signature_polymorphic: false,
     }
 }
 

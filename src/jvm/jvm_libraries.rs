@@ -1449,10 +1449,6 @@ impl JvmLibraries {
                     );
                 }
                 member.physical_ret = physical_ret;
-                // A Java declaration has no metadata; the annotations its method states are its own.
-                if declaration.is_none() && constructor_declaration.is_none() {
-                    member.annotations = m.annotations.to_vec();
-                }
                 // Kotlin metadata owns declaration modality. In legacy JVM-default mode a method
                 // can be physically abstract while its body lives on `$DefaultImpls`; classfile
                 // modality would hide it from `super` selection and inherited-implementation plans.

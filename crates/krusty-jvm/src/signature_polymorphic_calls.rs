@@ -8,21 +8,12 @@
 //! call is the operand of, so `handle.get(target) as Int` is `(…)I`; a declaration with any other
 //! result keeps it.
 //!
-//! The selected declaration states the shape: the JDK marks it `@PolymorphicSignature`. Common IR
-//! keeps the ordinary call with its single `vararg` argument; this module owns the physical form.
+//! The selected declaration states the shape: its provider records it signature-polymorphic
+//! (`LibraryMember::is_signature_polymorphic`). Common IR keeps the ordinary call with its single
+//! `vararg` argument; this module owns the physical form.
 
-use krusty::backend::BackendCallableFact;
 use krusty::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
-use krusty::types::{Ty, TypeName};
-
-/// The `@PolymorphicSignature` annotation, nested in `MethodHandle`.
-const ANNOTATION: &str = "java/lang/invoke/MethodHandle$PolymorphicSignature";
-
-/// Whether the selected declaration is signature-polymorphic.
-pub(super) fn is_signature_polymorphic(callable: &BackendCallableFact) -> bool {
-    let annotation: TypeName = krusty::types::type_name(ANNOTATION);
-    callable.annotations.contains(&annotation)
-}
+use krusty::types::Ty;
 
 /// The `as` cast reading each call, with its target, by that call: a signature-polymorphic call
 /// takes its `Object` result type from the cast that reads it, and the cast is then redundant.

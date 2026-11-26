@@ -1022,7 +1022,7 @@ fn realize_expressions(
         let mut descriptor = descriptor;
         let mut semantic_ret = semantic_ret;
         let mut polymorphic_result = None;
-        if super::signature_polymorphic_calls::is_signature_polymorphic(&callable) {
+        if callable.signature_polymorphic {
             if kind != ExternalCallableKind::Member || !defaults.is_empty() {
                 return Err(target.into());
             }
