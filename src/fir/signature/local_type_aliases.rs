@@ -107,9 +107,11 @@ impl SignatureGraph {
             }
         }
         match self.expr(expression) {
-            Some(SigExpr::Nullable(inner) | SigExpr::NonNullable(inner)) => {
-                self.expression_has_shape_changing_local_alias(inner)
-            }
+            Some(
+                SigExpr::Nullable(inner)
+                | SigExpr::NonNullable(inner)
+                | SigExpr::NotNullOperator(inner),
+            ) => self.expression_has_shape_changing_local_alias(inner),
             _ => false,
         }
     }
