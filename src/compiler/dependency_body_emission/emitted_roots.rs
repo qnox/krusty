@@ -126,6 +126,9 @@ pub(super) struct FrozenClosure {
     /// Members of a materialized class or object that dispatch reaches, whose bodies the unit
     /// emits although no walked body calls them directly.
     pub(super) dispatched: Vec<KlibDependencyCallable>,
+    /// The classes declaring a private member a class nested in them calls, which the unit
+    /// materializes to emit that member.
+    pub(super) private_member_classes: Vec<crate::libraries::KlibBodyClassContract>,
 }
 
 /// Where a unit's closure starts: the callables the emitted source selects, and the library
@@ -162,6 +165,7 @@ pub(super) fn declarations(
         objects: HashSet::default(),
         read_classes: root_objects.to_vec(),
         dispatched: HashSet::default(),
+        private_member_classes: Vec::new(),
         emitted_defaults: roots
             .callables
             .iter()
@@ -198,7 +202,18 @@ pub(super) fn declarations(
                     .is_none()
                     && !externals.contains_key(&identity)
             })
-            .and_then(|caller| private_member_class(platform, bodies, &identity, caller))
+            .and_then(|caller| {
+                let declaring = private_member_class(platform, bodies, &identity, caller.clone())?;
+                if declaring.classifier != caller.classifier
+                    && !state
+                        .private_member_classes
+                        .iter()
+                        .any(|known| known.classifier == declaring.classifier)
+                {
+                    state.private_member_classes.push(declaring.clone());
+                }
+                Some(declaring)
+            })
         {
             let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
             state.pending.extend(
@@ -504,6 +519,7 @@ pub(super) fn declarations(
         authorized_member_edges,
         read_classes: state.read_classes,
         dispatched: state.dispatched.into_iter().collect(),
+        private_member_classes: state.private_member_classes,
     })
 }
 
@@ -531,6 +547,8 @@ struct ClosureState<'c, 'u> {
     /// Members of a materialized class that dispatch reaches: their bodies are emitted even where
     /// a call of one folds to a common operation, as a virtual call runs the body.
     dispatched: HashSet<KlibDependencyCallable>,
+    /// The classes declaring a private member a class nested in them calls.
+    private_member_classes: Vec<crate::libraries::KlibBodyClassContract>,
     /// Interface default bodies a class of the file inherits, emitted for its dispatch record
     /// though no support unit materializes the interface.
     emitted_defaults: HashSet<KlibDependencyCallable>,

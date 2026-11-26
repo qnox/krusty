@@ -142,7 +142,6 @@ fn admit<'a, 'b>(
             KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract
         )
         || contract.is_value
-        || contract.is_inner
         || contract.is_expect
         || header.class.value_class_representation.is_some()
     {
@@ -587,7 +586,8 @@ fn own_delegation_from<'a, 'b>(
         module: contract.module.clone(),
         declaration: KlibDeclarationSignature::Public(target_signature.clone()),
     };
-    // A delegation within the class applies the class's own formals.
+    // A delegation within the class applies the class's own formals. An inner class's delegation
+    // passes only its own; the outer class's ones it captures are the same outer instance's.
     let type_arguments = access
         .type_arguments
         .iter()
@@ -597,22 +597,19 @@ fn own_delegation_from<'a, 'b>(
             semantic_type(header.arena, &header.types, argument)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if *type_arguments != *contract.parameters.formals {
+    let own_formals = contract
+        .parameters
+        .formals
+        .get(..contract.parameters.own_count)
+        .ok_or_else(|| mismatch("a class lists more own type parameters than formals"))?;
+    if *type_arguments != *own_formals {
         return Err(mismatch(
             "a delegation within the class applies other type arguments than the class's own",
         ));
     }
-    let arguments = match &access.arguments {
-        KlibIrArguments::Flat(values)
-        | KlibIrArguments::Split {
-            dispatch_receiver: None,
-            extension_receiver: None,
-            values,
-        } => values.clone(),
-        KlibIrArguments::Split { .. } => {
-            return Err(mismatch("a delegation within the class passes a receiver"))
-        }
-    };
+    // An inner class's delegation forwards the outer instance first, as its constructors take it.
+    let inner = header.outer.is_some();
+    let arguments = super::constructor_calls::constructor_arguments(access, inner)?;
     let Some(super::callee_facts::KlibCalleeFact::Selected(target_selected)) = callees.get(&target)
     else {
         return Ok(None);
@@ -621,10 +618,10 @@ fn own_delegation_from<'a, 'b>(
     let defaults = target_selected.parameter_defaults().ok_or_else(|| {
         mismatch("a delegation within the class reaches a constructor without declared defaults")
     })?;
-    if arguments.len() != defaults.len()
+    if arguments.len() != usize::from(inner) + defaults.len()
         || arguments
             .iter()
-            .zip(defaults.iter())
+            .zip(std::iter::repeat_n(&false, usize::from(inner)).chain(defaults.iter()))
             .any(|(argument, default)| argument.is_none() && !default)
     {
         return Err(mismatch(
