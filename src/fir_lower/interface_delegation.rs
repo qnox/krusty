@@ -497,6 +497,8 @@ fn materialize_delegation(
                             implementation_type: ty,
                             declared_receiver: overridden.receiver.map(crate::fir::ResolvedTy::get),
                             implementation_receiver: extension_receiver,
+                            declared_contexts: Vec::new(),
+                            implementation_contexts: Vec::new(),
                             overridden_setter_value: overridden.setter_value.clone(),
                             implementation_mutable: setter.is_some(),
                             has_kotlin_superclass_override: false,

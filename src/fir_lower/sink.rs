@@ -120,6 +120,12 @@ fn lower_property_override_plans(
             implementation_receiver: edge
                 .implementation_receiver
                 .map(crate::fir::ResolvedTy::get),
+            declared_contexts: edge.declared_contexts.iter().map(|ty| ty.get()).collect(),
+            implementation_contexts: edge
+                .implementation_contexts
+                .iter()
+                .map(|ty| ty.get())
+                .collect(),
             overridden_setter_value: edge.overridden_setter_value.clone(),
             implementation_mutable: edge.implementation_mutable,
             has_kotlin_superclass_override: edge.has_kotlin_superclass_override,

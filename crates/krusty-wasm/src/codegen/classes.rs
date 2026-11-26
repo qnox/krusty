@@ -167,6 +167,8 @@ pub(super) enum BridgedMember {
     Accessor {
         declared: Ty,
         implemented: Ty,
+        /// The operands between the receiver and the value, on each side.
+        operands: Vec<(Ty, Ty)>,
         setter: bool,
         target_slot: u32,
     },
@@ -205,12 +207,13 @@ impl BridgedMember {
             Slot::AccessorBridge {
                 declared,
                 implemented,
-                receiver: None,
+                operands,
                 setter,
                 target_slot,
             } => Some(Self::Accessor {
                 declared,
                 implemented,
+                operands,
                 setter,
                 target_slot,
             }),
@@ -597,12 +600,22 @@ fn declared_method_type(
 
 /// The function type of an accessor of a property of type `ty`, as a class table carries it: the
 /// receiver, then the value a setter takes; a getter answers the value.
-fn accessor_type(module: &mut Module, ty: Ty, setter: bool) -> Result<u32, Unsupported> {
+fn accessor_type(
+    module: &mut Module,
+    operands: impl IntoIterator<Item = Ty>,
+    ty: Ty,
+    setter: bool,
+) -> Result<u32, Unsupported> {
     let value = carrier(ty)?.ok_or_else(|| "a `Unit` property".to_string())?;
+    let mut parameters = vec![REFERENCE];
+    for operand in operands {
+        parameters.push(carrier(operand)?.ok_or_else(|| "a `Unit` accessor operand".to_string())?);
+    }
     Ok(if setter {
-        module.func_type(vec![REFERENCE, value], Vec::new())
+        parameters.push(value);
+        module.func_type(parameters, Vec::new())
     } else {
-        module.func_type(vec![REFERENCE], vec![value])
+        module.func_type(parameters, vec![value])
     })
 }
 
@@ -1499,8 +1512,16 @@ fn slot_types<'r>(
                     parameters, result, ..
                 } => Some(declared_method_type(module, parameters, *result)?),
                 Slot::AccessorBridge {
-                    declared, setter, ..
-                } => Some(accessor_type(module, *declared, *setter)?),
+                    declared,
+                    operands,
+                    setter,
+                    ..
+                } => Some(accessor_type(
+                    module,
+                    operands.iter().map(|&(declared, _)| declared),
+                    *declared,
+                    *setter,
+                )?),
                 Slot::FunctionBridge { .. } | Slot::Inherited { .. } => None,
             };
             own[slot] = ty;
@@ -1585,7 +1606,7 @@ fn property_key_type(
             if let Some(function) = function {
                 return method_type(module, ir, function);
             }
-            return accessor_type(module, *ty, setter);
+            return accessor_type(module, [], *ty, setter);
         }
         Some(IrLocalPropertyLayout::MemberExtension {
             getter,
