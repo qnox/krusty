@@ -10,7 +10,7 @@
 mod member_keys;
 mod most_specific;
 
-use super::{KlibCalleeOrigin, KlibDeclarationBodies};
+use super::{ir_signature, KlibCalleeOrigin, KlibDeclarationBodies};
 use crate::fx_hash::HashSet;
 use crate::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
@@ -27,9 +27,11 @@ impl KlibDeclarationBodies {
         body_module: &str,
         declaration: &KlibDeclarationSignature,
     ) -> KlibCalleeOrigin {
-        if declaring_member(declaration).is_none() {
-            return KlibCalleeOrigin::Missing;
-        }
+        let class = match self.member_class(body_module, declaration) {
+            Ok(Some((arena, class, _))) => (arena, class),
+            Ok(None) => return KlibCalleeOrigin::Missing,
+            Err(()) => return KlibCalleeOrigin::Ambiguous,
+        };
         let found = match self.inherited(body_module, declaration) {
             Ok(found) => found,
             Err(()) => return KlibCalleeOrigin::Ambiguous,
@@ -44,15 +46,7 @@ impl KlibDeclarationBodies {
                     .collect::<Vec<_>>();
                 match implemented.as_slice() {
                     [one] => KlibCalleeOrigin::Exact((*one).clone()),
-                    [] => {
-                        let Some(member) = declaring_member(declaration) else {
-                            return KlibCalleeOrigin::Missing;
-                        };
-                        match self.declaring_class(body_module, member) {
-                            Ok(Some(class)) => self.most_specific(body_module, class, several),
-                            Ok(None) | Err(()) => KlibCalleeOrigin::Ambiguous,
-                        }
-                    }
+                    [] => self.most_specific(body_module, class, several),
                     _ => KlibCalleeOrigin::Ambiguous,
                 }
             }
@@ -137,10 +131,7 @@ impl KlibDeclarationBodies {
                 KlibCalleeOrigin::Ambiguous => return Err(()),
                 KlibCalleeOrigin::Missing => {}
             }
-            let Some(member) = declaring_member(&declaration) else {
-                continue;
-            };
-            let Some((arena, class)) = self.declaring_class(body_module, member)? else {
+            let Some((arena, class, member)) = self.member_class(body_module, &declaration)? else {
                 continue;
             };
             for &supertype in &class.supertypes {
@@ -150,7 +141,7 @@ impl KlibDeclarationBodies {
                 let KlibIrSignature::Public(supertype) = &classifier.signature else {
                     continue;
                 };
-                pending.extend(as_member_of(&declaration, supertype));
+                pending.extend(as_member_of(&member, supertype));
             }
         }
         Ok(found)
@@ -395,6 +386,50 @@ impl KlibDeclarationBodies {
             }
         }
         Ok(found)
+    }
+
+    /// The class a member `declaration` of a body in `body_module` belongs to, with the arena
+    /// that owns it and the member's public identity in that class: the one class serializing the
+    /// member's owner, or, for a fake override of a class private to its file, that class. kotlinc
+    /// names such a fake override `Composite(File, Public)` with the public identity it would have
+    /// in a public class, so its member id is the one of the member it inherits.
+    fn member_class(
+        &self,
+        body_module: &str,
+        declaration: &KlibDeclarationSignature,
+    ) -> Result<Option<(&KlibIrArena, &KlibIrClass, KlibDeclarationSignature)>, ()> {
+        let KlibDeclarationSignature::FileLocal { file, .. } = declaration else {
+            let Some(member) = declaring_member(declaration) else {
+                return Ok(None);
+            };
+            return Ok(self
+                .declaring_class(body_module, member)?
+                .map(|(arena, class)| (arena, class, declaration.clone())));
+        };
+        let Some(&library) = self.modules.get(body_module) else {
+            return Ok(None);
+        };
+        let library = &self.libraries[library];
+        let signature = ir_signature(declaration);
+        // A member the class declares is its own declaration, never a fake override.
+        if library.local_function(&signature).is_some() {
+            return Ok(None);
+        }
+        let Some(member) = library.file_private_identity(&signature) else {
+            return Ok(None);
+        };
+        let Some(owner) = member.owner_path().filter(|_| member.member_id().is_some()) else {
+            return Ok(None);
+        };
+        Ok(library
+            .file_private_class_at(*file, &owner)
+            .map(|(arena, class)| {
+                (
+                    arena,
+                    class,
+                    KlibDeclarationSignature::Public(member.clone()),
+                )
+            }))
     }
 
     /// The one class in the producer graph rooted at `body_module` that declares `member`.

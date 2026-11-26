@@ -389,6 +389,14 @@ enum MemberMethodDeclaration {
         offset: u32,
         function: FunId,
     },
+    /// The outer class's static bridge of the compiler-default accessor of `@JvmStatic` property
+    /// `property` of the companion `companion`, reported at the property.
+    CompanionAccessorBridge {
+        offset: u32,
+        companion: usize,
+        property: usize,
+        setter: bool,
+    },
     GeneratedDataMember {
         offset: u32,
         function: FunId,
@@ -424,6 +432,7 @@ impl MemberMethodDeclaration {
         match self {
             Self::Source { offset, .. }
             | Self::CompanionBridge { offset, .. }
+            | Self::CompanionAccessorBridge { offset, .. }
             | Self::GeneratedDataMember { offset, .. }
             | Self::GeneratedMethod { offset }
             | Self::InPlaceDelegate { offset, .. }
@@ -565,8 +574,45 @@ fn report_platform_declaration_clashes(
                 .or_default()
                 .push(declaration);
         }
+        for bridge in crate::ir_emit::jvm_static_members::companion_bridges(ir, class) {
+            let crate::ir_emit::jvm_static_members::CompanionBridgeTarget::DefaultAccessor {
+                property,
+                side,
+            } = bridge
+            else {
+                continue;
+            };
+            let Some((signature, Some(offset))) =
+                crate::ir_emit::jvm_static_members::companion_default_accessor_bridge_signature(
+                    ir,
+                    class,
+                    property,
+                    side,
+                    override_results,
+                )
+            else {
+                continue;
+            };
+            let companion = class
+                .companion_class
+                .and_then(|companion| ir.class_id_by_name(companion))
+                .expect("a companion bridge has a companion");
+            groups
+                .entry((signature.name, signature.descriptor))
+                .or_default()
+                .push(MemberMethodDeclaration::CompanionAccessorBridge {
+                    offset,
+                    companion: companion as usize,
+                    property: property as usize,
+                    setter: matches!(side, crate::ir_emit::PropertyAccessorSide::Setter),
+                });
+        }
         for function in crate::ir_emit::jvm_static_members::companion_bridge_functions(ir, class) {
-            let Some(offset) = ir.function_position(function).signature_offset else {
+            let Some(offset) =
+                crate::ir_emit::jvm_static_members::companion_bridge_diagnostic_offset(
+                    ir, class, function,
+                )
+            else {
                 continue;
             };
             let descriptor = crate::ir_emit::function_descriptor(ir, override_results, function);
@@ -752,7 +798,11 @@ fn report_platform_declaration_clashes(
                     _ => false,
                 });
             let includes_companion_bridge = declarations.iter().any(|declaration| {
-                matches!(declaration, MemberMethodDeclaration::CompanionBridge { .. })
+                matches!(
+                    declaration,
+                    MemberMethodDeclaration::CompanionBridge { .. }
+                        | MemberMethodDeclaration::CompanionAccessorBridge { .. }
+                )
             });
             let declarations_are_renderable = declarations.iter().all(|&declaration| {
                 member_method_declaration_is_renderable(ir, class, declaration)
@@ -784,6 +834,8 @@ fn report_platform_declaration_clashes(
                     MemberMethodDeclaration::PropertyAnnotationMarker { .. } => 1,
                     MemberMethodDeclaration::Source { .. }
                     | MemberMethodDeclaration::CompanionBridge { .. } => 2,
+                    // kotlinc lists a default accessor's bridge after the members it clashes with.
+                    MemberMethodDeclaration::CompanionAccessorBridge { .. } => 3,
                 };
                 listed.sort_by_key(kind_order);
                 let type_context = listed
@@ -885,6 +937,20 @@ fn member_method_declaration_is_renderable(
             };
             Some(function)
         }
+        MemberMethodDeclaration::CompanionAccessorBridge {
+            companion,
+            property,
+            ..
+        } => {
+            let Some(property) = ir.classes[companion].properties.get(property) else {
+                return false;
+            };
+            return ensure_determined_type(property.ty).is_ok()
+                && property
+                    .context_params
+                    .iter()
+                    .all(|(_, _, ty)| ensure_determined_type(*ty).is_ok());
+        }
         MemberMethodDeclaration::PropertyAnnotationMarker { .. } => return true,
         MemberMethodDeclaration::GeneratedMethod { .. } => return false,
     };
@@ -943,6 +1009,24 @@ fn render_member_method_declaration(
         MemberMethodDeclaration::GeneratedMethod { .. } => {
             unreachable!("generated methods use the generic platform-clash diagnostic")
         }
+        MemberMethodDeclaration::CompanionAccessorBridge {
+            companion,
+            property,
+            setter,
+            ..
+        } => {
+            return render_property_accessor_declaration(
+                ir,
+                &ir.classes[companion].properties[property],
+                PropertyAccessorRendering {
+                    function: None,
+                    name: Some(name),
+                    setter,
+                },
+                owner,
+                type_context,
+            );
+        }
         MemberMethodDeclaration::DelegationForwarder { function, .. } => {
             return render_source_member_method(ir, function, name, owner, type_context);
         }
@@ -957,8 +1041,11 @@ fn render_member_method_declaration(
                     render_property_accessor_declaration(
                         ir,
                         &class.properties[property],
-                        function,
-                        setter,
+                        PropertyAccessorRendering {
+                            function,
+                            name: None,
+                            setter,
+                        },
                         owner,
                         type_context,
                     )
@@ -1046,18 +1133,29 @@ fn render_member_method_declaration(
     rendered
 }
 
+/// How a property accessor is named in a clash listing: by its function when source wrote one,
+/// else as `<get-x>`/`<set-x>`, or by `name` for the static bridge that calls it.
+struct PropertyAccessorRendering<'a> {
+    function: Option<FunId>,
+    name: Option<&'a str>,
+    setter: bool,
+}
+
 fn render_property_accessor_declaration(
     ir: &IrFile,
     property: &krusty::ir::IrProperty,
-    function: Option<FunId>,
-    setter: bool,
+    PropertyAccessorRendering {
+        function,
+        name,
+        setter,
+    }: PropertyAccessorRendering<'_>,
     owner: &str,
     type_context: &[krusty::types::Ty],
 ) -> String {
-    let callable = if setter {
-        format!("<set-{}>", property.name)
-    } else {
-        format!("<get-{}>", property.name)
+    let callable = match name {
+        Some(name) => name.to_string(),
+        None if setter => format!("<set-{}>", property.name),
+        None => format!("<get-{}>", property.name),
     };
     if let Some(function) = function {
         return render_source_member_method(ir, function, &callable, owner, type_context);
