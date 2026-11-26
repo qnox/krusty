@@ -4,10 +4,12 @@
 //! The image has no section headers, because no loader reads them. When the environment variable
 //! [`ENVIRONMENT_VARIABLE`] is set, the linker appends a symbol table, its string table and the
 //! section headers after the loaded segments and points the ELF header at them. Nothing in the
-//! loaded segments moves, so the program behaves identically. Two sections describe the loaded
+//! loaded segments moves, so the program behaves identically. Sections describe the loaded
 //! segments (`.text` for the read+execute one, `.data` for the read+write one), and each symbol
 //! belongs to the one containing its address, which is what lets a debugger treat a function as
-//! an executable location. A symbol in neither is absolute (`SHN_ABS`).
+//! an executable location. The memory past the writable segment's file contents is its own `.bss`
+//! section, so a symbol there lies inside a section of the size it declares. A symbol in no loaded
+//! segment is absolute (`SHN_ABS`).
 
 use object::read::{Object, ObjectSymbol};
 use object::SymbolKind;
@@ -22,6 +24,7 @@ const SHN_ABS: u16 = 0xfff1;
 const SHT_SYMTAB: u32 = 2;
 const SHT_STRTAB: u32 = 3;
 const SHT_PROGBITS: u32 = 1;
+const SHT_NOBITS: u32 = 8;
 const SHF_WRITE: u64 = 1;
 const SHF_ALLOC: u64 = 2;
 const SHF_EXECINSTR: u64 = 4;
@@ -80,6 +83,49 @@ fn section_header(image: &mut Vec<u8>, section: &Section) {
     image.extend_from_slice(&entry_size.to_le_bytes());
 }
 
+/// The sections that describe the loaded segments: `.text` for the executable one, then `.data`
+/// for the file contents of the writable one and `.bss` for the memory past them.
+fn loaded_sections(loaded: &[&ProgramHeader]) -> Vec<Section> {
+    let mut sections = Vec::new();
+    for (segment, (name, flags)) in loaded.iter().zip([
+        (1u32, SHF_ALLOC | SHF_EXECINSTR),
+        (7u32, SHF_ALLOC | SHF_WRITE),
+    ]) {
+        let mut section = |name, kind, address, offset, size| {
+            sections.push(Section {
+                name,
+                kind,
+                flags,
+                address,
+                offset,
+                size,
+                link: 0,
+                info: 0,
+            });
+        };
+        if segment.filesz > 0 {
+            section(
+                name,
+                SHT_PROGBITS,
+                segment.vaddr,
+                segment.offset,
+                segment.filesz,
+            );
+        }
+        if segment.memsz > segment.filesz {
+            let at = segment.filesz;
+            section(
+                13,
+                SHT_NOBITS,
+                segment.vaddr + at,
+                segment.offset + at,
+                segment.memsz - at,
+            );
+        }
+    }
+    sections
+}
+
 /// Append the table for every function and data symbol the layout placed.
 pub(super) fn append(
     image: &mut Vec<u8>,
@@ -92,11 +138,12 @@ pub(super) fn append(
         .iter()
         .filter(|header| header.p_type == PT_LOAD)
         .collect();
+    let sections = loaded_sections(&loaded);
     let section_of = |address: u64| {
-        loaded
+        sections
             .iter()
-            .position(|segment| {
-                address >= segment.vaddr && address < segment.vaddr + segment.memsz.max(1)
+            .position(|section| {
+                address >= section.address && address < section.address + section.size.max(1)
             })
             .map_or(SHN_ABS, |index| index as u16 + 1)
     };
@@ -151,9 +198,8 @@ pub(super) fn append(
     }
     let first_global = locals.len() as u32 + 1;
 
-    let section_names = b"\0.text\0.data\0.symtab\0.strtab\0.shstrtab\0";
-    let (text_name, data_name, symtab_name, strtab_name, shstrtab_name) =
-        (1u32, 7u32, 13u32, 21u32, 29u32);
+    let section_names = b"\0.text\0.data\0.bss\0.symtab\0.strtab\0.shstrtab\0";
+    let (symtab_name, strtab_name, shstrtab_name) = (18u32, 26u32, 34u32);
 
     let mut place = |bytes: &[u8]| {
         while !image.len().is_multiple_of(8) {
@@ -172,27 +218,10 @@ pub(super) fn append(
     let headers_at = image.len() as u64;
 
     image.extend_from_slice(&[0; SECTION_HEADER_SIZE as usize]);
-    // `.text` and `.data` describe the loaded segments; a program with one segment has no `.data`.
-    let loaded_names = [
-        (text_name, SHF_ALLOC | SHF_EXECINSTR),
-        (data_name, SHF_ALLOC | SHF_WRITE),
-    ];
-    for (segment, (name, flags)) in loaded.iter().zip(loaded_names) {
-        section_header(
-            image,
-            &Section {
-                name,
-                kind: SHT_PROGBITS,
-                flags,
-                address: segment.vaddr,
-                offset: segment.offset,
-                size: segment.filesz,
-                link: 0,
-                info: 0,
-            },
-        );
+    for section in &sections {
+        section_header(image, section);
     }
-    let first_table = loaded.len() as u32 + 1;
+    let first_table = sections.len() as u32 + 1;
     section_header(
         image,
         &Section {

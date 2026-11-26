@@ -1046,6 +1046,27 @@ mod tests {
         assert_eq!(section.name(), Ok(".text"));
     }
 
+    /// A symbol in the writable segment's memory past its file contents belongs to a `.bss` section
+    /// that is large enough to hold it.
+    #[test]
+    fn a_requested_symbol_table_puts_a_bss_symbol_in_a_bss_section() {
+        use object::read::{Object as _, ObjectSection as _, ObjectSymbol as _};
+        let (mut object, _) = x86_64_start(&[0xc3]);
+        let bss = object.uninitialized(".bss", SectionKind::UninitializedData, 16, 8);
+        object.define("counter", bss, 8);
+        let bytes = link_with(&[&object.bytes()], &[], linux(Arch::X86_64), true).unwrap();
+        let file = object::File::parse(&*bytes).unwrap();
+        let counter = file
+            .symbols()
+            .find(|symbol| symbol.name() == Ok("counter"))
+            .expect("`counter` is in the table");
+        let section = file
+            .section_by_index(counter.section_index().unwrap())
+            .unwrap();
+        assert_eq!(section.name(), Ok(".bss"));
+        assert!(counter.address() < section.address() + section.size());
+    }
+
     // ---- malformed input is an error, never a panic or a stray write -----------------------------
 
     fn parse_error(what: &str) -> ProgramLinkError {

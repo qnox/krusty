@@ -89,7 +89,9 @@ linker; each limit below is a decision, not an omission.
   in memory, so file offset and address stay congruent and no kernel page size puts both segments
   in one page. Both segments are aligned to that size. No PIC, and no section headers unless
   `KRUSTY_NATIVE_SYMBOL_TABLE` is set: that appends a `.symtab` of every function and data symbol
-  (absolute, at its final address) after the loaded segments, so `gdb`/`nm` can name a crashing
+  at its final address, after the loaded segments, together with `.text`, `.data` and `.bss`
+  sections that describe them. A symbol belongs to the section containing its address and is
+  absolute (`SHN_ABS`) only when no loaded segment contains it. So `gdb`/`nm` can name a crashing
   program's functions without moving anything that loads. The whole image must fit the 4 GiB the
   small code models address.
 - **Imports from shared libraries** (`src/native/linker/{dynamic,libraries}.rs`; design below in
