@@ -13,6 +13,15 @@ impl<'a> BodyLowering<'a> {
         self.instance_storage = Some(super::instance_storage::InstanceStorageFrame::initializer(
             class, plan,
         ));
+        let outer =
+            plan.header
+                .outer
+                .map(|outer| super::super::same_library_class::OuterInstance {
+                    symbol: outer.this,
+                    field: u32::try_from(plan.field_declarations.len())
+                        .expect("a field list fits u32"),
+                });
+        self = self.reading_outer_instance(class, outer);
         // The superclass constructor's arguments read the constructor's own parameters, which the
         // initialization frame numbers as the constructor does.
         if let Some(superclass) = &plan.superclass {
@@ -160,6 +169,7 @@ impl<'a> BodyLowering<'a> {
             Some(receiver),
             false,
         ));
+        self = self.reading_outer_instance(class, member.outer);
         // The arguments read the constructor's own parameters, which this frame numbers as the
         // constructor does.
         let mut lowered = Vec::with_capacity(arguments.len());
@@ -199,7 +209,7 @@ impl<'a> BodyLowering<'a> {
                 &plan.fields,
             ),
         );
-        self.read_outer_instance(plan.class, plan.outer);
+        self = self.reading_outer_instance(plan.class, plan.outer);
         // The superclass constructor's arguments read the constructor's values, which this
         // initialization's frame numbers as the constructor does.
         if !plan.superclass_arguments.is_empty() {
@@ -237,17 +247,16 @@ impl<'a> BodyLowering<'a> {
             member.receiver,
             &member.fields,
         ));
-        self.read_outer_instance(member.class, member.outer);
-        self
+        self.reading_outer_instance(member.class, member.outer)
     }
 
     /// An inner class's bodies read the outer class's `this` from the field its constructor
     /// stores the outer instance in.
-    fn read_outer_instance(
-        &mut self,
+    pub(in super::super) fn reading_outer_instance(
+        mut self,
         class: crate::ir::ClassId,
         outer: Option<super::super::same_library_class::OuterInstance<'a>>,
-    ) {
+    ) -> Self {
         if let Some(outer) = outer {
             let class_name = self.ir.classes[class as usize].fq_name_id();
             self.captures.insert(
@@ -259,5 +268,6 @@ impl<'a> BodyLowering<'a> {
                 },
             );
         }
+        self
     }
 }

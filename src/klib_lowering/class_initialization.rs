@@ -142,7 +142,6 @@ fn admit<'a, 'b>(
             KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract
         )
         || contract.is_value
-        || contract.is_inner
         || contract.is_expect
         || header.class.value_class_representation.is_some()
     {

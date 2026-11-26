@@ -95,8 +95,9 @@ impl<'u, 's> Linker<'u, 's> {
     }
 
     /// The class that directly declares the private member `identity`: one this lowering made
-    /// active, or an object the bodies read. Kotlin makes a companion's private member visible in
-    /// its containing class, whose body reads the companion and calls the member on it.
+    /// active, an object the bodies read, or a class enclosing the calling one, which Kotlin lets
+    /// call its private members. Kotlin makes a companion's private member visible in its
+    /// containing class, whose body reads the companion and calls the member on it.
     fn private_member_class(
         &mut self,
         ir: &mut IrFile,
@@ -139,7 +140,10 @@ impl<'u, 's> Linker<'u, 's> {
             return Ok(None);
         };
         let callees: &'s super::super::KlibCalleeFacts<'s> = self.sources.callees;
-        let Some(object) = callees.read_class(classifier) else {
+        let Some(object) = callees
+            .read_class(classifier)
+            .or_else(|| callees.private_member_class(classifier))
+        else {
             return Ok(None);
         };
         let header = super::super::class_headers::authenticate_private_member(

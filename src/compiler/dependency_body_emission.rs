@@ -409,6 +409,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             authorized_member_edges,
             read_classes,
             dispatched,
+            private_member_classes,
         } = closure;
         let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
@@ -421,6 +422,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         .with_checked_dependency_facts(checked_facts)
         .with_authorized_member_edges(authorized_member_edges)
         .with_read_classes(read_classes)
+        .with_private_member_classes(private_member_classes)
         .with_enum_entries_factory(entries_factory.clone())
         .with_target_classifiers(&target_represents_classifier);
         let capabilities = DependencyLeafCapabilities {

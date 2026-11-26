@@ -4,6 +4,9 @@ use super::*;
 use crate::fx_hash::HashSet;
 use crate::ir::{IrClass, IrCtorArg, IrCtorParameterProvenance, IrExpr, IrField};
 
+/// The field an inner class keeps its outer instance in, after the fields it declares.
+const OUTER_INSTANCE_FIELD: &str = "this$0";
+
 impl<'u, 's> Linker<'u, 's> {
     pub(super) fn materialize_class(
         &mut self,
@@ -182,6 +185,7 @@ impl<'u, 's> Linker<'u, 's> {
             fields: plan.field_declarations.clone(),
             properties: super::super::class_storage::backed_properties(&plan.header.class.members),
             contract: plan.header.contract,
+            outer: super::MemberClass::outer_instance(&plan.header, &plan.field_declarations),
         };
         // An enum's constants are its instances: the arguments each passes to the constructor
         // are lowered in the enum's own initialization frame.
@@ -309,7 +313,8 @@ impl<'u, 's> Linker<'u, 's> {
             .iter()
             .filter_map(super::super::class_storage::member_field)
             .collect::<Vec<_>>();
-        if fields.len() != ir.classes[class as usize].fields.len() {
+        let outer = super::MemberClass::outer_instance(&delegation.header, &fields);
+        if fields.len() + usize::from(outer.is_some()) != ir.classes[class as usize].fields.len() {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "a secondary constructor's class declares other fields than its materialized class"
                     .to_owned(),
@@ -415,6 +420,7 @@ impl<'u, 's> Linker<'u, 's> {
                     &delegation.header.class.members,
                 ),
                 contract: delegation.header.contract,
+                outer,
             }),
             local_body: None,
             static_initialization: None,
@@ -475,32 +481,65 @@ impl<'u, 's> Linker<'u, 's> {
                     .with_is_private(field.private)
             })
             .collect();
+        // An inner class stores the outer instance its constructor receives first in a field after
+        // its own, before the superclass constructor runs.
+        let outer = plan.header.outer.map(|outer| {
+            let field = u32::try_from(class.fields.len()).expect("a field list fits u32");
+            class
+                .fields
+                .push(IrField::new(OUTER_INSTANCE_FIELD.to_owned(), outer.ty).with_is_final(true));
+            class.is_inner_class = true;
+            class.constructor_prefix_count = 1;
+            class.pre_super_param_fields.push((0, field));
+            (outer.ty, field)
+        });
         // A class without a primary constructor is built by its secondary constructors alone.
         class.has_primary_ctor = plan.primary;
-        class.ctor_args = plan
-            .header
-            .function
-            .regular_parameters
-            .iter()
+        let values = &header.params()[usize::from(outer.is_some())..];
+        class.ctor_args = outer
             .filter(|_| plan.primary)
-            .zip(header.params())
-            .map(|(parameter, ty)| IrCtorArg {
-                name: Some(parameter.name.clone()),
+            .map(|(ty, field)| IrCtorArg {
+                name: None,
                 context_kind: crate::types::ContextParameterKind::None,
-                ty: *ty,
-                declared_ty: Some(*ty),
-                is_field: false,
-                field_index: None,
+                ty,
+                declared_ty: None,
+                is_field: true,
+                field_index: Some(field),
                 has_default: false,
                 is_vararg: false,
                 type_param: None,
                 check: None,
                 anonymous_super_forward: None,
                 capture: None,
-                provenance: IrCtorParameterProvenance::Value,
+                provenance: IrCtorParameterProvenance::EnclosingInstance,
                 capture_identity: None,
             })
+            .into_iter()
             .collect();
+        class.ctor_args.extend(
+            plan.header
+                .function
+                .regular_parameters
+                .iter()
+                .filter(|_| plan.primary)
+                .zip(values)
+                .map(|(parameter, ty)| IrCtorArg {
+                    name: Some(parameter.name.clone()),
+                    context_kind: crate::types::ContextParameterKind::None,
+                    ty: *ty,
+                    declared_ty: Some(*ty),
+                    is_field: false,
+                    field_index: None,
+                    has_default: false,
+                    is_vararg: false,
+                    type_param: None,
+                    check: None,
+                    anonymous_super_forward: None,
+                    capture: None,
+                    provenance: IrCtorParameterProvenance::Value,
+                    capture_identity: None,
+                }),
+        );
         // The initialization frame stores actual fields explicitly. Its plain value parameters
         // describe constructor arity, not leading constructor-backed storage.
         class.ctor_param_count = 0;
@@ -557,6 +596,7 @@ impl<'u, 's> Linker<'u, 's> {
                 fields: vec![field],
                 properties: super::super::class_storage::backed_properties(&header.class.members),
                 contract,
+                outer: None,
             });
         }
         let classifier = contract.classifier;
@@ -621,6 +661,7 @@ impl<'u, 's> Linker<'u, 's> {
             fields: vec![field],
             properties: super::super::class_storage::backed_properties(&header.class.members),
             contract,
+            outer: None,
         };
         // A boxed instance dispatches to the class's overrides, as an ordinary class's does: each
         // one the program's closure selected, with every declaration it overrides. An override
@@ -734,7 +775,8 @@ impl<'u, 's> Linker<'u, 's> {
             .iter()
             .filter_map(super::super::class_storage::member_field)
             .collect::<Vec<_>>();
-        if fields.len() != ir.classes[class as usize].fields.len() {
+        let outer = super::MemberClass::outer_instance(header, &fields);
+        if fields.len() + usize::from(outer.is_some()) != ir.classes[class as usize].fields.len() {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "a class member's declared fields disagree with its materialized class".to_owned(),
             ));
@@ -745,6 +787,7 @@ impl<'u, 's> Linker<'u, 's> {
             fields,
             properties: super::super::class_storage::backed_properties(&header.class.members),
             contract,
+            outer,
         })
     }
 
@@ -806,6 +849,12 @@ impl<'u, 's> Linker<'u, 's> {
                 )
             })
             .collect::<Result<_, _>>()?;
+        if let Some(outer) = header.outer {
+            class
+                .fields
+                .push(IrField::new(OUTER_INSTANCE_FIELD.to_owned(), outer.ty).with_is_final(true));
+            class.is_inner_class = true;
+        }
         let self_type = contract.self_type();
         let class = ir.add_class(class);
         ir.record_declared_class_self_type(classifier, self_type);

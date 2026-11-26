@@ -357,6 +357,23 @@ pub(super) struct MemberClass<'a> {
     /// The class's properties with a backing field, each with that field.
     pub(super) properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
     pub(super) contract: &'a crate::libraries::KlibBodyClassContract,
+    /// An inner class's outer instance, which its bodies read from the field after `fields`.
+    pub(super) outer: Option<super::same_library_class::OuterInstance<'a>>,
+}
+
+impl<'a> MemberClass<'a> {
+    /// The outer instance of the class `header` declares, kept after its declared `fields`.
+    fn outer_instance(
+        header: &super::class_headers::ClassMemberHeader<'_, 'a>,
+        fields: &[&'a KlibIrField],
+    ) -> Option<super::same_library_class::OuterInstance<'a>> {
+        header
+            .outer
+            .map(|outer| super::same_library_class::OuterInstance {
+                symbol: outer.this,
+                field: u32::try_from(fields.len()).expect("a field list fits u32"),
+            })
+    }
 }
 
 impl DependencyBodyUnit {
@@ -1070,6 +1087,7 @@ impl DependencyBodyUnit {
                                 member.properties.clone(),
                                 member.contract.is_value,
                             )
+                            .reading_outer_instance(member.class, member.outer)
                             .body(body.statements),
                         None => lowering.body(body.statements),
                     }
