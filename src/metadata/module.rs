@@ -114,10 +114,11 @@ pub fn build_kotlin_module(packages: &[(String, Vec<PackagePart>)], version: [i3
     for (pkg, parts) in packages {
         let mut pp = Pb::new();
         pp.field_bytes(1, pkg.as_bytes()); // package_fq_name
-                                           // kotlinc's `PackageParts.addTo`: the parts in the package, then those a
-                                           // `@file:JvmPackageName` moved out of it. Each is grouped by multifile facade (facades in
-                                           // name order, plain parts last) and sorted by name. Both lists number their facades from
-                                           // one table.
+
+        // kotlinc's `PackageParts.addTo`: the parts in the package, then those a
+        // `@file:JvmPackageName` moved out of it. Each is grouped by multifile facade (facades in
+        // name order, plain parts last) and sorted by name. Both lists number their facades from
+        // one table.
         let (within, outside): (Vec<&PackagePart>, Vec<&PackagePart>) =
             parts.iter().partition(|part| part.jvm_package.is_none());
         let mut facades = FacadeIds::default();

@@ -8,8 +8,12 @@
 
 use std::sync::Arc;
 
+use crate::ir_emit::KotlinMetadata;
+use crate::multifile_facades;
 use krusty::backend::BackendModuleFacts;
 use krusty::fir::SourceFileId;
+use krusty::ir::IrFile;
+use krusty::jvm::classfile::ClassWriter;
 use krusty::types::{type_name, type_name_child, AnnotationValue, TypeName};
 
 /// The JVM class that declares a source's top-level members, and where it sits.
@@ -82,6 +86,30 @@ pub(crate) fn relocated_package_name(class: &str, kotlin_package: &str) -> Optio
         .rsplit_once('/')
         .map_or("", |(directory, _)| directory);
     (directory != kotlin_package.replace('.', "/")).then(|| kotlin_package.to_string())
+}
+
+/// Writes the header of `class`, the class that declares `ir`'s top-level members: the `pn` of a
+/// class `@file:JvmPackageName` relocated, then either the part header of a `multifile_facade`
+/// part or a plain package part's file annotations and `@Metadata`.
+pub(crate) fn write_header(
+    cw: &mut ClassWriter,
+    ir: &IrFile,
+    metadata: Option<&KotlinMetadata>,
+    class: &str,
+    multifile_facade: Option<&str>,
+) {
+    if let Some(package) = relocated_package_name(class, ir.package.as_deref().unwrap_or_default())
+    {
+        cw.set_metadata_package_name(&package);
+    }
+    if let Some(multifile_facade) = multifile_facade {
+        multifile_facades::write_part_header(cw, ir, metadata, multifile_facade);
+    } else {
+        cw.set_class_annotations(&ir.file_annotations);
+        if let Some(m) = metadata {
+            cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
+        }
+    }
 }
 
 /// Each source's top-level class, indexed by source like `stems`.

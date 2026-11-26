@@ -1334,20 +1334,7 @@ fn emit_pass(
     // empty one is an ABI divergence (spurious extra class). A facade static is owner-less.
     let facade_has_static = ir.statics.iter().any(|s| s.is_facade_owned());
     if facade_has_method || facade_has_static || metadata.is_some() {
-        if let Some(package) = crate::file_facades::relocated_package_name(
-            facade,
-            ir.package.as_deref().unwrap_or_default(),
-        ) {
-            cw.set_metadata_package_name(&package);
-        }
-        if let Some(multifile_facade) = env.multifile_facade {
-            multifile_facades::write_part_header(&mut cw, ir, metadata, multifile_facade);
-        } else {
-            cw.set_class_annotations(&ir.file_annotations);
-            if let Some(m) = metadata {
-                cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
-            }
-        }
+        crate::file_facades::write_header(&mut cw, ir, metadata, facade, env.multifile_facade);
         out.push((facade.to_string(), env.run.finish_class(cw)));
         out.extend(drain_lambda_classes(env, opts));
         out.extend(env.run.machine_classes.borrow_mut().drain(..));
