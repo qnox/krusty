@@ -1685,9 +1685,8 @@ fn stdlib_calls_reach_header_declared_callees() {
                      indices)",
                     6,
                 ),
-                ("it uses a call of a member function)", 84),
-                ("it uses a call through a property accessor signature)", 41),
-                ("it uses a constant of another type than its value's)", 6),
+                ("it uses a call of a member function)", 83),
+                ("it uses a call through a property accessor signature)", 47),
                 (
                     "it uses an enum value whose class the closure did not read)",
                     1,

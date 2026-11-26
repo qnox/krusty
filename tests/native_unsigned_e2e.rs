@@ -410,10 +410,8 @@ fn a_signed_value_converts_to_an_unsigned_one_by_its_own_signedness() {
 /// serializes as their signed bits.
 #[test]
 fn a_float_converted_to_an_unsigned_type_saturates() {
-    let source = "fun box(): String {\n\
-         \x20   val d: Double = -1.5\n\
-         \x20   return if (d.toUInt() == 0u) \"OK\" else \"fail\"\n\
-         }\n";
+    let source = include_str!("box_regressions/floatToUnsignedSaturates.kt");
+    assert_eq!(kotlinc_box_result(source), "OK", "FloatToUnsigned: kotlinc");
     expect_box_ok_with_stdlib(source, "FloatToUnsigned");
     expect_native_box(source, "FloatToUnsigned", "OK");
 }
