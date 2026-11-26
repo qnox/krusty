@@ -138,6 +138,9 @@ enum BuilderMember {
     /// `get(Int)`, which throws the runtime `IndexOutOfBoundsException` whose struct is
     /// `index_out_of_bounds` for an index outside the units in use.
     Get { index_out_of_bounds: u32 },
+    /// `subSequence(Int, Int)`, the builder's units between two indices as a string, checked as
+    /// `String.subSequence` checks its range.
+    SubSequence,
 }
 
 impl Runtime {
@@ -219,6 +222,9 @@ impl Runtime {
         }
         match builder {
             Some(Ok(operation)) => {
+                if matches!(operation, Operation::Builder(BuilderMember::SubSequence)) {
+                    self.string_sub_sequence(module, classifiers)?;
+                }
                 let function =
                     self.define_implementation(module, member, Receiver::Runtime, operation)?;
                 self.objects
@@ -399,6 +405,15 @@ impl Runtime {
                         code.throw(self.exceptions.tag).end();
                         code.local_get(1).call(builders.get);
                     }
+                    BuilderMember::SubSequence => {
+                        let slice = self
+                            .defined_string_sub_sequence()
+                            .ok_or("a builder slice implemented before its function")?;
+                        code.call(builders.to_string)
+                            .local_get(1)
+                            .local_get(2)
+                            .call(slice);
+                    }
                 }
             }
             _ => return Err("a builtin implementation of another representation".to_string()),
@@ -455,6 +470,11 @@ fn builder_operation(
             Some(BuilderMember::Get {
                 index_out_of_bounds: index_out_of_bounds()?,
             })
+        }
+        ("subSequence", [Ty::Int, Ty::Int])
+            if params[1..] == [ValType::I32, ValType::I32] && *results == reference =>
+        {
+            Some(BuilderMember::SubSequence)
         }
         _ => None,
     };
