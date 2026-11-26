@@ -164,6 +164,9 @@ pub enum CompilerIntrinsic {
     /// units. A target that lays out strings itself orders them itself, as it reads their length
     /// and code units.
     StringCompare,
+    /// `String.subSequence(Int, Int): CharSequence`, the characters between two indices of a
+    /// string, which is itself a string. A target that lays out strings itself copies them.
+    StringSubSequence,
     NullableAnyToString,
     /// Exact builtin numeric/character conversion declaration selected from Kotlin builtins.
     /// The source and target types remain call-site semantic facts on FIR; this marker only states

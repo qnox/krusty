@@ -210,7 +210,6 @@ casts/wasmCastMessagesWasmJs.kt
 classDelegation/multipleModules.kt
 classLiteral/bound/primitives.kt
 classLiteral/classEquality.kt
-classes/comanionObjectFieldVsClassField.kt
 classes/kt1538.kt
 classes/kt2566_2.kt
 classes/nestedInitBlocksWithLambda.kt
@@ -856,8 +855,6 @@ inlineClasses/callableReferences/inlineClassPrivatePrimaryVal.kt
 inlineClasses/callableReferences/inlineClassPrivatePrimaryValGeneric.kt
 inlineClasses/castInsideWhenExpression.kt
 inlineClasses/castInsideWhenExpressionGeneric.kt
-inlineClasses/contextsAndAccessors/accessPrivateInlineClassConstructorFromLambda.kt
-inlineClasses/contextsAndAccessors/accessPrivateInlineClassConstructorFromLambdaGeneric.kt
 inlineClasses/contextsAndAccessors/kt27513.kt
 inlineClasses/contextsAndAccessors/kt27513Generic.kt
 inlineClasses/customIterator.kt
@@ -1057,7 +1054,6 @@ lower/forLoopsLowering/withIndexUInt.kt
 mangling/internalOverrideSuperCall.kt
 mangling/multipleConstructors.kt
 mangling/publicOverrideSuperCall.kt
-multiDecl/component.kt
 multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
 multiplatform/k2/basic/contextInFakeOverride.kt
 multiplatform/k2/basic/delegatedByExpectExtensionProperty.kt
@@ -1894,7 +1890,6 @@ regressions/kt15196.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
 regressions/kt32949.kt
-regressions/kt344.kt
 regressions/kt5056.kt
 regressions/kt6434.kt
 regressions/kt68727.kt
@@ -1902,7 +1897,6 @@ regressions/lambdaWrongReturnType.kt
 regressions/multimodule/inlineAssertFailsWithBlock.kt
 regressions/multimodule/inlineAssertFailsWithCompletedBlock.kt
 regressions/multimodule/inlineBuiltString.kt
-regressions/multimodule/inlineTextTrim.kt
 regressions/multimodule/inlineTodoDefaultMessage.kt
 regressions/multimodule/multimoduleDirectCollectionIterator.kt
 reified/callChain.kt
@@ -1988,8 +1982,6 @@ strings/concatNullableGenericWithPrimitiveUpperBound.kt
 strings/constInStringTemplate.kt
 strings/kt13213.kt
 strings/kt13213a.kt
-strings/kt3571.kt
-strings/kt5956.kt
 strings/kt86478_stringBuilderSetLength.kt
 strings/nestedConcat.kt
 strings/trimOptimization.kt
