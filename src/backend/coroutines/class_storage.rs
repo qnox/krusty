@@ -376,6 +376,16 @@ impl MachineStorage for ContinuationFields {
                         params.push(continuation_ty);
                         *ret = any;
                     }
+                    // A virtual call of a current-module suspend member (an interface member a
+                    // delegating class forwards to) takes the continuation like a module call.
+                    Callee::Virtual {
+                        params: Some((params, ret)),
+                        module_target: Some(_),
+                        ..
+                    } => {
+                        params.push(continuation_ty);
+                        *ret = any;
+                    }
                     _ => return Err(ReentryDecline::UnsupportedCallShape),
                 }
                 args.push(completion);
