@@ -83,10 +83,10 @@ impl KlibBodyClassContract {
     }
 
     /// Whether a support unit materializes this class and emits its members as functions of the
-    /// class it materializes: a value class, or a class or object that is not sealed, inner or
-    /// expected; a generic one carries its formals, which its members' bodies read. A builtin type
-    /// of the common type model is neither, and neither is `kotlin.Any`, the root of every class,
-    /// which each target lays out itself.
+    /// class it materializes: a value class, or a class, object or enum class that is not sealed,
+    /// inner or expected; a generic one carries its formals, which its members' bodies read. A
+    /// builtin type of the common type model is neither, and neither is `kotlin.Any`, the root of
+    /// every class, which each target lays out itself.
     pub(crate) fn emits_members(&self) -> bool {
         if self.is_builtin_type() || self.classifier == crate::types::wk::any() {
             return false;
@@ -100,6 +100,12 @@ impl KlibBodyClassContract {
                 KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract
             ) && !self.is_inner
                 && !self.is_expect)
+    }
+
+    /// Whether the class's own declaration creates every instance of it, through its private
+    /// primary constructor: an object its one instance, an enum class each of its entries.
+    pub(crate) fn declares_instances(&self) -> bool {
+        matches!(self.kind, super::TypeKind::Object | super::TypeKind::Enum)
     }
 
     /// This class applied to its declared formals. A non-generic class is the bare classifier.

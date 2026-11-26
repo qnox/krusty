@@ -1931,7 +1931,7 @@ fn check_jvm_outcomes(
     corpus: &BTreeSet<String>,
     full_run: bool,
 ) {
-    let version = krusty::kotlin_version::target();
+    let version = krusty::kotlin_version::environment_release();
     let failures: Vec<String> = results
         .iter()
         .filter_map(|(file, result, _)| match result {
@@ -2000,7 +2000,10 @@ fn check_jvm_outcomes(
     assert!(
         mismatches.is_empty(),
         "{}",
-        mismatches.report(Platform::Jvm, version)
+        box_ratchet::failed_line(
+            &box_ratchet::expectations_subject(Platform::Jvm),
+            &mismatches.report(Platform::Jvm, version)
+        )
     );
     eprintln!(
         "JVM box applicability matches {} ({} expected not-applicable)",

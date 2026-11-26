@@ -21,7 +21,7 @@ fn compile_sources(sources: &[(&str, &str)], class_major: Option<u16>) -> Vec<(S
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         krusty::frontend::PlatformProvider::jvm(platform),
-        &krusty::features::LangFeatures::default(),
+        &krusty::features::LangFeatures::from_environment(),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
     );

@@ -525,6 +525,16 @@ pub(super) fn plan(
                             found.line = line;
                         }
                     }
+                    // A suspend function's continuation class has no source position: kotlinc adds
+                    // it to the file after the declarations it was lowered from, so the accessor
+                    // its re-entry needs follows every use the source wrote.
+                    if context.class.is_some_and(|class| {
+                        ir.jvm_continuation_functions.contains_key(&(class as u32))
+                    }) {
+                        for found in &mut uses[first_use..] {
+                            found.line = u32::MAX;
+                        }
+                    }
                 }
             }
         }
