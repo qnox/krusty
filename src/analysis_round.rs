@@ -127,8 +127,22 @@ mod tests {
                 ["first", "Box", "öpen", "s", "top"],
                 "separator {separator:?}"
             );
-            let box_range = file.declarations[1].range;
-            assert!(slice(&text, box_range).starts_with("class Box"));
+            let whole: Vec<_> = file
+                .declarations
+                .iter()
+                .map(|declaration| slice(&text, declaration.range))
+                .collect();
+            assert_eq!(
+                whole,
+                [
+                    "val first = \"é\u{1F600}\"",
+                    "class Box {\n    fun öpen() = 1\n}",
+                    "fun öpen() = 1",
+                    "val s = \"\u{1F600}\"",
+                    "val top = 2",
+                ],
+                "separator {separator:?}"
+            );
             assert_eq!(file.declarations[2].parent, Some(1));
             assert_eq!(
                 file.declaration_at(file.declarations[2].name_range.start),
