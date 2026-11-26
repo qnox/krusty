@@ -242,6 +242,10 @@ pub struct FileInput<'a> {
     /// Dependency interface members a library default implements without a lowered body, with
     /// the reason; shared by the whole emission session.
     pub unimplementable_interface_members: &'a mut HashMap<Vec<u8>, String>,
+    /// What the files lowered so far declare, which a file lowered later reads beside its own: a
+    /// dependency body emitted for the program calls through a type the program puts a class of
+    /// its own behind exactly as the program itself would.
+    pub program_declarations: &'a mut ProgramDeclarations,
     /// The accessors synthesized for each reference to a dependency property, by site; see
     /// [`crate::dependency_references`].
     pub dependency_properties:
@@ -256,6 +260,37 @@ pub struct FileInput<'a> {
     /// The classes earlier files of the source module laid out, which a class of this file may
     /// extend.
     pub laid_out: &'a LaidOutClasses,
+}
+
+/// The capabilities the files of one program made unsafe for the runtime's own tables, kept across
+/// every file lowered: see [`declares_its_own_comparable`] and [`implemented_dependencies`].
+#[derive(Default)]
+pub struct ProgramDeclarations {
+    declares_its_own_comparable: bool,
+    implemented_dependencies: krusty::fx_hash::HashSet<krusty::types::TypeName>,
+}
+
+impl ProgramDeclarations {
+    /// Take in, before any file is lowered, the `Comparable` objects a source file of the program
+    /// declares: a dependency body ordering its operands through `Comparable` must reach them by
+    /// dispatch, where the runtime's own order answers only the builtin ones.
+    pub(super) fn absorb_comparable(&mut self, ir: &IrFile) {
+        self.declares_its_own_comparable |= declares_its_own_comparable(ir);
+        self.implemented_dependencies.extend(
+            implemented_dependencies(ir, |_| false)
+                .into_iter()
+                .filter(|&owner| super::super::intrinsics::is_comparable_supertype(owner)),
+        );
+    }
+
+    /// Take in what a file of the program's own source declares. Only source files count: a
+    /// library class a support unit lays out answers through its own table, whichever type
+    /// reaches it.
+    fn absorb(&mut self, ir: &IrFile, laid_out: impl Fn(krusty::types::TypeName) -> bool) {
+        self.declares_its_own_comparable |= declares_its_own_comparable(ir);
+        self.implemented_dependencies
+            .extend(implemented_dependencies(ir, laid_out));
+    }
 }
 
 pub fn lower_file(
@@ -284,11 +319,15 @@ pub fn lower_file(
         dependency_instances,
         dependency_interface_numbers,
         unimplementable_interface_members,
+        program_declarations,
         value_classes,
         slot_plan,
         module_facts,
         laid_out,
     } = input;
+    if unit_kind == krusty::backend::CheckedIrUnitKind::Source {
+        program_declarations.absorb(ir, |owner| laid_out.get(owner).is_some());
+    }
     let class_model = model::build(
         ir,
         value_classes,
@@ -392,10 +431,18 @@ pub fn lower_file(
         // a thunk could be emitted for, and only the model knows that.
         unwalkable_collections: krusty::fx_hash::HashSet::default(),
         walkable_classes: krusty::fx_hash::HashMap::default(),
-        declares_its_own_comparable: declares_its_own_comparable(ir),
-        implemented_dependencies: implemented_dependencies(ir, |owner| {
-            laid_out.get(owner).is_some()
-        }),
+        declares_its_own_comparable: declares_its_own_comparable(ir)
+            || program_declarations.declares_its_own_comparable,
+        implemented_dependencies: {
+            let mut own = implemented_dependencies(ir, |owner| laid_out.get(owner).is_some());
+            own.extend(
+                program_declarations
+                    .implemented_dependencies
+                    .iter()
+                    .copied(),
+            );
+            own
+        },
         module_name,
         unit_kind,
         dependency_signatures,

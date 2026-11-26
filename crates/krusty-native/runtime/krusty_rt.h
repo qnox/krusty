@@ -763,26 +763,6 @@ kt_boolean kt_floating_range_is_empty(KRef range);
 kt_double kt_floating_range_start(KRef range);
 kt_double kt_floating_range_end(KRef range);
 
-/* ---- comparable ranges ------------------------------------------------------------------------
-
-   `"a".."c"`, and every other `a..b` ordered by `Comparable` rather than by a machine comparison.
-   The bounds are OBJECTS, and the range carries the `compareTo` it orders them by: the generator
-   chose that operation where it built the range, knowing the element type, so the runtime never
-   has to rediscover it from the bounds' descriptors. `kt_compare_any` is the one for the builtin
-   comparables; a program's own `Comparable` class passes its `compareTo`. Not a progression
-   either: `Comparable` names no successor, so there is no step and no walk. */
-extern const KType kt_type_comparable_range;
-
-/* `a.compareTo(b)`: negative, zero or positive. A program's `compareTo` may raise instead; it then
-   leaves the exception pending and its answer means nothing. */
-typedef kt_int (*kt_compare_fn)(KRef a, KRef b);
-
-KRef kt_comparable_range(KRef start, KRef end, kt_compare_fn compare);
-kt_boolean kt_comparable_range_contains(KRef range, KRef value);
-kt_boolean kt_comparable_range_is_empty(KRef range);
-KRef kt_comparable_range_start(KRef range);
-KRef kt_comparable_range_end(KRef range);
-
 /* `for (x in range)` over a range the program materialized. The iterator is its own object because
    the loop reads it twice per step; a range iterated straight from a literal never becomes one,
    because checked common IR preserves that literal as a range-loop operation for this backend to
