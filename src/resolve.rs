@@ -320,8 +320,10 @@ mod operator_declarations;
 mod operator_of_declarations;
 mod opt_in_usage;
 mod primitive_reference;
+mod synthetic_property_references;
 use operator_calls::{
-    range_operator, OperatorOperand, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess,
+    builtin_inc_dec_result, builtin_unary_result, is_builtin_operator_method, range_operator,
+    OperatorOperand, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess,
 };
 mod declaration_publication;
 mod declaring_receivers;
@@ -1176,57 +1178,6 @@ fn fun_body_expr(body: &FunBody) -> Option<ExprId> {
         FunBody::Expr(expression) | FunBody::Block(expression) => Some(*expression),
         FunBody::None => None,
     }
-}
-
-/// Best-effort type of a simple literal initializer (for an unannotated top-level property).
-/// Names of Kotlin's primitive operator/bitwise/conversion-overloadable methods. An explicit call
-/// of one of these on a primitive receiver binds to the builtin operator, not a user extension.
-fn is_builtin_operator_method(name: &str) -> bool {
-    matches!(
-        name,
-        "plus"
-            | "minus"
-            | "times"
-            | "div"
-            | "rem"
-            | "inc"
-            | "dec"
-            | "unaryPlus"
-            | "unaryMinus"
-            | "and"
-            | "or"
-            | "xor"
-            | "inv"
-            | "shl"
-            | "shr"
-            | "ushr"
-            | "compareTo"
-            | "rangeTo"
-    )
-}
-
-fn builtin_unary_result(
-    platform: &dyn SemanticPlatform,
-    operand: Ty,
-    operator: UnOp,
-) -> Option<Ty> {
-    let operand = operand
-        .platform_lower_bound()
-        .unboxed_primitive()
-        .or_else(|| platform.boxed_primitive(operand))
-        .unwrap_or(operand);
-    match operator {
-        UnOp::Neg | UnOp::Plus if operand.is_numeric() => Some(match operand {
-            Ty::Byte | Ty::Short => Ty::Int,
-            _ => operand,
-        }),
-        UnOp::Not if operand == Ty::Boolean => Some(Ty::Boolean),
-        UnOp::Neg | UnOp::Not | UnOp::Plus => None,
-    }
-}
-
-fn builtin_inc_dec_result(operand: Ty) -> Option<Ty> {
-    operand.is_numeric_or_char().then_some(operand)
 }
 
 /// An EXTENSION property reference asserts no type arguments yet. Its value type is written in terms
@@ -28382,6 +28333,9 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
+        if self.rejects_synthetic_property_reference(expression, &property) {
+            return Some(Ty::Error);
+        }
         if !self.property_reference_exposes_setter(&property, receiver) {
             property.setter = None;
         }
@@ -28517,28 +28471,27 @@ impl<'a> Checker<'a> {
             Some(TyKind::Fun(function)) => Some(function),
             _ => None,
         };
-        if let Some(property) =
-            self.select_callable_property_ref(candidates.property.as_ref(), &[], expected)
-        {
+        let (declared, synthetic) = synthetic_property_references::by_level(
+            self.select_callable_property_ref(candidates.property.as_ref(), &[], expected),
+        );
+        if let Some(property) = declared {
             return Some(BoundCallableRefSelection::Property(Box::new(property)));
         }
-        if let Some(expected) = expected_function {
-            if let Some((member, argument_mapping, type_arguments)) =
-                self.select_adapted_instance_ref(&candidates.overloads, expected)
-            {
-                return Some(BoundCallableRefSelection::AdaptedMember {
-                    member: Box::new(member),
-                    argument_mapping,
-                    type_arguments,
-                    expected,
-                });
-            }
-            return None;
-        }
-        candidates
-            .method
-            .clone()
-            .map(|member| BoundCallableRefSelection::Member(Box::new(member)))
+        let member = match expected_function {
+            Some(expected) => self
+                .select_adapted_instance_ref(&candidates.overloads, expected)
+                .map(|(member, argument_mapping, type_arguments)| {
+                    BoundCallableRefSelection::AdaptedMember {
+                        member: Box::new(member),
+                        argument_mapping,
+                        type_arguments,
+                        expected,
+                    }
+                }),
+            None => (candidates.method.clone())
+                .map(|member| BoundCallableRefSelection::Member(Box::new(member))),
+        };
+        member.or_else(|| synthetic.map(|p| BoundCallableRefSelection::Property(Box::new(p))))
     }
 
     fn record_bound_callable_ref(
@@ -45283,11 +45236,13 @@ impl<'a> Checker<'a> {
                 &receiver_candidates,
                 Some(receiver_ty),
             );
-            if let Some(property) = self.select_callable_property_ref(
-                receiver_candidates.property.as_ref(),
-                &[receiver_ty],
-                expected,
-            ) {
+            let (declared, synthetic) =
+                synthetic_property_references::by_level(self.select_callable_property_ref(
+                    receiver_candidates.property.as_ref(),
+                    &[receiver_ty],
+                    expected,
+                ));
+            if let Some(property) = declared {
                 return self.record_callable_property_ref(
                     expression,
                     CallableReferenceBinding::Unbound,
@@ -45354,6 +45309,16 @@ impl<'a> Checker<'a> {
                         return Some(ty);
                     }
                 }
+            }
+            if let Some(property) = synthetic {
+                let unbound = CallableReferenceBinding::Unbound;
+                return self.record_callable_property_ref(
+                    expression,
+                    unbound,
+                    receiver_ty,
+                    property,
+                    expected,
+                );
             }
             let extension_candidates = if extension_receiver_ty == receiver_ty {
                 receiver_candidates.clone()
