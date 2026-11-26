@@ -11,7 +11,10 @@ use crate::libraries::{
     ExternalCallableKind, KlibBodyCallable, KlibBodyClassParameters, KlibDependencyCallable,
     ParamFlags,
 };
-use crate::metadata::klib_ir::tree::{KlibIrFunction, KlibIrNullability, KlibIrType};
+use crate::metadata::klib_ir::tree::{
+    KlibIrArguments, KlibIrExprId, KlibIrFunction, KlibIrMemberAccess, KlibIrNullability,
+    KlibIrType,
+};
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
 use crate::types::{Ty, TyKind, TypeName};
 
@@ -447,6 +450,32 @@ impl ConstructorDeclaration {
             .iter()
             .map(|parameter| crate::types::ty_subst_applied_arguments(*parameter, &bindings))
             .collect())
+    }
+}
+
+/// A constructor call's arguments in its constructor's parameter order: an inner class's outer
+/// instance, its dispatch receiver, comes first, as a flat argument list already orders it.
+pub(super) fn constructor_arguments(
+    access: &KlibIrMemberAccess,
+    enclosing_instance: bool,
+) -> Result<Vec<Option<KlibIrExprId>>, KlibBodyDeclineReason> {
+    match &access.arguments {
+        KlibIrArguments::Flat(values) => Ok(values.clone()),
+        KlibIrArguments::Split {
+            dispatch_receiver: None,
+            extension_receiver: None,
+            values,
+        } if !enclosing_instance => Ok(values.clone()),
+        KlibIrArguments::Split {
+            dispatch_receiver: Some(outer),
+            extension_receiver: None,
+            values,
+        } if enclosing_instance => Ok(std::iter::once(Some(*outer))
+            .chain(values.iter().copied())
+            .collect()),
+        _ => Err(mismatch(
+            "a constructor call supplies a dispatch or extension receiver",
+        )),
     }
 }
 

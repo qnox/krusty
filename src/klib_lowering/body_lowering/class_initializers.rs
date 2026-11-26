@@ -156,6 +156,11 @@ impl<'a> BodyLowering<'a> {
             ));
         };
         let target = target_params.clone();
+        // The target's parameters follow the constructor prefix, the outer instance an inner
+        // class's delegation reaches with, which the constructor passes on unchanged.
+        let arguments = arguments
+            .get(usize::from(member.outer.is_some())..)
+            .ok_or_else(|| mismatch("an inner class's delegation passes no outer instance"))?;
         if target.len() != arguments.len() {
             return Err(mismatch(
                 "a delegation within the class passes another number of arguments",

@@ -372,10 +372,13 @@ impl<'u, 's> Linker<'u, 's> {
                 },
                 default_masks: Vec::new(),
             },
+            // A delegation passes the class's constructor prefix, an inner class's outer
+            // instance, on by itself; its parameters are the target's own.
             None => crate::ir::CtorDelegateTarget::This {
                 target_params: ir.classes[class as usize]
                     .ctor_args
                     .iter()
+                    .skip(ir.classes[class as usize].constructor_prefix_count as usize)
                     .map(|parameter| parameter.ty)
                     .collect(),
                 target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
@@ -1346,12 +1349,16 @@ fn materialized_secondary(
     delegate: crate::ir::CtorDelegateTarget,
     initialize: crate::ir::ExprId,
 ) -> crate::ir::IrSecondaryCtor {
-    let params = header.params().to_vec();
+    // An inner class's outer instance is the compiler-supplied prefix every constructor shares.
+    let (prefix, params) = header
+        .params()
+        .split_at(usize::from(declaration.outer.is_some()));
+    let params = params.to_vec();
     crate::ir::IrSecondaryCtor {
         annotations: crate::ir::DeclarationAnnotations::default(),
         source_order: u32::MAX,
         lines: crate::ir::IrSecondaryCtorLines::default(),
-        prefix_params: Vec::new(),
+        prefix_params: prefix.to_vec(),
         declared_spellings: Default::default(),
         named_params: declaration
             .function
