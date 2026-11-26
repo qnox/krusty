@@ -691,16 +691,11 @@ increment/augmentedAssignmentWithComplexRhs.kt
 inference/integerLiteralTypeInLamdaReturnType.kt
 inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
-inference/pcla/builderCallAsReturnTypeInLocalClass.kt
-inference/pcla/callableReferenceAndCoercionToUnit.kt
 inference/pcla/callableReferencesProperCompletion.kt
 inference/pcla/issues/kt42139.kt
 inference/pcla/issues/kt47052.kt
-inference/pcla/issues/kt48633.kt
-inference/pcla/issues/kt49887.kt
 inference/pcla/issues/kt64066.kt
 inference/pcla/issues/kt66229.kt
-inference/pcla/issues/kt74819e.kt
 inference/pcla/nestedNonExhaustiveIf.kt
 inference/pcla/substituteStubTypeIntoCR.kt
 inference/pcla/substitutelambdaExtensionReceiverType.kt
