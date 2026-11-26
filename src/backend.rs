@@ -266,7 +266,7 @@ pub trait Backend {
     /// Told, before any file or dependency support is lowered, every source file of the program.
     /// A backend whose lowering of a dependency body depends on what the program declares (a class
     /// an operand typed by a library interface may hold) reads it here.
-    fn observe_program_sources(&self, _state: &mut Self::State, _sources: &[&crate::ir::IrFile]) {}
+    fn observe_program_sources(&self, _state: &mut Self::State, _sources: &[&CheckedIrFile<'_>]) {}
 
     /// Consume one checked common-IR file produced by the streaming FIR path. No parsed source or
     /// AST-keyed semantic table crosses this boundary; target realization consumes only checked IR

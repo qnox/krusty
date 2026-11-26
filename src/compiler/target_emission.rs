@@ -138,10 +138,7 @@ pub(super) fn emit_program<B: Backend>(
     }
     backend.observe_program_sources(
         target.state,
-        &checked
-            .iter()
-            .map(|(_, _, file)| &file.ir)
-            .collect::<Vec<_>>(),
+        &checked.iter().map(|(_, _, file)| file).collect::<Vec<_>>(),
     );
     let uses = checked
         .iter()

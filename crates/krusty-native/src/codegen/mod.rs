@@ -227,9 +227,9 @@ impl Backend for CraneliftBackend {
         format!("krusty: the native backend does not support {construct} yet")
     }
 
-    fn observe_program_sources(&self, state: &mut Self::State, sources: &[&krusty::ir::IrFile]) {
-        for ir in sources {
-            state.program_declarations.absorb_comparable(ir);
+    fn observe_program_sources(&self, state: &mut Self::State, sources: &[&CheckedIrFile<'_>]) {
+        for file in sources {
+            state.program_declarations.absorb_comparable(&file.ir);
         }
     }
 
