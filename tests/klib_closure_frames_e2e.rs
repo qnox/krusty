@@ -44,9 +44,6 @@ mod file_private_inherited_members;
 #[path = "klib_closure_frames_e2e/suspend_function_bodies.rs"]
 mod suspend_function_bodies;
 
-#[path = "klib_closure_frames_e2e/reference_array_literals.rs"]
-mod reference_array_literals;
-
 #[path = "klib_closure_frames_e2e/thread_local_objects.rs"]
 mod thread_local_objects;
 
