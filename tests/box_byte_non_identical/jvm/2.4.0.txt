@@ -267,7 +267,6 @@ casts/isNullablePrimitive.kt
 casts/kt48927_privateMethodOnDerivedCastToBase.kt
 casts/kt53677.kt
 casts/kt54802.kt
-casts/kt59022.kt
 casts/kt82732.kt
 casts/mutableCollections/asWithMutable.kt
 casts/mutableCollections/isWithMutable.kt
@@ -943,7 +942,6 @@ delegatedProperty/provideDelegate/inlineProvideDelegate.kt
 delegatedProperty/provideDelegate/kt16441.kt
 delegatedProperty/provideDelegate/kt39588.kt
 delegatedProperty/provideDelegate/local.kt
-delegatedProperty/provideDelegate/notNullAssertionInLocalDelegated.kt
 delegatedProperty/provideDelegate/propertyMetadata.kt
 delegatedProperty/referenceEnclosingClassFieldInReceiver.kt
 delegatedProperty/referenceEnclosingClassFieldInReceiver2.kt
@@ -1181,7 +1179,6 @@ ieee754/nullableIntEquals.kt
 ieee754/safeCall.kt
 ieee754/smartCastOnWhenSubjectAfterCheckInBranch_properIeeeComparisons.kt
 ieee754/smartCastToDifferentTypesWithNumericPromotion_properIeeeComparisons.kt
-ieee754/smartCastToDoubleAndComparableToDouble.kt
 increment/arrayElement.kt
 increment/classNaryGetSet.kt
 increment/classVarargGetSet.kt
@@ -1196,13 +1193,11 @@ inference/capturedSelfInsideIntersection.kt
 inference/capturedSelfInsideIntersection2.kt
 inference/capturedSelfInsideIntersection3.kt
 inference/capturedTypeAsLambdaInputType.kt
-inference/capturedTypeWhenSubject.kt
 inference/capturedTypesSubstitutionIntoAbbreviation.kt
 inference/coercionToUnitWithLastLambdaExpression.kt
 inference/coerctionToUnitForLastExpressionWithStarProjection.kt
 inference/kt10822.kt
 inference/kt38664.kt
-inference/kt39824.kt
 inference/kt49838.kt
 inference/lastExpressionOfLambdaWithNothingConstraint.kt
 inference/noCoercionToUniForNullableLambdaReturnType.kt
@@ -1380,7 +1375,6 @@ inlineClasses/callableReferences/let/stringGeneric.kt
 inlineClasses/callableReferences/let/stringN.kt
 inlineClasses/callableReferences/let/stringNGeneric.kt
 inlineClasses/callableReferences/let/stringNGeneric2.kt
-inlineClasses/castInsideWhenExpressionGeneric.kt
 inlineClasses/checkBoxingForComplexClassHierarchy.kt
 inlineClasses/checkBoxingForComplexClassHierarchyGeneric.kt
 inlineClasses/checkBoxingForNonLocalAndLabeledReturns.kt
@@ -1886,8 +1880,6 @@ ranges/forInFloatRangeWithCustomIterator.kt
 ranges/forInIndices/forInArrayListIndices.kt
 ranges/forInIndices/forNullableIntInArrayIndices.kt
 ranges/forInIndices/forNullableIntInCollectionIndices.kt
-ranges/forInIndices/kt12983_forInGenericCollectionIndices.kt
-ranges/forInIndices/kt12983_forInSpecificCollectionIndices.kt
 ranges/forInIndices/kt13241_CharSequence.kt
 ranges/forInIndices/kt13241_Collection.kt
 ranges/forInIndices/kt43159_GenericArray.kt
@@ -2160,7 +2152,6 @@ regressions/arrayLiteralSpreadsInSourceOrder.kt
 regressions/atomicCompareExchange.kt
 regressions/callableReferenceToImplicitReceiverUnitCoercion.kt
 regressions/captureStorageDefaultMetadata.kt
-regressions/castReceiverUsesTarget.kt
 regressions/closedRangeBoundsThroughInterface.kt
 regressions/closedRangeBoundsThroughSubclass.kt
 regressions/closedRangeIntAccessors.kt
@@ -2213,7 +2204,9 @@ regressions/inferredDeclarationOpenDependencyBranch.kt
 regressions/inferredResultCallsPastLexicalValue.kt
 regressions/inheritedDefaultDeclarationMetadata.kt
 regressions/inheritedMemberDefaultAcrossFiles.kt
+regressions/inlineAnonymousObjectAcrossFiles.kt
 regressions/inlineCallsInInitializerLambda.kt
+regressions/inlineCrossinlineLambdaAcrossFiles.kt
 regressions/inlineDefaultCallsFilePrivate.kt
 regressions/inlineDefaultLambdaCapturedByClosure.kt
 regressions/inlineDefaultStubRun.kt
@@ -2256,6 +2249,7 @@ regressions/listIteratorPastItsEnds.kt
 regressions/localFunctionReferenceInInlineLambdaCopies.kt
 regressions/localInnerSuperclassProjection.kt
 regressions/localObjectExtensionReceiver.kt
+regressions/loneCarriageReturnLineBreaks.kt
 regressions/longConstStringConcat.kt
 regressions/memberExtensionContextPropertyAcrossModules.kt
 regressions/memberExtensionDependentFormalBound.kt
@@ -2265,9 +2259,11 @@ regressions/memberExtensionRecursiveOpenBound.kt
 regressions/memberLocalFunctions.kt
 regressions/moduleDelegationForwarderSlots.kt
 regressions/multimodule/boundExtensionReferences.kt
+regressions/multimodule/delegatedPropertiesExpandInlineLibraryConventions.kt
 regressions/multimodule/dependencyArrayView.kt
 regressions/multimodule/dependencyContextLambdaArguments.kt
 regressions/multimodule/dependencyInheritedAbstractMembers.kt
+regressions/multimodule/dependencyInnerClasses.kt
 regressions/multimodule/dependencyInterfaceAppliedAbi.kt
 regressions/multimodule/dependencyMapErasedKeyBarrier.kt
 regressions/multimodule/dependencyMemberContractInitialization.kt
