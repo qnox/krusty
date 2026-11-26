@@ -144,14 +144,21 @@ pub(super) fn materialize_omitted_arguments(
 pub(super) fn materialize_constructor_defaults(
     ir: &mut IrFile,
     parameters: &[krusty::types::Ty],
-    supplied: Vec<krusty::ir::ExprId>,
+    mut supplied: Vec<krusty::ir::ExprId>,
     defaults: &[u32],
     prefix_count: u32,
     target: ExternalCallableId,
 ) -> Result<Vec<krusty::ir::ExprId>, ExternalCallableId> {
-    let omitted = defaults
-        .iter()
-        .map(|parameter| parameter.checked_add(prefix_count).ok_or(target))
-        .collect::<Result<Vec<_>, _>>()?;
-    materialize_omitted_arguments(ir, parameters, supplied, &omitted, target)
+    // The compiler's leading operands (an inner class's enclosing instance) precede the source
+    // parameters, which `parameters` and the omitted ordinals index.
+    let prefix = prefix_count as usize;
+    if supplied.len() < prefix {
+        return Err(target);
+    }
+    let source = supplied.split_off(prefix);
+    let mut arguments = supplied;
+    arguments.extend(materialize_omitted_arguments(
+        ir, parameters, source, defaults, target,
+    )?);
+    Ok(arguments)
 }
