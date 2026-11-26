@@ -1312,6 +1312,38 @@ fn hoist_expr(
             preserve_replacement_logical_type(ir, e, v);
             hoist_expr(ir, v, suspend_set, typing, value_types, prelude)
         }
+        // A checked property read evaluates its dispatch receiver, extension receiver and context
+        // arguments, in that order, before the access: hoist their suspensions like a call's
+        // operands (`call().value` reads a bound temporary).
+        IrExpr::Checked(operation) => {
+            let crate::ir::IrCheckedOperation::PropertyRead {
+                target,
+                dispatch_receiver,
+                extension_receiver,
+                context_arguments,
+                substitutions,
+            } = *operation
+            else {
+                return e;
+            };
+            let mut operands = vec![dispatch_receiver, extension_receiver];
+            operands.extend(context_arguments.iter().map(|&argument| Some(argument)));
+            let Some(mut hoisted) =
+                hoist_operands_in_order(ir, &operands, suspend_set, typing, value_types, prelude)
+            else {
+                return e;
+            };
+            let context_arguments = hoisted.split_off(2).into_iter().flatten().collect();
+            ir.exprs[e as usize] =
+                IrExpr::Checked(Box::new(crate::ir::IrCheckedOperation::PropertyRead {
+                    target,
+                    dispatch_receiver: hoisted[0],
+                    extension_receiver: hoisted[1],
+                    context_arguments,
+                    substitutions,
+                }));
+            e
+        }
         // A leaf or a conditional/unhandled node: leave it (any suspension inside surfaces to the
         // flattener, which restructures it or skips the file).
         _ => e,
@@ -1593,6 +1625,67 @@ mod tests {
         assert_eq!(
             suspension_bindings, 2,
             "each reference to a shared expression is a distinct evaluation"
+        );
+    }
+
+    #[test]
+    fn a_suspension_in_a_checked_property_read_receiver_is_hoisted_ahead_of_the_read() {
+        let mut ir = IrFile::default();
+        let suspension = ir.add_expr(IrExpr::UnitInstance);
+        ir.intrinsic_suspension_points.insert(
+            suspension,
+            IrIntrinsicSuspensionPoint { result: Ty::String },
+        );
+        let read = ir.add_expr(IrExpr::Checked(Box::new(
+            crate::ir::IrCheckedOperation::PropertyRead {
+                target: crate::fir::PropertyId::from_raw(0),
+                dispatch_receiver: Some(suspension),
+                extension_receiver: None,
+                context_arguments: Vec::new(),
+                substitutions: Vec::new(),
+            },
+        )));
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![read],
+            value: None,
+        });
+
+        crate::ir::make_expression_children_unique(&mut ir, body);
+        hoist_suspensions(
+            &mut ir,
+            body,
+            &HashSet::default(),
+            &typing(),
+            &mut HashMap::default(),
+        );
+
+        let IrExpr::Block { stmts, .. } = &ir.exprs[body as usize] else {
+            panic!("hoisting must retain the function body block")
+        };
+        let [bound, read] = stmts.as_slice() else {
+            panic!("the suspension binds first and the read follows: {stmts:?}")
+        };
+        let IrExpr::Variable {
+            init: Some(initializer),
+            index,
+            ..
+        } = ir.exprs[*bound as usize]
+        else {
+            panic!("the suspension is bound to a temporary")
+        };
+        assert!(ir.intrinsic_suspension_points.contains_key(&initializer));
+        let IrExpr::Checked(operation) = &ir.exprs[*read as usize] else {
+            panic!("the read stays a checked property read")
+        };
+        let crate::ir::IrCheckedOperation::PropertyRead {
+            dispatch_receiver: Some(receiver),
+            ..
+        } = **operation
+        else {
+            panic!("the read keeps its dispatch receiver")
+        };
+        assert!(
+            matches!(ir.exprs[receiver as usize], IrExpr::GetValue(read_index) if read_index == index)
         );
     }
 

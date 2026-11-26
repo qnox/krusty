@@ -13,6 +13,15 @@ impl<'a> BodyLowering<'a> {
         self.instance_storage = Some(super::instance_storage::InstanceStorageFrame::initializer(
             class, plan,
         ));
+        let outer =
+            plan.header
+                .outer
+                .map(|outer| super::super::same_library_class::OuterInstance {
+                    symbol: outer.this,
+                    field: u32::try_from(plan.field_declarations.len())
+                        .expect("a field list fits u32"),
+                });
+        self = self.reading_outer_instance(class, outer);
         // The superclass constructor's arguments read the constructor's own parameters, which the
         // initialization frame numbers as the constructor does.
         if let Some(superclass) = &plan.superclass {
@@ -82,6 +91,43 @@ impl<'a> BodyLowering<'a> {
         Ok(body)
     }
 
+    /// The arguments of each constant of the materialized enum `class`, in declaration order,
+    /// lowered in this frame, the enum's static initialization. Each becomes its constant's own:
+    /// the shared enum realization evaluates a constant's arguments in its initializer right
+    /// before constructing the constant, so every constant's run in declaration order.
+    pub(in super::super) fn enum_entry_arguments(
+        mut self,
+        class: ClassId,
+        entries: &[Vec<crate::metadata::klib_ir::tree::KlibIrExprId>],
+    ) -> Lowered<()> {
+        let parameters = self.ir.classes[class as usize]
+            .ctor_args
+            .iter()
+            .map(|parameter| parameter.ty)
+            .collect::<Vec<_>>();
+        if entries.len() != self.ir.classes[class as usize].enum_entries.len() {
+            return Err(mismatch(
+                "an enum's entry frame disagrees with its materialized constants",
+            ));
+        }
+        for (ordinal, arguments) in entries.iter().enumerate() {
+            if arguments.len() != parameters.len() {
+                return Err(mismatch(
+                    "an enum constant passes another number of arguments than its constructor takes",
+                ));
+            }
+            let arguments = arguments
+                .iter()
+                .zip(&parameters)
+                .map(|(&argument, &ty)| self.operand(argument, ty))
+                .collect::<Lowered<Vec<_>>>()?;
+            let entry = &mut self.ir.classes[class as usize].enum_entries[ordinal];
+            entry.args = arguments;
+            entry.constructor_parameter_types.clone_from(&parameters);
+        }
+        Ok(())
+    }
+
     /// A secondary constructor of the materialized `class` delegating to another of its
     /// constructors: the delegation's arguments become the arguments of the class's secondary
     /// constructor `secondary`, then its own statements run as a member of the class does,
@@ -110,6 +156,11 @@ impl<'a> BodyLowering<'a> {
             ));
         };
         let target = target_params.clone();
+        // The target's parameters follow the constructor prefix, the outer instance an inner
+        // class's delegation reaches with, which the constructor passes on unchanged.
+        let arguments = arguments
+            .get(usize::from(member.outer.is_some())..)
+            .ok_or_else(|| mismatch("an inner class's delegation passes no outer instance"))?;
         if target.len() != arguments.len() {
             return Err(mismatch(
                 "a delegation within the class passes another number of arguments",
@@ -123,6 +174,7 @@ impl<'a> BodyLowering<'a> {
             Some(receiver),
             false,
         ));
+        self = self.reading_outer_instance(class, member.outer);
         // The arguments read the constructor's own parameters, which this frame numbers as the
         // constructor does.
         let mut lowered = Vec::with_capacity(arguments.len());
@@ -162,7 +214,7 @@ impl<'a> BodyLowering<'a> {
                 &plan.fields,
             ),
         );
-        self.read_outer_instance(plan.class, plan.outer);
+        self = self.reading_outer_instance(plan.class, plan.outer);
         // The superclass constructor's arguments read the constructor's values, which this
         // initialization's frame numbers as the constructor does.
         if !plan.superclass_arguments.is_empty() {
@@ -200,17 +252,16 @@ impl<'a> BodyLowering<'a> {
             member.receiver,
             &member.fields,
         ));
-        self.read_outer_instance(member.class, member.outer);
-        self
+        self.reading_outer_instance(member.class, member.outer)
     }
 
     /// An inner class's bodies read the outer class's `this` from the field its constructor
     /// stores the outer instance in.
-    fn read_outer_instance(
-        &mut self,
+    pub(in super::super) fn reading_outer_instance(
+        mut self,
         class: crate::ir::ClassId,
         outer: Option<super::super::same_library_class::OuterInstance<'a>>,
-    ) {
+    ) -> Self {
         if let Some(outer) = outer {
             let class_name = self.ir.classes[class as usize].fq_name_id();
             self.captures.insert(
@@ -222,5 +273,6 @@ impl<'a> BodyLowering<'a> {
                 },
             );
         }
+        self
     }
 }

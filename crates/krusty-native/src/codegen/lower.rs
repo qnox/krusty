@@ -511,7 +511,7 @@ fn extended_elsewhere(
     let classes = module_facts.classes();
     let support = unit_kind != krusty::backend::CheckedIrUnitKind::Source;
     for (id, class) in ir.classes.iter().enumerate() {
-        if class.is_interface || super::super::symbols::is_local_class(ir, id as u32) {
+        if class.is_interface || krusty::backend::is_declared_in_executable_code(ir, id as u32) {
             continue;
         }
         // A local class of a later file, which no header names, may extend any class open to
@@ -801,7 +801,7 @@ impl<'a> FileLowering<'a> {
                             .dispatch_receiver
                             .and_then(|owner| self.ir.class_id_by_name(owner))
                             .is_some_and(|class| {
-                                super::super::symbols::is_local_class(self.ir, class)
+                                krusty::backend::is_declared_in_executable_code(self.ir, class)
                             }) =>
                     {
                         Linkage::Local
@@ -2075,8 +2075,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 value,
             } => self.ref_set(holder, elem, value),
             // The shared enum lowering realized every enum this file declares; what is left names
-            // an enum another file declares, whose constants live there. A constant, `values()`
-            // and `valueOf` are each reached through the entry the declaring file exports.
+            // an enum another file declares, whose constants live there. A constant, `values()`,
+            // `valueOf` and `entries` are each reached through the entry the declaring file
+            // exports.
             IrExpr::EnumEntry { classifier, name } => {
                 self.dependency_enum_constant(classifier, &name)
             }
@@ -2092,10 +2093,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 krusty::backend::enums::StaticMember::ValueOf,
                 Some(arg),
             ),
-            IrExpr::EnumEntries { classifier } => Err(declined!(
-                "the `entries` of an enum another file declares (`{}`)",
-                classifier.render()
-            )),
+            IrExpr::EnumEntries { classifier } => self.dependency_enum_member(
+                classifier,
+                krusty::backend::enums::StaticMember::Entries,
+                None,
+            ),
             IrExpr::EnumConstant {
                 name,
                 ordinal,

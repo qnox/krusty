@@ -25,7 +25,7 @@ pub struct RuntimeFunction {
 }
 
 /// Where a [`RuntimeFunction`] is declared.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RuntimeDeclaration {
     /// A top-level function of this package.
     Package(TypeName),
@@ -33,6 +33,47 @@ pub enum RuntimeDeclaration {
     Member(TypeName),
     /// A static function this classifier declares (a Java `static` method).
     Static(TypeName),
+}
+
+/// A runtime function a plugin declares it may call: where it is declared, its name and its exact
+/// signature. A plugin lists these before the file is checked, so resolution can select each one
+/// among the provider's declarations once and the handoff only looks the selection up.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RuntimeRequirement {
+    pub declaration: RuntimeDeclaration,
+    pub name: &'static str,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+}
+
+/// The requirements a plugin's binding code asks for, recorded by running that code against a
+/// runtime that answers every request. A plugin declares its requirements this way so the list can
+/// never drift from the functions its binding selects.
+pub fn record_requirements(
+    bind: impl FnOnce(&mut dyn PluginRuntime) -> Result<(), String>,
+) -> Vec<RuntimeRequirement> {
+    struct Recording(Vec<RuntimeRequirement>);
+
+    impl PluginRuntime for Recording {
+        fn function(&mut self, function: &RuntimeFunction) -> Result<BoundRuntimeFunction, String> {
+            self.0.push(function.requirement());
+            Ok(BoundRuntimeFunction {
+                target: ExternalCallableId::from_raw(0),
+                params: function.params.clone(),
+                ret: function.ret,
+            })
+        }
+
+        fn classifier(&self, _classifier: TypeName) -> Option<PluginClassifier> {
+            None
+        }
+
+        fn appended_parameters(&mut self, _target: ExternalCallableId, _appended: Vec<Ty>) {}
+    }
+
+    let mut recording = Recording(Vec::new());
+    bind(&mut recording).expect("a recording runtime answers every request");
+    recording.0
 }
 
 /// One [`RuntimeFunction`] the compilation selected.
@@ -83,6 +124,16 @@ pub struct PluginClassifier {
 }
 
 impl RuntimeFunction {
+    /// The requirement a plugin declares for this function.
+    pub fn requirement(&self) -> RuntimeRequirement {
+        RuntimeRequirement {
+            declaration: self.declaration,
+            name: self.name,
+            params: self.params.clone(),
+            ret: self.ret,
+        }
+    }
+
     /// `owner.name(Parameter, …): Result`, for a diagnostic.
     pub fn described(&self) -> String {
         let owner = match self.declaration {

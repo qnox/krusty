@@ -109,6 +109,18 @@ pub(super) fn inherited_defaults(
             )
         })
         .collect::<Vec<_>>();
+    // kotlinc builds a class's fake overrides from its superclass's member scope first, then from
+    // the interfaces' own members: a default the superclass's scope already carries a slot for
+    // precedes one only an interface contributes.
+    let superclass_slots = plan
+        .superclass_interfaces
+        .iter()
+        .flat_map(|&inherited| {
+            let inherited = actualized(source, inherited);
+            interface_surface(index, source, inherited, applied(inherited))
+        })
+        .map(|member| member.slot)
+        .collect::<Vec<_>>();
     let mut defaults = Vec::new();
     for interface in closure {
         let receiver = applied(interface);
@@ -158,6 +170,9 @@ pub(super) fn inherited_defaults(
                 selected.push(slot);
                 continue;
             }
+            let in_superclass_scope = superclass_slots
+                .iter()
+                .any(|inherited| inherited.same_slot(source, &slot));
             let annotation_origins = accessors
                 .iter()
                 .map(|accessor| {
@@ -192,27 +207,32 @@ pub(super) fn inherited_defaults(
                     applied_parameters,
                     applied_result,
                 );
-                defaults.push(ResolvedInheritedDefault {
-                    name: accessor.name,
-                    function: accessor.function,
-                    accessor: accessor.target,
-                    annotation_origin,
-                    declaring_interface: interface,
-                    dispatch_interface,
-                    parameters: accessor.parameters,
-                    parameter_identities: accessor.parameter_identities,
-                    result: accessor.result,
-                    applied_parameters,
-                    applied_result,
-                    type_parameters: accessor.type_parameters,
-                    suspend: accessor.suspend,
-                    vararg: accessor.vararg,
-                    body,
-                });
+                defaults.push((
+                    !in_superclass_scope,
+                    ResolvedInheritedDefault {
+                        name: accessor.name,
+                        function: accessor.function,
+                        accessor: accessor.target,
+                        annotation_origin,
+                        declaring_interface: interface,
+                        dispatch_interface,
+                        parameters: accessor.parameters,
+                        parameter_identities: accessor.parameter_identities,
+                        result: accessor.result,
+                        applied_parameters,
+                        applied_result,
+                        type_parameters: accessor.type_parameters,
+                        suspend: accessor.suspend,
+                        vararg: accessor.vararg,
+                        body,
+                    },
+                ));
             }
         }
     }
-    defaults
+    // The sort is stable: each group keeps its closure order.
+    defaults.sort_by_key(|(after_superclass_scope, _)| *after_superclass_scope);
+    defaults.into_iter().map(|(_, default)| default).collect()
 }
 
 /// Resolve metadata inheritance in the superclass's existing semantic member scope, independently

@@ -470,6 +470,14 @@ impl DependencyExportSignatures {
         self.instance_entries.push((instance, entry));
     }
 
+    /// Forget the entry realized for `instance`, which no file of the program reads.
+    pub(crate) fn withdraw_instance_entry(
+        &mut self,
+        instance: &super::instance_links::InstanceEntry,
+    ) {
+        self.instance_entries.retain(|(entry, _)| entry != instance);
+    }
+
     /// Every instance entry a target realized for this file.
     pub fn instance_entries(&self) -> &[(super::instance_links::InstanceEntry, FunId)] {
         &self.instance_entries

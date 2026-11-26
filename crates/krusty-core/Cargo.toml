@@ -1,0 +1,11 @@
+[package]
+name = "krusty-core"
+version = "0.0.1"
+edition = "2021"
+description = "Shared foundations of the compiler and its plugins: interned classifier identities (the name tree and the TypeName handle), growing to the type model and checked facts"
+license = "Apache-2.0"
+repository = "https://github.com/qnox/krusty"
+
+[dependencies]
+# Fast keyed hashing (`fx_hash::HashMap`); per-process random keys keep HashDoS resistance.
+ahash = "0.8.12"

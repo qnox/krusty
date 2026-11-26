@@ -272,6 +272,7 @@ fn emit_analyzed_into<B: Backend>(
         let mut ir = crate::ir::IrFile::with_package(package);
         ir.set_same_module_inlining(backend.same_module_inlining());
         ir.recursive_type_of = source.recursive_type_of(reparse_sources.features());
+        ir.reference = reparse_sources.features().reference();
         ir.source_debug =
             crate::ir::SourceDebug::from_map(&source_map, source_id, &source_line_counts);
         let mut sink = match crate::fir_lower::CommonIrBodySink::new(&index, source_id, &mut ir) {
@@ -492,7 +493,6 @@ fn emit_analyzed_into<B: Backend>(
                 common_ir_coroutines: common_ir_preparation.is_some(),
                 dispatched_classes: &dispatched_classes,
                 appends_char_sequences_by_index: backend.appends_char_sequences_by_index(),
-                collections_through_interfaces: backend.reads_collections_through_interfaces(),
             },
             diags,
         ) else {
@@ -508,6 +508,7 @@ fn emit_analyzed_into<B: Backend>(
                 symbols.semantic_platform(),
                 preparation,
                 symbols.coroutine_runtime(),
+                symbols.enum_entries_factory(),
                 &dispatched_classes,
             ) {
                 backend.report_common_ir_preparation_error(&error, diags);

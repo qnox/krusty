@@ -369,7 +369,7 @@ impl<'a> BodyLowering<'a> {
         let [Some(reference), operands @ ..] = arguments.as_slice() else {
             return Err(mismatch("an atomic field access has no property reference"));
         };
-        let reference = *reference;
+        let reference = self.returned_reference(*reference);
         let operands = operands.iter().copied().collect::<Option<Vec<_>>>();
         let Some(operands) = operands.filter(|operands| operands.len() == operation.operands())
         else {
@@ -443,5 +443,37 @@ impl<'a> BodyLowering<'a> {
                     operands,
                 })));
         Ok(self.typed(lowered, ty))
+    }
+
+    /// The expression `reference` stands for: itself, or, for a returnable block whose only
+    /// statement returns a value to it, directly or as the only statement of the inlined function
+    /// block it holds, that value. A library that inlines before it serializes leaves a lambda
+    /// returning a property reference as such a block, which `returnable_block` lowers to the
+    /// returned value alone.
+    fn returned_reference(&self, mut reference: KlibIrExprId) -> KlibIrExprId {
+        loop {
+            let KlibIrExprKind::ReturnableBlock {
+                symbol, statements, ..
+            } = &self.arena.expr(reference).kind
+            else {
+                return reference;
+            };
+            let mut statements = statements.as_slice();
+            let returned = loop {
+                let [KlibIrStatement::Expression(only)] = statements else {
+                    return reference;
+                };
+                match &self.arena.expr(*only).kind {
+                    KlibIrExprKind::InlinedFunctionBlock {
+                        statements: inlined,
+                        origin: None,
+                        ..
+                    } => statements = inlined,
+                    KlibIrExprKind::Return { target, value } if target == symbol => break *value,
+                    _ => return reference,
+                }
+            };
+            reference = returned;
+        }
     }
 }

@@ -77,12 +77,10 @@ pub(super) fn prepare_inline_template(
     let returns = returns_by_body(ir, root);
     let owns_returns = returns.iter().any(|found| found.depth == 0);
     record_evaluated_result_end(ir, root);
-    for found in &returns {
-        if found.depth > 0 {
-            ir.checked_return_depths
-                .insert(found.returned, found.depth - 1);
-        }
-    }
+    let returns = returns
+        .into_iter()
+        .filter(|found| crate::inline_expansion::leaves_inline_frame(ir, found.returned))
+        .collect::<Vec<_>>();
     if !owns_returns {
         return Some(root);
     }
@@ -96,10 +94,6 @@ pub(super) fn prepare_inline_template(
         slot
     });
     for found in returns {
-        if found.depth != 0 {
-            continue;
-        }
-        ir.checked_return_depths.remove(&found.returned);
         let IrExpr::Return(value) = ir.expr(found.returned).clone() else {
             return None;
         };

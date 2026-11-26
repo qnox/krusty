@@ -220,15 +220,6 @@ fn module_class_symbol_base(module_name: &str, fq_name: &str) -> String {
     base
 }
 
-/// Whether `class` is declared in executable code: a local or anonymous class, or the copy of an
-/// anonymous object an inline expansion specialized for its call. No other file names one, and
-/// every file that expands an inline function declaring one realizes it again under the same name,
-/// so its descriptor and members stay inside the object.
-pub(super) fn is_local_class(ir: &IrFile, class: krusty::ir::ClassId) -> bool {
-    ir.local_class_name_provenance.contains_key(&class)
-        || ir.specialized_anonymous_classes.contains_key(&class)
-}
-
 pub(super) fn symbols(
     ir: &IrFile,
     module_name: &str,
@@ -255,7 +246,7 @@ pub(super) fn symbols(
         if let Some(owner) = declared.dispatch_receiver {
             let named = ir
                 .class_id_by_name(owner)
-                .is_some_and(|class| !is_local_class(ir, class));
+                .is_some_and(|class| !krusty::backend::is_declared_in_executable_code(ir, class));
             if !named {
                 continue;
             }

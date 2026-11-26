@@ -85,7 +85,7 @@ impl<'a> FileLowering<'a> {
         // `Result.Failure`) its class against it.
         let named = match self.unit_kind {
             krusty::backend::CheckedIrUnitKind::Source => {
-                !super::super::super::symbols::is_local_class(self.ir, class)
+                !krusty::backend::is_declared_in_executable_code(self.ir, class)
             }
             krusty::backend::CheckedIrUnitKind::DependencySupport => {
                 self.exported.contains(&class)

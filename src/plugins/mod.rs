@@ -862,6 +862,13 @@ pub trait IrPlugin {
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
+    /// The runtime functions the plugin's generated code may call, by declaration and name. It
+    /// lists every one it can request in [`Self::record_source_facts`]: resolution reads their
+    /// declarations once, and a request for any other function is an error.
+    fn runtime_requirements(&self) -> Vec<runtime_declarations::RuntimeRequirement> {
+        Vec::new()
+    }
+
     /// Declare the Kotlin-visible classes and members the plugin generates. This runs at the
     /// frontend/backend handoff, before any target sees the file, so every target's declaration
     /// record includes them. A generated function's body is a placeholder until
@@ -1472,6 +1479,14 @@ pub struct PluginHost {
 impl PluginHost {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The runtime functions every registered plugin may call.
+    pub fn runtime_requirements(&self) -> Vec<runtime_declarations::RuntimeRequirement> {
+        self.plugins
+            .iter()
+            .flat_map(|plugin| plugin.runtime_requirements())
+            .collect()
     }
 
     pub fn register(&mut self, plugin: Box<dyn IrPlugin>) {

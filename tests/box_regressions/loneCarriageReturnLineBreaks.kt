@@ -1,0 +1,1 @@
+// leading commentfun box(): String {    val a = 1 // trailing comment    val b = 2    val text = """rawtext"""    val template = """x${a}y"""    return if (a + b == 3 && text == "raw\ntext" && template == "x\n1\ny") "OK" else "fail"}
