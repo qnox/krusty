@@ -105,16 +105,10 @@ fun clash(flag: Boolean): Bag<String> =\n\
                   Serializable>'."
             .to_string(),
     }];
-    let krusty = vec![common::CompilerError {
-        file: "Clash.kt".to_string(),
-        line: 6,
-        column: 1,
-        message: "return type mismatch: expected 'Bag<String>', actual 'Bag<out Any>'.".to_string(),
-    }];
     assert_eq!(result.reference_code, 1);
     assert_eq!(result.krusty_code, 1);
     assert_eq!(common::compiler_errors(&result.reference_stderr), reference);
-    assert_eq!(common::compiler_errors(&result.krusty_stderr), krusty);
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), reference);
 }
 
 #[test]

@@ -366,6 +366,15 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
             .copied()
             .all(|part| assignable_inner(cx, oracle, sub, part));
     }
+    // A nullable or flexible target over an intersection (`(A & B)?`, `(A & B)!`) admits what its
+    // non-null intersection admits: the value must meet every component, not merely one.
+    if let TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) = sup.kind() {
+        if matches!(inner.kind(), TyKind::Intersection(_))
+            && matches!(sub.kind(), TyKind::Intersection(_))
+        {
+            return assignable_inner(cx, oracle, sub, inner);
+        }
+    }
     // `A & B` is a subtype of each component, so it meets a target that any component meets.
     if let TyKind::Intersection(parts) = sub.kind() {
         return parts

@@ -145,6 +145,7 @@ mod class_literal_array_of_nothing;
 mod class_literal_receiver;
 mod class_literal_type_arguments;
 mod class_names_aliases;
+mod common_supertype_intersection;
 mod explicit_import_selection;
 pub(crate) use explicit_import_selection::explicit_classifier_selection;
 pub use explicit_import_selection::import_map;
@@ -20673,7 +20674,7 @@ fun box(): String {
     }
 
     #[test]
-    fn applied_common_supertype_rejects_equal_depth_semantic_owners() {
+    fn applied_common_supertype_keeps_equal_depth_semantic_owners_as_an_intersection() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(
             "interface First\n\
@@ -20699,12 +20700,12 @@ fun box(): String {
                 Ty::obj("Left"),
                 Ty::obj("Right")
             ),
-            None
+            Some(Ty::intersection(&[Ty::obj("First"), Ty::obj("Second")]))
         );
     }
 
     #[test]
-    fn applied_common_supertype_rejects_incomparable_owners_at_different_depths() {
+    fn applied_common_supertype_keeps_incomparable_depths_as_an_intersection() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(
             "interface First\n\
@@ -20731,7 +20732,7 @@ fun box(): String {
                 Ty::obj("Left"),
                 Ty::obj("Right")
             ),
-            None
+            Some(Ty::intersection(&[Ty::obj("First"), Ty::obj("ViaSecond")]))
         );
     }
 

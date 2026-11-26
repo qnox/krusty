@@ -409,6 +409,14 @@ fn reified_approximation(ty: Ty, to_super: bool, approximation: &Approximation<'
                 Ty::nullable(approximated)
             }
         }
+        TyKind::PlatformNullable(inner) => {
+            let approximated = reified_approximation(inner, to_super, approximation);
+            if approximated == inner {
+                ty
+            } else {
+                Ty::platform_nullable(approximated)
+            }
+        }
         // An intersection fixed below an upper type its own approximation does not reach
         // approximates to that upper type, as kotlinc's approximator does.
         TyKind::Intersection(parts) if to_super => match parts.approximation() {
