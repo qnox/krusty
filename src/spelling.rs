@@ -3,11 +3,28 @@
 
 pub use krusty_core::spelled::*;
 
+/// The type-use annotations of one declaration type occurrence tree: the file's function-type
+/// parameter names, then the already-checked `facts` re-keyed onto `reference` when the type
+/// carries them. `None` when those facts do not fit `reference`'s shape.
+pub(crate) fn declaration_type_annotations(
+    function_type_parameter_names: &crate::fx_hash::HashMap<u32, String>,
+    reference: &crate::ast::TypeRef,
+    facts: Option<&Spelled>,
+) -> Option<RecordedTypeAnnotations> {
+    let mut annotations = RecordedTypeAnnotations::default();
+    for (&occurrence, name) in function_type_parameter_names {
+        annotations.record_parameter_name(occurrence, name);
+    }
+    let fits =
+        facts.is_none_or(|facts| record_checked_source_facts(&mut annotations, reference, facts));
+    fits.then_some(annotations)
+}
+
 /// Re-key an already-checked, source-shaped occurrence tree onto one active parser type.
 /// The tree contains no names or semantic types; it is only the structural handoff for
 /// annotation applications whose arguments were folded before temporary source coordinates
 /// were released.
-pub(crate) fn record_checked_source_facts(
+fn record_checked_source_facts(
     annotations: &mut RecordedTypeAnnotations,
     reference: &crate::ast::TypeRef,
     facts: &Spelled,

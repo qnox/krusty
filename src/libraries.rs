@@ -100,9 +100,7 @@ pub(crate) use dependency_body_modifiers::KlibBodyDeclarationModifiers;
 pub use inline_kind::InlineKind;
 pub use klib_body_accessor::DependencyGetterSignature;
 pub(crate) use klib_body_accessor::{KlibAccessorRole, KlibBodyAccessor};
-pub use krusty_core::enhanced_nullability::{
-    enhance_from_overridden, EnhancedResult, TypeEnhancement,
-};
+pub use krusty_core::enhanced_nullability::{EnhancedResult, TypeEnhancement};
 pub use param_flags::ParamFlags;
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_abi::PlatformAbi;
