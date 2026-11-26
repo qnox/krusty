@@ -305,11 +305,7 @@ impl ReparseSource {
     }
 
     pub(crate) fn source_line_count(&self) -> u32 {
-        let newlines = u32::try_from(self.text.bytes().filter(|byte| *byte == b'\n').count())
-            .expect("a source file cannot contain more than u32::MAX physical newlines");
-        newlines
-            .checked_add(1)
-            .expect("a source file line count must fit in u32")
+        crate::diag::line_breaks::line_count(&self.text)
     }
 
     /// Run the ordinary checker during Pass 2 when Pass 1 published only a partial semantic index.
