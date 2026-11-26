@@ -13,12 +13,37 @@ impl Emitter<'_> {
         declaration: krusty::ir::ExprId,
         code: &mut CodeBuilder,
     ) {
-        let frame_start = u16::try_from(code.bytes.len()).unwrap_or(u16::MAX);
+        let pending = self
+            .pending_copied_frames
+            .pop_if(|frame| frame.block_depth == self.block_depth);
+        let default = pending.as_ref().and_then(|frame| frame.default);
+        if let Some(enclosing) = pending.as_ref().map(|frame| frame.enclosing_peak) {
+            let reached = self.frame.end_peak(enclosing);
+            if default.is_some() {
+                self.frame.reserve_through(reached);
+            }
+        }
+        let frame_start = pending
+            .and_then(|frame| frame.start)
+            .or_else(|| u16::try_from(code.bytes.len()).ok())
+            .unwrap_or(u16::MAX);
         let slot = self
             .frame
             .enter(FrameKey::InlineFrameMarker(declaration), Ty::Int);
+        if let Some(default) = default {
+            // The stub calls the real body on the default's line: an inline call evaluated inside
+            // the default left no line in effect, so the call writes it again.
+            if code.line_forgotten() {
+                if let Some(line) = self.ir.source_line(default) {
+                    self.mark_expression_line(default, line, code);
+                }
+            }
+        }
         code.push_int(0, self.cw);
         store(Ty::Int, slot, code);
+        if default.is_some() {
+            code.forget_line();
+        }
         if !self.record_locals {
             return;
         }
@@ -40,7 +65,10 @@ impl Emitter<'_> {
         let depth = self.block_depth;
         for local in &mut self.open_locals {
             if local.inline_operand && local.inline_frame.is_none() && local.depth == depth {
-                local.start = frame_start;
+                // A default evaluated inside the frame starts its range after its own store.
+                if local.start <= frame_start {
+                    local.start = frame_start;
+                }
                 local.inline_frame = Some(frame);
             }
         }

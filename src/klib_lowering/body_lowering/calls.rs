@@ -1188,7 +1188,7 @@ impl BodyLowering<'_> {
 
     /// A call of a dependency property's accessor, lowered as checked FIR lowers a source access
     /// of the property: a read through its getter, a write through its setter.
-    fn accessor_call(
+    pub(super) fn accessor_call(
         &mut self,
         accessor: &KlibAccessorIdSignature,
         access: &KlibIrMemberAccess,

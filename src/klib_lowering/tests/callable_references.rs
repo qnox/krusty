@@ -256,10 +256,6 @@ fn assert_refusals_and_reuse(
     let step = selected(libraries, "referenceStep");
     for (name, reason) in [
         (
-            "boundReference",
-            "a bound or reflective rich function reference",
-        ),
-        (
             "specializedReference",
             "a bound or reflective rich function reference",
         ),
