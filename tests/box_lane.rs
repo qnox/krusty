@@ -272,6 +272,7 @@ fn atomicfu_plugins(
         classpath: &[],
         module_name: "box",
         codegen_host: false,
+        module_ir_host: false,
     });
     let errors = resolved
         .diagnostics
@@ -310,7 +311,7 @@ pub(super) fn wasm_test_library(
         CompilationTarget::WasmWasi => "kotlin-test-wasm-wasi",
         _ => return None,
     };
-    let version = krusty::kotlin_version::target().to_string();
+    let version = krusty::kotlin_version::environment_release().to_string();
     let path = krusty::toolchain::ensure_maven_artifact(
         "org.jetbrains.kotlin",
         artifact,
@@ -406,7 +407,7 @@ pub fn compile<B: Backend>(
     } = stdlib_platform(compilation_target, &dependencies, &[]);
     let platform = krusty::frontend::PlatformProvider::new(compilation_target, semantics)
         .with_native_plugins(atomicfu_plugins(directive_source, compilation_target));
-    let features = krusty::features::LangFeatures::from_source(directive_source);
+    let features = krusty::features::LangFeatures::from_source_in_environment(directive_source);
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,
@@ -464,7 +465,7 @@ fn module_features(
     directive_source: &str,
     common_file_count: usize,
 ) -> krusty::features::LangFeatures {
-    let mut features = krusty::features::LangFeatures::from_source(directive_source);
+    let mut features = krusty::features::LangFeatures::from_source_in_environment(directive_source);
     if common_file_count != 0 {
         features.enable("MultiPlatformProjects");
     }
@@ -1234,7 +1235,7 @@ pub fn run(lane: &dyn Lane) {
         .unwrap_or_else(|error| panic!("{error}"));
     let relative = |file: &Path| box_ratchet::corpus_key(&corpus, file);
     let platform = lane.platform();
-    let version = krusty::kotlin_version::target();
+    let version = krusty::kotlin_version::environment_release();
     let corpus_cases: BTreeSet<String> = files.iter().map(|file| relative(file)).collect();
     // Triage knob: scan only the cases whose path contains this substring. The expected-failure
     // checks below cover the cases actually scanned, so a narrowed run stays self-consistent.

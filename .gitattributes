@@ -2,6 +2,7 @@ tools/krusty-bazel/intellij/*.patch whitespace=-blank-at-eol,-blank-at-eof
 # Outcome manifests are sets of entries; merge them as sets (scripts/outcome-set-merge.sh, installed
 # by `just install-merge-drivers`; the merge queue merges them with its own sorted-set driver). Without
 # the driver installed git merges them line by line.
+tests/box_byte_non_identical/** merge=sorted-set
 tests/box_expected_failures/** merge=sorted-set
 tests/box_expected_not_applicable/** merge=sorted-set
 src/plugins/*/boxes/included/** merge=sorted-set

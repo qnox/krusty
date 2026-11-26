@@ -291,6 +291,13 @@ pub(super) fn emit_dependencies<B: Backend>(
     // Category ownership is a declaration capability, not an emission-success test. An intrinsic
     // wrapper whose unsupported body transaction declines must not be retried as an ordinary body.
     let intrinsic_roots: HashSet<_> = roots.iter().map(|root| root.identity()).collect();
+    // A function a source module of this program declares and exports is called, never lowered a
+    // second time from the body its own KLIB also records.
+    let source_exports: HashSet<&KlibDependencyCallable> = uses
+        .iter()
+        .flat_map(|use_| use_.file.dependency_exports.callables())
+        .map(|(_, identity)| identity)
+        .collect();
     ordinary.retain(|root| {
         let intrinsic_owned = intrinsic_roots.contains(root.identity());
         if intrinsic_owned {
@@ -301,6 +308,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             );
         }
         !intrinsic_owned
+            && !source_exports.contains(root.identity())
             && !support_state.emitted.contains_key(root.identity())
             && !support_state.in_progress.contains_key(root.identity())
     });
@@ -372,6 +380,7 @@ pub(super) fn emit_dependencies<B: Backend>(
                 .keys()
                 .chain(support_state.materializing_classes.keys())
                 .copied(),
+            symbols.reference(),
         )
         .presetting_constant_statics(backend.presets_constant_top_level_initializers())
         .adding_members_to_realized_classes(backend.adds_members_to_realized_classes());
@@ -407,8 +416,10 @@ pub(super) fn emit_dependencies<B: Backend>(
         let emitted_roots::FrozenClosure {
             declarations,
             authorized_member_edges,
+            indices_bounds,
             read_classes,
             dispatched,
+            private_member_classes,
         } = closure;
         let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
@@ -420,9 +431,12 @@ pub(super) fn emit_dependencies<B: Backend>(
         )
         .with_checked_dependency_facts(checked_facts)
         .with_authorized_member_edges(authorized_member_edges)
+        .with_indices_bounds(indices_bounds)
         .with_read_classes(read_classes)
+        .with_private_member_classes(private_member_classes)
         .with_enum_entries_factory(entries_factory.clone())
-        .with_target_classifiers(&target_represents_classifier);
+        .with_target_classifiers(&target_represents_classifier)
+        .with_expansion_copies(facts.inline_bodies());
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,

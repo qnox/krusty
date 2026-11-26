@@ -132,6 +132,21 @@ step "rustfmt"
 just fmt-check
 step "legacy baseline"
 just legacy-baseline-check
+# The legacy cap is global: a branch that fits under it on its own base can exceed it once the
+# merges that landed since are combined with it, which is what the merge queue builds. Check the
+# merge of this branch with origin/master in a throwaway worktree.
+step "legacy baseline on the merge with origin/master"
+merge_tree="$(git merge-tree --write-tree HEAD origin/master)" || {
+  echo "smoke: this branch does not merge cleanly into origin/master; resolve the conflict first" >&2
+  exit 1
+}
+merge_commit="$(git commit-tree "$merge_tree" -p HEAD -p origin/master -m 'smoke merge')"
+merge_dir="$(mktemp -d)"
+git worktree add --quiet --detach "$merge_dir" "$merge_commit"
+trap 'git worktree remove --force "$merge_dir" >/dev/null 2>&1 || true' EXIT
+(cd "$merge_dir" && just legacy-baseline-check)
+git worktree remove --force "$merge_dir"
+trap - EXIT
 if [ "${KRUSTY_SMOKE_SKIP_CLIPPY:-}" != 1 ] && [ -n "$(affected '*.rs')" ]; then
   step "clippy baseline"
   just clippy-baseline-check
@@ -204,6 +219,14 @@ if [ -n "$(changed 'tools/krusty-build-tools/*' 'scripts/package-build-tools.sh'
     scripts/package-build-tools.sh 0.0.0-smoke "$release" "$KRUSTY_BIN" "$packaged/$release"
   done < <(just kotlin-versions)
   rm -rf "$packaged"
+fi
+
+# The Analysis API adapter is a Gradle build whose tests drive real KSP2 sessions, and the fixtures
+# under tests/psi_ranges are shared with krusty's parser tests; CI runs it as its own job.
+if [ -n "$(changed 'tools/krusty-analysis-api/*' 'tests/psi_ranges/*')" ]; then
+  step "analysis-api tests"
+  run_with_deadline "${KRUSTY_ANALYSIS_API_TIMEOUT_SECONDS:-1800}" \
+    tools/krusty-analysis-api/gradlew --no-daemon -p tools/krusty-analysis-api test
 fi
 
 if [ -z "$lanes" ]; then
@@ -280,6 +303,8 @@ run_lane() {
   esac
   local require=()
   [ -z "$infix" ] || require=("KRUSTY_REQUIRE_${infix}CONFORMANCE=1")
+  # The JVM lane also scores byte identity, so a case that newly diverges from kotlinc fails here.
+  [ "$lane" != jvm ] || require+=("KRUSTY_JVM_BYTE_REPORT=$logdir/jvm-byte-report")
   if [ "$limit" -gt 0 ]; then
     echo "$lane: $limit sampled corpus cases"
     run_with_deadline "$deadline" env "${require[@]}" "KRUSTY_${infix}BOX_LIMIT=$limit" \

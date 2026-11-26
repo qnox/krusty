@@ -45,7 +45,7 @@ use symbol_table::{
     TopLevelPropertySelection, VisibilitySuppressions,
 };
 pub use symbol_table::{ExtPropSig, ResolvedPropertyAccess, SourcePropertySig, SymbolTable};
-pub(crate) use symbol_table::{MissingContextParameter, PassTwoSymbols};
+pub(crate) use symbol_table::{MissingContextParameter, PassTwoSymbols, PluginRuntimeInventory};
 mod class_signature;
 use callable_signature::extract_ctor_default;
 pub use callable_signature::{
@@ -418,6 +418,7 @@ use signature_collection::{
 pub(crate) use signature_collection::{collect_signatures, collect_signatures_with_cp};
 pub(crate) use signature_collection::{
     collect_signatures_with_cp_and_plugins, collect_signatures_with_cp_headers_and_local_contexts,
+    PassOneHeaders,
 };
 use signature_parameter_identity::{
     aligned_parameter_identities, copy_parameter_identities, declared_parameter_identities,
@@ -477,7 +478,6 @@ use delegated_properties::{
 };
 pub(crate) use dependency_body_call_edges::for_checked_klib_bodies;
 pub(crate) use dependency_platform::DependencyPlatform;
-pub(crate) use diagnostic_selection::unresolved_member_message;
 use extension_reference_selection::ExtensionReferenceChoice;
 pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_declared_spellings, publish_stable_declaration_metadata,
@@ -639,54 +639,6 @@ fn has_type_annotation(
                 || (annotation.name.contains('.')
                     && type_name(&annotation.name.replace('.', "/")) == expected)
         })
-}
-
-fn resolved_jvm_name(file: &File, function: &FunDecl, class_names: &ClassNames) -> String {
-    let annotation = function
-        .annotations
-        .iter()
-        .enumerate()
-        .find(|(_, annotation)| {
-            class_names
-                .get_class(&annotation.name)
-                .is_some_and(|name| name.matches("kotlin/jvm/JvmName"))
-        });
-    annotation
-        .and_then(|(index, _)| {
-            function
-                .annotation_args
-                .get(index)
-                .and_then(|arguments| arguments.first())
-                .and_then(|&argument| match file.expr(argument) {
-                    Expr::StringLit(value) => value.as_str().map(str::to_string),
-                    _ => None,
-                })
-        })
-        .unwrap_or_else(|| function.name.clone())
-}
-
-fn resolved_compact_jvm_name(
-    headers: &crate::fir::StreamedHeaderModule,
-    declaration: crate::fir::DeclarationId,
-    annotations: &[TypeRef],
-    class_names: &ClassNames,
-    fallback: &str,
-) -> String {
-    annotations
-        .iter()
-        .enumerate()
-        .find(|(_, annotation)| {
-            class_names
-                .get_class(&annotation.name)
-                .is_some_and(|name| name.matches("kotlin/jvm/JvmName"))
-        })
-        .and_then(|(index, _)| {
-            headers
-                .annotation_string_arguments(declaration, index)
-                .first()
-                .map(|value| value.to_string())
-        })
-        .unwrap_or_else(|| fallback.to_string())
 }
 
 impl Checker<'_> {
@@ -15365,7 +15317,9 @@ mod tests {
     /// name where the reference version reports it there. That table row is checked against kotlinc
     /// by `tests/diagnostic_wording_versions_e2e.rs`; these tests check the resolver follows it.
     fn missing_argument_anchor<'a>(argument: &'a str, callee: &'a str) -> &'a str {
-        match crate::diagnostic_wording::no_value_for_parameter_anchor() {
+        match crate::diagnostic_wording::no_value_for_parameter_anchor(
+            crate::kotlin_version::ReferenceProfile::default(),
+        ) {
             crate::diagnostic_wording::Anchor::ValueArguments => argument,
             crate::diagnostic_wording::Anchor::ReferencedNameByQualified => callee,
         }
@@ -16257,6 +16211,7 @@ fun rejected(owner: Owner) { owner.hidden() }
         assert_eq!(
             errors,
             [crate::diagnostic_wording::unresolved_reference_on(
+                crate::kotlin_version::ReferenceProfile::default(),
                 "component2",
                 Some("Box")
             )]
@@ -19441,7 +19396,9 @@ fun box(): String {
             .flat_map(|callee| {
                 let missing = (missing, missing_argument_anchor("1)", callee), Some(callee));
                 let mixing = (mixing, "1", None);
-                match crate::diagnostic_wording::no_value_for_parameter_anchor() {
+                match crate::diagnostic_wording::no_value_for_parameter_anchor(
+                    crate::kotlin_version::ReferenceProfile::default(),
+                ) {
                     crate::diagnostic_wording::Anchor::ValueArguments => [mixing, missing],
                     crate::diagnostic_wording::Anchor::ReferencedNameByQualified => {
                         [missing, mixing]
@@ -22284,6 +22241,7 @@ fun use() {
         assert_eq!(
             errors,
             [crate::diagnostic_wording::unresolved_reference_on(
+                crate::kotlin_version::ReferenceProfile::default(),
                 "substring",
                 Some("Int")
             )]
@@ -22494,6 +22452,7 @@ fun use() {
         assert_eq!(
             errors,
             [crate::diagnostic_wording::unresolved_reference_on(
+                crate::kotlin_version::ReferenceProfile::default(),
                 "z",
                 Some("Point")
             )]
@@ -27052,7 +27011,13 @@ impl<'a> Checker<'a> {
         let unbound = matches!(binding, CallableReferenceBinding::Unbound);
         let source = self.fed_source();
         match extension_reference_selection::select_extension_reference(
-            &source, overloads, receiver, unbound, expected, self,
+            &source,
+            overloads,
+            receiver,
+            unbound,
+            expected,
+            self.file.reference.quirks(),
+            self,
         ) {
             ExtensionReferenceChoice::Selected(selected) => {
                 ExtensionRefSelection::Selected(selected)
@@ -27752,7 +27717,10 @@ impl<'a> Checker<'a> {
         {
             let source = self.fed_source();
             if callable_reference_selection::select_adapted_instance_candidate(
-                &source,
+                callable_reference_selection::ReferenceSource {
+                    source: &source,
+                    quirks: self.file.reference.quirks(),
+                },
                 &candidates,
                 self.file.language.callable_references_to_contextual,
                 None,
@@ -28477,7 +28445,10 @@ impl<'a> Checker<'a> {
         let source = self.fed_source();
         let (selected, plan, type_arguments) =
             callable_reference_selection::select_adapted_instance_candidate(
-                &source,
+                callable_reference_selection::ReferenceSource {
+                    source: &source,
+                    quirks: self.file.reference.quirks(),
+                },
                 overloads,
                 self.file.language.callable_references_to_contextual,
                 None,
@@ -29384,7 +29355,7 @@ impl<'a> Checker<'a> {
                     .map(|argument| self.span(*argument))
                     .unwrap_or_else(|| self.call_argument_list_span(call, args)),
                 CallArgMappingError::MissingRequired { .. } => self.anchored_span(
-                    crate::diagnostic_wording::no_value_for_parameter_anchor(),
+                    crate::diagnostic_wording::no_value_for_parameter_anchor(self.file.reference),
                     call,
                     || recovery_span.unwrap_or_else(|| self.call_argument_list_span(call, args)),
                 ),
@@ -37340,7 +37311,7 @@ impl<'a> Checker<'a> {
             {
                 let editor_span = self.call_callee_name_span(call);
                 let span = self.anchored_span(
-                    crate::diagnostic_wording::no_value_for_parameter_anchor(),
+                    crate::diagnostic_wording::no_value_for_parameter_anchor(self.file.reference),
                     call,
                     || span,
                 );
@@ -42016,6 +41987,7 @@ impl<'a> Checker<'a> {
                 self.diags.error(
                     operator_span,
                     crate::diagnostic_wording::unresolved_operator_reference_on(
+                        self.file.reference,
                         operator_name,
                         if decrement { "--" } else { "++" },
                         Some(read_ty.source_name().as_ref()),
@@ -44201,7 +44173,11 @@ impl<'a> Checker<'a> {
                     let ty = self.package_used_as_expression(span);
                     return self.set(e, ty);
                 }
-                let message = crate::diagnostic_wording::unresolved_reference_on(&name, None);
+                let message = crate::diagnostic_wording::unresolved_reference_on(
+                    self.file.reference,
+                    &name,
+                    None,
+                );
                 self.diags.error(span, message);
                 return self.set(e, Ty::Error);
             }
@@ -45245,7 +45221,10 @@ impl<'a> Checker<'a> {
                     .classifier_call_candidates(internal, name)
                     .and_then(|(classifier_receiver, candidates)| {
                         callable_reference_selection::select_adapted_instance_candidate(
-                            &source,
+                            callable_reference_selection::ReferenceSource {
+                                source: &source,
+                                quirks: self.file.reference.quirks(),
+                            },
                             &candidates,
                             self.file.language.callable_references_to_contextual,
                             None,
@@ -45545,7 +45524,10 @@ impl<'a> Checker<'a> {
                 let source = self.fed_source();
                 if let Some((selected, argument_mapping, type_arguments)) =
                     callable_reference_selection::select_adapted_instance_candidate(
-                        &source,
+                        callable_reference_selection::ReferenceSource {
+                            source: &source,
+                            quirks: self.file.reference.quirks(),
+                        },
                         &receiver_candidates.overloads,
                         self.file.language.callable_references_to_contextual,
                         Some(receiver_ty),

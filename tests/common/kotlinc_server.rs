@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use super::server_pool::{self, server_pool_cap};
+use super::server_pool::{self, kotlinc_pool_cap};
 use super::{
     byte_dump, die_with_parent, java_home, kotlinc_lib_dir, protocol_jvm_log_args,
     read_exact_deadline, spawn_owned, ProfGuard,
@@ -217,16 +217,18 @@ pub fn kotlin_compiler_jar() -> Option<PathBuf> {
 /// Compile the reference driver and typed settings updater into a stable cache directory.
 /// The updater compiles against the selected Kotlin compiler; the driver loads it in that compiler's
 /// class loader. These infrastructure helpers require no annotation processing.
-fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf> {
+fn setup_kotlinc_server(java_home: &str, compiler_jar: &Path) -> Option<PathBuf> {
     // The JDK is part of the cache key: a class compiled by a NEWER javac (another session's
     // JAVA_HOME) is unloadable by an older runtime, and the server-spawn failure then reads as
     // "kotlinc unavailable" — silently disabling every reference compile and cross-check.
+    // The compiler jar is part of it too: the settings updater is compiled against that
+    // distribution and loaded by its class loader, so two releases do not share one class file.
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in KOTLINC_SERVER_SRC
         .bytes()
         .chain(TYPED_LANGUAGE_SETTINGS_UPDATER_SRC.bytes())
         .chain(super::producing_jdk::driver_cache_key(java_home))
-        .chain(_compiler_jar.to_string_lossy().bytes())
+        .chain(compiler_jar.to_string_lossy().bytes())
     {
         hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
     }
@@ -263,7 +265,7 @@ fn setup_kotlinc_server(java_home: &str, _compiler_jar: &Path) -> Option<PathBuf
     let out = Command::new(&javac)
         .arg("-proc:none")
         .arg("-cp")
-        .arg(format!("{}/*", _compiler_jar.parent()?.to_string_lossy()))
+        .arg(format!("{}/*", compiler_jar.parent()?.to_string_lossy()))
         .arg("-d")
         .arg(&dir)
         .arg(&src_path)
@@ -402,7 +404,7 @@ impl KotlincServer {
 
 /// Pools of persistent compiler servers, one per classpath and JVM-property set. Callers claim a
 /// server, then compile outside the pool lock, so overlapping compiles use distinct JVMs up to
-/// [`server_pool_cap`].
+/// [`kotlinc_pool_cap`].
 type KotlincPools = Mutex<HashMap<String, Arc<server_pool::Pool<KotlincServer>>>>;
 
 /// Compile with the reference compiler via the persistent server. `args` are ordinary `kotlinc` CLI
@@ -417,17 +419,119 @@ type KotlincPools = Mutex<HashMap<String, Arc<server_pool::Pool<KotlincServer>>>
 /// On a cache miss the live compiler applies it as a JVM system property, on a server that no
 /// other compile shares, and does not pass it through to the compiler.
 pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
-    if let Some(replayed) = byte_dump::replay_class_dump(args) {
+    let jar = kotlin_compiler_jar()?;
+    let release = krusty::kotlin_version::environment_release().to_string();
+    // The provisioned distribution of the process release is that compiler. An override
+    // (`KRUSTY_KOTLINC`) names a different jar and keeps this function on that jar.
+    if compiler_jar_for_release(&release).as_deref() == Some(jar.as_ref()) {
+        return kotlinc_compile_for_release(&release, args);
+    }
+    compile_jar(&jar, args)
+}
+
+/// Compile `args` with the kotlinc distribution of `release`, through the same server and
+/// recorded-byte replay as [`kotlinc_compile`].
+///
+/// A release or RC replays under that distribution's identity and `lib/` fingerprint. A beta
+/// compiles live and is not archived. The distribution is
+/// `target/cache/kotlinc/<release>/`, downloaded when it is absent. The process compiler, the one
+/// [`kotlinc_compile`] uses, keeps its own replay key.
+pub fn kotlinc_compile_for_release(release: &str, args: &[String]) -> Option<(i32, String)> {
+    compile_jar(&compiler_jar_for_release(release)?, args)
+}
+
+fn compile_jar(compiler_jar: &Path, args: &[String]) -> Option<(i32, String)> {
+    let lib = compiler_jar.parent()?;
+    // The process compiler keeps its existing replay key. Another release fingerprints that
+    // release's `lib/` and build identity, and a beta compiles live.
+    let process_compiler = kotlin_compiler_jar().as_deref() == Some(compiler_jar);
+    let identity = build_identity(lib);
+    let replayed = if process_compiler {
+        byte_dump::replay_class_dump(args)
+    } else {
+        byte_dump::replay_class_dump_for_compiler(args, identity.as_deref(), Some(lib))
+    };
+    if let Some(replayed) = replayed {
         if replayed.code == 0 {
             byte_dump::write_replayed_classes(args, &replayed.files);
         }
         return Some((replayed.code, replayed.stderr));
     }
-    let result = kotlinc_compile_live(args, None, None)?;
-    // A replay returns above and prints nothing. This line names the test that reached the JVM.
-    byte_dump::report_live_kotlinc(args);
-    byte_dump::remember_class_dump(args, result.0, &result.1);
+    let result = kotlinc_compile_with_jar(compiler_jar, args, None, None)?;
+    if process_compiler {
+        byte_dump::report_live_kotlinc(args);
+        byte_dump::remember_class_dump(args, result.0, &result.1);
+    } else {
+        byte_dump::report_live_kotlinc_for(args, identity.is_some(), Some(lib));
+        byte_dump::remember_class_dump_for_compiler(
+            args,
+            result.0,
+            &result.1,
+            identity.as_deref(),
+            Some(lib),
+        );
+    }
     Some(result)
+}
+
+/// The `lib/` directory of `release`'s kotlinc distribution, provisioning it when needed. A
+/// distribution is available only when its whole payload is: a directory another process is still
+/// unpacking, or one an interrupted run left half-written, is provisioned again under the lock.
+pub fn kotlinc_lib_for_release(release: &str) -> Option<PathBuf> {
+    let jar = cached_compiler_jar(release);
+    if distribution_is_complete(release) {
+        return jar.parent().map(Path::to_path_buf);
+    }
+    if release == krusty::kotlin_version::environment_release().to_string() {
+        if let Some(jar) = kotlin_compiler_jar() {
+            return jar.parent().map(Path::to_path_buf);
+        }
+    }
+    provision_kotlinc(release).and_then(|jar| jar.parent().map(Path::to_path_buf))
+}
+
+fn compiler_jar_for_release(release: &str) -> Option<PathBuf> {
+    let jar = kotlinc_lib_for_release(release)?.join("kotlin-compiler.jar");
+    jar.is_file().then_some(jar)
+}
+
+fn cached_compiler_jar(release: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "target/cache/kotlinc/{release}/kotlinc/lib/kotlin-compiler.jar"
+    ))
+}
+
+fn kotlinc_cache_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("target/cache/kotlinc")
+}
+
+fn distribution_is_complete(release: &str) -> bool {
+    krusty::toolchain::kotlinc_distribution_complete(
+        &kotlinc_cache_root().join(release).join("kotlinc"),
+    )
+}
+
+fn build_identity(lib: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(lib.parent()?.join("build.txt")).ok()?;
+    let line = text.lines().next()?.trim();
+    byte_dump::cacheable_build_identity(line)
+}
+
+fn provision_kotlinc(release: &str) -> Option<PathBuf> {
+    provision_distribution(&kotlinc_cache_root().join(release), release, None)
+}
+
+/// Provision `release`'s distribution under `dest` through `scripts/provision-kotlinc.sh`, the one
+/// writer of that cache (the `just kotlinc` recipe calls it too). `url` replaces the release
+/// archive's address.
+fn provision_distribution(dest: &Path, release: &str, url: Option<&str>) -> Option<PathBuf> {
+    let mut script =
+        Command::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/provision-kotlinc.sh"));
+    script.arg(release).arg(dest);
+    script.args(url);
+    let provisioned = script.output().ok()?.status.success();
+    (provisioned && krusty::toolchain::kotlinc_distribution_complete(&dest.join("kotlinc")))
+        .then(|| dest.join("kotlinc/lib/kotlin-compiler.jar"))
 }
 
 /// [`kotlinc_compile`] without the recorded-byte archive: always the live persistent compiler, and
@@ -513,6 +617,22 @@ fn kotlinc_compile_live(
     )
 }
 
+/// The JVM compiler of one named release, in the same pool machinery as the process compiler.
+fn kotlinc_compile_with_jar(
+    compiler_jar: &Path,
+    args: &[String],
+    language_version: Option<&str>,
+    api_version: Option<&str>,
+) -> Option<(i32, String)> {
+    kotlinc_compile_on(
+        krusty::compilation_target::CompilationTarget::Jvm,
+        Some(compiler_jar),
+        args,
+        language_version,
+        api_version,
+    )
+}
+
 struct SelectedCompiler {
     lib_dir: String,
     class: &'static str,
@@ -523,6 +643,17 @@ struct SelectedCompiler {
 /// Compiler classes and typed configuration phases are selected explicitly, never retried as JVM.
 pub fn kotlinc_compile_for_target(
     target: krusty::compilation_target::CompilationTarget,
+    args: &[String],
+    language_version: Option<&str>,
+    api_version: Option<&str>,
+) -> Option<(i32, String)> {
+    kotlinc_compile_on(target, None, args, language_version, api_version)
+}
+
+/// `jvm_jar` names another release's JVM compiler; it applies to the JVM target only.
+fn kotlinc_compile_on(
+    target: krusty::compilation_target::CompilationTarget,
+    jvm_jar: Option<&Path>,
     args: &[String],
     language_version: Option<&str>,
     api_version: Option<&str>,
@@ -539,7 +670,10 @@ pub fn kotlinc_compile_for_target(
     let mut properties = Vec::new();
     let (compiler_jar, class, phase) = match target {
         CompilationTarget::Jvm => (
-            kotlin_compiler_jar()?,
+            match jvm_jar {
+                Some(jar) => jar.to_path_buf(),
+                None => kotlin_compiler_jar()?,
+            },
             "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler",
             "org.jetbrains.kotlin.cli.pipeline.jvm.JvmConfigurationPipelinePhase",
         ),
@@ -593,7 +727,7 @@ pub fn kotlinc_compile_for_target(
     let admission = Instant::now();
     let spawning = Cell::new(Duration::ZERO);
     pool.with_server(
-        server_pool_cap(),
+        kotlinc_pool_cap(),
         || {
             let started = Instant::now();
             let server = KotlincServer::new(&java, &cp, &compiler, &properties);
@@ -659,6 +793,267 @@ fn kotlinc_server_key(classpath: &str, properties: &[String]) -> String {
         key.push_str(property);
     }
     key
+}
+
+#[cfg(test)]
+mod provisioning_tests {
+    use super::provision_distribution;
+    use krusty::toolchain::{kotlinc_distribution_complete, KOTLINC_PAYLOAD};
+    use std::path::Path;
+    use std::process::Command;
+
+    /// A distribution archive with the whole tested payload, served from a local file.
+    fn archive(work: &Path) -> String {
+        let tree = work.join("tree");
+        for file in KOTLINC_PAYLOAD {
+            let path = tree.join("kotlinc").join(file);
+            std::fs::create_dir_all(path.parent().expect("a payload file has a directory"))
+                .expect("create the payload directory");
+            std::fs::write(&path, file).expect("write the payload file");
+        }
+        let bin = tree.join("kotlinc/bin");
+        std::fs::create_dir_all(&bin).expect("create bin");
+        std::fs::write(bin.join("kotlinc"), "#!/bin/sh\n").expect("write the launcher");
+        let zip = work.join("kotlinc.zip");
+        // Python's zipfile writes the archive: the harness does not depend on a JDK `jar` tool.
+        let status = Command::new("python3")
+            .arg("-I")
+            .arg("-c")
+            .arg(
+                "import os, sys, zipfile\n\
+                 root, out = sys.argv[1], sys.argv[2]\n\
+                 with zipfile.ZipFile(out, 'w') as z:\n\
+                 \x20   for d, _, files in os.walk(root):\n\
+                 \x20       for f in files:\n\
+                 \x20           p = os.path.join(d, f)\n\
+                 \x20           z.write(p, os.path.relpath(p, root))\n",
+            )
+            .arg(&tree)
+            .arg(&zip)
+            .status()
+            .expect("run python3");
+        assert!(status.success(), "archive the payload");
+        format!("file://{}", zip.display())
+    }
+
+    // A directory that holds the compiler jar alone is what a run interrupted mid-extraction
+    // leaves; it must not read as a distribution, and provisioning must replace it.
+    #[test]
+    fn a_partial_distribution_is_not_available_and_is_replaced_whole() {
+        let work = super::super::scratch_dir().expect("allocate a directory");
+        let url = archive(&work);
+        let dest = work.join("cache/9.9.9");
+        let lib = dest.join("kotlinc/lib");
+        std::fs::create_dir_all(&lib).expect("create the partial lib");
+        std::fs::write(lib.join("kotlin-compiler.jar"), "partial").expect("write the jar");
+        assert!(!kotlinc_distribution_complete(&dest.join("kotlinc")));
+        let jar = provision_distribution(&dest, "9.9.9", Some(&url)).expect("provision");
+        assert_eq!(jar, lib.join("kotlin-compiler.jar"));
+        assert!(kotlinc_distribution_complete(&dest.join("kotlinc")));
+        assert_eq!(
+            std::fs::read_to_string(&jar).expect("read the jar"),
+            "lib/kotlin-compiler.jar"
+        );
+        assert!(
+            std::fs::read_dir(&dest)
+                .expect("list the destination")
+                .all(|entry| !entry
+                    .expect("a directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".staging")),
+            "the staging directory is removed"
+        );
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    // A run killed mid-download never reaches its cleanup trap; the next provisioner removes the
+    // staging directory it left.
+    #[test]
+    fn a_staging_directory_a_killed_run_left_is_removed() {
+        let work = super::super::scratch_dir().expect("allocate a directory");
+        let url = archive(&work);
+        let dest = work.join("cache/9.9.5");
+        let stale = dest.join(".staging-1");
+        std::fs::create_dir_all(&stale).expect("create the stale staging directory");
+        std::fs::write(stale.join("kotlinc.zip"), "partial").expect("write the stale download");
+        provision_distribution(&dest, "9.9.5", Some(&url)).expect("provision");
+        assert!(!stale.exists(), "the stale staging directory is removed");
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    // Readers poll availability while provisioners race for the lock: whenever a reader sees a
+    // distribution, every payload file is there, and every provisioner returns a usable jar.
+    #[test]
+    fn a_concurrent_reader_never_sees_a_distribution_missing_its_payload() {
+        let work = super::super::scratch_dir().expect("allocate a directory");
+        let url = archive(&work);
+        let dest = work.join("cache/9.9.8");
+        std::fs::create_dir_all(&dest).expect("create the destination");
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut sightings = 0u32;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    if kotlinc_distribution_complete(&dest.join("kotlinc")) {
+                        sightings += 1;
+                        for file in KOTLINC_PAYLOAD {
+                            assert!(
+                                dest.join("kotlinc").join(file).is_file(),
+                                "{file} is missing from a distribution the reader accepted"
+                            );
+                        }
+                    }
+                }
+                sightings
+            });
+            let provisioners: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| provision_distribution(&dest, "9.9.8", Some(&url))))
+                .collect();
+            for provisioner in provisioners {
+                assert!(provisioner.join().expect("provisioner").is_some());
+            }
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            reader
+                .join()
+                .expect("the reader never saw a partial payload");
+        });
+        assert!(kotlinc_distribution_complete(&dest.join("kotlinc")));
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    // The script returns the launcher, so a cache holding the whole server payload but no
+    // executable launcher is repaired rather than handed back.
+    #[test]
+    fn a_cache_without_a_launcher_is_repaired() {
+        let work = super::super::scratch_dir().expect("allocate a directory");
+        let url = archive(&work);
+        let dest = work.join("cache/9.9.6");
+        for file in KOTLINC_PAYLOAD {
+            let path = dest.join("kotlinc").join(file);
+            std::fs::create_dir_all(path.parent().expect("a payload file has a directory"))
+                .expect("create the payload directory");
+            std::fs::write(&path, "stale").expect("write the stale payload file");
+        }
+        assert!(kotlinc_distribution_complete(&dest.join("kotlinc")));
+        assert!(!dest.join("kotlinc/bin/kotlinc").exists());
+        provision_distribution(&dest, "9.9.6", Some(&url)).expect("provision");
+        let launcher = dest.join("kotlinc/bin/kotlinc");
+        assert!(launcher.is_file());
+        assert_eq!(
+            std::fs::read_to_string(dest.join("kotlinc/lib/kotlin-compiler.jar"))
+                .expect("read the jar"),
+            "lib/kotlin-compiler.jar"
+        );
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    // A host without `flock` takes the lock through Python, which must still hold it while the
+    // script provisions. Four provisioners race for one release; the archive server answers slowly,
+    // so a provisioner that did not wait for the lock would download as well. Exactly one request
+    // reaches the server, and every provisioner returns a usable launcher.
+    #[test]
+    fn provisioners_without_flock_still_download_once() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let work = super::super::scratch_dir().expect("allocate a directory");
+        let url = archive(&work);
+        let body = std::fs::read(url.trim_start_matches("file://")).expect("read the archive");
+        let tools = work.join("tools");
+        std::fs::create_dir_all(&tools).expect("create the tool directory");
+        let path = std::env::var_os("PATH").expect("PATH");
+        for tool in [
+            "bash", "mkdir", "rm", "mv", "chmod", "curl", "unzip", "python3", "env", "sh",
+        ] {
+            // A wrapper script on PATH (a shell guard around `rm`, say) needs the PATH this test
+            // withholds, so the real executable is the first candidate that is not a script.
+            let candidates: Vec<_> = std::env::split_paths(&path)
+                .map(|dir| dir.join(tool))
+                .filter(|candidate| candidate.is_file())
+                .collect();
+            let found = candidates
+                .iter()
+                .find(|candidate| {
+                    std::fs::read(candidate).is_ok_and(|bytes| !bytes.starts_with(b"#!"))
+                })
+                .or(candidates.first());
+            if let Some(found) = found {
+                std::os::unix::fs::symlink(found, tools.join(tool)).expect("link the tool");
+            }
+        }
+        assert!(tools.join("python3").exists(), "the fallback needs python3");
+        assert!(!tools.join("flock").exists());
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the archive server");
+        let address = listener.local_addr().expect("server address");
+        let requests = AtomicUsize::new(0);
+        let dest = work.join("cache/9.9.7");
+        let served_url = format!("http://{address}/kotlin-compiler.zip");
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    let mut request = [0u8; 1024];
+                    let read = stream.read(&mut request).expect("read the request");
+                    if read == 0 {
+                        continue;
+                    }
+                    if requests.fetch_add(1, Ordering::SeqCst) + 1 > 4 {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(800));
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(&body);
+                }
+            });
+            let provisioners: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        Command::new(
+                            Path::new(env!("CARGO_MANIFEST_DIR"))
+                                .join("scripts/provision-kotlinc.sh"),
+                        )
+                        .args(["9.9.7"])
+                        .arg(&dest)
+                        .arg(&served_url)
+                        .env("PATH", &tools)
+                        .env("NO_PROXY", "127.0.0.1")
+                        .env("no_proxy", "127.0.0.1")
+                        .output()
+                        .expect("run the provisioning script")
+                    })
+                })
+                .collect();
+            let outputs: Vec<_> = provisioners
+                .into_iter()
+                .map(|provisioner| provisioner.join().expect("provisioner"))
+                .collect();
+            let downloads = requests.load(Ordering::SeqCst);
+            // Wake the accept loop first, so a failed assertion below cannot hang the scope.
+            requests.store(usize::MAX / 2, Ordering::SeqCst);
+            let _ =
+                std::net::TcpStream::connect(address).and_then(|mut stream| stream.write_all(b"x"));
+            for output in outputs {
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                    dest.join("kotlinc/bin/kotlinc").to_string_lossy()
+                );
+            }
+            assert_eq!(downloads, 1, "one download in all");
+        });
+        assert!(kotlinc_distribution_complete(&dest.join("kotlinc")));
+        let _ = std::fs::remove_dir_all(&work);
+    }
 }
 
 #[cfg(test)]

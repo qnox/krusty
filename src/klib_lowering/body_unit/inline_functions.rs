@@ -7,21 +7,109 @@
 //! A lambda the call passes for a parameter the function inlines is not created: each invocation
 //! of the parameter in the copied body is expanded from the lambda's own body instead.
 
+use crate::fir::ExternalCallableId;
 use crate::fx_hash::{HashMap, HashSet};
 
 use crate::inline_expansion::{InlineBodySplice, InlineOperand, SplicedResult};
 use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
 use crate::libraries::{KlibBodyCallable, KlibDependencyCallable};
-use crate::metadata::klib_ir::tree::KlibIrFunction;
+use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrFunction};
 use crate::types::{stored_value_ty, InlineExpansionMode, Ty, TyKind, TypeName};
 
 use super::super::decline::KlibBodyDeclineReason;
-use super::super::function_lowering::FunctionHeader;
+use super::super::function_lowering::{function_header, prepared_inline_header, FunctionHeader};
 use super::super::inline_templates::{expansion_modes, modifiers_with_receiver};
 
 /// Whether the serialized `function` is inline: every call of it is expanded, never made.
 fn declares_inline(function: &KlibIrFunction) -> bool {
     function.base.flags & crate::metadata::function_flags::IS_INLINE != 0
+}
+
+/// Decline a call of a suspend inline `function` that has no prepared copy to expand from.
+///
+/// Its serialized body still holds the unlowered suspension intrinsics, which only the library's
+/// prepared copy replaces with the continuation operations, so expanding it would emit a
+/// suspension the unit cannot lower.
+fn require_prepared_copy(function: &KlibIrFunction) -> Result<(), KlibBodyDeclineReason> {
+    if declares_inline(function)
+        && function.base.flags & crate::metadata::function_flags::IS_SUSPEND != 0
+    {
+        return Err(KlibBodyDeclineReason::UnsupportedOperation(
+            "a call of a suspend inline function without a prepared copy",
+        ));
+    }
+    Ok(())
+}
+
+impl<'s> super::Linker<'_, 's> {
+    /// The function a call of the top-level `declaration` links to, declared when this unit has not
+    /// yet. A call of a suspend inline function expands from the copy its library prepared, whose
+    /// header is the selected declaration's; without one the call is declined, since the serialized
+    /// body still holds the unlowered suspension intrinsics.
+    pub(super) fn top_level_callee(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        selected: Option<KlibBodyCallable<'s>>,
+        arena: &'s KlibIrArena,
+        declaration: &'s KlibIrFunction,
+    ) -> Result<FunId, KlibBodyDeclineReason> {
+        let copy = self.sources.callees.expansion_copy(identity, declaration);
+        match (self.functions.get(identity).copied(), copy) {
+            (Some(function), _) => {
+                // The function was declared under another lowering's selection, or from its
+                // header alone; this lowering's selection must describe it too.
+                if let Some(selected) = selected {
+                    match copy {
+                        Some((arena, copy)) => {
+                            prepared_inline_header(
+                                selected,
+                                selected.type_parameters(),
+                                arena,
+                                copy,
+                            )?;
+                        }
+                        None => {
+                            function_header(Some(selected), arena, declaration)?;
+                        }
+                    }
+                }
+                Ok(function)
+            }
+            (None, Some((arena, copy))) => {
+                let selected = selected.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                    "a call of a suspend inline function without a selected declaration",
+                ))?;
+                let header =
+                    prepared_inline_header(selected, selected.type_parameters(), arena, copy)?;
+                self.declare_with_header(ir, identity, Some(selected), arena, copy, header)
+            }
+            (None, None) => self.declare_callee(ir, identity, selected, arena, declaration),
+        }
+    }
+
+    /// Declare a callee from its serialized body, which a call of a suspend inline function cannot
+    /// expand without the copy its library prepared.
+    pub(super) fn declare_callee(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+        selected: Option<KlibBodyCallable<'s>>,
+        arena: &'s KlibIrArena,
+        function: &'s KlibIrFunction,
+    ) -> Result<FunId, KlibBodyDeclineReason> {
+        require_prepared_copy(function)?;
+        self.declare(ir, identity, selected, arena, function)
+    }
+
+    /// Whether a call this unit links to a function realized outside it (another unit's export)
+    /// calls a `suspend` declaration, as the provider's record of it says.
+    pub(super) fn external_is_suspend(&self, target: ExternalCallableId) -> bool {
+        self.sources
+            .declarations
+            .external_callable(target)
+            .is_some_and(|realization| realization.callable.suspend)
+    }
 }
 
 /// A function the unit lowered from its serialized body, with the selected declaration it was
@@ -45,6 +133,17 @@ impl<'a, 's> Candidate<'a, 's> {
             function,
             header,
             selected,
+        }
+    }
+
+    /// A suspend body is a suspend function of the unit, as a source one is of its file: the common
+    /// coroutine preparation gives it its continuation and state machine. An inline-only prepared
+    /// copy is registered too, because membership is what makes a call of it a suspension point of
+    /// its caller; coroutine preparation skips the template itself (it is never emitted, so it gets
+    /// no state machine) and its call sites are expanded from its body.
+    pub(super) fn register_suspension(&self, ir: &mut IrFile) {
+        if self.function.base.flags & crate::metadata::function_flags::IS_SUSPEND != 0 {
+            ir.suspend_funs.push(self.declared);
         }
     }
 
@@ -84,11 +183,6 @@ pub(super) fn declare(
     selected: Option<KlibBodyCallable<'_>>,
     is_interface: &mut dyn FnMut(TypeName) -> Result<bool, KlibBodyDeclineReason>,
 ) -> Result<(), KlibBodyDeclineReason> {
-    if declaration.base.flags & crate::metadata::function_flags::IS_SUSPEND != 0 {
-        return Err(KlibBodyDeclineReason::UnsupportedOperation(
-            "a call of a suspend inline function",
-        ));
-    }
     let receiver = header.extension_receiver_index();
     let modifiers = match selected {
         Some(selected) => selected.inline_modifiers().to_vec(),
@@ -212,6 +306,12 @@ pub(super) fn expand_calls(ir: &mut IrFile) -> Result<(), KlibBodyDeclineReason>
     };
     for site in sites {
         expansion.call(ir, site)?;
+    }
+    // Every lambda passed for an inlined parameter now runs only as the copies of its body. Its
+    // expression stays in the arena, orphaned, with the implementation consumed, as checked FIR
+    // lowering leaves a lambda it spliced into an inline caller: no target creates it.
+    for lambda in expansion.lambdas.into_values() {
+        ir.functions[lambda.function as usize].body = None;
     }
     Ok(())
 }

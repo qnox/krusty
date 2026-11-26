@@ -1,0 +1,5 @@
+A	/** doc */\n    A(1),
+B	@Deprecated("x") B(2) { },
+C	// c\n    C(3),
+in	`in`,
+D	D;

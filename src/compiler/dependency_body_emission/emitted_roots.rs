@@ -121,11 +121,16 @@ pub(super) struct FrozenClosure {
     /// empty edge is the authorization the provider call consumes.
     pub(super) authorized_member_edges:
         HashMap<KlibDependencyCallable, crate::klib_lowering::CallEdge>,
+    /// The getter that bounds a counted loop over the indices each reached `indices` getter is.
+    pub(super) indices_bounds: HashMap<KlibDependencyCallable, KlibDependencyCallable>,
     /// The library objects whose values the closure's bodies read, which the unit materializes.
     pub(super) read_classes: Vec<crate::libraries::KlibBodyClassContract>,
     /// Members of a materialized class or object that dispatch reaches, whose bodies the unit
     /// emits although no walked body calls them directly.
     pub(super) dispatched: Vec<KlibDependencyCallable>,
+    /// The classes declaring a private member a class nested in them calls, which the unit
+    /// materializes to emit that member.
+    pub(super) private_member_classes: Vec<crate::libraries::KlibBodyClassContract>,
 }
 
 /// Where a unit's closure starts: the callables the emitted source selects, and the library
@@ -151,6 +156,7 @@ pub(super) fn declarations(
     let root_objects = roots.objects;
     let mut visited = HashSet::default();
     let mut authorized_member_edges = HashMap::default();
+    let mut indices_bounds = HashMap::default();
     let mut state = ClosureState {
         pending: roots
             .callables
@@ -162,6 +168,7 @@ pub(super) fn declarations(
         objects: HashSet::default(),
         read_classes: root_objects.to_vec(),
         dispatched: HashSet::default(),
+        private_member_classes: Vec::new(),
         emitted_defaults: roots
             .callables
             .iter()
@@ -198,7 +205,18 @@ pub(super) fn declarations(
                     .is_none()
                     && !externals.contains_key(&identity)
             })
-            .and_then(|caller| private_member_class(platform, bodies, &identity, caller))
+            .and_then(|caller| {
+                let declaring = private_member_class(platform, bodies, &identity, caller.clone())?;
+                if declaring.classifier != caller.classifier
+                    && !state
+                        .private_member_classes
+                        .iter()
+                        .any(|known| known.classifier == declaring.classifier)
+                {
+                    state.private_member_classes.push(declaring.clone());
+                }
+                Some(declaring)
+            })
         {
             let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
             state.pending.extend(
@@ -308,6 +326,14 @@ pub(super) fn declarations(
             state.pending.push_back((member, None));
             state.declarations.push((declaration_target, realization));
             continue;
+        }
+        // A counted loop over a collection's or text's indices reads the receiver's size, which
+        // the loop's lowering calls in its place.
+        if let Some(member) = crate::klib_lowering::indices_bound_member(selected, bodies)
+            .map_err(|reason| format!("an invalid indices bound: {reason:?}"))?
+        {
+            indices_bounds.insert(identity.clone(), member.clone());
+            state.pending.push_back((member, None));
         }
         let retained = externals
             .get(&identity)
@@ -502,8 +528,10 @@ pub(super) fn declarations(
     Ok(FrozenClosure {
         declarations: state.declarations,
         authorized_member_edges,
+        indices_bounds,
         read_classes: state.read_classes,
         dispatched: state.dispatched.into_iter().collect(),
+        private_member_classes: state.private_member_classes,
     })
 }
 
@@ -531,6 +559,8 @@ struct ClosureState<'c, 'u> {
     /// Members of a materialized class that dispatch reaches: their bodies are emitted even where
     /// a call of one folds to a common operation, as a virtual call runs the body.
     dispatched: HashSet<KlibDependencyCallable>,
+    /// The classes declaring a private member a class nested in them calls.
+    private_member_classes: Vec<crate::libraries::KlibBodyClassContract>,
     /// Interface default bodies a class of the file inherits, emitted for its dispatch record
     /// though no support unit materializes the interface.
     emitted_defaults: HashSet<KlibDependencyCallable>,

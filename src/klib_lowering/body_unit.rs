@@ -357,6 +357,23 @@ pub(super) struct MemberClass<'a> {
     /// The class's properties with a backing field, each with that field.
     pub(super) properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
     pub(super) contract: &'a crate::libraries::KlibBodyClassContract,
+    /// An inner class's outer instance, which its bodies read from the field after `fields`.
+    pub(super) outer: Option<super::same_library_class::OuterInstance<'a>>,
+}
+
+impl<'a> MemberClass<'a> {
+    /// The outer instance of the class `header` declares, kept after its declared `fields`.
+    fn outer_instance(
+        header: &super::class_headers::ClassMemberHeader<'_, 'a>,
+        fields: &[&'a KlibIrField],
+    ) -> Option<super::same_library_class::OuterInstance<'a>> {
+        header
+            .outer
+            .map(|outer| super::same_library_class::OuterInstance {
+                symbol: outer.this,
+                field: u32::try_from(fields.len()).expect("a field list fits u32"),
+            })
+    }
 }
 
 impl DependencyBodyUnit {
@@ -763,11 +780,16 @@ impl DependencyBodyUnit {
 
     /// A unit that reads the enum constants and object instances of `classes`, which earlier
     /// units materialized, through their exports.
-    pub(crate) fn reading_realized_classes(classes: impl IntoIterator<Item = TypeName>) -> Self {
-        Self {
+    pub(crate) fn reading_realized_classes(
+        classes: impl IntoIterator<Item = TypeName>,
+        reference: crate::kotlin_version::ReferenceProfile,
+    ) -> Self {
+        let mut unit = Self {
             realized_classes: classes.into_iter().collect(),
             ..Self::default()
-        }
+        };
+        unit.ir.reference = reference;
+        unit
     }
 
     /// This unit for a target that lays out a class an earlier unit realized from that unit's
@@ -1070,6 +1092,7 @@ impl DependencyBodyUnit {
                                 member.properties.clone(),
                                 member.contract.is_value,
                             )
+                            .reading_outer_instance(member.class, member.outer)
                             .body(body.statements),
                         None => lowering.body(body.statements),
                     }
@@ -1165,6 +1188,10 @@ struct Linker<'u, 's> {
 }
 
 impl<'s> CallLinker for Linker<'_, 's> {
+    fn is_suspend_callable(&self, target: ExternalCallableId) -> bool {
+        self.external_is_suspend(target)
+    }
+
     fn atomic_field(
         &self,
         callee: &KlibPublicIdSignature,
@@ -1358,25 +1385,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         &self,
         getter: &KlibAccessorIdSignature,
     ) -> Result<Option<crate::libraries::IndicesReceiver>, KlibBodyDeclineReason> {
-        let signature = KlibDeclarationSignature::Accessor(getter.clone());
-        let identity = match self
-            .sources
-            .bodies
-            .callee_origin(&self.active_module, &signature)
-        {
-            KlibCalleeOrigin::Exact(identity) => identity,
-            // Dependency preparation omitted this getter's edge: the loop is not one this unit counts.
-            KlibCalleeOrigin::Missing => {
-                return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                    "a `for` loop over an `indices` getter without a provider declaration",
-                ))
-            }
-            KlibCalleeOrigin::Ambiguous => {
-                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
-                    getter.property().clone(),
-                )))
-            }
-        };
+        let identity = self.indices_getter_identity(getter)?;
         Ok(self
             .sources
             .declarations
@@ -1384,6 +1393,34 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .and_then(|(_, realization)| {
                 super::for_loops::indices_receiver(realization.klib_body_callable()?)
             }))
+    }
+
+    fn indices_bound(
+        &self,
+        getter: &KlibAccessorIdSignature,
+    ) -> Result<Option<super::body_lowering::IndicesBound>, KlibBodyDeclineReason> {
+        let identity = self.indices_getter_identity(getter)?;
+        let Some(bound) = self.sources.callees.indices_bound(&identity) else {
+            return Ok(None);
+        };
+        let KlibDeclarationSignature::Accessor(accessor) = &bound.declaration else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an `indices` bound is not a property accessor".to_owned(),
+            ));
+        };
+        let selected = match self.sources.callees.get(bound) {
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for an `indices` bound".to_owned(),
+                ))
+            }
+            None => return Err(KlibBodyDeclineReason::Unjoined),
+        };
+        Ok(Some(super::body_lowering::IndicesBound {
+            accessor: accessor.clone(),
+            ty: selected.ret(),
+        }))
     }
 
     fn reverses_progression(
@@ -1557,6 +1594,11 @@ impl<'s> CallLinker for Linker<'_, 's> {
         callee: &KlibPublicIdSignature,
     ) -> Result<LinkedCallableReference, KlibBodyDeclineReason> {
         let identity = self.callee_identity(callee)?;
+        // A private member of a class this unit lowers has no provider declaration; the unit
+        // emits it with the class, and the reference names that emitted member.
+        if let Some(call) = self.private_class_member(ir, &identity)? {
+            return private_members::private_member_reference(self.sources.bodies, &identity, call);
+        }
         let (declaration, callable) = self.sources.callees.reference_declaration(&identity)?;
         let call = self.link(ir, callee)?;
         Ok(LinkedCallableReference::new(declaration, callable, call))
@@ -2086,17 +2128,7 @@ impl<'s> Linker<'_, 's> {
         declaration: &'s KlibIrFunction,
     ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
         let selected = selected_callable_for_header(selected, None, arena, declaration)?;
-        let function = match self.functions.get(identity) {
-            Some(function) => {
-                // The function was declared under another lowering's selection, or from its
-                // header alone; this lowering's selection must describe it too.
-                if let Some(selected) = selected {
-                    function_header(Some(selected), arena, declaration)?;
-                }
-                *function
-            }
-            None => self.declare(ir, identity, selected, arena, declaration)?,
-        };
+        let function = self.top_level_callee(ir, identity, selected, arena, declaration)?;
         let parameter_defaults = parameter_defaults(declaration);
         let declaration = &ir.functions[function as usize];
         Ok(LinkedCallee {
@@ -2349,6 +2381,29 @@ impl<'s> Linker<'_, 's> {
             })
     }
 
+    /// The exact declaration of the `indices` getter a loop calls, which dependency preparation
+    /// reached as the loop's edge.
+    fn indices_getter_identity(
+        &self,
+        getter: &KlibAccessorIdSignature,
+    ) -> Result<KlibDependencyCallable, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Accessor(getter.clone());
+        match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => Ok(identity),
+            // Dependency preparation omitted this getter's edge: the loop is not one this unit counts.
+            KlibCalleeOrigin::Missing => Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a `for` loop over an `indices` getter without a provider declaration",
+            )),
+            KlibCalleeOrigin::Ambiguous => Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(
+                Box::new(getter.property().clone()),
+            )),
+        }
+    }
+
     /// Whether `identity` is an abstract accessor of a class an earlier unit realized and this
     /// unit does not declare: a call of it dispatches through the member's frozen declaration.
     fn is_earlier_abstract_accessor(&self, identity: &KlibDependencyCallable) -> bool {
@@ -2381,7 +2436,7 @@ impl<'s> Linker<'_, 's> {
                 body_header(Some(selected), arena, declaration, self.sources.bodies)?;
                 function
             }
-            None => self.declare(ir, identity, Some(selected), arena, declaration)?,
+            None => self.declare_callee(ir, identity, Some(selected), arena, declaration)?,
         };
         let declared = &ir.functions[function as usize];
         let (Some(receiver), params) = (
@@ -2586,6 +2641,7 @@ impl<'s> Linker<'_, 's> {
         let declared = declare_function(ir, &header);
         let callee = inline_functions::Candidate::new(declared, function, &header, selected);
         callee.declare(ir, self.root, identity, &mut |name| self.is_interface(name))?;
+        callee.register_suspension(ir);
         self.functions.insert(identity.clone(), declared);
         if let Some(formals) = self.private_members.get_mut(identity) {
             *formals = header.own_formals(function);

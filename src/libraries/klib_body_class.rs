@@ -83,8 +83,8 @@ impl KlibBodyClassContract {
     }
 
     /// Whether a support unit materializes this class and emits its members as functions of the
-    /// class it materializes: a value class, or a class, object or enum class that is not sealed,
-    /// inner or expected; a generic one carries its formals, which its members' bodies read. A
+    /// class it materializes: a value class, or a class, object or enum class that is not sealed
+    /// or expected; a generic one carries its formals, which its members' bodies read. A
     /// builtin type of the common type model is neither, and neither is `kotlin.Any`, the root of
     /// every class, which each target lays out itself.
     pub(crate) fn emits_members(&self) -> bool {
@@ -98,8 +98,7 @@ impl KlibBodyClassContract {
             ) && matches!(
                 self.modality,
                 KotlinModality::Final | KotlinModality::Open | KotlinModality::Abstract
-            ) && !self.is_inner
-                && !self.is_expect)
+            ) && !self.is_expect)
     }
 
     /// Whether the class's own declaration creates every instance of it, through its private

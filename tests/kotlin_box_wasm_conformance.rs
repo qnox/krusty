@@ -203,7 +203,7 @@ impl Lane for WasmLane {
             Ok(backend) => backend.with_entry_module(entry_module.name.clone()),
             Err(outcome) => return outcome,
         };
-        let features = krusty::features::LangFeatures::from_source(directive_source);
+        let features = krusty::features::LangFeatures::from_source_in_environment(directive_source);
         let platform = match self.target {
             WasmTarget::Js => krusty::klib::write::KlibPlatform::WasmJs,
             WasmTarget::Wasi => krusty::klib::write::KlibPlatform::WasmWasi,
@@ -211,7 +211,7 @@ impl Lane for WasmLane {
         let metadata = krusty::klib::backend::KlibBackend::new(
             platform,
             krusty::klib::write::KlibStamp::new(
-                krusty::kotlin_version::target(),
+                krusty::kotlin_version::environment_release(),
                 features.language_version(),
             ),
         )
@@ -251,7 +251,7 @@ fn wasm_applicability_reads_both_the_family_and_the_exact_target() {
             TestTarget::WasmWasi,
             format!(
                 "kotlin-stdlib-wasm-wasi-{}.klib",
-                krusty::kotlin_version::target()
+                krusty::kotlin_version::environment_release()
             ),
         ),
     ] {
@@ -1354,7 +1354,7 @@ fn expect_reference_array_bounds(source: &str, name: &str) {
     ]);
     assert_eq!(DEFAULTS.check(), Ok(()));
     let default = *DEFAULTS
-        .get(krusty::kotlin_version::target())
+        .get(krusty::kotlin_version::environment_release())
         .expect("supported release");
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };

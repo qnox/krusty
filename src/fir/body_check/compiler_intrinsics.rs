@@ -29,6 +29,8 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::ScalarInstruction(_)
         | CompilerIntrinsic::FloatingIsNaN { .. }
         | CompilerIntrinsic::FloatingIsInfinite { .. }
+        | CompilerIntrinsic::FloatingAdjacent { .. }
+        | CompilerIntrinsic::CountLeadingZeroBits { .. }
         | CompilerIntrinsic::CharIsSurrogate(_)
         | CompilerIntrinsic::RadixToString { .. }
         | CompilerIntrinsic::StringRangeEquals
@@ -43,6 +45,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::StringGet
         | CompilerIntrinsic::StringPlus
         | CompilerIntrinsic::StringCompare
+        | CompilerIntrinsic::StringSubSequence
         | CompilerIntrinsic::NullableAnyToString
         | CompilerIntrinsic::NumericConversion
         | CompilerIntrinsic::PrimitiveUnary(_)
@@ -53,6 +56,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::PrimitiveBitNot
         | CompilerIntrinsic::Assert { .. }
         | CompilerIntrinsic::AssertFailsWith
+        | CompilerIntrinsic::AssertionSwitch
         | CompilerIntrinsic::Print
         | CompilerIntrinsic::Println
         | CompilerIntrinsic::StartCoroutine

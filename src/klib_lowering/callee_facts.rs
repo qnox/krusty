@@ -35,10 +35,19 @@ pub struct KlibCalleeFacts<'a> {
     /// copies of the table with extra declarations, so the copies share them.
     member_edges: Rc<HashMap<KlibDependencyCallable, CallEdge>>,
     sam_declarations: Rc<HashMap<crate::ir::KlibSamKey, crate::ir::CheckedKlibSamDeclaration>>,
+    /// The getter that bounds a counted loop over the indices of a collection or text, by the
+    /// `indices` getter the closure reached. Resolved once, with the closure.
+    indices_bounds: Rc<HashMap<KlibDependencyCallable, KlibDependencyCallable>>,
     /// The library objects and enum classes whose instances the closed bodies read, by classifier.
     read_classes: Rc<HashMap<crate::types::TypeName, crate::libraries::KlibBodyClassContract>>,
+    /// The classes declaring a private member a class nested in them calls, by classifier.
+    private_member_classes:
+        Rc<HashMap<crate::types::TypeName, crate::libraries::KlibBodyClassContract>>,
     /// The checked edge of an enum's synthetic `entries` body: the selected `enumEntries`.
     enum_entries_factory: Option<KlibDependencyCallable>,
+    /// The prepared-inline copies of the loaded libraries' inline functions, which a call of a
+    /// suspend inline function expands from.
+    expansion_copies: Option<&'a crate::klib_libraries::KlibDeclarationBodies>,
 }
 
 #[derive(Clone)]
@@ -103,6 +112,23 @@ impl<'a> KlibCalleeFacts<'a> {
         self
     }
 
+    /// Record the bounding getter the closure resolved for each `indices` getter it reached.
+    pub(crate) fn with_indices_bounds(
+        mut self,
+        bounds: impl IntoIterator<Item = (KlibDependencyCallable, KlibDependencyCallable)>,
+    ) -> Self {
+        Rc::make_mut(&mut self.indices_bounds).extend(bounds);
+        self
+    }
+
+    /// The getter that bounds a counted loop over the indices `getter` is.
+    pub(super) fn indices_bound(
+        &self,
+        getter: &KlibDependencyCallable,
+    ) -> Option<&KlibDependencyCallable> {
+        self.indices_bounds.get(getter)
+    }
+
     /// These facts with `factory`, the selected `enumEntries`: the checker freezing its edge, or a
     /// target that builds an enum's `entries` by calling it.
     pub(crate) fn with_enum_entries_factory(
@@ -145,6 +171,28 @@ impl<'a> KlibCalleeFacts<'a> {
                 .collect(),
         );
         self
+    }
+
+    /// Record the classes declaring a private member a class nested in them calls.
+    pub(crate) fn with_private_member_classes(
+        mut self,
+        classes: Vec<crate::libraries::KlibBodyClassContract>,
+    ) -> Self {
+        self.private_member_classes = Rc::new(
+            classes
+                .into_iter()
+                .map(|class| (class.classifier, class))
+                .collect(),
+        );
+        self
+    }
+
+    /// The class `classifier`, when a class nested in it calls a private member it declares.
+    pub(crate) fn private_member_class(
+        &self,
+        classifier: crate::types::TypeName,
+    ) -> Option<&crate::libraries::KlibBodyClassContract> {
+        self.private_member_classes.get(&classifier)
     }
 
     /// The object or enum class `classifier`, when the closed bodies read an instance of it.
@@ -239,6 +287,35 @@ impl<'a> KlibCalleeFacts<'a> {
     ) -> Self {
         self.target_classifiers = Some(represents);
         self
+    }
+
+    /// Expand a call of a suspend inline function from its prepared copy in `copies`.
+    pub(crate) fn with_expansion_copies(
+        mut self,
+        copies: &'a crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Self {
+        self.expansion_copies = Some(copies);
+        self
+    }
+
+    /// The prepared copy of `declaration`, the ordinary serialized `identity`, that a call of it
+    /// expands from: kotlinc links a call of a suspend inline function by inlining the copy its
+    /// library prepared, whose suspension intrinsics are already lowered to the continuation
+    /// operations. `None` for any other declaration.
+    pub(super) fn expansion_copy(
+        &self,
+        identity: &KlibDependencyCallable,
+        declaration: &crate::metadata::klib_ir::tree::KlibIrFunction,
+    ) -> Option<(
+        &'a crate::metadata::klib_ir::tree::KlibIrArena,
+        &'a crate::metadata::klib_ir::tree::KlibIrFunction,
+    )> {
+        use crate::metadata::function_flags::{IS_INLINE, IS_SUSPEND};
+        let flags = declaration.base.flags;
+        if flags & IS_INLINE == 0 || flags & IS_SUSPEND == 0 {
+            return None;
+        }
+        self.expansion_copies?.function(identity)
     }
 
     /// Whether the target owns the representation of `classifier`, which a body then reads as the

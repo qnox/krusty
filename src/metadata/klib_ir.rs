@@ -22,6 +22,7 @@ use super::id_signature::{
 mod arena_fixtures;
 mod class_index;
 mod field_storage;
+mod reference_upgrade;
 mod symbols;
 pub mod tree;
 mod tree_decoding;

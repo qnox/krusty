@@ -4,6 +4,9 @@ use super::*;
 use crate::fx_hash::HashSet;
 use crate::ir::{IrClass, IrCtorArg, IrCtorParameterProvenance, IrExpr, IrField};
 
+/// The field an inner class keeps its outer instance in, after the fields it declares.
+const OUTER_INSTANCE_FIELD: &str = "this$0";
+
 impl<'u, 's> Linker<'u, 's> {
     pub(super) fn materialize_class(
         &mut self,
@@ -182,6 +185,7 @@ impl<'u, 's> Linker<'u, 's> {
             fields: plan.field_declarations.clone(),
             properties: super::super::class_storage::backed_properties(&plan.header.class.members),
             contract: plan.header.contract,
+            outer: super::MemberClass::outer_instance(&plan.header, &plan.field_declarations),
         };
         // An enum's constants are its instances: the arguments each passes to the constructor
         // are lowered in the enum's own initialization frame.
@@ -309,7 +313,8 @@ impl<'u, 's> Linker<'u, 's> {
             .iter()
             .filter_map(super::super::class_storage::member_field)
             .collect::<Vec<_>>();
-        if fields.len() != ir.classes[class as usize].fields.len() {
+        let outer = super::MemberClass::outer_instance(&delegation.header, &fields);
+        if fields.len() + usize::from(outer.is_some()) != ir.classes[class as usize].fields.len() {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "a secondary constructor's class declares other fields than its materialized class"
                     .to_owned(),
@@ -367,10 +372,13 @@ impl<'u, 's> Linker<'u, 's> {
                 },
                 default_masks: Vec::new(),
             },
+            // A delegation passes the class's constructor prefix, an inner class's outer
+            // instance, on by itself; its parameters are the target's own.
             None => crate::ir::CtorDelegateTarget::This {
                 target_params: ir.classes[class as usize]
                     .ctor_args
                     .iter()
+                    .skip(ir.classes[class as usize].constructor_prefix_count as usize)
                     .map(|parameter| parameter.ty)
                     .collect(),
                 target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
@@ -415,6 +423,7 @@ impl<'u, 's> Linker<'u, 's> {
                     &delegation.header.class.members,
                 ),
                 contract: delegation.header.contract,
+                outer,
             }),
             local_body: None,
             static_initialization: None,
@@ -475,32 +484,65 @@ impl<'u, 's> Linker<'u, 's> {
                     .with_is_private(field.private)
             })
             .collect();
+        // An inner class stores the outer instance its constructor receives first in a field after
+        // its own, before the superclass constructor runs.
+        let outer = plan.header.outer.map(|outer| {
+            let field = u32::try_from(class.fields.len()).expect("a field list fits u32");
+            class
+                .fields
+                .push(IrField::new(OUTER_INSTANCE_FIELD.to_owned(), outer.ty).with_is_final(true));
+            class.is_inner_class = true;
+            class.constructor_prefix_count = 1;
+            class.pre_super_param_fields.push((0, field));
+            (outer.ty, field)
+        });
         // A class without a primary constructor is built by its secondary constructors alone.
         class.has_primary_ctor = plan.primary;
-        class.ctor_args = plan
-            .header
-            .function
-            .regular_parameters
-            .iter()
+        let values = &header.params()[usize::from(outer.is_some())..];
+        class.ctor_args = outer
             .filter(|_| plan.primary)
-            .zip(header.params())
-            .map(|(parameter, ty)| IrCtorArg {
-                name: Some(parameter.name.clone()),
+            .map(|(ty, field)| IrCtorArg {
+                name: None,
                 context_kind: crate::types::ContextParameterKind::None,
-                ty: *ty,
-                declared_ty: Some(*ty),
-                is_field: false,
-                field_index: None,
+                ty,
+                declared_ty: None,
+                is_field: true,
+                field_index: Some(field),
                 has_default: false,
                 is_vararg: false,
                 type_param: None,
                 check: None,
                 anonymous_super_forward: None,
                 capture: None,
-                provenance: IrCtorParameterProvenance::Value,
+                provenance: IrCtorParameterProvenance::EnclosingInstance,
                 capture_identity: None,
             })
+            .into_iter()
             .collect();
+        class.ctor_args.extend(
+            plan.header
+                .function
+                .regular_parameters
+                .iter()
+                .filter(|_| plan.primary)
+                .zip(values)
+                .map(|(parameter, ty)| IrCtorArg {
+                    name: Some(parameter.name.clone()),
+                    context_kind: crate::types::ContextParameterKind::None,
+                    ty: *ty,
+                    declared_ty: Some(*ty),
+                    is_field: false,
+                    field_index: None,
+                    has_default: false,
+                    is_vararg: false,
+                    type_param: None,
+                    check: None,
+                    anonymous_super_forward: None,
+                    capture: None,
+                    provenance: IrCtorParameterProvenance::Value,
+                    capture_identity: None,
+                }),
+        );
         // The initialization frame stores actual fields explicitly. Its plain value parameters
         // describe constructor arity, not leading constructor-backed storage.
         class.ctor_param_count = 0;
@@ -557,6 +599,7 @@ impl<'u, 's> Linker<'u, 's> {
                 fields: vec![field],
                 properties: super::super::class_storage::backed_properties(&header.class.members),
                 contract,
+                outer: None,
             });
         }
         let classifier = contract.classifier;
@@ -621,6 +664,7 @@ impl<'u, 's> Linker<'u, 's> {
             fields: vec![field],
             properties: super::super::class_storage::backed_properties(&header.class.members),
             contract,
+            outer: None,
         };
         // A boxed instance dispatches to the class's overrides, as an ordinary class's does: each
         // one the program's closure selected, with every declaration it overrides. An override
@@ -734,7 +778,8 @@ impl<'u, 's> Linker<'u, 's> {
             .iter()
             .filter_map(super::super::class_storage::member_field)
             .collect::<Vec<_>>();
-        if fields.len() != ir.classes[class as usize].fields.len() {
+        let outer = super::MemberClass::outer_instance(header, &fields);
+        if fields.len() + usize::from(outer.is_some()) != ir.classes[class as usize].fields.len() {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "a class member's declared fields disagree with its materialized class".to_owned(),
             ));
@@ -745,6 +790,7 @@ impl<'u, 's> Linker<'u, 's> {
             fields,
             properties: super::super::class_storage::backed_properties(&header.class.members),
             contract,
+            outer,
         })
     }
 
@@ -806,6 +852,12 @@ impl<'u, 's> Linker<'u, 's> {
                 )
             })
             .collect::<Result<_, _>>()?;
+        if let Some(outer) = header.outer {
+            class
+                .fields
+                .push(IrField::new(OUTER_INSTANCE_FIELD.to_owned(), outer.ty).with_is_final(true));
+            class.is_inner_class = true;
+        }
         let self_type = contract.self_type();
         let class = ir.add_class(class);
         ir.record_declared_class_self_type(classifier, self_type);
@@ -947,6 +999,35 @@ impl<'u, 's> Linker<'u, 's> {
             self.record_inherited_implementation(ir, owner, body, None, implemented)?;
         }
         Ok(())
+    }
+
+    /// Record that the class `owner`, private to its library, implements `implemented` with the
+    /// inherited member `body`, declaring `body` first when this unit has not: no other unit
+    /// exports the class, so an interface default only dispatch reaches is declared here.
+    pub(super) fn declare_inherited_implementation(
+        &mut self,
+        ir: &mut IrFile,
+        owner: crate::types::TypeName,
+        body: &KlibDependencyCallable,
+        implemented: &[KlibDependencyCallable],
+    ) -> Result<(), KlibBodyDeclineReason> {
+        if self.declared_member(body).is_none() {
+            // The class carries the body however dispatch reaches it, so a body the closure did
+            // not select uniquely declines rather than leaving the slot without an implementation.
+            let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) else {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "an inherited implementation has no unique provider declaration".to_owned(),
+                ));
+            };
+            let selected = callables[0];
+            let (arena, function) = self.sources.bodies.function(body).ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "an inherited body has no serialized declaration".to_owned(),
+                )
+            })?;
+            self.declare(ir, body, Some(selected), arena, function)?;
+        }
+        self.record_inherited_implementation(ir, owner, body, None, implemented)
     }
 
     /// The method this unit declared for the member `body`: a member of a class it materialized,
@@ -1297,12 +1378,16 @@ fn materialized_secondary(
     delegate: crate::ir::CtorDelegateTarget,
     initialize: crate::ir::ExprId,
 ) -> crate::ir::IrSecondaryCtor {
-    let params = header.params().to_vec();
+    // An inner class's outer instance is the compiler-supplied prefix every constructor shares.
+    let (prefix, params) = header
+        .params()
+        .split_at(usize::from(declaration.outer.is_some()));
+    let params = params.to_vec();
     crate::ir::IrSecondaryCtor {
         annotations: crate::ir::DeclarationAnnotations::default(),
         source_order: u32::MAX,
         lines: crate::ir::IrSecondaryCtorLines::default(),
-        prefix_params: Vec::new(),
+        prefix_params: prefix.to_vec(),
         declared_spellings: Default::default(),
         named_params: declaration
             .function

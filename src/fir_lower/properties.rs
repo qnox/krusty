@@ -9,6 +9,7 @@ use crate::ir::{
 };
 use crate::types::{Ty, TypeName};
 
+use super::dependency_templates::DependencyTemplateCache;
 use super::{
     body_local_ownership::{semantic_owner, SemanticOwner},
     generics::{
@@ -311,6 +312,7 @@ fn publish_foreign_accessor_layouts(
 pub(super) fn finalize_properties(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
+    templates: &mut DependencyTemplateCache,
 ) -> Result<(), FirFileLoweringFailure> {
     let mut properties = ir
         .checked_properties
@@ -381,9 +383,12 @@ pub(super) fn finalize_properties(
                     property,
                     context_parameters,
                 },
-                class,
-                extension_receiver.expect("guarded member extension receiver"),
+                super::delegated_properties::MemberExtensionOwner {
+                    class_id: class,
+                    receiver: extension_receiver.expect("guarded member extension receiver"),
+                },
                 ir,
+                templates,
                 &mut realizations,
                 &mut initialization,
             )?,
@@ -398,6 +403,7 @@ pub(super) fn finalize_properties(
                     context_parameters,
                 },
                 ir,
+                templates,
                 &mut realizations,
                 &mut initialization,
             )?,
@@ -411,6 +417,7 @@ pub(super) fn finalize_properties(
                 },
                 extension_receiver,
                 ir,
+                templates,
                 &mut realizations,
             )?,
         }
@@ -524,12 +531,13 @@ struct PropertyMaterialization {
 fn materialize_member_extension_property(
     index: &ResolvedModuleIndex,
     materialization: PropertyMaterialization,
-    class_id: crate::ir::ClassId,
-    receiver: Ty,
+    owner: super::delegated_properties::MemberExtensionOwner,
     ir: &mut IrFile,
+    templates: &mut DependencyTemplateCache,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
     initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
+    let super::delegated_properties::MemberExtensionOwner { class_id, receiver } = owner;
     let PropertyMaterialization {
         source_order,
         property_id,
@@ -545,9 +553,9 @@ fn materialize_member_extension_property(
                 property,
                 context_parameters,
             },
-            class_id,
-            receiver,
+            super::delegated_properties::MemberExtensionOwner { class_id, receiver },
             ir,
+            templates,
             realizations,
             initialization,
         );
@@ -707,6 +715,7 @@ fn materialize_top_level_property(
     materialization: PropertyMaterialization,
     extension_receiver: Option<Ty>,
     ir: &mut IrFile,
+    templates: &mut DependencyTemplateCache,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
 ) -> Result<(), FirFileLoweringFailure> {
     let PropertyMaterialization {
@@ -726,6 +735,7 @@ fn materialize_top_level_property(
             extension_receiver,
             index,
             ir,
+            templates,
             realizations,
         );
     }
@@ -1092,6 +1102,7 @@ fn materialize_member_property(
     index: &ResolvedModuleIndex,
     member: MemberProperty,
     ir: &mut IrFile,
+    templates: &mut DependencyTemplateCache,
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
     initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
@@ -1130,6 +1141,7 @@ fn materialize_member_property(
             },
             class_id,
             ir,
+            templates,
             realizations,
             initialization,
         );

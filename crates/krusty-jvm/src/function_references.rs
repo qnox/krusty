@@ -910,6 +910,13 @@ fn realize_own_invoke(
         // The bridge maps its whole body to the same line.
         ir.function_position_mut(adapter).decl_line = Some(line);
         for &current in &expressions {
+            // An inlined callee's own code keeps the callee's lines; only the adapter's own nodes
+            // take the reference's line.
+            if ir.inline_copy_provenance(current).is_some() {
+                // The reference's line is the call line it was expanded under.
+                ir.record_inline_copy_call_line(current, line);
+                continue;
+            }
             let marks = match &ir.exprs[current as usize] {
                 // A parameter read, or a read of a temporary the adapter declares past them (the
                 // safe call over a nullable converted value tests one).

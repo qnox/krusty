@@ -317,7 +317,9 @@ fun use(c: C): Int = with(c) { "".hidden() }
 fn an_inaccessible_legacy_context_member_extension_matches_kotlinc_exactly() {
     // Kotlin 2.4.20 removed the legacy `context(Type)` source form. Older supported targets still
     // exercise this declaration shape in their matrix lanes.
-    if krusty::kotlin_version::target() >= krusty::kotlin_version::KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release()
+        >= krusty::kotlin_version::KotlinVersion::V2_4_20
+    {
         return;
     }
     let source = r#"// LANGUAGE: +ContextReceivers

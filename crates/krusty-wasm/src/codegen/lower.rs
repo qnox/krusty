@@ -39,6 +39,7 @@ mod scalar_instructions;
 mod scalar_value_classes;
 mod shared_cells;
 mod string_builders;
+mod string_slices;
 pub(super) use shared_cells::cell_reference;
 pub(super) use string_builders::{declared_by_string_builder, is_string_builder};
 mod string_conversion;
@@ -66,6 +67,7 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
         || operation == krusty::backend::BackendCompilerIntrinsic::StringPlus
+        || operation == krusty::backend::BackendCompilerIntrinsic::StringSubSequence
         || operation
             == krusty::backend::BackendCompilerIntrinsic::StartCoroutineUninterceptedOrReturn
         || matches!(
@@ -1516,6 +1518,24 @@ impl<'a> Body<'a> {
             }
             IrExpr::Call {
                 callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target, defaults, ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::StringSubSequence)
+                }) =>
+            {
+                let (Some(receiver), [start, end]) = (dispatch_receiver, args.as_slice()) else {
+                    return Err("an authenticated string slice with malformed operands".into());
+                };
+                self.string_sub_sequence(receiver, *start, *end)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
                 dispatch_receiver: None,
                 args,
             } if let Callee::External { target, params, .. } = &**call_callee
@@ -2635,7 +2655,9 @@ mod tests {
         lower_file(
             FileInput {
                 module_facts,
-                array_range_checks: super::super::super::array_access::default_range_checks(),
+                array_range_checks: super::super::super::array_access::default_range_checks(
+                    ir.reference.release(),
+                ),
                 classifiers,
                 ir,
                 properties,
