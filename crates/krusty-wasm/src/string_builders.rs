@@ -18,10 +18,14 @@ use super::encode::{StorageType, SubType, ValType};
 use super::identity::IdentityObjects;
 use super::interface_dispatch::ClassRef;
 use super::objects::{immutable, ObjectRoot, REFERENCE};
-use super::runtime::{ADD32, GE_S32, GT_S32, LT_S32, MUL32, OR32, SUB32};
+use super::runtime::{ADD32, AND32, GE_S32, GT_S32, LT_S32, LT_U32, MUL32, OR32, SUB32};
 
 /// `select`: the first of two values when the `i32` above them is nonzero, else the second.
 const SELECT: u8 = 0x1b;
+/// Both `reverse` phases work on UTF-16 units: a surrogate half is one of 0x400 values past its base.
+const SURROGATE_HALVES: i32 = 0x400;
+const HIGH_SURROGATE: i32 = 0xD800;
+const LOW_SURROGATE: i32 = 0xDC00;
 const CHARS_FIELD: u32 = super::identity::PREFIX_FIELDS;
 const LENGTH_FIELD: u32 = CHARS_FIELD + 1;
 /// The capacity of a builder that asked for less, and the least a full one grows by.
@@ -63,6 +67,9 @@ pub(super) struct StringBuilders {
     pub(super) length: u32,
     /// `(builder, index: Int) -> Char`, trapping outside the units in use.
     pub(super) get: u32,
+    /// `(builder) -> builder`: reverses the units in use in place, keeping each surrogate pair in
+    /// order, as `StringBuilder.reverse` does.
+    pub(super) reverse: u32,
     /// `(builder, count: Int) -> at: Int`: counts `count` more units in use, growing the storage
     /// as needed, and answers the offset of the first. The units are unset until stored.
     pub(super) reserve: u32,
@@ -125,6 +132,7 @@ impl StringBuilders {
             to_string,
             length: module.declare(),
             get: module.declare(),
+            reverse: module.declare(),
             reserve: module.declare(),
             ensure_capacity: module.declare(),
             claim_unit: module.declare(),
@@ -149,6 +157,7 @@ impl StringBuilders {
         builders.define_to_string(module, layout, objects);
         builders.define_length(module, layout);
         builders.define_get(module, layout);
+        builders.define_reverse(module, layout);
         builders
     }
 
@@ -402,6 +411,79 @@ impl StringBuilders {
             },
         );
     }
+
+    fn define_reverse(&self, module: &mut Module, layout: Layout) {
+        let ty = module.func_type(vec![REFERENCE], vec![REFERENCE]);
+        let (builder, storage, length, low, high, spare) = (0, 1, 2, 3, 4, 5);
+        let mut code = Code::default();
+        layout.storage(&mut code, builder);
+        code.local_set(storage);
+        layout.length(&mut code, builder);
+        code.local_set(length);
+        // Reverse every unit: `low` walks up from the first, `high` down from the last.
+        code.i32_const(0)
+            .local_set(low)
+            .local_get(length)
+            .i32_const(1)
+            .op(SUB32)
+            .local_set(high)
+            .block(BlockType::Empty)
+            .loop_(BlockType::Empty)
+            .local_get(low)
+            .local_get(high)
+            .op(GE_S32)
+            .br_if(1);
+        layout.swap_units(&mut code, storage, low, high, spare);
+        code.local_get(low)
+            .i32_const(1)
+            .op(ADD32)
+            .local_set(low)
+            .local_get(high)
+            .i32_const(1)
+            .op(SUB32)
+            .local_set(high)
+            .br(0)
+            .end()
+            .end();
+        // The reversal turned each surrogate pair around: a low half followed by a high half is
+        // one, and swapping them restores it, whether or not they were a pair before.
+        code.i32_const(0)
+            .local_set(low)
+            .block(BlockType::Empty)
+            .loop_(BlockType::Empty)
+            .local_get(low)
+            .i32_const(1)
+            .op(ADD32)
+            .local_tee(high)
+            .local_get(length)
+            .op(GE_S32)
+            .br_if(1);
+        layout.is_half(&mut code, storage, low, LOW_SURROGATE);
+        layout.is_half(&mut code, storage, high, HIGH_SURROGATE);
+        code.op(AND32).if_(BlockType::Empty);
+        layout.swap_units(&mut code, storage, low, high, spare);
+        code.local_get(low)
+            .i32_const(1)
+            .op(ADD32)
+            .local_set(low)
+            .end();
+        code.local_get(low)
+            .i32_const(1)
+            .op(ADD32)
+            .local_set(low)
+            .br(0)
+            .end()
+            .end();
+        code.local_get(builder);
+        let locals = vec![
+            ValType::reference(layout.chars),
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+        ];
+        module.define(self.reverse, Function { ty, locals, code });
+    }
 }
 
 /// The types every builder function reads.
@@ -413,6 +495,37 @@ struct Layout {
 }
 
 impl Layout {
+    /// Exchange the units at the offsets in locals `first` and `second` of the storage in local
+    /// `storage`, through local `spare`.
+    fn swap_units(self, code: &mut Code, storage: u32, first: u32, second: u32, spare: u32) {
+        code.local_get(storage)
+            .local_get(first)
+            .array_get_u(self.chars)
+            .local_set(spare)
+            .local_get(storage)
+            .local_get(first)
+            .local_get(storage)
+            .local_get(second)
+            .array_get_u(self.chars)
+            .array_set(self.chars)
+            .local_get(storage)
+            .local_get(second)
+            .local_get(spare)
+            .array_set(self.chars);
+    }
+
+    /// Push whether the unit at the offset in local `at` of the storage in local `storage` is one
+    /// of the 0x400 surrogate halves starting at `base`.
+    fn is_half(self, code: &mut Code, storage: u32, at: u32, base: i32) {
+        code.local_get(storage)
+            .local_get(at)
+            .array_get_u(self.chars)
+            .i32_const(base)
+            .op(SUB32)
+            .i32_const(SURROGATE_HALVES)
+            .op(LT_U32);
+    }
+
     /// Push the storage of the builder in local `builder`.
     fn storage(self, code: &mut Code, builder: u32) {
         code.local_get(builder)
