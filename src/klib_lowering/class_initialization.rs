@@ -806,9 +806,9 @@ fn initialization_callees(
         // A materialized superclass is initialized first, through its own constructor.
         .chain(superclass)
         .chain(entries_factory(plan, callees).cloned())
-        // The inherited bodies the class carries are reached with it, so the checker freezes the
-        // edges of what they call.
-        .chain(inherited_dispatched_bodies(plan, bodies).unwrap_or_default())
+        // The interface defaults the class carries for itself are reached with it, so the checker
+        // freezes the edges of what they call.
+        .chain(inherited_chain(plan, bodies))
         .collect()
 }
 
@@ -1012,6 +1012,26 @@ fn dispatched_members(
     Ok(members)
 }
 
+/// Whether the class carries the interface defaults it inherits for itself: an object or a final
+/// class, whose instances are exactly its own, and not an open or abstract class, whose subclass
+/// inherits them through its own layout.
+fn carries_inherited_defaults(plan: &ClassInitialization<'_, '_>) -> bool {
+    plan.header.contract.kind != TypeKind::Class
+        || plan.header.contract.modality == KotlinModality::Final
+}
+
+/// The inherited bodies reached with an admitted class. An enum class's own members come with its
+/// entries, so what it inherits from `Enum` is not walked here.
+fn inherited_chain(
+    plan: &ClassInitialization<'_, '_>,
+    bodies: &KlibDeclarationBodies,
+) -> Vec<KlibDependencyCallable> {
+    if plan.header.contract.kind == TypeKind::Enum {
+        return Vec::new();
+    }
+    inherited_dispatched_bodies(plan, bodies).unwrap_or_default()
+}
+
 /// The bodies an admitted class inherits that dispatch reaches and the class carries.
 ///
 /// A member the class inherits implements the interface declarations it reaches only through its
@@ -1031,7 +1051,9 @@ fn inherited_dispatched_bodies(
                 crate::klib_libraries::LocatedMember::One { class, .. }
                     if class_kind(class.base.flags) == TypeKind::Class
             );
-            from_class || implemented.as_slice() == std::slice::from_ref(body)
+            from_class
+                || (carries_inherited_defaults(plan)
+                    && implemented.as_slice() == std::slice::from_ref(body))
         })
         .map(|(body, _)| body)
         .collect())
