@@ -1110,6 +1110,9 @@ fn realize_expressions(
                 krusty::libraries::CompilerIntrinsic::ArraySize
                 | krusty::libraries::CompilerIntrinsic::FloatingIsNaN { .. }
                 | krusty::libraries::CompilerIntrinsic::FloatingIsInfinite { .. }
+                | krusty::libraries::CompilerIntrinsic::FloatingAdjacent { .. }
+                | krusty::libraries::CompilerIntrinsic::CountLeadingZeroBits { .. }
+                | krusty::libraries::CompilerIntrinsic::CharIsSurrogate(_)
                 | krusty::libraries::CompilerIntrinsic::RadixToString { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayStorageCopy
                 | krusty::libraries::CompilerIntrinsic::StringRangeEquals
@@ -1121,7 +1124,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::ListStorageConstruction(_)
                 | krusty::libraries::CompilerIntrinsic::CharCode
                 | krusty::libraries::CompilerIntrinsic::StringLength
-                | krusty::libraries::CompilerIntrinsic::Assert
+                | krusty::libraries::CompilerIntrinsic::Assert { .. }
                 | krusty::libraries::CompilerIntrinsic::AssertFailsWith
                 | krusty::libraries::CompilerIntrinsic::Print
                 | krusty::libraries::CompilerIntrinsic::Println
@@ -1778,6 +1781,7 @@ fn record_protected_dependency_call(
             name: name.clone(),
             parameters: callable.physical_params.clone().into_boxed_slice(),
             parameter_names: crate::parameter_names::dependency_access_bridge_local_variables(
+                ir.reference.quirks(),
                 &callable.parameter_identities,
                 &callable.params,
                 &callable.physical_params,

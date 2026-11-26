@@ -21,3 +21,28 @@ autoheal:
       file: '{list}'
       line: '{entry}'
       paths: ['tests/box_expected_not_applicable/*/*.txt']
+    # A diagnostics case krusty no longer falsely accepts: drop it from the list the lane printed.
+    - name: stale-diagnostics-false-accepts
+      uses: remove-lines
+      match: '^  (?<entry>\S+): no longer a false accept; remove it from \S*?/(?<list>tests/diagnostics_false_accepts/[^/\s]+/[^/\s]+\.txt)$'
+      file: '{list}'
+      line: '{entry}'
+      paths: ['tests/diagnostics_false_accepts/*/*.txt']
+
+# Re-runs: a run whose only failed jobs failed for reasons outside its PRs runs those jobs again
+# instead of failing. The queue already knows a lost runner, a job GitHub could not set up, and a
+# download that hit the network or a rate limit. These rules add what only this repository's logs
+# say. `match` is a failure annotation of the job, `step` the step that failed.
+rerun:
+  # The focused Wasm lanes stop at 600 s (`timeout 600s`); a slow runner reaches it with every test
+  # still passing. One re-run: a second timeout is the PR's.
+  - name: Wasm conformance timed out on a slow runner
+    job: '^conformance '
+    step: '[Ww]asm (box )?conformance'
+    match: '^Process completed with exit code 124\.$'
+    times: 1
+  # curl -f exits 22 when Maven Central answers 404 or 429 for the stdlib jar the smoke build reads.
+  - name: Maven Central refused the Bazel smoke download
+    job: '^bazel '
+    step: '^build the packaged Bazel module'
+    match: '^Process completed with exit code 22\.$'

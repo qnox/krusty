@@ -14,14 +14,14 @@ impl<'u, 's> Linker<'u, 's> {
     ) -> Result<Option<LinkedCallee>, KlibBodyDeclineReason> {
         // A private member is called only from its own class or a class nested in it, whose
         // member body this lowering made active before it.
-        let Some(active) = self.private_member_class(identity) else {
-            return Ok(None);
-        };
         if self.sources.callees.get(identity).is_some()
             || self.sources.externals.contains_key(identity)
         {
             return Ok(None);
         }
+        let Some(active) = self.private_member_class(ir, identity)? else {
+            return Ok(None);
+        };
         let Some((_, declaration)) = self.sources.bodies.function(identity) else {
             return Ok(None);
         };
@@ -49,9 +49,13 @@ impl<'u, 's> Linker<'u, 's> {
                         value_member: Some(active),
                     },
                 )?;
-                // It is a member of its class like any other, one no subclass overrides.
-                ir.set_method_visibility(function, crate::types::Visibility::Private);
-                register_class_method(ir, class, function);
+                // It is a member of its class like any other, one no subclass overrides. An
+                // inline one is expanded into every call and never dispatched, so the class
+                // carries no method for it.
+                if !ir.inline_only_fns.contains(&function) {
+                    ir.set_method_visibility(function, crate::types::Visibility::Private);
+                    register_class_method(ir, class, function);
+                }
                 function
             }
         };
@@ -90,24 +94,62 @@ impl<'u, 's> Linker<'u, 's> {
         }
     }
 
-    /// The class this lowering made active that directly declares the private member `identity`.
-    fn private_member_class(&self, identity: &KlibDependencyCallable) -> Option<MemberClass<'s>> {
+    /// The class that directly declares the private member `identity`: one this lowering made
+    /// active, or an object the bodies read. Kotlin makes a companion's private member visible in
+    /// its containing class, whose body reads the companion and calls the member on it.
+    fn private_member_class(
+        &mut self,
+        ir: &mut IrFile,
+        identity: &KlibDependencyCallable,
+    ) -> Result<Option<MemberClass<'s>>, KlibBodyDeclineReason> {
         let member = match &identity.declaration {
             KlibDeclarationSignature::Public(member) => member,
             KlibDeclarationSignature::Accessor(accessor) => accessor.property(),
-            KlibDeclarationSignature::FileLocal { .. } => return None,
+            KlibDeclarationSignature::FileLocal { .. } => return Ok(None),
         };
-        let (_, owner) = member.declaration().segments().split_last()?;
+        let Some((_, owner)) = member.declaration().segments().split_last() else {
+            return Ok(None);
+        };
         let declares = |class: &MemberClass<'s>| {
             class.contract.module == identity.module
                 && class.contract.signature.package() == member.package()
                 && class.contract.signature.declaration().segments() == owner
         };
-        self.active_value_class
+        if let Some(active) = self
+            .active_value_class
             .iter()
             .chain(&self.member_classes)
             .find(|class| declares(class))
-            .cloned()
+        {
+            return Ok(Some(active.clone()));
+        }
+        let crate::klib_libraries::LocatedMember::One { class, .. } =
+            self.sources.bodies.member_owner(identity)
+        else {
+            return Ok(None);
+        };
+        let crate::metadata::klib_ir::KlibIrSignature::Public(signature) =
+            &class.base.symbol.signature
+        else {
+            return Ok(None);
+        };
+        let Some(classifier) = super::super::object_classifier(signature)
+            .filter(|classifier| !self.realized_classes.contains(classifier))
+        else {
+            return Ok(None);
+        };
+        let callees: &'s super::super::KlibCalleeFacts<'s> = self.sources.callees;
+        let Some(object) = callees.read_class(classifier) else {
+            return Ok(None);
+        };
+        let header = super::super::class_headers::authenticate_private_member(
+            object,
+            identity,
+            self.sources.bodies,
+        )?;
+        let object = self.materialize_ordinary_member_class(ir, &header)?;
+        self.record_member_class(&object);
+        Ok(Some(object))
     }
 }
 

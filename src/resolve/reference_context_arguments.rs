@@ -29,6 +29,7 @@ impl Checker<'_> {
                 ret: expected_ret,
                 bound_contexts,
                 type_variable_inputs: self.active_reference_type_variable_inputs(),
+                quirks: self.file.reference.quirks(),
             },
             |actual, bound| self.generic_bound_admits(actual, bound),
         )
@@ -231,6 +232,12 @@ impl Checker<'_> {
                 resolved_argument_mapping,
                 ..
             } => (&target.params, resolved_argument_mapping),
+            ExprLowering::AdaptedLocalFunctionRef {
+                bound_context_types,
+                ..
+            } => {
+                return (!bound_context_types.is_empty()).then(|| bound_context_types.clone());
+            }
             ExprLowering::AdaptedCallableReference {
                 target,
                 argument_mapping,

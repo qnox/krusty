@@ -1329,6 +1329,10 @@ kt_long kt_abs_long(kt_long value);
 kt_float kt_abs_float(kt_float value);
 kt_double kt_abs_double(kt_double value);
 
+/* `countLeadingZeroBits`: the zero bits above the highest set one; the whole width for zero. */
+kt_int kt_count_leading_zero_bits_int(kt_int value);
+kt_int kt_count_leading_zero_bits_long(kt_long value);
+
 /* `compareTo` on scalars. Separate functions rather than an emitted `a < b ? -1 : ...` so neither
    operand is evaluated twice, and so the floating-point cases can implement Kotlin's TOTAL order
    (NaN above everything, -0.0 below 0.0) rather than C's comparison operators. */
@@ -1347,6 +1351,12 @@ kt_double kt_rem_double(kt_double a, kt_double b);
    so is not the sign bit. */
 kt_float  kt_mod_float(kt_float a, kt_float b);
 kt_double kt_mod_double(kt_double a, kt_double b);
+/* `kotlin.math.nextUp` and `nextDown`: the adjacent representable value toward positive or negative
+   infinity. Defined in `krusty_fp.c`. */
+kt_float  kt_next_up_float(kt_float value);
+kt_float  kt_next_down_float(kt_float value);
+kt_double kt_next_up_double(kt_double value);
+kt_double kt_next_down_double(kt_double value);
 
 kt_int kt_compare_float(kt_float a, kt_float b);
 kt_int kt_compare_double(kt_double a, kt_double b);

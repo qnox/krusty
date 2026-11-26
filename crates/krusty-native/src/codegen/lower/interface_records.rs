@@ -74,15 +74,15 @@ impl FileLowering<'_> {
     /// interface identity (`krusty::backend::interface_identity`). The same member keeps one
     /// number, after the numbers of this module's own interfaces.
     pub(super) fn dependency_interface_number(&mut self, bytes: Vec<u8>) -> u32 {
-        let base = self.slot_plan.interfaces().count();
-        let number = match self.dependency_interface_numbers.get(&bytes).copied() {
+        let count = self.model.numbers().count();
+        let numbers = &mut *self.dependency_interface_numbers;
+        let number = match numbers.dependency.get(&bytes).copied() {
             Some(number) => number,
             None => {
-                let number = base
-                    + u32::try_from(self.dependency_interface_numbers.len())
-                        .expect("a dependency interface number fits u32");
-                self.dependency_interface_numbers
-                    .insert(bytes.clone(), number);
+                // Fresh across the module: no installed member of any file and no other
+                // dependency member has it.
+                let number = numbers.extended.fresh(count);
+                numbers.dependency.insert(bytes.clone(), number);
                 number
             }
         };
@@ -375,8 +375,9 @@ impl FileLowering<'_> {
         class: ClassId,
     ) -> Result<Vec<(Vec<u8>, DependencyImplementation)>, Unsupported> {
         let mut implemented: Vec<(Vec<u8>, DependencyImplementation)> = Vec::new();
-        // Only a source module of this program calls a member through a stub; the members of a
-        // prebuilt library's interfaces need no records.
+        // Executable exports are needed only for inherited default bodies below. Abstract
+        // interface declarations still own dispatch identities even when their KLIB has no body
+        // exports: implementations must publish the recorded declared-to-implementation frame.
         let source_modules: krusty::fx_hash::HashSet<&str> = self
             .dependency_symbols
             .keys()
@@ -403,13 +404,6 @@ impl FileLowering<'_> {
                 let Some(identity) = self
                     .callables
                     .callable(target)
-                    .filter(|fact| {
-                        fact.dependency_callable.as_ref().is_some_and(|member| {
-                            source_modules.contains(member.module.as_str())
-                                || self.unit_kind
-                                    == krusty::backend::CheckedIrUnitKind::DependencySupport
-                        })
-                    })
                     .and_then(|fact| fact.member_slot_identity())
                 else {
                     continue;
@@ -522,11 +516,7 @@ impl FileLowering<'_> {
                 };
                 implemented.push((identity, implementation));
             }
-            self.record_dependency_property_implementations(
-                owner,
-                &source_modules,
-                &mut implemented,
-            )?;
+            self.record_dependency_property_implementations(owner, &mut implemented)?;
             for default in self.ir.inherited_defaults.get(&name).into_iter().flatten() {
                 let krusty::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration) =
                     default.body
@@ -606,7 +596,6 @@ impl FileLowering<'_> {
     fn record_dependency_property_implementations(
         &mut self,
         owner: ClassId,
-        source_modules: &krusty::fx_hash::HashSet<&str>,
         implemented: &mut Vec<(Vec<u8>, DependencyImplementation)>,
     ) -> Result<(), Unsupported> {
         let name = self.ir.classes[owner as usize].fq_name_id();
@@ -622,7 +611,6 @@ impl FileLowering<'_> {
                 .callables
                 .callable(target)
                 .and_then(|fact| fact.dependency_callable.as_ref())
-                .filter(|member| source_modules.contains(member.module.as_str()))
             else {
                 continue;
             };

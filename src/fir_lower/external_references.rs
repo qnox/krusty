@@ -231,7 +231,9 @@ impl BodyLowering<'_> {
         let call = call.ok_or(FirLoweringFailure::UnsupportedExternalCallableReference(
             declaration,
         ))?;
-        let body = self.callable_reference_adapter_body(call, result.get(), reference.ret);
+        let body = self
+            .ir
+            .callable_reference_adapter_body(call, result.get(), reference.ret);
         let mut wrapper_parameters = capture_types;
         wrapper_parameters.extend(reference.params.iter().copied());
         let function = self.ir.add_fun(IrFunction {

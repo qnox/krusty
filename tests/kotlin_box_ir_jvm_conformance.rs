@@ -929,6 +929,21 @@ fn compose_library_lambda_parameters_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_lambdas_in_plain_functions_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("lambdasInPlainFunctions");
+}
+
+#[test]
+fn compose_captured_lambdas_in_plain_functions_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("capturedLambdasInPlainFunctions");
+}
+
+#[test]
+fn compose_layout_calls_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("layoutCalls");
+}
+
+#[test]
 fn compose_call_initializers_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("callInitializers");
 }
@@ -1916,7 +1931,7 @@ fn check_jvm_outcomes(
     corpus: &BTreeSet<String>,
     full_run: bool,
 ) {
-    let version = krusty::kotlin_version::target();
+    let version = krusty::kotlin_version::environment_release();
     let failures: Vec<String> = results
         .iter()
         .filter_map(|(file, result, _)| match result {
@@ -1985,7 +2000,10 @@ fn check_jvm_outcomes(
     assert!(
         mismatches.is_empty(),
         "{}",
-        mismatches.report(Platform::Jvm, version)
+        box_ratchet::failed_line(
+            &box_ratchet::expectations_subject(Platform::Jvm),
+            &mismatches.report(Platform::Jvm, version)
+        )
     );
     eprintln!(
         "JVM box applicability matches {} ({} expected not-applicable)",
