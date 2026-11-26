@@ -563,14 +563,10 @@ module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[13:
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[14:inByteBoxCache] member=12565619675093302922 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[14:inCharBoxCache] member=5116829131853235457 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[14:inLongBoxCache] member=1530636493886382613 mask=0
-module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:areEqualByValue] member=12638851760301124478 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:areEqualByValue] member=13523694947667903585 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:areEqualByValue] member=1436632116814056171 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:areEqualByValue] member=16491362547098541913 mask=0
-module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:areEqualByValue] member=4059840921529727100 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:areEqualByValue] member=4733262214586354853 mask=0
-module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:areEqualByValue] member=5141243972268097908 mask=0
-module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:areEqualByValue] member=8476308219019816433 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:areEqualByValue] member=9443869086972263395 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:getCachedIntBox] member=9598583355232989955 mask=0
 module=6:stdlib public package=3[6:kotlin,6:native,8:internal] declaration=1[15:inShortBoxCache] member=6369144594771394578 mask=0
