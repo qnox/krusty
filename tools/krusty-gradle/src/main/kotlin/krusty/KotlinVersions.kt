@@ -10,13 +10,18 @@ internal val supportedKotlinVersions: List<String> by lazy {
     val resource = "/krusty/kotlin-versions"
     val text = KrustyKotlinPlugin::class.java.getResource(resource)?.readText()
         ?: throw GradleException("the krusty plugin is missing its Kotlin version manifest $resource")
-    text.lineSequence()
-        .map { it.substringBefore('#').trim() }
-        .filter { it.isNotEmpty() }
-        .map { it.split(Regex("\\s+")).first() }
-        .sortedWith(compareBy { it.versionKey() })
-        .toList()
+    orderedKotlinVersions(
+        text.lineSequence()
+            .map { it.substringBefore('#').trim() }
+            .filter { it.isNotEmpty() }
+            .map { it.split(Regex("\\s+")).first() }
+            .toList(),
+    )
 }
+
+/** [versions] oldest first, a pre-release before the stable release of the same numbers. */
+internal fun orderedKotlinVersions(versions: List<String>): List<String> =
+    versions.sortedWith(compareBy { it.versionKey() })
 
 /**
  * A pre-release precedes the stable release of the same numbers: `2.5.0-Beta1` < `2.5.0-Beta2` <
@@ -65,8 +70,12 @@ private fun String.versionKey(): VersionKey {
  * from kotlinc releases is kept only where it changes, so a release without its own record reads
  * its predecessor's, as the compiler does.
  */
-internal fun recordedRelease(version: String, isRecorded: (String) -> Boolean): String? {
-    val index = supportedKotlinVersions.indexOf(version)
+internal fun recordedRelease(
+    version: String,
+    versions: List<String> = supportedKotlinVersions,
+    isRecorded: (String) -> Boolean,
+): String? {
+    val index = versions.indexOf(version)
     if (index < 0) return null
-    return supportedKotlinVersions.subList(0, index + 1).lastOrNull(isRecorded)
+    return versions.subList(0, index + 1).lastOrNull(isRecorded)
 }

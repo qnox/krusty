@@ -52,12 +52,6 @@ impl KotlinVersion {
     pub const V2_4_10: Self = Self::new(2, 4, 10);
     pub const V2_4_20: Self = Self::new(2, 4, 20);
     pub const V2_4_21: Self = Self::new(2, 4, 21);
-    pub const V2_5_0_RC: Self = Self {
-        major: 2,
-        minor: 5,
-        patch: 0,
-        pre: PreRelease::Rc(0),
-    };
 
     /// Whether this is a pre-release (`-BetaN`, `-RC`, `-RCN`) rather than a stable release.
     pub const fn is_pre_release(self) -> bool {
@@ -411,7 +405,8 @@ mod tests {
         assert!(version("2.5.0-Beta2") < version("2.5.0-RC"));
         assert!(version("2.5.0-RC") < version("2.5.0-RC2"));
         assert!(version("2.5.0-RC2") < version("2.5.0"));
-        assert_eq!(version("2.5.0-RC"), KotlinVersion::V2_5_0_RC);
+        assert!(version("2.5.0-RC").is_pre_release());
+        assert!(!version("2.5.0").is_pre_release());
         assert_eq!(version("2.5.0-RC").to_string(), "2.5.0-RC");
         assert_eq!(version("2.5.0-RC2").to_string(), "2.5.0-RC2");
     }

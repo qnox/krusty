@@ -815,15 +815,23 @@ mod provisioning_tests {
         std::fs::create_dir_all(&bin).expect("create bin");
         std::fs::write(bin.join("kotlinc"), "#!/bin/sh\n").expect("write the launcher");
         let zip = work.join("kotlinc.zip");
-        let status = Command::new("jar")
-            .arg("--create")
-            .arg("--file")
-            .arg(&zip)
-            .arg("-C")
+        // Python's zipfile writes the archive: the harness does not depend on a JDK `jar` tool.
+        let status = Command::new("python3")
+            .arg("-I")
+            .arg("-c")
+            .arg(
+                "import os, sys, zipfile\n\
+                 root, out = sys.argv[1], sys.argv[2]\n\
+                 with zipfile.ZipFile(out, 'w') as z:\n\
+                 \x20   for d, _, files in os.walk(root):\n\
+                 \x20       for f in files:\n\
+                 \x20           p = os.path.join(d, f)\n\
+                 \x20           z.write(p, os.path.relpath(p, root))\n",
+            )
             .arg(&tree)
-            .arg("kotlinc")
+            .arg(&zip)
             .status()
-            .expect("run jar");
+            .expect("run python3");
         assert!(status.success(), "archive the payload");
         format!("file://{}", zip.display())
     }
@@ -856,6 +864,21 @@ mod provisioning_tests {
                     .starts_with(".staging")),
             "the staging directory is removed"
         );
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    // A run killed mid-download never reaches its cleanup trap; the next provisioner removes the
+    // staging directory it left.
+    #[test]
+    fn a_staging_directory_a_killed_run_left_is_removed() {
+        let work = super::super::scratch_dir().expect("allocate a directory");
+        let url = archive(&work);
+        let dest = work.join("cache/9.9.5");
+        let stale = dest.join(".staging-1");
+        std::fs::create_dir_all(&stale).expect("create the stale staging directory");
+        std::fs::write(stale.join("kotlinc.zip"), "partial").expect("write the stale download");
+        provision_distribution(&dest, "9.9.5", Some(&url)).expect("provision");
+        assert!(!stale.exists(), "the stale staging directory is removed");
         let _ = std::fs::remove_dir_all(&work);
     }
 
@@ -941,11 +964,20 @@ mod provisioning_tests {
         std::fs::create_dir_all(&tools).expect("create the tool directory");
         let path = std::env::var_os("PATH").expect("PATH");
         for tool in [
-            "bash", "mkdir", "rm", "mv", "chmod", "curl", "unzip", "python3", "jar", "env", "sh",
+            "bash", "mkdir", "rm", "mv", "chmod", "curl", "unzip", "python3", "env", "sh",
         ] {
-            let found = std::env::split_paths(&path)
+            // A wrapper script on PATH (a shell guard around `rm`, say) needs the PATH this test
+            // withholds, so the real executable is the first candidate that is not a script.
+            let candidates: Vec<_> = std::env::split_paths(&path)
                 .map(|dir| dir.join(tool))
-                .find(|candidate| candidate.is_file());
+                .filter(|candidate| candidate.is_file())
+                .collect();
+            let found = candidates
+                .iter()
+                .find(|candidate| {
+                    std::fs::read(candidate).is_ok_and(|bytes| !bytes.starts_with(b"#!"))
+                })
+                .or(candidates.first());
             if let Some(found) = found {
                 std::os::unix::fs::symlink(found, tools.join(tool)).expect("link the tool");
             }
