@@ -121,16 +121,7 @@ pub(super) fn emit(
     let Some(field) = c.fields.get(field_index as usize) else {
         return;
     };
-    let type_parameter = ir
-        .field_signatures(fq_name)
-        .and_then(|signatures| {
-            signatures
-                .iter()
-                .find(|(name, _)| *name == field.name)
-                .map(|(_, parameter)| parameter.as_str())
-        })
-        .or(field.type_param.as_deref());
-    let signatures = property_jvm_signatures(formatter, &field.ty, type_parameter);
+    let signatures = accessor_generic_signatures(ir, c, field, formatter);
     let lateinit_end = lateinit_end_line(property, field);
     let field_jt = jvm_value_ty(&field.ty);
     let field_desc = type_descriptor(field_jt);
@@ -156,6 +147,15 @@ pub(super) fn emit(
     // `public final getName()`); Kotlin rejects overriding a non-open property, so the flag is
     // safe. Interface accessors stay non-final (their default bodies dispatch virtually).
     let overridable = property.is_open || c.is_interface;
+    // A named object's `@JvmStatic` accessor is a `static` method of the object: no receiver
+    // occupies slot 0, and the value parameter of a setter takes it.
+    let jvm_static = super::jvm_static_members::singleton_static_accessor(c, property, side);
+    let receiver_slots = u16::from(!jvm_static);
+    let static_flag = if jvm_static {
+        krusty::jvm::classfile::ACC_STATIC
+    } else {
+        0
+    };
     if matches!(side, PropertyAccessorSide::Getter) {
         let getter = &planned.name;
         let getter_desc = &planned.descriptor;
@@ -178,7 +178,7 @@ pub(super) fn emit(
             annotations,
             &[],
         );
-        let mut g = CodeBuilder::new(1);
+        let mut g = CodeBuilder::new(receiver_slots);
         if let Some((_, start)) = lateinit_end {
             g.mark_line(own_accessor_line(property.accessor_lines.getter, start));
         }
@@ -217,9 +217,10 @@ pub(super) fn emit(
             emit_backing_field_read_adaptation(ir, cw, &mut g, property, field_jt, getter_jt);
             emit_return(getter_jt, &mut g);
         }
-        g.ensure_locals(1);
+        g.ensure_locals(receiver_slots);
         g.link();
         let access = default_accessor_access(property.visibility, overridable)
+            | static_flag
             | super::method_access::annotated_method_modifiers(Some(annotations));
         cw.add_method_sig(access, getter, getter_desc, &g, sig.as_deref());
         super::function_annotations::emit_declared(cw, annotations, getter, getter_desc);
@@ -267,7 +268,7 @@ pub(super) fn emit(
             // before the following declared member.
             cw.seed_utf8("<set-?>");
             let words = slot_words(accessor_jt);
-            let mut st = CodeBuilder::new(1 + words);
+            let mut st = CodeBuilder::new(receiver_slots + words);
             // kotlinc guards a non-null REFERENCE setter parameter, naming it `<set-?>`. A primitive
             // cannot be null, and neither is a type parameter that admits null (an unbounded `<T>` is
             // `Any?`); a NON-null-bounded one (`<T : Cargo>`) is guarded like any other reference.
@@ -276,7 +277,7 @@ pub(super) fn emit(
                 && !property.ty.is_nullable()
                 && is_nonnull_reference_field(field.ty);
             if guarded {
-                st.aload(1);
+                st.aload(receiver_slots);
                 st.push_string("<set-?>", cw);
                 let m = cw.methodref(
                     "kotlin/jvm/internal/Intrinsics",
@@ -300,7 +301,7 @@ pub(super) fn emit(
             if !statics_storage {
                 st.aload(0);
             }
-            load(accessor_jt, 1, &mut st);
+            load(accessor_jt, receiver_slots, &mut st);
             emit_backing_field_write_adaptation(ir, cw, &mut st, property, accessor_jt, field_jt);
             let physical_name = instance_field_jvm_name(ir, run, c, field_index as usize);
             let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
@@ -318,9 +319,10 @@ pub(super) fn emit(
                 st.mark_line(end);
             }
             st.ret_void();
-            st.ensure_locals(1 + words);
+            st.ensure_locals(receiver_slots + words);
             st.link();
             let access = default_accessor_access(property.setter_visibility, overridable)
+                | static_flag
                 | super::method_access::annotated_method_modifiers(Some(annotations));
             cw.add_method_sig(access, setter, setter_desc, &st, sig.as_deref());
             cw.set_method_param_annotations(setter, setter_desc, parameter_annotations);
@@ -328,6 +330,25 @@ pub(super) fn emit(
             seed_accessor_locals(c, fq_name, cw);
         }
     }
+}
+
+/// The generic `Signature`s of the accessors of the property stored in `field` of `class`.
+pub(super) fn accessor_generic_signatures(
+    ir: &IrFile,
+    class: &krusty::ir::IrClass,
+    field: &krusty::ir::IrField,
+    formatter: &JvmSignatureFormatter<'_>,
+) -> JvmPropertySignatures {
+    let type_parameter = ir
+        .field_signatures(&class.fq_name())
+        .and_then(|signatures| {
+            signatures
+                .iter()
+                .find(|(name, _)| *name == field.name)
+                .map(|(_, parameter)| parameter.as_str())
+        })
+        .or(field.type_param.as_deref());
+    property_jvm_signatures(formatter, &field.ty, type_parameter)
 }
 
 /// The last line of a lateinit declaration that spans more than its first line, with that first
