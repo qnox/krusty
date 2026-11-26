@@ -2266,6 +2266,7 @@ regressions/multimodule/dependencyMapErasedKeyBarrier.kt
 regressions/multimodule/dependencyMemberContractInitialization.kt
 regressions/multimodule/distinctScalarBackingFieldExport.kt
 regressions/multimodule/inferredResultThroughContextAliasArguments.kt
+regressions/multimodule/inlineLambdaSuspendCompletion.kt
 regressions/multimodule/inlineNarrowElementInRange.kt
 regressions/multimodule/inlineStdlibContextUnitBlock.kt
 regressions/multimodule/inlineStdlibRepeat.kt
