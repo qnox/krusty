@@ -2030,6 +2030,15 @@ pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'stati
     }
     if signature
         .owner
+        .classifier_matches("kotlin/collections/MutableListIterator")
+    {
+        return match (signature.name, signature.params) {
+            ("set", [_]) => Some("kt_list_iterator_set"),
+            _ => None,
+        };
+    }
+    if signature
+        .owner
         .classifier_matches("kotlin/text/StringBuilder")
     {
         return match (signature.name, signature.params) {

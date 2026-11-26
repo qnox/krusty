@@ -81,3 +81,24 @@ fn sorted_with_answers_a_new_list_and_is_stable() {
     expect_box_ok_with_stdlib(source, "SortedWithStable");
     expect_native_box(source, "SortedWithStable", "OK");
 }
+
+/// `MutableListIterator.set` replaces the element the last `next()` or `previous()` answered, and
+/// has nothing to replace before either.
+#[test]
+fn a_mutable_list_iterator_sets_the_last_element_it_answered() {
+    let source = "fun box(): String {\n\
+         \x20   val list = mutableListOf(1, 2, 3)\n\
+         \x20   val it = list.listIterator()\n\
+         \x20   try { it.set(0); return \"fail before next\" } catch (e: IllegalStateException) {}\n\
+         \x20   it.next()\n\
+         \x20   it.set(10)\n\
+         \x20   it.next()\n\
+         \x20   it.next()\n\
+         \x20   it.set(30)\n\
+         \x20   it.previous()\n\
+         \x20   it.set(20)\n\
+         \x20   return if (list == listOf(10, 2, 20)) \"OK\" else \"fail \" + list\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "ListIteratorSet");
+    expect_native_box(source, "ListIteratorSet", "OK");
+}
