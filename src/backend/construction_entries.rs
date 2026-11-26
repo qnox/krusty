@@ -139,6 +139,7 @@ pub fn realize(ir: &mut IrFile, exports: &mut DependencyExportSignatures) {
         if let Some(entry) = entry {
             ir.construction_entries.insert(entry, constructor.class);
             exports.record_callable(entry, identity);
+            publish_default_entry(ir, exports, constructor, entry);
         }
     }
     // Every object gets its instance entry, whether its module is a library or the program:
@@ -161,6 +162,57 @@ pub fn realize(ir: &mut IrFile, exports: &mut DependencyExportSignatures) {
                 entry,
             );
         }
+    }
+}
+
+/// Make the constructor entry `entry` of `constructor` reach its default-argument entry, the way a
+/// function's exported entry does, so another module's construction that leaves arguments out calls
+/// it with the whole frame and the omission masks. The default-argument entry is the one the
+/// module's own files link to when [`publish_constructor_defaults`] built it, or a new one.
+fn publish_default_entry(
+    ir: &mut IrFile,
+    exports: &DependencyExportSignatures,
+    constructor: super::ExportedConstructor,
+    entry: FunId,
+) {
+    let Some((&declaration, _)) = ir.checked_constructor_bodies.iter().find(|(_, body)| {
+        body.class == constructor.class
+            && body.ordinal.checked_sub(1).map(|index| index as usize) == constructor.secondary
+    }) else {
+        return;
+    };
+    let Some(&target) = ir.constructor_default_entries.get(&declaration) else {
+        return;
+    };
+    let linked = exports
+        .instance_entries()
+        .iter()
+        .find_map(|(instance, function)| {
+            matches!(
+            instance,
+            super::instance_links::InstanceEntry::ConstructorDefaults { declaration: published, .. }
+                if *published == declaration
+        )
+        .then_some(*function)
+        });
+    let default = match linked {
+        Some(function) => Some(function),
+        None => target
+            .ordinal
+            .checked_sub(1)
+            .and_then(|secondary| {
+                ir.add_construction_entry(constructor.class, Some(secondary as usize))
+            })
+            .map(|built| {
+                // A mask word can make the entry's parameter list equal to a declared
+                // constructor's, so the construction names the entry by its place.
+                ir.construction_targets.insert(built.construction, target);
+                built.function
+            }),
+    };
+    if let Some(default) = default {
+        ir.construction_entries.insert(default, constructor.class);
+        ir.default_entries.insert(entry, default);
     }
 }
 
