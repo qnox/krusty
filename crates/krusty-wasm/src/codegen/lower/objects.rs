@@ -661,9 +661,14 @@ impl Body<'_> {
                 context_parameters,
                 ..
             }) if context_parameters.is_empty() => *ty,
-            // A member extension of an interface is called through its accessor's dispatch.
-            Some(IrLocalPropertyLayout::MemberExtension { .. }) => return Ok(None),
-            Some(_) => return Err("an interface property with context parameters".to_string()),
+            // A member extension, or a property declaring context parameters, of an interface is
+            // called through its accessor's dispatch, whose operands lead with the receiver or
+            // the contexts.
+            Some(
+                IrLocalPropertyLayout::MemberExtension { .. }
+                | IrLocalPropertyLayout::Member { .. },
+            ) => return Ok(None),
+            Some(_) => return Err("an interface property with an unrecorded layout".to_string()),
             None => {
                 let reference = self
                     .ir
@@ -674,7 +679,7 @@ impl Body<'_> {
                     return Ok(None);
                 }
                 if !reference.context_parameters.is_empty() {
-                    return Err("an interface property with context parameters".to_string());
+                    return Ok(None);
                 }
                 reference.ty
             }

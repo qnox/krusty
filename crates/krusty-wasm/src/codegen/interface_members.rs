@@ -71,9 +71,22 @@ pub(super) fn accessor_types(ty: Ty, setter: bool) -> (Vec<Ty>, Ty) {
 
 /// The parameters and result of a property accessor of a value of type `ty` on a member extension
 /// whose receiver is `receiver`: the receiver comes first, then (for a setter) the value.
-fn extension_accessor_types(receiver: Option<Ty>, ty: Ty, setter: bool) -> (Vec<Ty>, Ty) {
+fn extension_accessor_types(
+    contexts: &[Ty],
+    receiver: Option<Ty>,
+    ty: Ty,
+    setter: bool,
+) -> (Vec<Ty>, Ty) {
     let (value, result) = accessor_types(ty, setter);
-    (receiver.into_iter().chain(value).collect(), result)
+    (
+        contexts
+            .iter()
+            .copied()
+            .chain(receiver)
+            .chain(value)
+            .collect(),
+        result,
+    )
 }
 
 /// What every recording of one file reads.
@@ -283,11 +296,16 @@ fn publish_identities(
                 continue;
             };
             let signature = match layout {
-                IrLocalPropertyLayout::Member { ty, .. } => {
+                IrLocalPropertyLayout::Member {
+                    context_parameters,
+                    ty,
+                    ..
+                } if context_parameters.is_empty() => {
                     let (params, result) = accessor_types(*ty, setter);
                     member_signature(&params, result)?
                 }
-                // A member extension's accessor takes its extension receiver as a parameter.
+                // A member extension's accessor takes its extension receiver as a parameter, and
+                // a property's, its context parameters.
                 IrLocalPropertyLayout::MemberExtension {
                     getter,
                     setter: setter_function,
@@ -299,6 +317,17 @@ fn publish_identities(
                         Some(*getter)
                     };
                     let Some(function) = function else {
+                        continue;
+                    };
+                    let declaration = &ir.functions[function as usize];
+                    member_signature(&declaration.params, declaration.ret)?
+                }
+                IrLocalPropertyLayout::Member {
+                    getter,
+                    setter: setter_function,
+                    ..
+                } => {
+                    let Some(function) = (if setter { *setter_function } else { *getter }) else {
                         continue;
                     };
                     let declaration = &ir.functions[function as usize];
@@ -1174,9 +1203,23 @@ impl FileRecorder<'_, '_, '_> {
                 }
             }
         };
+        // The accessors of a property declaring context parameters take them before the receiver
+        // and the value; override and declaration agree on them.
+        let contexts = match edge.implementation {
+            ResolvedPropertyOverrideTarget::Module(property) => {
+                match self.recording.ir.local_property_layouts.get(&property) {
+                    Some(IrLocalPropertyLayout::Member {
+                        context_parameters, ..
+                    }) => context_parameters.as_slice(),
+                    _ => &[],
+                }
+            }
+            ResolvedPropertyOverrideTarget::External(_) => &[],
+        };
         let declared_types =
-            extension_accessor_types(edge.declared_receiver, edge.declared_type, setter);
+            extension_accessor_types(contexts, edge.declared_receiver, edge.declared_type, setter);
         let implemented_types = extension_accessor_types(
+            contexts,
             edge.implementation_receiver,
             edge.implementation_type,
             setter,
