@@ -612,6 +612,9 @@ fn specialize_checked_operation(
         | IrCheckedOperation::RangeLoop { counter, .. } => specialize_ty(counter, bindings),
         IrCheckedOperation::IllegalProgressionStep { .. }
         | IrCheckedOperation::AtomicField { .. }
+        // A designated field's storage type is its class's, which no inline binding names.
+        | IrCheckedOperation::FieldDesignation { .. }
+        | IrCheckedOperation::AtomicFieldThrough { .. }
         | IrCheckedOperation::AtomicArrayElement { .. }
         | IrCheckedOperation::ComparableRangeContains { .. } => {}
         IrCheckedOperation::PropertyReference {

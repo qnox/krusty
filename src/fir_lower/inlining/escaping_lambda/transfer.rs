@@ -1939,6 +1939,8 @@ fn checked_substitutions(operation: &IrCheckedOperation) -> Option<&[IrCheckedSu
         | IrCheckedOperation::ComparableRangeContains { .. }
         | IrCheckedOperation::IllegalProgressionStep { .. }
         | IrCheckedOperation::AtomicField { .. }
+        | IrCheckedOperation::FieldDesignation { .. }
+        | IrCheckedOperation::AtomicFieldThrough { .. }
         | IrCheckedOperation::AtomicArrayElement { .. }
         | IrCheckedOperation::RangeLoop { .. } => None,
     }

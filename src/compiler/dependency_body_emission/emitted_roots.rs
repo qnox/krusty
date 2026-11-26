@@ -238,7 +238,14 @@ pub(super) fn declarations(
         // library, has no provider declaration either; only a body of its own module calls it, and
         // it is emitted with that body. One an earlier unit already emitted is that unit's export
         // instead, an exact external edge which keeps its declaration authentication below.
-        if bodies.is_library_private(&identity) && !externals.contains_key(&identity) {
+        // So has an internal top-level function the library's metadata does not publish.
+        let unpublished_internal = bodies.is_internal_top_level_function(&identity)
+            && platform
+                .external_callable_by_dependency(&identity)
+                .is_none();
+        if (bodies.is_library_private(&identity) || unpublished_internal)
+            && !externals.contains_key(&identity)
+        {
             let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
             state
                 .pending
