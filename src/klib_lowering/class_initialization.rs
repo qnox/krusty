@@ -930,7 +930,10 @@ pub(super) fn object_inherited_defaults(
     bodies: &KlibDeclarationBodies,
     callees: &super::KlibCalleeFacts<'_>,
 ) -> Result<Vec<InheritedDefault>, KlibBodyDeclineReason> {
-    let Some(plan) = object_plan(class, bodies, callees)? else {
+    if class.kind != TypeKind::Object {
+        return Ok(Vec::new());
+    }
+    let Some(plan) = declared_instances_plan(class, bodies, callees)? else {
         return Ok(Vec::new());
     };
     Ok(inherited_implementations(&plan, bodies)?
