@@ -283,6 +283,12 @@ extern const KType kt_type_number;
 extern const KType kt_type_comparable;
 /* `kotlin.CharSequence`, which a `String` and a `StringBuilder` both point at. */
 extern const KType kt_type_char_sequence;
+/* `kotlin.text.Appendable`, which a `StringBuilder` points at. */
+extern const KType kt_type_appendable;
+/* `kotlin.ranges.ClosedRange`, which each of the runtime's ranges points at, and
+   `ClosedFloatingPointRange`, which the floating-point ones point at too. */
+extern const KType kt_type_closed_range;
+extern const KType kt_type_closed_floating_point_range;
 /* The four unsigned integers. Each is a value class over a signed primitive and is carried as the
    machine integer it wraps, so a descriptor of its own is the only thing keeping a BOXED one from
    being an `Int`: `1u as? Int` must fail, and printing one must not print the signed number sharing

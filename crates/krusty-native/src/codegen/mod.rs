@@ -615,6 +615,20 @@ impl Backend for CraneliftBackend {
             state.entry_file = Some(source_stem);
         }
         for (identity, symbol) in lowered.class_descriptors {
+            match state.laid_out.published_descriptor(&identity) {
+                Ok(Some(previous)) if previous != symbol => {
+                    diags.error(
+                        krusty::diag::Span::new(0, 0),
+                        "krusty: conflicting physical descriptors for one selected KLIB classifier",
+                    );
+                    return Vec::new();
+                }
+                Err(error) => {
+                    diags.error(krusty::diag::Span::new(0, 0), error);
+                    return Vec::new();
+                }
+                _ => {}
+            }
             state.laid_out.publish_descriptor(identity, symbol);
         }
         for (identity, entries) in lowered.value_boxes {

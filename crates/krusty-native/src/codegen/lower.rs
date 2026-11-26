@@ -39,6 +39,7 @@ mod atomic_accesses;
 mod functions;
 mod implementor_dispatch;
 mod imported_functions;
+mod interface_descriptors;
 mod interface_records;
 pub(super) use imported_functions::ImportedAbis;
 mod lists;
@@ -369,6 +370,7 @@ pub fn lower_file(
         imports: imported_functions::ImportedFunctions::new(imported_abis),
         data_imports: HashMap::default(),
         type_of_objects: HashMap::default(),
+        dependency_interface_descriptors: HashMap::default(),
         static_classes: HashMap::default(),
         comdat_objects: Vec::new(),
         strings: HashMap::default(),
@@ -596,6 +598,7 @@ struct FileLowering<'a> {
     data_imports: HashMap<String, DataId>,
     /// The static `KType` object of each distinct type a `typeOf` in this file names.
     type_of_objects: HashMap<Ty, DataId>,
+    dependency_interface_descriptors: HashMap<krusty::backend::KlibClassIdentity, DataId>,
     /// The static `KClass` of each descriptor a `typeOf` classifier names.
     static_classes: HashMap<DataId, DataId>,
     /// The program-wide static objects this file emits, each the COMDAT group of its own section.

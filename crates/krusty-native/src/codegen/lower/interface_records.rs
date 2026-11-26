@@ -208,6 +208,17 @@ impl FileLowering<'_> {
             })?;
             implemented.push((identity, function));
         }
+        self.write_dependency_implementations(descriptor, base, &implemented)
+    }
+
+    /// Write, for the link, the record naming the function `descriptor`'s type implements each
+    /// member of a dependency's interface with, by the member's KLIB identity.
+    pub(super) fn write_dependency_implementations(
+        &mut self,
+        descriptor: DataId,
+        base: &str,
+        implemented: &[(Vec<u8>, FuncId)],
+    ) -> Result<(), Unsupported> {
         if implemented.is_empty() {
             return Ok(());
         }
@@ -215,7 +226,7 @@ impl FileLowering<'_> {
         let mut description = DataDescription::new();
         let mut contents = Vec::new();
         let mut fields = Vec::with_capacity(implemented.len());
-        for (identity, function) in &implemented {
+        for (identity, function) in implemented {
             let at = contents.len() as u32;
             contents.extend_from_slice(&(identity.len() as u64).to_le_bytes());
             contents.extend_from_slice(&[0; 16]);
@@ -237,6 +248,54 @@ impl FileLowering<'_> {
             .define_data(id, &description)
             .map_err(|error| format!("defining `kt_itfdep_{base}` ({error})"))?;
         Ok(())
+    }
+
+    /// Each member of a dependency's interface the `fun interface` `target`'s abstract member
+    /// overrides, by the member's KLIB identity, with the member's declared parameters and
+    /// result: what the object a lambda becomes when converted to `target` implements. A call
+    /// through the dependency's member reaches that object through the link's record, not through
+    /// this module's number, and hands over the overridden declaration's own operands.
+    pub(super) fn sam_dependency_members(
+        &self,
+        target: &krusty::ir::IrSamTarget,
+    ) -> Vec<(Vec<u8>, Vec<Ty>, Ty)> {
+        let krusty::ir::IrSamMethod::Module(method) = target.method_target else {
+            return Vec::new();
+        };
+        let mut members: Vec<(Vec<u8>, Vec<Ty>, Ty)> = Vec::new();
+        for edge in self
+            .ir
+            .function_overrides
+            .get(&target.classifier)
+            .into_iter()
+            .flatten()
+        {
+            let ResolvedFunctionOverrideTarget::External(overridden) = edge.overridden else {
+                continue;
+            };
+            if !edge.overridden_is_interface
+                || edge.implementation != ResolvedFunctionOverrideTarget::Module(method)
+            {
+                continue;
+            }
+            let Some(identity) = self
+                .callables
+                .callable(overridden)
+                .and_then(|fact| fact.dependency_callable.as_ref())
+            else {
+                continue;
+            };
+            let identity = member_identity(identity);
+            if members.iter().any(|(known, _, _)| *known == identity) {
+                continue;
+            }
+            members.push((
+                identity,
+                edge.declared_parameters.clone(),
+                edge.declared_result,
+            ));
+        }
+        members
     }
 
     /// The bridges of a class no instance of which is made here, which a class of another module

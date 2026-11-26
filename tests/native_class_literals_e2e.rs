@@ -4,7 +4,7 @@
 //! over a TYPE names it statically, while a literal over a VALUE reads the descriptor the object is
 //! wearing. The programs below are written so the two would disagree if the wrong one were read.
 
-use super::common::{expect_box_run_with_stdlib, expect_native_box};
+use super::common::{expect_box_ok_with_stdlib, expect_box_run_with_stdlib, expect_native_box};
 
 #[test]
 fn a_bound_literal_answers_the_runtime_class() {
@@ -111,4 +111,30 @@ fn a_literals_own_to_string_names_the_class() {
         "ClassLiteralToString",
         "OK",
     );
+}
+
+/// `is`/`as?` against `KClass`: a class literal is one, an instance or a string or null is not.
+/// kotlinc answers it first (the JVM oracle), then the runtime's own class descriptor must agree.
+///
+/// PLATFORM-SPECIFIC: the Wasm lanes answer `Plain::class is KClass<*>` false today, so this
+/// program cannot yet sit in the shared `tests/box_regressions` inventory without a Wasm fix.
+#[test]
+fn a_class_literal_is_a_kclass_to_an_erased_test() {
+    let source = "import kotlin.reflect.KClass\n\
+         class Plain\n\
+         fun isKClass(value: Any?): Boolean = value is KClass<*>\n\
+         fun asKClass(value: Any?): KClass<*>? = value as? KClass<*>\n\
+         fun box(): String {\n\
+         \x20   if (!isKClass(Plain::class)) return \"fail class literal\"\n\
+         \x20   if (!isKClass(String::class)) return \"fail String literal\"\n\
+         \x20   if (isKClass(Plain())) return \"fail instance\"\n\
+         \x20   if (isKClass(\"text\")) return \"fail String value\"\n\
+         \x20   if (isKClass(null)) return \"fail null\"\n\
+         \x20   if (asKClass(Plain::class) != Plain::class) return \"fail safe cast\"\n\
+         \x20   if (asKClass(Plain()) != null) return \"fail safe cast instance\"\n\
+         \x20   if (asKClass(null) != null) return \"fail safe cast null\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "KClassTypeChecks");
+    expect_native_box(source, "KClassTypeChecks", "OK");
 }

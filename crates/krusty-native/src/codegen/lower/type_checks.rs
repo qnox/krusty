@@ -187,6 +187,36 @@ impl<'a> FileLowering<'a> {
             {
                 "kt_type_char_sequence"
             }
+            // `Appendable` likewise: the runtime's builder points at it, so a check of a builder
+            // and of a program class that implements it asks about the one marker.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_appendable) =>
+            {
+                "kt_type_appendable"
+            }
+            // `ClosedRange` is worn by the runtime's ranges, which name this marker among their
+            // interfaces.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_closed_range) =>
+            {
+                "kt_type_closed_range"
+            }
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_closed_floating_range) =>
+            {
+                "kt_type_closed_floating_point_range"
+            }
+            // A `KClass` is the runtime's own object over `kt_type_kclass`, so a check of it asks
+            // about that descriptor rather than the dependency interface's KLIB one.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::classifier_shapes::is_kclass) =>
+            {
+                "kt_type_kclass"
+            }
             // `EnumEntries` is sealed, so the runtime's `EnumEntriesList` is every instance there
             // is, and it names this descriptor among its interfaces.
             _ if target
@@ -269,7 +299,7 @@ impl<'a> FileLowering<'a> {
                     .and_then(super::super::super::intrinsics::reflection_type_descriptor)
                     .expect("just matched")
             }
-            _ => return Ok(None),
+            _ => return self.dependency_interface_descriptor(target),
         };
         self.import_data(symbol).map(Some)
     }

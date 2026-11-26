@@ -891,6 +891,11 @@ impl<'a> FileLowering<'a> {
                 interfaces.push(descriptor);
             }
         }
+        for descriptor in self.dependency_interface_memberships(class, &local_interfaces)? {
+            if !interfaces.contains(&descriptor) {
+                interfaces.push(descriptor);
+            }
+        }
         let runtime_markers = super::classifier_shapes::class_runtime_interface_descriptors(
             self.ir,
             self.classifiers,
