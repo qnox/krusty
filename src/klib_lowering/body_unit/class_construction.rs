@@ -960,15 +960,20 @@ impl<'u, 's> Linker<'u, 's> {
         implemented: &[KlibDependencyCallable],
     ) -> Result<(), KlibBodyDeclineReason> {
         if self.declared_member(body).is_none() {
-            if let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) {
-                let selected = callables[0];
-                let (arena, function) = self.sources.bodies.function(body).ok_or_else(|| {
-                    KlibBodyDeclineReason::SignatureMismatch(
-                        "an inherited body has no serialized declaration".to_owned(),
-                    )
-                })?;
-                self.declare(ir, body, Some(selected), arena, function)?;
-            }
+            // The class carries the body however dispatch reaches it, so a body the closure did
+            // not select uniquely declines rather than leaving the slot without an implementation.
+            let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) else {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "an inherited implementation has no unique provider declaration".to_owned(),
+                ));
+            };
+            let selected = callables[0];
+            let (arena, function) = self.sources.bodies.function(body).ok_or_else(|| {
+                KlibBodyDeclineReason::SignatureMismatch(
+                    "an inherited body has no serialized declaration".to_owned(),
+                )
+            })?;
+            self.declare(ir, body, Some(selected), arena, function)?;
         }
         self.record_inherited_implementation(ir, owner, body, None, implemented)
     }
