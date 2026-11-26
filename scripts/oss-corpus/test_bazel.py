@@ -20,7 +20,7 @@ import summarize  # noqa: E402
 BIN = 'bazel-out/k8-fastbuild/bin'
 TOOL_BIN = 'bazel-out/k8-opt-exec/bin'
 OUT = 'k8-fastbuild/bin'
-SUMMARY_ROW = '| p | not fetched | 2 | 0 | ok | 2 / 5 | 3 / 10 (30.0%) |'
+SUMMARY_ROW = '| p | not fetched | 2 | 0 | ok | 2 / 5 | 1 | 2 | 0 | 3 / 10 (30.0%) |'
 
 
 def jar(path, entries):
