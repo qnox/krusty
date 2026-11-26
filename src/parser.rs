@@ -2343,10 +2343,10 @@ impl<'a> Parser<'a> {
                 names.push(None);
                 name_spans.push(None);
             }
-            let spread = self.eat(TokenKind::Star);
+            let star = self.eat_span(TokenKind::Star);
             let arg = self.parse_expr();
-            if spread {
-                self.file.spread_arg_ids.insert(arg.0);
+            if let Some(star) = star {
+                self.file.spread_arg_stars.insert(arg.0, star);
             }
             args.push(arg);
             self.skip_semicolons();

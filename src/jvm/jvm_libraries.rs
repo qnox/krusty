@@ -8,7 +8,9 @@ mod builtins_customizer;
 mod callable_availability;
 mod catalog_presence;
 mod class_application_headers;
+mod classfile_member_facts;
 mod classifier_facts;
+pub(crate) use classfile_member_facts::inherited_by_delegation;
 mod classpath_annotation_classes;
 mod collection_canonicalization;
 mod declaration_headers;
@@ -128,19 +130,6 @@ pub struct JvmLibraries {
     /// not a lookup fallback: recursive metadata reads observe the same immutable raw signature.
     building_types:
         std::cell::RefCell<crate::fx_hash::HashMap<TypeName, std::sync::Arc<LibraryType>>>,
-}
-
-/// Kotlin's JVM delegation filter, applied at the provider boundary: an implemented Java method
-/// (no Kotlin `@Metadata`, such as a JDK default method or one admitted onto a mapped builtin) and
-/// an implemented builtin mapped to a Java default (`@PlatformDependent`, such as
-/// `Map.getOrDefault`) stay inherited instead of being forwarded to a delegate.
-pub(crate) fn inherited_by_delegation(
-    is_abstract: bool,
-    has_kotlin_metadata: bool,
-    annotations: &[TypeName],
-) -> bool {
-    !is_abstract
-        && (!has_kotlin_metadata || annotations.contains(&crate::types::wk::platform_dependent()))
 }
 
 /// JVM-only description of a classfile field used to realize an already-normalized Kotlin
@@ -535,6 +524,7 @@ impl JvmLibraries {
                     is_final: true,
                     deprecated_hidden: false,
                     inherited_by_delegation: false,
+                    signature_polymorphic: false,
                     return_value_status: None,
                 },
                 ..FunctionInfo::plain(kind, None, callable)
@@ -619,6 +609,7 @@ impl JvmLibraries {
                 is_final: true,
                 deprecated_hidden: false,
                 inherited_by_delegation: false,
+                signature_polymorphic: false,
                 return_value_status: None,
             };
             function.callable.annotations = builtin.annotations;
@@ -805,6 +796,7 @@ impl JvmLibraries {
                     is_final: function.is_final(),
                     deprecated_hidden: false,
                     inherited_by_delegation: false,
+                    signature_polymorphic: false,
                     return_value_status: Some(function.return_value_status),
                 },
                 ..FunctionInfo::plain(
@@ -1493,6 +1485,10 @@ impl JvmLibraries {
                     }) {
                         member.descriptor.clear();
                     }
+                } else {
+                    member.set_signature_polymorphic(
+                        classfile_member_facts::is_signature_polymorphic_method(internal_name, m),
+                    );
                 }
                 member.physical_ret = physical_ret;
                 // Kotlin metadata owns declaration modality. In legacy JVM-default mode a method

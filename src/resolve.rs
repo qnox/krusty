@@ -112,6 +112,7 @@ mod checked_annotation_publication;
 mod checked_constant_publication;
 mod data_class_copy_visibility;
 pub(crate) mod operator_override_relations;
+mod selected_member_use;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
@@ -47464,18 +47465,9 @@ impl<'a> Checker<'a> {
         mut selected: crate::symbol_resolver::ResolvedMember,
     ) -> Option<Ty> {
         selected.member.owner?;
-        if self.reject_inaccessible_selected_member(self.call_callee_name_span(call), &selected) {
+        if !self.check_selected_member_use(call, args, &selected) {
             return Some(Ty::Error);
         }
-        self.check_data_class_copy_usage(self.call_callee_name_span(call), &selected.member);
-        self.reject_non_public_api_from_public_inline(
-            call,
-            Self::is_public_api_for_inline_access(
-                selected.member.visibility,
-                &selected.member.annotations,
-            ),
-            selected.member.inline,
-        );
         // A direct function parameter contextually CHECKS a postponed lambda body. Apply the
         // receiver builder's current lower approximation to that function shape so the selected
         // commit rechecks the body with the same concrete `it` type used by the provisional member
