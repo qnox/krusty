@@ -10,7 +10,7 @@ use krusty::fx_hash::{HashMap, HashSet};
 use krusty::kotlin_version::KotlinVersion;
 
 use super::reference_recording_support::{
-    kotlin_native_program_arguments, kotlin_native_root, recorded,
+    kotlin_native_program_arguments, kotlin_native_root, recorded, run_program_bounded,
 };
 
 /// What `box()` answers when kotlinc-native builds an exact `// MODULE:` graph as KLIB
@@ -235,9 +235,7 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
     }
 
     let executable = work.join("program.kexe");
-    let run = Command::new(&executable)
-        .output()
-        .expect("run the kotlinc-native multimodule program");
+    let run = run_program_bounded(&executable);
     assert!(
         run.status.success(),
         "the kotlinc-native multimodule program exited with {}:\n{}",
