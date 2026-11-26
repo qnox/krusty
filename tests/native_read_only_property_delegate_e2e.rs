@@ -111,7 +111,7 @@ fn a_value_class_read_only_delegate_answers_the_read() {
          \x20   val a: Int = 42\n\
          \x20   val b by Delegate(0)\n\
          }\n\
-         @JvmInline\n\
+         OPTIONAL_JVM_INLINE_ANNOTATION\n\
          value class Delegate(val ignored: Int) : ReadOnlyProperty<Foo, Int> {\n\
          \x20   override fun getValue(thisRef: Foo, property: KProperty<*>): Int = thisRef.a\n\
          }\n\

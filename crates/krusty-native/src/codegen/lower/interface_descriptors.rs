@@ -99,7 +99,21 @@ impl FileLowering<'_> {
         local_interfaces: &[ClassId],
     ) -> Result<Vec<DataId>, Unsupported> {
         let declared = &self.ir.classes[class as usize];
-        let inherited = self.classifiers.inherited_interfaces(declared.fq_name_id());
+        // A library superclass's interfaces are the ones its KLIB declares or the runtime marks. A
+        // builtin supertype no KLIB declares (`java.io.Serializable` of a builtin `Enum`, when the
+        // program is compiled against no library) names nothing of this target's type system.
+        let inherited = self
+            .classifiers
+            .inherited_interfaces(declared.fq_name_id())
+            .into_iter()
+            .filter(|name| {
+                super::classifier_shapes::standard_interface_descriptor(*name).is_some()
+                    || self
+                        .classifiers
+                        .classifier(*name)
+                        .is_some_and(|fact| fact.klib_identity.is_some() || fact.role.is_some())
+            })
+            .collect::<Vec<_>>();
         let mut pending = declared
             .interfaces
             .iter()

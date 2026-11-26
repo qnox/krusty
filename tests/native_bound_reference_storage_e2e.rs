@@ -37,8 +37,8 @@ fun box(): String {
 fn value_class_bound_receivers_keep_semantic_boxes_for_equality() {
     check(
         r#"
-@JvmInline value class Count(val value: Int)
-@JvmInline value class Label(val value: String)
+OPTIONAL_JVM_INLINE_ANNOTATION value class Count(val value: Int)
+OPTIONAL_JVM_INLINE_ANNOTATION value class Label(val value: String)
 private fun Any?.tag(): Int = 7
 private fun Count.add(value: Int): Int = this.value + value
 private fun Label.append(value: String): String = this.value + value

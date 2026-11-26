@@ -117,6 +117,11 @@ pub(crate) fn for_checked_klib_bodies<'a>(
             Ok(member) => pending.extend(member),
             Err(_) => return Err(external),
         }
+        // A counted loop over a collection's or text's indices reads the receiver's size.
+        match crate::klib_lowering::indices_bound_member(selected, bodies) {
+            Ok(member) => pending.extend(member),
+            Err(_) => return Err(external),
+        }
         semantic_types.extend(selected.params().iter().copied());
         semantic_types.push(selected.ret());
         semantic_types.extend(selected.type_parameters().iter().copied());

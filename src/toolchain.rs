@@ -175,15 +175,32 @@ fn toolchain_path(env: Option<OsString>, kind: &str, suffix: &str) -> Option<Pat
     })
 }
 
+/// The files of a kotlinc distribution (relative to its root) that count as the distribution being
+/// there: the all-in-one compiler jar, the standard library jar, and the build identity. A directory
+/// holding less, such as one an interrupted extraction left, is not a distribution.
+/// `scripts/provision-kotlinc.sh`, the only writer of the provisioned cache, publishes under the
+/// same rule.
+pub const KOTLINC_PAYLOAD: [&str; 3] = [
+    "lib/kotlin-compiler.jar",
+    "lib/kotlin-stdlib.jar",
+    "build.txt",
+];
+
+/// Whether `root` (the directory holding `bin/` and `lib/`) holds the whole [`KOTLINC_PAYLOAD`].
+pub fn kotlinc_distribution_complete(root: &Path) -> bool {
+    KOTLINC_PAYLOAD.iter().all(|file| root.join(file).is_file())
+}
+
 /// The reference Kotlin/JVM compiler used by differential and conformance-oracle runs.
-/// `KRUSTY_KOTLINC` overrides the provisioned distribution.
+/// `KRUSTY_KOTLINC` overrides the provisioned distribution. A launcher whose distribution is
+/// missing part of its payload is not available.
 pub fn kotlinc_path() -> Option<PathBuf> {
     let path = toolchain_path(
         std::env::var_os("KRUSTY_KOTLINC"),
         "kotlinc",
         "kotlinc/bin/kotlinc",
     )?;
-    path.is_file().then_some(path)
+    (path.is_file() && kotlinc_distribution_complete(path.parent()?.parent()?)).then_some(path)
 }
 
 /// The reference stdlib KLIB a compilation for `target` is analyzed against. JS and wasm-js ship
@@ -860,6 +877,39 @@ mod tests {
     }
 
     use super::*;
+
+    fn distribution_with(files: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "krusty-kotlinc-payload-{}-{}",
+            std::process::id(),
+            files.len()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        for file in files {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().expect("a payload file has a directory"))
+                .expect("create the directory");
+            std::fs::write(path, "").expect("write the file");
+        }
+        root
+    }
+
+    // The provisioned current release is read through the same readiness rule as any other: a
+    // launcher and compiler jar without the standard library are a half-written distribution.
+    #[test]
+    fn a_distribution_without_its_whole_payload_is_incomplete() {
+        let partial = distribution_with(&["bin/kotlinc", "lib/kotlin-compiler.jar"]);
+        assert!(!kotlinc_distribution_complete(&partial));
+        let whole = distribution_with(&[
+            "bin/kotlinc",
+            "lib/kotlin-compiler.jar",
+            "lib/kotlin-stdlib.jar",
+            "build.txt",
+        ]);
+        assert!(kotlinc_distribution_complete(&whole));
+        let _ = std::fs::remove_dir_all(partial);
+        let _ = std::fs::remove_dir_all(whole);
+    }
 
     #[test]
     fn debug_static_caches_are_the_host_targets_gstatic_system_directory() {

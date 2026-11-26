@@ -23,7 +23,6 @@ coroutines/nonLocalReturn.kt
 coroutines/stateMachine/kt25893.kt
 coroutines/stateMachine/withTypeParameter.kt
 deadCodeElimination/unusedPrimitiveAndObjectEquals.kt
-defaultArguments/maskAndArgumentElimination.kt
 defaultArguments/noAnonymousObjectRegenerationInDefaultStub.kt
 enum/enumEntriesIntrinsicForJava.kt
 falseSmartCast.kt

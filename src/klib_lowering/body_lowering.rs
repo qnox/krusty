@@ -88,10 +88,23 @@ pub(super) struct LinkedCallee {
 }
 
 pub(super) struct LinkedCallableReference {
-    pub(super) declaration: crate::fir::ExternalCallableId,
+    pub(super) target: LinkedReferenceTarget,
     pub(super) kind: crate::libraries::ExternalCallableKind,
     pub(super) extension_receiver_parameter: Option<usize>,
     pub(super) call: LinkedCallee,
+}
+
+/// The declaration a callable reference names.
+pub(super) enum LinkedReferenceTarget {
+    /// A dependency declaration its provider records.
+    External(crate::fir::ExternalCallableId),
+    /// A private member of a class the unit lowers, which no provider records: the unit emits it
+    /// as `function`, a member of `owner` named `name`.
+    PrivateMember {
+        owner: TypeName,
+        name: Box<str>,
+        function: FunId,
+    },
 }
 
 impl LinkedCallableReference {
@@ -101,7 +114,7 @@ impl LinkedCallableReference {
         call: LinkedCallee,
     ) -> Self {
         Self {
-            declaration,
+            target: LinkedReferenceTarget::External(declaration),
             kind: callable.kind(),
             extension_receiver_parameter: callable.parameter_identities().iter().position(|role| {
                 matches!(
@@ -112,6 +125,12 @@ impl LinkedCallableReference {
             call,
         }
     }
+}
+
+/// The getter bounding a counted loop over indices, with the type its declaration answers.
+pub(super) struct IndicesBound {
+    pub(super) accessor: crate::metadata::id_signature::KlibAccessorIdSignature,
+    pub(super) ty: Ty,
 }
 
 /// The declared shape of a member a range literal's membership calls.
@@ -246,6 +265,16 @@ pub(super) trait CallLinker {
         &self,
         _getter: &crate::metadata::id_signature::KlibAccessorIdSignature,
     ) -> Lowered<Option<crate::libraries::IndicesReceiver>> {
+        Ok(None)
+    }
+
+    /// The getter of the receiver property that bounds a counted loop over the indices `getter`
+    /// is: a collection's `size` or a text's `length`. `None` when the bound is no member read
+    /// (an array's intrinsic size), or the linker does not model it.
+    fn indices_bound(
+        &self,
+        _getter: &crate::metadata::id_signature::KlibAccessorIdSignature,
+    ) -> Lowered<Option<IndicesBound>> {
         Ok(None)
     }
 
@@ -609,6 +638,9 @@ pub(super) struct BodyLowering<'a> {
     member_return: Option<KlibIrSymbol>,
     /// The result type of [`Self::member_return`].
     member_result: Option<Ty>,
+    /// The declarations enclosing this closure whose `return`s its body may name, innermost last,
+    /// with their result types: a non-local return, valid only where the closure is inlined.
+    enclosing_returns: Vec<(KlibIrSymbol, Ty)>,
 }
 
 impl<'a> BodyLowering<'a> {
@@ -640,6 +672,7 @@ impl<'a> BodyLowering<'a> {
             member_return: None,
             member_result: None,
             object_members: HashMap::default(),
+            enclosing_returns: Vec::new(),
         }
     }
 
@@ -1392,7 +1425,7 @@ impl<'a> BodyLowering<'a> {
             .as_ref()
             .is_some_and(|member| member == target);
         if !member && target != self.function.symbol {
-            return Err(KlibBodyDeclineReason::ForeignReturnTarget);
+            return self.non_local_return(target, value);
         }
         let expected = self.member_result.unwrap_or(self.header.body_result());
         let mut value = if !member && self.header.erases_result() {
@@ -1410,6 +1443,26 @@ impl<'a> BodyLowering<'a> {
         let returned = self.ir.add_expr(IrExpr::Return(Some(value)));
         // The function's own return leaves the innermost callable.
         self.ir.checked_return_depths.insert(returned, 0);
+        Ok(returned)
+    }
+
+    /// A closure's `return` from the enclosing declaration `target`, which checked FIR lowering
+    /// records as a return as many lexical frames out as the closures it crosses. Inline expansion
+    /// moves it a frame nearer at each one.
+    fn non_local_return(&mut self, target: &KlibIrSymbol, value: KlibIrExprId) -> Lowered<ExprId> {
+        let Some((frames, &(_, result))) = self
+            .enclosing_returns
+            .iter()
+            .rev()
+            .enumerate()
+            .find(|(_, (symbol, _))| symbol == target)
+        else {
+            return Err(KlibBodyDeclineReason::ForeignReturnTarget);
+        };
+        let value = self.operand(value, result)?;
+        let returned = self.ir.add_expr(IrExpr::Return(Some(value)));
+        let depth = u32::try_from(frames + 1).expect("a closure nesting fits u32");
+        self.ir.checked_return_depths.insert(returned, depth);
         Ok(returned)
     }
 

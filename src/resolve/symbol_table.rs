@@ -1,5 +1,8 @@
 use super::*;
 
+mod plugin_runtime;
+pub(crate) use plugin_runtime::PluginRuntimeInventory;
+
 /// A collected TOP-LEVEL extension property: its declared type, mutability, and the source
 /// declaration key (file index, decl id) — how the backend's facade-metadata builder matches a
 /// declaration to its record without guessing by name (same-name properties may differ by receiver).
@@ -377,6 +380,7 @@ pub(crate) struct PassTwoSymbols {
     pub(super) compilation_id: u64,
     pub(super) libraries: std::rc::Rc<dyn SemanticPlatform>,
     coroutine_runtime: Option<crate::ir::IrCoroutineRuntime>,
+    plugin_runtime: PluginRuntimeInventory,
     char_sequence_protocol: Option<crate::fir::CharSequenceProtocol>,
     enum_entries_factory: Option<crate::fir::EnumEntriesFactory>,
     pub(super) native_plugins: crate::plugins::registry::NativePlugins,
@@ -391,6 +395,11 @@ impl PassTwoSymbols {
     /// A shared handle on the platform, for a consumer that outlives one borrow of these symbols.
     pub(crate) fn shared_semantic_platform(&self) -> std::rc::Rc<dyn SemanticPlatform> {
         std::rc::Rc::clone(&self.libraries)
+    }
+
+    /// The runtime functions the enabled plugins declared, frozen with their provider declarations.
+    pub(crate) fn plugin_runtime(&self) -> &PluginRuntimeInventory {
+        &self.plugin_runtime
     }
 
     /// The runtime declarations selected by resolution for suspend lowering.
@@ -423,12 +432,17 @@ impl PassTwoSymbols {
 impl SymbolTable {
     pub(crate) fn into_pass_two_symbols(self) -> PassTwoSymbols {
         let coroutine_runtime = coroutine_runtime::selected(&*self.libraries);
+        let plugin_runtime = PluginRuntimeInventory::freeze(
+            &*self.libraries,
+            &self.native_plugins.runtime_requirements(),
+        );
         let char_sequence_protocol = char_sequence_protocol::selected(&*self.libraries);
         let enum_entries_factory = enum_entries_factory::selected(&*self.libraries);
         PassTwoSymbols {
             compilation_id: self.compilation_id,
             libraries: std::rc::Rc::from(self.libraries),
             coroutine_runtime,
+            plugin_runtime,
             char_sequence_protocol,
             enum_entries_factory,
             native_plugins: self.native_plugins,

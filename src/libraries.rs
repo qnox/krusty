@@ -61,10 +61,10 @@ pub use call_arg_mapping_failure::{CallArgMappingError, CallArgMappingFailure};
 pub(crate) use call_realization::KlibBodyCallableShape;
 pub use call_realization::KlibBodyCompanionReceiver;
 pub use call_realization::{
-    DefaultCallRealization, DirectCFunction, ExternalCallableKind, ExternalCallableRealization,
-    ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
-    KlibDependencyCallable, NonvirtualCallRealization, OverriddenCallKind,
-    OverriddenCallRealization,
+    CFunctionAbi, DefaultCallRealization, DirectCFunction, ExternalCallableKind,
+    ExternalCallableRealization, ExternalPropertyRealization, KlibBodyCallable,
+    KlibDeclarationSignature, KlibDependencyCallable, NonvirtualCallRealization,
+    OverriddenCallKind, OverriddenCallRealization,
 };
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;

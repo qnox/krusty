@@ -10,20 +10,18 @@ use super::*;
 impl BodyLowering<'_, '_, '_> {
     pub(super) fn direct_c_call(
         &mut self,
-        symbol: &str,
+        function: &krusty::libraries::DirectCFunction,
         params: &[Ty],
         ret: Ty,
         defaults: &[u32],
         dispatch_receiver: Option<u32>,
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
+        let symbol = function.symbol();
         if !is_c_identifier(symbol) {
             return Err(declined!(
                 "a call of a C function with no callable symbol (`{symbol}`)"
             ));
-        }
-        if dispatch_receiver.is_some() {
-            return Err(declined!("a C function `{symbol}` called with a receiver"));
         }
         if !defaults.is_empty() {
             return Err(declined!(
@@ -33,19 +31,40 @@ impl BodyLowering<'_, '_, '_> {
         if params.len() != args.len() {
             return Err(declined!("a call of the variadic C function `{symbol}`"));
         }
-        for ty in params.iter().chain([&ret]) {
-            if matches!(self.carrier(*ty), Carrier::Ref) {
-                return Err(declined!(
-                    "a call of the C function `{symbol}` passing `{}`, which has no C representation here",
-                    spelling(*ty)
-                ));
+        match function.abi() {
+            krusty::libraries::CFunctionAbi::Interop => {
+                if dispatch_receiver.is_some() {
+                    return Err(declined!("a C function `{symbol}` called with a receiver"));
+                }
+                for ty in params.iter().chain([&ret]) {
+                    if matches!(self.carrier(*ty), Carrier::Ref) {
+                        return Err(declined!(
+                            "a call of the C function `{symbol}` passing `{}`, which has no C representation here",
+                            spelling(*ty)
+                        ));
+                    }
+                }
+                let arguments = self.arguments(args, params)?;
+                if self.terminated {
+                    return Ok(None);
+                }
+                self.runtime_call(symbol, params, ret, &arguments)
+            }
+            krusty::libraries::CFunctionAbi::Runtime => {
+                let mut arguments = Vec::with_capacity(args.len() + 1);
+                let mut carried = Vec::with_capacity(args.len() + 1);
+                if let Some(receiver) = dispatch_receiver {
+                    arguments.push(self.reference(receiver)?);
+                    carried.push(any());
+                }
+                carried.extend_from_slice(params);
+                arguments.extend(self.arguments(args, params)?);
+                if self.terminated {
+                    return Ok(None);
+                }
+                self.runtime_call(symbol, &carried, ret, &arguments)
             }
         }
-        let arguments = self.arguments(args, params)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        self.runtime_call(symbol, params, ret, &arguments)
     }
 }
 

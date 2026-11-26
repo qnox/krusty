@@ -632,6 +632,7 @@ impl Emitter<'_> {
         let caller_type_parameters = self.type_parameter_function.replace(impl_fn);
         let caller_fakes = self.enter_placed_fake_continuations(&fake_continuations);
         let brace_depth = self.unit_lambda_brace_depth();
+        let caller_in_lambda = self.enter_inline_lambda_body();
         // A lambda nested in a `crossinline` one moves wherever that one does. Its private access
         // goes through synthetic accessors, as the walk planning them found.
         let caller_crossinline = self.crossinline_lambda_body;
@@ -642,6 +643,7 @@ impl Emitter<'_> {
             emitter.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch)
         });
         self.crossinline_lambda_body = caller_crossinline;
+        self.leave_inline_lambda_body(caller_in_lambda);
         self.export_private_calls = caller_export;
         self.leave_placed_fake_continuations(&fake_continuations, caller_fakes);
         self.type_parameter_function = caller_type_parameters;
