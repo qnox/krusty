@@ -12,6 +12,7 @@ use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 use crate::plugins::registry::NativePlugins;
 use crate::script_definitions::ScriptDefinition;
 
+mod declaration_outline;
 mod explicit_api;
 mod external_modifier_targets;
 mod header_validation;
@@ -24,6 +25,7 @@ mod modifier_containing_declarations;
 mod no_expect_for_actual;
 mod published_declarations;
 mod published_overrides;
+pub use declaration_outline::{DeclarationOutline, OutlineKind, OutlineNode};
 pub use published_overrides::OverriddenMember;
 mod retained_syntax;
 #[cfg(test)]
