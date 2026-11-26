@@ -1,10 +1,4 @@
-//! The delegated-property signature boundary.
-//!
-//! A property declared `by` an expression takes its type from the convention that expression
-//! supplies, so signature solving has to select `provideDelegate`/`getValue` before it can answer
-//! what the declaration IS. Everything that selection needs — the `thisRef` the accessors pass,
-//! where the diagnostic points, and the refusal when no convention applies — is one responsibility
-//! and lives here rather than in the signature facade or the general semantics implementation.
+//! Delegated-property signature selection for `provideDelegate` and `getValue`.
 
 use super::*;
 
@@ -18,18 +12,12 @@ impl ProductionSignatureSemantics<'_> {
         demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let (provide_ref, this_ref) = self.delegate_first_arguments(&site);
-        // The classifier is resolved through the same source that answers applicability, so this
-        // probe and the checked selection agree on which declaration `KProperty` is — and a
-        // dependency set that declares none answers `None` here, exactly as a missing convention
-        // does.
+        // A missing `KProperty` is the same refusal as a missing convention.
         let property_reference = match self.with_resolver(scope, |resolver| {
             Some(crate::resolve::delegated_properties::delegate_property_reference_type(resolver))
         }) {
             Ok(Some(property_reference)) => property_reference,
-            // Without the classifier the accessors pass there is no convention to select against,
-            // which is the same refusal a missing `getValue` is and is reported the same way. The
-            // alternative — manufacturing the spelling — selects against a declaration the
-            // dependency set does not have.
+            // No classifier means no convention to select, reported like a missing `getValue`.
             Ok(None) => {
                 return Err(self.record_delegate_convention_failure(
                     scope,
@@ -300,9 +288,9 @@ impl ProductionSignatureSemantics<'_> {
                                 scope,
                                 site,
                                 stored.get(),
-                                "getValue",
                                 this_ref,
                                 &candidates,
+                                expected.is_none(),
                             ));
                         }
                     }
@@ -351,10 +339,8 @@ impl ProductionSignatureSemantics<'_> {
             "a delegate convention site must belong to its retained signature scope",
         );
         let convention_site = self.delegate_convention_site(&site, by_span);
-        // A candidate's own return may still be undetermined here — this phase is what determines
-        // it — and rendering the placeholder produces a second, differently worded message for the
-        // same mistake once the body check reports it. Ask the solver for the declaration instead,
-        // exactly as a SELECTED convention's result is asked for.
+        // Ask the solver for an undetermined candidate return. A placeholder would disagree with
+        // the body check.
         let message = match self.with_resolver(scope, |resolver| {
             Some(
                 crate::resolve::delegated_properties::delegate_convention_message(
@@ -500,7 +486,7 @@ impl ProductionSignatureSemantics<'_> {
         Vec<crate::resolve::delegated_properties::DelegateConventionDiagnosticCandidate>,
         crate::fir::DiagnosticId,
     > {
-        families.diagnostic_candidates(name, &mut |candidate| match candidate {
+        families.diagnostic_candidates(self.table.reference, name, &mut |found| match found {
             crate::resolve::delegated_properties::DelegateConventionCandidate::Function(
                 function,
             ) => self.determined_candidate_result(function, demand),
@@ -529,21 +515,25 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         site: crate::fir::ResolvedSignatureDelegateSite,
         delegate: Ty,
-        name: &str,
         this_ref: Ty,
         candidates: &[crate::resolve::delegated_properties::DelegateConventionDiagnosticCandidate],
+        declared_type_failed: bool,
     ) -> crate::fir::DiagnosticId {
         let (source, by_span) = self.delegate_by_location(&site);
         assert_eq!(
             source, scope.source,
             "a delegate convention site must belong to its retained signature scope",
         );
-        let convention_site = self.delegate_convention_site(&site, by_span);
+        let mut convention_site = self.delegate_convention_site(&site, by_span);
+        if declared_type_failed {
+            convention_site.failed_property_display =
+                self.failed_property_display(scope, site.diagnostic_owner);
+        }
         let message =
             crate::resolve::delegated_properties::delegate_convention_message_with_candidates(
                 convention_site,
                 delegate,
-                name,
+                "getValue",
                 this_ref,
                 None,
                 None,
@@ -553,11 +543,7 @@ impl ProductionSignatureSemantics<'_> {
         self.record_source_diagnostic_at(site.diagnostic_owner, source, by_span, message)
     }
 
-    /// One candidate's result type, resolved when this phase has not determined it yet.
-    ///
-    /// A declaration whose own return is inferred reads as undetermined in the symbol table until
-    /// its signature is solved. The solver answers for it on demand; a refusal carries that
-    /// declaration's diagnostic instead of rendering the placeholder or retrying another origin.
+    /// The solver's result for a candidate whose return is still inferred.
     fn determined_candidate_result(
         &self,
         candidate: &crate::libraries::FunctionInfo,
@@ -610,7 +596,29 @@ impl ProductionSignatureSemantics<'_> {
                     crate::resolve::delegated_properties::DelegateDispatchDiagnosticName::Anonymous,
             }),
             is_var: site.mutable,
+            written_property_type: None,
+            failed_property_display: None,
         }
+    }
+
+    fn failed_property_display(
+        &self,
+        scope: crate::fir::SignatureScope,
+        declaration: crate::fir::DeclarationId,
+    ) -> Option<String> {
+        let written =
+            super::super::delegated_properties::written_property_type(self.headers, declaration)?;
+        self.with_signature_type_scope(scope, |lexical| {
+            super::super::delegated_properties::diagnostic_type_syntax(&written, |name| {
+                super::super::delegated_properties::delegate_classifier_display(
+                    name,
+                    lexical.tparam_contains(name),
+                    self.qualified_type_classifier(scope, name),
+                    lexical.type_alias(name).is_some(),
+                )
+            })
+        })
+        .ok()
     }
 
     fn delegate_first_arguments(
@@ -689,11 +697,6 @@ impl ProductionSignatureSemantics<'_> {
 mod tests {
     use crate::symbol_source::{SymbolNamespace, SymbolSource};
 
-    /// The language builtins, minus the one declaration a delegate convention is selected against.
-    ///
-    /// `kotlin.reflect.KProperty` is what a delegated property's accessors pass as the second
-    /// convention argument, so a dependency set that declares none cannot supply the convention at
-    /// all. This source models exactly that set: everything else answers as usual.
     struct WithoutPropertyReferences;
 
     impl SymbolSource for WithoutPropertyReferences {
@@ -738,9 +741,6 @@ mod tests {
             .collect()
     }
 
-    /// The delegate convention is selected against a RESOLVED `KProperty`, never a spelling the
-    /// compiler manufactures. A dependency set that declares none therefore refuses the property —
-    /// with the ordinary convention diagnostic, not an internal failure and not a silent accept.
     #[test]
     fn a_dependency_set_without_kproperty_refuses_the_convention_instead_of_assuming_it() {
         const SOURCE: &str =

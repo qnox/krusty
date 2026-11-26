@@ -125,7 +125,13 @@ fn record_callable(
         placement,
         body,
         external,
-        has_operation: realization.direct_c_function.is_some() || has_operation(callable),
+        // A runtime entry is bound by name; whether the linked runtime defines it is the
+        // backend's to decide, so it is no compiler operation and the backlog keeps it.
+        has_operation: realization
+            .direct_c_function
+            .as_ref()
+            .is_some_and(|function| function.abi() == crate::libraries::CFunctionAbi::Interop)
+            || has_operation(callable),
     };
     assert_eq!(
         facts.insert(identity.clone(), fact),
@@ -837,7 +843,7 @@ fn signed_constructors_and_implicit_enum_callables_are_inventory_entries() {
                     },
                     DecodedBodyState::Bodyless,
                     false,
-                    false,
+                    true,
                 ),
             ),
             (
@@ -852,7 +858,7 @@ fn signed_constructors_and_implicit_enum_callables_are_inventory_entries() {
                     },
                     DecodedBodyState::Bodyless,
                     false,
-                    false,
+                    true,
                 ),
             ),
             (
@@ -867,7 +873,7 @@ fn signed_constructors_and_implicit_enum_callables_are_inventory_entries() {
                     },
                     DecodedBodyState::Bodyless,
                     false,
-                    false,
+                    true,
                 ),
             ),
         ])

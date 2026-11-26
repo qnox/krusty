@@ -39,6 +39,7 @@ fn is_runtime_annotation(annotation: crate::types::TypeName) -> bool {
 
 /// `android.os.Parcel`, which the generated members write to and read from.
 const PARCEL: &str = "android/os/Parcel";
+const PARCELABLE: &str = "android/os/Parcelable";
 
 /// `android.os.Parcelable.Creator`, the interface of a parcelized class's `CREATOR`.
 fn creator_interface() -> crate::types::TypeName {
@@ -72,6 +73,12 @@ impl ParcelizePlugin {
 impl IrPlugin for ParcelizePlugin {
     fn name(&self) -> &str {
         "parcelize"
+    }
+
+    fn runtime_requirements(
+        &self,
+    ) -> Vec<crate::plugins::runtime_declarations::RuntimeRequirement> {
+        serializers::requirements()
     }
 
     fn generate_frontend_declarations(

@@ -30,14 +30,13 @@ use krusty::types::CollectionKind;
 /// Whether a list's `addAll` makes room before it reads its argument, as kotlinc-native's library
 /// does ([`krusty::kotlin_version::Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument`]), or
 /// reads the argument first, under `-Xfix-kotlinc-defects`.
-fn add_all_grows_first() -> bool {
-    krusty::kotlin_version::Quirks::target()
-        .has(krusty::kotlin_version::Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument)
+fn add_all_grows_first(quirks: krusty::kotlin_version::Quirks) -> bool {
+    quirks.has(krusty::kotlin_version::Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument)
 }
 
 /// The runtime's `MutableCollection.addAll`, read as [`add_all_grows_first`] says.
-pub(super) fn collection_add_all_symbol() -> &'static str {
-    if add_all_grows_first() {
+pub(super) fn collection_add_all_symbol(quirks: krusty::kotlin_version::Quirks) -> &'static str {
+    if add_all_grows_first(quirks) {
         "kt_mutable_collection_add_all"
     } else {
         "kt_mutable_collection_add_all_reading_first"
@@ -45,8 +44,8 @@ pub(super) fn collection_add_all_symbol() -> &'static str {
 }
 
 /// The runtime's `list += elements`, read as [`add_all_grows_first`] says.
-fn list_add_all_symbol() -> &'static str {
-    if add_all_grows_first() {
+fn list_add_all_symbol(quirks: krusty::kotlin_version::Quirks) -> &'static str {
+    if add_all_grows_first(quirks) {
         "kt_mutable_list_add_all"
     } else {
         "kt_mutable_list_add_all_reading_first"
@@ -204,6 +203,7 @@ pub(super) fn indexed_value_getter_ty(name: &str) -> Ty {
 /// realizations differ where it counts: the index one takes an `Int` and the element one takes the
 /// erased reference, whatever `E` was substituted to.
 fn list_symbol(
+    quirks: krusty::kotlin_version::Quirks,
     declaration: classifier_shapes::CollectionDeclaration,
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
     physical: &[Ty],
@@ -292,9 +292,11 @@ fn list_symbol(
             Ty::Boolean,
         ),
         ("clear", [], Ty::Unit) if mutates => ("kt_mutable_list_clear", vec![any()], Ty::Unit),
-        ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => {
-            (collection_add_all_symbol(), vec![any(), any()], Ty::Boolean)
-        }
+        ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
+            collection_add_all_symbol(quirks),
+            vec![any(), any()],
+            Ty::Boolean,
+        ),
         _ => return None,
     })
 }
@@ -353,9 +355,9 @@ pub(super) fn collection_runtime_member(
                 .map(classifier_shapes::CollectionDeclaration::Implementation)
         })?;
     if list {
-        list_symbol(declaration, signature, physical)
+        list_symbol(file.ir.reference.quirks(), declaration, signature, physical)
     } else {
-        collection_symbol(declaration, signature)
+        collection_symbol(file.ir.reference.quirks(), declaration, signature)
     }
 }
 
@@ -363,6 +365,7 @@ pub(super) fn collection_runtime_member(
 /// typed by no narrower collection. Which collection stands behind it is the descriptor's to say,
 /// so each entry point asks it rather than reading one shape's header.
 fn collection_symbol(
+    quirks: krusty::kotlin_version::Quirks,
     declaration: classifier_shapes::CollectionDeclaration,
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
@@ -390,9 +393,11 @@ fn collection_symbol(
             vec![any(), any()],
             Ty::Boolean,
         ),
-        ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => {
-            (collection_add_all_symbol(), vec![any(), any()], Ty::Boolean)
-        }
+        ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
+            collection_add_all_symbol(quirks),
+            vec![any(), any()],
+            Ty::Boolean,
+        ),
         ("clear", [], Ty::Unit) if mutates => {
             ("kt_mutable_collection_clear", vec![any()], Ty::Unit)
         }
@@ -712,9 +717,14 @@ impl BodyLowering<'_, '_, '_> {
             getter.ret,
         );
         let (symbol, _, _) = if is_list(self.file, ty) {
-            list_symbol(declaration, signature, &getter.physical_params)?
+            list_symbol(
+                self.file.ir.reference.quirks(),
+                declaration,
+                signature,
+                &getter.physical_params,
+            )?
         } else {
-            collection_symbol(declaration, signature)?
+            collection_symbol(self.file.ir.reference.quirks(), declaration, signature)?
         };
         matches!(symbol, "kt_list_size" | "kt_collection_size").then(|| property.name.to_string())
     }
@@ -1071,7 +1081,12 @@ impl BodyLowering<'_, '_, '_> {
                     && is_list(self.file, receiver_ty)
                     && !self.file.implements_collection_of(receiver_ty) =>
             {
-                (list_add_all_symbol(), vec![any(), any()], Ty::Unit, args)
+                (
+                    list_add_all_symbol(self.file.ir.reference.quirks()),
+                    vec![any(), any()],
+                    Ty::Unit,
+                    args,
+                )
             }
             _ => return None,
         };
@@ -1105,14 +1120,18 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let name = signature.name;
         let params = signature.params;
-        // A member Kotlin gives a SPECIAL BRIDGE is not this dispatch's to make: a call through the
+        // A member Kotlin gives a SPECIAL BRIDGE is not this dispatch's to make, except the `Map` reads
+        // the runtime's own thunks guard (`KType.map_members`): a call through the
         // wide type answers the member's default rather than reaching the override when the
         // argument cannot be what the declaration accepts, and there is no bridge here to put in
         // front of an implementor's arm. Every one of them takes an argument, so the nullary
         // members are untouched.
-        if classifier_shapes::mapped_collection(self.file.classifiers, internal)
-            .is_some_and(|collection| collection.has_special_bridge(name))
-        {
+        if classifier_shapes::mapped_collection(self.file.classifiers, internal).is_some_and(
+            |collection| {
+                collection.has_special_bridge(name)
+                    && !super::super::super::intrinsics::map_thunk_guards_bridge(collection, name)
+            },
+        ) {
             return None;
         }
         let ty = self.checked_type(receiver)?;
@@ -1170,7 +1189,15 @@ impl BodyLowering<'_, '_, '_> {
             carried: &carried,
             answer,
         };
-        Some(self.member_by_implementor(&implementors, runtime, receiver, args, ret))
+        // A `Map` read the runtime's thunks guard goes to the runtime entry point alone: an arm of
+        // this dispatch would hand the override an argument its bridge has not checked, and the
+        // thunk of `KType.map_members` is where the guard lives for a program class.
+        let guarded = classifier_shapes::mapped_collection(self.file.classifiers, internal)
+            .is_some_and(|collection| {
+                super::super::super::intrinsics::map_thunk_guards_bridge(collection, name)
+            });
+        let arms: &[ImplementorArm] = if guarded { &[] } else { &implementors };
+        Some(self.member_by_implementor(arms, runtime, receiver, args, ret))
     }
 
     /// One of those, with the runtime entry point as the last arm.
@@ -1283,6 +1310,10 @@ impl BodyLowering<'_, '_, '_> {
 mod tests {
     use super::*;
 
+    fn quirks() -> krusty::kotlin_version::Quirks {
+        krusty::kotlin_version::ReferenceProfile::default().quirks()
+    }
+
     fn signature<'a>(
         owner: &str,
         name: &'a str,
@@ -1309,18 +1340,21 @@ mod tests {
         let element = Ty::ty_param("E", any());
         let list = face(CollectionKind::List, false);
         assert!(list_symbol(
+            quirks(),
             list,
             signature("kotlin/collections/List", "get", &[Ty::Int], element),
             &[Ty::Int],
         )
         .is_some());
         assert!(list_symbol(
+            quirks(),
             list,
             signature("kotlin/collections/List", "get", &[Ty::String], element),
             &[Ty::String],
         )
         .is_none());
         assert!(list_symbol(
+            quirks(),
             list,
             signature(
                 "kotlin/collections/List",
@@ -1332,6 +1366,7 @@ mod tests {
         )
         .is_none());
         assert!(list_symbol(
+            quirks(),
             face(CollectionKind::Set, false),
             signature("kotlin/collections/List", "get", &[Ty::Int], element),
             &[Ty::Int],
@@ -1357,24 +1392,24 @@ mod tests {
         let array_list =
             CollectionDeclaration::Implementation(StandardCollectionImplementation::List);
 
-        assert!(list_symbol(face(CollectionKind::List, false), size, &[]).is_some());
-        assert!(list_symbol(face(CollectionKind::List, true), size, &[]).is_none());
-        assert!(list_symbol(face(CollectionKind::List, true), clear, &[]).is_some());
-        assert!(list_symbol(face(CollectionKind::List, false), clear, &[]).is_none());
-        assert!(list_symbol(face(CollectionKind::List, false), add, &[any()]).is_none());
-        assert!(list_symbol(array_list, size, &[]).is_some());
-        assert!(list_symbol(array_list, clear, &[]).is_some());
+        assert!(list_symbol(quirks(), face(CollectionKind::List, false), size, &[]).is_some());
+        assert!(list_symbol(quirks(), face(CollectionKind::List, true), size, &[]).is_none());
+        assert!(list_symbol(quirks(), face(CollectionKind::List, true), clear, &[]).is_some());
+        assert!(list_symbol(quirks(), face(CollectionKind::List, false), clear, &[]).is_none());
+        assert!(list_symbol(quirks(), face(CollectionKind::List, false), add, &[any()]).is_none());
+        assert!(list_symbol(quirks(), array_list, size, &[]).is_some());
+        assert!(list_symbol(quirks(), array_list, clear, &[]).is_some());
 
         let collection = face(CollectionKind::Collection, false);
         let mutable_collection = face(CollectionKind::Collection, true);
-        assert!(collection_symbol(collection, size).is_some());
-        assert!(collection_symbol(mutable_collection, size).is_none());
-        assert!(collection_symbol(mutable_collection, clear).is_some());
-        assert!(collection_symbol(collection, clear).is_none());
-        assert!(collection_symbol(collection, add).is_none());
+        assert!(collection_symbol(quirks(), collection, size).is_some());
+        assert!(collection_symbol(quirks(), mutable_collection, size).is_none());
+        assert!(collection_symbol(quirks(), mutable_collection, clear).is_some());
+        assert!(collection_symbol(quirks(), collection, clear).is_none());
+        assert!(collection_symbol(quirks(), collection, add).is_none());
         // `Collection` is the only declaration a `Collection`-typed receiver can select.
-        assert!(collection_symbol(face(CollectionKind::List, false), size).is_none());
-        assert!(collection_symbol(array_list, size).is_none());
+        assert!(collection_symbol(quirks(), face(CollectionKind::List, false), size).is_none());
+        assert!(collection_symbol(quirks(), array_list, size).is_none());
     }
 
     /// `listIterator` is a query of a list, and the steps back are `ListIterator`'s own: an
@@ -1399,10 +1434,10 @@ mod tests {
             &by_text_params,
             iterator,
         );
-        assert!(list_symbol(list, first, &[]).is_some());
-        assert!(list_symbol(list, at, &[Ty::Int]).is_some());
-        assert!(list_symbol(list, by_text, &[Ty::String]).is_none());
-        assert!(list_symbol(face(CollectionKind::Set, false), at, &[Ty::Int]).is_none());
+        assert!(list_symbol(quirks(), list, first, &[]).is_some());
+        assert!(list_symbol(quirks(), list, at, &[Ty::Int]).is_some());
+        assert!(list_symbol(quirks(), list, by_text, &[Ty::String]).is_none());
+        assert!(list_symbol(quirks(), face(CollectionKind::Set, false), at, &[Ty::Int]).is_none());
 
         let steps = face(CollectionKind::ListIterator, false);
         let previous = signature("kotlin/collections/ListIterator", "previous", &[], element);

@@ -115,6 +115,22 @@ impl KlibPublicIdSignature {
         })
     }
 
+    /// The function `name` that this class declares, identified by its mangled signature as
+    /// kotlinc writes it (`invoke(1:0;1:1){}`). The mask is that of a declaration that is not
+    /// `expect`.
+    pub(crate) fn member_function(&self, name: &str, mangled: &str) -> Self {
+        let mut declaration = self.declaration.segments.to_vec();
+        declaration.push(name.to_owned());
+        Self {
+            package: self.package.clone(),
+            declaration: KlibNamePath {
+                segments: declaration.into_boxed_slice(),
+            },
+            member_id: Some(city_hash::city_hash64(mangled.as_bytes())),
+            mask: 0,
+        }
+    }
+
     /// The package and declaration paths of this signature, without its member id and mask.
     pub(crate) fn declaration_path(&self) -> KlibDeclarationPath {
         KlibDeclarationPath {

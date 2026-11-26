@@ -46,6 +46,12 @@ impl IrPlugin for AtomicfuPlugin {
         "atomicfu"
     }
 
+    fn runtime_requirements(
+        &self,
+    ) -> Vec<crate::plugins::runtime_declarations::RuntimeRequirement> {
+        source_facts::requirements()
+    }
+
     fn record_source_facts(
         &self,
         ir: &mut IrFile,

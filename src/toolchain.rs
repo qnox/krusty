@@ -14,7 +14,7 @@ use crate::jvm::classpath::Classpath;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-mod maven_download;
+use krusty_download as maven_download;
 
 /// Locate the kotlin-stdlib jar from the dist or standard local caches, mirroring how a drop-in
 /// `kotlinc` user supplies it via `-classpath`. Each source names the exact reference release's
@@ -109,7 +109,7 @@ fn jdk_home_from(java_home: Option<OsString>, reference_home: Option<OsString>) 
 
 /// The reference version whose provisioned toolchain this process uses: the one it reproduces.
 fn reference_version() -> String {
-    crate::kotlin_version::target().to_string()
+    crate::kotlin_version::environment_release().to_string()
 }
 
 /// The `<version>.txt` outcome lists in one directory, as seen by the reference version this
@@ -124,7 +124,7 @@ pub struct ReleaseList {
 }
 
 pub fn release_list(directory: &Path) -> ReleaseList {
-    let version = crate::kotlin_version::target();
+    let version = crate::kotlin_version::environment_release();
     let path_of = |release| directory.join(format!("{release}.txt"));
     let own = path_of(version);
     ReleaseList {
@@ -175,15 +175,32 @@ fn toolchain_path(env: Option<OsString>, kind: &str, suffix: &str) -> Option<Pat
     })
 }
 
+/// The files of a kotlinc distribution (relative to its root) that count as the distribution being
+/// there: the all-in-one compiler jar, the standard library jar, and the build identity. A directory
+/// holding less, such as one an interrupted extraction left, is not a distribution.
+/// `scripts/provision-kotlinc.sh`, the only writer of the provisioned cache, publishes under the
+/// same rule.
+pub const KOTLINC_PAYLOAD: [&str; 3] = [
+    "lib/kotlin-compiler.jar",
+    "lib/kotlin-stdlib.jar",
+    "build.txt",
+];
+
+/// Whether `root` (the directory holding `bin/` and `lib/`) holds the whole [`KOTLINC_PAYLOAD`].
+pub fn kotlinc_distribution_complete(root: &Path) -> bool {
+    KOTLINC_PAYLOAD.iter().all(|file| root.join(file).is_file())
+}
+
 /// The reference Kotlin/JVM compiler used by differential and conformance-oracle runs.
-/// `KRUSTY_KOTLINC` overrides the provisioned distribution.
+/// `KRUSTY_KOTLINC` overrides the provisioned distribution. A launcher whose distribution is
+/// missing part of its payload is not available.
 pub fn kotlinc_path() -> Option<PathBuf> {
     let path = toolchain_path(
         std::env::var_os("KRUSTY_KOTLINC"),
         "kotlinc",
         "kotlinc/bin/kotlinc",
     )?;
-    path.is_file().then_some(path)
+    (path.is_file() && kotlinc_distribution_complete(path.parent()?.parent()?)).then_some(path)
 }
 
 /// The reference stdlib KLIB a compilation for `target` is analyzed against. JS and wasm-js ship
@@ -192,20 +209,39 @@ pub fn kotlinc_path() -> Option<PathBuf> {
 /// library that is not provisioned.
 pub fn kotlin_stdlib_klib(target: crate::compilation_target::CompilationTarget) -> Option<PathBuf> {
     use crate::compilation_target::CompilationTarget;
+    if matches!(target, CompilationTarget::Jvm) {
+        return None;
+    }
+    kotlin_stdlib_klib_or_reason(target).ok()
+}
+
+/// [`kotlin_stdlib_klib`] that says why the library is unavailable: the URL and status or deadline
+/// of a failed wasm-wasi download, or the distribution the other targets read it from.
+pub fn kotlin_stdlib_klib_or_reason(
+    target: crate::compilation_target::CompilationTarget,
+) -> Result<PathBuf, String> {
+    use crate::compilation_target::CompilationTarget;
+    let missing = |what: &str| format!("{what} is not provisioned");
     match target {
-        CompilationTarget::Jvm => None,
-        CompilationTarget::Js => dist_jar("kotlin-stdlib-js.klib"),
-        CompilationTarget::WasmJs => dist_jar("kotlin-stdlib-wasm-js.klib"),
+        CompilationTarget::Jvm => Err("the JVM stdlib is a jar, not a KLIB".to_string()),
+        CompilationTarget::Js => {
+            dist_jar("kotlin-stdlib-js.klib").ok_or_else(|| missing("the kotlinc distribution"))
+        }
+        CompilationTarget::WasmJs => dist_jar("kotlin-stdlib-wasm-js.klib")
+            .ok_or_else(|| missing("the kotlinc distribution")),
         CompilationTarget::WasmWasi => kotlin_wasm_wasi_stdlib_klib(),
-        CompilationTarget::Native => kotlin_native_stdlib_klib(),
+        CompilationTarget::Native => {
+            kotlin_native_stdlib_klib().ok_or_else(|| missing("the Kotlin/Native distribution"))
+        }
     }
 }
 
 /// Kotlin publishes the wasm-wasi stdlib as a target-specific Maven KLIB for every supported
 /// release. Some compiler distributions do not bundle that publication, so use its versioned
 /// coordinate as the one authoritative source rather than selecting a different platform's bytes.
-fn kotlin_wasm_wasi_stdlib_klib() -> Option<PathBuf> {
-    ensure_maven_artifact(
+fn kotlin_wasm_wasi_stdlib_klib() -> Result<PathBuf, String> {
+    fetch_repository_artifact(
+        MAVEN_CENTRAL,
         "org.jetbrains.kotlin",
         "kotlin-stdlib-wasm-wasi",
         &reference_version(),
@@ -274,7 +310,7 @@ fn maven_version_from_build_number(build: &str) -> Option<&str> {
 
 /// The Kotlin version to pin Maven fallbacks to — from the dist `build.txt` (e.g.
 /// `1.9.24-release-822` → `1.9.24`, but `2.4.20-RC2-release-17` → `2.4.20-RC2`) or a located
-/// versioned stdlib jar, defaulting to the process-wide reference target. Dependency provisioning
+/// versioned stdlib jar, defaulting to the environment-selected reference release. Dependency provisioning
 /// must not alias one configured compiler release to another.
 pub fn kotlin_version() -> String {
     if let Some(lib) = kotlinc_lib_dir() {
@@ -655,8 +691,8 @@ pub fn compose_runtime_jars() -> Option<Vec<PathBuf>> {
     crate::conformance::plugin_corpus::named("compose").runtime_jars()
 }
 
-/// The atomicfu runtime version, for callers that name it as a constant (the conformance-deps
-/// fetch script). The atomicfu corpus descriptor is the producer;
+/// The atomicfu runtime version, for callers that name it as a constant. The atomicfu corpus
+/// descriptor is the producer;
 /// `plugin_runtime_version_constants_match_descriptors` pins this to it.
 pub const ATOMICFU_RUNTIME_VERSION: &str = "0.32.1";
 
@@ -702,6 +738,15 @@ fn atomicfu_klib_unavailable(
     format!(
         "box directive `// WITH_ATOMICFU` needs the atomicfu runtime KLIB for {target:?}: {reason}"
     )
+}
+
+/// The prebuilt static caches a Kotlin/Native distribution rooted at `native_root` ships for debug
+/// binaries of this host (`klib/cache/linux_x64-gSTATIC-system`), the caches Gradle's debug
+/// binaries and Kotlin's own Native box tests link against. `None` on a host Kotlin/Native does
+/// not target.
+pub fn kotlin_native_debug_static_caches(native_root: &Path) -> Option<PathBuf> {
+    let konan = crate::native_target::NativeTarget::host()?.konan_name()?;
+    Some(native_root.join(format!("klib/cache/{konan}-gSTATIC-system")))
 }
 
 /// The atomicfu runtime KLIB for `target`, pinned to the version of the atomicfu corpus's runtime; `Ok(None)` for
@@ -821,7 +866,65 @@ fn find_exact_jar(dir: &std::path::Path, expected: &str, depth: usize) -> Option
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_jvm_has_no_stdlib_klib_and_says_so() {
+        use crate::compilation_target::CompilationTarget;
+        assert_eq!(
+            kotlin_stdlib_klib_or_reason(CompilationTarget::Jvm),
+            Err("the JVM stdlib is a jar, not a KLIB".to_string())
+        );
+        assert_eq!(kotlin_stdlib_klib(CompilationTarget::Jvm), None);
+    }
+
     use super::*;
+
+    fn distribution_with(files: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "krusty-kotlinc-payload-{}-{}",
+            std::process::id(),
+            files.len()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        for file in files {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().expect("a payload file has a directory"))
+                .expect("create the directory");
+            std::fs::write(path, "").expect("write the file");
+        }
+        root
+    }
+
+    // The provisioned current release is read through the same readiness rule as any other: a
+    // launcher and compiler jar without the standard library are a half-written distribution.
+    #[test]
+    fn a_distribution_without_its_whole_payload_is_incomplete() {
+        let partial = distribution_with(&["bin/kotlinc", "lib/kotlin-compiler.jar"]);
+        assert!(!kotlinc_distribution_complete(&partial));
+        let whole = distribution_with(&[
+            "bin/kotlinc",
+            "lib/kotlin-compiler.jar",
+            "lib/kotlin-stdlib.jar",
+            "build.txt",
+        ]);
+        assert!(kotlinc_distribution_complete(&whole));
+        let _ = std::fs::remove_dir_all(partial);
+        let _ = std::fs::remove_dir_all(whole);
+    }
+
+    #[test]
+    fn debug_static_caches_are_the_host_targets_gstatic_system_directory() {
+        let konan = crate::native_target::NativeTarget::host().and_then(|host| host.konan_name());
+        assert_eq!(
+            kotlin_native_debug_static_caches(Path::new("/dist")),
+            konan.map(|konan| PathBuf::from(format!("/dist/klib/cache/{konan}-gSTATIC-system")))
+        );
+        if std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64" {
+            assert_eq!(
+                kotlin_native_debug_static_caches(Path::new("/dist")),
+                Some(PathBuf::from("/dist/klib/cache/linux_x64-gSTATIC-system"))
+            );
+        }
+    }
 
     #[test]
     fn plugin_runtime_version_constants_match_descriptors() {

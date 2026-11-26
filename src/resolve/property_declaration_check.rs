@@ -413,14 +413,14 @@ impl Checker<'_> {
         // (and its sub-expressions') types are recorded for the lowering of `x$delegate`.
         if let Some(de) = p.delegate.filter(|_| check_ordinary_property_body) {
             let this_ref = recv_ty.unwrap_or(Ty::Null);
-            let site = DelegateConventionSite::of(p, None, recv_ty);
+            let mut site = DelegateConventionSite::of(p, None, recv_ty);
             let (dt, _) = self.check_delegate_getvalue(
                 scope,
                 de,
                 Ty::Null,
                 this_ref,
                 Some(resolved_property_ty),
-                site.clone(),
+                &mut site,
             );
             if p.is_var {
                 self.record_delegate_setvalue(scope, de, dt, this_ref, resolved_property_ty, site);

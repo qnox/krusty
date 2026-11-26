@@ -44,6 +44,9 @@ impl BodyFirChecker<'_> {
             match &mut kind {
                 FirExprKind::CallableReference {
                     context_arguments, ..
+                }
+                | FirExprKind::LocalCallableReference {
+                    context_arguments, ..
                 } => *context_arguments = materialized,
                 _ => return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)),
             }
@@ -274,6 +277,7 @@ impl BodyFirChecker<'_> {
             argument_mapping,
             signature,
             suspend_conversion,
+            ..
         }) = self.info.expr_lowers.get(&expression).cloned()
         {
             let origin = self.expression_origin(expression)?;
@@ -305,6 +309,7 @@ impl BodyFirChecker<'_> {
                         })
                     })
                     .transpose()?,
+                context_arguments: Box::new([]),
                 adaptation: Some(Box::new(adaptation)),
             });
         }
@@ -333,6 +338,7 @@ impl BodyFirChecker<'_> {
                         })
                     })
                     .transpose()?,
+                context_arguments: Box::new([]),
                 adaptation: None,
             });
         }

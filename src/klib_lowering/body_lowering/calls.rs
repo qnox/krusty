@@ -44,7 +44,10 @@ impl BodyLowering<'_> {
         if access.symbol.kind != KlibIrSymbolKind::Function {
             return Err(mismatch("a call target's symbol is not a function"));
         }
-        let inherited = self.linker.inherited_getter(&access.symbol.signature)?;
+        let inherited = match self.linker.inherited_member(&access.symbol.signature) {
+            Some(member) => Some(member),
+            None => self.linker.inherited_getter(&access.symbol.signature)?,
+        };
         let signature = inherited.as_ref().unwrap_or(&access.symbol.signature);
         let callee = match signature {
             KlibIrSignature::Public(callee) if !self.linker.links_privately(signature) => callee,
@@ -67,9 +70,6 @@ impl BodyLowering<'_> {
         }
         if let Some(operation) = self.linker.atomic_array_element(callee)? {
             return self.atomic_array_element(operation, access, ty);
-        }
-        if let Some((classifier, member)) = self.linker.enum_static_member(self.ir, callee)? {
-            return self.enum_static_member_call(classifier, member, access, ty);
         }
         if let Some(arity) = suspend_function_invocation_arity(callee) {
             if !access.type_arguments.is_empty() {
@@ -102,6 +102,11 @@ impl BodyLowering<'_> {
             }
             BuiltinCallDisposition::Dependency => {
                 let signature = crate::libraries::KlibDeclarationSignature::Public(callee.clone());
+                if let Some((classifier, member)) =
+                    self.linker.implicit_enum_member(self.ir, &signature)?
+                {
+                    return self.implicit_enum_member(classifier, member, access, ty);
+                }
                 if let Some(suspension) = self.linker.unintercepted_suspension(&signature)? {
                     return self.unintercepted_suspension_call(suspension, access, ty);
                 }
@@ -342,54 +347,6 @@ impl BodyLowering<'_> {
             operand,
             check: crate::ir::NullCheck::Source,
         }))
-    }
-
-    /// `values()` or `valueOf(name)` of a dependency enum class: the common enum operation, which
-    /// the backend realizes as it does for a source enum's call of the same member.
-    fn enum_static_member_call(
-        &mut self,
-        classifier: crate::types::TypeName,
-        member: super::super::enum_classes::EnumStaticMember,
-        access: &KlibIrMemberAccess,
-        ty: Ty,
-    ) -> Lowered<ExprId> {
-        use super::super::enum_classes::EnumStaticMember;
-        if !access.type_arguments.is_empty() {
-            return Err(mismatch(
-                "an enum's compiler-generated member is called with type arguments",
-            ));
-        }
-        let operands = arguments(access);
-        let value = match (member, operands.as_slice()) {
-            (EnumStaticMember::Values, []) => {
-                if ty != Ty::obj_args("kotlin/Array", &[Ty::obj_name(classifier)]) {
-                    return Err(mismatch("an enum's `values()` is typed apart from its array"));
-                }
-                IrExpr::EnumValues { classifier }
-            }
-            (EnumStaticMember::ValueOf, &[Some(name)]) => {
-                if ty != Ty::obj_name(classifier) {
-                    return Err(mismatch("an enum's `valueOf` is typed apart from its enum"));
-                }
-                let arg = self.expression(name)?;
-                if self.lowered_type(arg) != Ty::String {
-                    return Err(mismatch("an enum's `valueOf` is called on a non-String name"));
-                }
-                IrExpr::EnumValueOf {
-                    classifier,
-                    arg,
-                    declaration: crate::ir::EnumValueOfDeclaration::Member,
-                }
-            }
-            _ => {
-                return Err(mismatch(
-                    "an enum's compiler-generated member is called with another shape than its declaration's",
-                ))
-            }
-        };
-        let value = self.ir.add_expr(value);
-        self.ir.set_logical_type(value, ty);
-        Ok(value)
     }
 
     /// A data class array member, as a call of the array's content extension on the operand.
@@ -897,22 +854,42 @@ impl BodyLowering<'_> {
                 .ir
                 .overridable_method(*function)
                 .map(|slot| (slot, receiver)),
-            (Callee::LocalWithDefaults { function, .. }, Some(_))
-                if self.ir.overridable_method(*function).is_some() =>
-            {
-                return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                    "a dispatched call leaving arguments to their defaults",
-                ));
-            }
+            (Callee::LocalWithDefaults { function, .. }, Some(receiver)) => self
+                .ir
+                .overridable_method(*function)
+                .map(|slot| (slot, receiver)),
             _ => None,
         };
         let call = match overridable {
-            Some(((class, index), receiver)) => self.ir.add_expr(IrExpr::MethodCall {
-                class,
-                index,
-                receiver,
-                args: args.into_iter().map(Some).collect(),
-            }),
+            // A dispatched call leaving arguments to their defaults leaves their places empty: the
+            // shared default-argument lowering fills them in the declaration's entry, which then
+            // dispatches through the slot, as kotlinc's `$default` entry does.
+            Some(((class, index), receiver)) => {
+                let args = match &callee {
+                    Callee::LocalWithDefaults { defaults, .. } => {
+                        let mut supplied = args.into_iter();
+                        let count = supplied.len() + defaults.len();
+                        (0..count)
+                            .map(|ordinal| {
+                                if u32::try_from(ordinal)
+                                    .is_ok_and(|ordinal| defaults.contains(&ordinal))
+                                {
+                                    None
+                                } else {
+                                    supplied.next()
+                                }
+                            })
+                            .collect()
+                    }
+                    _ => args.into_iter().map(Some).collect(),
+                };
+                self.ir.add_expr(IrExpr::MethodCall {
+                    class,
+                    index,
+                    receiver,
+                    args,
+                })
+            }
             None => self.ir.add_expr(IrExpr::Call {
                 callee: Box::new(callee),
                 dispatch_receiver,
@@ -1186,13 +1163,16 @@ impl BodyLowering<'_> {
 
     /// A call of a dependency property's accessor, lowered as checked FIR lowers a source access
     /// of the property: a read through its getter, a write through its setter.
-    fn accessor_call(
+    pub(super) fn accessor_call(
         &mut self,
         accessor: &KlibAccessorIdSignature,
         access: &KlibIrMemberAccess,
         ty: Ty,
     ) -> Lowered<ExprId> {
         let signature = crate::libraries::KlibDeclarationSignature::Accessor(accessor.clone());
+        if let Some((classifier, member)) = self.linker.implicit_enum_member(self.ir, &signature)? {
+            return self.implicit_enum_member(classifier, member, access, ty);
+        }
         if access.type_arguments.is_empty() {
             if let Some(primitive) = self.linker.common_primitive(&signature)? {
                 return self.primitive_call(primitive, access, ty);

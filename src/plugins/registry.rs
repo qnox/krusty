@@ -50,6 +50,21 @@ pub struct Activation<'a> {
     /// Whether the driver resolving this compilation runs codegen hosts (KSP). One that does not must
     /// refuse a hosted plugin instead of reporting it hosted and dropping its generated sources.
     pub codegen_host: bool,
+    /// Whether the driver resolving this compilation runs a module-IR host: a process that loads a
+    /// compiler-plugin jar krusty does not implement and transforms the module's IR through the
+    /// plugin API. A driver without one refuses such a jar instead of dropping what it generates.
+    pub module_ir_host: bool,
+}
+
+/// A plugin jar the driver's module-IR host runs, and the registrars of it the host runs.
+///
+/// The registrars are only those no registered extension answers to. A registrar krusty
+/// substitutes natively is left out, so a bundle jar never runs its substituted plugin twice: the
+/// host must load exactly [`HostedJar::registrars`] from the jar and no other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedJar {
+    pub jar: String,
+    pub registrars: Vec<String>,
 }
 
 /// Builds the native `IrPlugin` for an extension, configured from the activation context and the
@@ -191,6 +206,8 @@ pub enum PluginDiagnostic {
     },
     /// krusty will host the real plugin via the sidecar.
     Hosted { plugin_id: String },
+    /// The jar declares a plugin krusty does not implement, which the driver's module-IR host runs.
+    HostedModuleIr { jar: String },
     /// A codegen-host plugin requested from a driver that runs no codegen host — hard error.
     HostUnavailable { plugin_id: String },
     /// A plugin krusty can neither reimplement nor host — hard error. `plugin` is the offending
@@ -236,6 +253,10 @@ impl PluginDiagnostic {
             PluginDiagnostic::Hosted { plugin_id } => {
                 format!("krusty: hosting '{plugin_id}' via the KSP sidecar (the real plugin runs unmodified).")
             }
+            PluginDiagnostic::HostedModuleIr { jar } => format!(
+                "krusty: '{jar}' declares a compiler plugin krusty does not implement; the module-IR \
+                 host runs it unmodified."
+            ),
             PluginDiagnostic::HostUnavailable { plugin_id } => format!(
                 "krusty: '{plugin_id}' runs only through krusty's codegen host, which this driver \
                  does not start. Ignoring it would silently drop the code it generates, so this is \
@@ -341,6 +362,17 @@ impl NativePlugins {
         !self.enabled.is_empty() && self.host("").passes_transformed_entry_defaults(entry)
     }
 
+    /// The runtime functions the enabled plugins may call. The module name only mangles a plugin's
+    /// output, so it plays no part in what a plugin requires.
+    pub fn runtime_requirements(
+        &self,
+    ) -> Vec<crate::plugins::runtime_declarations::RuntimeRequirement> {
+        if self.is_empty() {
+            return Vec::new();
+        }
+        self.host("").runtime_requirements()
+    }
+
     /// Build this compilation's plugin host. `module_name` reaches plugins whose output is
     /// module-mangled (serialization's `write$Self$<module>`).
     pub fn host(&self, module_name: &str) -> PluginHost {
@@ -349,6 +381,7 @@ impl NativePlugins {
             classpath: &self.classpath,
             module_name,
             codegen_host: false,
+            module_ir_host: false,
         };
         let mut host = PluginHost::new();
         for native in &self.enabled {
@@ -370,6 +403,9 @@ impl NativePlugins {
 pub struct Resolved {
     pub native: NativePlugins,
     pub ksp_active: bool,
+    /// The plugin jars, in request order, that declare a plugin neither reimplemented nor
+    /// substituted: the driver's module-IR host loads them. Empty where the driver runs no such host.
+    pub hosted_jars: Vec<HostedJar>,
     pub diagnostics: Vec<PluginDiagnostic>,
 }
 
@@ -643,6 +679,7 @@ impl PluginRegistry {
                 return Resolved {
                     native,
                     ksp_active: false,
+                    hosted_jars: Vec::new(),
                     diagnostics: vec![PluginDiagnostic::UnparsedOrderConstraint { message }],
                 };
             }
@@ -663,6 +700,7 @@ impl PluginRegistry {
                     return Resolved {
                         native,
                         ksp_active,
+                        hosted_jars: Vec::new(),
                         diagnostics: vec![PluginDiagnostic::OrderCycle(cycle)],
                     };
                 }
@@ -750,13 +788,34 @@ impl PluginRegistry {
         // A jar that declares a registrar no registered extension answers to is a FIR/IR plugin krusty
         // can neither run nor substitute, and one that cannot be read is a plugin krusty cannot even
         // identify — fail rather than silently mis-compile.
+        let mut hosted_jars = Vec::new();
         for (jar, registrars) in &jars {
-            let understood = registrars.as_ref().is_some_and(|registrars| {
+            let unknown: Option<Vec<String>> = registrars.as_ref().map(|registrars| {
                 registrars
                     .iter()
-                    .all(|registrar| self.extensions.iter().any(|ext| ext.registrar == registrar))
+                    .filter(|registrar| {
+                        !self
+                            .extensions
+                            .iter()
+                            .any(|ext| ext.registrar == registrar.as_str())
+                    })
+                    .cloned()
+                    .collect()
             });
-            if !understood {
+            if unknown.as_ref().is_some_and(|unknown| unknown.is_empty()) {
+                continue;
+            }
+            // A jar the driver's module-IR host can run is one krusty read: it declared a registrar
+            // no extension answers to. One that cannot be read has nothing for a host to load.
+            if let Some(unknown) = unknown.filter(|_| act.module_ir_host) {
+                hosted_jars.push(HostedJar {
+                    jar: jar.to_string(),
+                    registrars: unknown,
+                });
+                diagnostics.push(PluginDiagnostic::HostedModuleIr {
+                    jar: jar.to_string(),
+                });
+            } else {
                 diagnostics.push(PluginDiagnostic::Unsupported {
                     plugin: jar.to_string(),
                 });
@@ -786,6 +845,7 @@ impl PluginRegistry {
         Resolved {
             native,
             ksp_active,
+            hosted_jars,
             diagnostics,
         }
     }
@@ -900,6 +960,7 @@ mod tests {
             classpath,
             module_name: "app",
             codegen_host: true,
+            module_ir_host: false,
         }
     }
 
@@ -1295,6 +1356,79 @@ mod tests {
         let msg = resolved.diagnostics[0].message();
         assert!(msg.contains(&jar));
         assert!(msg.contains("unsupported"));
+    }
+
+    /// A driver that runs a module-IR host hands it the jar of a plugin krusty neither reimplements
+    /// nor substitutes, instead of refusing the compilation. Which jars those are is the registry's
+    /// answer, from the registrars the jars declare; krusty starts nothing itself.
+    #[test]
+    fn a_driver_with_a_module_ir_host_receives_the_jar_of_a_plugin_krusty_does_not_implement() {
+        let jar = plugin_jar("widget-compiler-plugin.jar", &[WIDGET_REGISTRAR]);
+        let c = cfg(&[&format!("-Xplugin={jar}")]);
+        let act = Activation {
+            module_ir_host: true,
+            ..activation(&c, &[])
+        };
+        let resolved = PluginRegistry::with_builtins().resolve(&act);
+        assert!(resolved.native.is_empty());
+        assert_eq!(
+            resolved.hosted_jars,
+            vec![HostedJar {
+                jar: jar.clone(),
+                registrars: vec![WIDGET_REGISTRAR.to_string()],
+            }]
+        );
+        assert_eq!(
+            resolved.diagnostics,
+            vec![PluginDiagnostic::HostedModuleIr { jar }]
+        );
+        assert!(!resolved.has_errors());
+    }
+
+    /// One jar may declare a plugin krusty substitutes beside one it does not implement: the first is
+    /// substituted, and the jar goes to the host for the second only. The hosted entry names just the
+    /// unknown registrar, because the host loads every registrar a jar declares unless told which, and
+    /// the substituted plugin would otherwise run twice.
+    #[test]
+    fn a_jar_declaring_a_substituted_and_an_unknown_registrar_is_both_substituted_and_hosted() {
+        let jar = plugin_jar(
+            "bundle.jar",
+            &[registrar_of(SERIALIZATION_PLUGIN_ID), WIDGET_REGISTRAR],
+        );
+        let c = cfg(&[&format!("-Xplugin={jar}")]);
+        let act = Activation {
+            module_ir_host: true,
+            ..activation(&c, &[])
+        };
+        let resolved = PluginRegistry::with_builtins().resolve(&act);
+        assert_eq!(resolved.native.plugin_ids(), vec![SERIALIZATION_PLUGIN_ID]);
+        assert_eq!(
+            resolved.hosted_jars,
+            vec![HostedJar {
+                jar,
+                registrars: vec![WIDGET_REGISTRAR.to_string()],
+            }]
+        );
+        assert!(!resolved.has_errors());
+    }
+
+    /// A jar krusty cannot even read cannot be handed to a host: it stays an error.
+    #[test]
+    fn an_unreadable_jar_is_an_error_even_where_a_module_ir_host_runs() {
+        let junk = scratch().join("junk-hosted.jar");
+        std::fs::write(&junk, b"not a zip archive").expect("write the junk jar");
+        let junk = junk.to_string_lossy().into_owned();
+        let c = cfg(&[&format!("-Xplugin={junk}")]);
+        let act = Activation {
+            module_ir_host: true,
+            ..activation(&c, &[])
+        };
+        let resolved = PluginRegistry::with_builtins().resolve(&act);
+        assert!(resolved.hosted_jars.is_empty());
+        assert_eq!(
+            resolved.diagnostics,
+            vec![PluginDiagnostic::Unsupported { plugin: junk }]
+        );
     }
 
     /// kotlinc finds a plugin through the registrar its jar declares, whatever the file is called; so

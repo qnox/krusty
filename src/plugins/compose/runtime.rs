@@ -7,7 +7,8 @@ use crate::ir::{
     RetainedAnnotation,
 };
 use crate::plugins::runtime_declarations::{
-    BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
+    record_requirements, BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
+    RuntimeRequirement,
 };
 use crate::types::{type_name, Ty};
 
@@ -64,6 +65,11 @@ pub(super) struct ComposeRuntime {
     /// `rememberComposableLambda`, itself composable: it takes the caller's composer and
     /// `$changed` after its declared parameters.
     pub(super) remember_composable_lambda: BoundRuntimeFunction,
+}
+
+/// Every runtime function [`ComposeRuntime::bind`] selects, which the pass declares up front.
+pub(super) fn requirements() -> Vec<RuntimeRequirement> {
+    record_requirements(|runtime| ComposeRuntime::bind(runtime).map(drop))
 }
 
 impl ComposeRuntime {

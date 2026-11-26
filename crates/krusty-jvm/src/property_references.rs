@@ -113,6 +113,7 @@ pub(super) fn realize(
 ) -> Result<PropertyReferenceRealizations, PropertyReferenceRealizationTarget> {
     let facades = &file_classes.containers[..];
     let mut realizations = PropertyReferenceRealizations::default();
+    let mut carriers = krusty::fx_hash::HashMap::<(TypeName, bool), krusty::ir::ClassId>::default();
     realizations.local_delegated =
         local_delegated_properties::LocalDelegatedProperties::collect(ir, facades)
             .ok_or(PropertyReferenceRealizationTarget::Invalid)?;
@@ -332,6 +333,22 @@ pub(super) fn realize(
             });
             continue;
         }
+        // Nodes carrying one source reference's name are copies of it (an inline splice copies the
+        // node, and a lambda keeps a template beside its implementation): one class, which each
+        // copy instantiates with its own receiver. A copy has no carrier of its own to take a
+        // spliced getter's body.
+        let named = u32::try_from(raw)
+            .ok()
+            .and_then(|raw| crate::local_class_names::callable_reference_name(ir, raw));
+        if let Some((name, class)) = named.and_then(|name| {
+            carriers
+                .get(&(name, receiver.is_some()))
+                .map(|&class| (name, class))
+        }) {
+            let _ = spliced_getters.take(raw as u32);
+            ir.exprs[raw] = carrier_expression(name, class, receiver);
+            continue;
+        }
         let get_receiver = inline_getters::GetReceiver::of(receiver.is_some(), &property);
         let (class, carrier) = synthesize(
             ir,
@@ -344,6 +361,12 @@ pub(super) fn realize(
         );
         if let Some(adapter) = spliced_getters.take(raw as u32) {
             inline_getters::realize_own_get(ir, raw, class, adapter, get_receiver);
+        }
+        if named.is_some_and(|name| ir.classes[class as usize].fq_name == name) {
+            carriers.insert(
+                (named.expect("a named reference"), receiver.is_some()),
+                class,
+            );
         }
         ir.exprs[raw] = carrier;
     }
@@ -1134,7 +1157,17 @@ fn synthesize(
     class.prop_ref = Some(property);
     realizations.record(internal, realization);
     let class = ir.add_class(class);
-    let carrier = match receiver {
+    (class, carrier_expression(internal, class, receiver))
+}
+
+/// The value of a property reference: a new carrier bound to its receiver, or the shared instance
+/// of an unbound one.
+fn carrier_expression(
+    internal: TypeName,
+    class: krusty::ir::ClassId,
+    receiver: Option<krusty::ir::ExprId>,
+) -> IrExpr {
+    match receiver {
         Some(receiver) => IrExpr::New {
             internal,
             args: vec![receiver],
@@ -1150,8 +1183,7 @@ fn synthesize(
             ty: class,
             field: "INSTANCE",
         },
-    };
-    (class, carrier)
+    }
 }
 
 /// A private companion property is realized before its field moves to the outer class. Once that
