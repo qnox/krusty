@@ -28,7 +28,9 @@ pub const DECLINE_PREFIX: &str = "krusty: the wasm backend does not support ";
 pub struct WasmBackend {
     target: WasmTarget,
     entry: krusty::backend::ProgramEntry,
-    array_range_checks: bool,
+    /// An explicit `-Xwasm-enable-array-range-checks`; otherwise each file's reference release
+    /// decides.
+    array_range_checks: Option<bool>,
 }
 
 impl WasmBackend {
@@ -36,7 +38,7 @@ impl WasmBackend {
         Self {
             target,
             entry: krusty::backend::ProgramEntry::new(Entry::Main),
-            array_range_checks: super::array_access::default_range_checks(),
+            array_range_checks: None,
         }
     }
 
@@ -56,7 +58,7 @@ impl WasmBackend {
     /// Explicit `-Xwasm-enable-array-range-checks` semantics. This is a code-generation option;
     /// it does not change frontend array types, overload selection or dependency identities.
     pub fn with_array_range_checks(mut self, enabled: bool) -> Self {
-        self.array_range_checks = enabled;
+        self.array_range_checks = Some(enabled);
         self
     }
 }
@@ -328,7 +330,9 @@ impl Backend for WasmBackend {
                 properties: &properties,
                 callables: &file.callables,
                 classifiers: &file.classifiers,
-                array_range_checks: self.array_range_checks,
+                array_range_checks: self.array_range_checks.unwrap_or_else(|| {
+                    super::array_access::default_range_checks(file.ir.reference.release())
+                }),
                 dependency_exports: &file.dependency_exports,
                 module_name: file.module_name,
                 plan,
@@ -1242,7 +1246,7 @@ mod tests {
         let metadata = krusty::klib::backend::KlibBackend::new(
             platform,
             krusty::klib::write::KlibStamp::new(
-                krusty::kotlin_version::target(),
+                krusty::features::LangFeatures::new().release(),
                 krusty::features::LangFeatures::new().language_version(),
             ),
         );

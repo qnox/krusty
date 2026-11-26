@@ -1779,6 +1779,7 @@ fn record_protected_dependency_call(
             name: name.clone(),
             parameters: callable.physical_params.clone().into_boxed_slice(),
             parameter_names: crate::parameter_names::dependency_access_bridge_local_variables(
+                ir.reference.quirks(),
                 &callable.parameter_identities,
                 &callable.params,
                 &callable.physical_params,

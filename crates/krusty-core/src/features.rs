@@ -7,7 +7,8 @@ use crate::fx_hash::HashSet;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::assertions::{AssertionCompilation, AssertionMode};
-use crate::kotlin_version::KotlinVersion;
+pub use crate::kotlin_version::ReferenceProfile;
+use crate::kotlin_version::{KotlinVersion, KotlincDefects};
 use crate::language_version::LanguageVersion;
 
 pub mod deprecation_cycle_messages;
@@ -107,8 +108,9 @@ const ASSERTION_MODES: [(&str, &str, AssertionCompilation); 4] = [
 /// `NameBasedDestructuring`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LangFeatures {
-    /// The reference release whose feature table supplies the defaults.
-    release: KotlinVersion,
+    /// What this compilation reproduces of kotlinc: the release whose feature table supplies the
+    /// defaults, and whether it keeps that release's defects.
+    reference: ReferenceProfile,
     language_version: LanguageVersion,
     enabled: HashSet<String>,
     /// The explicitly set features and their states, in kotlinc's `specificFeatures` sense. These
@@ -135,15 +137,28 @@ impl LangFeatures {
     /// release's table whose `sinceVersion` and `sinceApiVersion` are both reached (kotlinc's
     /// `isEnabledByDefault`).
     pub fn for_versions(language_version: LanguageVersion, api_version: LanguageVersion) -> Self {
-        Self::for_release(
-            crate::kotlin_version::target(),
-            language_version,
-            api_version,
+        Self::for_release(KotlinVersion::newest(), language_version, api_version)
+    }
+
+    /// The default features of the environment-selected reference release
+    /// ([`crate::kotlin_version::environment_release`]), for a test harness or tool that mirrors a
+    /// provisioned kotlinc. A compilation never calls this: it carries its own features.
+    pub fn from_environment() -> Self {
+        Self::for_language_version_in_release(
+            crate::kotlin_version::environment_release(),
+            LanguageVersion::default(),
         )
     }
 
-    /// [`Self::for_versions`] under an explicitly chosen reference release, for a driver that
-    /// configures a compilation before fixing the process-wide reference version.
+    fn for_language_version_in_release(
+        release: KotlinVersion,
+        language_version: LanguageVersion,
+    ) -> Self {
+        Self::for_release(release, language_version, language_version)
+    }
+
+    /// [`Self::for_versions`] under an explicitly chosen reference release, which defaults to the
+    /// newest supported one.
     pub fn for_release(
         release: KotlinVersion,
         language_version: LanguageVersion,
@@ -157,7 +172,7 @@ impl LangFeatures {
             .map(|feature| feature.name.clone())
             .collect();
         Self {
-            release,
+            reference: ReferenceProfile::of_release(release),
             language_version,
             enabled,
             specific: BTreeMap::new(),
@@ -242,14 +257,14 @@ const SUBSUMED_FEATURES: &[(&str, &str)] = &[(
 impl LangFeatures {
     /// The feature table of the reference release these defaults come from.
     pub fn table(&self) -> &'static FeatureTable {
-        FeatureTable::for_version(self.release)
-            .unwrap_or_else(|| panic!("kotlinc {} has no language feature table", self.release))
+        FeatureTable::for_version(self.release())
+            .unwrap_or_else(|| panic!("kotlinc {} has no language feature table", self.release()))
     }
 
     /// The language version policy of the reference release these defaults come from.
     pub fn versions(&self) -> &'static LanguageVersionPolicy {
-        LanguageVersionPolicy::for_release(self.release)
-            .unwrap_or_else(|| panic!("kotlinc {} has no language version policy", self.release))
+        LanguageVersionPolicy::for_release(self.release())
+            .unwrap_or_else(|| panic!("kotlinc {} has no language version policy", self.release()))
     }
 
     /// Whether krusty's frontend/backend has an explicit semantic consumer for this kotlinc
@@ -314,7 +329,18 @@ impl LangFeatures {
 
     /// The reference release whose feature table supplies the defaults.
     pub fn release(&self) -> KotlinVersion {
-        self.release
+        self.reference.release()
+    }
+
+    /// The reference profile this compilation reproduces.
+    pub fn reference(&self) -> ReferenceProfile {
+        self.reference
+    }
+
+    /// These features reproducing or fixing kotlinc's defects ([`KotlincDefects`]).
+    pub fn with_defects(mut self, defects: KotlincDefects) -> Self {
+        self.reference = self.reference.with_defects(defects);
+        self
     }
 
     /// kotlinc's `toDeprecationWarningMessage` for a diagnostic this compilation's selected
@@ -495,6 +521,14 @@ impl LangFeatures {
     /// Collect every `// LANGUAGE:` directive in a source file.
     pub fn from_source(src: &str) -> Self {
         let mut f = Self::default();
+        f.apply_source_directives(src);
+        f
+    }
+
+    /// [`Self::from_source`] over [`Self::from_environment`], for a harness that mirrors a
+    /// provisioned kotlinc.
+    pub fn from_source_in_environment(src: &str) -> Self {
+        let mut f = Self::from_environment();
         f.apply_source_directives(src);
         f
     }

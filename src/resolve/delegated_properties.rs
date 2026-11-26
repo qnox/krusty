@@ -766,12 +766,14 @@ impl DelegateConventionFamilies {
     /// [`Quirk::DelegateFailureNamesFirstRungOnly`]: crate::kotlin_version::Quirk::DelegateFailureNamesFirstRungOnly
     pub(crate) fn diagnostic_candidates(
         &self,
+        reference: crate::kotlin_version::ReferenceProfile,
         name: &str,
         result: &mut dyn FnMut(
             DelegateConventionCandidate<'_>,
         ) -> Result<Ty, crate::fir::DiagnosticId>,
     ) -> Result<Vec<DelegateConventionDiagnosticCandidate>, crate::fir::DiagnosticId> {
-        let every_rung = !crate::kotlin_version::Quirks::target()
+        let every_rung = !reference
+            .quirks()
             .has(crate::kotlin_version::Quirk::DelegateFailureNamesFirstRungOnly);
         let members = every_rung || !self.members.is_empty();
         let member_extensions = every_rung || !members && !self.member_extensions.is_empty();
@@ -1196,7 +1198,7 @@ impl Checker<'_> {
         let property = query.property;
         let value = query.value;
         let candidates = families
-            .diagnostic_candidates(name, &mut |candidate| {
+            .diagnostic_candidates(self.file.reference, name, &mut |candidate| {
                 Ok(match candidate {
                     DelegateConventionCandidate::Function(function) => function.callable.ret,
                     DelegateConventionCandidate::MemberExtension(candidate)

@@ -552,7 +552,7 @@ impl Suite {
     /// not applicable, and none panics. Prints `<passed>/<applicable>`.
     pub fn assert_krusty_ratchet(&self) {
         let corpus = Corpus::new(self);
-        let version = krusty::kotlin_version::target();
+        let version = krusty::kotlin_version::environment_release();
         let outcomes = run_corpus(&corpus, krusty_outcome);
         let not_applicable = load_expectation(&expectation_path(&self.not_applicable(), version));
         let full = corpus.only().is_none();
@@ -630,7 +630,7 @@ impl Suite {
     /// gap.
     pub fn assert_reference_reproduces_applicable_cases(&self) {
         let corpus = Corpus::new(self);
-        let version = krusty::kotlin_version::target();
+        let version = krusty::kotlin_version::environment_release();
         let outcomes = run_corpus(&corpus, reference_outcome);
         let not_applicable = load_expectation(&expectation_path(&self.not_applicable(), version));
         let mut problems = Vec::new();

@@ -1931,7 +1931,7 @@ fn check_jvm_outcomes(
     corpus: &BTreeSet<String>,
     full_run: bool,
 ) {
-    let version = krusty::kotlin_version::target();
+    let version = krusty::kotlin_version::environment_release();
     let failures: Vec<String> = results
         .iter()
         .filter_map(|(file, result, _)| match result {

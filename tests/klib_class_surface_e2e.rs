@@ -210,7 +210,7 @@ fn kotlinc_native_consumes_a_krusty_reified_inline_body() {
             krusty::compilation_target::CompilationTarget::Native,
             Box::new(libraries.for_compilation()),
         ),
-        &krusty::features::LangFeatures::from_source(library_source),
+        &krusty::features::LangFeatures::from_source_in_environment(library_source),
         &mut diags,
     );
     let stems = ["Probe".to_owned()];
@@ -392,7 +392,7 @@ fn official_inline_expansions(
             krusty::compilation_target::CompilationTarget::Native,
             Box::new(libraries.for_compilation()),
         ),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
 
@@ -583,7 +583,11 @@ fn constructor_property_annotation_sites_match_native_in_both_language_modes() {
         ];
         let reference = native_property_annotation_sites(&native, language);
         assert_eq!(reference, expected, "official Native language {language}");
-        let features = krusty::features::LangFeatures::for_language_version(language);
+        let features = krusty::features::LangFeatures::for_release(
+            krusty::kotlin_version::environment_release(),
+            language,
+            language,
+        );
         let (messages, packages) =
             written_packages_with_native_stdlib(&[("shapes", CLASSES)], &features)
                 .expect("the selected Native stdlib is provisioned");
@@ -699,7 +703,7 @@ fn executable_dependency_support_does_not_become_a_klib_fragment() {
             "Bits",
             "package bits\nfun bits(value: Float): Int = value.toBits()\n",
         )],
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
     ) else {
         return;
     };

@@ -258,11 +258,11 @@ impl Lane for NativeLane {
             .with_entry(Entry::Box)
             .with_entry_module(entry_module.name.clone())
             .verified();
-        let features = krusty::features::LangFeatures::from_source(directive_source);
+        let features = krusty::features::LangFeatures::from_source_in_environment(directive_source);
         let metadata = match krusty::klib::backend::KlibBackend::new(
             krusty::klib::write::KlibPlatform::Native,
             krusty::klib::write::KlibStamp::new(
-                krusty::kotlin_version::target(),
+                krusty::kotlin_version::environment_release(),
                 features.language_version(),
             ),
         )
@@ -579,7 +579,7 @@ fn run_native_against_official_producer(source: &str, stem: &str) {
             krusty::compilation_target::CompilationTarget::Native,
             Box::new(libraries.for_compilation()),
         ),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
     let backend = CraneliftBackend::new(target)
