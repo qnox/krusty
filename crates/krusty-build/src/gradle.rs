@@ -2343,18 +2343,23 @@ fun main() {
 
     /// The message `task` failed with, as Gradle reports it under "What went wrong", one entry
     /// per non-empty line. Gradle 9 names the plugin that registered the task in the header
-    /// (`Execution failed for task ':a' (registered by plugin 'dev.krustythecompiler').`);
-    /// Gradle 8 does not.
+    /// (`Execution failed for task ':a' (registered by plugin 'dev.krustythecompiler').`, or
+    /// `'org.jetbrains.kotlin.jvm'` for a Kotlin task); Gradle 8 does not.
     fn task_failure(rendered: &str, task: &str) -> Vec<String> {
         let header = format!("Execution failed for task '{task}'.");
-        let registered = format!(
-            "Execution failed for task '{task}' (registered by plugin 'dev.krustythecompiler')."
-        );
+        let registered = format!("Execution failed for task '{task}' (registered by plugin '");
+        let is_header = |line: &str| {
+            line == header
+                || line
+                    .strip_prefix(registered.as_str())
+                    .and_then(|plugin| plugin.strip_suffix("')."))
+                    .is_some_and(|plugin| !plugin.is_empty() && !plugin.contains('\''))
+        };
         let lines = rendered.lines().collect::<Vec<_>>();
         let at = lines
             .iter()
             .enumerate()
-            .filter(|(_, line)| line.trim() == header || line.trim() == registered)
+            .filter(|(_, line)| is_header(line.trim()))
             .map(|(at, _)| at)
             .collect::<Vec<_>>();
         assert_eq!(at.len(), 1, "{header}\n{rendered}");
