@@ -4,12 +4,9 @@
 //! member read the serialized loop never makes: it holds only the `indices` getter call.
 //! `CharSequence.trimEnd` loops over `this.indices.reversed()`, so lowering its body reads the
 //! receiver's `length` through the dependency property's own getter. The portable behavior of the
-//! function is pinned against kotlinc by the programs below, which the reference compiler runs
-//! first; the probe pins that the shared KLIB lowering emits the body, with that one read, instead
-//! of declining the loop. The shared box inventory takes the same program once the Native and Wasm
-//! lanes lower `trimEnd`.
-
-use super::common::{expect_box_run, jdk_modules, kotlinc_box_result, stdlib_jar};
+//! function is pinned against kotlinc by `tests/box_regressions/klibIndicesBounds.kt`, which the
+//! box inventory runs on every backend; the probe pins that the shared KLIB lowering emits the
+//! body, with that one read, instead of declining the loop.
 
 use krusty::backend::{Artifact, Backend, CheckedIrFile, CheckedIrUnitKind};
 use krusty::diag::DiagSink;
@@ -180,42 +177,5 @@ fn trim_end_lowers_its_indices_loop_with_the_receivers_length_read() {
             "Some(Obj(TypeName(\"kotlin/CharSequence\"), []))".to_owned(),
             "Obj(TypeName(\"kotlin/Int\"), [])".to_owned(),
         )]
-    );
-}
-
-/// kotlinc's answers for `trimEnd` and for a counted loop over a `Collection`'s `indices`.
-const BEHAVIOR: &str = r#"
-fun box(): String {
-    if ("abc  ".trimEnd() != "abc") return "fail trailing"
-    if ("  abc".trimEnd() != "  abc") return "fail leading kept"
-    if ("   ".trimEnd() != "") return "fail blank"
-    if ("".trimEnd() != "") return "fail empty"
-    val list: Collection<Int> = listOf(4, 5, 6)
-    var sum = 0
-    for (i in (list as List<Int>).indices) sum += i
-    if (sum != 3) return "fail collection indices"
-    var count = 0
-    for (i in emptyList<Int>().indices) count++
-    if (count != 0) return "fail empty indices"
-    return "OK"
-}
-"#;
-
-#[test]
-fn trim_end_and_collection_indices_loops_match_the_reference_compiler() {
-    assert_eq!(
-        kotlinc_box_result(BEHAVIOR),
-        "OK",
-        "the reference compiler is the oracle"
-    );
-    let jdk = jdk_modules();
-    assert_eq!(
-        expect_box_run(
-            BEHAVIOR,
-            "klibIndicesBoundBehavior",
-            &[stdlib_jar()],
-            Some(jdk.as_path())
-        ),
-        "OK"
     );
 }
