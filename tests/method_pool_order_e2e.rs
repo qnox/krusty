@@ -576,3 +576,20 @@ fn an_enum_s_property_accessors_intern_at_their_declarations() {
         &["Gear"],
     );
 }
+
+/// kotlinc builds a class's fake overrides from its superclass's member scope first: the defaults
+/// `get` and `minusKey` that `AbstractCoroutineContextElement` already has slots for precede
+/// `releaseInterceptedContinuation`, which only the interface contributes.
+#[test]
+fn inherited_forwarders_follow_the_superclass_scope_order() {
+    assert_identical_with_stdlib(
+        "ForwarderScopes",
+        r#"import kotlin.coroutines.*
+
+abstract class Dispatcher : AbstractCoroutineContextElement(ContinuationInterceptor), ContinuationInterceptor {
+    override fun <T> interceptContinuation(continuation: Continuation<T>): Continuation<T> = continuation
+}
+"#,
+        &["Dispatcher"],
+    );
+}
