@@ -392,9 +392,9 @@ impl Planner<'_> {
         let parent = match class.superclass {
             Some(superclass) if self.representation.owns_base(superclass) => None,
             Some(superclass) if self.classes.class(superclass).is_some() => {
-                Some(self.plan(superclass).map_err(|_| {
+                Some(self.plan(superclass).map_err(|reason| {
                     format!(
-                        "a class whose superclass has no module-wide layout (`{}`)",
+                        "a class whose superclass has no module-wide layout (`{}`): {reason}",
                         qualified()
                     )
                 })?)

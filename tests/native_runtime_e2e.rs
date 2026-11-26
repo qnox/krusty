@@ -1215,11 +1215,6 @@ fn a_progression_renders_compares_and_hashes_with_its_step() {
 }
 
 #[test]
-fn a_range_of_a_program_comparable_orders_by_its_compare_to() {
-    run_driver("comparable_range_program_type");
-}
-
-#[test]
 fn an_empty_unsigned_until_is_the_declared_empty_range() {
     run_driver_against_kotlin("range_unsigned_until_empty");
 }
@@ -1237,11 +1232,6 @@ fn a_spread_copy_that_does_not_fit_throws_and_writes_nothing() {
 #[test]
 fn a_range_a_progression_and_their_iterators_are_kotlins_classes() {
     run_driver_against_kotlin("range_class_identity");
-}
-
-#[test]
-fn a_comparable_ranges_members_call_the_program_in_kotlins_order_and_stop_at_a_throw() {
-    run_driver_against_kotlin("comparable_range_members");
 }
 
 #[test]

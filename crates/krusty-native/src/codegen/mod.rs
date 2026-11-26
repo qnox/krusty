@@ -152,6 +152,8 @@ pub struct CodegenModule {
     /// library default whose body lowering does not model: a call through one declines with the
     /// reason, rather than reaching an instance nothing implements it on.
     unimplementable_interface_members: krusty::fx_hash::HashMap<Vec<u8>, String>,
+    /// What the files lowered so far declare; see [`lower::ProgramDeclarations`].
+    program_declarations: lower::ProgramDeclarations,
     /// The exported entry answering each object instance and enum constant another file reads,
     /// linked by the instance (see `krusty::backend::instance_links`).
     instances: krusty::backend::module_links::ModuleLinks<
@@ -223,6 +225,12 @@ impl Backend for CraneliftBackend {
 
     fn capability_decline(&self, construct: &str) -> String {
         format!("krusty: the native backend does not support {construct} yet")
+    }
+
+    fn observe_program_sources(&self, state: &mut Self::State, sources: &[&CheckedIrFile<'_>]) {
+        for file in sources {
+            state.program_declarations.absorb_comparable(&file.ir);
+        }
     }
 
     fn common_ir_preparation(&self) -> Option<krusty::backend::CommonIrPreparation> {
@@ -578,6 +586,7 @@ impl Backend for CraneliftBackend {
                 dependency_instances: &instance_reads,
                 dependency_interface_numbers: &mut dependency_interface_numbers,
                 unimplementable_interface_members: &mut state.unimplementable_interface_members,
+                program_declarations: &mut state.program_declarations,
                 laid_out: &state.laid_out,
                 #[cfg(feature = "test-support")]
                 driver_entries: self

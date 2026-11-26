@@ -47,7 +47,8 @@ fn primitive_iterator_next_is_byte_identical_to_kotlinc() {
 // bridge and its boxed/nullable/interface uses; the JVM test above owns its bytecode oracle.
 #[test]
 fn primitive_iterator_bridges_emit_verified_native_objects() {
-    use common::native_backend::{native_objects, NativeBox};
+    use common::native_backend::NativeBox;
+    use common::native_objects;
     let target = krusty_native::NativeTarget::ALL[0];
     let objects = match native_objects(&[("PrimitiveIteratorNext", SOURCE)], target) {
         Ok(objects) => objects,

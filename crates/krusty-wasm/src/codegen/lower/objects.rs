@@ -1476,6 +1476,12 @@ impl Body<'_> {
             TyKind::Obj(name, _) if name == krusty::types::wk::any() => {
                 self.code.ref_test(nullable, HeapType::Eq);
             }
+            // A `KClass` is the runtime's class token: the one object a class literal evaluates
+            // to, so the test is its structure's.
+            TyKind::Obj(name, _) if name == krusty::types::wk::kclass() => {
+                let token = self.runtime.class_tokens.structure;
+                self.code.ref_test(nullable, HeapType::Concrete(token));
+            }
             TyKind::Obj(name, _)
                 if self
                     .classifiers

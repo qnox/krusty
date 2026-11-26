@@ -1,11 +1,8 @@
 //! `"a".."c"` — a range whose bounds are ordered by `Comparable`, not by a machine comparison.
 //!
 //! Kotlin declares `rangeTo` on `Comparable<T>` and answers a `ComparableRange<T>`, seen through
-//! `ClosedRange<T>`. It keeps the two bounds as OBJECTS and orders them by the element's
-//! `compareTo`, so the runtime object here carries that function, chosen where the range is built.
-//! It is no progression:
-//! `Comparable` names no successor, so there is no step and no walk — a pair of bounds and the
-//! question `value in it`.
+//! `ClosedRange<T>`. The stdlib's own class is lowered from its KLIB: it keeps the two bounds as
+//! OBJECTS and orders them by the element's `compareTo` through the element's interface table.
 //!
 //! Beside it, the INTEGRAL ranges reached through the same interface: `fun f(r: ClosedRange<Int>)`
 //! names `ClosedRange` where the object is an `IntRange`, and a bound read there is the erased `T`,
@@ -55,18 +52,11 @@ fn two_comparable_ranges_are_equal_by_their_bounds_or_by_being_empty() {
 }
 
 /// The runtime's comparable range is a `ClosedRange` to an erased test too, as every other closed
-/// range it builds is, and nothing else it holds is.
+/// range it builds is, and nothing else it holds is. The whole program is shared with every other
+/// lane in `tests/box_regressions`.
 #[test]
 fn a_comparable_range_is_a_closed_range_to_an_erased_test() {
-    let source = "fun isClosedRange(value: Any?): Boolean = value is ClosedRange<*>\n\
-         fun box(): String {\n\
-         \x20   val range = \"a\"..\"c\"\n\
-         \x20   if (!isClosedRange(range)) return \"fail range\"\n\
-         \x20   if (!isClosedRange(\"a\"..\"c\")) return \"fail literal\"\n\
-         \x20   if (isClosedRange(\"a\")) return \"fail String\"\n\
-         \x20   if (isClosedRange(null)) return \"fail null\"\n\
-         \x20   return \"OK\"\n\
-         }\n";
+    let source = include_str!("box_regressions/comparableRangeIsClosedRange.kt");
     expect_box_ok_with_stdlib(source, "ComparableRangeIsClosedRange");
     expect_native_box(source, "ComparableRangeIsClosedRange", "OK");
 }
@@ -150,19 +140,17 @@ fn a_range_over_the_files_own_comparable_orders_by_its_compare_to() {
     expect_native_box(source, "OwnComparableRange", "OK");
 }
 
-/// An OPEN class's `compareTo` may be overridden by the object behind a bound, so no one function
-/// orders its range: the construction declines by name rather than pass the declared one.
+/// An OPEN class's `compareTo` may be overridden by the object behind a bound, so the range
+/// orders its bounds through the object's own table, as `ComparableRange` does.
 #[test]
-fn a_range_over_an_open_comparable_declines() {
-    expect_native_decline(
-        "open class V(val n: Int) : Comparable<V> {\n\
+fn a_range_over_an_open_comparable_orders_through_its_table() {
+    let source = "open class V(val n: Int) : Comparable<V> {\n\
          \x20   override fun compareTo(other: V): Int = n.compareTo(other.n)\n\
          }\n\
          fun box(): String {\n\
          \x20   val range = V(1)..V(3)\n\
          \x20   return if (V(2) in range) \"OK\" else \"fail\"\n\
-         }\n",
-        "OpenComparableRange",
-        "not a final class declaring its own `compareTo`",
-    );
+         }\n";
+    expect_box_ok_with_stdlib(source, "OpenComparableRange");
+    expect_native_box(source, "OpenComparableRange", "OK");
 }

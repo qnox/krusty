@@ -366,6 +366,33 @@ impl KlibDeclarationBodies {
         }
     }
 
+    /// The serialized symbols of the interface members the class serialized at `signature`
+    /// inherits as its implementations: an interface default no class declares reaches the class
+    /// only through dispatch, so the class carries it and the closure that emits the class selects
+    /// it with the class's own members.
+    pub(crate) fn inherited_interface_default_symbols(
+        &self,
+        body_module: &str,
+        signature: &KlibIrSignature,
+    ) -> Vec<&crate::metadata::klib_ir::KlibIrSymbol> {
+        let Ok(inherited) = self.inherited_implementations_of(body_module, signature) else {
+            return Vec::new();
+        };
+        inherited
+            .into_iter()
+            .filter(|(body, _)| {
+                matches!(
+                    self.member_owner(body),
+                    super::LocatedMember::One { class, .. }
+                        if crate::metadata::semantic::class_kind(class.base.flags)
+                            == crate::libraries::TypeKind::Interface
+                )
+            })
+            .filter_map(|(body, _)| member_keys::member_function(self, &body))
+            .map(|(_, function)| &function.base.symbol)
+            .collect()
+    }
+
     /// The one class in the producer graph rooted at `body_module` serialized at `signature`.
     fn declaring_class_of(
         &self,
