@@ -251,7 +251,6 @@ impl ClassWriter {
                 .map(|argument| descriptors::size(argument) as u16)
                 .sum::<u16>();
         let context = PassContext {
-            owner: &self.internal_name,
             value_classes: &*self.value_classes,
             parameter_slots,
             post_coroutine: stage == BodyStage::Transformed,

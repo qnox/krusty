@@ -469,7 +469,6 @@ impl ClassWriter {
         }
         let entry = expand_slots(&entry);
         let context = PassContext {
-            owner: &self.internal_name,
             value_classes: &*self.value_classes,
             parameter_slots: u16::try_from(entry.len()).ok()?,
             post_coroutine: stage == BodyStage::Transformed,
