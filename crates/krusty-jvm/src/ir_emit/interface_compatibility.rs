@@ -2,6 +2,7 @@
 
 use super::inherited_member_target::InheritedMemberTarget;
 use super::*;
+use crate::declared_type_nullability::declared_annotation;
 
 /// Under `enable`, an interface REPUBLISHES the compatibility surface for every non-abstract,
 /// non-private member it inherits and does not redeclare (override resolution selects them as the
@@ -198,10 +199,11 @@ pub(super) fn emit_inherited_default_surface(
         let guards: Vec<Option<String>> = if opts.param_assertions {
             semantic_params
                 .iter()
+                .zip(&param_tys)
                 .zip(&identities)
                 .enumerate()
-                .map(|(index, (parameter, identity))| {
-                    (jd_nullability_annotation(parameter)
+                .map(|(index, ((parameter, physical), identity))| {
+                    (declared_annotation(*parameter, *physical)
                         == Some("Lorg/jetbrains/annotations/NotNull;")
                         && !matches!(
                             identity,
@@ -494,9 +496,14 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
     if deprecated {
         cw.seed_utf8("Ljava/lang/Deprecated;");
     }
-    let ret_ann = jd_nullability_annotation(&semantic_ret);
+    let ret_ann = declared_annotation(semantic_ret, ret);
     let mut parameter_annotations = vec![Some("Lorg/jetbrains/annotations/NotNull;")];
-    parameter_annotations.extend(semantic_params.iter().map(jd_nullability_annotation));
+    parameter_annotations.extend(
+        semantic_params
+            .iter()
+            .zip(param_tys)
+            .map(|(declared, physical)| declared_annotation(*declared, *physical)),
+    );
     let mut user_parameter_annotations = vec![krusty::ir::DeclarationAnnotations::default()];
     user_parameter_annotations.extend(annotations.parameters.iter().cloned());
     cw.reserve_method_pool_with_annotations(
@@ -586,19 +593,6 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
     }
     if ret_ann.is_some() || parameter_annotations.iter().any(Option::is_some) {
         cw.set_method_nullability(member_name, &desc, ret_ann, &parameter_annotations);
-    }
-}
-
-/// `@NotNull`/`@Nullable` for one semantic type in the `-jvm-default` compatibility surface, the
-/// same selection the implementing-class forwarders use: reference types only, and never a bare
-/// type variable (kotlinc leaves `T`-typed positions unannotated).
-fn jd_nullability_annotation(ty: &Ty) -> Option<&'static str> {
-    if ty.non_null().is_ty_param() || !ir_ty_to_jvm(ty).is_reference() {
-        None
-    } else if ty.is_nullable() {
-        Some("Lorg/jetbrains/annotations/Nullable;")
-    } else {
-        Some("Lorg/jetbrains/annotations/NotNull;")
     }
 }
 

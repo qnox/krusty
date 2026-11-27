@@ -2293,7 +2293,6 @@ regressions/propertyReferenceGetAndName.kt
 regressions/propertyReferenceIdentityAcrossModules.kt
 regressions/propertySmartCastKeepsDeclaredType.kt
 regressions/rangeEqualityThroughProgression.kt
-regressions/receiverParameterMemberKeepsDefinitelyNonNull.kt
 regressions/referenceArrayStoreEvaluatesValueBeforeBoundsCheck.kt
 regressions/rigid.kt
 regressions/runtimeArrayListInterfaceTests.kt
@@ -2391,7 +2390,6 @@ serialization/deserializedMembers.kt
 serialization/serializedDefaultArgs.kt
 smartCasts/avoidSmartCastToDerivedForPrivate.kt
 smartCasts/falseSmartCast.kt
-smartCasts/genericInheritanceWithNonGenericNoAmbiguity.kt
 smartCasts/genericSet.kt
 smartCasts/implicitMemberReceiver.kt
 smartCasts/invokeRecieverSmartcastK2.kt
