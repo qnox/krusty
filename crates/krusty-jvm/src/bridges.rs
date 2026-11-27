@@ -811,7 +811,7 @@ fn property_bridges(
         // accessor bridges below, which take the value alone, cannot stand in for it. Where the
         // override and the declaration agree on every erased type, the override's own accessors
         // already have the declaration's descriptors and nothing bridges.
-        if has_context_parameters(ir, edge.implementation)
+        if !context_parameter_types(ir, edge.implementation).is_empty()
             && krusty::jvm::names::same_type_descriptor(
                 getter_results.declared,
                 getter_results.implementation,
@@ -906,6 +906,7 @@ fn property_bridges(
                 internal_getter: internal_getter_bridge,
                 internal_setter: internal_setter_bridge,
                 overridden_internal: overridden_getter_internal,
+                contexts: context_parameter_types(ir, edge.implementation),
             },
         );
         order.resize(
@@ -931,18 +932,22 @@ fn value_class_result_difference(ir: &IrFile, declared: Ty, implementation: Ty) 
         })
 }
 
-/// Whether the module property `target` declares context parameters.
-fn has_context_parameters(
+/// The context parameters the module property `target` declares, which its accessors take before
+/// the value.
+fn context_parameter_types(
     ir: &IrFile,
     target: krusty::fir::ResolvedPropertyOverrideTarget,
-) -> bool {
+) -> Vec<Ty> {
     match target {
-        krusty::fir::ResolvedPropertyOverrideTarget::Module(property) => matches!(
-            ir.local_property_layouts.get(&property),
-            Some(krusty::ir::IrLocalPropertyLayout::Member { context_parameters, .. })
-                if !context_parameters.is_empty()
-        ),
-        krusty::fir::ResolvedPropertyOverrideTarget::External(_) => false,
+        krusty::fir::ResolvedPropertyOverrideTarget::Module(property) => {
+            match ir.local_property_layouts.get(&property) {
+                Some(krusty::ir::IrLocalPropertyLayout::Member {
+                    context_parameters, ..
+                }) => context_parameters.clone(),
+                _ => Vec::new(),
+            }
+        }
+        krusty::fir::ResolvedPropertyOverrideTarget::External(_) => Vec::new(),
     }
 }
 
@@ -1031,6 +1036,8 @@ struct PropertyBridgeNames {
     internal_setter: bool,
     /// The overridden getter is `internal`: its JVM name is the module slot, not a mapped builtin.
     overridden_internal: bool,
+    /// The context parameters both accessors take before the value, which a bridge forwards.
+    contexts: Vec<Ty>,
 }
 
 fn push_property_bridge(
@@ -1047,7 +1054,24 @@ fn push_property_bridge(
         internal_getter: internal_getter_bridge,
         internal_setter: internal_setter_bridge,
         overridden_internal,
+        contexts,
     } = names;
+    let context_parameters = || {
+        contexts
+            .iter()
+            .enumerate()
+            .map(|(ordinal, ty)| BridgeParameter {
+                identity: krusty::fir::ResolvedParameterIdentity::AnonymousContextParameter {
+                    ordinal: ordinal as u32,
+                },
+                semantic: *ty,
+            })
+            .collect::<Vec<_>>()
+    };
+    let erased_contexts = contexts
+        .iter()
+        .map(|ty| bridge_erasure(*ty))
+        .collect::<Vec<_>>();
     let own = |accessor: Option<u32>| accessor.filter(|f| ir.classes[cid].methods.contains(f));
     let (getter, setter) = (
         own(edge.implementation_getter),
@@ -1058,7 +1082,7 @@ fn push_property_bridge(
     // descriptor is the same.
     let has_getter = ir.classes[cid].bridges.iter().any(|b| {
         b.name == getter_name
-            && b.erased_params.is_empty()
+            && b.erased_params.len() == contexts.len()
             && krusty::jvm::names::same_type_descriptor(
                 bridge_erasure(b.erased_ret),
                 bridge_erasure(getter_results.declared),
@@ -1082,11 +1106,11 @@ fn push_property_bridge(
             target_function: getter,
             overridden_owner: None,
             collection_barrier: None,
-            parameters: Vec::new(),
+            parameters: context_parameters(),
             name: getter_name.clone(),
-            erased_params: vec![],
+            erased_params: erased_contexts.clone(),
             erased_ret: getter_results.declared,
-            concrete_params: vec![],
+            concrete_params: contexts.clone(),
             concrete_ret: getter_results.implementation,
             target_ret: None,
             barrier_plan: None,
@@ -1117,9 +1141,9 @@ fn push_property_bridge(
         && krusty::jvm::names::same_type_descriptor(setter_param, edge.implementation_type))
         || ir.classes[cid].bridges.iter().any(|b| {
             b.name == sname
-                && b.erased_params.len() == 1
+                && b.erased_params.len() == contexts.len() + 1
                 && krusty::jvm::names::same_type_descriptor(
-                    bridge_erasure(b.erased_params[0]),
+                    bridge_erasure(b.erased_params[contexts.len()]),
                     setter_param,
                 )
         });
@@ -1131,14 +1155,25 @@ fn push_property_bridge(
             target_function: setter,
             overridden_owner: None,
             collection_barrier: None,
-            parameters: vec![BridgeParameter {
-                identity: value,
-                semantic: edge.declared_type,
-            }],
+            parameters: context_parameters()
+                .into_iter()
+                .chain([BridgeParameter {
+                    identity: value,
+                    semantic: edge.declared_type,
+                }])
+                .collect(),
             name: sname,
-            erased_params: vec![edge.declared_type],
+            erased_params: contexts
+                .iter()
+                .copied()
+                .chain([edge.declared_type])
+                .collect(),
             erased_ret: Ty::Unit,
-            concrete_params: vec![edge.implementation_type],
+            concrete_params: contexts
+                .iter()
+                .copied()
+                .chain([edge.implementation_type])
+                .collect(),
             concrete_ret: Ty::Unit,
             target_ret: None,
             barrier_plan: None,
