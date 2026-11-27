@@ -32093,17 +32093,15 @@ impl<'a> Checker<'a> {
                 .active_declaration_spelling_facts
                 .take()
                 .expect("declaration spelling capture must remain active for one type traversal");
-            let mut annotations = crate::spelling::RecordedTypeAnnotations::default();
-            for (&occurrence, name) in &self.file.function_type_parameter_names {
-                annotations.record_parameter_name(occurrence, name);
-            }
-            if checked_source_facts.is_some_and(|facts| {
-                !annotations.record_checked_source_facts(binding_reference, facts)
-            }) {
+            let Some(annotations) = crate::spelling::declaration_type_annotations(
+                &self.file.function_type_parameter_names,
+                binding_reference,
+                checked_source_facts,
+            ) else {
                 self.resolved_declaration_types
                     .insert((reference.span.lo, reference.span.hi), Ty::Error);
                 return Ty::Error;
-            }
+            };
             let already_written_aliases = HashMap::default();
             let source_spellings = crate::spelling::SourceSpellings {
                 aliases: if checked_source_facts.is_some() {
