@@ -18,10 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use krusty::backend::{Artifact, Backend as _};
-use krusty::diag::DiagSink;
-use krusty::source::SourceInput;
-use krusty_native::{CraneliftBackend, NativeTarget};
+use krusty_native::NativeTarget;
 
 use super::common;
 
@@ -51,50 +48,12 @@ fn host() -> Option<NativeTarget> {
     .then_some(target)
 }
 
-/// Compile one program with the native code generator for the host.
-fn compile(source: &str) -> (Vec<Artifact>, Vec<String>) {
-    let target = host().expect("checked by the caller");
-    // The JVM front end resolves against the classpath kotlinc would: the stdlib and the JDK.
-    let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_and_jdk_classpath());
-    let platform = Box::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
-            .expect("JVM provider initialization"),
-    );
-    let inputs = vec![SourceInput::kotlin(source).with_file_stem("Main")];
-    let mut diags = DiagSink::new();
-    let mut features = krusty::features::LangFeatures::from_environment();
-    features.apply_source_directives(source);
-    let backend = CraneliftBackend::new(target).verified();
-    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
-        &inputs,
-        krusty::frontend::PlatformProvider::new(backend.compilation_target(), platform),
-        &features,
-        &mut diags,
-    );
-    let artifacts = krusty::compiler::emit_analyzed(
-        analysis,
-        &["Main".to_string()],
-        &backend,
-        "main",
-        &mut diags,
-    );
-    (artifacts, diags.diags.into_iter().map(|d| d.msg).collect())
-}
-
-/// Compile, link and run; return standard output.
+/// Compile and link one program with the native code generator for the host, against the Native
+/// stdlib KLIB the way kotlinc-native resolves it.
 fn run(source: &str) -> String {
     let target = host().expect("checked by the caller");
-    let (artifacts, diagnostics) = compile(source);
-    assert!(
-        diagnostics.is_empty(),
-        "the program must compile: {diagnostics:?}"
-    );
-    let objects = artifacts
-        .iter()
-        .filter(|(name, _)| name.ends_with(".o"))
-        .map(|(_, bytes)| bytes.as_slice())
-        .collect::<Vec<_>>();
-    let image = krusty_native::link_program(&objects, target).expect("link");
+    let image = common::native_backend::native_image(&[("Main", source)], target)
+        .unwrap_or_else(|failure| panic!("the program must build: {failure:?}"));
     let scratch = Scratch::new();
     let executable = scratch.path().join("program");
     std::fs::write(&executable, &image).expect("write");
