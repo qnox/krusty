@@ -66,8 +66,11 @@ fn a_type_variable_input_binds_the_vararg_as_the_reference_release_does() {
 
 #[test]
 fn the_original_nullable_and_nonnullable_inputs_keep_the_reference_binding_together() {
-    if !krusty::conformance::kotlinc_release_applicable(BEFORE_25, krusty::kotlin_version::environment_release())
-        .expect("the shared fixture declares a valid release range")
+    if !krusty::conformance::kotlinc_release_applicable(
+        BEFORE_25,
+        krusty::kotlin_version::environment_release(),
+    )
+    .expect("the shared fixture declares a valid release range")
     {
         return;
     }
