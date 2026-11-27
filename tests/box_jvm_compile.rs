@@ -1,13 +1,14 @@
 //! How the box conformance lanes compile a corpus case with krusty, in process: the directive-
 //! selected command line of each unit, the per-thread classpath reuse, and the case topologies
 //! (single source, `// FILE:` sets with Java, and `// MODULE:` builds). The JVM box lane runs the
-//! classes this emits; the diagnostics lane only asks whether a compilation reports errors.
+//! classes this emits; the diagnostics lanes ask whether a compilation reports errors and, through
+//! [`recording_diagnostics`], which diagnostics it reports where.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use krusty::diag::DiagSink;
+use krusty::diag::{DiagSink, DiagnosticName, Severity, Span};
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::classreader::parse_class;
 
@@ -46,6 +47,7 @@ fn emitted(
     stems: &[String],
     diags: &DiagSink,
 ) -> Compiled<Vec<(String, Vec<u8>)>> {
+    record_reported(inputs, diags);
     if diags.has_errors() {
         return Err(CompileFailure::Rejected {
             errors: diags
@@ -72,6 +74,70 @@ fn emitted(
                 .map(|internal| (internal.to_string(), bytes))
         })
         .collect())
+}
+
+/// One source file a recorded compilation compiled, with the diagnostics krusty reported in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ReportedFile {
+    /// The file's text exactly as krusty compiled it, which the spans index.
+    pub(super) text: String,
+    pub(super) diagnostics: Vec<ReportedDiagnostic>,
+}
+
+/// A located diagnostic as krusty reported it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ReportedDiagnostic {
+    pub(super) name: Option<DiagnosticName>,
+    pub(super) severity: Severity,
+    pub(super) span: Span,
+}
+
+thread_local! {
+    /// The files and diagnostics of the compilations [`recording_diagnostics`] is observing.
+    static REPORTED: std::cell::RefCell<Option<Vec<ReportedFile>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `compile` and return, beside its result, every file each of its krusty compilations
+/// compiled and the diagnostics reported in it, in compilation order: every module of a
+/// `// MODULE:` build, whether it compiled or was rejected.
+pub(super) fn recording_diagnostics<T>(compile: impl FnOnce() -> T) -> (T, Vec<ReportedFile>) {
+    /// Ends the recording even when `compile` panics, so the next case starts unobserved.
+    struct Recording;
+    impl Drop for Recording {
+        fn drop(&mut self) {
+            REPORTED.with(|reported| reported.borrow_mut().take());
+        }
+    }
+    REPORTED.with(|reported| *reported.borrow_mut() = Some(Vec::new()));
+    let recording = Recording;
+    let result = compile();
+    let files = REPORTED.with(|reported| reported.borrow_mut().take().unwrap_or_default());
+    drop(recording);
+    (result, files)
+}
+
+fn record_reported(inputs: &[krusty::source::SourceInput<'_>], diags: &DiagSink) {
+    REPORTED.with(|reported| {
+        let mut reported = reported.borrow_mut();
+        let Some(files) = reported.as_mut() else {
+            return;
+        };
+        files.extend(inputs.iter().enumerate().map(|(index, input)| {
+            ReportedFile {
+                text: input.text.to_string(),
+                diagnostics: diags
+                    .diags
+                    .iter()
+                    .filter(|diagnostic| diagnostic.file as usize == index)
+                    .map(|diagnostic| ReportedDiagnostic {
+                        name: diagnostic.name,
+                        severity: diagnostic.severity,
+                        span: diagnostic.span,
+                    })
+                    .collect(),
+            }
+        }));
+    });
 }
 
 thread_local! {
