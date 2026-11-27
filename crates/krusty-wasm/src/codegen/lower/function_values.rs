@@ -567,11 +567,11 @@ impl Body<'_> {
         let mut locals = Vec::new();
         code.local_get(0);
         for (index, &param) in params.iter().enumerate() {
-            if carrier(param)?.is_none() {
-                return Err("a functional interface member taking a `Unit` value".into());
-            }
             code.local_get(index as u32 + 1);
-            self.pack_result(&mut code, &mut locals, params.len() as u32 + 1, param)?;
+            // A `Unit` parameter already arrives as the `Unit` instance, in a reference slot.
+            if carrier(param)?.is_some() {
+                self.pack_result(&mut code, &mut locals, params.len() as u32 + 1, param)?;
+            }
         }
         code.call(invoke);
         if carrier(result)?.is_none() {
