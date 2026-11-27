@@ -299,7 +299,19 @@ impl Checker<'_> {
     ) -> usize {
         let depth = self.active_lexical_policies.len();
         if let Some(annotations) = self.file.statement_annotations.get(&statement).cloned() {
-            self.open_use_site_policies(scope, &annotations, "local variable");
+            // A variable declaration is a local variable; an assignment, loop or other statement is
+            // an expression. A local function, class or alias carries its own declaration check.
+            let target = match self.file.stmt(statement) {
+                Stmt::Local { .. }
+                | Stmt::LocalLateinit { .. }
+                | Stmt::LocalDelegate { .. }
+                | Stmt::Destructure { .. } => "local variable",
+                Stmt::LocalFun(_) | Stmt::LocalClass(_) | Stmt::LocalTypeAlias(_) => {
+                    "local declaration"
+                }
+                _ => "expression",
+            };
+            self.open_use_site_policies(scope, &annotations, target);
         }
         depth
     }
