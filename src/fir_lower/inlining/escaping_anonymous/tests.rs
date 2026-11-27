@@ -343,7 +343,7 @@ fn lifted_captures_after_a_fieldless_one_extend_the_recorded_order_by_constructo
     let name = ir.classes[class as usize].fq_name;
     let lifted = ir.add_expr(IrExpr::UnitInstance);
 
-    let field_base = append_lifted_captures(
+    let field_base = capturing_lambdas::append_lifted_captures(
         &mut ir,
         class,
         construction,
