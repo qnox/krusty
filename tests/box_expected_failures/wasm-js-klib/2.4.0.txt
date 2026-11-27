@@ -869,7 +869,6 @@ ranges/unsigned/literal/progressionDownToMinValue.kt
 ranges/unsigned/literal/progressionMaxValueMinusTwoToMaxValue.kt
 ranges/unsigned/literal/progressionMaxValueToMaxValue.kt
 ranges/unsigned/literal/progressionMaxValueToMinValue.kt
-ranges/unsigned/literal/progressionMinValueToMinValue.kt
 ranges/unsigned/literal/reversedBackSequence.kt
 ranges/unsigned/literal/reversedEmptyBackSequence.kt
 ranges/unsigned/literal/reversedEmptyRange.kt
