@@ -458,8 +458,8 @@ fn a_block_that_completes_fails_the_assertion() {
          \x20       assertFailsWith<IllegalStateException> { }\n\
          \x20       \"fail: no throw\"\n\
          \x20   } catch (e: AssertionError) {\n\
-         \x20       val want = \"Expected an exception of class kotlin.IllegalStateException\" +\n\
-         \x20                  \" to be thrown, but was completed successfully.\"\n\
+         \x20       val want = \"Expected an exception of kotlin.IllegalStateException\" +\n\
+         \x20                  \" to be thrown, but was completed successfully..\"\n\
          \x20       if (e.message == want) \"OK\" else \"fail: ${e.message}\"\n\
          \x20   }\n\
          }\n",
@@ -482,7 +482,7 @@ fn a_block_that_throws_the_wrong_type_fails_the_assertion_rather_than_propagatin
          \x20   } catch (e: NumberFormatException) {\n\
          \x20       \"fail: the wrong exception propagated\"\n\
          \x20   } catch (e: AssertionError) {\n\
-         \x20       val want = \"Expected an exception of class kotlin.IllegalStateException\" +\n\
+         \x20       val want = \"Expected an exception of kotlin.IllegalStateException\" +\n\
          \x20                  \" to be thrown, but was kotlin.NumberFormatException: nfe\"\n\
          \x20       if (e.message == want) \"OK\" else \"fail: ${e.message}\"\n\
          \x20   }\n\
@@ -503,8 +503,8 @@ fn a_supplied_message_is_a_prefix() {
          \x20       assertFailsWith<IllegalStateException>(\"mine\") { }\n\
          \x20       \"fail: no throw\"\n\
          \x20   } catch (e: AssertionError) {\n\
-         \x20       val want = \"mine. Expected an exception of class kotlin.IllegalStateException\" +\n\
-         \x20                  \" to be thrown, but was completed successfully.\"\n\
+         \x20       val want = \"mine. Expected an exception of kotlin.IllegalStateException\" +\n\
+         \x20                  \" to be thrown, but was completed successfully..\"\n\
          \x20       if (e.message == want) \"OK\" else \"fail: ${e.message}\"\n\
          \x20   }\n\
          }\n",
@@ -710,6 +710,22 @@ fn a_long_try_in_a_reference_position_is_boxed() {
          \x20   return if (answer == \"got 5 7\") \"OK\" else answer\n\
          }\n",
         "TryLongAsReference",
+        "OK",
+    );
+}
+
+#[test]
+fn a_class_literal_tests_whether_a_value_is_an_instance() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val e: Any? = IllegalStateException(\"boom\")\n\
+         \x20   if (!IllegalStateException::class.isInstance(e)) return \"fail: same class\"\n\
+         \x20   if (!RuntimeException::class.isInstance(e)) return \"fail: supertype\"\n\
+         \x20   if (NumberFormatException::class.isInstance(e)) return \"fail: unrelated\"\n\
+         \x20   if (IllegalStateException::class.isInstance(null)) return \"fail: null\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "ClassLiteralIsInstance",
         "OK",
     );
 }
