@@ -1190,30 +1190,18 @@ pub fn actualization(
         bindings: &ActualizationTypeBindings,
         actualized_aliases: &[ActualizedAlias],
     ) -> Option<(DeclarationKind, String, ReceiverKey, usize)> {
-        let lookup_name = |stub: &DeclarationStub| {
+        // A nested classifier's lookup path runs through its owner (`Outer.Nested`), and an owner
+        // an `actual typealias` stands for is spelled differently on the two sides (`Outer`,
+        // `OuterImpl`). Within one owner's children a classifier is identified by its own
+        // declared name.
+        let name = if stub.kind == DeclarationKind::Classifier {
+            headers.classifier_source_spelling(stub.id)?
+        } else {
             stub.lookup_name
                 .and_then(|name| headers.lookup_names.get(name))
                 .unwrap_or_default()
-                .to_string()
-        };
-        let mut name = lookup_name(stub);
-        // A nested classifier is spelled through its owner (`Outer.Nested`), and an owner an
-        // `actual typealias` stands for is spelled differently on the two sides (`Outer`,
-        // `OuterImpl`). Within one owner's children it is the name relative to that owner that
-        // identifies it.
-        if stub.kind == DeclarationKind::Classifier {
-            let owner_name = headers
-                .declarations
-                .anchor(stub.id)
-                .and_then(|anchor| anchor.owner)
-                .and_then(|owner| headers.stub(owner))
-                .map(lookup_name);
-            if let Some(relative) = owner_name
-                .and_then(|owner| name.strip_prefix(&format!("{owner}.")).map(str::to_owned))
-            {
-                name = relative;
-            }
         }
+        .to_string();
         // The receiver a member extension declares, as the CLASSIFIER it identifies. The two sides
         // of a pair may write it differently — one imports it, the other qualifies it, and an
         // `expect class` actualized by a `typealias` is written as the alias's target on the
@@ -1860,6 +1848,7 @@ mod tests {
             mutable: false,
             operator: false,
             infix: false,
+            inline: false,
         }
     }
 
@@ -1876,6 +1865,7 @@ mod tests {
             mutable,
             operator: false,
             infix: false,
+            inline: false,
         }
     }
 
@@ -1965,25 +1955,26 @@ mod tests {
         assert_eq!(owed, 1);
     }
 
-    /// `operator` is part of an `expect` member's contract and the inherited record carries it, so
-    /// the two must agree in both directions.
+    /// kotlinc requires an implementation to state the `operator`, `infix` and `inline` its `expect`
+    /// member states, and lets it state more: the rule is a subset, not an agreement.
     #[test]
-    fn an_inherited_operator_implements_only_an_expect_operator() {
-        let operator = |token: crate::types::Ty| InheritedDependencyMember {
+    fn an_inherited_member_states_at_least_the_expect_members_function_modifiers() {
+        let stating = |token: crate::types::Ty| InheritedDependencyMember {
             operator: true,
+            infix: true,
+            inline: true,
             ..inherited_function("plus", &[token], token)
         };
         let plain = |token: crate::types::Ty| inherited_function("plus", &[token], token);
-        let matched = owed_with_inherited("operator fun plus(other: Token): Token", |token, _| {
-            vec![operator(token)]
-        });
+        for modifier in ["operator", "infix", "inline"] {
+            let expect = format!("{modifier} fun plus(other: Token): Token");
+            let matched = owed_with_inherited(&expect, |token, _| vec![stating(token)]);
+            let actual_lacks = owed_with_inherited(&expect, |token, _| vec![plain(token)]);
+            assert_eq!((matched, actual_lacks), (0, 1), "{modifier}");
+        }
         let expect_lacks = owed_with_inherited("fun plus(other: Token): Token", |token, _| {
-            vec![operator(token)]
+            vec![stating(token)]
         });
-        let actual_lacks =
-            owed_with_inherited("operator fun plus(other: Token): Token", |token, _| {
-                vec![plain(token)]
-            });
-        assert_eq!((matched, expect_lacks, actual_lacks), (0, 1, 1));
+        assert_eq!(expect_lacks, 0);
     }
 }
