@@ -73,47 +73,14 @@ impl InheritedForwarder {
         method_descriptor(&self.target_params, self.target_ret)
     }
 
-    /// Load the forwarder's parameters from `first_slot` as the inherited declaration takes them:
-    /// a value class's carrier the substitution introduced is boxed with its `box-impl`, and a
-    /// primitive with its wrapper, for the erased type-parameter slot.
-    fn load_target_arguments(&self, cw: &mut ClassWriter, code: &mut CodeBuilder, first_slot: u16) {
-        let mut slot = first_slot;
-        for (index, (parameter, target)) in
-            self.param_tys.iter().zip(&self.target_params).enumerate()
-        {
-            load(*parameter, slot, code);
-            if let Some(carried) = self.value_class_params.get(index).copied().flatten() {
-                emit_value_class_box_adapter(
-                    cw,
-                    code,
-                    carried.owner,
-                    *parameter,
-                    carried.null_preserving,
-                );
-            } else if parameter.is_jvm_scalar() && target.is_reference() {
-                box_prim_free(cw, code, *parameter);
-            }
-            slot += slot_words(*parameter);
-        }
-    }
-
-    /// Cast the inherited declaration's erased result back to the forwarder's substituted one, and
-    /// unbox a value class the forwarder returns as its carrier.
-    fn cast_target_result(&self, cw: &mut ClassWriter, code: &mut CodeBuilder) {
-        if let Some(carried) = self.value_class_ret {
-            emit_value_class_unbox_adapter(
-                cw,
-                code,
-                carried.owner,
-                self.ret,
-                carried.null_preserving,
-            );
-        } else if self.target_ret != self.ret
-            && self.target_ret.is_reference()
-            && self.ret.is_reference()
-        {
-            let result = cw.class_ref(&krusty::jvm::names::instanceof_internal_name(self.ret));
-            code.checkcast(result);
+    /// The inherited declaration this forwarder calls, with the value classes its own parameters
+    /// and result carry unboxed.
+    fn target(&self) -> super::inherited_member_target::InheritedMemberTarget<'_> {
+        super::inherited_member_target::InheritedMemberTarget {
+            params: &self.target_params,
+            ret: self.target_ret,
+            value_class_params: &self.value_class_params,
+            value_class_ret: self.value_class_ret,
         }
     }
 
@@ -288,8 +255,37 @@ fn forwarder(
     let mut semantic_params = types.semantic_params;
     let mut parameter_identities = default.parameter_identities.to_vec();
     let mut semantic_ret = types.semantic_ret;
-    let value_class_params = types.value_class_params;
-    let value_class_ret = types.value_class_ret;
+    let mut value_class_params = types.value_class_params;
+    let mut value_class_ret = types.value_class_ret;
+    // A holder of the interface the member is inherited through republishes it as that interface's
+    // supertype substitutes it: the call names that shape, and a value class it already carries
+    // unboxed crosses as it is.
+    if let Some(republished) = matches!(realization, Realization::DispatchHolder)
+        .then(|| {
+            super::interface_compatibility::republished_member(
+                ir,
+                default.dispatch_interface,
+                default,
+            )
+        })
+        .flatten()
+    {
+        let surface =
+            super::interface_compatibility::republished_member_types(ir, callables, republished);
+        target_params = jvm_tys(&surface.physical_params);
+        target_ret = jvm_declared_ty(&surface.physical_ret);
+        for (own, carried) in value_class_params
+            .iter_mut()
+            .zip(&surface.value_class_params)
+        {
+            if carried.is_some() {
+                *own = None;
+            }
+        }
+        if surface.value_class_ret.is_some() {
+            value_class_ret = None;
+        }
+    }
     let signature = forwarder_signature(
         formatter,
         class_type_params,
@@ -377,7 +373,7 @@ fn forwarder(
 ///
 /// The member's own type parameters are declared ahead of the parameter list with their bounds as
 /// the class's applied supertype substitutes them (`<T::Ljava/lang/Comparable<-TT;>;>`).
-fn forwarder_signature(
+pub(super) fn forwarder_signature(
     formatter: &JvmSignatureFormatter<'_>,
     class_type_params: &[String],
     type_parameters: &[krusty::fir::InheritedTypeParameter],
@@ -446,7 +442,7 @@ fn forwarder_signature(
 
 /// A forwarder's generic `Signature` in its grammar's parts: the type-parameter declaration
 /// section, the parameter types and the result type, each already written.
-struct ForwarderSignature {
+pub(super) struct ForwarderSignature {
     declarations: String,
     parameters: String,
     result: String,
@@ -455,7 +451,7 @@ struct ForwarderSignature {
 impl ForwarderSignature {
     /// The signature, with `leading` written ahead of the forwarder's parameters (a value class's
     /// static takes its carrier first).
-    fn render(&self, leading: Option<&str>) -> String {
+    pub(super) fn render(&self, leading: Option<&str>) -> String {
         format!(
             "{}({}{}){}",
             self.declarations,
@@ -580,7 +576,9 @@ fn write_forwarder(
         let receiver = cw.class_ref(&target_interface.render());
         code.checkcast(receiver);
     }
-    forwarder.load_target_arguments(cw, &mut code, 1);
+    forwarder
+        .target()
+        .load_arguments(cw, &mut code, 1, &forwarder.param_tys);
     match dispatch {
         ForwarderDispatch::HolderStatic => {
             let target = cw.methodref(target_owner, &forwarder.target_name, target_descriptor);
@@ -595,7 +593,7 @@ fn write_forwarder(
             code.invokespecial(target, target_words, result_words);
         }
     }
-    forwarder.cast_target_result(cw, &mut code);
+    forwarder.target().cast_result(cw, &mut code, forwarder.ret);
     emit_return(ret, &mut code);
     finish_code_sig::<0x0041>(
         cw,
@@ -756,7 +754,9 @@ fn write_value_class_static(
     code.invokestatic(box_impl, slot_words(carrier) as i32, 1);
     // kotlinc calls the box's entry for the inherited declaration itself — under a specializing
     // supertype that is the erased bridge — and casts its result back.
-    forwarder.load_target_arguments(cw, &mut code, slot_words(carrier));
+    forwarder
+        .target()
+        .load_arguments(cw, &mut code, slot_words(carrier), &forwarder.param_tys);
     let entry = cw.methodref(
         &owner,
         &forwarder.target_name,
@@ -772,7 +772,7 @@ fn write_value_class_static(
         parameter_words,
         slot_words(forwarder.target_ret) as i32,
     );
-    forwarder.cast_target_result(cw, &mut code);
+    forwarder.target().cast_result(cw, &mut code, forwarder.ret);
     emit_return(forwarder.ret, &mut code);
     finish_code_sig::<0x0009>(
         cw,
