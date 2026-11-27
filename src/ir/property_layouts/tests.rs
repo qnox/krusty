@@ -457,9 +457,6 @@ impl crate::backend::class_tables::Representation for ReferenceMembers {
     fn same(&self, _: Ty, _: Ty) -> bool {
         true
     }
-    fn is_reference(&self, _: Ty) -> bool {
-        true
-    }
     fn owns_base(&self, _: crate::types::TypeName) -> bool {
         false
     }

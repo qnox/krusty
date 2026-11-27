@@ -33,9 +33,9 @@ static inline kt_boolean took(const KType *expected) {
     return thrown != NULL && type_of(thrown) == expected;
 }
 
-/* A function value: an object whose descriptor puts `invoke` in the slots a function value declares
-   beyond `kotlin.Any`'s three, one per operand count the runtime calls back with (none, one, two:
-   `KT_SLOT_INVOKE_N`). `IDENTIFIER_type` is the descriptor and `IDENTIFIER` an instance of it, which
+/* A function value: an object whose descriptor puts `invoke` in the three slots after `kotlin.Any`'s,
+   one per operand count the runtime calls back with (none, one, two), which is where the driver's
+   own function protocol stubs read it (`support/function_protocol.c`). `IDENTIFIER_type` is the descriptor and `IDENTIFIER` an instance of it, which
    needs no fields because every function here keeps its state in statics. */
 #define FUNCTION_VALUE(identifier, invoke)                                                         \
     static const kt_fn identifier##_vtable[] = {NULL,           NULL,          NULL,               \

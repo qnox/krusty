@@ -1,12 +1,11 @@
 //! A class of the program that implements a FUNCTION TYPE.
 //!
-//! A function value's body sits at a vtable number of its operand count — the runtime names the
-//! first `KT_SLOT_INVOKE` — and every caller through a function type reads it rather than asking,
-//! passing and reading references, because that is the one signature every function value shares. A class whose
-//! `invoke` carries references throughout stands there itself. One that does not — `class A : (Int)
-//! -> Int` carries machine integers — cannot: a caller would read an integer as a pointer. It takes
-//! a slot of its own and the fixed number gets a converting stand-in, which forwards by DISPATCH so
-//! that a further subclass's override is reached through the same number.
+//! A call through a function type finds the function value's body by the call's operand count
+//! (the function protocol, `native::interface_calls`), passing and reading references, because that
+//! is the one signature every function value shares. A class whose `invoke` carries machine
+//! integers — `class A : (Int) -> Int` — cannot be that body: a caller would read an integer as a
+//! pointer. It takes a slot of its own and a converting bridge, which forwards by DISPATCH so that
+//! a further subclass's override is reached through the same bridge.
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 

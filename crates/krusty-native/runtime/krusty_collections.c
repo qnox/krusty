@@ -1845,14 +1845,12 @@ static kt_boolean kt_more(KRef iterator) {
 }
 
 /* Call a one-argument function value. The second place the runtime calls back into emitted code,
-   through the slot of its operand count; see `KT_SLOT_INVOKE_N`. */
+   through the function protocol's stub of its operand count; see `krusty_rt.h`. */
 static KRef kt_invoke_one(KRef function, KRef argument) {
-    if (function == NULL || function->header.type->vtable == NULL ||
-        function->header.type->vtable_length <= KT_SLOT_INVOKE_N(1)) {
+    if (function == NULL) {
         KT_FAIL("krusty: a function value was expected here\n");
     }
-    return ((KRef(*)(KRef, KRef))function->header.type->vtable[KT_SLOT_INVOKE_N(1)])(function,
-                                                                                    argument);
+    return kt_itf__1_function_1(function, argument);
 }
 
 /* How many elements an iterable will yield. Only the two this runtime has are askable, and the
@@ -2023,12 +2021,10 @@ void kt_iterable_for_each(KRef iterable, KRef action) {
 
 /* A function value of TWO parameters, called the way `kt_invoke_one` calls one of one. */
 static KRef kt_invoke_two(KRef function, KRef first, KRef second) {
-    if (function == NULL || function->header.type->vtable == NULL ||
-        function->header.type->vtable_length <= KT_SLOT_INVOKE_N(2)) {
+    if (function == NULL) {
         KT_FAIL("krusty: a function value was expected here\n");
     }
-    return ((KRef(*)(KRef, KRef, KRef))function->header.type->vtable[KT_SLOT_INVOKE_N(2)])(
-        function, first, second);
+    return kt_itf__1_function_2(function, first, second);
 }
 
 /* `list.sortWith(comparator)` / `xs.sortedWith(comparator)`. The comparator is an ordinary

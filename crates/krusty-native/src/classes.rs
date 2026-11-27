@@ -273,8 +273,7 @@ pub(super) enum Slot {
         target_slot: u32,
         target: FunId,
     },
-    /// See [`class_tables::Slot::FunctionBridge`]; the runtime names the number it stands in
-    /// `KT_SLOT_INVOKE`.
+    /// See [`class_tables::Slot::FunctionBridge`].
     FunctionBridge {
         arity: usize,
         target_slot: u32,
@@ -453,17 +452,8 @@ impl Representation for NativeRepresentation<'_> {
         representation(self.0, a) == representation(self.0, b)
     }
 
-    fn is_reference(&self, ty: Ty) -> bool {
-        c_kind(self.0, ty) == CKind::Ref
-    }
-
     fn owns_base(&self, superclass: TypeName) -> bool {
         superclass == krusty::types::wk::kotlin_enum() || external_base(superclass).is_some()
-    }
-
-    /// The runtime's own callbacks call function values of up to two operands.
-    fn min_function_slots(&self) -> u32 {
-        3
     }
 }
 
@@ -513,8 +503,6 @@ pub(super) struct ClassModel {
     direct_methods: HashSet<FunId>,
     /// The module's interface numbers, extended with the interfaces this file installed.
     numbers: ModuleInterfaces,
-    /// How many function slots follow `kotlin.Any`'s in every table.
-    function_slots: u32,
 }
 
 /// Which table a member dispatches through, and at which index.
@@ -524,18 +512,16 @@ pub(super) enum Dispatch {
     Class(u32),
     /// The receiver's interface table, by module-wide member number.
     Interface(u32),
+    /// A function type's `invoke`, by the physical operand count of the call: the function
+    /// protocol, which no module numbers (`native::interface_calls`).
+    Function(usize),
 }
 
 impl ClassModel {
-    /// How many function slots follow `kotlin.Any`'s in every table: a function value's `invoke`
-    /// holds the one its physical operand count names.
-    pub fn function_slots(&self) -> u32 {
-        self.function_slots
-    }
-
-    /// The table number a call through a function type of `operands` physical operands reads.
-    pub fn function_slot(&self, operands: usize) -> u32 {
-        class_tables::function_slot(self.function_slots, operands)
+    /// The function types `class`'s instances implement, each with the slot of the bridge a call
+    /// through that function type reaches ([`class_tables::ClassTable::function_invokes`]).
+    pub(super) fn function_invokes(&self, class: ClassId) -> &[class_tables::FunctionInvoke] {
+        &self.laid_out_tables[class as usize].function_invokes
     }
 
     /// Whether `function` is a method its class's table does not dispatch, which a call reaches
@@ -686,6 +672,7 @@ pub(super) fn build(
             interfaces: numbered.interface_tables.implemented[id].clone(),
             interface_entries: numbered.interface_tables.members[id].clone(),
             members: numbered.members[id].clone(),
+            function_invokes: numbered.tables[id].function_invokes.clone(),
         })
         .collect();
     let direct_methods = numbered
@@ -701,7 +688,6 @@ pub(super) fn build(
         interfaces: numbered.interfaces,
         implemented: numbered.interface_tables.implemented,
         numbers: numbered.numbers,
-        function_slots: numbered.function_slots,
         callables: ir
             .checked_callable_functions
             .iter()
@@ -805,9 +791,9 @@ mod tests {
         add_method, class, field, function, record_override, record_semantic_override,
         stored_property,
     };
-    use krusty::backend::class_tables::FUNCTION_SLOT;
-    /// The first table number a method of a class takes: after `kotlin.Any`'s and the function slots.
-    const FIRST: u32 = FUNCTION_SLOT + 3;
+    use krusty::backend::class_tables::ANY_SLOTS;
+    /// The first table number a method of a class takes: right after `kotlin.Any`'s.
+    const FIRST: u32 = ANY_SLOTS;
     use krusty::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
     use krusty::ir::IrProperty;
 
@@ -850,9 +836,6 @@ mod tests {
                 Slot::Runtime("kt_any_to_string"),
             ]
             .into_iter()
-            // The function slots, one per operand count, reserved in every table so no member
-            // ever stands there.
-            .chain((0..3).map(|_| Slot::Abstract))
             .collect::<Vec<_>>()
         );
         assert_eq!(layout.instance_size, HEADER_SIZE);
@@ -1244,10 +1227,10 @@ mod tests {
     }
 
     #[test]
-    fn a_function_class_never_takes_the_slot_of_a_member_it_inherits() {
-        // `open class A { open fun foo(): String }` and `class B : A(), () -> String`: `invoke`
-        // belongs at the function slot, and `A.foo` must still be where every call through `A`
-        // looks for it.
+    fn a_function_class_answers_through_a_bridge_after_the_members_it_inherits() {
+        // `open class A { open fun foo(): String }` and `class B : A(), () -> String`: `A.foo` is
+        // still where every call through `A` looks for it, `invoke` takes a slot after it, and the
+        // function type's bridge a slot after that, found by the operand count.
         let mut ir = IrFile::default();
         let a = class(&mut ir, "A", "kotlin/Any", 0);
         let b = class(&mut ir, "B", "A", 1);
@@ -1268,14 +1251,27 @@ mod tests {
         )
         .expect("layout");
         let foo_slot = model.slot(b, &SlotKey::Function(foo)).expect("foo's slot");
-        assert_ne!(foo_slot, FUNCTION_SLOT);
+        assert_eq!(foo_slot, FIRST);
         assert_eq!(
             model.layout(b).vtable[foo_slot as usize],
             Slot::Function(foo)
         );
+        let invoke_slot = model
+            .slot(b, &SlotKey::Function(invoke))
+            .expect("invoke's slot");
+        assert_eq!(invoke_slot, FIRST + 1);
+        let [bridge] = model.function_invokes(b) else {
+            panic!("one function type implemented");
+        };
+        assert_eq!(bridge.operands, 0);
+        assert_eq!(bridge.slot, FIRST + 2);
         assert_eq!(
-            model.layout(b).vtable[FUNCTION_SLOT as usize],
-            Slot::Function(invoke)
+            model.layout(b).vtable[bridge.slot as usize],
+            Slot::FunctionBridge {
+                arity: 0,
+                target_slot: invoke_slot,
+                target: invoke
+            }
         );
     }
 

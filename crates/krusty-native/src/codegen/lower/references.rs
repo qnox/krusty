@@ -23,8 +23,7 @@
 use super::*;
 use krusty::fir::FirPropertyReferenceTarget;
 
-/// Where the three members live: after `kotlin.Any`'s three and the function slots every function
-/// value's `invoke` takes by its operand count, which a reference fills alike with its getter.
+/// Where the three members live: right after `kotlin.Any`'s three.
 #[derive(Clone, Copy)]
 pub(super) struct ReferenceSlots {
     pub(super) get: u32,
@@ -33,14 +32,15 @@ pub(super) struct ReferenceSlots {
 }
 
 impl ReferenceSlots {
-    /// The numbers after `function_slots` function slots, which a reference's own members never
-    /// share with an `invoke`.
-    pub(super) fn new(function_slots: u32) -> Self {
-        let get = krusty::backend::class_tables::FUNCTION_SLOT + function_slots;
+    const GET: u32 = krusty::backend::class_tables::ANY_SLOTS;
+    const SET: u32 = Self::GET + 1;
+    const NAME: u32 = Self::GET + 2;
+
+    pub(super) fn new() -> Self {
         Self {
-            get,
-            set: get + 1,
-            name: get + 2,
+            get: Self::GET,
+            set: Self::SET,
+            name: Self::NAME,
         }
     }
 }
@@ -414,8 +414,8 @@ impl<'a> FileLowering<'a> {
         let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
         let mut vtable = self.any_vtable()?;
         vtable[0] = equals;
-        // The function slots, `get` and `set`: nothing can call any of them on a local property.
-        vtable.extend((0..self.model.function_slots() + 2).map(|_| unreachable));
+        // `get` and `set`: nothing can call either on a local property.
+        vtable.extend([unreachable, unreachable]);
         vtable.push(name);
         let any_type = self.import_data("kt_type_any")?;
         // A local delegated property's metadata is a KProperty, but not a KProperty0: Kotlin does
@@ -435,6 +435,7 @@ impl<'a> FileLowering<'a> {
                 reference_offsets: &[],
                 vtable: &vtable,
                 itable: &[],
+                function_invokes: &[],
                 instantiable: true,
                 superclass: any_type,
                 interfaces: &interfaces,
@@ -623,9 +624,8 @@ impl<'a> FileLowering<'a> {
         vtable[0] = self.runtime_member_import("kt_reference_equals")?;
         vtable[1] = self.runtime_member_import("kt_reference_hash_code")?;
         vtable[2] = to_string;
-        // A property reference is also the function `(R) -> V` it reads through, called at the slot
-        // of its operand count, so every function slot holds the getter.
-        vtable.extend((0..self.model.function_slots()).map(|_| getter));
+        // A property reference is also the function `(R) -> V` it reads through, which the function
+        // protocol reaches by the descriptor's record of the getter below.
         vtable.push(getter);
         vtable.push(match setter {
             Some(setter) => setter,
@@ -634,10 +634,7 @@ impl<'a> FileLowering<'a> {
             None => getter,
         });
         vtable.push(name);
-        debug_assert_eq!(
-            vtable.len() as u32,
-            ReferenceSlots::new(self.model.function_slots()).name + 1
-        );
+        debug_assert_eq!(vtable.len() as u32, ReferenceSlots::NAME + 1);
 
         let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
         let any_type = self.import_data("kt_type_any")?;
@@ -677,6 +674,7 @@ impl<'a> FileLowering<'a> {
                 reference_offsets: &references,
                 vtable: &vtable,
                 itable: &[],
+                function_invokes: &[(arity, getter)],
                 instantiable: true,
                 superclass: any_type,
                 interfaces: &markers,
@@ -1103,11 +1101,7 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        let slot = reference_slot(
-            ReferenceSlots::new(self.file.model.function_slots()),
-            role,
-            args.len(),
-        )?;
+        let slot = reference_slot(ReferenceSlots::new(), role, args.len())?;
         Some(self.reference_call(slot, receiver, args, ret))
     }
 
@@ -1198,12 +1192,7 @@ impl BodyLowering<'_, '_, '_> {
             .property(target)
             .and_then(|property| self.file.callables.callable(property.getter))
             .is_some_and(|getter| {
-                reference_slot(
-                    ReferenceSlots::new(self.file.model.function_slots()),
-                    getter.semantic_role,
-                    0,
-                )
-                .is_some()
+                reference_slot(ReferenceSlots::new(), getter.semantic_role, 0).is_some()
             })
     }
 
@@ -1218,11 +1207,7 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let property = self.file.callables.property(target)?;
         let getter = self.file.callables.callable(property.getter)?;
-        let slot = reference_slot(
-            ReferenceSlots::new(self.file.model.function_slots()),
-            getter.semantic_role,
-            0,
-        )?;
+        let slot = reference_slot(ReferenceSlots::new(), getter.semantic_role, 0)?;
         let owner = getter.physical_owner;
         Some(self.reference_property_read(slot, owner, property.getter, receiver, property.result))
     }
@@ -1309,7 +1294,7 @@ impl BodyLowering<'_, '_, '_> {
         use krusty::types::SemanticCallRole;
         // Which operands reach the slot: a `KProperty1` is handed `thisRef`, a `KProperty0` is not,
         // and the written value is always the last one.
-        let slots = ReferenceSlots::new(self.file.model.function_slots());
+        let slots = ReferenceSlots::new();
         let (slot, kept): (u32, Vec<usize>) = match role {
             Some(SemanticCallRole::KotlinPropertyReferenceDelegateGet(arity))
                 if args.len() == 2 && arity <= 1 =>
@@ -1349,7 +1334,7 @@ impl BodyLowering<'_, '_, '_> {
         let mut arguments: Vec<Value> = kept.iter().map(|index| evaluated[*index]).collect();
         // A bound reference's slot ignores the receiver operand; a null keeps one signature for
         // both shapes, exactly as `reference_call` does.
-        let slots = ReferenceSlots::new(self.file.model.function_slots());
+        let slots = ReferenceSlots::new();
         let expected = usize::from(slot == slots.set) + 1;
         while arguments.len() < expected {
             arguments.insert(0, self.builder.ins().iconst(types::I64, 0));
@@ -1398,7 +1383,7 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Result<Option<Value>, Unsupported> {
         // `get()` on a BOUND reference passes no receiver and the body ignores the slot anyway; a
         // null keeps one signature for both shapes.
-        let slots = ReferenceSlots::new(self.file.model.function_slots());
+        let slots = ReferenceSlots::new();
         let expected = usize::from(slot == slots.set) + 1;
         while arguments.len() < expected {
             arguments.insert(0, self.builder.ins().iconst(types::I64, 0));

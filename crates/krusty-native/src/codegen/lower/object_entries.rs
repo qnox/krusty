@@ -60,7 +60,7 @@ impl FileLowering<'_> {
                 let Some(value) =
                     body.convert(values[index + 1], Some(any()), parameter_slot(want))?
                 else {
-                    return Err("a `Unit` operand crossing the function slot".into());
+                    return Err("a `Unit` operand crossing the function bridge".into());
                 };
                 arguments.push(value);
             }

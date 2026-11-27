@@ -488,6 +488,7 @@ impl<'a> FileLowering<'a> {
                     let SamTables {
                         mut vtable,
                         itable,
+                        function_invokes,
                         interfaces,
                         kotlin_name,
                     } = self.sam_table(target, &base, impl_fn, &storage)?;
@@ -513,6 +514,7 @@ impl<'a> FileLowering<'a> {
                             reference_offsets: &references,
                             vtable: &vtable,
                             itable: &itable,
+                            function_invokes: &function_invokes,
                             instantiable: true,
                             superclass: any_type,
                             interfaces: &interfaces,
@@ -551,9 +553,6 @@ impl<'a> FileLowering<'a> {
                         }
                         None => None,
                     };
-                    // Called at the slot of its operand count, which the callers of its function
-                    // type read, so every one holds the body.
-                    vtable.extend((0..self.model.function_slots()).map(|_| thunk));
                     // A REFERENCE answers `KCallable.name` too, and a program reaches it through
                     // a variable rather than through the written reference — so the answer is a
                     // member of the object rather than a constant folded at the site. It takes
@@ -604,6 +603,7 @@ impl<'a> FileLowering<'a> {
                             reference_offsets: &references,
                             vtable: &vtable,
                             itable: &[],
+                            function_invokes: &[(arity, thunk)],
                             instantiable: true,
                             superclass: any_type,
                             interfaces: &markers,
@@ -693,10 +693,7 @@ impl<'a> FileLowering<'a> {
             }
             krusty::ir::IrSamMethod::FunctionTypeInvoke => {
                 let operands = target.declared_parameters.len();
-                (
-                    None,
-                    model::Dispatch::Class(self.model.function_slot(operands)),
-                )
+                (None, model::Dispatch::Function(operands))
             }
         };
 
@@ -720,7 +717,12 @@ impl<'a> FileLowering<'a> {
         let layout = self.model.layout(interface).clone();
         let mut vtable = self.table_functions(&layout.vtable, None)?;
         let itable_template = layout.itable;
+        let mut function_invokes = Vec::new();
         let sam_number = match entry {
+            model::Dispatch::Function(operands) => {
+                function_invokes.push((operands, thunk));
+                None
+            }
             model::Dispatch::Class(slot) => {
                 let slot = slot as usize;
                 if slot >= vtable.len() {
@@ -785,7 +787,7 @@ impl<'a> FileLowering<'a> {
                 &vec![any(); arity],
                 any(),
             )?;
-            vtable[self.model.function_slot(arity) as usize] = boxed;
+            function_invokes.push((arity, boxed));
         }
 
         let mut interfaces: Vec<DataId> = Vec::new();
@@ -801,6 +803,7 @@ impl<'a> FileLowering<'a> {
         Ok(SamTables {
             vtable,
             itable,
+            function_invokes,
             interfaces,
             kotlin_name,
         })
@@ -1003,6 +1006,7 @@ impl<'a> FileLowering<'a> {
                 reference_offsets: &references,
                 vtable: &vtable,
                 itable: &[],
+                function_invokes: &[],
                 instantiable: true,
                 superclass: any_type,
                 interfaces: &[],
@@ -1103,9 +1107,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             };
             arguments.push(value);
         }
-        let result = self.dispatch(
+        let result = self.dispatch_through(
             function,
-            self.file.model.function_slot(arguments.len()),
+            model::Dispatch::Function(arguments.len()),
             &vec![any(); arguments.len()],
             any(),
             &arguments,
@@ -1158,9 +1162,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         arguments: &[Value],
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        let result = self.dispatch(
+        let result = self.dispatch_through(
             function,
-            self.file.model.function_slot(arguments.len()),
+            model::Dispatch::Function(arguments.len()),
             &vec![any(); arguments.len()],
             any(),
             arguments,
@@ -1247,6 +1251,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 struct SamTables {
     vtable: Vec<FuncId>,
     itable: Vec<FuncId>,
+    function_invokes: Vec<(usize, FuncId)>,
     interfaces: Vec<DataId>,
     kotlin_name: String,
 }

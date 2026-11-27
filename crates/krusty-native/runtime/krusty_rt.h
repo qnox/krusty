@@ -185,15 +185,6 @@ typedef struct KObjectHeader {
 #define KT_SLOT_EQUALS 0u    /* kt_boolean (*)(KRef self, KRef other) */
 #define KT_SLOT_HASH_CODE 1u /* kt_int (*)(KRef self) */
 #define KT_SLOT_TO_STRING 2u /* KRef (*)(KRef self) — a kotlin.String */
-/* A FUNCTION VALUE's own member, in the one slot it declares beyond kotlin.Any's three. The
-   generator puts a lambda's and a callable reference's `invoke` there; nothing else in this runtime
-   calls through it, and nothing but a function value is ever handed to something that does. */
-#define KT_SLOT_INVOKE 3u /* KRef (*)(KRef self, …) */
-/* The slot holding a function value's `invoke` of `n` physical operands: one number per operand
-   count, so a class implementing several function types holds each body where its callers read
-   it. `KT_SLOT_INVOKE` is the zero-operand one. */
-#define KT_SLOT_INVOKE_N(n) (KT_SLOT_INVOKE + (n))
-
 /* ---- memory ---------------------------------------------------------------------------------- */
 
 /* Record where the program's stack begins, and attach the calling thread as the first one that
@@ -229,6 +220,15 @@ size_t kt_gc_global_roots(void);
 /* Every Kotlin reference is one of these. `NULL` is Kotlin's `null`. */
 typedef struct KObject KObject;
 typedef KObject *KRef;
+
+/* A FUNCTION VALUE's `invoke` is no vtable slot: a call through a function type goes to a stub per
+   physical operand count that the final link writes from the function every lambda, callable
+   reference and class implementing a function type records (`native::interface_calls`). The
+   runtime calls function values of up to two operands, and so names those three stubs; nothing but
+   a function value is ever handed to something that does. */
+KRef kt_itf__1_function_0(KRef self);
+KRef kt_itf__1_function_1(KRef self, KRef first);
+KRef kt_itf__1_function_2(KRef self, KRef first, KRef second);
 
 /* ---- classes ----------------------------------------------------------------------------------- */
 

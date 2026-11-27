@@ -52,7 +52,7 @@ use krusty::backend::class_tables::module_classes::ModuleClasses;
 use krusty::backend::class_tables::module_slots::ModuleSlotPlan;
 use krusty::backend::class_tables::{
     self, AnyMember, LaidOutSuperclass, NumberedClassTables, Representation, Slot, SlotKey,
-    ANY_SLOTS, FUNCTION_SLOT,
+    ANY_SLOTS,
 };
 use krusty::backend::local_properties::RealizedLocalPropertyAccess;
 use krusty::backend::BackendClassifierSource;
@@ -68,9 +68,7 @@ use super::super::identity::PREFIX_FIELDS;
 use super::super::interface_dispatch::{ClassRef, MemberRef};
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
 use super::super::runtime::Runtime;
-use super::laid_out_classes::{
-    DependencyImplementation, FunctionBridgeEntry, LaidOutClass, LaidOutClasses, Placed,
-};
+use super::laid_out_classes::{DependencyImplementation, LaidOutClass, LaidOutClasses, Placed};
 use super::lower::{carrier, cell_reference, parameter_carrier, Unsupported, STRING};
 
 mod constructor_prefix;
@@ -96,10 +94,6 @@ impl Representation for WasmRepresentation<'_> {
                 (Ok(a), Ok(b)) => a == b,
                 _ => false,
             }
-    }
-
-    fn is_reference(&self, ty: Ty) -> bool {
-        matches!(carrier(ty), Ok(Some(ValType::Ref { .. })))
     }
 
     /// `kotlin.Enum` is a base no file declares: its `name` and `ordinal` are the `$Enum` struct's
@@ -368,70 +362,6 @@ impl FileClasses {
             .find_map(|superclass| superclass.methods.get(&callable).copied())
     }
 
-    /// The exact erased function entry a producer table defines or inherits.
-    fn function_bridge(
-        &self,
-        class: ClassId,
-        module: &mut Module,
-    ) -> Result<Option<FunctionBridgeEntry>, Unsupported> {
-        let Some(entry) = self.tables.table(class).vtable.get(FUNCTION_SLOT as usize) else {
-            return Ok(None);
-        };
-        let bridge = match entry {
-            Slot::FunctionBridge { arity, .. } => {
-                let function = self.entries[class as usize]
-                    .get(FUNCTION_SLOT as usize)
-                    .copied()
-                    .flatten()
-                    .ok_or("a function bridge slot with no defined adapter")?;
-                let expected = module.func_type(vec![REFERENCE; *arity + 1], vec![REFERENCE]);
-                let signature = module
-                    .defined_function_type(function)
-                    .ok_or("a function bridge whose adapter has no defined body")?;
-                if signature != expected {
-                    return Err("a function bridge body with a mismatched erased signature".into());
-                }
-                FunctionBridgeEntry {
-                    arity: *arity,
-                    function,
-                    signature,
-                }
-            }
-            Slot::Inherited { slot } if *slot == FUNCTION_SLOT => {
-                let inherited = self
-                    .laid_out_superclass(class)
-                    .and_then(|superclass| superclass.function_bridge);
-                let function = self.entries[class as usize]
-                    .get(FUNCTION_SLOT as usize)
-                    .copied()
-                    .flatten();
-                match (inherited, function) {
-                    // The superclass adapts no function type, so neither does this class: the slot
-                    // is the first ordinary member it inherits.
-                    (None, _) => return Ok(None),
-                    (Some(inherited), Some(function)) if inherited.function == function => {
-                        inherited
-                    }
-                    _ => {
-                        return Err(
-                            "an inherited function slot differing from its producer adapter".into(),
-                        )
-                    }
-                }
-            }
-            _ => return Ok(None),
-        };
-        let expected = module.func_type(vec![REFERENCE; bridge.arity + 1], vec![REFERENCE]);
-        if bridge.signature != expected
-            || module.defined_function_type(bridge.function) != Some(bridge.signature)
-        {
-            return Err(
-                "an inherited function adapter with a mismatched physical signature".into(),
-            );
-        }
-        Ok(Some(bridge))
-    }
-
     /// What a later file extending each class of this file reads of it. `functions` and
     /// `signatures` are the file's function indices and types, by `FunId`.
     pub(super) fn records(
@@ -566,7 +496,6 @@ impl FileClasses {
                     base: self.bases[id as usize],
                     slot_types: self.slot_types[id as usize].clone(),
                     entries: self.entries[id as usize].clone(),
-                    function_bridge: self.function_bridge(id, module)?,
                     ancestors: self.ancestors[id as usize].clone(),
                     constructors,
                     constructor_entries: std::iter::once(self.forms[id as usize].constructor)
@@ -592,6 +521,7 @@ impl FileClasses {
                         interface_entries: self.tables.interface_tables.members[id as usize]
                             .clone(),
                         members: self.tables.members[id as usize].clone(),
+                        function_invokes: table.function_invokes.clone(),
                     },
                     interface_bodies: self.interface_bodies[id as usize].clone(),
                     dependency_implementations: self.dependency_implementations[id as usize]
@@ -704,6 +634,7 @@ pub(super) fn module_plan(
                         .try_into()
                         .expect("too many class slots"),
                     declarations: layout.declaration_slots.clone(),
+                    function_invokes: layout.table.function_invokes.clone(),
                 }
             }))
         },
@@ -1073,7 +1004,7 @@ pub(super) fn declare(
                                 parent.table_type.expect("a superclass has a table type")
                             }
                             (None, Some(superclass)) => superclass.table_type,
-                            (None, None) => objects.function_table,
+                            (None, None) => objects.any_table,
                         }),
                         open: true,
                     })
@@ -1281,27 +1212,28 @@ impl TableEntries<'_> {
                     Slot::FunctionBridge { arity, .. } => {
                         runtime.function_shape(module, *arity).invoke
                     }
-                    // Slot 3 is a function value's body only in a table whose producer defines
-                    // one; in any other class it is the first ordinary member slot.
+                    // A function type's bridge the superclass of another file introduced: typed by
+                    // the physical `invoke` of its operand count, and the producer's adapter.
                     Slot::Inherited { slot }
-                        if *slot == FUNCTION_SLOT
-                            && laid_out
-                                .is_some_and(|superclass| superclass.function_bridge.is_some()) =>
+                        if laid_out.is_some_and(|superclass| {
+                            superclass
+                                .table
+                                .function_invokes
+                                .iter()
+                                .any(|invoke| invoke.slot == *slot)
+                        }) =>
                     {
-                        let inherited = laid_out.and_then(|superclass| superclass.function_bridge);
-                        let function = laid_out.and_then(|superclass| {
-                            superclass.entries.get(*slot as usize).copied().flatten()
-                        });
-                        match (inherited, function) {
-                            // A superclass that adapts no function type leaves the reserved slot
-                            // empty, as the class that declares none does.
-                            (None, None) => resolved.push(None),
-                            (Some(inherited), Some(function))
-                                if inherited.function == function
-                                    && runtime.function_shape(module, inherited.arity).invoke
-                                        == inherited.signature
-                                    && module.defined_function_type(function)
-                                        == Some(inherited.signature) =>
+                        let superclass = laid_out.expect("matched above");
+                        let invoke = superclass
+                            .table
+                            .function_invokes
+                            .iter()
+                            .find(|invoke| invoke.slot == *slot)
+                            .expect("matched above");
+                        let signature = runtime.function_shape(module, invoke.operands).invoke;
+                        match superclass.entries.get(*slot as usize).copied().flatten() {
+                            Some(function)
+                                if module.defined_function_type(function) == Some(signature) =>
                             {
                                 resolved.push(Some(function));
                             }
