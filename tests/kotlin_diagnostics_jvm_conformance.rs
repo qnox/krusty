@@ -54,7 +54,7 @@ use super::common;
 use super::krusty_case_workers::{serve, Reply, Workers};
 
 /// The diagnostics directories, relative to the JetBrains checkout.
-const CORPORA: [&str; 2] = [
+pub(super) const CORPORA: [&str; 2] = [
     "compiler/testData/diagnostics/tests",
     "compiler/testData/diagnostics/testsWithStdLib",
 ];
@@ -100,7 +100,12 @@ enum Outcome {
 
 /// The case's source as both compilers receive it: markers stripped, the directive-selected helper
 /// sources added to each module, and the JVM corpus placeholders applied.
-fn prepare(root: &Path, file: &Path, source: &str, stem: &str) -> Result<String, String> {
+pub(super) fn prepare(
+    root: &Path,
+    file: &Path,
+    source: &str,
+    stem: &str,
+) -> Result<String, String> {
     let mut helpers = Vec::new();
     for (directive, path) in HELPERS {
         if krusty::conformance::directive(source, directive) {
@@ -235,7 +240,7 @@ fn krusty(
 const WORKER_ROLE: &str = "KRUSTY_DIAGNOSTICS_KRUSTY_WORKER";
 
 /// How long a worker may take on one case before it is killed and the case fails.
-fn case_deadline() -> Duration {
+pub(super) fn case_deadline() -> Duration {
     let seconds = std::env::var("KRUSTY_DIAGNOSTICS_CASE_TIMEOUT_SECONDS")
         .ok()
         .map(|value| {
@@ -283,14 +288,14 @@ fn krusty_in_worker(workers: &Workers, file: &Path) -> Verdict {
     }
 }
 
-fn case_stem(file: &Path) -> &str {
+pub(super) fn case_stem(file: &Path) -> &str {
     file.file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("case")
 }
 
 /// The JDKs a case compiles against: the box corpus's mock runtime, or the full JDK on request.
-fn box_jdks(root: &Path) -> BoxJdkRoots {
+pub(super) fn box_jdks(root: &Path) -> BoxJdkRoots {
     let box_dir = root.join("compiler/testData/codegen/box");
     BoxJdkRoots::new(
         krusty::toolchain::box_mock_jdk_rt_jar(&box_dir).unwrap_or_else(|error| panic!("{error}")),
@@ -298,7 +303,7 @@ fn box_jdks(root: &Path) -> BoxJdkRoots {
     )
 }
 
-fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+pub(super) fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
     panic
         .downcast_ref::<String>()
         .cloned()
@@ -306,7 +311,7 @@ fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
         .unwrap_or_else(|| "a non-text payload".to_string())
 }
 
-fn first_line(output: &str) -> &str {
+pub(super) fn first_line(output: &str) -> &str {
     output
         .lines()
         .find(|line| !line.trim().is_empty())
@@ -386,7 +391,7 @@ fn run_case(
 }
 
 /// Every case of the diagnostics corpora: `<name>.kt` files whose name has no other dot.
-fn cases(root: &Path) -> Vec<PathBuf> {
+pub(super) fn cases(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for corpus in CORPORA {
         let directory = root.join(corpus);
@@ -439,7 +444,7 @@ fn read_list(directory: &str, version: KotlinVersion) -> BTreeSet<String> {
     }
 }
 
-fn percent(part: usize, whole: usize) -> String {
+pub(super) fn percent(part: usize, whole: usize) -> String {
     if whole == 0 {
         return "n/a".to_string();
     }
