@@ -62,6 +62,9 @@ pub(super) mod ktype {
     /// the note on `KType`. Absent when it binds none.
     pub const REFERENCE_CONTEXT_OFFSETS: u32 = 176;
     pub const REFERENCE_CONTEXT_COUNT: u32 = 184;
+    /// Nonzero on a descriptor that names a dependency class by identity alone; see the note on
+    /// `KType`.
+    pub const NOMINAL: u32 = 188;
     pub const SIZE: usize = 192;
 }
 

@@ -10,7 +10,6 @@ annotations/instances/inInlineFunction.kt
 annotations/instances/multifileEqHc.kt
 annotations/instances/multimoduleTypeParams.kt
 arithmetic/division.kt
-arrays/primitiveArrays.kt
 associatedObjects/associatedObjectNested.kt
 associatedObjects/findAssociatedObject.kt
 associatedObjects/findAssociatedObjectAndDCE.kt
@@ -89,10 +88,8 @@ casts/mutableCollections/reifiedIsWithMutable.kt
 casts/mutableCollections/reifiedSafeAsWithMutable.kt
 casts/mutableCollections/safeAsWithMutable.kt
 casts/mutableCollections/weirdMutableCasts.kt
-casts/toNativePointers.kt
 classDelegation/delegationToStarProjectedType.kt
 classDelegation/multipleModules.kt
-classes/kt1538.kt
 classes/kt2566_2.kt
 classes/kt3001.kt
 classes/typedDelegation.kt
@@ -128,7 +125,6 @@ contracts/kt39374.kt
 contracts/referenceToGenericInDeserializedContract.kt
 controlStructures/breakContinueInExpressions/breakInLoopConditions.kt
 controlStructures/kt513.kt
-controlflow/for_loops_array_nested.kt
 controlflow/for_loops_coroutines.kt
 coroutines/32defaultParametersInSuspend.kt
 coroutines/asyncIteratorNullMerge_1_3.kt
@@ -656,7 +652,6 @@ ranges/unsigned/literal/openRangeUntil.kt
 ranges/unsigned/literal/overflowZeroToMinValue.kt
 ranges/unsigned/outOfBoundsInMixedContains.kt
 reflection/classLiterals/annotationClassLiteral.kt
-reflection/classes/qualifiedNameOfStandardClasses.kt
 reflection/classes/qualifiedNameOfStandardClassesOther.kt
 reflection/functions/genericOverriddenFunction.kt
 reflection/functions/typeParameterInReturnType.kt
@@ -766,4 +761,3 @@ volatile/intrinsicWithInlineFunction.kt
 volatile/intrinsics.kt
 volatile/intrinsicsOnGlobal.kt
 volatile/messagePassing.kt
-when/is.kt
