@@ -673,15 +673,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         }
         // Declared constructor annotations, with the same `Deprecated` / `ACC_SYNTHETIC` companions
         // a function's carry (see the method emitter).
-        if !sc.annotations.retains_none() {
-            cw.set_method_annotations("<init>", &sc_desc, &sc.annotations);
-            if sc.annotations.deprecated() {
-                cw.mark_method_deprecated("<init>", &sc_desc);
-            }
-            if super::function_annotations::hidden_realization_is_synthetic(&sc.annotations) {
-                cw.set_method_synthetic("<init>", &sc_desc);
-            }
-        }
+        super::function_annotations::emit_constructor_declared(cw, &sc.annotations, &sc_desc);
         if let Some(defaults) = crate::default_wrappers::secondary_constructor(sc) {
             // The stub's physical prefix is everything ahead of the declared parameters — the
             // owner's synthetic entries included, which is what makes an enum's stub
