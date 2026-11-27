@@ -91,11 +91,15 @@ impl CallableRegistry {
     pub(super) fn link_instances(
         &mut self,
         exports: &DependencyExportSignatures,
+        classifiers: &dyn krusty::backend::BackendClassifierSource,
         wasm: &mut Module,
     ) -> Result<Vec<(krusty::ir::FunId, u32)>, Unsupported> {
-        krusty::backend::instance_links::link_entries(exports, &mut self.instances, || {
-            wasm.declare()
-        })
+        krusty::backend::instance_links::link_entries(
+            exports,
+            classifiers,
+            &mut self.instances,
+            || wasm.declare(),
+        )
         .map_err(str::to_owned)
     }
 
@@ -263,22 +267,24 @@ impl CallableRegistry {
                 let mut reads = krusty::backend::instance_links::link_reads(
                     ir,
                     module_facts,
+                    classifiers,
                     &mut self.instances,
                     || wasm.declare(),
-                );
+                )?;
                 reads.extend(krusty::backend::instance_links::link_constructor_reads(
                     ir,
                     self.source_module.as_deref().unwrap_or_default(),
                     module_facts,
                     &mut self.instances,
                     || wasm.declare(),
-                ));
+                )?);
                 reads.extend(krusty::backend::instance_links::link_type_test_reads(
                     ir,
                     module_facts,
+                    classifiers,
                     &mut self.instances,
                     || wasm.declare(),
-                ));
+                )?);
                 reads
             },
         };

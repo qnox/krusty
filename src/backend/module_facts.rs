@@ -52,6 +52,14 @@ pub trait BackendClassifierSource {
         }
     }
 
+    /// Whether the module declares `classifier` and a dependency declares it too: the module's
+    /// declaration redeclares one of its dependency chain, the way a platform module's class
+    /// replaces a common module's on its classpath. Only a view that federates the module with its
+    /// dependencies can tell.
+    fn redeclares_dependency_classifier(&self, _classifier: TypeName) -> bool {
+        false
+    }
+
     /// Whether `ancestor` is `classifier` or one of the supertypes its facts publish, transitively.
     fn is_subclassifier(&self, classifier: TypeName, ancestor: TypeName) -> bool {
         is_subclassifier(self, classifier, ancestor)
@@ -922,6 +930,13 @@ impl<'a> CheckedBackendClassifiers<'a> {
 }
 
 impl BackendClassifierSource for CheckedBackendClassifiers<'_> {
+    fn redeclares_dependency_classifier(&self, classifier: TypeName) -> bool {
+        self.module
+            .classifier(classifier)
+            .is_some_and(|fact| fact.source)
+            && self.dependencies.classifier(classifier).is_some()
+    }
+
     fn classifier_declaration_name(
         &self,
         declaration: crate::libraries::ClassifierDeclarationKey,
