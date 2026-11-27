@@ -1264,7 +1264,6 @@ inline/fakeOverrideInliningCrossModule.kt
 inline/getClass.kt
 inline/inline16.kt
 inline/inline21.kt
-inline/inline24.kt
 inline/inline26.kt
 inline/inline5.kt
 inline/inlineCallInsideStringTemplate.kt
