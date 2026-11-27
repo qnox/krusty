@@ -285,6 +285,12 @@ extern const KType kt_type_number;
 extern const KType kt_type_comparable;
 /* `kotlin.CharSequence`, which a `String` and a `StringBuilder` both point at. */
 extern const KType kt_type_char_sequence;
+/* `kotlin.text.Appendable`, which a `StringBuilder` points at. */
+extern const KType kt_type_appendable;
+/* `kotlin.ranges.ClosedRange`, which each of the runtime's ranges points at, and
+   `ClosedFloatingPointRange`, which the floating-point ones point at too. */
+extern const KType kt_type_closed_range;
+extern const KType kt_type_closed_floating_point_range;
 /* The four unsigned integers. Each is a value class over a signed primitive and is carried as the
    machine integer it wraps, so a descriptor of its own is the only thing keeping a BOXED one from
    being an `Int`: `1u as? Int` must fail, and printing one must not print the signed number sharing
@@ -330,6 +336,12 @@ void kt_index_out_of_bounds(kt_int index, kt_int size);
 
 /* `Enum.toString()`: the constant's name, read from the storage `kotlin.Enum` contributes. */
 KRef kt_enum_to_string(KRef self);
+
+/* The `kotlin.Enum` marker every enum class descriptor has as its `super`, whether an object is one
+   of an enum's constants (or an entry body of one), and `Enum.compareTo` over two of them. */
+extern const KType kt_type_enum;
+kt_boolean kt_is_enum_constant(KRef object);
+kt_int kt_enum_compare_to(KRef self, KRef other);
 
 /* An exhaustive `when` none of whose branches matched after all: Kotlin's
    `NoWhenBranchMatchedException`, raised and returned from. */
@@ -1226,6 +1238,7 @@ KRef kt_class_literal(const KType *type);
    fails loudly and names itself. */
 KRef kt_class_simple_name(KRef self);
 KRef kt_class_qualified_name(KRef self);
+kt_boolean kt_class_is_instance(KRef self, KRef value);
 
 /* `typeOf<T>()`: a `kotlin.reflect.KType`. Each is a static object the generator emits whole
    (see `krusty_rt.c` for its layout) wearing `kt_type_ktype_impl`, which names the `KType` marker

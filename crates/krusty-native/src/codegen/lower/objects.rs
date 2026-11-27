@@ -865,6 +865,13 @@ impl<'a> FileLowering<'a> {
                     .clone();
                 self.import_data(&symbol)?
             }
+            // An enum's storage is the language's, and its descriptor is what marks the class an
+            // enum for the runtime's own orders.
+            (None, None)
+                if super::super::super::classes::is_enum(&self.ir.classes[class as usize]) =>
+            {
+                self.import_data("kt_type_enum")?
+            }
             (None, None) => {
                 match model::external_base(self.ir.classes[class as usize].superclass) {
                     Some(base) => self.import_data(base.descriptor)?,
@@ -887,6 +894,11 @@ impl<'a> FileLowering<'a> {
             let descriptor = self
                 .type_descriptor(Ty::obj_name(name))?
                 .ok_or("an interface of the module with no descriptor")?;
+            if !interfaces.contains(&descriptor) {
+                interfaces.push(descriptor);
+            }
+        }
+        for descriptor in self.dependency_interface_memberships(class, &local_interfaces)? {
             if !interfaces.contains(&descriptor) {
                 interfaces.push(descriptor);
             }
