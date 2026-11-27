@@ -15008,7 +15008,7 @@ impl<'a> Checker<'a> {
                         self.this_labels.pop();
                     }
                     self.this_extension_receiver = previous_extension_receiver;
-                    self.inferred_declaration_value_ty(*e, inferred_declaration_ty(inferred))
+                    self.inferred_declaration_value_ty(*e, inferred)
                 }
                 _ => Ty::Unit,
             };
@@ -33297,8 +33297,7 @@ impl<'a> Checker<'a> {
                     continue;
                 };
                 let inferred = self.expr(&property_scope, expression);
-                let inferred = self
-                    .inferred_declaration_value_ty(expression, inferred_declaration_ty(inferred));
+                let inferred = self.inferred_declaration_value_ty(expression, inferred);
                 if inferred == Ty::Error || inferred.mentions_pending() {
                     continue;
                 }
@@ -36660,8 +36659,7 @@ impl<'a> Checker<'a> {
                             }
                         });
                         if declared.is_none() && it != Ty::Error {
-                            let inferred = self
-                                .inferred_declaration_value_ty(init, inferred_declaration_ty(it));
+                            let inferred = self.inferred_declaration_value_ty(init, it);
                             if let Some(declaration) = stable_property {
                                 self.record_inferred_property_publication(
                                     declaration,
