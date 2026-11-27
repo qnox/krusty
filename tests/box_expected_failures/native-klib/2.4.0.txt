@@ -26,7 +26,6 @@ basics/unchecked_cast11.kt
 basics/unchecked_cast12.kt
 basics/unchecked_cast13.kt
 basics/unchecked_cast2.kt
-basics/unchecked_cast4.kt
 basics/unchecked_cast5.kt
 basics/unchecked_cast6.kt
 basics/unchecked_cast6x.kt
