@@ -318,6 +318,36 @@ impl Body<'_> {
             })
     }
 
+    /// A progression's `step` that is not positive: `IllegalArgumentException("Step must be
+    /// positive, was: $step.")`, as the standard library's `step` raises it.
+    pub(super) fn illegal_progression_step(&mut self, step: u32) -> Result<(), Unsupported> {
+        let exception = self.runtime.exception_class(
+            self.module,
+            self.classifiers,
+            krusty::libraries::RuntimeExceptionKind::IllegalArgument.classifier(),
+        )?;
+        let prefix = "Step must be positive, was: "
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        self.runtime
+            .string_constant(self.module, &mut self.code, &prefix);
+        self.string_of(step)?;
+        self.code.call(self.runtime.string_concat);
+        self.runtime
+            .string_constant(self.module, &mut self.code, &[u16::from(b'.')]);
+        self.code.call(self.runtime.string_concat);
+        let message = self.local(STRING);
+        self.code.local_set(message);
+        self.runtime.exceptions.construct_class(
+            &mut self.code,
+            exception,
+            Some(message),
+            self.runtime.string,
+        )?;
+        self.code.throw(self.runtime.exceptions.tag);
+        Ok(())
+    }
+
     pub(super) fn throw_value(&mut self, operand: u32) -> Result<(), Unsupported> {
         self.value(operand, Ty::obj("kotlin/Throwable"))?;
         self.code

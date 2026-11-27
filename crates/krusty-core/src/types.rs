@@ -54,6 +54,8 @@ pub use substitute::{ty_subst, ty_subst_all, ty_subst_applied_arguments, TyParam
 
 pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
 pub use crate::inline_parameter_modifier::{InlineExpansionMode, InlineParameterModifier};
+mod inline_parameters;
+pub use inline_parameters::is_inline_parameter;
 use interning::ShardedInterner;
 mod array_types;
 mod primitive_arrays;
