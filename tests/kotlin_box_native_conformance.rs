@@ -118,7 +118,60 @@ struct NativeLane {
     target: Option<NativeTarget>,
 }
 
+/// The KLIB backend that writes Native module libraries for `target`.
+fn library_backend(
+    target: krusty_native::NativeTarget,
+    directive_source: &str,
+) -> Result<krusty::klib::backend::KlibBackend, Outcome> {
+    let features = krusty::features::LangFeatures::from_source_in_environment(directive_source);
+    krusty::klib::backend::KlibBackend::new(
+        krusty::klib::write::KlibPlatform::Native,
+        krusty::klib::write::KlibStamp::new(
+            krusty::kotlin_version::environment_release(),
+            features.language_version(),
+        ),
+    )
+    .with_annotations_in_metadata(features.has("AnnotationsInMetadata"))
+    .with_native_target(target)
+    .map_err(|error| Outcome::Harness(error.to_string()))
+}
+
 impl NativeLane {
+    /// Compile every module but the last into a KLIB only, link the last module's program against
+    /// those KLIBs, and run it.
+    fn compile_klib_modules_and_run(
+        &self,
+        scratch: &Path,
+        stem: &str,
+        modules: &[krusty::conformance::ModuleUnit],
+        directive_source: &str,
+    ) -> Outcome {
+        let target = self.target.expect("checked by `unavailable`");
+        let backend = CraneliftBackend::new(target)
+            .with_entry(Entry::Box)
+            .verified();
+        let library = match library_backend(target, directive_source) {
+            Ok(library) => library,
+            Err(outcome) => return outcome,
+        };
+        let program = match box_lane::compile_modules_from_klibs(
+            ModuleCase {
+                scratch,
+                stem,
+                modules,
+            },
+            directive_source,
+            TestTarget::Native,
+            &backend,
+            &library,
+            DECLINE_PREFIX,
+        ) {
+            Ok(program) => program,
+            Err(outcome) => return outcome,
+        };
+        self.run_artifacts(scratch, stem, "klib-modules", directive_source, program)
+    }
+
     fn run_artifacts(
         &self,
         scratch: &Path,
@@ -258,19 +311,9 @@ impl Lane for NativeLane {
             .with_entry(Entry::Box)
             .with_entry_module(entry_module.name.clone())
             .verified();
-        let features = krusty::features::LangFeatures::from_source_in_environment(directive_source);
-        let metadata = match krusty::klib::backend::KlibBackend::new(
-            krusty::klib::write::KlibPlatform::Native,
-            krusty::klib::write::KlibStamp::new(
-                krusty::kotlin_version::environment_release(),
-                features.language_version(),
-            ),
-        )
-        .with_annotations_in_metadata(features.has("AnnotationsInMetadata"))
-        .with_native_target(target)
-        {
+        let metadata = match library_backend(target, directive_source) {
             Ok(metadata) => metadata,
-            Err(error) => return Outcome::Harness(error.to_string()),
+            Err(outcome) => return outcome,
         };
         let program = match box_lane::compile_modules(
             ModuleCase {
@@ -1085,5 +1128,21 @@ fn native_string_comparison_runs_the_whole_portable_program_through_klib() {
         run_native_portable_box(source, "StringComparisonProgram"),
         Outcome::Pass,
         "the Native KLIB driver must run every comparison control"
+    );
+}
+
+#[test]
+fn native_links_a_library_s_top_level_function_bodies_from_its_klib() {
+    let source = include_str!("box_regressions/multimodule/libraryTopLevelFunctionBodies.kt");
+    let stem = "nativeLibraryTopLevelFunctionBodies";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the whole library-bodies program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    let lane = NativeLane { target: host() };
+    assert_eq!(lane.unavailable(), None);
+    assert_eq!(
+        lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+        Outcome::Pass
     );
 }
