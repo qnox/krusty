@@ -7,14 +7,23 @@
 
 use super::*;
 
-/// The lambdas analysed without a shape for a written parameter, the lambdas a selected call
-/// committed as its arguments, and the call and type variable each unshaped argument was bound to
-/// as a bare parameter of its callee.
+/// The lambdas whose latest analysis found no shape for a written parameter, the lambdas a
+/// selected call committed as their arguments, and the call and type variable each unshaped
+/// argument was bound to as a bare parameter of its callee.
 #[derive(Default)]
 pub(super) struct UnshapedLambdas {
-    lambdas: crate::fx_hash::HashSet<ExprId>,
+    lambdas: crate::fx_hash::HashMap<ExprId, LambdaShapeCoverage>,
     arguments: crate::fx_hash::HashSet<ExprId>,
     formals: crate::fx_hash::HashMap<ExprId, (ExprId, String)>,
+}
+
+/// How much of a lambda's parameter list the function shape it was analysed under gave types to.
+#[derive(Clone, Copy)]
+pub(super) enum LambdaShapeCoverage {
+    /// A standalone literal: no shape at all.
+    Standalone,
+    /// A shape typing the first this many parameters.
+    Shaped(usize),
 }
 
 /// The type of a written lambda parameter that names none: the error type where nothing can
@@ -86,18 +95,37 @@ impl Checker<'_> {
             .collect()
     }
 
+    /// The written parameters of `lambda` that name no type and that a shape covering
+    /// `coverage` of its parameter list leaves without one.
+    fn uncovered_lambda_parameters(
+        &self,
+        lambda: ExprId,
+        coverage: LambdaShapeCoverage,
+    ) -> Vec<bool> {
+        let mut uninferrable = self.untyped_named_lambda_parameters(lambda);
+        if let LambdaShapeCoverage::Shaped(shaped) = coverage {
+            for flag in uninferrable.iter_mut().take(shaped) {
+                *flag = false;
+            }
+        }
+        uninferrable
+    }
+
     /// Report each written parameter of `lambda` that names no type and has none to infer from:
-    /// as a call argument its callee could not give it a shape; standing alone it never had one.
+    /// as a call argument or under a function shape something could have given it one; standing
+    /// alone it never had one.
     pub(super) fn report_uninferrable_lambda_parameters(
         &mut self,
         lambda: ExprId,
         as_argument: bool,
+        coverage: LambdaShapeCoverage,
     ) {
         let Expr::Lambda { params, .. } = self.file.expr(lambda) else {
             return;
         };
         let params = params.clone();
-        let uninferrable = self.untyped_named_lambda_parameters(lambda);
+        let uninferrable = self.uncovered_lambda_parameters(lambda, coverage);
+        let as_argument = as_argument || matches!(coverage, LambdaShapeCoverage::Shaped(_));
         let spans = self.file.lambda_param_spans.get(&lambda.0);
         let mut errors = Vec::new();
         for (index, parameter) in params.iter().enumerate() {
@@ -131,8 +159,8 @@ impl Checker<'_> {
         let mut lambdas = std::mem::take(&mut self.unshaped_lambdas.lambdas)
             .into_iter()
             .collect::<Vec<_>>();
-        lambdas.sort_by_key(|lambda| lambda.0);
-        for lambda in lambdas {
+        lambdas.sort_by_key(|(lambda, _)| lambda.0);
+        for (lambda, coverage) in lambdas {
             let still_unshaped = matches!(
                 self.expr_types[lambda.0 as usize].kind(),
                 TyKind::Fun(signature) if signature.params.iter().any(|parameter| parameter.mentions_error())
@@ -147,19 +175,25 @@ impl Checker<'_> {
                     );
                 }
                 let as_argument = self.unshaped_lambdas.arguments.contains(&lambda);
-                self.report_uninferrable_lambda_parameters(lambda, as_argument);
+                self.report_uninferrable_lambda_parameters(lambda, as_argument, coverage);
             }
         }
     }
 
-    /// Analyse `lambda` for the written parameters it must give a type to and note it unshaped if
-    /// any of them has none to take from a function shape: the lambda is reported at the end of
-    /// the file, if no selected shape replaced this analysis. Returns those parameters by
-    /// position.
-    pub(super) fn note_unshaped_lambda(&mut self, lambda: ExprId) -> Vec<bool> {
-        let uninferrable = self.untyped_named_lambda_parameters(lambda);
+    /// Analyse `lambda` under a shape covering `coverage` of its parameter list and note it
+    /// unshaped if a written parameter that names no type lies beyond that shape: the lambda is
+    /// reported at the end of the file, if no later analysis under a shape replaced this one.
+    /// Returns those parameters by position.
+    pub(super) fn note_unshaped_lambda(
+        &mut self,
+        lambda: ExprId,
+        coverage: LambdaShapeCoverage,
+    ) -> Vec<bool> {
+        let uninferrable = self.uncovered_lambda_parameters(lambda, coverage);
         if uninferrable.contains(&true) {
-            self.unshaped_lambdas.lambdas.insert(lambda);
+            self.unshaped_lambdas.lambdas.insert(lambda, coverage);
+        } else {
+            self.unshaped_lambdas.lambdas.remove(&lambda);
         }
         uninferrable
     }
@@ -178,7 +212,7 @@ impl Checker<'_> {
             return;
         }
         self.unshaped_lambdas.arguments.insert(argument);
-        if !self.unshaped_lambdas.lambdas.contains(&argument)
+        if !self.unshaped_lambdas.lambdas.contains_key(&argument)
             || self.file.call_type_args.contains_key(&call.0)
         {
             return;

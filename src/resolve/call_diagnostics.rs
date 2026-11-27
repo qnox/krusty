@@ -773,7 +773,11 @@ impl Checker<'_> {
                 continue;
             }
 
-            self.report_uninferrable_lambda_parameters(argument, true);
+            self.report_uninferrable_lambda_parameters(
+                argument,
+                true,
+                unshaped_lambdas::LambdaShapeCoverage::Standalone,
+            );
         }
     }
 

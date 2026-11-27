@@ -41053,7 +41053,8 @@ impl<'a> Checker<'a> {
                 .get(&e.0)
                 .cloned()
                 .unwrap_or_default();
-            let uninferrable = self.note_unshaped_lambda(e);
+            let uninferrable =
+                self.note_unshaped_lambda(e, unshaped_lambdas::LambdaShapeCoverage::Standalone);
             let bret = {
                 let lambda_scope = scope.child(ScopeKind::Function { receiver: None });
                 let scope = &lambda_scope;
@@ -48165,6 +48166,10 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            let uninferrable = self.note_unshaped_lambda(
+                e,
+                unshaped_lambdas::LambdaShapeCoverage::Shaped(bind_types.len()),
+            );
             if let Some(receiver) = extension_receiver {
                 self.mark_receiver_lambda(e, receiver);
             }
@@ -48261,7 +48266,10 @@ impl<'a> Checker<'a> {
                     }
                 }
                 for (i, name) in bind_names.iter().enumerate() {
-                    let pty = bind_types.get(i).copied().unwrap_or(Ty::obj("kotlin/Any"));
+                    let pty = bind_types
+                        .get(i)
+                        .copied()
+                        .unwrap_or_else(|| unshaped_lambdas::untyped_ty(&uninferrable, i));
                     if i < named_context_count {
                         self.declare_context_parameter(scope, name, pty);
                     } else {
@@ -48315,7 +48323,7 @@ impl<'a> Checker<'a> {
                     bind_types
                         .get(i)
                         .copied()
-                        .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+                        .unwrap_or_else(|| unshaped_lambdas::untyped_ty(&uninferrable, i))
                 }));
             }
             let ret = self.lambda_result_type(
