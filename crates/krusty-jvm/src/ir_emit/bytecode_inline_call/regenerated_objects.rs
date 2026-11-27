@@ -291,7 +291,7 @@ pub(super) struct CallObjects<'a> {
     owner: String,
     site: Option<RegenerationSite<'a>>,
     call_expression: u32,
-    major: u16,
+    version: krusty::jvm::classfile::ClassFileVersion,
     /// The `@Metadata` stamp the caller writes: the inlining module's `mv` and pre-release flag, as
     /// kotlinc's `AnonymousObjectTransformer` rewrites the copied class's annotation with them.
     metadata_stamp: krusty::jvm::classfile::MetadataStamp,
@@ -331,7 +331,7 @@ impl<'a> Emitter<'a> {
             owner: self.owner.clone(),
             site: self.regeneration_site.clone(),
             call_expression,
-            major: self.cw.major(),
+            version: self.cw.version(),
             metadata_stamp: self.metadata_stamp,
             callee: callee.to_string(),
             caller_lines,
@@ -405,7 +405,7 @@ impl AnonymousObjects for CallObjects<'_> {
         let wrapper = sam_wrapper_copy_name(self.bodies, generators, &owner, class)
             .map_err(InlineError::Regeneration)?;
         if let Some((new_class, first)) = wrapper {
-            let bytes = copy_sam_wrapper(&original, &new_class, self.major)
+            let bytes = copy_sam_wrapper(&original, &new_class, self.version)
                 .map_err(InlineError::Regeneration)?;
             if first {
                 self.run
@@ -443,7 +443,7 @@ impl AnonymousObjects for CallObjects<'_> {
                 calling_class: &self.owner,
                 type_arguments: &type_arguments,
                 prior_classes,
-                major: self.major,
+                version: self.version,
                 metadata_stamp: self.metadata_stamp,
                 lambdas,
                 suspend_values,

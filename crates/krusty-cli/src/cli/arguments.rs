@@ -300,6 +300,7 @@ pub(super) fn apply(
             }
         }
         "-jdk-home" => opts.jdk_home = Some(PathBuf::from(text)),
+        "-Xjvm-enable-preview" => opts.jvm_enable_preview = flag,
         "-Xno-param-assertions" => opts.no_param_assertions = flag,
         "-Xno-call-assertions" => opts.no_call_assertions = flag,
         "-Xno-receiver-assertions" => opts.no_receiver_assertions = flag,

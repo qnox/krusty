@@ -831,13 +831,13 @@ impl<'a> BodyLowering<'a> {
     ) -> Lowered<MemberFrame<'a>> {
         let mut locals = super::super::local_values::LocalValues::after(0);
         if let Some(receiver) = &function.dispatch_receiver {
-            locals.temporary(&receiver.base.symbol, Ty::obj_name(owner))?;
+            locals.temporary(&receiver.base.symbol, Ty::obj_name(owner), false)?;
         } else {
             locals.anonymous_slot();
         }
         for parameter in &function.regular_parameters {
             let ty = self.semantic(parameter.ty)?;
-            locals.temporary(&parameter.base.symbol, ty)?;
+            locals.temporary(&parameter.base.symbol, ty, false)?;
         }
         let fields = super::instance_storage::InstanceStorageFrame::object_member(
             class,
@@ -875,7 +875,7 @@ impl<'a> BodyLowering<'a> {
         // class's own receiver, as a member does through its dispatch receiver.
         match &class.this_receiver {
             Some(receiver) => {
-                locals.temporary(&receiver.base.symbol, Ty::obj_name(owner))?;
+                locals.temporary(&receiver.base.symbol, Ty::obj_name(owner), false)?;
             }
             None => {
                 locals.anonymous_slot();

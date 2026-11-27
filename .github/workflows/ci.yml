@@ -348,15 +348,6 @@ jobs:
         with:
           path: ~/.cache/JetBrains/Kotlin/cli
           key: kotlin-toolchain-cli-${{ runner.os }}-${{ hashFiles('scripts/kotlin-toolchain/kotlin') }}
-      # krusty-toolchain's tests run the krusty-build-tools wrapper in a fresh Gradle user home (see
-      # the own test suites below). Only the wrapper's distribution is kept: a restored Kotlin-DSL
-      # workspace can lack metadata.bin.
-      - name: restore Kotlin Build Tools Gradle distribution
-        id: build-tools-gradle-dists
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/krusty-build-tools-gradle-user-home/wrapper/dists
-          key: build-tools-gradle-dists-${{ runner.os }}-${{ hashFiles('tools/krusty-build-tools/gradle/wrapper/gradle-wrapper.properties') }}
       # The native runtime's thread drivers run on every supported architecture: built for each
       # with clang and lld, and run under QEMU's user-mode emulators (tests/native_runtime_e2e.rs).
       # The packages are cached by the runner's release, so a run installs them without the Ubuntu
@@ -486,9 +477,11 @@ jobs:
         name: install Maven
         run: scripts/install-maven.sh 3.9.11
       # Maven Central and the Gradle Plugin Portal through Infragnite's package cache
-      # (maven.infragnite.dev), for the tests' Gradle builds and the Maven embedder.
+      # (maven.infragnite.dev), for the tests' Gradle builds and the Maven embedder. The step also
+      # fetches the krusty-build-tools wrapper's distribution through the cache into that Gradle
+      # user home, where the wrapper finds it; the checked-in URL stays on services.gradle.org.
       - name: send Gradle's and Maven's downloads through the package cache
-        uses: infragnite/package-cache-action@0390145ce4d6ed169d553bad09fa3921643a6f35 # main
+        uses: infragnite/package-cache-action@3301abc273091e9b02fb391abdfd3a887a18ef4f # main
         env:
           # The init script goes to the Gradle user home the tests' builds use.
           GRADLE_USER_HOME: ${{ runner.temp }}/krusty-build-tools-gradle-user-home
@@ -570,12 +563,6 @@ jobs:
         with:
           path: target/cache/box-corpus
           key: ${{ steps.box-corpus.outputs.cache-primary-key }}
-      - name: save Kotlin Build Tools Gradle distribution
-        if: github.ref == 'refs/heads/master' && steps.build-tools-gradle-dists.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/krusty-build-tools-gradle-user-home/wrapper/dists
-          key: ${{ steps.build-tools-gradle-dists.outputs.cache-primary-key }}
       - name: save Kotlin Toolchain distribution
         if: github.ref == 'refs/heads/master' && steps.kotlin-toolchain-cli.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1433,7 +1420,7 @@ jobs:
       # (maven.infragnite.dev): an init script in GRADLE_USER_HOME, so set that first.
       - &package-cache
         name: send Gradle's downloads through the package cache
-        uses: infragnite/package-cache-action@0390145ce4d6ed169d553bad09fa3921643a6f35 # main
+        uses: infragnite/package-cache-action@3301abc273091e9b02fb391abdfd3a887a18ef4f # main
       - name: build portable local-Maven distribution
         run: |
           set -euo pipefail
@@ -1712,7 +1699,7 @@ jobs:
       # setup-java, which rewrites that file.
       - &package-cache-maven
         name: send Maven's downloads through the package cache
-        uses: infragnite/package-cache-action@0390145ce4d6ed169d553bad09fa3921643a6f35 # main
+        uses: infragnite/package-cache-action@3301abc273091e9b02fb391abdfd3a887a18ef4f # main
         with:
           gradle: 'false'
           maven: 'true'

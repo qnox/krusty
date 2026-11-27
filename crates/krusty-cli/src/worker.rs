@@ -11,9 +11,13 @@
 //! [`WorkUnit`] and is unit-tested against the flags the real build emits. The protocol loop around
 //! it is deliberately thin.
 //!
+//! A mixed target compiles as the builder compiles it: krusty compiles the Kotlin with the `.java`
+//! sources read as declarations, then the JDK's javac compiles the Java against krusty's classes
+//! ([`java_compilation`]), and both land in the one jar.
+//!
 //! What krusty CANNOT do here is stated as a failed work response rather than a silently wrong jar:
-//! it has no Java front end, so a target whose action carries `.java` sources or source jars is
-//! refused, and it produces no reduced ABI jar, so `--abi-out` receives a copy of the full jar.
+//! a target with source jars or a `module-info.java` is refused, and krusty produces no reduced ABI
+//! jar, so `--abi-out` receives a copy of the full jar.
 //! `--resources` groups (`strip_prefix:add_prefix:file`) are copied into the output jar after the
 //! classes, under the same entry names the module jar uses.
 
@@ -22,6 +26,10 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use krusty_jvm::ir_emit::JvmDefaultMode;
+
+pub mod java_compilation;
+
+pub use java_compilation::JavaCompilation;
 
 /// One compilation the worker was asked to perform, in krusty's terms.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -34,7 +42,10 @@ pub struct WorkUnit {
     /// Incremental-compilation state file (`--kotlin-cri-out`). krusty keeps no such state, but the
     /// file is a declared action output, so it must exist or bazel fails the action.
     pub cri_file: Option<PathBuf>,
+    /// The Kotlin sources.
     pub sources: Vec<PathBuf>,
+    /// The `.java` sources, which krusty reads as declarations and javac then compiles.
+    pub java: JavaCompilation,
     pub classpath: Vec<PathBuf>,
     pub friend_paths: Vec<PathBuf>,
     pub module_name: Option<String>,
@@ -81,7 +92,12 @@ impl WorkUnit {
             ));
         }
         argv.extend(self.kotlinc_args.iter().cloned());
-        argv.extend(self.sources.iter().map(|path| path.display().to_string()));
+        argv.extend(
+            self.sources
+                .iter()
+                .chain(&self.java.sources)
+                .map(|path| path.display().to_string()),
+        );
         argv
     }
 }
@@ -99,9 +115,6 @@ pub struct ResourceGroup {
 /// Why a work request cannot be served.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// The action mixes Java into the compilation. krusty has no Java front end, so producing a jar
-    /// would silently drop those classes.
-    JavaSources(String),
     /// A flag that changes the output shape in a way krusty does not implement.
     Unsupported(String),
     /// The request is malformed (a flag missing its value, no `--out`).
@@ -111,10 +124,6 @@ pub enum Refusal {
 impl std::fmt::Display for Refusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Refusal::JavaSources(detail) => write!(
-                formatter,
-                "krusty has no Java front end, so this target cannot be built by it: {detail}"
-            ),
             Refusal::Unsupported(detail) => {
                 write!(formatter, "unsupported by krusty: {detail}")
             }
@@ -159,7 +168,6 @@ fn boolean_option(flag: &str) -> Option<Option<&'static str>> {
         // Diagnostics and reporting: they change what the compiler PRINTS, not what it emits.
         "--x_render_internal_diagnostic_names" => Some("-Xrender-internal-diagnostic-names"),
         "--trace"
-        | "--no-proc"
         | "--x_wasm_attach_js_exception"
         | "--x_wasm_generate_closed_world_multimodule"
         | "--x_wasm_kclass_fqn" => None,
@@ -219,6 +227,8 @@ fn is_worker_owned_kotlinc_option(argument: &str) -> bool {
 pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
     let mut unit = WorkUnit::default();
     let mut java_count: Option<usize> = None;
+    let mut warn_off = false;
+    let mut raises_warnings = false;
     let mut source_jars = Vec::new();
     let mut index = 0;
 
@@ -244,23 +254,32 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 "--srcs" => {
                     for value in values {
                         let path = PathBuf::from(&value);
-                        // A `.java` source in the action is the one case that must not be compiled
-                        // "as far as possible": the jar would be missing those classes and every
-                        // Kotlin reference to them would have failed to resolve.
-                        if path.extension().and_then(|e| e.to_str()) == Some("java") {
-                            return Err(Refusal::JavaSources(format!("{value} is a Java source")));
+                        if krusty::source::kind(&path) == Some(krusty::source::SourceKind::Java) {
+                            // A module declaration puts javac on the module path, which the
+                            // builder splits from the classpath; the worker does not model that.
+                            if path.file_name().and_then(|name| name.to_str())
+                                == Some("module-info.java")
+                            {
+                                return Err(Refusal::Unsupported(format!(
+                                    "--srcs {value}: Java module declarations are not compiled by the worker"
+                                )));
+                            }
+                            unit.java.sources.push(path);
+                            continue;
                         }
                         // A script compiles against a script definition the action does not
                         // describe, so the worker leaves it to the reference compiler.
                         if krusty::source::kind(&path) != Some(krusty::source::SourceKind::Kotlin) {
                             return Err(Refusal::Unsupported(format!(
-                                "--srcs {value}: krusty's batch compiler accepts only .kt sources"
+                                "--srcs {value}: the worker compiles only .kt and .java sources"
                             )));
                         }
                         unit.sources.push(path);
                     }
                 }
                 "--src-jars" => source_jars.extend(values),
+                // javac `--add-exports`; it has no effect on the Kotlin half.
+                "--add-export" => unit.java.add_exports.extend(values),
                 "--cp" => unit.classpath.extend(values.into_iter().map(PathBuf::from)),
                 // `associates` — classpath modules whose `internal` declarations this target sees.
                 "--friends" => unit
@@ -281,6 +300,9 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                         ));
                     }
                     for value in values {
+                        // javac keeps its warnings under `--warn off` when an entry raises a
+                        // category back to a warning or an error (`buildJavaOptions`).
+                        raises_warnings |= value.ends_with(":error") || value.ends_with(":warning");
                         unit.kotlinc_args.push(format!("-Xwarning-level={value}"));
                     }
                 }
@@ -356,9 +378,15 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 index += 2;
             }
             "--jvm_target" => {
+                let value = value_of(index, flag)?;
                 unit.kotlinc_args.push("-jvm-target".to_string());
-                unit.kotlinc_args.push(value_of(index, flag)?);
+                unit.kotlinc_args.push(value.clone());
+                unit.java.jvm_target = Some(value);
                 index += 2;
+            }
+            "--no-proc" => {
+                unit.java.no_proc = true;
+                index += 1;
             }
             "--api_version" => {
                 let value = value_of(index, flag)?;
@@ -455,6 +483,7 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 let value = value_of(index, flag)?;
                 if value == "off" {
                     unit.kotlinc_args.push("-nowarn".to_string());
+                    warn_off = true;
                 } else {
                     return Err(Refusal::Unsupported(format!("{flag} {value}")));
                 }
@@ -507,12 +536,17 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
             source_jars.join(", ")
         )));
     }
-    if java_count.is_some_and(|count| count > 0) {
-        return Err(Refusal::JavaSources(format!(
-            "--java-count {}",
-            java_count.unwrap_or_default()
-        )));
+    // The builder states how many of `--srcs` are Java. A count that disagrees means the request
+    // was assembled from a different source list than the one it carries.
+    if let Some(count) = java_count {
+        if count != unit.java.sources.len() {
+            return Err(Refusal::Malformed(format!(
+                "--java-count {count}, but --srcs lists {} Java source(s)",
+                unit.java.sources.len()
+            )));
+        }
     }
+    unit.java.no_warn = warn_off && !raises_warnings;
     if unit.output_jar.as_os_str().is_empty() {
         return Err(Refusal::Malformed("no --out".to_string()));
     }
@@ -655,10 +689,6 @@ pub fn resource_entry_name(
 
 /// Copy `--resources` into an existing jar. Entry names follow [`resource_entry_name`].
 pub fn package_resources(jar: &std::path::Path, groups: &[ResourceGroup]) -> Result<(), String> {
-    use std::collections::BTreeSet;
-    use std::io::Write;
-    use zip::write::SimpleFileOptions;
-
     let mut planned: Vec<(String, PathBuf)> = Vec::new();
     for group in groups {
         for listed in &group.files {
@@ -666,6 +696,16 @@ pub fn package_resources(jar: &std::path::Path, groups: &[ResourceGroup]) -> Res
             planned.push((name, listed.clone()));
         }
     }
+    append_entries(jar, planned)
+}
+
+/// Append files to an existing jar, each under its entry name, in order. An entry name the jar or
+/// an earlier file already holds fails before the jar is changed.
+fn append_entries(jar: &std::path::Path, planned: Vec<(String, PathBuf)>) -> Result<(), String> {
+    use std::collections::BTreeSet;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+
     if planned.is_empty() {
         return Ok(());
     }
@@ -698,13 +738,13 @@ pub fn package_resources(jar: &std::path::Path, groups: &[ResourceGroup]) -> Res
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     for (name, path) in planned {
         let bytes = std::fs::read(&path)
-            .map_err(|error| format!("cannot read resource {}: {error}", path.display()))?;
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
         writer
             .start_file(name, options)
-            .map_err(|error| format!("cannot add resource to {}: {error}", jar.display()))?;
+            .map_err(|error| format!("cannot add to {}: {error}", jar.display()))?;
         writer
             .write_all(&bytes)
-            .map_err(|error| format!("cannot add resource to {}: {error}", jar.display()))?;
+            .map_err(|error| format!("cannot add to {}: {error}", jar.display()))?;
     }
     writer
         .finish()
@@ -1118,27 +1158,99 @@ mod tests {
         }
     }
 
-    /// The honest limit: krusty has no Java front end, so a mixed target is refused rather than
-    /// compiled into a jar missing every Java class.
+    /// A mixed target compiles as the builder compiles it: the `.java` sources reach krusty as
+    /// declarations, after the Kotlin sources, and javac gets the options the request selects.
     #[test]
-    fn java_in_the_action_is_refused_two_ways() {
-        let by_source =
-            translate(&args(&["--srcs", "A.kt", "B.java", "--out", "o.jar"])).unwrap_err();
-        assert!(
-            matches!(by_source, Refusal::JavaSources(_)),
-            "{by_source:?}"
-        );
-
-        let by_count = translate(&args(&[
+    fn java_sources_are_declarations_for_krusty_and_inputs_for_javac() {
+        let unit = translate(&args(&[
+            "--jvm_target",
+            "17",
+            "--warn",
+            "off",
+            "--no-proc",
+            "--add-export",
+            "java.desktop/sun.awt=ALL-UNNAMED",
             "--srcs",
+            "B.java",
             "A.kt",
             "--out",
             "o.jar",
             "--java-count",
-            "3",
+            "1",
         ]))
-        .unwrap_err();
-        assert!(matches!(by_count, Refusal::JavaSources(_)), "{by_count:?}");
+        .expect("must translate");
+        assert_eq!(unit.sources, [PathBuf::from("A.kt")]);
+        assert_eq!(
+            unit.java,
+            JavaCompilation {
+                sources: vec![PathBuf::from("B.java")],
+                jvm_target: Some("17".to_string()),
+                no_warn: true,
+                no_proc: true,
+                add_exports: vec!["java.desktop/sun.awt=ALL-UNNAMED".to_string()],
+            }
+        );
+        assert_eq!(
+            unit.compiler_arguments(),
+            args(&[
+                "-d",
+                "o.jar",
+                "-jvm-target",
+                "17",
+                "-nowarn",
+                "A.kt",
+                "B.java"
+            ])
+        );
+        assert!(unit.inert.is_empty(), "{:?}", unit.inert);
+    }
+
+    /// `--warn off` keeps javac's warnings when a `--x_warning_level` entry raises a category back
+    /// to a warning or an error, as `buildJavaOptions` decides.
+    #[test]
+    fn a_raised_warning_level_keeps_javac_warnings() {
+        let unit = translate(&args(&[
+            "--warn",
+            "off",
+            "--x_warning_level",
+            "DEPRECATION:warning",
+            "--srcs",
+            "B.java",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("must translate");
+        assert!(!unit.java.no_warn);
+    }
+
+    /// A `--java-count` that disagrees with `--srcs` means the request lost or gained a source.
+    #[test]
+    fn the_java_count_must_match_the_java_sources() {
+        assert_eq!(
+            translate(&args(&[
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+                "--java-count",
+                "3"
+            ])),
+            Err(Refusal::Malformed(
+                "--java-count 3, but --srcs lists 0 Java source(s)".to_string()
+            ))
+        );
+    }
+
+    /// A module declaration needs javac's module path, which the worker does not split.
+    #[test]
+    fn a_java_module_declaration_is_refused() {
+        assert_eq!(
+            translate(&args(&["--srcs", "A.kt", "src/module-info.java", "--out", "o.jar"])),
+            Err(Refusal::Unsupported(
+                "--srcs src/module-info.java: Java module declarations are not compiled by the worker"
+                    .to_string()
+            ))
+        );
     }
 
     /// The batch CLI silently ignores unknown path kinds. A worker cannot inherit that
@@ -1800,7 +1912,7 @@ mod tests {
         let requests = concat!(
             r#"{"arguments":["--srcs","A.kt","--out","o.jar"],"requestId":7}"#,
             "\n",
-            r#"{"arguments":["--srcs","B.java","--out","o.jar"],"requestId":8}"#,
+            r#"{"arguments":["--srcs","B.kts","--out","o.jar"],"requestId":8}"#,
             "\n",
         );
         let mut output = Vec::new();
@@ -1815,7 +1927,7 @@ mod tests {
         assert!(lines[0].contains("\"exitCode\":0") && lines[0].contains("\"requestId\":7"));
         // The refusal is a FAILED response, not a crash: bazel reports the action, the worker lives.
         assert!(lines[1].contains("\"exitCode\":1") && lines[1].contains("\"requestId\":8"));
-        assert!(lines[1].contains("Java front end"));
+        assert!(lines[1].contains("only .kt and .java sources"));
     }
 
     /// A compile failure is reported through the response, and the worker keeps serving.
