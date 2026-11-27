@@ -131,12 +131,17 @@ pub(super) fn read_class(bytes: &[u8]) -> Result<ClassNode, ClassReadError> {
     let (cp, after_pool) = read_constant_pool(bytes).map_err(|_| Malformed("unreadable pool"))?;
     let pool = Pool(&cp);
     let mut header = Cursor { bytes, at: 4 };
-    // A copy is written under its caller's version, which has no minor version.
-    if header.u2()? != 0 {
-        return Err(ClassReadError::UnsupportedAttribute(
-            "a minor version".to_string(),
-        ));
-    }
+    // A copy is written under its caller's version, whose minor version is either none or the
+    // preview marker; any other minor version is not a version this reader can copy.
+    let preview = match header.u2()? {
+        0 => false,
+        crate::jvm::classfile::PREVIEW_MINOR_VERSION => true,
+        _ => {
+            return Err(ClassReadError::UnsupportedAttribute(
+                "a minor version".to_string(),
+            ));
+        }
+    };
     let major = header.u2()?;
     let mut r = Cursor {
         bytes,
@@ -160,6 +165,7 @@ pub(super) fn read_class(bytes: &[u8]) -> Result<ClassNode, ClassReadError> {
 
     let mut class = ClassNode {
         major,
+        preview,
         access,
         name,
         signature: None,

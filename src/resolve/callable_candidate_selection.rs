@@ -342,6 +342,7 @@ impl Checker<'_> {
                             (!matches!(
                                 argument_kinds[argument],
                                 CallArgKind::IntegerLiteral { .. }
+                                    | CallArgKind::CollectionLiteral { .. }
                             ))
                             .then_some((
                                 parameter,
@@ -373,6 +374,25 @@ impl Checker<'_> {
                         }
                         kind => kind,
                     };
+                    if matches!(kind, CallArgKind::CollectionLiteral { .. }) {
+                        // A collection literal is built from the type its parameter ends up with,
+                        // so its expectation-free `List<T>` reading is evidence only for a formal
+                        // nothing else constrains: `select(mutableSetOf<Int>(), [1])` is a
+                        // `MutableSet<Int>`, not the `Collection<Int>` joined with that reading.
+                        let literal =
+                            crate::symbol_resolver::infer_generic_call_constraints_from_symbols(
+                                &source,
+                                &signature,
+                                [actual],
+                                candidate.call_sig.vararg_index,
+                            );
+                        let constrained_elsewhere = !literal.bindings.is_empty()
+                            && literal
+                                .bindings
+                                .keys()
+                                .all(|formal| preliminary.bindings.contains_key(formal));
+                        return (!constrained_elsewhere).then_some(actual);
+                    }
                     if !matches!(kind, CallArgKind::IntegerLiteral { .. }) {
                         return Some(actual);
                     }

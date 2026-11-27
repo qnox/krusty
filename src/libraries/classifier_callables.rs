@@ -251,6 +251,7 @@ impl FunctionInfo {
         candidate.flags.is_final = member.is_final();
         candidate.flags.deprecated_hidden = member.deprecated_hidden();
         candidate.flags.inherited_by_delegation = member.inherited_by_delegation();
+        candidate.flags.signature_polymorphic = member.is_signature_polymorphic();
         candidate.flags.return_value_status = member.return_value_status;
         candidate.classifier_static = member.is_classifier_static();
         candidate.callable.annotations = member.annotations.clone();

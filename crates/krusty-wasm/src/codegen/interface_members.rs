@@ -744,6 +744,11 @@ impl FileRecorder<'_, '_, '_> {
         match (&signature.1[..], &carried.1[..]) {
             ([wide], [narrow]) if wide == narrow => {}
             ([wide], [ValType::Ref { .. }]) if *wide == REFERENCE => {}
+            // The checker proved the value is of the declared type; only the carriers differ (a
+            // `Nothing?` override of a `String?` member carries its null as a plain reference).
+            ([ValType::Ref { nullable, heap }], [ValType::Ref { .. }]) => {
+                code.ref_cast(*nullable, *heap);
+            }
             ([wide], [scalar]) if *wide == REFERENCE => {
                 let Some(ResultAdapter::Box(form)) = adapters.result else {
                     return Err(unadapted());

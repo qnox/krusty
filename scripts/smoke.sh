@@ -25,6 +25,11 @@
 #      (JVM, Native, wasm-js, wasm-wasi) an even sample of the box corpus and the owned regressions
 #      (`tests/box_regressions/`), the non-box conformance (CLI and bytecode corpora), the focused
 #      Native and Wasm tests, and the diagnostics lane when this change touches its expectations.
+#      On the newest version the JVM lane runs the whole box corpus instead of a sample, so the
+#      byte-identity ratchet (`tests/box_byte_non_identical/`) is judged in both directions: a case
+#      that newly diverges from kotlinc and a listed case that is identical now both fail here,
+#      before the merge queue finds them. The reference compiler's class dumps are cached under
+#      target/cache/class-dumps, so only the first run pays for compiling them.
 #
 # Every test process runs under the harness's configurable deadlines (scripts/test-gate-defaults.sh).
 #
@@ -33,6 +38,8 @@
 # wasm-wasi"; empty runs none), KRUSTY_SMOKE_VERSIONS (default: newest, then the rest on failure;
 # "all" runs every version, or list versions), KRUSTY_SMOKE_JOBS (parallel jobs, default nproc),
 # KRUSTY_SMOKE_DIAGNOSTICS=1 (always run the diagnostics lane),
+# KRUSTY_SMOKE_BYTE_IDENTITY=0 (sample the newest version's JVM lane too, skipping the whole-corpus
+# byte-identity run; its deadline is KRUSTY_SMOKE_BYTE_IDENTITY_TIMEOUT_SECONDS, default 3600),
 # KRUSTY_JDK_CACHE (where missing JDK 8, 11, 17, 21 and 25 are downloaded),
 # KRUSTY_SMOKE_SKIP_CLIPPY=1 (skip the clippy run, the slowest static check: it lints the whole
 # workspace from a clean target of its own).
@@ -121,6 +128,22 @@ fi
 # The selection alone, for the scenario test: no checks, no build.
 if [ "${KRUSTY_SMOKE_PRINT_LANES:-}" = 1 ]; then
   printf '%s\n' "$lanes"
+  exit 0
+fi
+
+# How much of the box corpus the JVM lane of <version> runs, given the <newest> supported version:
+# "full" judges the byte-identity ratchet both ways, "sampled" only catches a newly divergent case
+# among the sample and the owned regressions.
+jvm_scope() { # <version> <newest>
+  if [ "$1" = "$2" ] && [ "${KRUSTY_SMOKE_BYTE_IDENTITY:-1}" != 0 ]; then
+    echo full
+  else
+    echo sampled
+  fi
+}
+# The scope alone, for the scenario test: "<version> <newest>", no checks, no build.
+if [ -n "${KRUSTY_SMOKE_PRINT_JVM_SCOPE:-}" ]; then
+  jvm_scope $KRUSTY_SMOKE_PRINT_JVM_SCOPE
   exit 0
 fi
 
@@ -304,7 +327,14 @@ run_lane() {
   local require=()
   [ -z "$infix" ] || require=("KRUSTY_REQUIRE_${infix}CONFORMANCE=1")
   # The JVM lane also scores byte identity, so a case that newly diverges from kotlinc fails here.
-  [ "$lane" != jvm ] || require+=("KRUSTY_JVM_BYTE_REPORT=$logdir/jvm-byte-report")
+  [ "$lane" != jvm ] || require+=("KRUSTY_JVM_BYTE_REPORT=$logdir/jvm-byte-report-$KRUSTY_LANGUAGE_VERSION")
+  # The whole corpus, owned regressions included, as a full run that also finds stale rows.
+  if [ "$lane" = jvm ] && [ "$(jvm_scope "$KRUSTY_LANGUAGE_VERSION" "$newest")" = full ]; then
+    echo "$lane: the whole corpus, judging byte identity both ways"
+    run_with_deadline "${KRUSTY_SMOKE_BYTE_IDENTITY_TIMEOUT_SECONDS:-3600}" env "${require[@]}" \
+      "$bin" --exact "$test" --nocapture
+    return
+  fi
   if [ "$limit" -gt 0 ]; then
     echo "$lane: $limit sampled corpus cases"
     run_with_deadline "$deadline" env "${require[@]}" "KRUSTY_${infix}BOX_LIMIT=$limit" \

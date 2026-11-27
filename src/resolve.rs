@@ -112,6 +112,7 @@ mod checked_annotation_publication;
 mod checked_constant_publication;
 mod data_class_copy_visibility;
 pub(crate) mod operator_override_relations;
+mod selected_member_use;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
@@ -247,6 +248,7 @@ mod generic_call_bindings;
 mod if_expression;
 mod implicit_receiver_calls;
 mod implicit_rungs;
+mod imported_singleton_members;
 mod inline_access;
 mod inline_parameter_usage;
 mod inner_constructor_calls;
@@ -308,6 +310,7 @@ mod name_read_demand;
 mod named_class_constructors;
 pub(crate) mod operator_calls;
 mod operator_declarations;
+mod operator_of_declarations;
 mod opt_in_usage;
 mod primitive_reference;
 use operator_calls::{
@@ -437,6 +440,7 @@ mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
 mod super_calls;
+use super_calls::is_super_qualifier;
 pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
 mod type_parameter_owners;
@@ -534,10 +538,6 @@ const MAX_OVERLOAD_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES: usize = 4 * 1024 * 1024;
 const CONFLICTING_OVERLOAD_PREFIX: &str = "conflicting overloads:";
 const INAPPLICABLE_OVERLOAD_PREFIX: &str = "none of the following candidates is applicable:";
-
-fn is_super_qualifier(spelling: &str) -> bool {
-    spelling == "super" || spelling.starts_with("super<") || spelling.starts_with("super@")
-}
 
 fn lexical_receiver_label(file: &File, reference: &TypeRef) -> String {
     file.alias_spellings
@@ -1255,19 +1255,6 @@ fn builtin_inc_dec_result(operand: Ty) -> Option<Ty> {
 /// which is weaker but never wrong. Box
 /// `callableReference/property/extensionPropertyWithExtensionType.kt` covers it.
 const CALLABLE_INVOKE_OPERATOR: &str = "invoke";
-
-/// The augmented-assignment operator name for a binary op (`+=` → `plusAssign`, etc.). Only the five
-/// arithmetic compound operators have an `…Assign` form.
-fn assign_op_name(op: BinOp) -> Option<&'static str> {
-    Some(match op {
-        BinOp::Add => "plusAssign",
-        BinOp::Sub => "minusAssign",
-        BinOp::Mul => "timesAssign",
-        BinOp::Div => "divAssign",
-        BinOp::Rem => "remAssign",
-        _ => return None,
-    })
-}
 
 fn delegated_getvalue_ret_for_signature(
     file: &File,
@@ -5486,56 +5473,6 @@ impl<'a> Checker<'a> {
         };
         self.expr_lowers.insert(expression, lowering);
         Some(ty)
-    }
-
-    /// Explicit import of a member declared on a singleton classifier. The import scope has already
-    /// resolved the owner path and alias to stable identities; this only supplies the ordinary value
-    /// receiver used by member/property selection.
-    fn imported_singleton_member(
-        &self,
-        name: &str,
-    ) -> Option<(ImplicitReceiver, String, SingletonValue)> {
-        let mut candidates = self
-            .function_import_scope
-            .explicit_targets(name)
-            .into_iter()
-            .filter_map(|(namespace, declared_name)| {
-                crate::trace_compiler!(
-                    "resolve",
-                    "imported singleton candidate name={name} target={namespace:?}.{declared_name}"
-                );
-                let crate::symbol_source::SymbolNamespace::Classifier(classifier) = namespace
-                else {
-                    return None;
-                };
-                let singleton = self.classifier_singleton_value(classifier)?;
-                (singleton.classifier == classifier).then_some((
-                    ImplicitReceiver {
-                        receiver_role: None,
-                        ty: Ty::obj_name(classifier),
-                        declared_ty: Ty::obj_name(classifier),
-                        identity: (0, 0),
-                        extension_receiver: None,
-                        class_receiver: false,
-                        current: false,
-                        receiver_depth: 0,
-                        dsl_shadowed: false,
-                    },
-                    declared_name,
-                    singleton,
-                ))
-            })
-            .collect::<Vec<_>>();
-        if candidates.len() != 1 {
-            return None;
-        }
-        let (receiver, declared_name, singleton) = candidates.pop()?;
-        crate::trace_compiler!(
-            "resolve",
-            "imported singleton classifier={:?} storage={singleton:?}",
-            singleton.classifier
-        );
-        Some((receiver, declared_name, singleton))
     }
 
     /// A classifier contributed by a star-import level can denote a value when it is an object or
@@ -15019,7 +14956,7 @@ impl<'a> Checker<'a> {
                         self.this_labels.pop();
                     }
                     self.this_extension_receiver = previous_extension_receiver;
-                    self.inferred_declaration_value_ty(*e, inferred_declaration_ty(inferred))
+                    self.inferred_declaration_value_ty(*e, inferred)
                 }
                 _ => Ty::Unit,
             };
@@ -23698,6 +23635,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_fun_rets: HashMap::default(),
         inferred_ext_fun_rets: HashMap::default(),
         inferred_method_rets: HashMap::default(),
+        operator_of_overloads: Vec::new(),
         inferred_source_member_rets: HashMap::default(),
         inferred_stable_declaration_rets: HashMap::default(),
         inferred_declaration_publications: Default::default(),
@@ -24699,6 +24637,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     c.narrow_value_class_receivers();
     c.narrow_script_template_receivers();
     c.publish_member_declaring_receivers();
+    c.report_operator_of_overloads();
     let enhanced_values = c.enhanced_value_heads();
     let builtin_implementations = match builtin_implementation::for_checked_unit(&c) {
         Ok(implementations) => implementations,
@@ -24732,6 +24671,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         inferred_fun_rets,
         inferred_ext_fun_rets,
         inferred_method_rets,
+        operator_of_overloads: _,
         inferred_source_member_rets,
         inferred_stable_declaration_rets,
         inferred_declaration_publications,
@@ -25739,6 +25679,7 @@ struct Checker<'a> {
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
     inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
     inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
+    operator_of_overloads: Vec<operator_of_declarations::OperatorOfOverload>,
     inferred_source_member_rets: HashMap<crate::libraries::SourceMember, Ty>,
     inferred_stable_declaration_rets: HashMap<crate::fir::DeclarationId, Ty>,
     inferred_declaration_publications: declaration_publication::InferredDeclarationPublications,
@@ -28363,6 +28304,24 @@ impl<'a> Checker<'a> {
             property.getter_visibility,
             property.setter_visibility,
         );
+        if property.context_count > 0 && !self.file.language.callable_references_to_contextual {
+            return Some(
+                self.report_context_property_reference(
+                    expression,
+                    &property.name,
+                    reference_context_arguments::ContextualPropertyDisplay {
+                        context_names: &property.context_names,
+                        context_types: property.context_types(),
+                        extension_receiver: property
+                            .extension_facade
+                            .as_ref()
+                            .and_then(|_| property.getter.params.first().copied()),
+                        property_type: property.prop_ty,
+                        mutable: property.setter.is_some(),
+                    },
+                ),
+            );
+        }
         if !self.property_reference_exposes_setter(&property, receiver) {
             property.setter = None;
         }
@@ -33304,8 +33263,7 @@ impl<'a> Checker<'a> {
                     continue;
                 };
                 let inferred = self.expr(&property_scope, expression);
-                let inferred = self
-                    .inferred_declaration_value_ty(expression, inferred_declaration_ty(inferred));
+                let inferred = self.inferred_declaration_value_ty(expression, inferred);
                 if inferred == Ty::Error || inferred.mentions_pending() {
                     continue;
                 }
@@ -36667,8 +36625,7 @@ impl<'a> Checker<'a> {
                             }
                         });
                         if declared.is_none() && it != Ty::Error {
-                            let inferred = self
-                                .inferred_declaration_value_ty(init, inferred_declaration_ty(it));
+                            let inferred = self.inferred_declaration_value_ty(init, it);
                             if let Some(declaration) = stable_property {
                                 self.record_inferred_property_publication(
                                     declaration,
@@ -39983,6 +39940,9 @@ impl<'a> Checker<'a> {
         argument: ExprId,
         ty: Ty,
     ) -> CallArgKind {
+        if let Some(literal) = self.unpostponed_collection_literal_kind(argument, ty) {
+            return literal;
+        }
         if let Some(function) = self.expression_function_type(scope, argument, ty) {
             if function != ty {
                 return CallArgKind::CallableReference {
@@ -40732,7 +40692,7 @@ impl<'a> Checker<'a> {
                 if t == Ty::Null {
                     return self.set(e, Ty::Nothing);
                 }
-                let narrowed = definitely_non_null_ty(t);
+                let narrowed = t.not_null_operator_result(self.file.reference.quirks());
                 // A successful assertion proves the same stable access path non-null for the rest
                 // of this lexical flow (`x!!.let { use(x) }`, and later statements). Reassignments
                 // invalidate the fact through the ordinary scope machinery; temporaries and
@@ -45822,12 +45782,25 @@ impl<'a> Checker<'a> {
                     .resolver()
                     .top_level_properties(&name)
                     .into_iter()
-                    .filter(|property| {
-                        property.kind == crate::libraries::PropKind::TopLevel
-                            && property.context_count == 0
-                    })
+                    .filter(|property| property.kind == crate::libraries::PropKind::TopLevel)
                     .collect::<Vec<_>>();
                 if let [property] = top_level_properties.as_slice() {
+                    if property.context_count > 0
+                        && !self.file.language.callable_references_to_contextual
+                    {
+                        let context = property.getter.params[..property.context_count].to_vec();
+                        return self.report_context_property_reference(
+                            e,
+                            &name,
+                            reference_context_arguments::ContextualPropertyDisplay {
+                                context_names: &property.context_param_names,
+                                context_types: &context,
+                                extension_receiver: None,
+                                property_type: property.ty,
+                                mutable: property.setter.is_some(),
+                            },
+                        );
+                    }
                     if let Some(ty) =
                         self.property_ref_ty(0, property.setter.is_some(), &[property.ty])
                     {
@@ -47466,18 +47439,9 @@ impl<'a> Checker<'a> {
         mut selected: crate::symbol_resolver::ResolvedMember,
     ) -> Option<Ty> {
         selected.member.owner?;
-        if self.reject_inaccessible_selected_member(self.call_callee_name_span(call), &selected) {
+        if !self.check_selected_member_use(call, args, &selected) {
             return Some(Ty::Error);
         }
-        self.check_data_class_copy_usage(self.call_callee_name_span(call), &selected.member);
-        self.reject_non_public_api_from_public_inline(
-            call,
-            Self::is_public_api_for_inline_access(
-                selected.member.visibility,
-                &selected.member.annotations,
-            ),
-            selected.member.inline,
-        );
         // A direct function parameter contextually CHECKS a postponed lambda body. Apply the
         // receiver builder's current lower approximation to that function shape so the selected
         // commit rechecks the body with the same concrete `it` type used by the provisional member

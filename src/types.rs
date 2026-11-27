@@ -54,6 +54,8 @@ pub use substitute::{ty_subst, ty_subst_all, ty_subst_applied_arguments, TyParam
 
 pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
 pub use crate::inline_parameter_modifier::{InlineExpansionMode, InlineParameterModifier};
+mod inline_parameters;
+pub use inline_parameters::is_inline_parameter;
 use interning::ShardedInterner;
 mod array_types;
 mod primitive_arrays;
@@ -626,6 +628,26 @@ impl Ty {
                 inner.without_intersection_approximation()
             }
             _ => self.non_null_keeping_mutability(),
+        }
+    }
+
+    /// The type of a not-null operator (`!!`, the left of `?:`, the receiver of `?.`) applied to a
+    /// value of this type, in the release `quirks` describes. It differs from smart-casting the
+    /// value to non-null only for a nullable intersection fixed below an upper type, whose operator
+    /// result keeps that upper type from 2.5.
+    pub fn not_null_operator_result(self, quirks: crate::kotlin_version::Quirks) -> Ty {
+        if quirks.has(crate::kotlin_version::Quirk::NotNullOperatorDropsIntersectionApproximation) {
+            self.definitely_non_null()
+        } else {
+            self.non_null_keeping_intersection_bound()
+        }
+    }
+
+    /// This type made non-null, keeping the upper type a nullable intersection was fixed below.
+    pub fn non_null_keeping_intersection_bound(self) -> Ty {
+        match self.kind() {
+            TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Intersection(_)) => inner,
+            _ => self.definitely_non_null(),
         }
     }
 

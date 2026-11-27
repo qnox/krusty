@@ -1422,11 +1422,11 @@ impl SignatureConstraintExtractor {
             }
             Expr::NotNull { operand } => {
                 let operand = self.expression(file, *operand, scope, origin)?;
-                self.graph.add_expr(SigExpr::NonNullable(operand))
+                self.graph.add_expr(Self::not_null_operator(file, operand))
             }
             Expr::Elvis { lhs, rhs } => {
                 let lhs = self.expression(file, *lhs, scope, origin)?;
-                let lhs = self.graph.add_expr(SigExpr::NonNullable(lhs));
+                let lhs = self.graph.add_expr(Self::not_null_operator(file, lhs));
                 let rhs = self.expression(file, *rhs, scope, origin)?;
                 let operands = self.graph.add_operands([lhs, rhs]);
                 self.graph.add_expr(SigExpr::Join {
@@ -1470,7 +1470,7 @@ impl SignatureConstraintExtractor {
                         .expect("a signature receiver must retain its source span"),
                 );
                 let receiver = self.expression(file, *receiver, scope, origin)?;
-                let receiver = self.graph.add_expr(SigExpr::NonNullable(receiver));
+                let receiver = self.graph.add_expr(Self::not_null_operator(file, receiver));
                 let selected = match args {
                     Some(args) => {
                         let lexical_callee =
@@ -2803,6 +2803,23 @@ impl SignatureConstraintExtractor {
             lookup,
             origin,
         })
+    }
+
+    /// The value of a not-null operator: a release whose operators publish what a smart cast does
+    /// ([`Quirk::NotNullOperatorDropsIntersectionApproximation`]) narrows like one; later ones keep
+    /// the upper type a nullable intersection was fixed below.
+    ///
+    /// [`Quirk::NotNullOperatorDropsIntersectionApproximation`]: crate::kotlin_version::Quirk::NotNullOperatorDropsIntersectionApproximation
+    fn not_null_operator(file: &File, value: SigExprId) -> SigExpr {
+        if file
+            .reference
+            .quirks()
+            .has(crate::kotlin_version::Quirk::NotNullOperatorDropsIntersectionApproximation)
+        {
+            SigExpr::NonNullable(value)
+        } else {
+            SigExpr::NotNullOperator(value)
+        }
     }
 
     fn member_name_origin(

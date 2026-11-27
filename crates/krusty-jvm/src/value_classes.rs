@@ -57,6 +57,7 @@ pub(crate) use declaration_inventory::ModuleValueClasses;
 mod tail_boxing;
 mod type_operation_roles;
 mod unboxing_rewrites;
+mod underlying_getter;
 mod value_boundaries;
 use tail_boxing::{box_nullable_vc_tail, box_ref_tail, box_tail, restore_boxed_suspension_tails};
 mod value_members;
@@ -164,6 +165,7 @@ pub(crate) fn lower_value_classes(
     let ModuleValueClasses {
         underlying: module_value_classes,
         readable: module_readable_value_classes,
+        storage_properties,
     } = module;
     krusty::trace_compiler!(
         "value_classes",
@@ -561,23 +563,13 @@ pub(crate) fn lower_value_classes(
         }
     }
 
-    // Each source value class's getter name keyed by its internal name (`A2` → `getValue`) — to
-    // recognize the legacy call-shaped form. Semantic property nodes use the source property-name map
-    // below and never derive meaning from a JVM getter spelling.
-    let mut vc_getters: HashMap<TypeName, String> = ir
-        .classes
-        .iter()
-        .filter(|c| c.is_value)
-        .filter_map(|c| {
-            c.fields
-                .first()
-                .map(|f| (c.fq_name, property_getter_name(&f.name)))
-        })
-        .collect();
-    vc_getters.extend(
-        external_underlying_properties
-            .iter()
-            .map(|(owner, property)| (*owner, property_getter_name(property))),
+    // The getters that read a value class's underlying property, to recognize the call-shaped form.
+    // Semantic property nodes use the source property-name map below and never derive meaning from
+    // a JVM getter spelling.
+    let vc_getters = underlying_getter::UnderlyingGetters::new(
+        ir,
+        &external_underlying_properties,
+        storage_properties,
     );
     let mut vc_properties: HashMap<TypeName, String> = ir
         .classes
@@ -1110,6 +1102,7 @@ pub(crate) fn lower_value_classes(
                     owner,
                     name,
                     params: Some((params, ret)),
+                    target,
                     ..
                 } = &mut **call_callee
                 {
@@ -1119,7 +1112,7 @@ pub(crate) fn lower_value_classes(
                     if dispatch_receiver.is_some()
                         && module_value_classes.contains_key(owner)
                         && !cls_by_name.contains_key(owner)
-                        && vc_getters.get(owner) != Some(name)
+                        && !vc_getters.reads(owner, name, *target)
                     {
                         let impl_name =
                             vc_member_impl_name(name, params, ret, &callable_under, is_suspend);
@@ -1930,9 +1923,10 @@ pub(crate) fn lower_value_classes(
                 owner,
                 name,
                 params,
+                target,
                 ..
             } = &**call_callee
-                && (vc_getters.get(owner).is_some_and(|g| g == name)) =>
+                && vc_getters.reads(owner, name, *target) =>
             {
                 value_class_name(*owner, &under).map(|owner| Rw::Prop {
                     receiver: *receiver,

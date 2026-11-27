@@ -64,3 +64,33 @@ impl UnOp {
         }
     }
 }
+
+/// The spelling of a binary operator in the debug tree.
+pub(super) fn binop(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Rem => "%",
+        BinOp::Eq => "==",
+        BinOp::Ne => "!=",
+        BinOp::Lt => "<",
+        BinOp::Le => "<=",
+        BinOp::Gt => ">",
+        BinOp::Ge => ">=",
+        BinOp::And => "&&",
+        BinOp::Or => "||",
+        BinOp::RefEq => "===",
+        BinOp::RefNe => "!==",
+    }
+}
+
+/// The spelling of a unary operator in the debug tree.
+pub(super) fn unop(op: UnOp) -> &'static str {
+    match op {
+        UnOp::Neg => "neg",
+        UnOp::Not => "not",
+        UnOp::Plus => "plus",
+    }
+}

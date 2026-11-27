@@ -93,7 +93,6 @@ boxingOptimization/kt48394.kt
 boxingOptimization/kt5844.kt
 boxingOptimization/maxMinByOrNull.kt
 boxingOptimization/unsignedArrayForEach.kt
-bridges/covariantGenericDiamond.kt
 bridges/delegationComplexWithList.kt
 bridges/genericProperty.kt
 bridges/internalMethodOverrideInFriendModule.kt
@@ -113,8 +112,6 @@ bridges/test3.kt
 bridges/test5.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/extensionPropertyToFun.kt
-callableReference/adaptedReferences/inlineDefault.kt
-callableReference/adaptedReferences/inlineVararg.kt
 callableReference/adaptedReferences/innerConstructorWithVararg.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithContextParameterAsAPropertyType.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithExtensionProperty.kt
@@ -194,11 +191,8 @@ contextParameters/contextPropertyInInterface.kt
 contextParameters/contextualCallableReference.kt
 contextParameters/explicitPassing.kt
 contextParameters/kt65953.kt
-contextParameters/propertyCompoundAssignment.kt
-contextParameters/substitutedContextReceivers.kt
 contextParameters/suspendContextParemetersWithExtension.kt
 contracts/kt39374.kt
-contracts/kt47300.kt
 contracts/referenceToGenericInDeserializedContract.kt
 controlStructures/breakContinueInExpressions/breakInLoopConditions.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNameBasedDestructuringShortForm.kt
@@ -426,9 +420,6 @@ dataClasses/hashCode/long.kt
 dataClasses/hashCode/short.kt
 dataClasses/toString/primitiveArrays.kt
 dataClasses/unitComponent.kt
-defaultArguments/implementedByFake.kt
-defaultArguments/implementedByFake2.kt
-defaultArguments/implementedByFake3.kt
 defaultArguments/useThisInLambda.kt
 delegatedProperty/callableReferenceAsSecondArgumentOfDelegate.kt
 delegatedProperty/delegateToConstVal.kt
@@ -569,11 +560,9 @@ inline/defaultArgsLateinitLowering.kt
 inline/inline16.kt
 inline/inline17.kt
 inline/inline21.kt
-inline/inlinedLambdaWithErasedParamType.kt
 inline/lateinitProperty.kt
 inline/localObjectReturnedFromWhen.kt
 inline/propertyAccessorInline.kt
-inline/rootConstructor.kt
 inline/typeParameterSymbolIsUnbound.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
 inlineArgsInPlace/kt49370.kt
@@ -616,11 +605,9 @@ inlineClasses/kt33119Generic.kt
 inlineClasses/kt47762Generic.kt
 inlineClasses/kt47823.kt
 inlineClasses/kt51157.kt
-inlineClasses/overridingFunCallingPrivateFunGeneric.kt
 inlineClasses/resultRunCatchingOrElse.kt
 inlineClasses/secondaryConstructorWithVarargGeneric.kt
 inlineClasses/secondaryConstructorsInsideInlineClassWithPrimitiveCarrierTypeGeneric.kt
-inlineClasses/smartCastOnThisOfInlineClassTypeGeneric.kt
 inlineClasses/toStringCallingPrivateFunGeneric.kt
 inlineClasses/unboxGenericParameter/funInterface/primitive.kt
 inlineClasses/unboxGenericParameter/lambda/primitive.kt
@@ -1278,7 +1265,6 @@ unsignedTypes/unsignedIntCompare.kt
 unsignedTypes/unsignedLiteralsForMaxLongValue.kt
 unsignedTypes/unsignedLongCompare.kt
 unsignedTypes/unsignedRangeIterator.kt
-unsignedTypes/varargsOfUnsignedTypes.kt
 vararg/varargInTailrec.kt
 wasm-annotations/branchHint.kt
 wasm-new-exception-handling/finally5.kt

@@ -16,6 +16,7 @@
 // not define it, and repeated builds of the same checkout remain cached.
 const _: Option<&str> = option_env!("KRUSTY_BUILD_CHECKOUT");
 
+pub mod analysis;
 mod annotation_names;
 mod convention;
 pub mod ir;

@@ -25,6 +25,7 @@ mod array_storage;
 mod arrays;
 mod boxing;
 mod callable_reference_identity;
+mod char_array_text;
 mod class_literals;
 mod dependency_exports;
 mod enums;
@@ -68,6 +69,10 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
         || operation == krusty::backend::BackendCompilerIntrinsic::StringPlus
         || operation == krusty::backend::BackendCompilerIntrinsic::StringSubSequence
+        || matches!(
+            operation,
+            krusty::backend::BackendCompilerIntrinsic::CharArrayToString(_)
+        )
         || operation
             == krusty::backend::BackendCompilerIntrinsic::StartCoroutineUninterceptedOrReturn
         || matches!(
@@ -1532,6 +1537,24 @@ impl<'a> Body<'a> {
                 target, defaults, ..
             } = &**call_callee
                 && defaults.is_empty()
+                && let Some(krusty::backend::BackendCompilerIntrinsic::CharArrayToString(range)) =
+                    self.callables
+                        .callable(*target)
+                        .and_then(|fact| fact.compiler_operation()) =>
+            {
+                // The extension form carries its receiver as the dispatch receiver or as the
+                // first argument; either way it is the char array, first.
+                let operands: Vec<u32> = dispatch_receiver.into_iter().chain(args).collect();
+                self.char_array_to_string(range, &operands)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target, defaults, ..
+            } = &**call_callee
+                && defaults.is_empty()
                 && self.callables.callable(*target).is_some_and(|fact| {
                     fact.compiler_operation()
                         == Some(krusty::backend::BackendCompilerIntrinsic::StringSubSequence)
@@ -1717,6 +1740,16 @@ impl<'a> Body<'a> {
                         self.value(arg, type_operand)?;
                         if op == IrTypeOp::CastNonNull && matches!(target, ValType::Ref { .. }) {
                             self.require_nonnull_reference(target)?;
+                        }
+                        // An inline expansion keeps the declaration type parameter a coercion
+                        // names while its checked result is the call's substitution; the value
+                        // is read at that type from here on.
+                        if op == IrTypeOp::ImplicitCoercion {
+                            if let Some(result) = self.type_of(id)? {
+                                if result != type_operand && carrier(result)? != Some(target) {
+                                    self.coerce_emitted_value(type_operand, result)?;
+                                }
+                            }
                         }
                     }
                 }

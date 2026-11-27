@@ -18,6 +18,9 @@ use crate::metadata::klib_ir::tree::{
 use crate::metadata::klib_ir::{KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::Ty;
 
+/// The serialized local-variable flag that marks a `var`.
+const LOCAL_IS_VAR: u64 = 1 << 1;
+
 /// The origins of the temporaries a prepared body's inlined calls declare.
 const TEMPORARIES: [&str; 2] = [
     "IR_TEMPORARY_VARIABLE",
@@ -311,20 +314,20 @@ impl BodyLowering<'_> {
     /// otherwise an unnamed local holding its initializer's value.
     fn temporary(&mut self, id: KlibIrVariableId) -> Lowered<Option<ExprId>> {
         let variable = self.arena.variable(id);
-        if variable.base.flags != 0 || !variable.base.annotations.is_empty() {
+        if variable.base.flags & !LOCAL_IS_VAR != 0 || !variable.base.annotations.is_empty() {
             return unsupported("a mutable or annotated compiler temporary");
         }
         let initializer = variable
             .initializer
             .ok_or_else(|| mismatch("a compiler temporary has no initializer"))?;
         let symbol = variable.base.symbol.clone();
-        if self.reads_immutable_value(initializer) {
+        if variable.base.flags & LOCAL_IS_VAR == 0 && self.reads_immutable_value(initializer) {
             if self.compiler_aliases.insert(symbol, initializer).is_some() {
                 return Err(mismatch("a compiler temporary repeats another's identity"));
             }
             return Ok(None);
         }
-        self.unnamed_local(id).map(Some)
+        self.unnamed_variable(id).map(Some)
     }
 
     /// The compiler temporary `id` as an unnamed immutable local holding its initializer's value.
@@ -333,13 +336,24 @@ impl BodyLowering<'_> {
         if variable.base.flags != 0 || !variable.base.annotations.is_empty() {
             return unsupported("a mutable or annotated compiler temporary");
         }
+        self.unnamed_variable(id)
+    }
+
+    /// The compiler temporary `id` as an unnamed local holding its initializer's value, reassignable
+    /// when the serialized temporary is a `var` (an inlined loop's induction counter).
+    pub(super) fn unnamed_variable(&mut self, id: KlibIrVariableId) -> Lowered<ExprId> {
+        let variable = self.arena.variable(id);
+        if variable.base.flags & !LOCAL_IS_VAR != 0 || !variable.base.annotations.is_empty() {
+            return unsupported("a mutable or annotated compiler temporary");
+        }
+        let mutable = variable.base.flags & LOCAL_IS_VAR != 0;
         let initializer = variable
             .initializer
             .ok_or_else(|| mismatch("a compiler temporary has no initializer"))?;
         let symbol = variable.base.symbol.clone();
         let ty = self.semantic(variable.ty)?;
         let init = self.operand(initializer, ty)?;
-        let local = self.locals.temporary(&symbol, ty)?;
+        let local = self.locals.temporary(&symbol, ty, mutable)?;
         Ok(self.ir.add_expr(IrExpr::Variable {
             index: local.index,
             ty,
