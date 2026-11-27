@@ -1857,6 +1857,9 @@ mod type_of;
 #[path = "wasm_char_sequence_appends.rs"]
 mod char_sequence_appends;
 
+#[path = "wasm_kotlinc_defects.rs"]
+mod kotlinc_defects;
+
 #[test]
 fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
     expect_wasm_box(
