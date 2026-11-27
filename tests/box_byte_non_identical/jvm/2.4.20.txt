@@ -111,7 +111,6 @@ boxingOptimization/unsignedArrayForEach.kt
 branching/when_with_try1.kt
 bridges/delegationComplex.kt
 bridges/delegationComplexWithList.kt
-bridges/diamond.kt
 bridges/fakeCovariantOverride.kt
 bridges/fakeGenericCovariantOverride.kt
 bridges/fakeGenericCovariantOverrideWithDelegation.kt
@@ -133,7 +132,6 @@ bridges/returnTypeSignature.kt
 bridges/special.kt
 bridges/substitutionInSuperClass/boundedTypeArguments.kt
 bridges/substitutionInSuperClass/delegation.kt
-bridges/substitutionInSuperClass/enum.kt
 bridges/test6.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/adaptedSecondArgArray.kt
@@ -969,7 +967,6 @@ directInvokeOptimization/simpleLambda.kt
 directInvokeOptimization/unboundInnerContructorRef.kt
 directInvokeOptimization/unboundMemberRef.kt
 elvis/genericElvisWithNullLHS.kt
-elvis/kt6694ExactAnnotationForElvis.kt
 elvis/ofNonNullableResultType.kt
 elvis/withNothingConstraintAndExpectedType.kt
 enum/deepInnerClassInEnumEntryClass.kt
@@ -1065,7 +1062,6 @@ extensionProperties/kt9897.kt
 extensionProperties/kt9897_topLevel.kt
 fakeOverride/kt40180_2.kt
 fakeOverride/kt40180_3.kt
-fakeOverride/kt49371.kt
 fakeOverride/privateFakeOverrides0.kt
 fakeOverride/privateFakeOverrides1.kt
 finally/decrementInFinally.kt
@@ -1425,10 +1421,7 @@ inlineClasses/interfaceDelegation/memberFunDelegationToInlineClassWithInlineClas
 inlineClasses/interfaceDelegation/memberFunDelegationToInlineClassWithInlineClassParameterTypesGeneric.kt
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypes.kt
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypesGeneric.kt
-inlineClasses/interfaceMethodCalls/genericDefaultInterfaceExtensionFunCall.kt
 inlineClasses/interfaceMethodCalls/genericDefaultInterfaceExtensionFunCallGeneric.kt
-inlineClasses/interfaceMethodCalls/genericDefaultInterfaceMethodCall.kt
-inlineClasses/interfaceMethodCalls/genericDefaultInterfaceMethodCallGeneric.kt
 inlineClasses/interfaceMethodCalls/interfaceSuperCallGeneric.kt
 inlineClasses/iterateOverArrayOfInlineClassValues.kt
 inlineClasses/iterateOverArrayOfInlineClassValuesGeneric.kt
@@ -1547,7 +1540,6 @@ innerNested/superConstructorCall/objectExtendsInnerOfLocalVarargAndDefault.kt
 innerNested/superConstructorCall/objectExtendsInnerOfLocalWithCapture.kt
 innerNested/superConstructorCall/objectExtendsLocalWithClosure.kt
 innerNested/superConstructorCall/objectOuterDiffersFromInnerOuter.kt
-interfaceCallsNCasts/diamond.kt
 interfaceCallsNCasts/finalMethod.kt
 intrinsics/kt10131.kt
 intrinsics/kt10131a.kt
@@ -2086,9 +2078,6 @@ regressions/arrayLiteralSpreadsInSourceOrder.kt
 regressions/atomicCompareExchange.kt
 regressions/callableReferenceToImplicitReceiverUnitCoercion.kt
 regressions/captureStorageDefaultMetadata.kt
-regressions/closedRangeBoundsThroughInterface.kt
-regressions/closedRangeBoundsThroughSubclass.kt
-regressions/closedRangeIntAccessors.kt
 regressions/closureWriteConformingSmartCast.kt
 regressions/closureWriteConformingSmartCastStringBuilder.kt
 regressions/collectionLiteralForTypeVariableBuiltFromOtherBound.kt
@@ -2242,7 +2231,6 @@ regressions/propertyReferenceGetAndName.kt
 regressions/propertyReferenceIdentityAcrossModules.kt
 regressions/propertySmartCastKeepsDeclaredType.kt
 regressions/rangeEqualityThroughProgression.kt
-regressions/receiverParameterMemberKeepsDefinitelyNonNull.kt
 regressions/referenceArrayStoreEvaluatesValueBeforeBoundsCheck.kt
 regressions/runtimeArrayListInterfaceTests.kt
 regressions/runtimeExceptionConstructors.kt
@@ -2333,7 +2321,6 @@ serialization/deserializedMembers.kt
 serialization/serializedDefaultArgs.kt
 smartCasts/avoidSmartCastToDerivedForPrivate.kt
 smartCasts/falseSmartCast.kt
-smartCasts/genericInheritanceWithNonGenericNoAmbiguity.kt
 smartCasts/genericSet.kt
 smartCasts/implicitMemberReceiver.kt
 smartCasts/invokeRecieverSmartcastK2.kt
@@ -2374,7 +2361,6 @@ super/kt3492ClassFun.kt
 super/kt3492ClassProperty.kt
 super/kt3492TraitFun.kt
 super/kt3492TraitProperty.kt
-super/superCallToNonGenericImplThroughGenericDefaultImpls.kt
 super/superConstructor/kt18356_2.kt
 super/superConstructor/objectExtendsInner.kt
 super/superConstructor/objectExtendsLocalInner.kt
@@ -2413,7 +2399,6 @@ traits/kt2399.kt
 traits/multiple.kt
 traits/receiverOfIntersectionType.kt
 traits/traitImplDelegationWithCovariantOverride.kt
-traits/traitImplGenericDelegation.kt
 traits/traitWithPrivateExtension.kt
 traits/traitWithPrivateMember.kt
 traits/traitWithPrivateMemberAccessFromLambda.kt

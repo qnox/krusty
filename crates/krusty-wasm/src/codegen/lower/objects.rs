@@ -88,6 +88,27 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// A field read with the throw-if-null a `lateinit` field carries. Every read of a `lateinit`
+    /// field is guarded, the default getter's included; only the raw read `isInitialized` makes
+    /// (`LateinitInitialized`) uses [`Self::field_read`] alone.
+    pub(super) fn guarded_field_read(
+        &mut self,
+        receiver: u32,
+        class: ClassId,
+        index: u32,
+    ) -> Result<(), Unsupported> {
+        self.field_read(receiver, class, index)?;
+        let field = &self.ir.classes[class as usize].fields[index as usize];
+        if !field.is_lateinit() {
+            return Ok(());
+        }
+        let name = field.name.clone();
+        let Some(reference @ ValType::Ref { .. }) = carrier(field.ty)? else {
+            return Err("a `lateinit` read without a reference carrier".to_string());
+        };
+        self.guard_lateinit(reference, &name)
+    }
+
     /// Consume one checked enclosing edge through the producer-certified constructor field.
     /// The existing field reader evaluates the receiver exactly once and projects its GC layout.
     pub(super) fn enclosing_instance(
@@ -1159,7 +1180,7 @@ impl Body<'_> {
         }
         match property.backing_field {
             Some(field) => {
-                self.field_read(receiver, class, field)?;
+                self.guarded_field_read(receiver, class, field)?;
                 // The field keeps its storage type. Callers of the read see the public type: the
                 // checker lowers a read of the field itself as a field access, so a property read
                 // that remains is the default getter.
