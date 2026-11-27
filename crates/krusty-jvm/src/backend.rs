@@ -981,14 +981,6 @@ impl JvmState {
     }
 }
 
-/// A facade's internal name: its simple name under the file's package (`p/q/FooKt`).
-fn facade_class_name(segment: &str, package: &Option<String>) -> String {
-    match package.as_deref() {
-        Some(package) if !package.is_empty() => format!("{}/{segment}", package.replace('.', "/")),
-        _ => segment.to_string(),
-    }
-}
-
 /// A checked file after every JVM representation pass has selected its physical facts. Keeping the
 /// handoff together makes the boundary explicit: emission consumes this closed product and must not
 /// recover any of its decisions.
@@ -1035,12 +1027,10 @@ impl JvmBackend {
         } = file;
         let stem = &stems[source.raw() as usize];
         let package = ir.package.clone().unwrap_or_default();
-        let facade_name =
-            facade_class_name(&file_classes.containers[source.raw() as usize], &ir.package);
+        let facade = &file_classes.containers[source.raw() as usize];
+        let facade_name = facade.internal_name(ir.package.as_deref());
         let facade_class = krusty::types::type_name(&facade_name);
-        let multifile_facade = file_classes.multifile_facades[source.raw() as usize]
-            .as_deref()
-            .map(|facade| facade_class_name(facade, &ir.package));
+        let multifile_facade = facade.multifile_internal_name(ir.package.as_deref());
         pass_facts.property_realizations = property_realizations;
         if let Err(reason) = run_backend_passes(
             &mut ir,
@@ -1272,6 +1262,7 @@ impl JvmBackend {
                     part,
                     run.multifile_part.take(),
                     facade_slots,
+                    &package,
                 );
             }
         }
@@ -1282,10 +1273,18 @@ impl JvmBackend {
         if has_facade_members {
             let simple_name =
                 |internal: &str| internal.rsplit('/').next().unwrap_or(internal).to_string();
+            // The module file lists the class under its Kotlin package, and names the JVM package
+            // only when `@file:JvmPackageName` put the class somewhere else.
+            let jvm_package = facade_name
+                .rsplit_once('/')
+                .map_or("", |(directory, _)| directory);
+            let jvm_package =
+                (jvm_package != package.replace('.', "/")).then(|| jvm_package.to_string());
             state.module_packages.entry(package).or_default().push(
                 krusty::metadata::module::PackagePart {
                     name: simple_name(&facade_name),
                     multifile_facade: multifile_facade.as_deref().map(simple_name),
+                    jvm_package,
                 },
             );
         }
@@ -1413,7 +1412,7 @@ impl Backend for JvmBackend {
     ) -> Vec<Artifact> {
         let file_classes = state.file_classes(file.stems, file.classifiers.module());
         let facades = file_classes.containers.clone();
-        let facade = facade_class_name(&facades[file.source.raw() as usize], &file.ir.package);
+        let facade = facades[file.source.raw() as usize].internal_name(file.ir.package.as_deref());
         let facade_class = type_name(&facade);
         crate::local_class_names::realize(&mut file.ir, |source| {
             crate::module_calls::facade_for(source, &facades)

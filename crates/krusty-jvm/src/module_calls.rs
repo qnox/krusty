@@ -7,7 +7,7 @@ use krusty::ir::{
 use krusty::jvm::inline::PropertyAccess;
 use krusty::types::TypeName;
 
-use super::file_facades::FileClasses;
+use super::file_facades::{FacadeClass, FileClasses};
 
 use super::default_call_operands::{DefaultCallOperand, DefaultCallOperands};
 
@@ -27,7 +27,10 @@ pub(super) enum ModuleRealizationTarget {
     Static(u32),
 }
 
-fn jvm_field_access(property: &IrModuleProperty, facades: &[String]) -> Option<PropertyAccess> {
+fn jvm_field_access(
+    property: &IrModuleProperty,
+    facades: &[FacadeClass],
+) -> Option<PropertyAccess> {
     let (owner, is_static) = jvm_field_storage(property, facades)?;
     Some(PropertyAccess::Field {
         owner,
@@ -43,7 +46,7 @@ fn jvm_field_access(property: &IrModuleProperty, facades: &[String]) -> Option<P
 /// makes its storage the declaration's JVM surface.
 pub(super) fn jvm_field_storage(
     property: &IrModuleProperty,
-    facades: &[String],
+    facades: &[FacadeClass],
 ) -> Option<(TypeName, bool)> {
     if !crate::property_realizations::jvm_field_eligible(
         &property.annotations,
@@ -1461,7 +1464,7 @@ fn private_accessor_call(
 }
 
 /// Resolve each foreign inline template's declaring source unit to its JVM file facade.
-pub(super) fn resolve_foreign_template_facades(ir: &mut IrFile, facades: &[String]) {
+pub(super) fn resolve_foreign_template_facades(ir: &mut IrFile, facades: &[FacadeClass]) {
     let templates = ir
         .foreign_template_sources()
         .filter_map(|(function, source)| Some((function, facade_for(source, facades)?)))
@@ -1474,7 +1477,7 @@ pub(super) fn resolve_foreign_template_facades(ir: &mut IrFile, facades: &[Strin
 pub(super) fn static_owner(
     placement: IrStaticPlacement,
     source: IrModuleSource,
-    facades: &[String],
+    facades: &[FacadeClass],
 ) -> Option<krusty::types::TypeName> {
     match placement {
         IrStaticPlacement::Package => facade_for(source, facades),
@@ -1489,24 +1492,21 @@ pub(super) fn call_owner(
     source: IrModuleSource,
     file_classes: &FileClasses,
 ) -> Option<krusty::types::TypeName> {
-    match (
-        placement,
-        file_classes
-            .multifile_facades
-            .get(source.source.raw() as usize)?,
-    ) {
-        (IrStaticPlacement::Package, Some(facade)) => {
-            Some(krusty::types::type_name_child(source.package, facade))
-        }
+    let class = file_classes.containers.get(source.source.raw() as usize)?;
+    match (placement, class.multifile_type_name(source.package)) {
+        (IrStaticPlacement::Package, Some(facade)) => Some(facade),
         _ => static_owner(placement, source, &file_classes.containers),
     }
 }
 
-/// The facade class of `source`, from each source's facade class simple name.
+/// The facade class of `source`, from each source's facade class.
 pub(super) fn facade_for(
     source: IrModuleSource,
-    facades: &[String],
+    facades: &[FacadeClass],
 ) -> Option<krusty::types::TypeName> {
-    let segment = facades.get(source.source.raw() as usize)?;
-    Some(krusty::types::type_name_child(source.package, segment))
+    Some(
+        facades
+            .get(source.source.raw() as usize)?
+            .type_name(source.package),
+    )
 }

@@ -67,7 +67,7 @@ impl HelperAccess {
 pub(crate) fn realize(
     ir: &mut IrFile,
     current_source: IrModuleSource,
-    facades: &[String],
+    facades: &[crate::file_facades::FacadeClass],
     classifiers: &krusty::backend::CheckedBackendClassifiers<'_>,
     references: &crate::property_reference_delegates::PropertyReferenceDelegates,
 ) -> Result<HelperAccess, ()> {

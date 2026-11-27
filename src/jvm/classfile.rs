@@ -507,6 +507,9 @@ pub struct ClassWriter {
     /// class's single `RuntimeVisibleAnnotations` attribute — `@Metadata` and user annotations both append
     /// here so `finish` writes ONE attribute (two would be invalid per JVMS §4.7.16).
     runtime_annotations: Vec<Vec<u8>>,
+    /// The `@Metadata.pn` of a file class that `@file:JvmPackageName` moved out of its Kotlin
+    /// package: that package.
+    metadata_package_name: Option<String>,
     invisible_annotations: Vec<Vec<u8>>,
     /// `BootstrapMethods` entries: `(method_handle_cp_index, static_argument_cp_indices)`.
     /// The index of an entry here is its `bootstrap_method_attr_index` (referenced by InvokeDynamic).
@@ -582,6 +585,7 @@ impl ClassWriter {
             class_attributes: Vec::new(),
             class_signature: None,
             runtime_annotations: Vec::new(),
+            metadata_package_name: None,
             invisible_annotations: Vec::new(),
             bootstrap_methods: Vec::new(),
             class_deprecated: false,

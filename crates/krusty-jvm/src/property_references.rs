@@ -464,7 +464,7 @@ pub(crate) fn place_delegated_arrays(
 /// IR; this function chooses only their JVM representation.
 fn synthesize_delegated(
     ir: &mut IrFile,
-    facades: &[String],
+    facades: &[crate::file_facades::FacadeClass],
     target: PropertyId,
     declaration: &IrModuleProperty,
     property: PropRef,
@@ -564,7 +564,7 @@ fn synthesize_delegated(
 /// declaration's file facade, flagged as such), and receiver-less.
 fn local_property_reference(
     ir: &mut IrFile,
-    facades: &[String],
+    facades: &[crate::file_facades::FacadeClass],
     reference: &krusty::ir::IrLocalPropertyReference,
 ) -> Result<(TypeName, IrExpr), PropertyReferenceRealizationTarget> {
     let container = match reference.class {
