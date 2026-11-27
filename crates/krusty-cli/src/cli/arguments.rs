@@ -300,6 +300,7 @@ pub(super) fn apply(
             }
         }
         "-jdk-home" => opts.jdk_home = Some(PathBuf::from(text)),
+        "-Xjvm-enable-preview" => opts.jvm_enable_preview = flag,
         "-Xno-param-assertions" => opts.no_param_assertions = flag,
         "-Xno-call-assertions" => opts.no_call_assertions = flag,
         "-Xno-receiver-assertions" => opts.no_receiver_assertions = flag,
@@ -352,11 +353,25 @@ pub(super) fn apply(
                 ));
             }
         }
+        // `-XXexplicit-return-types=<mode>` is the return-type half of `-Xexplicit-api`.
+        "-XXexplicit-return-types" => {
+            if matches!(text, "strict" | "warning" | "disable") {
+                opts.explicit_return_types = Some(text.to_string());
+            } else {
+                opts.errors.push(format!(
+                    "unknown value for parameter -XXexplicit-return-types: '{text}'. Value should \
+                     be one of {{disable, strict, warning}}"
+                ));
+            }
+        }
         // `-Xassertions` selects how `assert(...)` is compiled. krusty emits the two unconditional
-        // modes; `jvm` and `legacy` name runtime-checked shapes it does not reproduce yet.
+        // modes and `legacy`, kotlinc's default; `jvm` names a runtime-checked shape it does not
+        // reproduce yet.
         "-Xassertions" => match text {
-            "always-enable" | "always-disable" => opts.assertions = Some(text.to_string()),
-            "jvm" | "legacy" => opts.refuse(format!(
+            "always-enable" | "always-disable" | "legacy" => {
+                opts.assertions = Some(text.to_string())
+            }
+            "jvm" => opts.refuse(format!(
                 "{name}={text} selects an output shape krusty does not emit"
             )),
             _ => opts.errors.push(format!(
@@ -477,6 +492,21 @@ fn jvm_target_matches_release(target: &str, release: &str) -> bool {
     target == release
 }
 
+/// kotlinc's configuration error for `-Xexplicit-api` and `-XXexplicit-return-types` naming two
+/// different enabled modes; `disable` on either side never conflicts.
+fn explicit_mode_conflict(opts: &Options) -> Option<String> {
+    let api = opts.explicit_api.as_deref().unwrap_or("disable");
+    let return_types = opts.explicit_return_types.as_deref().unwrap_or("disable");
+    if api == "disable" || return_types == "disable" || api == return_types {
+        return None;
+    }
+    Some(format!(
+        "'-Xexplicit-api' and '-XXexplicit-return-types' flags cannot have different values at \
+         the same time.\nConsider use only one of those flags\nPassed:\n  '-Xexplicit-api={api}'\n  \
+         '-XXexplicit-return-types={return_types}'"
+    ))
+}
+
 pub(super) fn finish_language_settings(
     opts: &mut Options,
     mut parsed: ParsedSettings,
@@ -484,6 +514,9 @@ pub(super) fn finish_language_settings(
     explicit: &[(&ArgumentSpec, Recorded)],
     lifecycle: Vec<CliWarning>,
 ) {
+    if let Some(conflict) = explicit_mode_conflict(opts) {
+        opts.configuration_errors.push(conflict);
+    }
     let reference_version = catalog.version;
     let table = FeatureTable::for_version(reference_version)
         .expect("every supported reference release has a language feature table");

@@ -6,12 +6,6 @@
 /// One file's language-feature decisions.
 #[derive(Default)]
 pub struct FileLanguagePolicy {
-    /// `// ASSERTIONS_MODE: always-enable` — `assert(...)` is emitted UNGUARDED (always checks + throws),
-    /// not behind the per-class `desiredAssertionStatus()` guard. From the test directive / `-Xassertions`.
-    pub assert_always_enabled: bool,
-    /// `// ASSERTIONS_MODE: always-disable` — `assert(...)` is elided entirely (the condition is not even
-    /// evaluated). Mutually exclusive with `assert_always_enabled`; both unset ⇒ the per-class guard.
-    pub assert_always_disabled: bool,
     /// `+ExplicitContextArguments`: named context parameters may be supplied at a call site instead
     /// of being selected from the implicit receiver and lexical scope.
     pub explicit_context_arguments: bool,
@@ -50,6 +44,9 @@ pub struct FileLanguagePolicy {
     pub data_copy_respects_ctor_visibility: bool,
     /// Configured property-parameter annotation defaulting, projected once from language features.
     pub property_annotation_default_target_mode: crate::types::PropertyAnnotationDefaultTargetMode,
+    /// What this file's compilation reproduces of kotlinc, projected from its language features so
+    /// every later phase reads it from the file instead of a process setting.
+    pub reference: crate::kotlin_version::ReferenceProfile,
     /// `+UnitConversionsOnArbitraryExpressions`: a call argument whose function value returns
     /// non-`Unit` may be converted to a function type returning `Unit`.
     pub unit_conversions_on_arbitrary_expressions: bool,

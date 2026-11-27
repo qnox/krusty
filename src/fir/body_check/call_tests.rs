@@ -1272,12 +1272,16 @@ fn suspend_coroutine_is_an_ordinary_inline_suspend_call() {
 }
 
 #[test]
-fn kotlin_assert_is_a_checked_lazy_fir_intrinsic() {
-    let (body, _) = checked_function_body_with_platform(
-        "// WITH_STDLIB\n\
-         fun verify(value: Boolean): Unit = assert(value)\n",
+fn kotlin_assert_under_jvm_assertions_is_a_checked_lazy_fir_intrinsic() {
+    let source = "// WITH_STDLIB\n\
+                  // ASSERTIONS_MODE: jvm\n\
+                  fun verify(value: Boolean): Unit = assert(value)\n";
+    let features = crate::features::LangFeatures::from_source(source);
+    let (body, _) = checked_function_body_with_platform_and_features(
+        source,
         "verify",
         jvm_stdlib_semantics(),
+        &features,
     );
     let FirExprKind::Call(call) = &body.expr(root_expression(&body)).expect("assert call").kind
     else {
@@ -1297,6 +1301,27 @@ fn kotlin_assert_is_a_checked_lazy_fir_intrinsic() {
     assert!(matches!(
         call.arguments.as_ref(),
         [FirCallArgument::Expression { parameter: 0, .. }]
+    ));
+}
+
+#[test]
+fn kotlin_assert_by_default_is_an_ordinary_inline_call_like_kotlincs_legacy_mode() {
+    let (body, _) = checked_function_body_with_platform(
+        "// WITH_STDLIB\n\
+         fun verify(value: Boolean): Unit = assert(value)\n",
+        "verify",
+        jvm_stdlib_semantics(),
+    );
+    let FirExprKind::Call(call) = &body.expr(root_expression(&body)).expect("assert call").kind
+    else {
+        panic!("the selected kotlin.assert declaration must remain an explicit checked call")
+    };
+    assert!(matches!(
+        call.target,
+        FirCallTarget::External {
+            inline: crate::libraries::InlineKind::MustInline,
+            ..
+        }
     ));
 }
 

@@ -44,8 +44,9 @@ impl BodyLowering<'_, '_, '_> {
         Ok(Some(self.builder.inst_results(call)[0]))
     }
 
-    /// `values()` or `valueOf` of an enum another file declares, called through the entry that
-    /// file exports: they read the constants its storage holds. `name` is `valueOf`'s argument.
+    /// `values()`, `valueOf` or `entries` of an enum another file declares, called through the
+    /// entry that file exports: they read the constants its storage holds. `name` is `valueOf`'s
+    /// argument.
     pub(super) fn dependency_enum_member(
         &mut self,
         classifier: krusty::types::TypeName,
@@ -75,6 +76,9 @@ impl BodyLowering<'_, '_, '_> {
                 Ty::obj_args("kotlin/Array", &[Ty::obj_name(classifier)])
             }
             krusty::backend::enums::StaticMember::ValueOf => Ty::obj_name(classifier),
+            krusty::backend::enums::StaticMember::Entries => {
+                Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::obj_name(classifier)])
+            }
         };
         let id = self.file.import(symbol, &params, result)?;
         let func_ref = self.func_ref(id);

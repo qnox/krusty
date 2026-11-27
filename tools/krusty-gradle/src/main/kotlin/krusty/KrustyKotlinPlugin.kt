@@ -237,6 +237,7 @@ private fun replaceKotlinJvmCompiles(
             compileTaskPath.set(kotlinTask.path)
             compilerArguments.set(kotlincArguments)
             pluginRefusals.set(request.map(KotlincRequest::refusals))
+            toolchainRefusals.convention(emptyList())
             compilerPluginClasspath.from(kotlinTask.pluginClasspath)
             compilerPluginOptions.set(compilerPluginArguments)
             kotlinPluginVersion.set(pluginVersion)
@@ -306,6 +307,7 @@ private fun replaceKotlinJvmCompiles(
             configureCompilation()
             fixKotlincDefects.set(defectFixes)
             destinationDirectory.set(kotlinTask.destinationDirectory)
+            kotlinTaskPath.set(kotlinTask.path)
             handoff.set(project.layout.buildDirectory.file("krusty/${kotlinTask.name}/handoff.txt"))
             dependsOn(compilePrerequisites)
             dependsOn(supportCheck)
@@ -336,18 +338,30 @@ private fun replaceKotlinJvmCompiles(
             val selectedJavaVersion = launcher
                 .map { it.metadata.languageVersion.asInt().toString() }
                 .orElse(project.provider { JavaVersion.current().majorVersion })
+            val kotlinJavaVersion = kotlinTask.kotlinJavaToolchainProvider
+                .flatMap { it.javaVersion }
+                .map { it.majorVersion }
+                .orElse(selectedJavaVersion)
             for (compilation in compilations) {
                 compilation.configure {
                     jdkHome.set(selectedJdkHome)
                     javaVersion.set(selectedJavaVersion)
-                    kotlinJavaVersion.set(
-                        kotlinTask.kotlinJavaToolchainProvider
-                            .flatMap { it.javaVersion }
-                            .map { it.majorVersion }
-                            .orElse(selectedJavaVersion),
-                    )
+                    this.kotlinJavaVersion.set(kotlinJavaVersion)
                 }
             }
+            // KGP compiles against the Kotlin task's own Java toolchain (`kotlinJavaToolchain`),
+            // which defaults to the project's. Its JDK home is no public KGP API, so a compile that
+            // sets a different one is left to kotlinc, which compiles it against that JDK.
+            supportCheck.configure {
+                toolchainRefusals.set(
+                    kotlinJavaVersion.zip(selectedJavaVersion) { kotlin, java ->
+                        listOfNotNull(kotlinJavaToolchainRefusal(kotlin, java))
+                    },
+                )
+            }
+            // KGP checks the Kotlin JVM target against the Java task's targetCompatibility, whose
+            // convention follows `options.release`. It is read as a value: a mapped task provider
+            // would make the compile depend on the Java task, which depends on the compile.
             if (android) {
                 // An Android variant is no Java source set. kotlinc reads the Java sources the
                 // variant's javac task compiles, generated ones (BuildConfig, AIDL) included; that
@@ -361,12 +375,7 @@ private fun replaceKotlinJvmCompiles(
                 for (compilation in compilations) {
                     compilation.configure {
                         javaSourceFiles.from(javaCompile.map { it.source })
-                        javaTarget.set(
-                            javaCompile.flatMap { task ->
-                                task.options.release.map { it.toString() }
-                                    .orElse(project.provider { task.targetCompatibility })
-                            },
-                        )
+                        javaTarget.set(javaCompile.flatMap { task -> project.provider { task.targetCompatibility } })
                     }
                 }
             }
@@ -377,12 +386,7 @@ private fun replaceKotlinJvmCompiles(
                     for (compilation in compilations) {
                         compilation.configure {
                             javaSourceFiles.from(sourceSet.allJava)
-                            javaTarget.set(
-                                javaCompile.flatMap { task ->
-                                    task.options.release.map { it.toString() }
-                                        .orElse(project.provider { task.targetCompatibility })
-                                },
-                            )
+                            javaTarget.set(javaCompile.flatMap { task -> project.provider { task.targetCompatibility } })
                         }
                     }
                 }
@@ -392,7 +396,7 @@ private fun replaceKotlinJvmCompiles(
         // Preserve the public task graph: callers and downstream tasks can still depend on
         // compileKotlin/compileTestKotlin. A skipped task runs its dependencies but none of its own
         // compiler actions, so no private action list is mutated. kotlinc runs only for a compile
-        // whose request krusty refused, or whose module a native compiler plugin pass handed back.
+        // whose request krusty refused, or whose module krusty did not compile.
         kotlinTask.dependsOn(replacement)
         val handedBack = replacement.flatMap { it.handoff }
         kotlinTask.onlyIf("krusty refused part of the compile's request, handed the module back, or the build verifies krusty") {
@@ -484,12 +488,20 @@ abstract class KrustyCompilation : DefaultTask() {
     @get:Input
     abstract val fixKotlincDefects: Property<Boolean>
 
-    /** The Kotlin and Java sources krusty compiles, in path order. */
+    /**
+     * The Kotlin and Java sources krusty compiles, in path order. None without a Kotlin source:
+     * KGP's task then has no source and compiles nothing, so neither Java sources nor the JVM
+     * target are checked.
+     */
     protected fun sources(): List<File> {
-        validateJvmTargets(kotlinTarget.get(), javaTarget.get(), targetValidationMode.get()) {
-            logger.warn(it)
-        }
         val kotlinSources = sourceFiles.asFileTree.files.map(::normalized).sortedBy(File::getAbsolutePath)
+        if (kotlinSources.isEmpty()) return emptyList()
+        jvmTargetMismatch(kotlinTarget.get(), javaTarget.get())?.let { mismatch ->
+            when (targetValidationMode.get()) {
+                "ERROR" -> throw GradleException(mismatch)
+                "WARNING" -> logger.warn(mismatch)
+            }
+        }
         val unsupported = kotlinSources.filter { it.extension != "kt" }
         if (unsupported.isNotEmpty()) {
             throw GradleException(
@@ -526,11 +538,9 @@ abstract class KrustyCompilation : DefaultTask() {
                 arguments.add("-Xfragment-refines=" + fragmentRefines.get().joinToString(","))
             }
         }
-        if (javaVersion.get() != kotlinJavaVersion.get()) {
-            throw GradleException(
-                "Kotlin task Java ${kotlinJavaVersion.get()} differs from Gradle Java toolchain ${javaVersion.get()}",
-            )
-        }
+        // The support check leaves such a compile to kotlinc; krusty never compiles it against
+        // another JDK.
+        kotlinJavaToolchainRefusal(kotlinJavaVersion.get(), javaVersion.get())?.let { throw GradleException(it) }
         val pluginVersion = supportedKotlinPluginVersion(kotlinPluginVersion.get())
         arguments.add("-Xkotlin-reference-version=$pluginVersion")
         if (fixKotlincDefects.get()) arguments.add(FIX_KOTLINC_DEFECTS_ARGUMENT)
@@ -554,11 +564,13 @@ abstract class KrustyCompileTask @Inject constructor(
     @get:OutputDirectory
     abstract val destinationDirectory: DirectoryProperty
 
+    /** The Kotlin task this compile replaces, which compiles the module with kotlinc on a handoff. */
+    @get:Internal
+    abstract val kotlinTaskPath: Property<String>
+
     /**
-     * Empty when krusty compiled the module. Otherwise the errors of a native compiler plugin pass
-     * that does not implement a construct of the module yet, which krusty reports with its own exit
-     * status, [PLUGIN_REFUSAL_EXIT_STATUS]: the Kotlin task then compiles the module with kotlinc.
-     * Any other failure of krusty fails the build.
+     * Empty when krusty compiled the module. Otherwise why it did not ([KotlincHandoff]): the Kotlin
+     * task then compiles the module with kotlinc. A krusty failure never fails the build.
      */
     @get:OutputFile
     abstract val handoff: RegularFileProperty
@@ -576,33 +588,41 @@ abstract class KrustyCompileTask @Inject constructor(
         handoff.get().asFile.writeText("")
         if (sources.isEmpty()) return
 
+        classpathFingerprintFailure(classpathFingerprint.get().asFile)?.let { reason ->
+            handOff(internalErrorHandoff("$FINGERPRINT_FAILURE\n$reason"))
+            return
+        }
         val executable = binary.get().asFile.absolutePath
         val errors = ByteArrayOutputStream()
-        val result = execOperations.exec {
-            this.executable = executable
-            args(arguments)
-            errorOutput = TeeOutputStream(System.err, errors)
-            isIgnoreExitValue = true
-        }
-        when (result.exitValue) {
-            0 -> return
-            PLUGIN_REFUSAL_EXIT_STATUS -> {
-                val refused = errors.toString(Charsets.UTF_8).lines().filter { ": error: " in it }
-                logger.warn(
-                    "krusty: task '{}' is handed to kotlinc: a krusty compiler plugin does not implement " +
-                        "everything the module uses\n{}",
-                    path,
-                    refused.joinToString("\n") { "  $it" },
-                )
-                handoff.get().asFile.writeText(refused.joinToString("\n", postfix = "\n"))
+        val result = try {
+            execOperations.exec {
+                this.executable = executable
+                args(arguments)
+                errorOutput = TeeOutputStream(System.err, errors)
+                isIgnoreExitValue = true
             }
-            else -> throw GradleException("$executable exited with ${result.exitValue} for $path")
+        } catch (failure: GradleException) {
+            handOff(internalErrorHandoff("$executable could not be run: ${failure.message}"))
+            return
         }
+        if (result.exitValue == 0) return
+        // kotlinc writes the module's classes into the same directory; nothing krusty wrote stays.
+        fileSystemOperations.delete { delete(destination) }
+        destination.mkdirs()
+        handOff(kotlincHandoff(result.exitValue, errors.toString(Charsets.UTF_8)))
+    }
+
+    private fun handOff(handoff: KotlincHandoff) {
+        // The same line the support check logs for a request krusty refuses up front.
+        logger.warn(
+            "krusty: task '{}' is left to kotlinc: {}\n{}",
+            kotlinTaskPath.get(),
+            handoff.failure.description,
+            handoff.details.joinToString("\n") { "  $it" },
+        )
+        this.handoff.get().asFile.writeText(handoff.record())
     }
 }
-
-/** krusty's exit status for a compile that failed only on a native plugin pass's refusals. */
-private const val PLUGIN_REFUSAL_EXIT_STATUS = 3
 
 /** Writes to both streams, so krusty's report reaches the build output and the task keeps it. */
 private class TeeOutputStream(private val first: OutputStream, private val second: OutputStream) : OutputStream() {
@@ -683,13 +703,24 @@ abstract class KrustyClasspathFingerprintTask @Inject constructor(
             isIgnoreExitValue = true
         }
         if (result.exitValue != 0) {
-            throw GradleException(
-                "$executable classpath-fingerprint exited with ${result.exitValue} for $path\n" +
-                    errors.toString(Charsets.UTF_8).trimEnd(),
+            // Not a build failure: the compile keyed on this fingerprint hands its module to kotlinc.
+            fingerprint.get().asFile.writeText(
+                "$FINGERPRINT_FAILURE\n$executable classpath-fingerprint exited with ${result.exitValue} for $path\n" +
+                    errors.toString(Charsets.UTF_8).trimEnd() + "\n",
             )
+            return
         }
         fingerprint.get().asFile.writeText(output.toString(Charsets.UTF_8))
     }
+}
+
+/** The first line of a fingerprint krusty could not take; what follows it says why. */
+private const val FINGERPRINT_FAILURE = "krusty classpath-fingerprint failed"
+
+/** Why krusty could not fingerprint a compile's classpath, or null when the fingerprint is one. */
+private fun classpathFingerprintFailure(fingerprint: File): String? {
+    val text = fingerprint.readText()
+    return if (text.startsWith("$FINGERPRINT_FAILURE\n")) text.removePrefix("$FINGERPRINT_FAILURE\n") else null
 }
 
 private fun normalized(file: File): File = file.toPath().toAbsolutePath().normalize().toFile()
@@ -743,6 +774,10 @@ abstract class KrustySupportCheckTask @Inject constructor(
     @get:Input
     abstract val pluginRefusals: ListProperty<String>
 
+    /** Why krusty cannot compile against the Kotlin task's Java toolchain; empty when it can. */
+    @get:Input
+    abstract val toolchainRefusals: ListProperty<String>
+
     @get:Classpath
     abstract val compilerPluginClasspath: ConfigurableFileCollection
 
@@ -765,7 +800,7 @@ abstract class KrustySupportCheckTask @Inject constructor(
 
     @TaskAction
     fun check() {
-        val refusedByPlugin = pluginRefusals.get()
+        val refusedByPlugin = pluginRefusals.get() + toolchainRefusals.get()
         if (refusedByPlugin.isNotEmpty()) {
             record(refusedByPlugin)
             return
@@ -789,10 +824,12 @@ abstract class KrustySupportCheckTask @Inject constructor(
         when (result.exitValue) {
             0 -> refusals.get().asFile.writeText("")
             1 -> record(refused)
-            // A command line kotlinc itself rejects is no refusal: the build fails with the
-            // errors the compilation would report, and neither compiler runs.
-            2 -> throw GradleException(errors.toString(Charsets.UTF_8).trimEnd())
-            else -> throw GradleException("$executable exited with ${result.exitValue} for $path")
+            // A command line krusty rejects is left to kotlinc too: kotlinc reports it if it is
+            // invalid, and compiles it if krusty was wrong to reject it.
+            2 -> record(listOf("krusty rejects the command line") + errorLines(errors))
+            else -> record(
+                listOf("krusty refusals exited with ${result.exitValue}") + errorLines(errors),
+            )
         }
     }
 
@@ -814,6 +851,9 @@ abstract class KrustySupportCheckTask @Inject constructor(
 }
 
 private fun File.refuses(): Boolean = length() > 0
+
+private fun errorLines(errors: ByteArrayOutputStream): List<String> =
+    errors.toString(Charsets.UTF_8).lines().map(String::trimEnd).filter(String::isNotBlank)
 
 /**
  * KGP's compiler-plugin request: the resolved plugin classpath (`-Xplugin`) and the structured
@@ -840,16 +880,29 @@ private fun pluginOptionArguments(configs: List<CompilerPluginConfig>): List<Str
         }
     }
 
-private fun validateJvmTargets(kotlin: String, java: String, mode: String, warn: (String) -> Unit) {
-    fun normalized(value: String): String = value.removePrefix("1.")
-    if (normalized(kotlin) == normalized(java) || mode == "IGNORE") return
-    val message = "Kotlin JVM target $kotlin differs from Java target $java"
-    if (mode == "WARNING") {
-        warn(message)
-    } else {
-        throw GradleException(message)
+/**
+ * KGP's check of a Kotlin JVM target against its Java compile task's `targetCompatibility`: the
+ * Java value is normalized by KGP's own table, the Kotlin one is compared as it is.
+ */
+internal fun jvmTargetMismatch(kotlin: String, java: String): String? {
+    val normalizedJava = when (java) {
+        "6" -> "1.6"
+        "7" -> "1.7"
+        "8" -> "1.8"
+        "1.9" -> "9"
+        else -> java
     }
+    return if (normalizedJava == kotlin) null else "Kotlin JVM target $kotlin differs from Java target $java"
 }
+
+/** Why krusty cannot compile against a Kotlin task's own Java toolchain, or null when it can. */
+internal fun kotlinJavaToolchainRefusal(kotlinJava: String, gradleJava: String): String? =
+    if (kotlinJava == gradleJava) {
+        null
+    } else {
+        "Kotlin task Java toolchain $kotlinJava differs from Gradle Java toolchain $gradleJava, " +
+            "whose JDK is the only one krusty receives"
+    }
 
 /**
  * The kotlinc arguments krusty receives for a compile, derived from its structured task inputs and

@@ -111,7 +111,7 @@ impl Toolchain {
         Toolchain {
             compiler,
             root,
-            reference: krusty::kotlin_version::target(),
+            reference: krusty::kotlin_version::environment_release(),
             jdks: available_jdks(),
             dist_jars,
             home,
@@ -440,6 +440,11 @@ fn run_case(toolchain: &Toolchain, args_file: &Path, recording: Option<&Recordin
             ),
             Some(recording) => recording.run(toolchain, args_file, &temp, &invocations),
         },
+        // The common-stdlib placeholder is one no runner here expands yet: a case naming it is not
+        // applicable (listed) rather than unavailable, until the runner supplies that library.
+        Err(reason) if reason.starts_with("needs $STDLIB_COMMON_PATH$") => {
+            Outcome::Excluded(reason)
+        }
         Err(reason) => Outcome::Unavailable(reason),
     };
     let _ = std::fs::remove_dir_all(&temp);

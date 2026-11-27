@@ -942,7 +942,7 @@ impl Body<'_> {
                                 class, *property, false, receiver, args,
                             ),
                         _ if args.is_empty() => self.property_read(None, *property, Some(receiver)),
-                        _ => Err("a property getter call with arguments".to_string()),
+                        _ => self.context_member_accessor(*property, false, receiver, args),
                     },
                     IrVirtualTarget::PropertySetter(ResolvedPropertyOverrideTarget::Module(
                         property,
@@ -954,7 +954,7 @@ impl Body<'_> {
                         _ if args.len() == 1 => {
                             self.property_write(None, *property, Some(receiver), args[0])
                         }
-                        _ => Err("a property setter call with the wrong arguments".to_string()),
+                        _ => self.context_member_accessor(*property, true, receiver, args),
                     },
                     _ => Err("a call to a library member".to_string()),
                 }
@@ -982,6 +982,61 @@ impl Body<'_> {
             },
             Callee::Super { .. } => Err("a `super` call to a library member".to_string()),
             _ => Err("a member call through this calling convention".to_string()),
+        }
+    }
+
+    /// A getter or setter of a class member property that declares context parameters: `args` are
+    /// its contexts, then, for the setter, the written value.
+    fn context_member_accessor(
+        &mut self,
+        property: PropertyId,
+        setter: bool,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let (class, index) = self.member_property(None, property)?;
+        let Some(IrLocalPropertyLayout::Member {
+            context_parameters,
+            ty,
+            ..
+        }) = self.ir.local_property_layouts.get(&property).cloned()
+        else {
+            return Err(
+                "an accessor call with arguments on a property that is not a class member"
+                    .to_string(),
+            );
+        };
+        let mut params = context_parameters;
+        if setter {
+            params.push(ty);
+        }
+        if params.len() != args.len() {
+            return Err("an accessor call whose arguments do not match its parameters".to_string());
+        }
+        let declared = self.ir.classes[class as usize].properties[index].clone();
+        let slot = local_property_target(self.ir, class, index)
+            .filter(|_| !self.ir.classes[class as usize].is_value)
+            .and_then(|target| {
+                let key = if setter {
+                    SlotKey::Setter(target)
+                } else {
+                    SlotKey::Getter(target)
+                };
+                self.file_classes().ok()?.tables.slot(class, &key)
+            });
+        if let Some(slot) = slot {
+            return self.dispatch(class, slot, receiver, args, &params, None);
+        }
+        match if setter {
+            declared.setter
+        } else {
+            declared.getter
+        } {
+            Some(accessor) => self.direct_member_call(accessor, receiver, args),
+            None => Err(format!(
+                "a property with context parameters and no accessor (`{}`)",
+                declared.name
+            )),
         }
     }
 
@@ -1361,25 +1416,6 @@ impl Body<'_> {
             .then_some(name)
     }
 
-    /// Whether the runtime's `ArrayList`, whose class the program does not declare, is below the
-    /// library interface `interface`, by the frontend's supertype traversal.
-    fn runtime_array_list_is_below(&self, interface: TypeName) -> bool {
-        let Some(array_list) = Ty::obj("kotlin/collections/ArrayList").obj_internal() else {
-            return false;
-        };
-        self.classifiers.is_subclassifier(array_list, interface)
-    }
-
-    /// Whether the runtime's list iterator, whose class the program does not declare, is below the
-    /// library interface `interface`: it is a `MutableListIterator`, as `ArrayList`'s own is.
-    fn runtime_array_list_iterator_is_below(&self, interface: TypeName) -> bool {
-        let Some(iterator) = Ty::obj("kotlin/collections/MutableListIterator").obj_internal()
-        else {
-            return false;
-        };
-        self.classifiers.is_subclassifier(iterator, interface)
-    }
-
     /// Replace the reference on the stack with whether it is an instance of the library interface
     /// `interface` — or null, when `nullable`. Its instances are the program's classes below it and
     /// the builtin values its builtin subclasses carry (`crate::builtin_instances`).
@@ -1393,8 +1429,6 @@ impl Body<'_> {
             string_builder: self
                 .classifiers
                 .is_subclassifier(krusty::types::wk::string_builder(), interface),
-            array_list: self.runtime_array_list_is_below(interface),
-            array_list_iterator: self.runtime_array_list_iterator_is_below(interface),
         };
         self.runtime
             .builtin_instances(interface, subtypes, laid_out);
@@ -2459,7 +2493,7 @@ impl Body<'_> {
 
     /// Run the companion's typed initializer when this class has one. The getter's result is
     /// unused: construction needs the initialization, not the instance.
-    fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
+    pub(super) fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
         let declaration = &self.ir.classes[class as usize];
         if declaration.is_enum || declaration.is_enum_entry {
             return Ok(());

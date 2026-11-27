@@ -499,7 +499,11 @@ pub(super) fn decode_properties(
             is_abstract: (flags >> 4) & 0x3 == 2,
             is_final: (flags >> 4) & 0x3 == 0,
             is_var,
-            is_inline_underlying: inline_underlying_property_name_id == Some(name_id),
+            // The storage property names no context parameter or receiver: a member that shares its
+            // name but takes one is an ordinary property of the class.
+            is_inline_underlying: inline_underlying_property_name_id == Some(name_id)
+                && !has_context_parameters
+                && receiver_body.is_none(),
             is_value_class_component: false,
             getter_inline: accessor_is_inline(getter_flags),
             setter_inline: accessor_is_inline(setter_flags),

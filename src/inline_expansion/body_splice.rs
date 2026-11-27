@@ -180,12 +180,12 @@ pub(crate) fn splice_inline_body(
                 ir.expr(copy).clone(),
                 ir.checked_return_depths.get(&copy).copied(),
             ) {
+                super::leaves_inline_frame(ir, copy);
                 returns.push(InlineReturn {
                     returned: copy,
                     value,
                     nested: true,
                 });
-                ir.checked_return_depths.remove(&copy);
             }
             continue;
         }
@@ -199,12 +199,13 @@ pub(crate) fn splice_inline_body(
         )
         .ok_or(InlineBodySpliceFailure::ValueRebase)?;
         if let IrExpr::Return(value) = ir.expr(copy).clone() {
-            returns.push(InlineReturn {
-                returned: copy,
-                value,
-                nested: false,
-            });
-            ir.checked_return_depths.remove(&copy);
+            if super::leaves_inline_frame(ir, copy) {
+                returns.push(InlineReturn {
+                    returned: copy,
+                    value,
+                    nested: false,
+                });
+            }
         }
     }
 

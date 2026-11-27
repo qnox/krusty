@@ -12,9 +12,9 @@ use crate::fx_hash::{HashMap, HashSet};
 use std::collections::VecDeque;
 
 use super::body_lowering::{
-    constant_value, publish_parameter_defaults, BodyLowering, CallLinker, ConstructorRole,
-    LinkedAccessorCall, LinkedCallableReference, LinkedCallee, LinkedConstructor, LoweredFunction,
-    StaticField,
+    constant_value, lower_parameter_defaults, publish_parameter_defaults, BodyLowering, CallLinker,
+    ConstructorRole, LinkedAccessorCall, LinkedCallableReference, LinkedCallee, LinkedConstructor,
+    LoweredFunction, StaticField,
 };
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
@@ -41,6 +41,7 @@ pub(crate) use class_construction::superclass_constructor_ordinal;
 mod constructor_linking;
 mod enum_materialization;
 mod fake_overrides;
+mod file_private_functions;
 pub(crate) use fake_overrides::emitted_body;
 #[cfg(test)]
 mod initializer_capability_tests;
@@ -206,12 +207,12 @@ pub struct DependencyBodyUnit {
     classes: HashMap<KlibDependencyCallable, crate::ir::ClassId>,
     /// The initialization each materialized constructor of an ordinary class runs.
     constructors: HashMap<KlibDependencyCallable, MaterializedConstructor>,
-    /// Enum classes whose constants this unit's bodies read, keyed by their constructor. Their
-    /// constants are built by the shared enum realization, so none exports a constructor.
-    enum_classes: HashMap<KlibDependencyCallable, crate::ir::ClassId>,
     /// Classes an earlier unit of the program materialized and exports the constants or the
     /// instance of: this unit reads them through those exports instead of holding a second copy.
     realized_classes: HashSet<TypeName>,
+    /// Whether the target lays out a class an earlier unit realized from that unit's record, so
+    /// this unit may add final members to it ([`crate::ir::ClassOwnership::EarlierUnit`]).
+    adds_members_to_realized_classes: bool,
     authenticated_singleton_dispatches: HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: HashMap<KlibDependencyCallable, TypeName>,
     /// Private members of value classes and file-private functions, which only this unit's bodies
@@ -270,8 +271,8 @@ impl Default for DependencyBodyUnit {
             functions: HashMap::default(),
             classes: HashMap::default(),
             constructors: HashMap::default(),
-            enum_classes: HashMap::default(),
             realized_classes: HashSet::default(),
+            adds_members_to_realized_classes: false,
             authenticated_singleton_dispatches: HashMap::default(),
             authenticated_singleton_classifiers: HashMap::default(),
             private_members: HashMap::default(),
@@ -332,8 +333,11 @@ enum PendingInitialization<'a> {
     /// class, whose arguments the class's secondary constructor `secondary` passes.
     OwnDelegation {
         secondary: usize,
-        arguments: Vec<crate::metadata::klib_ir::tree::KlibIrExprId>,
+        arguments: Vec<Option<crate::metadata::klib_ir::tree::KlibIrExprId>>,
     },
+    /// The arguments of each constant of a materialized enum class, in declaration order, which
+    /// lower to the constants' own rather than to the function's body.
+    EnumEntries(Vec<Vec<crate::metadata::klib_ir::tree::KlibIrExprId>>),
 }
 
 /// The declaration of a body this unit emits, and for a value class member, its class.
@@ -354,6 +358,23 @@ pub(super) struct MemberClass<'a> {
     /// The class's properties with a backing field, each with that field.
     pub(super) properties: Vec<(&'a KlibIrSymbol, &'a KlibIrSymbol)>,
     pub(super) contract: &'a crate::libraries::KlibBodyClassContract,
+    /// An inner class's outer instance, which its bodies read from the field after `fields`.
+    pub(super) outer: Option<super::same_library_class::OuterInstance<'a>>,
+}
+
+impl<'a> MemberClass<'a> {
+    /// The outer instance of the class `header` declares, kept after its declared `fields`.
+    fn outer_instance(
+        header: &super::class_headers::ClassMemberHeader<'_, 'a>,
+        fields: &[&'a KlibIrField],
+    ) -> Option<super::same_library_class::OuterInstance<'a>> {
+        header
+            .outer
+            .map(|outer| super::same_library_class::OuterInstance {
+                symbol: outer.this,
+                field: u32::try_from(fields.len()).expect("a field list fits u32"),
+            })
+    }
 }
 
 impl DependencyBodyUnit {
@@ -754,17 +775,30 @@ impl DependencyBodyUnit {
     ) -> impl Iterator<Item = (&KlibDependencyCallable, MaterializedClassConstructor)> {
         self.initializing_constructors().filter(|(_, constructor)| {
             let class = &self.ir.classes[constructor.class as usize];
-            !class.is_abstract && !class.is_sealed && !class.is_object
+            !class.is_abstract && !class.is_sealed && !class.is_object && !class.is_enum
         })
     }
 
     /// A unit that reads the enum constants and object instances of `classes`, which earlier
     /// units materialized, through their exports.
-    pub(crate) fn reading_realized_classes(classes: impl IntoIterator<Item = TypeName>) -> Self {
-        Self {
+    pub(crate) fn reading_realized_classes(
+        classes: impl IntoIterator<Item = TypeName>,
+        reference: crate::kotlin_version::ReferenceProfile,
+    ) -> Self {
+        let mut unit = Self {
             realized_classes: classes.into_iter().collect(),
             ..Self::default()
-        }
+        };
+        unit.ir.reference = reference;
+        unit
+    }
+
+    /// This unit for a target that lays out a class an earlier unit realized from that unit's
+    /// record, so a member this unit needs of such a class is added to it here
+    /// ([`crate::backend::Backend::adds_members_to_realized_classes`]).
+    pub(crate) fn adding_members_to_realized_classes(mut self, adds: bool) -> Self {
+        self.adds_members_to_realized_classes = adds;
+        self
     }
 
     /// Whether an earlier unit materialized `classifier`, which this unit reads through its
@@ -791,11 +825,7 @@ impl DependencyBodyUnit {
     pub(crate) fn materialized_classes(
         &self,
     ) -> impl Iterator<Item = (TypeName, &KlibDependencyCallable)> {
-        let mut classes = self
-            .classes
-            .iter()
-            .chain(&self.enum_classes)
-            .collect::<Vec<_>>();
+        let mut classes = self.classes.iter().collect::<Vec<_>>();
         classes.sort_unstable_by_key(|(_, class)| **class);
         classes
             .into_iter()
@@ -874,7 +904,7 @@ impl DependencyBodyUnit {
                 declarations,
             },
             |linker, ir| {
-                linker.materialize_object(ir, &identity, class)?;
+                linker.materialize_declared_instances(ir, &identity, class)?;
                 if linker.classes.contains_key(&identity) {
                     Ok(())
                 } else {
@@ -902,8 +932,8 @@ impl DependencyBodyUnit {
             functions: &mut self.functions,
             classes: &mut self.classes,
             constructors: &mut self.constructors,
-            enum_classes: &mut self.enum_classes,
             realized_classes: &self.realized_classes,
+            adds_members_to_realized_classes: self.adds_members_to_realized_classes,
             authenticated_singleton_dispatches: &mut self.authenticated_singleton_dispatches,
             authenticated_singleton_classifiers: &mut self.authenticated_singleton_classifiers,
             private_members: &mut self.private_members,
@@ -946,6 +976,31 @@ impl DependencyBodyUnit {
                 symbol: body.symbol,
                 function: body.function,
             };
+            let declined = |reason| match reason {
+                KlibBodyDeclineReason::CalleeDeclined(decline) => *decline,
+                reason => KlibBodyDecline::new(body.identity.declaration.clone(), reason),
+            };
+            if let Some((class, PendingInitialization::EnumEntries(arguments))) =
+                &body.initialization
+            {
+                BodyLowering::new(
+                    body.arena,
+                    function,
+                    &body.header,
+                    &self.builtins,
+                    &mut self.ir,
+                    &mut linker,
+                )
+                .enum_entry_arguments(*class, arguments)
+                .map_err(declined)?;
+                continue;
+            }
+            // The secondary constructor a class initialization materialized, which carries its
+            // own defaults.
+            let initialized_secondary = linker
+                .constructors
+                .get(&body.identity)
+                .and_then(|constructor| constructor.secondary);
             let lowering = BodyLowering::new(
                 body.arena,
                 function,
@@ -979,7 +1034,18 @@ impl DependencyBodyUnit {
             } else {
                 match (&body.initialization, &body.value_member) {
                     (Some((class, PendingInitialization::Class(plan))), _) => {
-                        lowering.initialize_class(*class, plan)
+                        lowering.initialize_class(*class, plan).and_then(|lowered| {
+                            publish_constructor_defaults(
+                                body.arena,
+                                function,
+                                &body.header,
+                                &self.builtins,
+                                &mut self.ir,
+                                &mut linker,
+                                (*class, initialized_secondary),
+                            )
+                            .map(|()| lowered)
+                        })
                     }
                     (
                         Some((
@@ -990,17 +1056,33 @@ impl DependencyBodyUnit {
                             },
                         )),
                         Some(member),
-                    ) => lowering.delegate_within_class(
-                        *class,
-                        *secondary,
-                        member,
-                        arguments,
-                        body.statements,
-                    ),
+                    ) => lowering
+                        .delegate_within_class(
+                            *class,
+                            *secondary,
+                            member,
+                            arguments,
+                            body.statements,
+                        )
+                        .and_then(|lowered| {
+                            publish_constructor_defaults(
+                                body.arena,
+                                function,
+                                &body.header,
+                                &self.builtins,
+                                &mut self.ir,
+                                &mut linker,
+                                (*class, Some(*secondary)),
+                            )
+                            .map(|()| lowered)
+                        }),
                     (Some((_, PendingInitialization::OwnDelegation { .. })), None) => {
                         Err(KlibBodyDeclineReason::SignatureMismatch(
                             "a delegation within the class has no materialized class".to_owned(),
                         ))
+                    }
+                    (Some((_, PendingInitialization::EnumEntries(_))), _) => {
+                        unreachable!("an enum's entry frame is lowered before any function body")
                     }
                     (None, value_member) => match value_member {
                         Some(member) => lowering
@@ -1011,6 +1093,7 @@ impl DependencyBodyUnit {
                                 member.properties.clone(),
                                 member.contract.is_value,
                             )
+                            .reading_outer_instance(member.class, member.outer)
                             .body(body.statements),
                         None => lowering.body(body.statements),
                     }
@@ -1027,17 +1110,43 @@ impl DependencyBodyUnit {
                     }),
                 }
             }
-            .map_err(|reason| match reason {
-                KlibBodyDeclineReason::CalleeDeclined(decline) => *decline,
-                reason => KlibBodyDecline::new(body.identity.declaration, reason),
-            })?;
+            .map_err(declined)?;
             self.ir.functions[body.function as usize].body = Some(lowered);
         }
         let decline = |reason| KlibBodyDecline::new(identity.declaration.clone(), reason);
         super::class_hierarchies::publish(&mut self.ir, first_class, classes).map_err(decline)?;
         inline_functions::expand_calls(&mut self.ir).map_err(decline)?;
+        super::atomic_references::resolve_all(&mut self.ir).map_err(decline)?;
         Ok(root)
     }
+}
+
+/// Publish a materialized constructor's parameter defaults, lowered in its initializer's frame,
+/// where the constructor's default-argument entry reads them: the instance is value 0 and the
+/// parameters follow it, as they do in the constructor's own frame. A primary constructor's
+/// defaults are recorded beside its class, a secondary constructor's on its declaration.
+fn publish_constructor_defaults(
+    arena: &KlibIrArena,
+    initializer: LoweredFunction<'_>,
+    header: &FunctionHeader,
+    builtins: &IrBuiltinOperators,
+    ir: &mut IrFile,
+    linker: &mut dyn CallLinker,
+    (class, secondary): (crate::ir::ClassId, Option<usize>),
+) -> Result<(), KlibBodyDeclineReason> {
+    let Some(defaults) =
+        lower_parameter_defaults(arena, initializer, header, builtins, ir, linker)?
+    else {
+        return Ok(());
+    };
+    match secondary {
+        Some(ordinal) => ir.classes[class as usize].secondary_ctors[ordinal].defaults = defaults,
+        None => {
+            let classifier = ir.classes[class as usize].fq_name_id();
+            ir.insert_class_ctor_defaults_name(classifier, defaults);
+        }
+    }
+    Ok(())
 }
 
 /// Joins the calls of the bodies being lowered to the unit's functions, declaring each callee
@@ -1046,8 +1155,8 @@ struct Linker<'u, 's> {
     functions: &'u mut HashMap<KlibDependencyCallable, FunId>,
     classes: &'u mut HashMap<KlibDependencyCallable, crate::ir::ClassId>,
     constructors: &'u mut HashMap<KlibDependencyCallable, MaterializedConstructor>,
-    enum_classes: &'u mut HashMap<KlibDependencyCallable, crate::ir::ClassId>,
     realized_classes: &'u HashSet<TypeName>,
+    adds_members_to_realized_classes: bool,
     authenticated_singleton_dispatches: &'u mut HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: &'u mut HashMap<KlibDependencyCallable, TypeName>,
     private_members: &'u mut HashMap<KlibDependencyCallable, OwnFormals>,
@@ -1081,6 +1190,10 @@ struct Linker<'u, 's> {
 }
 
 impl<'s> CallLinker for Linker<'_, 's> {
+    fn is_suspend_callable(&self, target: ExternalCallableId) -> bool {
+        self.external_is_suspend(target)
+    }
+
     fn atomic_field(
         &self,
         callee: &KlibPublicIdSignature,
@@ -1097,6 +1210,15 @@ impl<'s> CallLinker for Linker<'_, 's> {
         Ok(self
             .linked_identity(callee)
             .and_then(|identity| self.sources.intrinsics.atomic_array_element(&identity)))
+    }
+
+    fn implicit_enum_member(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibDeclarationSignature,
+    ) -> Result<Option<(TypeName, super::body_lowering::ImplicitEnumMember)>, KlibBodyDeclineReason>
+    {
+        self.implicit_enum_member_call(ir, callee)
     }
 
     fn common_primitive(
@@ -1265,25 +1387,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         &self,
         getter: &KlibAccessorIdSignature,
     ) -> Result<Option<crate::libraries::IndicesReceiver>, KlibBodyDeclineReason> {
-        let signature = KlibDeclarationSignature::Accessor(getter.clone());
-        let identity = match self
-            .sources
-            .bodies
-            .callee_origin(&self.active_module, &signature)
-        {
-            KlibCalleeOrigin::Exact(identity) => identity,
-            // Dependency preparation omitted this getter's edge: the loop is not one this unit counts.
-            KlibCalleeOrigin::Missing => {
-                return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                    "a `for` loop over an `indices` getter without a provider declaration",
-                ))
-            }
-            KlibCalleeOrigin::Ambiguous => {
-                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
-                    getter.property().clone(),
-                )))
-            }
-        };
+        let identity = self.indices_getter_identity(getter)?;
         Ok(self
             .sources
             .declarations
@@ -1291,6 +1395,34 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .and_then(|(_, realization)| {
                 super::for_loops::indices_receiver(realization.klib_body_callable()?)
             }))
+    }
+
+    fn indices_bound(
+        &self,
+        getter: &KlibAccessorIdSignature,
+    ) -> Result<Option<super::body_lowering::IndicesBound>, KlibBodyDeclineReason> {
+        let identity = self.indices_getter_identity(getter)?;
+        let Some(bound) = self.sources.callees.indices_bound(&identity) else {
+            return Ok(None);
+        };
+        let KlibDeclarationSignature::Accessor(accessor) = &bound.declaration else {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "an `indices` bound is not a property accessor".to_owned(),
+            ));
+        };
+        let selected = match self.sources.callees.get(bound) {
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for an `indices` bound".to_owned(),
+                ))
+            }
+            None => return Err(KlibBodyDeclineReason::Unjoined),
+        };
+        Ok(Some(super::body_lowering::IndicesBound {
+            accessor: accessor.clone(),
+            ty: selected.ret(),
+        }))
     }
 
     fn reverses_progression(
@@ -1341,11 +1473,12 @@ impl<'s> CallLinker for Linker<'_, 's> {
         matches!(
             callee,
             KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_)
-        ) && self
+        ) && (self
             .sources
             .bodies
             .module_local_function(&self.active_module, callee)
             .is_some()
+            || self.unpublished_internal_function(callee).is_some())
     }
 
     fn link_local_object(
@@ -1380,11 +1513,38 @@ impl<'s> CallLinker for Linker<'_, 's> {
         fake_overrides::inherited_getter(self, callee)
     }
 
+    fn inherited_member(&self, callee: &KlibIrSignature) -> Option<KlibIrSignature> {
+        let &KlibIrSignature::FileLocal { file, slot } = callee else {
+            return None;
+        };
+        let signature = KlibDeclarationSignature::FileLocal { file, slot };
+        match self
+            .sources
+            .bodies
+            .linked_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(KlibDependencyCallable {
+                declaration: KlibDeclarationSignature::Public(member),
+                ..
+            }) => Some(KlibIrSignature::Public(member)),
+            KlibCalleeOrigin::Exact(KlibDependencyCallable {
+                declaration: KlibDeclarationSignature::Accessor(member),
+                ..
+            }) => Some(KlibIrSignature::Accessor(member)),
+            KlibCalleeOrigin::Exact(_)
+            | KlibCalleeOrigin::Missing
+            | KlibCalleeOrigin::Ambiguous => None,
+        }
+    }
+
     fn link_local_function(
         &mut self,
         ir: &mut IrFile,
         callee: &KlibIrSignature,
     ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+        if let Some(identity) = self.unpublished_internal_function(callee) {
+            return self.link_file_private(ir, identity.declaration.clone(), identity);
+        }
         let &KlibIrSignature::FileLocal { file, slot } = callee else {
             // A member of a class private to its enclosing class keeps its public signature.
             if !self.links_privately(callee) {
@@ -1402,8 +1562,17 @@ impl<'s> CallLinker for Linker<'_, 's> {
             .bodies
             .linked_origin(&self.active_module, &signature)
         {
-            KlibCalleeOrigin::Exact(identity) => self.link_file_private(ir, signature, identity),
-            KlibCalleeOrigin::Missing => self.link_local_member(ir, callee),
+            KlibCalleeOrigin::Exact(
+                identity @ KlibDependencyCallable {
+                    declaration: KlibDeclarationSignature::FileLocal { .. },
+                    ..
+                },
+            ) => self.link_file_private(ir, signature, identity),
+            // A fake override links to the member it inherits only as a call of that member
+            // (`inherited_member`); any other use of it names no declaration of this module.
+            KlibCalleeOrigin::Exact(_) | KlibCalleeOrigin::Missing => {
+                self.link_local_member(ir, callee)
+            }
             KlibCalleeOrigin::Ambiguous => Err(KlibBodyDeclineReason::SignatureMismatch(
                 "a file-private call names two top-level declarations".to_owned(),
             )),
@@ -1431,6 +1600,11 @@ impl<'s> CallLinker for Linker<'_, 's> {
         callee: &KlibPublicIdSignature,
     ) -> Result<LinkedCallableReference, KlibBodyDeclineReason> {
         let identity = self.callee_identity(callee)?;
+        // A private member of a class this unit lowers has no provider declaration; the unit
+        // emits it with the class, and the reference names that emitted member.
+        if let Some(call) = self.private_class_member(ir, &identity)? {
+            return private_members::private_member_reference(self.sources.bodies, &identity, call);
+        }
         let (declaration, callable) = self.sources.callees.reference_declaration(&identity)?;
         let call = self.link(ir, callee)?;
         Ok(LinkedCallableReference::new(declaration, callable, call))
@@ -1471,42 +1645,13 @@ impl<'s> CallLinker for Linker<'_, 's> {
         ir: &mut IrFile,
         entry: &KlibPublicIdSignature,
     ) -> Result<(TypeName, String), KlibBodyDeclineReason> {
-        let (class, name) = super::enum_classes::authenticate_entry(
+        let (classifier, name) = super::enum_classes::authenticate_entry(
             self.sources.bodies,
             &self.active_module,
             entry,
         )?;
-        let classifier = class.classifier;
-        if !self.realized_classes.contains(&classifier) {
-            self.materialize_enum_class(ir, class)?;
-        }
+        self.materialize_enum(ir, classifier)?;
         Ok((classifier, name))
-    }
-
-    fn enum_static_member(
-        &mut self,
-        ir: &mut IrFile,
-        callee: &KlibPublicIdSignature,
-    ) -> Result<Option<(TypeName, super::enum_classes::EnumStaticMember)>, KlibBodyDeclineReason>
-    {
-        let signature = KlibDeclarationSignature::Public(callee.clone());
-        let KlibCalleeOrigin::Exact(identity) = self
-            .sources
-            .bodies
-            .linked_origin(&self.active_module, &signature)
-        else {
-            return Ok(None);
-        };
-        let Some((class, member)) =
-            super::enum_classes::authenticate_static_member(self.sources.bodies, &identity)?
-        else {
-            return Ok(None);
-        };
-        let classifier = class.classifier;
-        if !self.realized_classes.contains(&classifier) {
-            self.materialize_enum_class(ir, class)?;
-        }
-        Ok(Some((classifier, member)))
     }
 
     fn static_field(
@@ -1536,7 +1681,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
         let callees: &'s super::KlibCalleeFacts<'s> = self.sources.callees;
         let class =
             callees
-                .read_object(classifier)
+                .read_class(classifier)
                 .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
                     "an object value",
                 ))?;
@@ -1547,7 +1692,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
             module: class.module.clone(),
             declaration: KlibDeclarationSignature::Public(primary),
         };
-        self.materialize_object(ir, &identity, class)?;
+        self.materialize_declared_instances(ir, &identity, class)?;
         if !self.classes.contains_key(&identity) {
             return Err(KlibBodyDeclineReason::UnsupportedOperation(
                 "an object value",
@@ -1989,17 +2134,7 @@ impl<'s> Linker<'_, 's> {
         declaration: &'s KlibIrFunction,
     ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
         let selected = selected_callable_for_header(selected, None, arena, declaration)?;
-        let function = match self.functions.get(identity) {
-            Some(function) => {
-                // The function was declared under another lowering's selection, or from its
-                // header alone; this lowering's selection must describe it too.
-                if let Some(selected) = selected {
-                    function_header(Some(selected), arena, declaration)?;
-                }
-                *function
-            }
-            None => self.declare(ir, identity, selected, arena, declaration)?,
-        };
+        let function = self.top_level_callee(ir, identity, selected, arena, declaration)?;
         let parameter_defaults = parameter_defaults(declaration);
         let declaration = &ir.functions[function as usize];
         Ok(LinkedCallee {
@@ -2096,14 +2231,8 @@ impl<'s> Linker<'_, 's> {
         if class.is_value {
             return Ok(true);
         }
-        if class.kind == crate::libraries::TypeKind::Enum {
-            return Ok(super::enum_classes::materializes(
-                self.sources.bodies,
-                class,
-            ));
-        }
-        if class.kind == crate::libraries::TypeKind::Object {
-            return Ok(super::class_initialization::object_plan(
+        if class.declares_instances() {
+            return Ok(super::class_initialization::declared_instances_plan(
                 class,
                 self.sources.bodies,
                 self.sources.callees,
@@ -2258,6 +2387,29 @@ impl<'s> Linker<'_, 's> {
             })
     }
 
+    /// The exact declaration of the `indices` getter a loop calls, which dependency preparation
+    /// reached as the loop's edge.
+    fn indices_getter_identity(
+        &self,
+        getter: &KlibAccessorIdSignature,
+    ) -> Result<KlibDependencyCallable, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Accessor(getter.clone());
+        match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => Ok(identity),
+            // Dependency preparation omitted this getter's edge: the loop is not one this unit counts.
+            KlibCalleeOrigin::Missing => Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a `for` loop over an `indices` getter without a provider declaration",
+            )),
+            KlibCalleeOrigin::Ambiguous => Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(
+                Box::new(getter.property().clone()),
+            )),
+        }
+    }
+
     /// Whether `identity` is an abstract accessor of a class an earlier unit realized and this
     /// unit does not declare: a call of it dispatches through the member's frozen declaration.
     fn is_earlier_abstract_accessor(&self, identity: &KlibDependencyCallable) -> bool {
@@ -2290,7 +2442,7 @@ impl<'s> Linker<'_, 's> {
                 body_header(Some(selected), arena, declaration, self.sources.bodies)?;
                 function
             }
-            None => self.declare(ir, identity, Some(selected), arena, declaration)?,
+            None => self.declare_callee(ir, identity, Some(selected), arena, declaration)?,
         };
         let declared = &ir.functions[function as usize];
         let (Some(receiver), params) = (
@@ -2495,6 +2647,7 @@ impl<'s> Linker<'_, 's> {
         let declared = declare_function(ir, &header);
         let callee = inline_functions::Candidate::new(declared, function, &header, selected);
         callee.declare(ir, self.root, identity, &mut |name| self.is_interface(name))?;
+        callee.register_suspension(ir);
         self.functions.insert(identity.clone(), declared);
         if let Some(formals) = self.private_members.get_mut(identity) {
             *formals = header.own_formals(function);
@@ -2702,8 +2855,6 @@ impl UnitCheckpoint {
         unit.constructors.retain(|identity, constructor| {
             constructor.initializer < first && classes.contains_key(identity)
         });
-        unit.enum_classes
-            .retain(|_, class| (*class as usize) < unit.ir.classes.len());
         let functions = &unit.functions;
         unit.authenticated_singleton_dispatches
             .retain(|identity, _| functions.contains_key(identity));
@@ -2814,55 +2965,6 @@ impl Linker<'_, '_> {
                 primitive
             },
         )
-    }
-
-    /// The top-level function private to the active body's file that `identity` names. No
-    /// provider records one: the unit emits it from its serialized header alone, as a function of
-    /// the unit that it publishes to no one.
-    fn link_file_private(
-        &mut self,
-        ir: &mut IrFile,
-        signature: KlibDeclarationSignature,
-        identity: KlibDependencyCallable,
-    ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
-        let callee_declined = |reason| {
-            KlibBodyDeclineReason::CalleeDeclined(Box::new(KlibBodyDecline::new(
-                signature.clone(),
-                reason,
-            )))
-        };
-        let (arena, declaration) = self
-            .sources
-            .bodies
-            .function(&identity)
-            .ok_or_else(|| callee_declined(KlibBodyDeclineReason::Unjoined))?;
-        // A generic one binds the formals its own identity mints, as a provider's record binds a
-        // published declaration's.
-        let (types, type_parameters, type_parameter_bounds) =
-            super::function_lowering::file_private_formals(&identity, arena, declaration)
-                .map_err(callee_declined)?;
-        self.private_members.entry(identity.clone()).or_default();
-        let function = match self.functions.get(&identity) {
-            Some(function) => *function,
-            None => self
-                .declare_with_types(ir, &identity, None, arena, declaration, types)
-                .map_err(callee_declined)?,
-        };
-        let parameter_defaults = parameter_defaults(declaration);
-        let declared = &ir.functions[function as usize];
-        Ok(LinkedCallee {
-            callee: Callee::Local(function),
-            receiver: None,
-            params: declared.params.clone(),
-            ret: declared.ret,
-            context_count: ir.declared_parameters(function).context_count,
-            singleton_dispatch: None,
-            type_parameters,
-            type_parameter_bounds: Some(type_parameter_bounds),
-            class_type_parameters: Vec::new(),
-            parameter_defaults,
-            edge: super::CallEdge::default(),
-        })
     }
 }
 

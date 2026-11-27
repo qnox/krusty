@@ -104,6 +104,10 @@ pub(super) struct PackageInventory {
     /// under a public identity even when it is file-private, because the runtime implements it by
     /// name; a body of its own file calls it by that identity. It names nothing in its package.
     private_externals: Vec<(TypeName, SignedFunction)>,
+    /// The packages the selected target stdlib makes default imports of every source file.
+    /// Kotlin/Wasm imports `kotlin.js.*` on both of its targets, as kotlinc's
+    /// `WasmPlatformAnalyzerServices` does.
+    default_import_packages: &'static [&'static str],
     /// The exact-identity index of the finished inventory, built on the first dependency lookup.
     dependency_identities: std::cell::OnceCell<DependencyIdentities>,
 }
@@ -138,6 +142,8 @@ impl InlineBodySelection {
             .unwrap_or_else(|| NONE.get_or_init(HashSet::default))
     }
 }
+
+const WASM_DEFAULT_IMPORT_PACKAGES: &[&str] = &["kotlin.js"];
 
 impl PackageInventory {
     pub(super) fn from_packages(
@@ -189,6 +195,7 @@ impl PackageInventory {
             namespaces: HashSet::default(),
             intrinsics: KlibIntrinsicFacts::default(),
             private_externals: Vec::new(),
+            default_import_packages: &[],
             dependency_identities: std::cell::OnceCell::new(),
         };
         // A type alias's qualified identity omits its declaring archive. When an ordinary
@@ -212,6 +219,9 @@ impl PackageInventory {
         } in packages
         {
             let identity = inventory.declare_package(&segments);
+            if intrinsic_platform == Some(TargetIntrinsicPlatform::Wasm) {
+                inventory.default_import_packages = WASM_DEFAULT_IMPORT_PACKAGES;
+            }
             for alias in package
                 .type_aliases
                 .into_iter()
@@ -255,6 +265,12 @@ impl PackageInventory {
                     crate::libraries::CallablePlacement::Package(identity),
                     &signed.declaration,
                 );
+                signed.direct_c_function = super::direct_c_calls::runtime_entry_unless_realized(
+                    intrinsic_platform,
+                    &signed.declaration,
+                    signed.direct_c_function.take(),
+                    signed.target_intrinsic.is_some(),
+                );
                 inventory.intrinsics.insert(&signed);
                 inventory.private_externals.push((identity, signed));
             }
@@ -281,6 +297,13 @@ impl PackageInventory {
                             crate::libraries::CallablePlacement::Package(identity),
                             &signed.declaration,
                         );
+                        signed.direct_c_function =
+                            super::direct_c_calls::runtime_entry_unless_realized(
+                                intrinsic_platform,
+                                &signed.declaration,
+                                signed.direct_c_function.take(),
+                                signed.target_intrinsic.is_some(),
+                            );
                         Ok(signed)
                     })
                 })
@@ -368,6 +391,13 @@ impl PackageInventory {
                         member,
                         &function.declaration,
                     );
+                    function.direct_c_function =
+                        super::direct_c_calls::runtime_entry_unless_realized(
+                            intrinsic_platform,
+                            &function.declaration,
+                            function.direct_c_function.take(),
+                            function.target_intrinsic.is_some(),
+                        );
                     inventory.intrinsics.insert(function);
                 }
                 for function in &mut signed.associated_functions {
@@ -389,6 +419,13 @@ impl PackageInventory {
                         associated,
                         &function.declaration,
                     );
+                    function.direct_c_function =
+                        super::direct_c_calls::runtime_entry_unless_realized(
+                            intrinsic_platform,
+                            &function.declaration,
+                            function.direct_c_function.take(),
+                            function.target_intrinsic.is_some(),
+                        );
                     inventory.intrinsics.insert(function);
                 }
                 let selected = inventory
@@ -410,6 +447,10 @@ impl PackageInventory {
             }
         }
         Ok(inventory)
+    }
+
+    pub(super) fn default_import_packages(&self) -> &'static [&'static str] {
+        self.default_import_packages
     }
 
     pub(super) fn intrinsic_facts(&self) -> &KlibIntrinsicFacts {
@@ -730,6 +771,18 @@ impl PackageInventory {
             signed,
             signed.declared_constructors().nth(position)?,
         ))
+    }
+
+    /// The enum class whose implicit `values`, `valueOf` or `entries` getter is serialized under
+    /// exactly `identity`.
+    pub(super) fn dependency_enum_member(
+        &self,
+        identity: &crate::libraries::KlibDependencyCallable,
+    ) -> Option<(TypeName, &SignedClassifier)> {
+        let classifier = self
+            .dependency_identities()
+            .enum_member(&identity.module, &identity.declaration)?;
+        Some((classifier, &self.classifiers[&classifier]))
     }
 
     /// The property whose getter or setter is serialized under exactly `identity`, at its

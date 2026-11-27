@@ -451,6 +451,15 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
                 *receiver = map(*receiver);
                 operands.iter_mut().for_each(|value| *value = map(*value));
             }
+            IrCheckedOperation::FieldDesignation { receiver, .. } => *receiver = map(*receiver),
+            IrCheckedOperation::AtomicFieldThrough {
+                reference,
+                operands,
+                ..
+            } => {
+                *reference = map(*reference);
+                operands.iter_mut().for_each(|value| *value = map(*value));
+            }
             IrCheckedOperation::AtomicArrayElement {
                 array,
                 index,
@@ -489,10 +498,14 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
             IrCheckedOperation::PropertyReference {
                 dispatch_receiver,
                 extension_receiver,
+                context_arguments,
                 ..
             } => {
                 map_option(dispatch_receiver, &mut map);
                 map_option(extension_receiver, &mut map);
+                context_arguments
+                    .iter_mut()
+                    .for_each(|argument| *argument = map(*argument));
             }
         },
         IrExpr::CallableReference(reference) => {

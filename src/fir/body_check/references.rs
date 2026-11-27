@@ -44,6 +44,12 @@ impl BodyFirChecker<'_> {
             match &mut kind {
                 FirExprKind::CallableReference {
                     context_arguments, ..
+                }
+                | FirExprKind::PropertyReference {
+                    context_arguments, ..
+                }
+                | FirExprKind::LocalCallableReference {
+                    context_arguments, ..
                 } => *context_arguments = materialized,
                 _ => return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)),
             }
@@ -274,6 +280,7 @@ impl BodyFirChecker<'_> {
             argument_mapping,
             signature,
             suspend_conversion,
+            ..
         }) = self.info.expr_lowers.get(&expression).cloned()
         {
             let origin = self.expression_origin(expression)?;
@@ -305,6 +312,7 @@ impl BodyFirChecker<'_> {
                         })
                     })
                     .transpose()?,
+                context_arguments: Box::new([]),
                 adaptation: Some(Box::new(adaptation)),
             });
         }
@@ -333,6 +341,7 @@ impl BodyFirChecker<'_> {
                         })
                     })
                     .transpose()?,
+                context_arguments: Box::new([]),
                 adaptation: None,
             });
         }
@@ -1272,6 +1281,7 @@ impl BodyFirChecker<'_> {
             binding,
             dispatch_receiver,
             extension_receiver,
+            context_arguments: Box::new([]),
             mutable,
             substitutions,
             adaptation: adaptation.map(Box::new),
@@ -1333,6 +1343,7 @@ impl BodyFirChecker<'_> {
             binding,
             dispatch_receiver,
             extension_receiver,
+            context_arguments: Box::new([]),
             mutable,
             substitutions: self.external_reference_substitutions(
                 expression,
@@ -1367,6 +1378,7 @@ impl BodyFirChecker<'_> {
             binding: FirCallableReferenceBinding::Static,
             dispatch_receiver: None,
             extension_receiver: None,
+            context_arguments: Box::new([]),
             mutable: false,
             substitutions: Box::new([]),
             adaptation: adaptation.map(Box::new),

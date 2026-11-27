@@ -151,7 +151,7 @@ fn kotlinc_admits_equality_bound() -> bool {
     use krusty::kotlin_version::KotlinVersion;
     common::for_reference(&[
         (KotlinVersion::V2_4_0, false),
-        (KotlinVersion::V2_5_0_RC, true),
+        (KotlinVersion::V2_5_0_RC2, true),
     ])
 }
 
@@ -161,29 +161,29 @@ fn generated_equals_is_bound() -> bool {
     use krusty::kotlin_version::KotlinVersion;
     common::for_reference(&[
         (KotlinVersion::V2_4_0, false),
-        (KotlinVersion::V2_5_0_RC, true),
+        (KotlinVersion::V2_5_0_RC2, true),
     ])
 }
 
 /// An equality that holds with the generated `equals` as the selected call proves the other
 /// operand has the receiver's class. A nullable receiver proves only the nullable class for a
 /// nullable operand, and calling `equals` directly narrows as `==` does.
-const GENERATED_BOUND_NARROWS: &str = include_str!("box_regressions/StrictEqualsGeneratedBound.kt");
+fn generated_bound_narrows() -> String {
+    krusty::conformance::prepare_test_source(
+        include_str!("box_regressions/StrictEqualsGeneratedBound.kt"),
+        krusty::conformance::TestTarget::Jvm,
+    )
+}
 
 #[test]
 fn a_generated_equals_bound_narrows_the_other_operand() {
-    let reference_args = common::language_directives::kotlinc_args(GENERATED_BOUND_NARROWS);
+    let source = generated_bound_narrows();
+    let reference_args = common::language_directives::kotlinc_args(&source);
     if generated_equals_is_bound() {
-        common::assert_sources_accepted_like_kotlinc(
-            &[("main.kt", GENERATED_BOUND_NARROWS)],
-            &reference_args,
-        );
-        assert_ok("GeneratedBoundNarrows", GENERATED_BOUND_NARROWS);
+        common::assert_sources_accepted_like_kotlinc(&[("main.kt", &source)], &reference_args);
+        assert_ok("GeneratedBoundNarrows", &source);
     } else {
-        common::assert_errors_match_kotlinc(
-            &[("main.kt", GENERATED_BOUND_NARROWS)],
-            &reference_args,
-        );
+        common::assert_errors_match_kotlinc(&[("main.kt", &source)], &reference_args);
     }
 }
 

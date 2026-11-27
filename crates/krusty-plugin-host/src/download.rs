@@ -1,7 +1,9 @@
 //! Moving a file from a URL to disk. Provisioning verifies what arrives, so a fetcher only transfers.
 
 use std::path::Path;
-use std::process::Command;
+use std::time::{Duration, Instant};
+
+use krusty_download::{download, RetryPolicy};
 
 pub trait Fetcher {
     /// Writes the content at `url` to `dest`, or says why it could not.
@@ -9,32 +11,29 @@ pub trait Fetcher {
 }
 
 /// Downloads with the system `curl`, which every supported platform ships and which already honors
-/// the user's proxy variables and CA configuration. Transient failures, including a repository's
-/// `429 Too Many Requests` that Maven Central answers under load, are retried with curl's backoff,
-/// which honors a `Retry-After`.
+/// the user's proxy variables and CA configuration. The shared fetcher paces the requests and
+/// retries transient failures, including the `429 Too Many Requests` Maven Central answers under
+/// load. A JDK archive is large, so an attempt may run long.
 pub struct Curl;
+
+const POLICY: RetryPolicy = RetryPolicy {
+    connect_timeout: Duration::from_secs(30),
+    attempt_timeout: Duration::from_secs(30 * 60),
+    retry_delay: Duration::from_secs(10),
+    max_attempts: 8,
+    request_gap: Duration::from_secs(3),
+};
+
+/// The whole provisioning of one file, retries included.
+const DEADLINE: Duration = Duration::from_secs(2 * 60 * 60);
 
 impl Fetcher for Curl {
     fn fetch(&self, url: &str, dest: &Path) -> Result<(), String> {
-        let output = Command::new("curl")
-            .args(["--fail", "--location", "--silent", "--show-error"])
-            .args(["--retry", "8", "--connect-timeout", "30"])
-            .arg("--output")
-            .arg(dest)
-            .arg(url)
-            .output()
-            .map_err(|error| format!("could not run curl, which krusty downloads with: {error}"))?;
-        if output.status.success() {
+        let (outcome, failure) = download(url, dest, POLICY, Instant::now() + DEADLINE);
+        if outcome.completed {
             Ok(())
         } else {
-            // Each retry repeats the error; the last attempt's is the one to show.
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(stderr
-                .trim()
-                .lines()
-                .last()
-                .unwrap_or("curl failed")
-                .to_string())
+            Err(failure.unwrap_or_else(|| "curl failed".to_string()))
         }
     }
 }

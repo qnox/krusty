@@ -531,11 +531,7 @@ impl Checker<'_> {
             return None;
         };
         let view = access.property.receiver?;
-        let name = match kind {
-            crate::libraries::IndicesReceiver::Array
-            | crate::libraries::IndicesReceiver::Collection => wk::SIZE,
-            crate::libraries::IndicesReceiver::CharSequence => wk::CHAR_SEQUENCE_LENGTH,
-        };
+        let name = kind.bound_property();
         let size = self
             .resolver()
             .select_member_property(view, name)

@@ -533,8 +533,8 @@ pub(super) struct ContinuationClass<'a> {
     pub(super) outer_method: &'a str,
     pub(super) outer_descriptor: &'a str,
     pub(super) plan: &'a MachinePlan,
-    /// Class-file major version, matched to the method's own.
-    pub(super) major: Option<u16>,
+    /// Class-file version, matched to the method's own.
+    pub(super) version: Option<krusty::jvm::classfile::ClassFileVersion>,
     pub(super) source_file: Option<&'a str>,
     /// `Some(owner)` for an instance method, whose receiver the continuation keeps.
     pub(super) receiver: Option<&'a str>,
@@ -553,7 +553,7 @@ pub(super) fn build_continuation_class(spec: ContinuationClass<'_>) -> Vec<u8> {
         outer_method,
         outer_descriptor,
         plan,
-        major,
+        version,
         source_file,
         receiver,
         bridge,
@@ -561,7 +561,8 @@ pub(super) fn build_continuation_class(spec: ContinuationClass<'_>) -> Vec<u8> {
     } = spec;
     use krusty::jvm::classfile::{ClassWriter, CodeBuilder, ACC_FINAL, ACC_PUBLIC};
     let mut cw = ClassWriter::new(internal, CONTINUATION_IMPL);
-    if let Some(major) = major {
+    if let Some(krusty::jvm::classfile::ClassFileVersion { major, preview }) = version {
+        cw.set_preview(preview);
         cw.set_major(major);
     }
     cw.set_source_file(source_file.map(str::to_string));

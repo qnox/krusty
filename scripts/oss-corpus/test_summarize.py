@@ -33,11 +33,40 @@ class Summary(unittest.TestCase):
             text = subprocess.run([sys.executable, os.path.join(HERE, 'summarize.py'), f'{work}/zeta.json'],
                                   check=True, capture_output=True, text=True).stdout
         self.assertEqual(text.splitlines()[:5], [
-            '| Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Identical classes | Measured |',
-            '| --- | ---: | ---: | ---: | --- | ---: | ---: | --- |',
-            '| zeta | not fetched | 1,200 | 30 | ok | 1 / 1 | 4 / 4 (100.0%) | [2026-10-25, krusty 4dd7475](https://example.test/run/1) |',
+            '| Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Refused up front | Unsupported | Internal error | Reported errors | Failed | Not run | Identical classes | Measured |',
+            '| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |',
+            '| zeta | not fetched | 1,200 | 30 | ok | 1 / 1 | 0 | 0 | 0 | 0 | 0 | 0 | 4 / 4 (100.0%) | [2026-10-25, krusty 4dd7475](https://example.test/run/1) |',
             '',
             '**Measured total:** 1 / 1 compilations built by krusty, 4 / 4 identical classes (100.0%).',
+        ])
+
+    def test_the_scoreboard_splits_compilations_by_outcome(self):
+        blocked = row(':d:compileKotlin', False, 1, 0)
+        blocked['blocked_by'] = [':e:compileKotlin']
+        with tempfile.TemporaryDirectory() as work:
+            p = project('zeta', [row(':a:compileKotlin', True, 4, 4),
+                                 row(':b:compileKotlin', True, 1, 1),
+                                 row(':c:compileKotlin', False, 2, 0, fallback='krusty does not implement '
+                                     'everything it requests (krusty: unsupported compiler plugin '
+                                     "'plugin id 'androidx.compose'': no)"),
+                                 row(':g:compileKotlin', False, 2, 0,
+                                     fallback='krusty does not implement everything the module uses'),
+                                 row(':h:compileKotlin', False, 2, 0,
+                                     fallback='krusty failed with an internal error'),
+                                 row(':i:compileKotlin', False, 2, 0, fallback='krusty reported errors'),
+                                 row(':j:compileKotlin', False, 2, 0, fallback='krusty reported errors'),
+                                 row(':e:compileKotlin', False, 3, 0, error='e: boom'),
+                                 row(':f:compileKotlin', False, 3, 0, error='e: boom'),
+                                 blocked])
+            with open(f'{work}/zeta.json', 'w') as f:
+                json.dump(p, f)
+            text = subprocess.run([sys.executable, os.path.join(HERE, 'summarize.py'), f'{work}/zeta.json'],
+                                  check=True, capture_output=True, text=True).stdout
+        self.assertEqual(text.splitlines()[:3], [
+            '| Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | '
+            'Refused up front | Unsupported | Internal error | Reported errors | Failed | Not run | Identical classes |',
+            '| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
+            '| zeta | not fetched | 1,200 | 30 | ok | 2 / 10 | 1 | 1 | 1 | 2 | 2 | 1 | 5 / 22 (22.7%) |',
         ])
 
     def test_report_and_json(self):
@@ -77,10 +106,10 @@ class Summary(unittest.TestCase):
             with open(f'{work}/out.json') as f:
                 document = json.load(f)
         self.assertEqual(text, '''\
-| Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Identical classes |
-| --- | ---: | ---: | ---: | --- | ---: | ---: |
-| Alpha | 7 | 1,200 | 30 | failed (exit 1) | 0 / 1 | 0 / 5 (0.0%) |
-| zeta | 12,345 | 1,200 | 30 | ok | 1 / 3 | 3 / 7 (42.9%) |
+| Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Refused up front | Unsupported | Internal error | Reported errors | Failed | Not run | Identical classes |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Alpha | 7 | 1,200 | 30 | failed (exit 1) | 0 / 1 | 0 | 0 | 0 | 0 | 1 | 0 | 0 / 5 (0.0%) |
+| zeta | 12,345 | 1,200 | 30 | ok | 1 / 3 | 2 | 0 | 0 | 0 | 0 | 0 | 3 / 7 (42.9%) |
 
 **Measured total:** 1 / 3 compilations built by krusty, 3 / 7 identical classes (42.9%).
 
@@ -204,6 +233,43 @@ class Summary(unittest.TestCase):
             '',
         ])
 
+    def test_the_job_summary_drops_the_largest_error_listings_to_fit_its_size_limit(self):
+        def verified(task, count):
+            r = row(task, False, 1, 0, error='not run: a task it depends on failed')
+            r['verify'] = dict(status='failed', errors=[f"{task}/F{n}.kt:1:1: error: unresolved reference 'x{n}'."
+                                                        for n in range(count)])
+            return r
+
+        def compiled(task):
+            return dict(row(task, True, 1, 1), verify=dict(status='compiled', errors=[]))
+        with tempfile.TemporaryDirectory() as work:
+            reports = []
+            for name, count in (('big', 400), ('small', 2)):
+                p = dict(project(name, [verified(':compileKotlin', count), compiled(':other:compileKotlin')]), verify_exit=1)
+                path = os.path.join(work, name + '.json')
+                with open(path, 'w') as f:
+                    json.dump(p, f)
+                reports.append(path)
+            command = [sys.executable, os.path.join(HERE, 'summarize.py'), '--step-summary', f'{work}/job.md']
+            full = subprocess.run([*command, *reports], check=True, capture_output=True, text=True).stdout
+            with open(f'{work}/job.md') as f:
+                unlimited = f.read()
+            os.remove(f'{work}/job.md')
+            subprocess.run([*command, '--step-summary-limit', '6000', *reports], check=True,
+                           capture_output=True, text=True)
+            with open(f'{work}/job.md') as f:
+                trimmed = f.read()
+        self.assertEqual(unlimited, full)
+        self.assertGreater(len(full.encode()), 6000)
+        self.assertLessEqual(len(trimmed.encode()), 6000)
+        lines = trimmed.splitlines()
+        self.assertIn('<details><summary><b>small</b>: 2 errors in 1 compilation, 1 cause; '
+                      '2 of 2 compilations verified (verify build exit 1)</summary>', lines)
+        self.assertEqual([line for line in lines if line.startswith('- **big**: ')], [
+            '- **big**: 400 errors in 1 compilation, 1 cause; 2 of 2 compilations verified (verify build exit 1); '
+            'listed in summary.md of the summary artifact'])
+        self.assertEqual(trimmed.count('<details>'), trimmed.count('</details>'))
+
     def test_verify_errors_are_listed_per_project_and_grouped_by_cause(self):
         def verified(task, *errors, status='failed'):
             r = row(task, False, 1, 0, error='not run: a task it depends on failed')
@@ -309,9 +375,9 @@ class Summary(unittest.TestCase):
             with open(f'{work}/out.json') as f:
                 document = json.load(f)
         self.assertEqual(text, '''\
-| Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Identical classes |
-| --- | ---: | ---: | ---: | --- | ---: | ---: |
-| zeta | not fetched | 1,200 | 30 | ok | 0 / 1 | 0 / 2 (0.0%) |
+| Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Refused up front | Unsupported | Internal error | Reported errors | Failed | Not run | Identical classes |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| zeta | not fetched | 1,200 | 30 | ok | 0 / 1 | 0 | 0 | 0 | 0 | 1 | 0 | 0 / 2 (0.0%) |
 
 **Measured total:** 0 / 1 compilations built by krusty, 0 / 2 identical classes (0.0%).
 

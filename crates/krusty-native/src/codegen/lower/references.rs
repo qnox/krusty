@@ -14,9 +14,11 @@
 //!
 //! What is realized: a property of this file, top-level or a class member, bound or not, and
 //! however its value is reached — a slot, a source-written accessor pair, or a delegate. A
-//! reference to a DEPENDENCY property (`"kotlin"::length`), to a MEMBER extension property, or to
-//! one with context parameters declines by name: each wants more operands than the one receiver
-//! this object has room for, and answering it wrongly would be worse than skipping the program.
+//! reference to a DEPENDENCY property (`"kotlin"::length`) or to a MEMBER extension property
+//! declines by name: each wants more operands than the receiver and context values this object has
+//! room for, and answering it wrongly would be worse than skipping the program. The values a
+//! reference binds for the property's context parameters are fields of the object after its
+//! receiver; its descriptor lists their offsets, which equality and hashing read.
 
 use super::*;
 use krusty::fir::FirPropertyReferenceTarget;
@@ -33,6 +35,8 @@ pub(super) struct ReferenceItems {
     instance_size: u32,
     /// Byte offset of the bound receiver, for a site that binds one.
     receiver_offset: Option<u32>,
+    /// Byte offset of the first of the bound context values, which follow one another.
+    context_offset: u32,
     /// The one instance a site with no bound receiver has, in static storage.
     singleton: Option<DataId>,
 }
@@ -42,10 +46,12 @@ pub(super) struct ReferenceItems {
 ///
 /// Kept beside the items rather than read back out of the node, because the node says it in a
 /// different place for each kind of target and only [`reference_site`] knows the module one.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct ReferenceSite {
     items: ReferenceItems,
     bound: Option<u32>,
+    /// The expressions this site binds for the property's context parameters, in parameter order.
+    contexts: Vec<u32>,
 }
 
 /// What a site's `get` and `set` reach.
@@ -72,6 +78,19 @@ enum Access {
         setter: Option<FunId>,
         receiver: bool,
     },
+    /// A property with context parameters, reached through its accessors: the object holds the
+    /// values it bound for them, and `get`/`set` pass them first, as the accessors declare.
+    ContextAccessor {
+        getter: FunId,
+        setter: Option<FunId>,
+        /// The class a MEMBER property's accessors belong to, which dispatches them; `None` for a
+        /// top-level property.
+        owner: Option<TypeName>,
+        /// Whether the property takes a receiver: its class's instance for a member, its extension
+        /// receiver for a top-level one.
+        receiver: bool,
+        contexts: usize,
+    },
 }
 
 /// One reference site, as the declaration pass reads it out of the checked node.
@@ -83,10 +102,12 @@ struct Site {
     mutable: bool,
     /// The expression supplying `x` in `x::p`.
     bound: Option<u32>,
+    /// How many values the reference binds for the property's context parameters.
+    contexts: usize,
 }
 
 /// The reference a checked node creates, or `None` when it creates none.
-fn reference_site(expr: &IrExpr) -> Option<(&krusty::fir::PropertyId, Option<u32>, bool)> {
+fn reference_site(expr: &IrExpr) -> Option<(&krusty::fir::PropertyId, Option<u32>, bool, &[u32])> {
     let IrExpr::Checked(checked_op) = expr else {
         return None;
     };
@@ -94,6 +115,7 @@ fn reference_site(expr: &IrExpr) -> Option<(&krusty::fir::PropertyId, Option<u32
         target,
         dispatch_receiver,
         extension_receiver,
+        context_arguments,
         mutable,
         ..
     } = &**checked_op
@@ -118,7 +140,7 @@ fn reference_site(expr: &IrExpr) -> Option<(&krusty::fir::PropertyId, Option<u32
         | FirPropertyReferenceTarget::SpecializedModule { property, .. } => property,
         _ => return None,
     };
-    Some((property, bound, *mutable))
+    Some((property, bound, *mutable, context_arguments))
 }
 
 impl<'a> FileLowering<'a> {
@@ -188,14 +210,6 @@ impl<'a> FileLowering<'a> {
             return "a reference to a property this file does not declare".to_string();
         };
         match self.ir.local_property_layouts.get(property) {
-            Some(krusty::ir::IrLocalPropertyLayout::TopLevelAccessor {
-                context_parameters,
-                ..
-            }) if !context_parameters.is_empty() => format!(
-                "a reference to the property `{}`, which has context parameters this object has \
-                 no room for",
-                checked.name
-            ),
             Some(krusty::ir::IrLocalPropertyLayout::MemberExtension { .. }) => format!(
                 "a reference to the member extension property `{}`",
                 checked.name
@@ -218,11 +232,12 @@ impl<'a> FileLowering<'a> {
         let mut emitted: HashMap<(krusty::fir::PropertyId, bool, bool), ReferenceItems> =
             HashMap::default();
         for index in 0..self.ir.exprs.len() {
-            let Some((property, bound, mutable)) = reference_site(&self.ir.exprs[index]) else {
+            let Some((property, bound, mutable, contexts)) = reference_site(&self.ir.exprs[index])
+            else {
                 continue;
             };
-            let (property, bound) = (*property, bound);
-            let Some(site) = self.reference_of(&property, bound, mutable) else {
+            let (property, bound, contexts) = (*property, bound, contexts.to_vec());
+            let Some(site) = self.reference_of(&property, bound, mutable, contexts.len()) else {
                 // Not a shape this realizes. The node keeps its decline, raised where it is
                 // lowered, so the diagnostic still names the construct rather than this pass.
                 continue;
@@ -242,8 +257,14 @@ impl<'a> FileLowering<'a> {
                     items
                 }
             };
-            self.references
-                .insert(index as u32, ReferenceSite { items, bound });
+            self.references.insert(
+                index as u32,
+                ReferenceSite {
+                    items,
+                    bound,
+                    contexts,
+                },
+            );
         }
         Ok(())
     }
@@ -289,6 +310,7 @@ impl<'a> FileLowering<'a> {
                 ty: realized.ty,
                 mutable: realized.mutable,
                 bound: realized.bound,
+                contexts: 0,
             };
             let is_bound = realized.bound.is_some();
             let key = (realized.property, is_bound, realized.mutable);
@@ -313,6 +335,7 @@ impl<'a> FileLowering<'a> {
                 ReferenceSite {
                     items,
                     bound: realized.bound,
+                    contexts: Vec::new(),
                 },
             );
         }
@@ -347,8 +370,14 @@ impl<'a> FileLowering<'a> {
                 }
             };
             // A LOCAL delegated property's metadata binds no receiver: Kotlin gives it none.
-            self.references
-                .insert(index as u32, ReferenceSite { items, bound: None });
+            self.references.insert(
+                index as u32,
+                ReferenceSite {
+                    items,
+                    bound: None,
+                    contexts: Vec::new(),
+                },
+            );
         }
         Ok(())
     }
@@ -418,6 +447,7 @@ impl<'a> FileLowering<'a> {
             descriptor,
             instance_size,
             receiver_offset: None,
+            context_offset: 0,
             singleton: Some(instance),
         })
     }
@@ -428,6 +458,7 @@ impl<'a> FileLowering<'a> {
         property: &krusty::fir::PropertyId,
         bound: Option<u32>,
         mutable: bool,
+        contexts: usize,
     ) -> Option<Site> {
         let checked = self.ir.checked_properties.get(property)?;
         let access = match self.ir.local_property_layouts.get(property) {
@@ -443,8 +474,41 @@ impl<'a> FileLowering<'a> {
                 setter: *setter,
                 receiver: receiver.is_some(),
             },
-            // A property with context parameters, or a MEMBER extension property: its accessor
-            // takes operands this object does not carry, so the site is left to decline by name.
+            // A top-level property with context parameters: the object holds the values the site
+            // binds for them and hands them to its accessors ahead of the extension receiver.
+            Some(IrLocalPropertyLayout::TopLevelAccessor {
+                getter,
+                setter,
+                receiver,
+                context_parameters,
+                ..
+            }) if context_parameters.len() == contexts => Access::ContextAccessor {
+                getter: *getter,
+                setter: *setter,
+                owner: None,
+                receiver: receiver.is_some(),
+                contexts,
+            },
+            // A member property with context parameters: its accessors are the class's methods,
+            // dispatched on the receiver the object binds or is handed.
+            Some(IrLocalPropertyLayout::Member {
+                owner,
+                getter,
+                setter,
+                context_parameters,
+                ..
+            }) if !context_parameters.is_empty() && context_parameters.len() == contexts => {
+                Access::ContextAccessor {
+                    getter: (*getter)?,
+                    setter: *setter,
+                    owner: Some(*owner),
+                    receiver: true,
+                    contexts,
+                }
+            }
+            // Context values this site does not bind, or a MEMBER extension property: its
+            // accessor takes operands this object does not carry, so the site is left to decline
+            // by name.
             Some(IrLocalPropertyLayout::TopLevelAccessor { .. })
             | Some(IrLocalPropertyLayout::MemberExtension { .. }) => return None,
             _ => match checked.class {
@@ -473,6 +537,7 @@ impl<'a> FileLowering<'a> {
             ty: checked.ty,
             mutable,
             bound,
+            contexts,
         })
     }
 
@@ -505,14 +570,18 @@ impl<'a> FileLowering<'a> {
     ) -> Result<ReferenceItems, Unsupported> {
         let base = format!("kt_prop_{ordinal}");
         // The bound receiver is the object's one field, and the one reference the collector traces.
-        let (receiver_offset, instance_size, references) = match site.bound {
-            None => (None, model::HEADER_SIZE.next_multiple_of(8), Vec::new()),
-            Some(_) => (
-                Some(model::HEADER_SIZE),
-                (model::HEADER_SIZE + 8).next_multiple_of(8),
-                vec![model::HEADER_SIZE],
-            ),
-        };
+        // The context values the site binds follow the receiver, one reference each, and are
+        // traced like it.
+        let receiver_offset = site.bound.map(|_| model::HEADER_SIZE);
+        let context_offset = model::HEADER_SIZE + if site.bound.is_some() { 8 } else { 0 };
+        let context_offsets: Vec<u32> = (0..site.contexts)
+            .map(|index| context_offset + 8 * index as u32)
+            .collect();
+        let references: Vec<u32> = receiver_offset
+            .into_iter()
+            .chain(context_offsets.iter().copied())
+            .collect();
+        let instance_size = (context_offset + 8 * site.contexts as u32).next_multiple_of(8);
 
         let getter = self.declare_local_function(&format!("{base}_get"), &[any(), any()], any())?;
         let setter = site
@@ -526,6 +595,8 @@ impl<'a> FileLowering<'a> {
             })
             .transpose()?;
         let name = self.declare_local_function(&format!("{base}_name"), &[any()], any())?;
+        let to_string =
+            self.declare_local_function(&format!("{base}_to_string"), &[any()], any())?;
 
         let mut vtable = self.any_vtable()?;
         // Kotlin compares two references by the declaration they name and the receiver they bind.
@@ -534,6 +605,7 @@ impl<'a> FileLowering<'a> {
         let marker = self.reference_identity_marker(identity)?;
         vtable[0] = self.runtime_member_import("kt_reference_equals")?;
         vtable[1] = self.runtime_member_import("kt_reference_hash_code")?;
+        vtable[2] = to_string;
         vtable.push(getter);
         vtable.push(match setter {
             Some(setter) => setter,
@@ -559,7 +631,9 @@ impl<'a> FileLowering<'a> {
         } else {
             match site.access {
                 Access::Member { .. } => 1,
-                Access::Accessor { receiver, .. } => usize::from(receiver),
+                Access::Accessor { receiver, .. } | Access::ContextAccessor { receiver, .. } => {
+                    usize::from(receiver)
+                }
                 Access::TopLevel { .. } | Access::Static { .. } => 0,
             }
         };
@@ -586,7 +660,7 @@ impl<'a> FileLowering<'a> {
                 reference_target: Some(super::objects::ReferenceTarget {
                     marker,
                     receiver_offset: receiver_offset.unwrap_or(0),
-                    context_offsets: Vec::new(),
+                    context_offsets,
                 }),
                 walk: super::objects::WalkMembers::default(),
                 qualified_name: None,
@@ -595,15 +669,16 @@ impl<'a> FileLowering<'a> {
             },
         )?;
 
-        self.define_reference_get(getter, &base, &site, receiver_offset)?;
+        self.define_reference_get(getter, &base, &site, receiver_offset, context_offset)?;
         if let Some(setter) = setter {
-            self.define_reference_set(setter, &base, &site, receiver_offset)?;
+            self.define_reference_set(setter, &base, &site, receiver_offset, context_offset)?;
         }
         self.define_reference_name(name, &base, &site.name)?;
+        self.define_reference_to_string(to_string, &base, &site.name)?;
 
-        let singleton = match site.bound {
-            Some(_) => None,
-            None => {
+        let singleton = match (site.bound, site.contexts) {
+            (Some(_), _) | (None, 1..) => None,
+            (None, 0) => {
                 let instance = self.declare_local_data(&format!("{base}_instance"), false)?;
                 let mut description = DataDescription::new();
                 description.define(vec![0; model::HEADER_SIZE as usize].into_boxed_slice());
@@ -623,6 +698,7 @@ impl<'a> FileLowering<'a> {
             descriptor,
             instance_size,
             receiver_offset,
+            context_offset,
             singleton,
         })
     }
@@ -702,6 +778,7 @@ impl<'a> FileLowering<'a> {
         base: &str,
         site: &Site,
         receiver_offset: Option<u32>,
+        context_offset: u32,
     ) -> Result<(), Unsupported> {
         let signature = self.signature_of(&[any(), any()], any())?;
         let (access, ty) = (site.access, site.ty);
@@ -728,6 +805,18 @@ impl<'a> FileLowering<'a> {
                             takes_receiver.then(|| receiver(body, params, receiver_offset));
                         body.accessor_of(getter, object, None)?
                     }
+                    Access::ContextAccessor {
+                        getter,
+                        owner,
+                        receiver: takes_receiver,
+                        contexts,
+                        ..
+                    } => {
+                        let object =
+                            takes_receiver.then(|| receiver(body, params, receiver_offset));
+                        let contexts = bound_contexts(body, params[0], context_offset, contexts);
+                        body.context_accessor_of(getter, owner, object, &contexts, None)?
+                    }
                 };
                 let answer = match value {
                     Some(value) => body
@@ -751,6 +840,7 @@ impl<'a> FileLowering<'a> {
         base: &str,
         site: &Site,
         receiver_offset: Option<u32>,
+        context_offset: u32,
     ) -> Result<(), Unsupported> {
         let signature = self.signature_of(&[any(), any(), any()], Ty::Unit)?;
         let (access, name) = (site.access, site.name.clone());
@@ -802,6 +892,26 @@ impl<'a> FileLowering<'a> {
                         let written = body.check_erased_value(params[2], written_ty)?;
                         body.accessor_of(setter, object, Some(written))?;
                     }
+                    Access::ContextAccessor {
+                        setter,
+                        owner,
+                        receiver: takes_receiver,
+                        contexts,
+                        ..
+                    } => {
+                        let setter =
+                            setter.ok_or_else(|| format!("a write to the read-only `{name}`"))?;
+                        let object =
+                            takes_receiver.then(|| receiver(body, params, receiver_offset));
+                        let written_ty = body.file.ir.functions[setter as usize]
+                            .params
+                            .last()
+                            .copied()
+                            .ok_or_else(|| format!("a setter of `{name}` without a value"))?;
+                        let written = body.check_erased_value(params[2], written_ty)?;
+                        let contexts = bound_contexts(body, params[0], context_offset, contexts);
+                        body.context_accessor_of(setter, owner, object, &contexts, Some(written))?;
+                    }
                 }
                 body.builder.ins().return_(&[]);
                 body.terminate();
@@ -811,6 +921,30 @@ impl<'a> FileLowering<'a> {
     }
 
     /// `name(self)`: the property's Kotlin name.
+    /// `toString(self)`: a property reference prints as `property NAME (Kotlin reflection is not
+    /// available)`, which is what kotlinc-native's references print.
+    fn define_reference_to_string(
+        &mut self,
+        id: FuncId,
+        base: &str,
+        property: &str,
+    ) -> Result<(), Unsupported> {
+        let signature = self.signature_of(&[any()], any())?;
+        let text = format!("property {property} (Kotlin reflection is not available)").into_bytes();
+        self.emit_function(
+            id,
+            signature,
+            any(),
+            &format!("{base}_to_string"),
+            &mut |body, _| {
+                let value = body.string_literal(&text)?;
+                body.builder.ins().return_(&[value]);
+                body.terminate();
+                Ok(())
+            },
+        )
+    }
+
     pub(super) fn define_reference_name(
         &mut self,
         id: FuncId,
@@ -845,6 +979,26 @@ fn receiver(body: &mut BodyLowering<'_, '_, '_>, params: &[Value], offset: Optio
     }
 }
 
+/// The values a reference object holds for its property's context parameters, read out of its
+/// fields; the first is at `offset`.
+fn bound_contexts(
+    body: &mut BodyLowering<'_, '_, '_>,
+    object: Value,
+    offset: u32,
+    count: usize,
+) -> Vec<Value> {
+    (0..count)
+        .map(|index| {
+            body.builder.ins().load(
+                types::I64,
+                trusted(),
+                object,
+                (offset + 8 * index as u32) as i32,
+            )
+        })
+        .collect()
+}
+
 impl BodyLowering<'_, '_, '_> {
     /// The `KProperty` metadata of a local delegated property: one object, for its name.
     pub(super) fn local_property_reference(
@@ -866,30 +1020,51 @@ impl BodyLowering<'_, '_, '_> {
         let Some(site) = self.file.references.get(&id) else {
             return Err(self.file.property_reference_decline(id).into());
         };
-        let (descriptor, size, receiver_offset, singleton, bound) = (
+        let (descriptor, size, receiver_offset, context_offset, singleton, bound, contexts) = (
             site.items.descriptor,
             site.items.instance_size,
             site.items.receiver_offset,
+            site.items.context_offset,
             site.items.singleton,
             site.bound,
+            site.contexts.clone(),
         );
         if let Some(instance) = singleton {
             // No receiver to hold: one object for the program, which is also what makes
             // `::foo == ::foo` answer true through identity equality.
             return Ok(Some(self.data_address(instance)));
         }
-        // The operand the DECLARE pass read out of this site — not re-read here, because the node
-        // says it in a different place for each kind of target.
-        let bound = bound.expect("a site with no singleton binds a receiver");
-        let object = self.reference(bound)?;
+        // The operands the DECLARE pass read out of this site — not re-read here, because the node
+        // says them in a different place for each kind of target.
+        let object = match bound {
+            Some(bound) => Some(self.reference(bound)?),
+            None => None,
+        };
         if self.terminated {
             return Ok(None);
         }
+        let mut values = Vec::with_capacity(contexts.len());
+        for context in contexts {
+            values.push(self.reference(context)?);
+            if self.terminated {
+                return Ok(None);
+            }
+        }
         let instance = self.allocate(descriptor, size)?;
-        let offset = receiver_offset.expect("a bound site stores its receiver");
-        self.builder
-            .ins()
-            .store(trusted(), object, instance, offset as i32);
+        if let Some(object) = object {
+            let offset = receiver_offset.expect("a bound site stores its receiver");
+            self.builder
+                .ins()
+                .store(trusted(), object, instance, offset as i32);
+        }
+        for (index, value) in values.into_iter().enumerate() {
+            self.builder.ins().store(
+                trusted(),
+                value,
+                instance,
+                (context_offset + 8 * index as u32) as i32,
+            );
+        }
         Ok(Some(instance))
     }
 
@@ -939,6 +1114,52 @@ impl BodyLowering<'_, '_, '_> {
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &arguments)?;
         Ok(self.builder.inst_results(call).first().copied())
+    }
+
+    /// Call the accessor of a property with context parameters on behalf of a reference object:
+    /// the context values it holds, then the extension receiver when the property takes one, then
+    /// the written value for a setter. A member's accessor is dispatched on `object`, the instance
+    /// the reference binds or is handed. Every operand crosses the object's members as a
+    /// reference and is converted to the type the accessor declares.
+    pub(super) fn context_accessor_of(
+        &mut self,
+        accessor: FunId,
+        owner: Option<TypeName>,
+        object: Option<Value>,
+        contexts: &[Value],
+        value: Option<Value>,
+    ) -> Result<Option<Value>, Unsupported> {
+        let params = self.file.ir.functions[accessor as usize].params.clone();
+        let extension = match owner {
+            Some(_) => None,
+            None => object,
+        };
+        let supplied = contexts
+            .iter()
+            .copied()
+            .chain(extension)
+            .chain(value)
+            .collect::<Vec<_>>();
+        if supplied.len() != params.len() {
+            return Err(declined!(
+                "a property accessor taking {} operands for {} parameters",
+                params.len(),
+                supplied.len()
+            ));
+        }
+        let mut arguments = Vec::with_capacity(supplied.len());
+        for (operand, ty) in supplied.into_iter().zip(&params) {
+            let Some(argument) = self.convert(operand, Some(any()), *ty)? else {
+                return Err("a `Unit` operand of a property accessor".into());
+            };
+            arguments.push(argument);
+        }
+        let dispatch = match (owner, object) {
+            (Some(owner), Some(object)) => Some((owner, object)),
+            (Some(_), None) => return Err("a member accessor with no receiver".into()),
+            (None, _) => None,
+        };
+        self.call_receiver_accessor(accessor, dispatch, &arguments)
     }
 
     /// Whether a checked read of `target` is answered by a reference object's slot: its selected

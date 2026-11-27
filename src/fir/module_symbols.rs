@@ -918,6 +918,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             is_final: header.flags.has(DeclarationFlags::FINAL),
             deprecated_hidden: false,
             inherited_by_delegation: false,
+            signature_polymorphic: false,
             return_value_status: None,
         };
         function.visibility = header.visibility;
@@ -1212,6 +1213,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 is_final,
                 deprecated_hidden,
                 inherited_by_delegation: false,
+                signature_polymorphic: false,
                 return_value_status: None,
             };
             function.visibility = header.visibility;
@@ -1699,6 +1701,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 is_final: header.flags.has(DeclarationFlags::FINAL),
                 deprecated_hidden: self.declaration_is_hidden_at_use(declaration),
                 inherited_by_delegation: false,
+                signature_polymorphic: false,
                 return_value_status: None,
             };
             function.visibility = header.visibility;

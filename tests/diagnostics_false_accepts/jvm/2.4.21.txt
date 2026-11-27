@@ -15,7 +15,6 @@ compiler/testData/diagnostics/tests/OverridenSetterVisibility.kt
 compiler/testData/diagnostics/tests/OverridingVarByVal.kt
 compiler/testData/diagnostics/tests/PrimaryConstructors.kt
 compiler/testData/diagnostics/tests/PrivateSetterForOverridden.kt
-compiler/testData/diagnostics/tests/ProcessingEmptyImport.kt
 compiler/testData/diagnostics/tests/ProjectionOnFunctionArgumentErrror.kt
 compiler/testData/diagnostics/tests/ReserveYieldNoMore2.kt
 compiler/testData/diagnostics/tests/SetterVisibility.kt
@@ -203,12 +202,9 @@ compiler/testData/diagnostics/tests/classLiteral/reifiedWithoutUpperBoundAfter.k
 compiler/testData/diagnostics/tests/classLiteral/smartCast.kt
 compiler/testData/diagnostics/tests/classObjects/InnerClassClassObject.kt
 compiler/testData/diagnostics/tests/classObjects/companionObjectOfPrivateClassVisibility.kt
-compiler/testData/diagnostics/tests/classObjects/invisibleClassObjects.kt
 compiler/testData/diagnostics/tests/classObjects/nestedClassInPrivateClassObject.kt
 compiler/testData/diagnostics/tests/classObjects/selfCallsInCompanionSuperConstructor_error.kt
-compiler/testData/diagnostics/tests/collectionLiterals/collectionLiteralAsReceiver.kt
 compiler/testData/diagnostics/tests/collectionLiterals/collectionLiteralsDisabled/kt34515.kt
-compiler/testData/diagnostics/tests/collectionLiterals/collectionLiteralsDisabled/noCollectionLiterals.kt
 compiler/testData/diagnostics/tests/collectionLiterals/collectionLiteralsDisabled/resolveToFunctionFromBuiltIns.kt
 compiler/testData/diagnostics/tests/collectionLiterals/deprecatedCompanionObject.kt
 compiler/testData/diagnostics/tests/collectionLiterals/emptyArrayAsSpreadInAnnotation.kt
@@ -222,13 +218,10 @@ compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/defaultV
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/deprecatedOfs.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/extensions.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/extraParametersInVarargOverload.kt
-compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/flexibleReturnType.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/inconsistentFunctionalParameterTypes.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/intersectionReturnType.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/irrelevantReturnType.kt
-compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/localTypeApproximation.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/nonCompanionMember.kt
-compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/nullableReturnType.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/suspendMismatches.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/topLevel.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/visibilityMismatches.kt

@@ -2,7 +2,8 @@
 //!
 //! Which statics wait for their class, and what each activation point initializes, is
 //! [`krusty::backend::class_statics::ClassStaticPlan`]'s. Here each class of the plan gets
-//! `kt_classinit_<class>`, which runs its statics in declaration order behind a once-only flag,
+//! `kt_classinit_<class>`, which runs its statics in declaration order behind a once-only flag
+//! (initializing the companion object at the point the plan names),
 //! and each activation point the plan names calls it.
 
 use super::*;
@@ -13,6 +14,22 @@ pub(super) struct ClassInitializer {
     function: FuncId,
     /// Set once the initializers have started.
     flag: DataId,
+}
+
+/// The file's class static plan, in the order the reference release initializes a class's statics.
+pub(super) fn plan(
+    ir: &IrFile,
+) -> Result<krusty::backend::class_statics::ClassStaticPlan, Unsupported> {
+    krusty::backend::class_statics::ClassStaticPlan::new(
+        ir,
+        krusty::kotlin_version::class_statics_in_program_order(ir.reference.quirks()),
+    )
+    .map_err(|unordered| {
+        declined!(
+            "a non-`const` property stored on `{}`",
+            unordered.owner.render()
+        )
+    })
 }
 
 impl<'a> FileLowering<'a> {
@@ -51,6 +68,7 @@ impl<'a> FileLowering<'a> {
         for position in 0..self.class_statics.classes().len() {
             let group = &self.class_statics.classes()[position];
             let class = group.class;
+            let before_companion = group.before_companion;
             let declarations: Vec<_> = group
                 .statics
                 .iter()
@@ -81,7 +99,10 @@ impl<'a> FileLowering<'a> {
                 let flag_address = body.data_address(flag);
                 let one = body.builder.ins().iconst(types::I8, 1);
                 body.builder.ins().store(trusted(), one, flag_address, 0);
-                for &(slot, ty, init) in &declarations {
+                for (position, &(slot, ty, init)) in declarations.iter().enumerate() {
+                    if before_companion == Some(position) {
+                        body.initialize_companion(class)?;
+                    }
                     let Some(init) = init else {
                         continue;
                     };
@@ -97,6 +118,9 @@ impl<'a> FileLowering<'a> {
                     };
                     let address = body.data_address(slot);
                     body.builder.ins().store(trusted(), value, address, 0);
+                }
+                if before_companion == Some(declarations.len()) && !body.terminated {
+                    body.initialize_companion(class)?;
                 }
                 if !body.terminated {
                     body.builder.ins().jump(done, &[]);

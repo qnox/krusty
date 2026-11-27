@@ -11,6 +11,11 @@ pub fn lex(src: &str, diags: &mut DiagSink) -> Vec<Token> {
     lexer(src, diags).run()
 }
 
+pub(crate) fn file_header(src: &str, diags: &mut DiagSink) -> crate::token::file_header::Header {
+    let mut lexer = lexer(src, diags);
+    crate::token::file_header::read(src, || lexer.next_token())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NameTokenKind {
     Ident,
@@ -420,12 +425,17 @@ impl<'a> Lexer<'a> {
 
     fn run_names(mut self) -> Vec<NameToken> {
         let mut names = Vec::new();
+        let source = self.s;
+        let header = crate::token::file_header::read(source, || self.next_token());
+        let mut prefix = header.prefix.into_iter();
         loop {
-            let token = self.next_token();
+            let token = prefix.next().unwrap_or_else(|| self.next_token());
             let kind = match token.kind {
+                TokenKind::Ident if header.import_starts.binary_search(&token.span.lo).is_ok() => {
+                    Some(NameTokenKind::Import)
+                }
                 TokenKind::Ident => Some(NameTokenKind::Ident),
                 TokenKind::KwPackage => Some(NameTokenKind::Package),
-                TokenKind::KwImport => Some(NameTokenKind::Import),
                 TokenKind::At => Some(NameTokenKind::At),
                 TokenKind::Dot => Some(NameTokenKind::Dot),
                 TokenKind::Plus
@@ -519,7 +529,7 @@ impl<'a> Lexer<'a> {
             }
         }
         let kind = match c {
-            b'\n' => {
+            b'\n' | b'\r' => {
                 self.i += 1;
                 TokenKind::Newline
             }
@@ -609,7 +619,13 @@ impl<'a> Lexer<'a> {
                     self.i += 1;
                     self.retain(RetainedKind::Newline, start, self.i);
                 }
-                b' ' | b'\t' | b'\r' => {
+                // kotlinc reads a lone `\r` as a line break, which `lex_token` tokenizes; the `\r` of
+                // a `\r\n` is whitespace before the `\n` that is the line break.
+                b' ' | b'\t' => {
+                    self.i += 1;
+                    self.retain(RetainedKind::Whitespace, start, self.i);
+                }
+                b'\r' if self.peek2() == b'\n' => {
                     self.i += 1;
                     self.retain(RetainedKind::Whitespace, start, self.i);
                 }
@@ -622,14 +638,8 @@ impl<'a> Lexer<'a> {
                     self.retain_line_suffix(RetainedKind::Shebang, start, self.i);
                 }
                 b'/' if self.peek2() == b'/' => {
-                    if self.formatting.is_some() {
-                        while self.i < self.b.len() && !matches!(self.b[self.i], b'\r' | b'\n') {
-                            self.i += 1;
-                        }
-                    } else {
-                        while self.i < self.b.len() && self.b[self.i] != b'\n' {
-                            self.i += 1;
-                        }
+                    while self.i < self.b.len() && !matches!(self.b[self.i], b'\r' | b'\n') {
+                        self.i += 1;
                     }
                     self.retain_line_suffix(RetainedKind::LineComment, start, self.i);
                 }
@@ -673,7 +683,7 @@ impl<'a> Lexer<'a> {
                 {
                     let mut j = self.i + 2;
                     while j + 1 < self.b.len()
-                        && self.b[j] != b'\n'
+                        && !matches!(self.b[j], b'\r' | b'\n')
                         && !(self.b[j] == b'!' && self.b[j + 1] == b'>')
                     {
                         j += 1;
@@ -751,7 +761,7 @@ impl<'a> Lexer<'a> {
     fn backtick_ident(&mut self) -> Token {
         self.i += 1; // opening backtick
         let start = self.i as u32;
-        while self.i < self.b.len() && self.b[self.i] != b'`' && self.b[self.i] != b'\n' {
+        while self.i < self.b.len() && !matches!(self.b[self.i], b'`' | b'\r' | b'\n') {
             self.i += 1;
         }
         let end = self.i as u32;
@@ -1345,6 +1355,32 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_carriage_return_is_a_line_break() {
+        use TokenKind::*;
+        let with_breaks = |src: &str| {
+            let mut d = DiagSink::new();
+            lex(src, &mut d)
+                .into_iter()
+                .map(|t| t.kind)
+                .collect::<Vec<_>>()
+        };
+        // kotlinc reads `\r` as `\n`: a line comment ends there, and it separates statements.
+        assert_eq!(
+            with_breaks("val a = 1 // c\rval b = 2"),
+            vec![KwVal, Ident, Eq, IntLit, Newline, KwVal, Ident, Eq, IntLit, Eof]
+        );
+        assert_eq!(
+            with_breaks("val a = 1\rval b = 2"),
+            with_breaks("val a = 1\nval b = 2")
+        );
+        // `\r\n` stays one line break.
+        assert_eq!(
+            with_breaks("val a = 1\r\nval b = 2"),
+            with_breaks("val a = 1\nval b = 2")
+        );
+    }
+
+    #[test]
     fn formatting_lexer_preserves_bytes_and_exposes_template_expressions() {
         let source =
             "val text = \"sum=${left+right}; raw=$left\" /* outer /* nested */ */ // tail  \r\n";
@@ -1691,6 +1727,28 @@ mod tests {
                 (StrChunk, "]\"\""),
                 (TemplateEnd, ""),
                 (Eof, ""),
+            ]
+        );
+        assert!(!diagnostics.has_errors());
+    }
+
+    /// Only import-list positions in the file preamble receive the directive role.
+    #[test]
+    fn only_a_preamble_import_is_a_directive_name_token() {
+        let source = "package p; import q.Semi\nimport q.Shown\nval import = q.import\n";
+        let mut diagnostics = DiagSink::new();
+        let names = lex_name_tokens(source, &mut diagnostics)
+            .into_iter()
+            .filter(|token| token.text(source) == "import")
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                NameTokenKind::Import,
+                NameTokenKind::Import,
+                NameTokenKind::Ident,
+                NameTokenKind::Ident,
             ]
         );
         assert!(!diagnostics.has_errors());

@@ -256,6 +256,7 @@ impl BodyFirChecker<'_> {
             constructor_prefix_capture_access: self.constructor_prefix_capture_access,
             hoist_anonymous_super_argument: self.hoist_anonymous_super_argument,
             construction_site_receiver_frames: self.construction_site_receiver_frames.clone(),
+            range_builder_expression: None,
         };
         for (name, ty) in context_parameter_names
             .iter()

@@ -62,7 +62,7 @@ pub(crate) use raw_erasure::{formal_erasures, raw_member_type, DeclaredFormals};
 mod thin_handles;
 mod ty_kind;
 mod ty_table;
-pub use krusty_names::{
+pub use krusty_core::{
     existing_type_name, existing_type_name_child, existing_type_name_in,
     existing_type_name_nested_child, insert_type_name_in, same, type_name, type_name_child,
     type_name_from, type_name_from_multifile_facade, type_name_nested_child, InternalName,
@@ -91,15 +91,7 @@ pub(crate) use type_parameter_identity::declaration_type_parameter;
 #[cfg(any(test, feature = "test-support"))]
 pub use type_parameter_identity::declaration_type_parameter;
 
-/// Compile-time policy for Kotlin's `assert` operation. Every backend must guard, retain, or elide
-/// the checked operation while preserving lazy condition/message evaluation.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum AssertionMode {
-    #[default]
-    Runtime,
-    AlwaysEnabled,
-    AlwaysDisabled,
-}
+pub use krusty_core::assertions::{AssertionCompilation, AssertionMode};
 
 /// Semantic shape of one compiler-provided Kotlin array factory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -518,6 +510,17 @@ impl Ty {
         }
     }
 
+    /// This intersection without the upper type it was fixed below, so it approximates by its own
+    /// components. Any other type is returned unchanged.
+    pub fn without_intersection_approximation(self) -> Ty {
+        match self.kind() {
+            TyKind::Intersection(parts) if parts.approximation().is_some() => Ty::from(
+                TyKind::Intersection(IntersectionParts::new(parts.parts(), None)),
+            ),
+            _ => self,
+        }
+    }
+
     pub fn projection_inner(self) -> Option<Ty> {
         match self.kind() {
             TyKind::InProjection(inner)
@@ -617,7 +620,32 @@ impl Ty {
             TyKind::TyParam(..) | TyKind::Var(..) => {
                 self.with_symbol_bound(self.ty_param_bound().unwrap().definitely_non_null())
             }
+            // Narrowing `(A & B)?` to non-null intersects it with `Any`, which builds a new
+            // intersection: the upper type the original was fixed below no longer applies.
+            TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Intersection(_)) => {
+                inner.without_intersection_approximation()
+            }
             _ => self.non_null_keeping_mutability(),
+        }
+    }
+
+    /// The type of a not-null operator (`!!`, the left of `?:`, the receiver of `?.`) applied to a
+    /// value of this type, in the release `quirks` describes. It differs from smart-casting the
+    /// value to non-null only for a nullable intersection fixed below an upper type, whose operator
+    /// result keeps that upper type from 2.5.
+    pub fn not_null_operator_result(self, quirks: crate::kotlin_version::Quirks) -> Ty {
+        if quirks.has(crate::kotlin_version::Quirk::NotNullOperatorDropsIntersectionApproximation) {
+            self.definitely_non_null()
+        } else {
+            self.non_null_keeping_intersection_bound()
+        }
+    }
+
+    /// This type made non-null, keeping the upper type a nullable intersection was fixed below.
+    pub fn non_null_keeping_intersection_bound(self) -> Ty {
+        match self.kind() {
+            TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Intersection(_)) => inner,
+            _ => self.definitely_non_null(),
         }
     }
 

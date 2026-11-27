@@ -9,6 +9,19 @@ pub(super) fn is_exact_argument_rank(expected: Ty, actual: Ty) -> bool {
     expected == actual && !matches!(expected.kind(), TyKind::TyParam(..) | TyKind::Var(..))
 }
 
+/// The call-site signature's parameters, before inference binds its variables, in the order of
+/// the scored shape. `None` when the shape names a parameter the signature does not declare.
+fn shaped_declared_parameters(
+    signature: &crate::libraries::GenericSig,
+    shape: &ContextualCallShape,
+) -> Option<Vec<Ty>> {
+    shape
+        .parameter_indices
+        .iter()
+        .map(|&index| signature.params.get(index).copied())
+        .collect()
+}
+
 impl Checker<'_> {
     /// Select one declaration from a provider's raw callable family. Receiver/name lookup has already
     /// produced the family; applicability, generic binding, and contextual argument shape are shared.
@@ -329,6 +342,7 @@ impl Checker<'_> {
                             (!matches!(
                                 argument_kinds[argument],
                                 CallArgKind::IntegerLiteral { .. }
+                                    | CallArgKind::CollectionLiteral { .. }
                             ))
                             .then_some((
                                 parameter,
@@ -360,6 +374,25 @@ impl Checker<'_> {
                         }
                         kind => kind,
                     };
+                    if matches!(kind, CallArgKind::CollectionLiteral { .. }) {
+                        // A collection literal is built from the type its parameter ends up with,
+                        // so its expectation-free `List<T>` reading is evidence only for a formal
+                        // nothing else constrains: `select(mutableSetOf<Int>(), [1])` is a
+                        // `MutableSet<Int>`, not the `Collection<Int>` joined with that reading.
+                        let literal =
+                            crate::symbol_resolver::infer_generic_call_constraints_from_symbols(
+                                &source,
+                                &signature,
+                                [actual],
+                                candidate.call_sig.vararg_index,
+                            );
+                        let constrained_elsewhere = !literal.bindings.is_empty()
+                            && literal
+                                .bindings
+                                .keys()
+                                .all(|formal| preliminary.bindings.contains_key(formal));
+                        return (!constrained_elsewhere).then_some(actual);
+                    }
                     if !matches!(kind, CallArgKind::IntegerLiteral { .. }) {
                         return Some(actual);
                     }
@@ -1013,6 +1046,14 @@ impl Checker<'_> {
                     argument_names,
                 )?
             };
+            let Some(declared_params) = shaped_declared_parameters(&signature, &shape) else {
+                crate::trace_compiler!(
+                    "resolve",
+                    "candidate {} rejected: call shape names an undeclared parameter",
+                    candidate.callable.name,
+                );
+                continue;
+            };
             let Some(mut score) = call_applicability::score_with_declaration(
                 self,
                 scope,
@@ -1030,6 +1071,10 @@ impl Checker<'_> {
                         bindings: &specialized_bindings,
                         parameter_indices: &shape.parameter_indices,
                     }
+                }),
+                Some(call_applicability::DeclaredParameters {
+                    params: &declared_params,
+                    formals: &signature.formals,
                 }),
             ) else {
                 crate::trace_compiler!(
@@ -1107,6 +1152,14 @@ impl Checker<'_> {
                         argument_names,
                     )?
                 };
+                let Some(declared_params) = shaped_declared_parameters(&signature, &shape) else {
+                    crate::trace_compiler!(
+                        "resolve",
+                        "candidate {} rejected: call shape names an undeclared parameter",
+                        candidate.callable.name,
+                    );
+                    continue;
+                };
                 let Some(specialized_score) = call_applicability::score_with_declaration(
                     self,
                     scope,
@@ -1124,6 +1177,10 @@ impl Checker<'_> {
                             bindings: &specialized_bindings,
                             parameter_indices: &shape.parameter_indices,
                         }
+                    }),
+                    Some(call_applicability::DeclaredParameters {
+                        params: &declared_params,
+                        formals: &signature.formals,
                     }),
                 ) else {
                     continue;
@@ -1547,43 +1604,24 @@ impl Checker<'_> {
         if maximal.len() > 1 {
             // A generic declaration whose parameters another's accept, and not the reverse, is the
             // more general one: `reference(Column<T>)` over a free `T` accepts
-            // `reference(Column<E>)` over `E : EntityID<T>`, which is the more specific.
+            // `reference(Column<E>)` over `E : EntityID<T>`, which is the more specific. A vararg
+            // takes part through the element its one argument supplies, as in the signature phase.
             let source = self.fed_source();
-            let accepts = |general: &crate::libraries::GenericSig, specific| {
-                crate::symbol_resolver::generic_declaration_accepts_parameters_of(
-                    &source, general, specific,
-                )
-            };
-            let dominated = maximal
+            let shapes = maximal
                 .iter()
-                .enumerate()
-                .filter_map(|(index, (_, _, _, _, _, candidate, _, _))| {
-                    // A vararg parameter stands for its element type at a call, which the declaration
-                    // comparison does not model; those overloads keep ordinary specificity.
-                    let general = candidate
-                        .info
-                        .generic_sig
-                        .as_ref()
-                        .filter(|_| candidate.call_sig.vararg_index.is_none())?;
-                    maximal
-                        .iter()
-                        .any(|(_, _, _, _, _, other, _, _)| {
-                            other
-                                .info
-                                .generic_sig
-                                .as_ref()
-                                .filter(|_| other.call_sig.vararg_index.is_none())
-                                .is_some_and(|specific| {
-                                    accepts(general, specific) && !accepts(specific, general)
-                                })
-                        })
-                        .then_some(index)
+                .map(|(_, _, _, _, _, candidate, _, _)| {
+                    candidate.info.generic_sig.as_ref().and_then(|_| {
+                        crate::symbol_resolver::declared_call_shape(&candidate.info, arg_tys.len())
+                    })
                 })
+                .collect::<Vec<_>>();
+            let retained = crate::symbol_resolver::declaration_dominance_maxima(&source, &shapes)
+                .into_iter()
                 .collect::<crate::fx_hash::HashSet<_>>();
             maximal = maximal
                 .into_iter()
                 .enumerate()
-                .filter_map(|(index, candidate)| (!dominated.contains(&index)).then_some(candidate))
+                .filter_map(|(index, candidate)| retained.contains(&index).then_some(candidate))
                 .collect();
         }
         if maximal.len() > 1 {
@@ -1595,52 +1633,53 @@ impl Checker<'_> {
             let no_bindings = crate::types::TyParamBindings::default();
             let viable = maximal
                 .iter()
-                .filter(|(_, _, _, _, _, candidate, _, _)| {
-                    candidate.info.generic_sig.as_ref().is_some_and(|sig| {
-                        sig.params.len() == arg_tys.len()
-                            && sig.params.iter().zip(arg_tys).all(|(parameter, argument)| {
+                .filter_map(|entry| {
+                    let candidate = &entry.5;
+                    candidate.info.generic_sig.as_ref()?;
+                    let shape = crate::symbol_resolver::declared_call_shape(
+                        &candidate.info,
+                        arg_tys.len(),
+                    )?;
+                    (shape.params.len() == arg_tys.len()
+                        && shape
+                            .params
+                            .iter()
+                            .zip(arg_tys)
+                            .all(|(parameter, argument)| {
                                 crate::symbol_resolver::resolution_subtype(
                                     &source,
                                     *argument,
                                     parameter.substitute_erased(&no_bindings),
                                 )
-                            })
-                    })
+                            }))
+                    .then_some((entry, shape))
                 })
                 .collect::<Vec<_>>();
             // Only a parameter that mentions a type parameter is compared by the solve; a
             // constructor's class parameters do not make `(Int)` and `(Long)` incomparable.
-            let signatures = viable
-                .iter()
-                .map(|(_, _, _, _, _, candidate, _, _)| {
-                    candidate.info.generic_sig.as_ref().filter(|sig| {
-                        candidate.call_sig.vararg_index.is_none()
-                            && sig
-                                .params
-                                .iter()
-                                .any(|parameter| parameter.mentions_ty_param())
-                    })
-                })
-                .collect::<Option<Vec<_>>>();
+            let compared = viable.iter().all(|(_, shape)| {
+                shape
+                    .params
+                    .iter()
+                    .any(|parameter| parameter.mentions_ty_param())
+            });
             if viable.len() > 1
-                && signatures.is_some_and(|signatures| {
-                    signatures.iter().enumerate().all(|(index, general)| {
-                        signatures.iter().skip(index + 1).all(|specific| {
-                            !crate::symbol_resolver::generic_declaration_accepts_parameters_of(
-                                &source, general, specific,
-                            ) && !crate::symbol_resolver::generic_declaration_accepts_parameters_of(
-                                &source, specific, general,
-                            )
-                        })
+                && compared
+                && viable.iter().enumerate().all(|(index, (_, left))| {
+                    viable.iter().skip(index + 1).all(|(_, right)| {
+                        crate::symbol_resolver::declarations_incomparable(&source, left, right)
                     })
                 })
             {
                 return Some(CallableCandidateSelection::Ambiguous(
                     viable
                         .iter()
-                        .map(|(_, _, _, _, _, candidate, _, _)| candidate.info.clone())
+                        .map(|(entry, _)| entry.5.info.clone())
                         .collect(),
-                    viable.iter().filter_map(|t| t.5.candidate_index).collect(),
+                    viable
+                        .iter()
+                        .filter_map(|(entry, _)| entry.5.candidate_index)
+                        .collect(),
                 ));
             }
         }

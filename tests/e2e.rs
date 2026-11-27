@@ -16,18 +16,20 @@ mod bytecode_comparison_support;
 #[path = "common/mod.rs"]
 mod common_core;
 #[cfg(test)]
-pub(crate) use common_core::server_pool::Pool as ServerPool;
+pub(crate) use common_core::server_pool::{Budget as ServerBudget, Pool as ServerPool};
 #[path = "common/compiler_plugin_fixture.rs"]
 mod compiler_plugin_fixture;
 #[path = "common/e2e.rs"]
 mod e2e_support;
 #[path = "common/inner_class_rows.rs"]
 mod inner_class_rows_support;
+#[path = "common/kotlin_native_multimodule.rs"]
+mod kotlin_native_multimodule_support;
 #[path = "common/reference_box.rs"]
 mod reference_box_support;
 #[path = "common/reference_compiler.rs"]
 mod reference_compiler_support;
-#[path = "common/reference_targets/invocation.rs"]
+#[path = "common/reference_targets/recorded_library.rs"]
 mod reference_invocation_support;
 #[path = "common/reference_recording.rs"]
 mod reference_recording_support;
@@ -44,6 +46,9 @@ mod common {
     pub use super::e2e_support::*;
     pub use super::inner_class_rows_support::{
         assert_same_inner_classes, compile_with_kotlinc, compile_with_kotlinc_for_target,
+    };
+    pub use super::kotlin_native_multimodule_support::{
+        kotlin_native_multimodule_outcome, NativeModulesOutcome,
     };
     pub use super::reference_box_support::*;
     pub use super::reference_compiler_support::*;

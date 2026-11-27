@@ -1952,6 +1952,12 @@ impl<'a> FileLowering<'a> {
             .and_then(|outer| self.ir.enum_initializers().get(&outer))
             .and_then(|&initializer| self.functions[initializer as usize]);
 
+        // A `ThreadLocal` object keeps one instance on every thread, in the slot the runtime gives
+        // each thread for this declaration, which the program's own slot identifies. The runtime
+        // roots every such slot for as long as its thread lives.
+        let per_thread = self.ir.classes[class as usize]
+            .applied_annotations
+            .declares(krusty::types::wk::thread_local());
         let name = format!("{}.INSTANCE", self.ir.classes[class as usize].fq_name());
         let signature = self.signature_of(&[], any())?;
         self.emit_function(getter, signature, any(), &name, &mut |body, _| {
@@ -1960,6 +1966,12 @@ impl<'a> FileLowering<'a> {
                 body.emit_call(func_ref, &[])?;
             }
             let slot_address = body.data_address(slot);
+            let slot_address = if per_thread {
+                body.runtime_call("kt_thread_object_slot", &[any()], any(), &[slot_address])?
+                    .ok_or("a per-thread object slot without an address")?
+            } else {
+                slot_address
+            };
             let current = body
                 .builder
                 .ins()
@@ -1970,7 +1982,9 @@ impl<'a> FileLowering<'a> {
             body.builder.ins().brif(is_null, construct, &[], done, &[]);
 
             body.continue_in(construct);
-            body.runtime_call("kt_gc_add_global_root", &[any()], Ty::Unit, &[slot_address])?;
+            if !per_thread {
+                body.runtime_call("kt_gc_add_global_root", &[any()], Ty::Unit, &[slot_address])?;
+            }
             let instance = body.allocate(descriptor, size)?;
             body.builder
                 .ins()
@@ -2421,7 +2435,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// Initialize the companion object of `class`, when it has one: through its singleton
     /// getter. An enum's companion stays with the enum initializer.
-    fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
+    pub(super) fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
         let getter = {
             let ir = self.file.ir;
             let classes = &self.file.classes;

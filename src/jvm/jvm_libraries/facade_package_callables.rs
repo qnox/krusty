@@ -273,6 +273,7 @@ impl JvmLibraries {
                     is_final: mf.is_final(),
                     deprecated_hidden: false,
                     inherited_by_delegation: false,
+                    signature_polymorphic: false,
                     return_value_status: Some(mf.return_value_status),
                 },
                 call_sig,

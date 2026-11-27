@@ -277,11 +277,14 @@ impl BodyLowering<'_> {
                 return super::delegated_properties::delegated_call_with_dispatch(
                     self.index,
                     self.ir,
-                    declaration,
-                    call,
-                    delegate,
-                    dispatch,
-                    arguments,
+                    self.dependency_templates,
+                    super::delegated_properties::DelegatedUse {
+                        property: declaration,
+                        call,
+                        receiver: delegate,
+                        selected_dispatch: dispatch,
+                        arguments,
+                    },
                 )
                 .map_err(|_| FirLoweringFailure::InvalidLocalDelegatePlan(self.body.owner()));
             }
@@ -323,11 +326,14 @@ impl BodyLowering<'_> {
         super::delegated_properties::delegated_call_with_dispatch(
             self.index,
             self.ir,
-            declaration,
-            call,
-            delegate,
-            dispatch,
-            arguments,
+            self.dependency_templates,
+            super::delegated_properties::DelegatedUse {
+                property: declaration,
+                call,
+                receiver: delegate,
+                selected_dispatch: dispatch,
+                arguments,
+            },
         )
         .map_err(|_| FirLoweringFailure::InvalidLocalDelegatePlan(self.body.owner()))
     }

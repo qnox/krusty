@@ -1,6 +1,7 @@
 # The Bazel targets the corpus builds in intellij-community, one label per line.
-# Each is a jvm_library with Kotlin sources and no Java sources, source jars or compiler plugins: the
-# shape krusty's integration compiles (the rest of the closure stays on the project's JPS builder).
+# Each is a jvm_library with Kotlin sources and no Java sources, source jars or compiler plugins. In
+# their closures krusty's integration compiles every Kotlin target, mixed Kotlin and Java included,
+# without source jars or compiler plugins; the rest stays on the project's JPS builder.
 # They are the ones whose transitive jvm_library closures are smallest, taken in that order while the
 # union of the closures holds at most about 10,000 source files, so the reference build, the krusty
 # build and the warm-up fit one runner job.

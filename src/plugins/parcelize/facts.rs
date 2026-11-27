@@ -5,10 +5,10 @@
 use crate::ir::{ClassId, ExprId, FunId, IrExpr, IrFile};
 use crate::plugins::runtime_declarations::PluginRuntime;
 use crate::plugins::{PluginRejection, PluginSourceView};
-use crate::types::{Ty, TypeName};
+use crate::types::{ClassifierDeclarationKind, Ty, TypeName};
 
 use super::frontend::{declaration, DESCRIBE_CONTENTS, WRITE_TO_PARCEL};
-use super::serializers::{ParcelRuntime, ParcelSerializer, ParcelValue};
+use super::serializers::{ClassifierShape, ParcelRuntime, ParcelSerializer, ParcelValue};
 
 /// The Parcelize facts of one file.
 pub struct ParcelizeFileFacts {
@@ -49,6 +49,25 @@ pub(super) fn record(
     rejections: &mut Vec<PluginRejection>,
 ) {
     let mut classes = Vec::new();
+    let parcelized_here = ir
+        .classes
+        .iter()
+        .filter(|class| {
+            class
+                .applied_annotations
+                .applications()
+                .any(|annotation| annotations.contains(&annotation.internal))
+        })
+        .map(|class| class.fq_name_id())
+        .collect::<Vec<_>>();
+    let shape = |classifier: TypeName| match runtime.classifier(classifier) {
+        Some(fact) if fact.kind == ClassifierDeclarationKind::Enum => ClassifierShape::Enum,
+        Some(fact) if fact.in_module && fact.is_final && parcelized_here.contains(&classifier) => {
+            ClassifierShape::FileParcelize
+        }
+        _ if classifier.matches(super::PARCELABLE) => ClassifierShape::Parcelable,
+        _ => ClassifierShape::Other,
+    };
     for (index, class) in ir.classes.iter().enumerate() {
         let parcelized = class
             .applied_annotations
@@ -57,7 +76,7 @@ pub(super) fn record(
         if !parcelized {
             continue;
         }
-        match parcelized_class(ir, index as ClassId) {
+        match parcelized_class(ir, index as ClassId, &shape) {
             Ok(class) => classes.push(class),
             Err(what) => rejections.push(rejection(source, class, what)),
         }
@@ -122,7 +141,11 @@ fn generated_body_placeholder(ir: &mut IrFile) -> ExprId {
 }
 
 /// The facts of a parcelized class, or the construct the port does not cover yet.
-fn parcelized_class(ir: &IrFile, index: ClassId) -> Result<ParcelizedClass, &'static str> {
+fn parcelized_class(
+    ir: &IrFile,
+    index: ClassId,
+    shape: &dyn Fn(TypeName) -> ClassifierShape,
+) -> Result<ParcelizedClass, &'static str> {
     let class = &ir.classes[index as usize];
     if class.is_object
         || class.is_enum
@@ -195,7 +218,7 @@ fn parcelized_class(ir: &IrFile, index: ClassId) -> Result<ParcelizedClass, &'st
         {
             return Err("a property with a Parcelize annotation");
         }
-        let Some((value, null_aware)) = ParcelValue::of(parameter.ty) else {
+        let Some((value, null_aware)) = ParcelValue::of(parameter.ty, shape) else {
             return Err("a property of this type");
         };
         properties.push(ParcelableProperty {

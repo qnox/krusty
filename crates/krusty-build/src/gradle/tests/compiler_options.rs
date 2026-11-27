@@ -4,12 +4,23 @@
 
 use super::*;
 
+/// How kotlinc fails a compile whose malformed value krusty rejected too.
+const KOTLINC_EXPLICIT_API_FAILURE: [&str; 2] = [
+    "A failure occurred while executing org.jetbrains.kotlin.compilerRunner.btapi.BuildToolsApiCompilationWork",
+    " > Unknown -Xexplicit-api value: sideways",
+];
+const KOTLINC_API_VERSION_FAILURE: [&str; 2] = [
+    "A failure occurred while executing org.jetbrains.kotlin.compilerRunner.btapi.BuildToolsApiCompilationWork",
+    " > Compilation error. See log for more details",
+];
+
 /// Run every compiler-option scenario against the compiler-slice `fixture`, whose `compiler/util`
 /// module writes its Kotlin classes to `kotlin_classes`.
 pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
     let root = &fixture.root;
     let log = &fixture.log;
     let build = || fixture.build();
+    let refusals_record = &root.join("compiler/util/build/krusty/compileKotlin/refusals.txt");
     // A request the plugin cannot derive krusty's arguments from is valid for kotlinc: the
     // check reports it without asking krusty, and the compile is left to kotlinc. Every refusal
     // the plugin derives is pinned by its KotlincRequestTest; this build drives one free
@@ -168,6 +179,59 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
     );
     assert!(!log.exists(), "jvm-target must fail before execing krusty");
 
+    // A Kotlin task with no Kotlin source compiles nothing, as KGP's: its Java sources and Java
+    // target are neither compiled nor checked.
+    clear_invocation_log(log);
+    clear_invocation_log(&fixture.probes);
+    build()
+        .property("krusty.negative", "java-only-source-set")
+        .tasks([":compiler:util:compileJavaOnlyKotlin"])
+        .run()
+        .unwrap_or_else(|error| panic!("java-only-source-set: {error}"));
+    assert!(
+        !log.exists(),
+        "java-only-source-set: krusty compiles no Java-only source set"
+    );
+
+    // KGP compiles against the Kotlin task's own Java toolchain, whose JDK home is no public
+    // KGP API: such a compile is kotlinc's, which compiles it against that JDK.
+    clear_invocation_log(log);
+    clear_invocation_log(&fixture.probes);
+    let _ = std::fs::remove_dir_all(kotlin_classes);
+    let output = build()
+        .property("krusty.negative", "kotlin-java-toolchain")
+        .tasks([":compiler:util:compileKotlin"])
+        .run_output()
+        .unwrap_or_else(|error| panic!("kotlin-java-toolchain: {error}"));
+    let gradle_java = output
+        .lines()
+        .find_map(|line| line.strip_prefix("fixture: Gradle Java "))
+        .and_then(|major| major.trim().parse::<u32>().ok())
+        .unwrap_or_else(|| panic!("kotlin-java-toolchain: no Gradle Java release\n{output}"));
+    assert_left_to_kotlinc(
+        &output,
+        ":compiler:util:compileKotlin",
+        &[format!(
+            "Kotlin task Java toolchain {} differs from Gradle Java toolchain {gradle_java}, \
+             whose JDK is the only one krusty receives",
+            gradle_java - 1,
+        )],
+    );
+    assert!(
+        !fixture.probes.exists(),
+        "kotlin-java-toolchain: the plugin refuses without asking krusty"
+    );
+    assert!(
+        !log.exists(),
+        "kotlin-java-toolchain: kotlinc, not krusty, compiles it"
+    );
+    assert!(
+        kotlin_classes
+            .join("org/jetbrains/kotlin/util/UtilKt.class")
+            .is_file(),
+        "kotlin-java-toolchain: kotlinc wrote the module's classes"
+    );
+
     // A compiler plugin krusty implements only partly no longer leaves the compile to kotlinc: krusty
     // compiles it, with the plugin.
     clear_invocation_log(log);
@@ -200,10 +264,10 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
         "kotlinc, not krusty, compiles a refused argument"
     );
 
-    // A malformed value is no refusal: the support check rejects it with the same parser
-    // and the same one error line as a direct CLI or Bazel-worker invocation, so neither
-    // compiler runs and the task's destination is left untouched. The CLI's own tests pin
-    // each malformed value's message.
+    // A malformed value krusty rejects never fails the build on krusty's word: the support
+    // check records krusty's error line, the same as a direct CLI or Bazel-worker invocation
+    // reports, and leaves the compile to kotlinc, which rejects the value itself. krusty never
+    // compiles. The CLI's own tests pin each malformed value's message.
     {
         let case = "explicit-api-bad-mode";
         let argument = "-Xexplicit-api=sideways";
@@ -230,13 +294,19 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
             "{case}: {check:?}",
         );
         assert_eq!(
-            task_failure(&rendered, ":compiler:util:compileKotlinKrustyCheck"),
-            [expected],
+            std::fs::read_to_string(refusals_record).expect("refusals record"),
+            format!("krusty rejects the command line\n{expected}\n"),
             "{case}: {rendered}",
         );
-        assert!(!log.exists(), "{case} must fail before compiling");
+        assert_eq!(
+            task_failure(&rendered, ":compiler:util:compileKotlin"),
+            KOTLINC_EXPLICIT_API_FAILURE,
+            "{case}: {rendered}",
+        );
+        assert!(!log.exists(), "krusty never compiles {case}");
+        // KGP creates the destination before kotlinc rejects the value; no compiler writes a class.
         assert!(
-            !kotlin_classes.exists(),
+            !kotlin_classes.exists() || class_files_under(kotlin_classes).is_empty(),
             "{case} wrote to {}",
             kotlin_classes.display()
         );
@@ -258,19 +328,22 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
             .expect_err("negative case succeeded")
             .to_string();
         assert_eq!(
-            task_failure(&rendered, ":compiler:util:compileKotlinKrustyCheck"),
-            [
-                format!("krusty: error: unknown {kind} version: 1.9"),
-                format!(
-                    "Supported {kind} versions: 2.0 (deprecated), 2.1 (deprecated), 2.2, \
-                             2.3, 2.4, 2.5 (experimental)"
-                ),
-            ],
+            std::fs::read_to_string(refusals_record).expect("refusals record"),
+            format!(
+                "krusty rejects the command line\nkrusty: error: unknown {kind} version: 1.9\n\
+                 Supported {kind} versions: 2.0 (deprecated), 2.1 (deprecated), 2.2, 2.3, 2.4, \
+                 2.5 (experimental)\n"
+            ),
             "{case}: {rendered}",
         );
-        assert!(!log.exists(), "{case} must fail before compiling");
+        assert_eq!(
+            task_failure(&rendered, ":compiler:util:compileKotlin"),
+            KOTLINC_API_VERSION_FAILURE,
+            "{case}: {rendered}",
+        );
+        assert!(!log.exists(), "krusty never compiles {case}");
         assert!(
-            !kotlin_classes.exists(),
+            !kotlin_classes.exists() || class_files_under(kotlin_classes).is_empty(),
             "{case} wrote to {}",
             kotlin_classes.display()
         );

@@ -56,6 +56,12 @@ impl IrPlugin for ComposePlugin {
         "compose"
     }
 
+    fn runtime_requirements(
+        &self,
+    ) -> Vec<crate::plugins::runtime_declarations::RuntimeRequirement> {
+        runtime::requirements()
+    }
+
     fn record_source_facts(
         &self,
         ir: &mut IrFile,

@@ -31,6 +31,37 @@ pub(super) struct DeclarationInputs<'a> {
     pub(super) parameter_indices: &'a [usize],
 }
 
+/// A candidate's value parameters as declared over its own call variables, aligned with the
+/// scored shape. kotlinc ranks applicable candidates by declaration specificity, never by how
+/// inference instantiated them: an argument fits a parameter declared as the candidate's own bare
+/// type variable exactly only because that variable was inferred from it, so such a fit is not
+/// the exact-argument evidence that outranks another candidate. `check(x: T)` therefore ties with
+/// `check(x: List<E>)` and `check(x: CharSequence)` until specificity compares the declarations.
+#[derive(Clone, Copy)]
+pub(super) struct DeclaredParameters<'a> {
+    pub(super) params: &'a [Ty],
+    pub(super) formals: &'a [crate::types::TyParamName],
+}
+
+impl DeclaredParameters<'_> {
+    /// Whether shape parameter `parameter` is declared as one of the candidate's own type
+    /// variables. `reads_element` says the argument is one packed vararg element, so the declared
+    /// element type is compared; a spread or named vararg argument is measured by the whole array.
+    fn names_own_variable(&self, parameter: usize, reads_element: bool) -> bool {
+        let Some(&declared) = self.params.get(parameter) else {
+            return false;
+        };
+        let declared = if reads_element {
+            declared.array_read_elem()
+        } else {
+            Some(declared)
+        };
+        declared
+            .and_then(|declared| declared.non_null().ty_param_name())
+            .is_some_and(|name| crate::types::declares_formal(self.formals, name))
+    }
+}
+
 impl CallCandidateScore {
     pub(super) fn uses_sam_conversion(&self) -> bool {
         self.sam_signatures.iter().any(Option::is_some)
@@ -50,7 +81,7 @@ pub(super) fn score(
     call_sig: &CallSig,
     slots: ArgSlots<'_>,
 ) -> Option<CallCandidateScore> {
-    score_with_declaration(checker, scope, params, call_sig, slots, None)
+    score_with_declaration(checker, scope, params, call_sig, slots, None, None)
 }
 
 pub(super) fn score_with_declaration(
@@ -60,6 +91,7 @@ pub(super) fn score_with_declaration(
     call_sig: &CallSig,
     slots: ArgSlots<'_>,
     declaration: Option<DeclarationInputs<'_>>,
+    declared: Option<DeclaredParameters<'_>>,
 ) -> Option<CallCandidateScore> {
     let ArgSlots {
         args,
@@ -98,6 +130,15 @@ pub(super) fn score_with_declaration(
             lambda_result_mismatch.set(lambda_result_mismatch.get() || !fits);
         }
     };
+    // A positional, unspread argument of the vararg slot is one packed element, measured by the
+    // declared element type; a spread or named one is measured by the whole array.
+    let reads_vararg_element = |parameter: usize, argument: ExprId, source: usize| {
+        call_sig.vararg_index == Some(parameter)
+            && !checker.file.is_spread_arg(argument)
+            && !arg_names
+                .and_then(|names| names.get(source))
+                .is_some_and(Option::is_some)
+    };
     // Candidate scoring receives the expression as well as its runtime type so every module
     // call shape (positional, named, defaulted, and vararg) consults the same literal adaptation
     // carried by `CallArgKind`.
@@ -116,13 +157,7 @@ pub(super) fn score_with_declaration(
         if let Some(inputs) = declaration.as_ref() {
             let ordinal = *inputs.parameter_indices.get(parameter)?;
             let raw = inputs.declaration.declared_input(ordinal)?;
-            let named = arg_names
-                .and_then(|names| names.get(source))
-                .is_some_and(Option::is_some);
-            let raw = if call_sig.vararg_index == Some(parameter)
-                && !checker.file.is_spread_arg(argument)
-                && !named
-            {
+            let raw = if reads_vararg_element(parameter, argument, source) {
                 raw.array_read_elem().unwrap_or(raw)
             } else {
                 raw
@@ -270,10 +305,22 @@ pub(super) fn score_with_declaration(
         {
             return None;
         }
+        // A result-only producer is an ordinary fit for a parameter its result can bind. For any
+        // other parameter (`emptyList()` against a function type) it stays a candidate, so a lone
+        // one still reports the argument mismatch, but it ranks below every candidate that binds.
         checker
             .argument_uses_context_only_result(scope, argument)
-            .then_some(1)
-            .or_else(|| checker.member_argument_score(expected, semantic_actual))
+            .then_some(usize::from(contextual_call_result))
+            .or_else(|| {
+                let fit = checker.member_argument_score(expected, semantic_actual)?;
+                let inferred_fit = declared.is_some_and(|declared| {
+                    declared.names_own_variable(
+                        parameter,
+                        reads_vararg_element(parameter, argument, source),
+                    )
+                });
+                Some(if inferred_fit { fit.min(1) } else { fit })
+            })
             // A nested call re-solved to the parameter's own classifier is an ordinary fit; one
             // whose result only an expected-type binding could reshape ranks below it.
             .or_else(|| {

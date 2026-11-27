@@ -469,10 +469,14 @@ impl BodyLowering<'_> {
                 function_type,
                 reflective: _,
                 extension_receiver,
+                context_arguments,
                 adaptation,
             } => self.checked_local_callable_reference(
                 target.clone(),
-                *extension_receiver,
+                super::local_callables::LocalReferenceBindings {
+                    extension_receiver: *extension_receiver,
+                    context_arguments,
+                },
                 adaptation.as_deref(),
                 function_type.get(),
             )?,
@@ -518,6 +522,7 @@ impl BodyLowering<'_> {
                 binding,
                 dispatch_receiver,
                 extension_receiver,
+                context_arguments,
                 mutable,
                 substitutions,
                 adaptation,
@@ -530,8 +535,11 @@ impl BodyLowering<'_> {
                     adaptation: adaptation.as_deref(),
                     reference_ty: function_type.get(),
                 },
-                *dispatch_receiver,
-                *extension_receiver,
+                super::checked::CheckedPropertyReceivers {
+                    dispatch_receiver: *dispatch_receiver,
+                    extension_receiver: *extension_receiver,
+                    context_arguments,
+                },
                 *reflective,
             )?,
             FirExprKind::TypeOperation {

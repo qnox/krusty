@@ -7,8 +7,8 @@ use crate::features::LangFeatures;
 /// declaration-unit reparsing must project the feature set through this one operation; otherwise a
 /// Pass-2 unit can resolve the same source under different language rules than Pass 1.
 pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
-    file.language.assert_always_enabled = features.has("AssertionsAlwaysEnable");
-    file.language.assert_always_disabled = features.has("AssertionsAlwaysDisable");
+    file.language.reference = features.reference();
+    file.assertions = features.assertions();
     file.language.explicit_context_arguments = features.has("ExplicitContextArguments");
     file.language.callable_references_to_contextual =
         features.has("CallableReferencesToContextual");
@@ -283,7 +283,7 @@ mod tests {
         apply_file_features(
             &mut before,
             &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_RC,
+                KotlinVersion::V2_5_0_RC2,
                 LanguageVersion::V2_4,
                 LanguageVersion::V2_4,
             ),
@@ -305,7 +305,7 @@ mod tests {
         apply_file_features(
             &mut at_since,
             &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_RC,
+                KotlinVersion::V2_5_0_RC2,
                 LanguageVersion::V2_6,
                 LanguageVersion::V2_6,
             ),
@@ -330,7 +330,7 @@ mod tests {
         apply_file_features(
             &mut rc,
             &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_RC,
+                KotlinVersion::V2_5_0_RC2,
                 LanguageVersion::V2_5,
                 LanguageVersion::V2_5,
             ),
@@ -341,7 +341,7 @@ mod tests {
         apply_file_features(
             &mut at_since,
             &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_RC,
+                KotlinVersion::V2_5_0_RC2,
                 LanguageVersion::V2_6,
                 LanguageVersion::V2_6,
             ),

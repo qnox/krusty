@@ -42,6 +42,7 @@ mod param_flags;
 pub mod physical_parameter_plan;
 mod platform_abi;
 mod platform_contract;
+mod property_accessor_role;
 mod property_producer;
 mod provider_override;
 mod result_nullability;
@@ -60,16 +61,17 @@ pub use call_arg_mapping_failure::{CallArgMappingError, CallArgMappingFailure};
 pub(crate) use call_realization::KlibBodyCallableShape;
 pub use call_realization::KlibBodyCompanionReceiver;
 pub use call_realization::{
-    DefaultCallRealization, DirectCFunction, ExternalCallableKind, ExternalCallableRealization,
-    ExternalPropertyRealization, KlibBodyCallable, KlibDeclarationSignature,
-    KlibDependencyCallable, NonvirtualCallRealization, OverriddenCallKind,
-    OverriddenCallRealization,
+    CFunctionAbi, DefaultCallRealization, DirectCFunction, ExternalCallableKind,
+    ExternalCallableRealization, ExternalPropertyRealization, KlibBodyCallable,
+    KlibDeclarationSignature, KlibDependencyCallable, NonvirtualCallRealization,
+    OverriddenCallKind, OverriddenCallRealization,
 };
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
 pub use class_identity::KlibClassIdentity;
 pub(crate) use classifier_application::{
     application_arguments_with_star_bounds, classifier_bindings, classifier_type_parameter_bounds,
+    has_placeholder_star,
 };
 pub(crate) use classifier_callables::{
     constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
@@ -106,6 +108,7 @@ pub use platform_abi::PlatformAbi;
 pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
 };
+pub use property_accessor_role::{PropertyAccessorCandidate, PropertyAccessorRole};
 pub use property_producer::PropertyProducer;
 pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
@@ -122,8 +125,8 @@ use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName
 pub(crate) use array_factories::kotlin_array_factory_kind;
 pub(crate) use class_name_property::realize_class_name_property;
 pub use compiler_intrinsic::{
-    AtomicOperation, ClassNameKind, CompilerIntrinsic, IndicesReceiver, ListStorageConstruction,
-    ResultFailureIntrinsic,
+    AdjacentDirection, AtomicOperation, CharArrayRange, ClassNameKind, CompilerIntrinsic,
+    IndicesReceiver, ListStorageConstruction, ResultFailureIntrinsic, SurrogateHalf,
 };
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
@@ -591,6 +594,12 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
+    /// Whether a suspension point inside a `synchronized` or `withLock` block is an error on this
+    /// platform: the JVM releases a monitor only on the thread that acquired it.
+    fn rejects_suspension_in_critical_sections(&self) -> bool {
+        false
+    }
+
     /// Normalize a semantic type to the identity used when comparing source call arguments against
     /// compiled-library signatures. This is not an emit descriptor; it is a semantic compatibility key.
     /// Implementations that do not need library-name normalization return the type unchanged.
@@ -822,30 +831,6 @@ impl LibraryMember {
         }
     }
 
-    #[inline]
-    pub fn ret_nullable(&self) -> bool {
-        self.flags.has(LmFlags::RET_NULLABLE)
-    }
-    #[inline]
-    pub fn is_interface(&self) -> bool {
-        self.flags.has(LmFlags::IS_INTERFACE)
-    }
-    #[inline]
-    pub fn suspend(&self) -> bool {
-        self.flags.has(LmFlags::SUSPEND)
-    }
-    #[inline]
-    pub fn is_operator(&self) -> bool {
-        self.flags.has(LmFlags::IS_OPERATOR)
-    }
-    #[inline]
-    pub fn is_infix(&self) -> bool {
-        self.flags.has(LmFlags::IS_INFIX)
-    }
-    #[inline]
-    pub fn is_member_extension(&self) -> bool {
-        self.flags.has(LmFlags::IS_EXTENSION)
-    }
     /// The semantic extension receiver published by this declaration. Generic signatures retain
     /// the declaration-owned receiver; non-generic members carry it in the logical parameter list
     /// after the context prefix. Physical parameters and descriptors are deliberately irrelevant.
@@ -857,71 +842,6 @@ impl LibraryMember {
             .as_ref()
             .and_then(|signature| signature.receiver)
             .or_else(|| self.params.get(self.context_count).copied())
-    }
-    #[inline]
-    pub fn is_primary_constructor(&self) -> bool {
-        self.flags.has(LmFlags::IS_PRIMARY_CONSTRUCTOR)
-    }
-    #[inline]
-    pub fn deprecated_hidden(&self) -> bool {
-        self.flags.has(LmFlags::DEPRECATED_HIDDEN)
-    }
-
-    pub fn is_classifier_static(&self) -> bool {
-        self.flags.has(LmFlags::IS_CLASSIFIER_STATIC)
-    }
-    #[inline]
-    pub fn set_ret_nullable(&mut self, on: bool) {
-        self.flags = self.flags.with_ret_nullable(on);
-    }
-    #[inline]
-    pub fn set_is_primary_constructor(&mut self, on: bool) {
-        self.flags = self.flags.with_is_primary_constructor(on);
-    }
-    #[inline]
-    pub fn set_deprecated_hidden(&mut self, on: bool) {
-        self.flags = self.flags.with_deprecated_hidden(on);
-    }
-
-    pub fn set_is_classifier_static(&mut self, on: bool) {
-        self.flags = self.flags.with_is_classifier_static(on);
-    }
-    #[inline]
-    pub fn set_is_interface(&mut self, on: bool) {
-        self.flags = self.flags.with_is_interface(on);
-    }
-    #[inline]
-    pub fn set_suspend(&mut self, on: bool) {
-        self.flags = self.flags.with_suspend(on);
-    }
-    pub fn set_is_operator(&mut self, on: bool) {
-        self.flags = self.flags.with_is_operator(on);
-    }
-    pub fn set_is_infix(&mut self, on: bool) {
-        self.flags = self.flags.with_is_infix(on);
-    }
-    pub fn set_is_member_extension(&mut self, on: bool) {
-        self.flags = self.flags.with_is_extension(on);
-    }
-    pub fn is_abstract(&self) -> bool {
-        self.flags.has(LmFlags::IS_ABSTRACT)
-    }
-    pub fn set_is_abstract(&mut self, on: bool) {
-        self.flags = self.flags.with_is_abstract(on);
-    }
-    pub fn is_final(&self) -> bool {
-        self.flags.has(LmFlags::IS_FINAL)
-    }
-    pub fn set_is_final(&mut self, on: bool) {
-        self.flags = self.flags.with_is_final(on);
-    }
-    /// A class delegating an interface that declares this member does not forward it: the
-    /// member's own implementation stays inherited.
-    pub fn inherited_by_delegation(&self) -> bool {
-        self.flags.has(LmFlags::INHERITED_BY_DELEGATION)
-    }
-    pub fn set_inherited_by_delegation(&mut self, on: bool) {
-        self.flags = self.flags.with_inherited_by_delegation(on);
     }
     pub fn owner_name(&self) -> Option<String> {
         self.owner.map(TypeName::render)
@@ -943,21 +863,6 @@ pub enum Origin {
 
 /// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
 /// first parameter). `owner` is the internal name of the facade/declaring container for emit.
-/// The properties whose getter or setter a platform method is named as: a Java `getA()` is the
-/// getter of `a`, and `setOpen(v)` the setter of `open` or `isOpen`. Each candidate names the
-/// methods that would be the same property's other accessor (`setA` for `getA`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PropertyAccessorRole {
-    pub candidates: Box<[PropertyAccessorCandidate]>,
-    pub setter: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PropertyAccessorCandidate {
-    pub property: String,
-    pub counterparts: Box<[String]>,
-}
-
 #[derive(Clone, Debug)]
 pub struct LibraryCallable {
     /// Stable provider-owned declaration identity. Current-module declarations use FIR's
@@ -1830,6 +1735,7 @@ impl FunctionInfo {
         member.set_is_abstract(self.flags.is_abstract);
         member.set_is_final(self.flags.is_final);
         member.set_deprecated_hidden(self.flags.deprecated_hidden);
+        member.set_signature_polymorphic(self.flags.signature_polymorphic);
         member.set_is_classifier_static(self.classifier_static);
         member.return_value_status = self.flags.return_value_status;
         // Interface-ness travels with the selected overload for the same reason `suspend` does: it is a
@@ -1889,6 +1795,8 @@ pub struct FnFlags {
     pub deprecated_hidden: bool,
     /// See [`LibraryMember::inherited_by_delegation`].
     pub inherited_by_delegation: bool,
+    /// See [`LibraryMember::is_signature_polymorphic`].
+    pub signature_polymorphic: bool,
     /// See [`LibraryMember::return_value_status`]. A current-module declaration leaves this `None`:
     /// its status is derived from its override edges after they are frozen.
     pub return_value_status: Option<crate::types::ReturnValueStatus>,

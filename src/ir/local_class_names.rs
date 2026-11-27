@@ -472,6 +472,8 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'
         }
         IrCheckedOperation::IllegalProgressionStep { .. }
         | IrCheckedOperation::AtomicField { .. }
+        | IrCheckedOperation::FieldDesignation { .. }
+        | IrCheckedOperation::AtomicFieldThrough { .. }
         | IrCheckedOperation::AtomicArrayElement { .. }
         | IrCheckedOperation::ComparableRangeContains { .. } => return,
         IrCheckedOperation::PropertyReference {
@@ -540,6 +542,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
                 | super::IrIntrinsic::StringGet
                 | super::IrIntrinsic::StringLength
                 | super::IrIntrinsic::EnumOrdinal
+                | super::IrIntrinsic::EnumName
                 | super::IrIntrinsic::NullableAnyToString
                 | super::IrIntrinsic::CoroutineContext => {}
             }

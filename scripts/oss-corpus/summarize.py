@@ -170,6 +170,45 @@ def misses(project):
     return reasons.most_common()
 
 
+# The reasons the plugin logs when krusty fails a compile it took and the module is left to kotlinc
+# anyway; any other reason is a refusal the support check made up front.
+RUNTIME_FALLBACKS = (
+    ('krusty does not implement everything the module uses', 'unsupported'),
+    ('krusty failed with an internal error', 'internal'),
+    ('krusty reported errors', 'errors'),
+)
+
+
+def fallback_class(reason):
+    """`refused` for a compilation the support check left to kotlinc before krusty ran, else how krusty
+    failed once it compiled: `unsupported` (a construct it does not implement), `internal` (a bug) or
+    `errors` (errors kotlinc may not report)."""
+    for text, kind in RUNTIME_FALLBACKS:
+        if reason.startswith(text):
+            return kind
+    return 'refused'
+
+
+FALLBACK_CLASSES = ('refused', 'unsupported', 'internal', 'errors')
+
+
+def outcomes(project):
+    """Compilation counts: `built`, one per class of `fallback_class`, `failed` and `blocked`; they add
+    up to `compilations`. A compilation krusty did not build is blocked when a failed task kept it
+    from running, left to kotlinc when it logged a fallback, and failed otherwise."""
+    counts = collections.Counter()
+    for r in project['rows']:
+        if r['built']:
+            counts['built'] += 1
+        elif r.get('blocked_by'):
+            counts['blocked'] += 1
+        elif r.get('fallback'):
+            counts[fallback_class(r['fallback'])] += 1
+        else:
+            counts['failed'] += 1
+    return counts
+
+
 QUOTED = {quote: re.compile(f'{quote}[^{quote}]*{quote}') for quote in ("'", '`', '"')}
 
 
@@ -508,16 +547,18 @@ def report(projects, stars, surveys, title, previous=None, not_measured=()):
         out += [f'# {title}', '']
     # A published result carries the run that measured it: projects can come from different runs.
     dated = any('measured' in p for p in projects)
-    out += ['| Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Identical classes |'
-            + (' Measured |' if dated else ''),
-            '| --- | ---: | ---: | ---: | --- | ---: | ---: |' + (' --- |' if dated else '')]
+    out += ['| Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Refused up front | Unsupported | Internal error | Reported errors | Failed | Not run |'
+            ' Identical classes |' + (' Measured |' if dated else ''),
+            '| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |' + (' --- |' if dated else '')]
     built = compilations = identical = classes = 0
     for p in projects:
         measured = p['reference_exit'] == 0
         reference = 'ok' if measured else f"failed (exit {p['reference_exit']})"
+        counts = outcomes(p)
+        split = ' | '.join(str(counts[key]) for key in (*FALLBACK_CLASSES, 'failed', 'blocked'))
         star = f"{stars[p['name']]:,}" if p['name'] in stars else 'not fetched'
         out.append(f"| {p['name']} | {star} | {p['loc']['kotlin']:,} | {p['loc']['java']:,} | {reference} | "
-                   f"{p['built']} / {p['compilations']} | {p['identical']:,} / {p['classes']:,}"
+                   f"{p['built']} / {p['compilations']} | {split} | {p['identical']:,} / {p['classes']:,}"
                    f"{share(p['identical'], p['classes'])} |" + (f" {measured_cell(p)} |" if dated else ''))
         if measured:
             built += p['built']
@@ -566,6 +607,30 @@ def report(projects, stars, surveys, title, previous=None, not_measured=()):
     return '\n'.join(out) + '\n'
 
 
+DETAILS = re.compile(r'<details><summary><b>(.*?)</b>: (.*?)</summary>.*?</details>', re.S)
+LISTED_IN_ARTIFACT = 'listed in summary.md of the summary artifact'
+
+
+def fit_to_limit(markdown, limit):
+    """The job summary page refuses more than its size limit, so the per-project listings, largest
+    first, give way to one line each that points at the complete report; whatever still does not fit
+    is cut at a section boundary."""
+    while len(markdown.encode()) > limit:
+        listings = list(DETAILS.finditer(markdown))
+        if not listings:
+            break
+        biggest = max(listings, key=lambda m: len(m.group(0).encode()))
+        line = f'- **{biggest.group(1)}**: {biggest.group(2)}; {LISTED_IN_ARTIFACT}'
+        markdown = markdown[:biggest.start()] + line + markdown[biggest.end():]
+    note = '\n\nThe rest of the report is cut here to fit the page; the complete report is in summary.md of the summary artifact.\n'
+    while len(markdown.encode()) > limit:
+        cut = markdown.rfind('\n## ', 0, len(markdown) - 1)
+        if cut < 0:
+            break
+        markdown = markdown[:cut].rstrip('\n') + note
+    return markdown
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--stars')
@@ -575,6 +640,9 @@ def main():
     parser.add_argument('--json')
     parser.add_argument('--title')
     parser.add_argument('--previous', help="the previous run's summary.json")
+    parser.add_argument('--step-summary', help="also append the report, cut to fit the job summary page's size limit, to this file")
+    parser.add_argument('--step-summary-limit', type=int, default=1_000_000,
+                        help='the most bytes --step-summary receives (the page accepts 1,048,576)')
     parser.add_argument('reports', nargs='+')
     args = parser.parse_args()
     projects = []
@@ -589,7 +657,11 @@ def main():
         with open(args.previous) as f:
             previous = json.load(f)['projects']
     missing = not_measured(read_names(args.expected), projects, args.results or '')
-    print(report(projects, stars, surveys, args.title, previous, missing), end='')
+    text = report(projects, stars, surveys, args.title, previous, missing)
+    print(text, end='')
+    if args.step_summary:
+        with open(args.step_summary, 'a') as f:
+            f.write(fit_to_limit(text, args.step_summary_limit))
     if args.json:
         with open(args.json, 'w') as f:
             json.dump(dict(not_measured=missing, projects=[dict(p, stars=stars.get(p['name']), misses=misses(p),

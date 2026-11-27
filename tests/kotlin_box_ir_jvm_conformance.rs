@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
+use super::box_byte_ratchet;
 use super::box_byte_score;
 use super::box_jvm_compile::{
     compile_blocks, compile_module_test, compile_multifile, find_box_class, unit_options,
@@ -939,6 +940,11 @@ fn compose_captured_lambdas_in_plain_functions_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_layout_calls_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("layoutCalls");
+}
+
+#[test]
 fn compose_call_initializers_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("callInitializers");
 }
@@ -953,7 +959,18 @@ fn assert_compose_fixture_matches_kotlinc(stem: &str) {
         .join("tests/fixtures/compose")
         .join(format!("{stem}.kt"));
     let source = fs::read_to_string(&path).expect("read the Compose fixture");
-    assert_plugin_case_matches_kotlinc(&source, stem);
+    let version = krusty::kotlin_version::environment_release();
+    let inventory = box_ratchet::read_path("plugin_expected_failures", "compose", version);
+    let expected_to_differ = box_ratchet::load_path(&inventory, false).contains(stem);
+    let outcome = std::panic::catch_unwind(|| assert_plugin_case_matches_kotlinc(&source, stem));
+    match (expected_to_differ, outcome) {
+        (false, Ok(())) | (true, Err(_)) => {}
+        (false, Err(failure)) => std::panic::resume_unwind(failure),
+        (true, Ok(())) => panic!(
+            "the Compose fixture {stem} now matches kotlinc {version}: remove it from {}",
+            inventory.display()
+        ),
+    }
 }
 
 /// A compiler plugin's case compiles to exactly the classes the reference compiler and that plugin
@@ -1901,6 +1918,12 @@ fn kotlin_codegen_box_conformance() {
         eprintln!("box expectations: skipped (KRUSTY_NO_RUN compiles without running box())");
     } else {
         check_jvm_outcomes(&box_dir, &results, &corpus, full_run);
+        // Byte identity is judged where the run reference-compiled and scored its cases, which a
+        // run asks for with the JVM byte report. A narrowed run (the smoke check's sample) can only
+        // catch a case that newly diverges; staleness needs the whole corpus.
+        if score_on && env("KRUSTY_JVM_BYTE_REPORT").is_some() {
+            enforce_byte_identity(&box_dir, &results, full_run);
+        }
     }
     // A full run with zero passes means box() never ran (broken corpus discovery or JVM runner).
     // A deliberate `KRUSTY_BOX_ONLY` selection may legitimately pick only known-failing cases (the
@@ -1919,31 +1942,28 @@ fn kotlin_codegen_box_conformance() {
     }
 }
 
-/// Reject every applicable failure and hold exclusions to the exact JVM applicability inventory.
+/// Hold every applicable failure and exclusion to the exact JVM inventories: a release records the
+/// cases it does not yet pass, and a case outside them that fails is an error.
 fn check_jvm_outcomes(
     box_dir: &Path,
     results: &[(PathBuf, TestResult, box_byte_score::CaseScore)],
     corpus: &BTreeSet<String>,
     full_run: bool,
 ) {
-    let version = krusty::kotlin_version::target();
+    let version = krusty::kotlin_version::environment_release();
     let failures: Vec<String> = results
         .iter()
         .filter_map(|(file, result, _)| match result {
-            TestResult::Fail(reason) => Some(format!(
-                "{}: {reason}",
-                box_ratchet::corpus_key(box_dir, file)
-            )),
             TestResult::NotApplicable if super::box_inventory::owned(file) => Some(format!(
                 "{}: owned portable box case may not be not-applicable",
                 box_ratchet::corpus_key(box_dir, file)
             )),
-            TestResult::Pass | TestResult::NotApplicable => None,
+            TestResult::Pass | TestResult::Fail(_) | TestResult::NotApplicable => None,
         })
         .collect();
     assert!(
         failures.is_empty(),
-        "{} applicable JVM box case(s) failed:\n  {}",
+        "{} owned JVM box case(s) not applicable:\n  {}",
         failures.len(),
         failures.join("\n  ")
     );
@@ -1986,21 +2006,53 @@ fn check_jvm_outcomes(
         return;
     }
     let expected = box_ratchet::load(Platform::Jvm, version);
-    assert!(
-        expected.failures.is_empty(),
-        "JVM expected-failure inventories are obsolete; remove every entry from {}",
-        box_ratchet::failure_path(Platform::Jvm, version).display()
-    );
     let mismatches = box_ratchet::compare(&expected, &outcomes, corpus);
     assert!(
         mismatches.is_empty(),
         "{}",
-        mismatches.report(Platform::Jvm, version)
+        box_ratchet::failed_line(
+            &box_ratchet::expectations_subject(Platform::Jvm),
+            &mismatches.report(Platform::Jvm, version)
+        )
     );
     eprintln!(
         "JVM box applicability matches {} ({} expected not-applicable)",
         box_ratchet::not_applicable_path(Platform::Jvm, version).display(),
         expected.not_applicable.len(),
+    );
+}
+
+/// The per-case byte-identity ratchet: every scored case whose classes are not byte-for-byte
+/// kotlinc's must be in the committed inventory, and no identical case may be.
+fn enforce_byte_identity(
+    box_dir: &Path,
+    results: &[(PathBuf, TestResult, box_byte_score::CaseScore)],
+    full_run: bool,
+) {
+    let non_identical: BTreeSet<String> = results
+        .iter()
+        .filter_map(|(file, _, score)| match score {
+            box_byte_score::CaseScore::Scored(score) if !box_byte_ratchet::is_identical(*score) => {
+                Some(box_ratchet::corpus_key(box_dir, file))
+            }
+            _ => None,
+        })
+        .collect();
+    let bless = env("KRUSTY_BLESS_BOX_BYTE_IDENTITY").is_some_and(|value| value == "1");
+    assert!(
+        !bless || env("CI").is_none(),
+        "KRUSTY_BLESS_BOX_BYTE_IDENTITY is refused under CI: the inventory is blessed locally and reviewed"
+    );
+    assert!(
+        !bless || full_run,
+        "KRUSTY_BLESS_BOX_BYTE_IDENTITY needs a full run: unset KRUSTY_BOX_ONLY and KRUSTY_BOX_LIMIT"
+    );
+    box_byte_ratchet::enforce(
+        "jvm",
+        krusty::kotlin_version::environment_release(),
+        &non_identical,
+        bless,
+        full_run,
     );
 }
 

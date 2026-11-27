@@ -676,6 +676,16 @@ impl PluginContext {
             .map_or(crate::ir::Spelled::NONE, |spellings| &spellings.ret)
     }
 
+    /// The declared type of `class`'s ordinary property `property`.
+    pub fn property_type(&self, ir: &IrFile, class: ClassId, property: &str) -> Option<Ty> {
+        ir.classes
+            .get(class as usize)?
+            .properties
+            .iter()
+            .find(|candidate| candidate.name == property)
+            .map(|property| property.ty)
+    }
+
     pub fn property_canonical_type(
         &self,
         ir: &IrFile,
@@ -851,6 +861,13 @@ pub trait IrPlugin {
 
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
+
+    /// The runtime functions the plugin's generated code may call, by declaration and name. It
+    /// lists every one it can request in [`Self::record_source_facts`]: resolution reads their
+    /// declarations once, and a request for any other function is an error.
+    fn runtime_requirements(&self) -> Vec<runtime_declarations::RuntimeRequirement> {
+        Vec::new()
+    }
 
     /// Declare the Kotlin-visible classes and members the plugin generates. This runs at the
     /// frontend/backend handoff, before any target sees the file, so every target's declaration
@@ -1462,6 +1479,14 @@ pub struct PluginHost {
 impl PluginHost {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The runtime functions every registered plugin may call.
+    pub fn runtime_requirements(&self) -> Vec<runtime_declarations::RuntimeRequirement> {
+        self.plugins
+            .iter()
+            .flat_map(|plugin| plugin.runtime_requirements())
+            .collect()
     }
 
     pub fn register(&mut self, plugin: Box<dyn IrPlugin>) {

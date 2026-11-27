@@ -25,6 +25,7 @@ mod compiler_blocks;
 mod conditionals;
 mod constructions;
 mod elvis_blocks;
+mod enum_members;
 mod instance_storage;
 mod loops;
 mod object_literals;
@@ -36,7 +37,8 @@ mod string_templates;
 mod try_catch;
 mod type_operators;
 
-pub(super) use blocks::publish_parameter_defaults;
+pub(super) use blocks::{lower_parameter_defaults, publish_parameter_defaults};
+pub(super) use enum_members::ImplicitEnumMember;
 
 use super::decline::KlibBodyDeclineReason;
 use super::function_lowering::FunctionHeader;
@@ -86,10 +88,23 @@ pub(super) struct LinkedCallee {
 }
 
 pub(super) struct LinkedCallableReference {
-    pub(super) declaration: crate::fir::ExternalCallableId,
+    pub(super) target: LinkedReferenceTarget,
     pub(super) kind: crate::libraries::ExternalCallableKind,
     pub(super) extension_receiver_parameter: Option<usize>,
     pub(super) call: LinkedCallee,
+}
+
+/// The declaration a callable reference names.
+pub(super) enum LinkedReferenceTarget {
+    /// A dependency declaration its provider records.
+    External(crate::fir::ExternalCallableId),
+    /// A private member of a class the unit lowers, which no provider records: the unit emits it
+    /// as `function`, a member of `owner` named `name`.
+    PrivateMember {
+        owner: TypeName,
+        name: Box<str>,
+        function: FunId,
+    },
 }
 
 impl LinkedCallableReference {
@@ -99,7 +114,7 @@ impl LinkedCallableReference {
         call: LinkedCallee,
     ) -> Self {
         Self {
-            declaration,
+            target: LinkedReferenceTarget::External(declaration),
             kind: callable.kind(),
             extension_receiver_parameter: callable.parameter_identities().iter().position(|role| {
                 matches!(
@@ -110,6 +125,12 @@ impl LinkedCallableReference {
             call,
         }
     }
+}
+
+/// The getter bounding a counted loop over indices, with the type its declaration answers.
+pub(super) struct IndicesBound {
+    pub(super) accessor: crate::metadata::id_signature::KlibAccessorIdSignature,
+    pub(super) ty: Ty,
 }
 
 /// The declared shape of a member a range literal's membership calls.
@@ -149,6 +170,17 @@ pub(super) trait CallLinker {
         &self,
         _callee: &crate::libraries::KlibDeclarationSignature,
     ) -> Lowered<Option<super::primitive_calls::CommonPrimitiveCall>> {
+        Ok(None)
+    }
+
+    /// The enum class whose implicit `values`, `valueOf` or `entries` getter a call of
+    /// `callee` names, which the linker has materialized, and that member. Template linkers keep
+    /// the call's ordinary declaration boundary.
+    fn implicit_enum_member(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &crate::libraries::KlibDeclarationSignature,
+    ) -> Lowered<Option<(TypeName, ImplicitEnumMember)>> {
         Ok(None)
     }
 
@@ -233,6 +265,16 @@ pub(super) trait CallLinker {
         &self,
         _getter: &crate::metadata::id_signature::KlibAccessorIdSignature,
     ) -> Lowered<Option<crate::libraries::IndicesReceiver>> {
+        Ok(None)
+    }
+
+    /// The getter of the receiver property that bounds a counted loop over the indices `getter`
+    /// is: a collection's `size` or a text's `length`. `None` when the bound is no member read
+    /// (an array's intrinsic size), or the linker does not model it.
+    fn indices_bound(
+        &self,
+        _getter: &crate::metadata::id_signature::KlibAccessorIdSignature,
+    ) -> Lowered<Option<IndicesBound>> {
         Ok(None)
     }
 
@@ -345,6 +387,16 @@ pub(super) trait CallLinker {
         unsupported("a call of a file-private constructor")
     }
 
+    /// The member a call of the file-local `callee` inherits when `callee` is a fake override of
+    /// a class private to its file, which no declaration defines: the call is one of that member,
+    /// dispatched on its receiver. `None` for any other callee; template linkers find none.
+    fn inherited_member(
+        &self,
+        _callee: &crate::metadata::klib_ir::KlibIrSignature,
+    ) -> Option<crate::metadata::klib_ir::KlibIrSignature> {
+        None
+    }
+
     /// The function a file-local call invokes: a top-level function private to the lowered
     /// body's file, or a member of a file-local class. Template linkers keep the refusal.
     /// The getter of an inherited property that a call of the fake override `callee` of a local
@@ -401,17 +453,6 @@ pub(super) trait CallLinker {
         _entry: &KlibPublicIdSignature,
     ) -> Lowered<(TypeName, String)> {
         unsupported("an enum entry")
-    }
-
-    /// The dependency enum class whose compiler-generated `values()` or `valueOf` the public
-    /// declaration `callee` is, with which of the two. `None` for any other callee, which links
-    /// as an ordinary call; a linker that materializes no enum class knows none.
-    fn enum_static_member(
-        &mut self,
-        _ir: &mut IrFile,
-        _callee: &KlibPublicIdSignature,
-    ) -> Lowered<Option<(TypeName, super::enum_classes::EnumStaticMember)>> {
-        Ok(None)
     }
 
     /// `sub` as the class `owner` it is a subtype of, with the type arguments its hierarchy applies
@@ -597,6 +638,9 @@ pub(super) struct BodyLowering<'a> {
     member_return: Option<KlibIrSymbol>,
     /// The result type of [`Self::member_return`].
     member_result: Option<Ty>,
+    /// The declarations enclosing this closure whose `return`s its body may name, innermost last,
+    /// with their result types: a non-local return, valid only where the closure is inlined.
+    enclosing_returns: Vec<(KlibIrSymbol, Ty)>,
 }
 
 impl<'a> BodyLowering<'a> {
@@ -628,6 +672,7 @@ impl<'a> BodyLowering<'a> {
             member_return: None,
             member_result: None,
             object_members: HashMap::default(),
+            enclosing_returns: Vec::new(),
         }
     }
 
@@ -808,10 +853,11 @@ impl<'a> BodyLowering<'a> {
                 }
                 (self.closure(*invoke, ty, origin.as_deref())?, ty)
             }
-            KlibIrExprKind::PropertyReference { .. }
-            | KlibIrExprKind::RichPropertyReference { .. } => {
-                return unsupported("a property reference")
+            KlibIrExprKind::RichPropertyReference { .. } => {
+                let ty = self.ty(expression, "property reference")?;
+                return self.field_designation(expression, ty);
             }
+            KlibIrExprKind::PropertyReference { .. } => return unsupported("a property reference"),
             KlibIrExprKind::LocalDelegatedPropertyReference { .. } => {
                 return unsupported("a local delegated property reference")
             }
@@ -1115,6 +1161,14 @@ impl<'a> BodyLowering<'a> {
         if site.is_some_and(|site| captures_star_projection(actual, expected, site)) {
             return Ok(lowered);
         }
+        // A body a compiler plugin generates may use a value of a type parameter's declared bound
+        // as a value of the parameter, as an atomicfu helper initializes a `T` from the `Any?` its
+        // field intrinsic reads. kotlinc's backends represent both by the parameter's erasure; the
+        // value crosses with the coercion a generic declaration's boundary places.
+        if expected.is_ty_param() && expected.ty_param_bound() == Some(actual) {
+            let coerced = self.coercion(lowered, expected);
+            return Ok(self.typed(coerced, expected));
+        }
         self.upcast(lowered, actual, expected)
             .ok_or(KlibBodyDeclineReason::ImplicitConversion)
     }
@@ -1302,7 +1356,7 @@ impl<'a> BodyLowering<'a> {
         // A compiler temporary, such as the cast `other` of a data class's `equals`, is an unnamed
         // immutable local the source never names.
         if variable.base.origin == "IR_TEMPORARY_VARIABLE" {
-            return self.unnamed_local(id);
+            return self.unnamed_variable(id);
         }
         let ty = self.semantic(variable.ty)?;
         let Some(initializer) = variable.initializer else {
@@ -1380,7 +1434,7 @@ impl<'a> BodyLowering<'a> {
             .as_ref()
             .is_some_and(|member| member == target);
         if !member && target != self.function.symbol {
-            return Err(KlibBodyDeclineReason::ForeignReturnTarget);
+            return self.non_local_return(target, value);
         }
         let expected = self.member_result.unwrap_or(self.header.body_result());
         let mut value = if !member && self.header.erases_result() {
@@ -1398,6 +1452,26 @@ impl<'a> BodyLowering<'a> {
         let returned = self.ir.add_expr(IrExpr::Return(Some(value)));
         // The function's own return leaves the innermost callable.
         self.ir.checked_return_depths.insert(returned, 0);
+        Ok(returned)
+    }
+
+    /// A closure's `return` from the enclosing declaration `target`, which checked FIR lowering
+    /// records as a return as many lexical frames out as the closures it crosses. Inline expansion
+    /// moves it a frame nearer at each one.
+    fn non_local_return(&mut self, target: &KlibIrSymbol, value: KlibIrExprId) -> Lowered<ExprId> {
+        let Some((frames, &(_, result))) = self
+            .enclosing_returns
+            .iter()
+            .rev()
+            .enumerate()
+            .find(|(_, (symbol, _))| symbol == target)
+        else {
+            return Err(KlibBodyDeclineReason::ForeignReturnTarget);
+        };
+        let value = self.operand(value, result)?;
+        let returned = self.ir.add_expr(IrExpr::Return(Some(value)));
+        let depth = u32::try_from(frames + 1).expect("a closure nesting fits u32");
+        self.ir.checked_return_depths.insert(returned, depth);
         Ok(returned)
     }
 

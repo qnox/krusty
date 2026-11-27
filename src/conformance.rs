@@ -301,14 +301,14 @@ class ResultContinuation : Continuation<Any?> {
 /// needs `@JvmInline`. The JVM runner inserts it only while `FullValueClasses` is disabled; Native
 /// and Wasm always expand it to nothing because their `value class` needs no JVM annotation.
 pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
-    prepare_test_source_for(src, target, crate::kotlin_version::target())
+    prepare_test_source_for(src, target, crate::kotlin_version::environment_release())
 }
 
 /// The name Kotlin's runner gives its JVM `TargetBackend`, which `BACKEND_UNDER_TEST` spells. Kotlin
 /// 2.5 renamed the `JVM_IR` entry to `JVM` (keeping `JVM_IR` only as a deprecated alias), so a corpus
 /// compares against the spelling of the release it was written for.
 fn jvm_backend_under_test(release: crate::kotlin_version::KotlinVersion) -> &'static str {
-    if release >= crate::kotlin_version::KotlinVersion::V2_5_0_RC {
+    if release >= crate::kotlin_version::KotlinVersion::V2_5_0_RC2 {
         "\"JVM\""
     } else {
         "\"JVM_IR\""
@@ -321,7 +321,7 @@ fn prepare_test_source_for(
     release: crate::kotlin_version::KotlinVersion,
 ) -> String {
     let full_value_classes =
-        crate::features::LangFeatures::from_source(src).has("FullValueClasses");
+        crate::features::LangFeatures::from_source_in_environment(src).has("FullValueClasses");
     let jvm = jvm_backend_under_test(release);
     let (value_class_annotation, backend) = match target {
         TestTarget::Jvm if !full_value_classes => ("@JvmInline", jvm),
@@ -520,6 +520,21 @@ pub fn backend_muted(src: &str, names: &[&str]) -> bool {
                 || l.starts_with("// DONT_TARGET_EXACT_BACKEND:")
         })
         .any(|l| mentions(l.split_once(':').map(|x| x.1).unwrap_or("").trim(), names))
+}
+
+/// Whether kotlinc's own Wasm test run mutes this case in its multi-module mode:
+/// `// WASM_IGNORE_FOR: mode=multi-module`. The directive is a known kotlinc defect marker (the
+/// case carries the upstream issue), so a case that krusty also builds as several modules is not a
+/// krusty failure. A `runner=` or `vm=` qualifier names a different test generator or engine than
+/// krusty's lane, and a case built as one module is outside the mode, so neither is muted here.
+pub fn wasm_ignored_for_multi_module(src: &str) -> bool {
+    let muted = src.lines().any(|line| {
+        directive_payload(line, "WASM_IGNORE_FOR").is_some_and(|payload| {
+            let mut tokens = payload.split_whitespace().peekable();
+            tokens.peek().is_some() && tokens.all(|token| token == "mode=multi-module")
+        })
+    });
+    muted && split_modules(src).is_some()
 }
 
 /// Whether the test applies to krusty's backend (the common case of [`backend_applicable`]).
@@ -1410,7 +1425,7 @@ mod tests {
     fn backend_under_test_spells_the_jvm_backend_as_the_release_runner_does() {
         let source = "val here = BACKEND_UNDER_TEST";
         assert_eq!(
-            prepare_test_source_for(source, TestTarget::Jvm, KotlinVersion::V2_5_0_RC),
+            prepare_test_source_for(source, TestTarget::Jvm, KotlinVersion::V2_5_0_RC2),
             "val here = \"JVM\""
         );
         assert_eq!(
@@ -1418,7 +1433,7 @@ mod tests {
             "val here = \"JVM_IR\""
         );
         assert_eq!(
-            prepare_test_source_for(source, TestTarget::Native, KotlinVersion::V2_5_0_RC),
+            prepare_test_source_for(source, TestTarget::Native, KotlinVersion::V2_5_0_RC2),
             "val here = \"NATIVE\""
         );
     }

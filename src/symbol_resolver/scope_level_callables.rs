@@ -355,6 +355,67 @@ pub(super) fn callables_from_symbols(symbols: &[Rc<ResolvedSymbols>]) -> Callabl
     Callables::from_parts(functions, properties)
 }
 
+/// Keep the candidates of the nearest scope-tower level among `candidates`, the ones that fit a
+/// call or a reference. That level owns the use: a farther fitting declaration never competes
+/// with a nearer one on specificity or conversion cost, and a nearer level whose declarations do
+/// not fit leaves the use to the next.
+pub(crate) fn retain_nearest_scope_level<T>(
+    candidates: &mut Vec<T>,
+    level: impl Fn(&T) -> (u8, u32),
+) {
+    if let Some(nearest) = candidates.iter().map(&level).min() {
+        candidates.retain(|candidate| level(candidate) == nearest);
+    }
+}
+
+/// Keep the functions of the level that owns the family, the level of its first candidate: what a
+/// query about the family the source names sees, as opposed to a selection, which falls through.
+pub(super) fn owning_scope_level(mut functions: Vec<FunctionInfo>) -> Vec<FunctionInfo> {
+    if let Some(owner) = functions.first().map(scope_level) {
+        functions.retain(|function| scope_level(function) == owner);
+    }
+    functions
+}
+
+/// The distinct values that the nearest scope-tower level among `fitting` produces, in order: the
+/// [`retain_nearest_scope_level`] rule for a use that only needs what its candidates produce.
+pub(crate) fn nearest_level_distinct<T: PartialEq>(fitting: Vec<((u8, u32), T)>) -> Vec<T> {
+    let nearest = fitting.iter().map(|(level, _)| *level).min();
+    let mut distinct = Vec::new();
+    for (level, value) in fitting {
+        if Some(level) == nearest && !distinct.contains(&value) {
+            distinct.push(value);
+        }
+    }
+    distinct
+}
+
+/// The nearest-first scope-tower position of the level that offers `function`.
+pub(crate) fn scope_level(function: &FunctionInfo) -> (u8, u32) {
+    function.scope_rung.selection_key(function.scope_rank)
+}
+
+/// Whether two candidates are one declaration reached twice: by its stable or source identity,
+/// else its external identity, else its realized coordinates.
+pub(crate) fn same_callable_declaration(left: &FunctionInfo, right: &FunctionInfo) -> bool {
+    if let (Some(left), Some(right)) = (left.stable_declaration, right.stable_declaration) {
+        return left == right;
+    }
+    if let (Some(left), Some(right)) = (left.source_member, right.source_member) {
+        return left == right;
+    }
+    if let (Some(left), Some(right)) = (
+        left.callable.external_identity,
+        right.callable.external_identity,
+    ) {
+        return left == right;
+    }
+    left.kind == right.kind
+        && left.callable.owner == right.callable.owner
+        && left.callable.name == right.callable.name
+        && left.callable.descriptor == right.callable.descriptor
+}
+
 /// Whether a classpath callable is visible for an unqualified call in `fn_scope`.
 pub(super) fn fn_in_scope(o: &FunctionInfo, fn_scope: Option<FunctionScopeRef<'_>>) -> bool {
     if !matches!(o.callable.origin, Origin::Library) {
@@ -403,36 +464,20 @@ pub(super) fn level_properties(
 }
 
 impl SymbolResolver<'_> {
-    /// [`Self::top_level_candidates`], each stamped with the scope rung of the level that offers
-    /// them, so one selection can rank them against candidates from another family on the same
-    /// scope tower (a classifier's constructors).
+    /// [`Self::top_level_candidates`]. Every candidate already carries the scope rung of the
+    /// level that offers it, so one selection ranks the family against candidates from another
+    /// family on the same scope tower (a classifier's constructors).
     pub(crate) fn ranked_top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
-        let Some(scope) = self.fn_scope else {
-            return Vec::new();
-        };
-        let levels = tagged_symbol_levels_in_function_scope(&self.src, name, scope);
-        let symbols = levels
-            .iter()
-            .map(|level| level.symbols.clone())
-            .collect::<Vec<_>>();
-        let Some((index, functions)) = self.nearest_top_level_level(&symbols) else {
-            return Vec::new();
-        };
-        let level = &levels[index];
-        functions
-            .into_top_level()
-            .filter(|function| !function.callable.default_call)
-            .map(|mut function| {
-                function.scope_rung = level.kind.callable_scope_rung();
-                function.scope_rank = level.rank;
-                function
-            })
-            .collect()
+        self.top_level_candidates(name)
     }
 
-    /// The receiver-less function overloads named `name` at the nearest scope level that offers one.
+    /// The receiver-less function overloads named `name` on the scope tower, from the level that
+    /// owns the name outward, each stamped with its level's scope rung. Selection, not lookup,
+    /// decides which level is the first with an applicable candidate: as in kotlinc's tower, an
+    /// explicitly imported `ByteString(vararg Byte)` that does not accept the arguments leaves the
+    /// call to a current-package `ByteString(ByteBuffer)`.
     pub(crate) fn top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
-        let functions = self.nearest_top_level_functions(&self.symbol_levels_in_scope(name));
+        let (functions, _) = self.top_level_tower(name);
         crate::trace_compiler!(
             "resolve",
             "top-level candidate inventory {name}: {:?}",
@@ -449,6 +494,8 @@ impl SymbolResolver<'_> {
                         .generic_sig
                         .as_ref()
                         .map(|signature| signature.formal_bounds.as_slice()),
+                    function.scope_rung,
+                    function.scope_rank,
                 ))
                 .collect::<Vec<_>>()
         );
@@ -459,6 +506,41 @@ impl SymbolResolver<'_> {
             // by declaration order and later append `$default` a second time.
             .filter(|function| !function.callable.default_call)
             .collect()
+    }
+
+    /// Callable records by Kotlin scope-tower level, nearest first. A declaration with the same
+    /// spelling but the wrong callable facet or an inapplicable receiver does not hide a declaration
+    /// at the next level; selection, not lookup, decides which level is the first applicable one.
+    pub(super) fn symbol_levels_in_scope(&self, name: &str) -> Vec<Vec<Rc<ResolvedSymbols>>> {
+        self.fn_scope
+            .map(|scope| symbol_levels_in_function_scope(&self.src, name, scope))
+            .unwrap_or_default()
+    }
+
+    /// [`Self::top_level_candidates`] at the level that owns `name` only. A query about the
+    /// family a call names (whether it inlines a lambda, its unique stable signature) must not
+    /// mix in a farther level that only a failed selection would fall through to.
+    pub(crate) fn owning_level_top_level_functions(&self, name: &str) -> FunctionSet {
+        FunctionSet {
+            overloads: owning_scope_level(self.top_level_candidates(name)),
+        }
+    }
+
+    /// The receiver-less tower named `name`: its function family from the owning level outward
+    /// ([`Self::top_level_tower_functions`]) and every level's symbols, nearest first.
+    pub(super) fn top_level_tower(
+        &self,
+        name: &str,
+    ) -> (FunctionSet, Vec<Vec<Rc<ResolvedSymbols>>>) {
+        let levels = self
+            .fn_scope
+            .map(|scope| tagged_symbol_levels_in_function_scope(&self.src, name, scope))
+            .unwrap_or_default();
+        let functions = self.top_level_tower_functions(&levels);
+        (
+            functions,
+            levels.into_iter().map(|level| level.symbols).collect(),
+        )
     }
 
     /// The top-level properties named `name` at the nearest scope level that declares a visible
@@ -494,45 +576,50 @@ impl SymbolResolver<'_> {
             .unwrap_or_default()
     }
 
-    /// The receiver-less function family of the nearest scope level that declares an accessible
-    /// function named `name`. An inaccessible declaration is never a successful candidate, so, as
-    /// in kotlinc's tower, a level offering only inaccessible functions does not own the name and
-    /// resolution continues outward: a file-private or dependency-internal `minOf` under an
-    /// explicit star import leaves the default-imported `kotlin.comparisons.minOf` selectable.
-    /// When no level declares an accessible function, the nearest level declaring any keeps the
-    /// name so the call reports the inaccessible declarations instead of an unresolved reference.
-    pub(super) fn nearest_top_level_functions(
-        &self,
-        levels: &[Vec<Rc<ResolvedSymbols>>],
-    ) -> FunctionSet {
-        self.nearest_top_level_level(levels)
-            .map(|(_, functions)| functions)
-            .unwrap_or_default()
-    }
-
-    /// The index of the scope level that owns a receiver-less call, with its functions: the
-    /// nearest level with an accessible receiver-less function, else the nearest with any.
-    fn nearest_top_level_level(
-        &self,
-        levels: &[Vec<Rc<ResolvedSymbols>>],
-    ) -> Option<(usize, FunctionSet)> {
+    /// The receiver-less function family of the scope tower named by `levels`, nearest first, each
+    /// function stamped with the scope rung of its level. The family starts at the nearest level
+    /// that declares an accessible function named `name`. An inaccessible declaration is never a
+    /// successful candidate, so, as in kotlinc's tower, a level offering only inaccessible
+    /// functions does not own the name and resolution continues outward: a file-private or
+    /// dependency-internal `minOf` under an explicit star import leaves the default-imported
+    /// `kotlin.comparisons.minOf` selectable. Every farther level offering an accessible function
+    /// follows it, for selection to fall through to when no nearer candidate applies. When no
+    /// level declares an accessible function, the nearest level declaring any keeps the name so
+    /// the call reports the inaccessible declarations instead of an unresolved reference.
+    pub(super) fn top_level_tower_functions(&self, levels: &[FunctionScopeLevel]) -> FunctionSet {
         let mut nearest_inaccessible = None;
-        for (index, symbols) in levels.iter().enumerate() {
-            let functions = function_set_from_symbols(symbols);
+        let mut tower = Vec::new();
+        for level in levels {
+            let mut functions = function_set_from_symbols(&level.symbols);
             // Extensions require a receiver. Only the receiver-less facet can own this scope
             // level or supply the inaccessible candidates retained for a bare-call diagnostic.
             if functions.top_level().next().is_none() {
                 continue;
             }
+            for function in &mut functions.overloads {
+                function.scope_rung = level.kind.callable_scope_rung();
+                function.scope_rank = level.rank;
+            }
             if functions
                 .top_level()
                 .any(|function| self.non_member_callable_accessible(function))
             {
-                return Some((index, functions));
+                // One declaration reached through two levels (a package's own declaration under a
+                // star import of that package) stays one candidate, on its nearest level.
+                functions.overloads.retain(|function| {
+                    !tower
+                        .iter()
+                        .any(|nearer| same_callable_declaration(nearer, function))
+                });
+                tower.append(&mut functions.overloads);
+            } else if tower.is_empty() {
+                nearest_inaccessible.get_or_insert(functions);
             }
-            nearest_inaccessible.get_or_insert((index, functions));
         }
-        nearest_inaccessible
+        if tower.is_empty() {
+            return nearest_inaccessible.unwrap_or_default();
+        }
+        FunctionSet { overloads: tower }
     }
 
     pub(super) fn nearest_top_level_properties(
@@ -748,54 +835,80 @@ mod tests {
             function.visibility = visibility;
             function
         };
-        let level = |overloads| {
-            vec![Rc::new(ResolvedSymbols {
+        let level = |rank, overloads| FunctionScopeLevel {
+            kind: FunctionScopeLevelKind::Import,
+            rank,
+            symbols: vec![Rc::new(ResolvedSymbols {
                 callables: Callables::Functions(FunctionSet { overloads }),
                 ..ResolvedSymbols::default()
-            })]
+            })],
         };
-        let extensions = level(vec![function(
-            FnKind::Extension,
-            "near/ExtensionsKt",
-            Visibility::Public,
-        )]);
-        let inaccessible = level(vec![
-            function(FnKind::TopLevel, "middle/PrivateKt", Visibility::Private),
-            function(FnKind::Extension, "middle/ExtensionsKt", Visibility::Public),
-        ]);
-        let accessible = level(vec![
-            function(FnKind::TopLevel, "far/FunctionsKt", Visibility::Public),
-            function(FnKind::Extension, "far/ExtensionsKt", Visibility::Public),
-        ]);
+        let extensions = || {
+            level(
+                0,
+                vec![function(
+                    FnKind::Extension,
+                    "near/ExtensionsKt",
+                    Visibility::Public,
+                )],
+            )
+        };
+        let inaccessible = || {
+            level(
+                1,
+                vec![
+                    function(FnKind::TopLevel, "middle/PrivateKt", Visibility::Private),
+                    function(FnKind::Extension, "middle/ExtensionsKt", Visibility::Public),
+                ],
+            )
+        };
+        let accessible = |rank, owner| {
+            level(
+                rank,
+                vec![function(FnKind::TopLevel, owner, Visibility::Public)],
+            )
+        };
+        let positions = |functions: &FunctionSet| {
+            functions
+                .overloads
+                .iter()
+                .map(|function| {
+                    (
+                        function.callable.owner,
+                        function.scope_rung,
+                        function.scope_rank,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
         let resolver = SymbolResolver::new(&crate::libraries::EmptySymbolSource);
-        let selected = resolver.nearest_top_level_functions(&[
-            extensions.clone(),
-            inaccessible.clone(),
-            accessible,
+        // The nearest accessible level owns the name; every farther accessible level stays in the
+        // family, stamped with its own rung, for selection to fall through to.
+        let selected = resolver.top_level_tower_functions(&[
+            extensions(),
+            inaccessible(),
+            accessible(2, "far/FunctionsKt"),
+            accessible(3, "farther/FunctionsKt"),
         ]);
+        let import = crate::libraries::CallableScopeRung::Import;
         assert_eq!(
-            selected
-                .overloads
-                .iter()
-                .map(|function| function.callable.owner)
-                .collect::<Vec<_>>(),
-            [type_name("far/FunctionsKt"), type_name("far/ExtensionsKt")]
-        );
-        let retained = resolver.nearest_top_level_functions(&[extensions.clone(), inaccessible]);
-        assert_eq!(
-            retained
-                .overloads
-                .iter()
-                .map(|function| function.callable.owner)
-                .collect::<Vec<_>>(),
+            positions(&selected),
             [
-                type_name("middle/PrivateKt"),
-                type_name("middle/ExtensionsKt")
+                (type_name("far/FunctionsKt"), import, 2),
+                (type_name("farther/FunctionsKt"), import, 3),
+            ]
+        );
+        let retained = resolver.top_level_tower_functions(&[extensions(), inaccessible()]);
+        assert_eq!(
+            positions(&retained),
+            [
+                (type_name("middle/PrivateKt"), import, 1),
+                (type_name("middle/ExtensionsKt"), import, 1),
             ]
         );
         assert!(!resolver.non_member_callable_accessible(retained.top_level().next().unwrap()));
         assert!(resolver
-            .nearest_top_level_functions(&[extensions])
+            .top_level_tower_functions(&[extensions()])
             .overloads
             .is_empty());
     }

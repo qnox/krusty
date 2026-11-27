@@ -1208,13 +1208,13 @@ fn implicit_inner_constructor_reference_captures_the_checked_outer_receiver() {
     );
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
-        IrExpr::Lambda {
-            impl_fn,
-            arity: 1,
-            captures,
-            sam: None,
-            inline_body: None,
-        } if *impl_fn == wrapper && captures.len() == 1
+        IrExpr::CallableReference(reference)
+            if reference.adapter == wrapper
+                && reference.bound_receiver.is_some()
+                && matches!(
+                    reference.target,
+                    crate::ir::IrCallableReferenceTarget::Constructor { .. }
+                )
     )));
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,

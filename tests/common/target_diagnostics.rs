@@ -17,7 +17,7 @@ pub fn front_end_diagnostic_records_for(
         src,
         cp_jars,
         jdk_modules,
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
     )
 }
 

@@ -67,17 +67,86 @@ pub(super) fn realize_own_get(
         .body
         .expect("a splicing adapter has a body");
     let expressions = krusty::ir::value_namespace_expressions(ir, body);
-    let receiver_reads = expressions
-        .iter()
-        .copied()
-        .filter(|&current| matches!(ir.exprs[current as usize], IrExpr::GetValue(0)))
+    // The adapter takes the bound context arguments first, then the receiver, if it has one.
+    let contexts = ir.classes[class as usize]
+        .prop_ref
+        .as_ref()
+        .map(|property| property.context_types.clone())
+        .expect("a carrier with a spliced getter is a property reference");
+    let context_count = u32::try_from(contexts.len()).expect("few context parameters");
+    let has_receiver = !matches!(receiver, GetReceiver::None);
+    let adapter_parameters = context_count + u32::from(has_receiver);
+    let reads_of = |ir: &IrFile, slot: u32| {
+        expressions
+            .iter()
+            .copied()
+            .filter(|&current| matches!(ir.exprs[current as usize], IrExpr::GetValue(index) if index == slot))
+            .collect::<Vec<_>>()
+    };
+    let receiver_reads = if has_receiver {
+        reads_of(ir, context_count)
+    } else {
+        Vec::new()
+    };
+    let context_reads = (0..context_count)
+        .map(|slot| reads_of(ir, slot))
         .collect::<Vec<_>>();
-    let receiver_ty = ir.functions[adapter as usize].params.first().copied();
+    let receiver_ty = has_receiver
+        .then(|| {
+            ir.functions[adapter as usize]
+                .params
+                .get(context_count as usize)
+        })
+        .flatten()
+        .copied();
     let any = Ty::nullable(Ty::obj("kotlin/Any"));
+    // `this` takes value 0 and an unbound reference's `get(Object)` parameter value 1: the
+    // body's locals follow them where its parameters were.
+    let first_local = 1 + u32::from(matches!(receiver, GetReceiver::Parameter));
+    krusty::ir::remap_forest_value_indices(ir, &[body], adapter_parameters, &|index| {
+        index - adapter_parameters + first_local
+    });
+    // The contexts live in the runtime base class's `boundContextArguments`.
+    if !contexts.is_empty() {
+        let array = Ty::array(Ty::obj("kotlin/Any"));
+        let field = ir.classes[class as usize].fields.len();
+        ir.classes[class as usize].fields.push(krusty::ir::IrField {
+            name: "boundContextArguments".to_string(),
+            ty: array,
+            constructor_store_line: 0,
+            type_param: None,
+            default: None,
+            flags: krusty::ir::IrfFlags::default(),
+        });
+        for (index, (reads, &context_ty)) in context_reads.iter().zip(&contexts).enumerate() {
+            for &current in reads {
+                let this = ir.add_expr(IrExpr::GetValue(0));
+                let held = ir.add_expr(IrExpr::GetField {
+                    receiver: this,
+                    class,
+                    index: u32::try_from(field).expect("a reference carrier has few fields"),
+                });
+                let position = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::Int(
+                    i32::try_from(index).expect("few context parameters"),
+                )));
+                let element = ir.add_expr(IrExpr::Call {
+                    callee: Box::new(krusty::ir::Callee::Intrinsic {
+                        operation: krusty::ir::IrIntrinsic::ArrayGet,
+                        ret: any,
+                    }),
+                    dispatch_receiver: Some(held),
+                    args: vec![position],
+                });
+                ir.exprs[current as usize] = IrExpr::TypeOp {
+                    op: krusty::ir::IrTypeOp::ImplicitCoercion,
+                    arg: element,
+                    type_operand: context_ty,
+                };
+            }
+        }
+    }
     let params = match receiver {
         GetReceiver::Parameter => {
-            // `this` takes value 0, and the receiver parameter moves to value 1.
-            krusty::ir::shift_value_indices(ir, body, 0, 1);
             let receiver_ty =
                 receiver_ty.expect("an unbound reference's adapter takes its receiver");
             for &current in &receiver_reads {
@@ -91,7 +160,7 @@ pub(super) fn realize_own_get(
             vec![any]
         }
         GetReceiver::Bound => {
-            // `this` takes the receiver's value 0; the receiver is read from the base class field.
+            // The receiver is read from the base class field.
             let receiver_ty = receiver_ty.expect("a bound reference's adapter takes its receiver");
             let field = ir.classes[class as usize].fields.len();
             ir.classes[class as usize].fields.push(krusty::ir::IrField {
@@ -117,10 +186,7 @@ pub(super) fn realize_own_get(
             }
             Vec::new()
         }
-        GetReceiver::None => {
-            krusty::ir::shift_value_indices(ir, body, 0, 1);
-            Vec::new()
-        }
+        GetReceiver::None => Vec::new(),
     };
     // The adapter returns the property's value; `get` returns it as an object.
     for &current in &expressions {

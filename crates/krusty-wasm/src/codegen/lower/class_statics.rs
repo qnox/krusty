@@ -6,7 +6,7 @@
 //! calls it.
 
 use super::*;
-use krusty::backend::class_statics::ClassStaticPlan;
+use krusty::backend::class_statics::{ClassActivationStep, ClassStaticPlan};
 
 /// The emitted pieces of one class's static initialization.
 struct ClassInitializer {
@@ -32,8 +32,11 @@ impl ClassInitializers {
         module: &mut Module,
         properties: &mut PropertyRegistry,
     ) -> Result<Self, Unsupported> {
-        let plan = ClassStaticPlan::new(ir)
-            .map_err(|unordered| format!("a static property of `{}`", unordered.owner.render()))?;
+        let plan = ClassStaticPlan::new(
+            ir,
+            krusty::kotlin_version::class_statics_in_program_order(ir.reference.quirks()),
+        )
+        .map_err(|unordered| format!("a static property of `{}`", unordered.owner.render()))?;
         let classes = plan
             .classes()
             .iter()
@@ -91,12 +94,27 @@ impl ClassInitializers {
             body.code.end();
             body.code.i32_const(1);
             body.code.global_set(initializer.flag);
-            for &index in &group.statics {
+            // Initializing the class initializes what it builds on first, as a call of this
+            // function from another file expects.
+            body.activate_superclasses(group.class, Some(group.class))?;
+            for step in self.plan.superinterface_steps(group.class) {
+                match step {
+                    ClassActivationStep::OwnStatics(class) => body.initialize_own_statics(class),
+                    ClassActivationStep::Companion(class) => body.initialize_companion(class)?,
+                }
+            }
+            for (position, &index) in group.statics.iter().enumerate() {
+                if group.before_companion == Some(position) {
+                    body.initialize_companion(group.class)?;
+                }
                 let property = &ir.statics[index as usize];
                 if let Some(init) = property.init {
                     body.value(init, property.ty)?;
                     body.code.global_set(context.globals[index as usize]);
                 }
+            }
+            if group.before_companion == Some(group.statics.len()) {
+                body.initialize_companion(group.class)?;
             }
             let Body { code, locals, .. } = body;
             module.define(initializer.function, Function { ty, locals, code });
@@ -136,7 +154,8 @@ impl Body<'_> {
                 self.initialize_static_owner(*storage)
             }
             // A `companion { }` block property of another file: its owner's initializer, which
-            // that file defines, runs the owner's statics once.
+            // that file defines, initializes the class once: what it builds on, its statics and
+            // its companion object.
             _ => {
                 let owner =
                     self.ir

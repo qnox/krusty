@@ -997,12 +997,14 @@ mod tests {
         );
         // The LSP boundary consumes the compiler's alternate editor span, but preserves the
         // reference compiler's diagnostic order for the selected Kotlin version.
-        let expected =
-            if krusty::kotlin_version::at_least(krusty::kotlin_version::KotlinVersion::V2_4_20) {
-                vec![missing, mixing]
-            } else {
-                vec![mixing, missing]
-            };
+        let expected = if krusty::features::LangFeatures::new()
+            .reference()
+            .at_least(krusty::kotlin_version::KotlinVersion::V2_4_20)
+        {
+            vec![missing, mixing]
+        } else {
+            vec![mixing, missing]
+        };
         assert_eq!(
             diagnostics
                 .iter()

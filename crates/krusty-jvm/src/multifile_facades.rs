@@ -167,6 +167,7 @@ fn write_facade(facade: &str, parts: &[Part], stamp: MetadataStamp) -> Result<Ve
             .max()
             .unwrap_or_default(),
     );
+    cw.set_preview(nodes.iter().any(|node| node.preview));
     cw.keep_visited_inner_classes();
     // A facade of one part is compiled from that part's file; one of several names none.
     if let [node] = &nodes[..] {
