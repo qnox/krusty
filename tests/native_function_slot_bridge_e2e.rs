@@ -1,8 +1,8 @@
 //! A class of the program that implements a FUNCTION TYPE.
 //!
-//! A function value's body sits at a fixed vtable number — the runtime names it `KT_SLOT_INVOKE` —
-//! and every caller through a function type reads it rather than asking, passing and reading
-//! references, because that is the one signature every function value shares. A class whose
+//! A function value's body sits at a vtable number of its operand count — the runtime names the
+//! first `KT_SLOT_INVOKE` — and every caller through a function type reads it rather than asking,
+//! passing and reading references, because that is the one signature every function value shares. A class whose
 //! `invoke` carries references throughout stands there itself. One that does not — `class A : (Int)
 //! -> Int` carries machine integers — cannot: a caller would read an integer as a pointer. It takes
 //! a slot of its own and the fixed number gets a converting stand-in, which forwards by DISPATCH so
@@ -130,12 +130,11 @@ fn an_object_implements_a_function_type_too() {
     every_backend_agrees_with_kotlinc("InvokeObjectFunctionType", source);
 }
 
-/// TWO function types at once has more `invoke`s than there are fixed numbers to put them in, so
-/// it declines rather than picking one and answering the other call with the wrong body.
+/// TWO function types at once put two `invoke`s on one class. Each operand count has its own
+/// function slot, so a call through either type reaches its own body.
 #[test]
-fn two_function_types_at_once_decline() {
-    expect_native_decline(
-        "var result = \"\"\n\
+fn two_function_types_at_once_each_reach_their_own_body() {
+    let source = "var result = \"\"\n\
          object Test : () -> Unit, (Boolean) -> Unit {\n\
          \x20   override fun invoke() { result += \"O\" }\n\
          \x20   override fun invoke(p1: Boolean) { if (p1) result += \"K\" }\n\
@@ -146,17 +145,15 @@ fn two_function_types_at_once_decline() {
          \x20   nullary()\n\
          \x20   unary(true)\n\
          \x20   return result\n\
-         }\n",
-        "TwoFunctionTypes",
-        "function types at once",
-    );
+         }\n";
+    every_backend_agrees_with_kotlinc("TwoFunctionTypes", source);
 }
 
 /// Two named interfaces, each inheriting a function type of its own arity, put two `invoke`s on a
-/// class that names neither function type itself. The fixed function slot still holds one body, so
-/// this declines exactly as naming both function types directly does.
+/// class that names neither function type itself. Each is reached through its own slot, exactly as
+/// when the class names both function types directly.
 #[test]
-fn two_function_types_through_named_interfaces_decline() {
+fn two_function_types_through_named_interfaces_each_reach_their_own_body() {
     let source = "interface Nullary : () -> String\n\
          interface Unary : (Int) -> String\n\
          class Both : Nullary, Unary {\n\
@@ -168,12 +165,7 @@ fn two_function_types_through_named_interfaces_decline() {
          \x20   val unary: (Int) -> String = Both()\n\
          \x20   return nullary() + unary(1)\n\
          }\n";
-    expect_box_ok_with_stdlib(source, "TwoFunctionTypesThroughInterfaces");
-    expect_native_decline(
-        source,
-        "TwoFunctionTypesThroughInterfaces",
-        "function types at once",
-    );
+    every_backend_agrees_with_kotlinc("TwoFunctionTypesThroughInterfaces", source);
 }
 
 /// A function type of more than 22 parameters has no `Function23` or wider to declare `invoke` on,
