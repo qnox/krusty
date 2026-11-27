@@ -206,7 +206,7 @@ pub(crate) struct EmittedBody {
     /// The interface defaults the local classes the body constructs inherit as their
     /// implementations. Each is also one of `callables`; the unit emits it with its class, so
     /// dispatch through the interface reaches its body.
-    pub(crate) inherited_defaults: Vec<KlibDependencyCallable>,
+    pub(crate) constructed_class_defaults: Vec<KlibDependencyCallable>,
     pub(crate) objects: Vec<KlibPublicIdSignature>,
     pub(crate) sam_classifiers: Vec<(KlibPublicIdSignature, TypeName)>,
     pub(crate) hierarchy_roots: Vec<TypeName>,
@@ -222,7 +222,7 @@ pub(crate) struct EmittedBody {
 #[derive(Default)]
 struct EmittedBodyInventory<'a> {
     callables: Vec<&'a KlibIrSymbol>,
-    inherited_defaults: Vec<&'a KlibIrSymbol>,
+    constructed_class_defaults: Vec<&'a KlibIrSymbol>,
     objects: Vec<&'a KlibIrSymbol>,
     enum_entries: Vec<&'a KlibIrSymbol>,
     public_hierarchy_roots: Vec<TypeName>,
@@ -1281,8 +1281,8 @@ impl KlibDeclarationBodies {
         inherited: &dyn Fn(&KlibIrSignature) -> Option<KlibIrSignature>,
     ) -> EmittedBody {
         let inventory = self.emitted_body_symbols(identity, forms);
-        let inherited_defaults = inventory
-            .inherited_defaults
+        let constructed_class_defaults = inventory
+            .constructed_class_defaults
             .iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
             .filter_map(
@@ -1346,7 +1346,7 @@ impl KlibDeclarationBodies {
             .collect();
         EmittedBody {
             callables,
-            inherited_defaults,
+            constructed_class_defaults,
             objects,
             sam_classifiers,
             hierarchy_roots: inventory.public_hierarchy_roots,
@@ -1416,7 +1416,7 @@ impl KlibDeclarationBodies {
             }
         }
         let mut classifiers = Vec::new();
-        let mut inherited_defaults = Vec::new();
+        let mut constructed_class_defaults = Vec::new();
         if let Some(file) = self.top_level_file(identity) {
             for initializer in self.module_file_initializers(&identity.module, file, false) {
                 let roots = vec![initializer.initializer];
@@ -1494,7 +1494,7 @@ impl KlibDeclarationBodies {
                     &class.base.symbol.signature,
                 );
                 symbols.extend(inherited.iter().copied());
-                inherited_defaults.extend(inherited);
+                constructed_class_defaults.extend(inherited);
                 symbols.extend(class_arena.emitted_callable_symbols_from(roots.clone(), forms));
                 objects.extend(class_arena.emitted_object_symbols_from(roots.clone(), forms));
                 sams.extend(class_arena.emitted_sam_classifiers_from(roots.clone(), forms));
@@ -1504,7 +1504,7 @@ impl KlibDeclarationBodies {
         }
         EmittedBodyInventory {
             callables: symbols,
-            inherited_defaults,
+            constructed_class_defaults,
             objects: read_objects,
             enum_entries: entries,
             public_hierarchy_roots: classifiers,
