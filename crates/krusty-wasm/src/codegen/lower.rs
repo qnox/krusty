@@ -716,6 +716,13 @@ fn expression_type(
         {
             Ty::Unit
         }
+        // A `when` built after checking, as the suspend lowering builds the decision tree of a
+        // suspending condition, names its result on the `when` itself rather than as a checked type.
+        IrExpr::When { .. }
+            if ir.checked_type(id).is_none() && ir.when_result_type(id).is_some() =>
+        {
+            ir.when_result_type(id).expect("guarded by the arm")
+        }
         // A top-level property read has its storage's declared type.
         IrExpr::GetStatic(index) if ir.checked_type(id).is_none() => ir.statics[*index as usize].ty,
         // A shared cell's element is read, and a write evaluates to what it stored, at the
