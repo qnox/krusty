@@ -785,8 +785,12 @@ impl Emitter<'_> {
         // body that always throws or returns non-locally ends without a return of its own.
         // An expression body that ends in an inlined call has forgotten the line in effect, so
         // the return the lambda's body falls into writes its own end line again: the entry the
-        // inliner's `nop` keeps once the lambda is placed.
-        if !scratch.is_dead() && scratch.line_forgotten() {
+        // inliner's `nop` keeps once the lambda is placed. A callable reference's adapter has no
+        // closing line of its own.
+        if !scratch.is_dead()
+            && scratch.line_forgotten()
+            && callable_reference_template(self.ir, argument).is_none()
+        {
             if let Some(returned) = self.lambda_value_return(impl_fn) {
                 self.mark_return(returned, &mut scratch);
             }

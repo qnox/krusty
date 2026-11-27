@@ -1407,7 +1407,7 @@ impl<'a> CommonIrBodySink<'a> {
             // A member of a class an inline template declares in another file is compiled only to
             // be read; its source unit is gone, so it carries no declaration line, but it still
             // names its receiver, parameters and locals as the declaring file's own does.
-            if anchor.source != self.source {
+            if class.is_some() && anchor.source != self.source {
                 self.ir.fn_debug_locals.insert(function);
             }
             if let Some(owner) = companion_block_owner {

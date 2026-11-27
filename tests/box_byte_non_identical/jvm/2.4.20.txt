@@ -195,7 +195,6 @@ callableReference/bound/equals/nullableReceiverInEquals.kt
 callableReference/bound/equals/reflectionReference.kt
 callableReference/bound/genericBoundPropertyAsCrossinline.kt
 callableReference/bound/genericValOnLHS.kt
-callableReference/bound/inlineFunctionRefToAnonymousObject.kt
 callableReference/bound/kCallableNameIntrinsic.kt
 callableReference/bound/kt15446.kt
 callableReference/bound/kt44636_localExtension.kt
@@ -332,7 +331,6 @@ closures/capturedVarsOptimization/capturedVarsOfSize2.kt
 closures/capturedVarsOptimization/kt45446.kt
 closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
-closures/crossinlineLocalDeclaration.kt
 closures/enclosingThis.kt
 closures/kt11634.kt
 closures/kt11634_2.kt
@@ -368,7 +366,6 @@ companionBlocksAndExtensions/interfaces.kt
 companionBlocksAndExtensions/lateinit.kt
 companionBlocksAndExtensions/propertyDelegation_block.kt
 companionBlocksAndExtensions/typeAlias.kt
-compileKotlinAgainstKotlin/adaptedSuspendFunctionReference.kt
 compileKotlinAgainstKotlin/coroutinesBinary.kt
 compileKotlinAgainstKotlin/doublyNestedClass.kt
 compileKotlinAgainstKotlin/inlineClasses/inlineClassInlineProperty.kt
@@ -391,7 +388,6 @@ contextParameters/contextOnInvokeResolve.kt
 contextParameters/contextualAnonymousFunAsAnExpression.kt
 contextParameters/explicitPassing.kt
 contextParameters/functionalType.kt
-contextParameters/inlineAnonymousParameter.kt
 contextParameters/invokeMultipleContextParametersOfSameType.kt
 contextParameters/kt51290.kt
 contextParameters/kt51475.kt
@@ -562,7 +558,6 @@ coroutines/dispatchResume.kt
 coroutines/doubleColonExpressionsGenerationInBuilderInference.kt
 coroutines/emptyClosure.kt
 coroutines/emptyCommonConstraintSystemForCoroutineInferenceCall.kt
-coroutines/epam.kt
 coroutines/falseUnitCoercion.kt
 coroutines/featureIntersection/breakWithNonEmptyStack.kt
 coroutines/featureIntersection/callableReference/bigArity.kt
@@ -640,8 +635,6 @@ coroutines/inlineClasses/resume/overrideSuspendFun_Int.kt
 coroutines/inlineClasses/resume/returnResult.kt
 coroutines/inlineClasses/resume/syntheticAccessor.kt
 coroutines/inlineClasses/resumeWithException/boxReturnValueOfSuspendFunctionReference.kt
-coroutines/inlineClasses/resumeWithException/boxTypeParameterOfSuperType.kt
-coroutines/inlineClasses/resumeWithException/boxTypeParameterOfSuperTypeResult.kt
 coroutines/inlineClasses/resumeWithException/boxUnboxInsideCoroutine_InlineInt.kt
 coroutines/inlineClasses/resumeWithException/boxUnboxInsideCoroutine_Int.kt
 coroutines/inlineClasses/resumeWithException/boxUnboxInsideCoroutine_Long.kt
@@ -691,7 +684,6 @@ coroutines/kt12958.kt
 coroutines/kt15016.kt
 coroutines/kt15017.kt
 coroutines/kt21080.kt
-coroutines/kt21605.kt
 coroutines/kt24135.kt
 coroutines/kt28844.kt
 coroutines/kt30858.kt
@@ -1180,7 +1172,6 @@ functions/kt47527.kt
 functions/kt58825_arrayOverloads.kt
 functions/localFunction.kt
 functions/localFunctions/callBetweenLocalFunctions.kt
-functions/localFunctions/definedWithinLambdaInnerUsage1.kt
 functions/localFunctions/kt2895.kt
 functions/localFunctions/kt4783.kt
 functions/localFunctions/kt4784.kt
@@ -1229,7 +1220,6 @@ inference/pcla/callableReferencesProperCompletion.kt
 inference/pcla/issues/kt41164.kt
 inference/pcla/issues/kt42139.kt
 inference/pcla/issues/kt45083.kt
-inference/pcla/issues/kt47744.kt
 inference/pcla/issues/kt48633.kt
 inference/pcla/issues/kt49160a.kt
 inference/pcla/issues/kt49160b.kt
@@ -1264,7 +1254,6 @@ inference/pcla/substituteStubTypeIntolambdaParameterDescriptor.kt
 inference/pcla/substitutelambdaExtensionReceiverType.kt
 inference/plusAssignInsideLambda.kt
 inference/safeCastWithElvis.kt
-inference/sumOfOverloads.kt
 inference/tryCatchAtAssignmentWithSmartCast.kt
 inference/whenAtAssignmentWithSmartCast.kt
 inference/whenAtAssignmentWithSmartCastInsideCapturedLambda.kt
@@ -1291,7 +1280,6 @@ inline/inline24.kt
 inline/inline26.kt
 inline/inline5.kt
 inline/inlineCallInsideStringTemplate.kt
-inline/inlineFunctionInLambda.kt
 inline/inlineInInlineWithLambdaPrivate.kt
 inline/inlineLambdaWithCapture.kt
 inline/innerInlineFunCapturesOuter.kt
@@ -1308,10 +1296,8 @@ inline/multipleInheritanceClash.kt
 inline/nestedLabelsInlinedClashingAtFunctionsWithClosure.kt
 inline/privateProperty.kt
 inline/redundantCoercionsCleaner.kt
-inline/rootConstructor.kt
 inline/safeCall.kt
 inline/severalClosures.kt
-inline/severalUsage.kt
 inline/typeParameterSymbolIsUnbound.kt
 inline/vararg.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
@@ -1406,9 +1392,7 @@ inlineClasses/constructorCallableReference.kt
 inlineClasses/constructorCallableReferenceGeneric.kt
 inlineClasses/correctBoxingForBranchExpressions.kt
 inlineClasses/correctBoxingForBranchExpressionsGeneric.kt
-inlineClasses/crossinlineWithInlineClassInParameter.kt
 inlineClasses/crossinlineWithInlineClassInParameterGeneric.kt
-inlineClasses/crossinlineWithInlineClassInParameterGeneric2.kt
 inlineClasses/defaultFunctionsFromAnyForInlineClass.kt
 inlineClasses/defaultFunctionsFromAnyForInlineClassGeneric.kt
 inlineClasses/defaultInterfaceMethodsInInlineClass.kt
@@ -1646,7 +1630,6 @@ localClasses/localExtendsInnerAndReferencesOuterMember.kt
 localClasses/nameWithWhitespace.kt
 localClasses/subclassingExtensionReceiverClass.kt
 localEscapeAnalysis/arraysFieldWrite.kt
-lower/forLoopsLowering/arrays.kt
 lower/forLoopsLowering/nested.kt
 lower/forLoopsLowering/progressions.kt
 lower/forLoopsLowering/sequences.kt
@@ -2090,10 +2073,8 @@ reflection/functions/simpleNames.kt
 reflection/kClassCompanion.kt
 reflection/noReflectAtRuntime/methodsFromAny/delegatedProperty.kt
 reflection/noReflectAtRuntime/simpleClassLiterals.kt
-reflection/typeOf/localClass.kt
 reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithInline.kt
 reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithoutInline.kt
-reflection/typeOf/reifiedAsNestedArgument.kt
 reflection/types/innerGenericArguments.kt
 reflection/types/typeArguments.kt
 reflection/types/useSiteVariance.kt
@@ -2172,10 +2153,8 @@ regressions/inaccessibleOperatorRanksBelowResolved.kt
 regressions/inapplicableFunctionValueYieldsToLaterCallLevel.kt
 regressions/inferredDeclarationOpenDependencyBranch.kt
 regressions/inferredResultCallsPastLexicalValue.kt
-regressions/inlineAnonymousObjectAcrossFiles.kt
 regressions/inlineCallsInInitializerLambda.kt
 regressions/inlineCompiledSuspendObjects.kt
-regressions/inlineCrossinlineLambdaAcrossFiles.kt
 regressions/inlineDefaultCallsFilePrivate.kt
 regressions/inlineDefaultEvaluatesNestedInlineCall.kt
 regressions/inlineDefaultLambdaCapturedByClosure.kt
@@ -2183,10 +2162,6 @@ regressions/inlineDefaultStubRun.kt
 regressions/inlineJvmStaticDefaultStub.kt
 regressions/inlineLibraryCountedLoops.kt
 regressions/inlineLibraryFunctionReference.kt
-regressions/inlineObjectCopySuperArguments.kt
-regressions/inlineObjectLiftedLambdaBesideConstructorCapture.kt
-regressions/inlineObjectOwnStoredProperty.kt
-regressions/inlineObjectSplicedLambdaFrame.kt
 regressions/inlinePropertyReferenceIdentity.kt
 regressions/inlinedLibraryErrorInsideTry.kt
 regressions/integerLiteralNullableExpected.kt
@@ -2297,8 +2272,6 @@ regressions/sourceKCallableNameAcrossFiles.kt
 regressions/sourceKPropertyName.kt
 regressions/suspendCoroutineResultInTypedLocal.kt
 regressions/suspendLambdaLabeledReturn.kt
-regressions/suspendLambdaRetainedInlineObject.kt
-regressions/suspendLambdaRetainedInlineObjectCaptures.kt
 regressions/suspendReferenceResumesSharedLocals.kt
 regressions/suspendStateMachineResumesLocalsAndFailure.kt
 regressions/unitLambdaLabeledReturn.kt
@@ -2329,12 +2302,10 @@ reified/capture.kt
 reified/catchParameter/tryCatchReifiedType.kt
 reified/checkcast.kt
 reified/copyToArray.kt
-reified/innerObject.kt
 reified/kt16445.kt
 reified/kt36237.kt
 reified/lambdaNameClash.kt
 reified/multipleTypeParameters.kt
-reified/newArrayInt.kt
 reified/parameterSwap.kt
 reified/recursiveNewArray.kt
 reified/reifiedIntersectionType.kt
