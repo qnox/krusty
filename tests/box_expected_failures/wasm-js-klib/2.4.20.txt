@@ -254,7 +254,6 @@ contextParameters/suspendContextParemetersWithExtension.kt
 contracts/contractForCast.kt
 contracts/isNullString.kt
 contracts/kt39374.kt
-contracts/kt47300.kt
 contracts/nonNullSmartCast.kt
 contracts/referenceToGenericInDeserializedContract.kt
 contracts/require.kt
@@ -800,7 +799,6 @@ inline/inlineMethod.kt
 inline/inlineNoReturn.kt
 inline/inlineOrder.kt
 inline/inlineSimpleAssignment.kt
-inline/inlinedLambdaWithErasedParamType.kt
 inline/iteratorOnInlineFunctionResult.kt
 inline/lambdaInLambda.kt
 inline/lambdaReassignment.kt
@@ -820,7 +818,6 @@ inline/propertyAccessorInline.kt
 inline/redundantCoercionsCleaner.kt
 inline/redundantCoercionsCleanerKT48876.kt
 inline/redundantCoercionsCleanerKT49356.kt
-inline/rootConstructor.kt
 inline/safeCall.kt
 inline/sharedVar.kt
 inline/simpleReturnFunctionWithResultUnused.kt
