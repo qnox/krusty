@@ -290,14 +290,14 @@ fun ok() = Local { }
 fun interface Local { fun run() }
 ";
 
-/// 2.5.0-RC warns when a SAM constructor or conversion targets an interface whose supertype
+/// 2.5.0-RC2 warns when a SAM constructor or conversion targets an interface whose supertype
 /// is missing, and `ForbidSamConstructorCallsWithMissingDependencySupertype` (on at language 2.6,
 /// under `-progressive`, or by name) makes that an error. 2.4.21 has no such check.
 #[test]
 fn a_sam_constructor_missing_a_dependency_supertype_follows_rc() {
-    let rc = "2.5.0-RC";
+    let rc = "2.5.0-RC2";
     let stdlib = common::kotlinc_server::kotlinc_lib_for_release(rc)
-        .expect("kotlinc 2.5.0-RC")
+        .expect("kotlinc 2.5.0-RC2")
         .join("kotlin-stdlib.jar");
     let work = common::scratch_dir().expect("allocate a scratch directory");
     let a = release_library(rc, &work, "sam-a", SAM_A, None);

@@ -446,7 +446,7 @@ mod tests {
                 ],
             ),
             (
-                KotlinVersion::V2_5_0_RC,
+                KotlinVersion::V2_5_0_RC2,
                 &[
                     ("2.2", "abi_version=2.5.0 metadata_version=2.2.0"),
                     ("2.3", "abi_version=2.5.0 metadata_version=2.3.0"),

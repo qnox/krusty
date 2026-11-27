@@ -53,11 +53,11 @@ impl KotlinVersion {
     pub const V2_4_10: Self = Self::new(2, 4, 10);
     pub const V2_4_20: Self = Self::new(2, 4, 20);
     pub const V2_4_21: Self = Self::new(2, 4, 21);
-    pub const V2_5_0_RC: Self = Self {
+    pub const V2_5_0_RC2: Self = Self {
         major: 2,
         minor: 5,
         patch: 0,
-        pre: PreRelease::Rc(0),
+        pre: PreRelease::Rc(2),
     };
 
     pub const fn new(major: u16, minor: u16, patch: u16) -> Self {
@@ -400,7 +400,7 @@ mod tests {
         assert!(version("2.5.0-Beta2") < version("2.5.0-RC"));
         assert!(version("2.5.0-RC") < version("2.5.0-RC2"));
         assert!(version("2.5.0-RC2") < version("2.5.0"));
-        assert_eq!(version("2.5.0-RC"), KotlinVersion::V2_5_0_RC);
+        assert_eq!(version("2.5.0-RC2"), KotlinVersion::V2_5_0_RC2);
         assert_eq!(version("2.5.0-RC").to_string(), "2.5.0-RC");
         assert_eq!(version("2.5.0-RC2").to_string(), "2.5.0-RC2");
     }
@@ -434,9 +434,9 @@ mod tests {
         let supported = KotlinVersion::supported();
         assert!(supported.contains(&KotlinVersion::V2_4_10));
         assert!(supported.contains(&KotlinVersion::V2_4_20));
-        assert!(supported.contains(&KotlinVersion::V2_5_0_RC));
+        assert!(supported.contains(&KotlinVersion::V2_5_0_RC2));
         assert!(!supported.contains(&KotlinVersion::parse("2.5.0-Beta2").unwrap()));
-        assert_eq!(supported.last().copied(), Some(KotlinVersion::V2_5_0_RC));
+        assert_eq!(supported.last().copied(), Some(KotlinVersion::V2_5_0_RC2));
         assert_eq!(KotlinVersion::newest(), KotlinVersion::V2_4_21);
         assert_eq!(
             manifest_versions("# c\n2.4.0 a\n\n2.4.10 b # note\n"),
@@ -472,8 +472,8 @@ mod tests {
         assert_eq!(target_from(None), Ok(KotlinVersion::V2_4_21));
         assert_eq!(target_from(None), Ok(KotlinVersion::newest()));
         assert_eq!(
-            target_from(Some("2.5.0-RC".into())),
-            Ok(KotlinVersion::V2_5_0_RC)
+            target_from(Some("2.5.0-RC2".into())),
+            Ok(KotlinVersion::V2_5_0_RC2)
         );
         assert!(target_from(Some(String::new())).is_err());
         assert!(target_from(Some("2.4.99".into())).is_err());

@@ -280,7 +280,7 @@ mod tests {
         apply_file_features(
             &mut before,
             &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_RC,
+                KotlinVersion::V2_5_0_RC2,
                 LanguageVersion::V2_4,
                 LanguageVersion::V2_4,
             ),
@@ -302,7 +302,7 @@ mod tests {
         apply_file_features(
             &mut at_since,
             &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_RC,
+                KotlinVersion::V2_5_0_RC2,
                 LanguageVersion::V2_6,
                 LanguageVersion::V2_6,
             ),
@@ -327,7 +327,7 @@ mod tests {
         apply_file_features(
             &mut rc,
             &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_RC,
+                KotlinVersion::V2_5_0_RC2,
                 LanguageVersion::V2_5,
                 LanguageVersion::V2_5,
             ),
@@ -338,7 +338,7 @@ mod tests {
         apply_file_features(
             &mut at_since,
             &LangFeatures::for_release(
-                KotlinVersion::V2_5_0_RC,
+                KotlinVersion::V2_5_0_RC2,
                 LanguageVersion::V2_6,
                 LanguageVersion::V2_6,
             ),

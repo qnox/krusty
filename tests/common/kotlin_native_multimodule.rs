@@ -253,7 +253,7 @@ fn order_libraries_for_native_linker(
     friends: &[PathBuf],
     version: KotlinVersion,
 ) {
-    if (KotlinVersion::V2_4_20..KotlinVersion::V2_5_0_RC).contains(&version) {
+    if (KotlinVersion::V2_4_20..KotlinVersion::V2_5_0_RC2).contains(&version) {
         libraries.sort_by_key(|library| friends.contains(library));
     } else {
         libraries.sort_by_key(|library| !friends.contains(library));
@@ -606,7 +606,7 @@ mod tests {
         order_libraries_for_native_linker(
             &mut since_2_5,
             std::slice::from_ref(&friend),
-            KotlinVersion::V2_5_0_RC,
+            KotlinVersion::V2_5_0_RC2,
         );
         assert_eq!(since_2_5, original);
     }

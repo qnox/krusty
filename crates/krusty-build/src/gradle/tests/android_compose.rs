@@ -96,7 +96,7 @@ fn android_compose_app_is_compiled_by_krusty_with_a_handoff_for_what_it_refuses(
     // under test writes `CREATOR` differently from the plugin krusty reproduces: from 2.5 it is the
     // class's first declaration. The pull request that makes it so removes this exception.
     let kotlin = std::env::var("KRUSTY_GRADLE_KGP_VERSION").unwrap_or_default();
-    let model_differs: &[&str] = if kotlin == "2.5.0-RC" {
+    let model_differs: &[&str] = if kotlin == "2.5.0-RC2" {
         &["sample/model/CounterState.class"]
     } else {
         &[]

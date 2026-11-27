@@ -109,7 +109,7 @@ impl WasmLane {
         if krusty::conformance::directive(src, "FULL_JDK") {
             return Some("requires the JDK runtime");
         }
-        if version >= krusty::kotlin_version::KotlinVersion::V2_5_0_RC
+        if version >= krusty::kotlin_version::KotlinVersion::V2_5_0_RC2
             && krusty::conformance::wasm_ignored_for_multi_module(src)
         {
             return Some("kotlinc mutes it in its multi-module wasm mode");
@@ -297,7 +297,7 @@ fn wasm_applicability_reads_both_the_family_and_the_exact_target() {
         "a JVM mute must not remove Wasm coverage"
     );
     let two_modules = "// WASM_IGNORE_FOR: mode=multi-module\n// MODULE: a\n// FILE: a.kt\nfun a() = 1\n// MODULE: b(a)\n// FILE: b.kt\nfun box() = \"OK\"";
-    let rc = krusty::kotlin_version::KotlinVersion::V2_5_0_RC;
+    let rc = krusty::kotlin_version::KotlinVersion::V2_5_0_RC2;
     for lane in [&js, &wasi] {
         assert_eq!(
             lane.not_applicable_for(rc, two_modules),
