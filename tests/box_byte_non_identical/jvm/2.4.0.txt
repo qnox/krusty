@@ -188,7 +188,6 @@ callableReference/adaptedReferences/varargViewedAsPrimitiveArray.kt
 callableReference/adaptedReferences/varargWithDefaultValue.kt
 callableReference/arrayConstructor.kt
 callableReference/arrayConstructorArgument.kt
-callableReference/arrayOfNulls.kt
 callableReference/bound/arrayConstructorArgument.kt
 callableReference/bound/arrayGetIntrinsic.kt
 callableReference/bound/captureVarInPropertyInit.kt
@@ -2124,7 +2123,6 @@ regressions/captureStorageDefaultMetadata.kt
 regressions/closureWriteConformingSmartCast.kt
 regressions/closureWriteConformingSmartCastStringBuilder.kt
 regressions/collectionLiteralForTypeVariableBuiltFromOtherBound.kt
-regressions/collectionSizeInInlineBody.kt
 regressions/commonSupertypeContravariant.kt
 regressions/companionBlockFunctionValueClassResult.kt
 regressions/conditionalArgumentBranchView.kt
