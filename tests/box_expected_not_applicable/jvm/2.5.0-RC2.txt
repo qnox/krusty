@@ -229,12 +229,6 @@ volatile/intrinsicsOnCompanionExtensions.kt
 volatile/intrinsicsOnGlobal.kt
 volatile/messagePassing.kt
 wasm-annotations/branchHint.kt
-wasm-ir-checks/wasmIrCheckForBranchHints.kt
-wasm-ir-checks/wasmIrCheckForTailCalls.kt
-wasm-ir-checks/wasmIrCheckForTailCallsDisabled.kt
-wasm-ir-checks/wasmIrCheckForWhens.kt
-wasm-ir-checks/wasmTailCallCallRef.kt
-wasm-ir-checks/wasmTailCallStress.kt
 wasm-new-exception-handling/breakAndOuterFinally.kt
 wasm-new-exception-handling/catch1.kt
 wasm-new-exception-handling/catch2.kt
