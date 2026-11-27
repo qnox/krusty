@@ -1069,8 +1069,26 @@ impl FileRecorder<'_, '_, '_> {
             }
         };
         let declared = member_signature(declaration.0, declaration.1)?;
-        let implemented =
-            member_signature(&edge.implementation_parameters, edge.implementation_result)?;
+        // What the placed function physically takes: a `suspend` override's frame carries its
+        // continuation after the source parameters and answers the erased result.
+        let (implemented_parameters, implemented_result) = if edge.suspend {
+            let (continuation, erased) =
+                krusty::types::continuation_passing(edge.implementation_result);
+            (
+                edge.implementation_parameters
+                    .iter()
+                    .copied()
+                    .chain([continuation])
+                    .collect::<Vec<_>>(),
+                erased,
+            )
+        } else {
+            (
+                edge.implementation_parameters.to_vec(),
+                edge.implementation_result,
+            )
+        };
+        let implemented = member_signature(&implemented_parameters, implemented_result)?;
         let special_bridge = self
             .recording
             .classifiers
@@ -1085,7 +1103,7 @@ impl FileRecorder<'_, '_, '_> {
             });
         let adapters = self.adapters_for_placed(
             declaration,
-            (&edge.implementation_parameters, edge.implementation_result),
+            (&implemented_parameters, implemented_result),
             &declared,
             &implemented,
             &placed,
