@@ -321,6 +321,8 @@ impl ReferencedDependencies {
             | IrCheckedOperation::ComparableRangeContains { .. }
             | IrCheckedOperation::IllegalProgressionStep { .. }
             | IrCheckedOperation::AtomicField { .. }
+            | IrCheckedOperation::FieldDesignation { .. }
+            | IrCheckedOperation::AtomicFieldThrough { .. }
             | IrCheckedOperation::AtomicArrayElement { .. } => {}
         }
     }

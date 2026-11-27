@@ -2585,6 +2585,8 @@ fn checked_operation_name(operation: &krusty::ir::IrCheckedOperation) -> &'stati
         IrCheckedOperation::ComparableRangeContains { .. } => "ComparableRangeContains",
         IrCheckedOperation::IllegalProgressionStep { .. } => "IllegalProgressionStep",
         IrCheckedOperation::AtomicField { .. } => "AtomicField",
+        IrCheckedOperation::FieldDesignation { .. } => "FieldDesignation",
+        IrCheckedOperation::AtomicFieldThrough { .. } => "AtomicFieldThrough",
         IrCheckedOperation::AtomicArrayElement { .. } => "AtomicArrayElement",
         IrCheckedOperation::RangeLoop { .. } => "RangeLoop",
         IrCheckedOperation::PropertyReference { .. } => "PropertyReference",

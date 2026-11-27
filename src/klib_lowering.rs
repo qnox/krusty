@@ -13,6 +13,7 @@
 
 mod accessor_calls;
 mod array_content_members;
+mod atomic_references;
 mod body_lowering;
 mod body_unit;
 mod callable_references;

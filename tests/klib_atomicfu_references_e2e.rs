@@ -1,12 +1,15 @@
-//! PLATFORM-SPECIFIC: the KLIB form kotlinc-native serializes for an atomicfu library.
+//! PLATFORM-SPECIFIC: the KLIB forms kotlinc-native serializes for an atomicfu library.
 //!
 //! The atomicfu compiler plugin rewrites an inline extension of an atomic into a helper that takes
 //! a lambda returning a reference to the atomic's field, and every operation on the atomic in its
 //! body into the Native field intrinsic on that lambda's result. A producer that inlines before it
 //! serializes leaves each caller holding the helper's inlined body, in which the lambda's
-//! invocation is a returnable block returning the property reference. The program itself is
-//! portable; the JVM oracle runs it against the atomicfu runtime before the Native consumer runs
-//! the dependency's serialized bodies.
+//! invocation is a returnable block returning the property reference. One that does not (any
+//! producer before Kotlin 2.4.20, or `-Xklib-ir-inliner=disabled`) leaves each caller calling the
+//! helper, which its metadata does not publish, with the lambda; the intrinsic's receiver is the
+//! lambda's invocation until the call is expanded. The program itself is portable; the JVM oracle
+//! runs it against the atomicfu runtime before the Native consumer runs the dependency's serialized
+//! bodies.
 
 use crate::common;
 use krusty::diag::DiagSink;
@@ -17,6 +20,17 @@ const CONSUMER: &str = include_str!("fixtures/klib_atomicfu/Consumer.kt");
 
 #[test]
 fn dependency_atomicfu_helpers_update_the_field_their_inlined_lambda_references() {
+    atomicfu_consumer_runs(&[]);
+}
+
+#[test]
+fn dependency_atomicfu_helper_calls_update_the_field_their_lambda_references() {
+    atomicfu_consumer_runs(&["-Xklib-ir-inliner=disabled"]);
+}
+
+/// Produce the atomicfu library with `producer_arguments`, then compile and run the consumer
+/// against its serialized bodies on Native.
+fn atomicfu_consumer_runs(producer_arguments: &[&str]) {
     let Some(root) = std::env::var_os("KRUSTY_KOTLIN_NATIVE").map(std::path::PathBuf::from) else {
         assert!(
             std::env::var_os("KRUSTY_REQUIRE_KLIB").is_none(),
@@ -50,6 +64,7 @@ fn dependency_atomicfu_helpers_update_the_field_their_inlined_lambda_references(
         .arg(format!("-Xplugin={}", plugin.display()))
         .arg("-l")
         .arg(&atomicfu)
+        .args(producer_arguments)
         .args(["-p", "library", "-nopack", "-o"])
         .arg(&library)
         .arg(&source)
