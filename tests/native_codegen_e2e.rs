@@ -482,7 +482,8 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     };
-    // `UIntArray.isEmpty` stands in here: it is a member the backend does not realize yet.
+    // A class literal of `IntRange` stands in here: the backend realizes no reflection class of a
+    // library range yet.
     // The contract under test is not WHICH construct is refused but that the backend SAYS so —
     // emitting a partial object that links and misbehaves would be far worse than refusing.
     //
@@ -494,7 +495,7 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
         &[(
             "Main",
             "fun main() {\n\
-             \x20   println(uintArrayOf(1u).isEmpty())\n\
+             \x20   println(IntRange::class)\n\
              }\n",
         )],
         target,
@@ -541,19 +542,19 @@ fn declines_with_the_same_message_are_reported_at_each_ones_own_position() {
     // first occurrence once; with that one gone, the second is reported at its own position. The
     // message is identical both times: only the node decides where it lands.
     let helpers = "package demo\nfun one(): Int = 1\n";
-    let both = "package demo\n\nfun main() {\n    println(one())\n  val a = uintArrayOf(1u).isEmpty()\n    val x = 2; println(uintArrayOf(1u).isEmpty())\n}\n";
-    let second = "package demo\n\nfun main() {\n    println(one())\n  val a = 1\n    val x = 2; println(uintArrayOf(1u).isEmpty())\n}\n";
+    let both = "package demo\n\nfun main() {\n    println(one())\n  val a = IntRange::class\n    val x = 2; println(IntRange::class)\n}\n";
+    let second = "package demo\n\nfun main() {\n    println(one())\n  val a = 1\n    val x = 2; println(IntRange::class)\n}\n";
     let (artifacts, rendered) =
         rendered_diagnostics(&[("Helpers", helpers), ("Main", both)], target);
     assert_eq!(
         rendered,
-        "Main.kt:5:11: error: krusty: the native backend does not support the member `kotlin.UIntArray.isEmpty` yet\n"
+        "Main.kt:5:11: error: krusty: the native backend does not support a class literal of `Obj(TypeName(\"kotlin/ranges/IntRange\"), [])` yet\n"
     );
     assert!(artifacts.iter().all(|(name, _)| name != "Main.o"));
     let (_, rendered) = rendered_diagnostics(&[("Helpers", helpers), ("Main", second)], target);
     assert_eq!(
         rendered,
-        "Main.kt:6:24: error: krusty: the native backend does not support the member `kotlin.UIntArray.isEmpty` yet\n"
+        "Main.kt:6:24: error: krusty: the native backend does not support a class literal of `Obj(TypeName(\"kotlin/ranges/IntRange\"), [])` yet\n"
     );
 }
 
@@ -564,12 +565,12 @@ fn a_decline_nested_in_lowered_expressions_is_reported_at_the_innermost_one() {
         return;
     };
     // The decline surfaces through the argument list, `listOf`, the `println` call and the
-    // statement around them; the node it names is the innermost one, the `isEmpty` call.
-    let main = "fun main() {\n    println(listOf(1, uintArrayOf(1u).isEmpty()))\n}\n";
+    // statement around them; the node it names is the innermost one, the class literal.
+    let main = "fun main() {\n    println(listOf(1, IntRange::class))\n}\n";
     let (_, rendered) = rendered_diagnostics(&[("Main", main)], target);
     assert_eq!(
         rendered,
-        "Main.kt:2:23: error: krusty: the native backend does not support the member `kotlin.UIntArray.isEmpty` yet\n"
+        "Main.kt:2:23: error: krusty: the native backend does not support a class literal of `Obj(TypeName(\"kotlin/ranges/IntRange\"), [])` yet\n"
     );
 }
 
