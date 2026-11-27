@@ -65,6 +65,14 @@ impl TParams {
             .unwrap_or_else(|| Ty::obj("kotlin/Any"))
     }
 
+    /// The upper bound `name` declares, `Any?` when it declares none: the bound a signature
+    /// records for the parameter.
+    pub(crate) fn declared_upper_bound(&self, name: &str) -> Ty {
+        self.bound(name)
+            .ty_param_bound()
+            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
+    }
+
     /// The semantic identity of the parameter written `name`: the identity its binding carries,
     /// or the spelling itself for a parameter bound to a substitution rather than to itself.
     pub(crate) fn identity(&self, name: &str) -> crate::types::TyParamName {
