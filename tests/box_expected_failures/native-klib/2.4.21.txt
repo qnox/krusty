@@ -65,8 +65,6 @@ bridges/test22.kt
 bridges/test23.kt
 bridges/test24.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
-callableReference/adaptedReferences/inlineDefault.kt
-callableReference/adaptedReferences/inlineVararg.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithContextParameterAsAPropertyType.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithExtensionProperty.kt
 callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction.kt
@@ -798,7 +796,6 @@ typeErasure/twoFunWithTypeParametersWithUpperBoundsInlineFunWithReifiedTypeParam
 typealias/abbreviationWithCapturedType.kt
 unsignedTypes/forInUnsignedRangeWithCoercion.kt
 unsignedTypes/kt47716.kt
-unsignedTypes/varargsOfUnsignedTypes.kt
 volatile/atomicArrayIntrinsics.kt
 volatile/intrinsicWithInlineFunction.kt
 volatile/intrinsics.kt

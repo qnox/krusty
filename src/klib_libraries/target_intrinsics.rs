@@ -24,6 +24,7 @@ use crate::types::{type_name, Ty, TypeName};
 use super::declaration_signatures::SignedFunction;
 
 mod atomic_array_elements;
+mod char_array_text;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TargetIntrinsicPlatform {
@@ -739,6 +740,13 @@ pub(super) fn authenticate(
 ) -> Option<KlibIntrinsicShape> {
     if platform == Some(TargetIntrinsicPlatform::Native) {
         if let Some(shape) = native_continuation(placement, declaration) {
+            return Some(shape);
+        }
+    }
+    // The char-array conversions state default arguments of their own (`concatToString`'s two
+    // indices), which a call that supplies them never reads.
+    if platform == Some(TargetIntrinsicPlatform::Wasm) {
+        if let Some(shape) = char_array_text::authenticate(placement, declaration) {
             return Some(shape);
         }
     }
@@ -1792,7 +1800,7 @@ mod tests {
     use crate::metadata::semantic::KotlinModality;
     use crate::types::Visibility;
 
-    fn declaration(
+    pub(super) fn declaration(
         name: &str,
         params: &[&str],
         ret: &str,

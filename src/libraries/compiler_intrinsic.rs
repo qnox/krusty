@@ -19,6 +19,15 @@ pub enum ClassNameKind {
     Qualified,
 }
 
+/// Which characters of a `CharArray` an authenticated conversion to a `String` reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CharArrayRange {
+    /// The whole array: `concatToString()`.
+    Whole,
+    /// `concatToString(startIndex, endIndex)`, the characters from `startIndex` until `endIndex`.
+    StartEnd,
+}
+
 /// Which neighbour of a floating-point value an authenticated `nextUp`/`nextDown` answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdjacentDirection {
@@ -167,6 +176,9 @@ pub enum CompilerIntrinsic {
     /// `String.subSequence(Int, Int): CharSequence`, the characters between two indices of a
     /// string, which is itself a string. A target that lays out strings itself copies them.
     StringSubSequence,
+    /// `CharArray.concatToString` of `kotlin.text`: the string of a range of a char array's units. A target that lays out strings itself checks the
+    /// range as the stdlib does and copies the units.
+    CharArrayToString(CharArrayRange),
     NullableAnyToString,
     /// Exact builtin numeric/character conversion declaration selected from Kotlin builtins.
     /// The source and target types remain call-site semantic facts on FIR; this marker only states

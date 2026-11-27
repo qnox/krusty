@@ -255,22 +255,17 @@ fn an_unsigned_array_is_allocated_through_its_declared_constructor() {
     expect_native_box(source, "UnsignedArrayAllocation", "OK");
 }
 
-/// `UIntArray(n) { init }` is the library's inline function, not a compiler-provided array. This
-/// target has no splice of that body yet, so it declines the call by its declaration rather than
-/// allocating an array the library never asked for.
+/// `UIntArray(n) { init }` is the library's inline function, so the program runs its serialized
+/// body (an array allocation, a counter and a loop) rather than an array the library never asked for.
 #[test]
-fn an_unsigned_array_initializer_is_declined_by_its_library_declaration() {
+fn an_unsigned_array_initializer_runs_from_the_library_body() {
     let source = "@file:OptIn(ExperimentalUnsignedTypes::class)\n\
          fun box(): String {\n\
          \x20   val i = UIntArray(2) { (it + 4294967294L).toUInt() }\n\
          \x20   return if (\"${i[0]} ${i[1]}\" == \"4294967294 4294967295\") \"OK\" else \"fail\"\n\
          }\n";
     expect_box_ok_with_stdlib(source, "UnsignedArrayInitializer");
-    expect_native_decline(
-        source,
-        "UnsignedArrayInitializer",
-        "the declaration `kotlin.UIntArrayKt.UIntArray`",
-    );
+    expect_native_box(source, "UnsignedArrayInitializer", "OK");
 }
 
 /// A stride is not a name: an unsigned array carries its OWN type, not the signed array's.
@@ -416,7 +411,7 @@ fn a_float_converted_to_an_unsigned_type_is_declined() {
          \x20   return if (d.toUInt() == 0u) \"OK\" else \"fail\"\n\
          }\n",
         "FloatToUnsigned",
-        "toUInt",
+        "kotlin.doubleToUInt",
     );
 }
 

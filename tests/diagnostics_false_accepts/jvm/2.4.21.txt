@@ -220,13 +220,10 @@ compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/defaultV
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/deprecatedOfs.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/extensions.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/extraParametersInVarargOverload.kt
-compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/flexibleReturnType.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/inconsistentFunctionalParameterTypes.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/intersectionReturnType.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/irrelevantReturnType.kt
-compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/localTypeApproximation.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/nonCompanionMember.kt
-compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/nullableReturnType.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/suspendMismatches.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/topLevel.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/visibilityMismatches.kt
