@@ -2425,6 +2425,15 @@ impl<'s> Linker<'_, 's> {
                 body_header(Some(selected), arena, declaration, self.sources.bodies)?;
                 function
             }
+            // An abstract member is a dispatch slot of its class, which declares it when the
+            // unit materializes the class; a call can reach it before any construction does.
+            None if declaration.body.is_none() => {
+                self.materialize_member_class(ir, selected)?;
+                *self
+                    .functions
+                    .get(identity)
+                    .ok_or(KlibBodyDeclineReason::NoBody)?
+            }
             None => self.declare_callee(ir, identity, Some(selected), arena, declaration)?,
         };
         let declared = &ir.functions[function as usize];
