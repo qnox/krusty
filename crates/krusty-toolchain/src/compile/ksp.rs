@@ -97,7 +97,7 @@ pub(super) struct KspRun<'a> {
     pub jdk_home: &'a Path,
     /// `jvm.jdk.version`.
     pub jdk_version: i64,
-    /// The `-jvm-target`: `jvm.release`.
+    /// The `-jvm-target`'s Java release: `jvm.release`.
     pub jvm_target: i64,
     /// `kotlin.version`, whose major and minor version are the language and API version.
     pub kotlin_version: &'a str,
@@ -186,7 +186,7 @@ pub(super) fn ksp(run: &KspRun<'_>) -> Result<Ksp, String> {
     }
     arguments.push(joined("-java-output-dir=", &outputs.java));
     arguments.push(joined("-jdk-home=", run.jdk_home));
-    arguments.push(format!("-jvm-target={}", run.jvm_target).into());
+    arguments.push(format!("-jvm-target={}", jvm_target_spelling(run.jvm_target)).into());
     arguments.push("-jvm-default-mode=disable".into());
     arguments.push(
         std::env::join_paths(run.processors)
@@ -316,9 +316,26 @@ fn argument_file(arguments: &[OsString]) -> Vec<u8> {
     file
 }
 
+/// kotlinc's `-jvm-target` spelling of a Java release: `1.8` for Java 8, the bare number from Java 9
+/// (kotlinc refuses a bare `8`).
+fn jvm_target_spelling(release: i64) -> String {
+    if release <= 8 {
+        format!("1.{release}")
+    } else {
+        release.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn java_8_is_spelled_the_way_kotlinc_accepts_it() {
+        assert_eq!(jvm_target_spelling(8), "1.8");
+        assert_eq!(jvm_target_spelling(9), "9");
+        assert_eq!(jvm_target_spelling(25), "25");
+    }
 
     #[test]
     fn an_argument_the_jvm_would_split_or_unescape_is_quoted() {

@@ -153,3 +153,20 @@ fn ignoring_case_matches_across_case() {
         "IgnoreCaseStartsWith",
     );
 }
+
+/// A `CharIterator` the stdlib's own body builds (`CharSequence.iterator()`) is read through its
+/// narrow static type, which no runtime range or array walk backs.
+#[test]
+fn a_char_iterator_a_library_body_builds_answers_has_next_and_next() {
+    let source = "fun box(): String {\n\
+         \x20   val it: CharIterator = \"abc\".iterator()\n\
+         \x20   var seen = \"\"\n\
+         \x20   while (it.hasNext()) seen += it.next()\n\
+         \x20   if (seen != \"abc\") return \"fail \" + seen\n\
+         \x20   var total = 0\n\
+         \x20   \"xyz\".forEach { total += it.code }\n\
+         \x20   return if (total == 'x'.code + 'y'.code + 'z'.code) \"OK\" else \"fail total\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "CharIteratorFromLibraryBody");
+    expect_native_box(source, "CharIteratorFromLibraryBody", "OK");
+}

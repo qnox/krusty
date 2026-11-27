@@ -297,7 +297,7 @@ impl Emitter<'_> {
                 }
                 // A `lateinit var` read throws while the field is still null, wherever it is read from.
                 if lateinit {
-                    self.emit_lateinit_use_guard(&name, code);
+                    self.emit_lateinit_use_guard(&name, &descriptor, code);
                 }
                 (slot.ty, slot.reference)
             }
@@ -376,7 +376,11 @@ impl Emitter<'_> {
                 // a private property, so the uninitialized guard has to sit at this read, the same
                 // place a direct field load puts it.
                 if let Some(property) = inline_uninitialized_guard {
-                    self.emit_lateinit_use_guard(&property, code);
+                    self.emit_lateinit_use_guard(
+                        &property,
+                        super::field_read::returned_descriptor(&descriptor),
+                        code,
+                    );
                 }
                 (slot.ty, slot.reference)
             }

@@ -675,13 +675,23 @@ fn physical_stub_result(result: Ty, boxed: bool) -> Ty {
 }
 
 /// The policy of the declaration a member of the builtin `owner` is, or overrides: `owner`'s own
-/// row first, then each builtin supertype's, nearest first.
+/// row first, then each builtin supertype's, nearest first. An `owner` that is the JVM interface a
+/// builtin collection maps onto (an `interface by` forwarder names the platform declaration) reads
+/// the rows of the Kotlin faces mapped onto it: the policy belongs to the Kotlin declaration.
 pub(super) fn overridden_declaration_policy<T>(
     classpath: &Classpath,
     owner: TypeName,
     policy: impl Fn(TypeName) -> Option<T>,
 ) -> Option<T> {
     let mut pending = std::collections::VecDeque::from([owner]);
+    pending.extend(
+        [
+            krusty::jvm::jvm_class_map::jvm_collection_to_kotlin_type_name(owner),
+            krusty::jvm::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name(owner),
+        ]
+        .into_iter()
+        .flatten(),
+    );
     let mut seen = HashSet::default();
     while let Some(current) = pending.pop_front() {
         if !seen.insert(current) {

@@ -1072,6 +1072,40 @@ static kt_int kt_render_char(kt_char unit, char *buffer) {
     return 3;
 }
 
+/* Kotlin/Native's `unsafeStringFromCharArray`: the text of `size` UTF-16 units of `chars` from
+   `start`, the bounds already proven by the caller. A high surrogate followed by a low one is the
+   one character they encode; any other surrogate is a lone unit, stored as the three bytes it
+   encodes to, as every lone unit of a string is. `chars` is a root in the caller's frame across
+   the allocation. */
+KRef kt_string_from_char_array(KRef chars, kt_int start, kt_int size) {
+    /* Three bytes bound a unit, and a pair's four bytes fit within the six its two units bound.
+       Multiplied out in 64 bits: a slice of more than a third of the largest array would wrap the
+       capacity, and text longer than any array can hold is memory the runtime cannot provide. */
+    uint64_t capacity = (uint64_t)size * 3u;
+    if (capacity > (uint64_t)INT32_MAX) {
+        kt_fail_oom();
+    }
+    KByteArray *text = kt_bytes_new((kt_int)capacity);
+    char *out = kt_bytes_of(text);
+    const kt_char *units = (const kt_char *)((const KArray *)kt_array_storage(chars) + 1) + start;
+    kt_int written = 0;
+    for (kt_int at = 0; at < size; at++) {
+        uint32_t unit = units[at];
+        if (unit >= 0xD800u && unit < 0xDC00u && at + 1 < size && units[at + 1] >= 0xDC00u
+            && units[at + 1] < 0xE000u) {
+            uint32_t code = 0x10000u + ((unit - 0xD800u) << 10) + (units[at + 1] - 0xDC00u);
+            out[written++] = (char)(0xF0 | (code >> 18));
+            out[written++] = (char)(0x80 | ((code >> 12) & 0x3F));
+            out[written++] = (char)(0x80 | ((code >> 6) & 0x3F));
+            out[written++] = (char)(0x80 | (code & 0x3F));
+            at++;
+        } else {
+            written += kt_render_char((kt_char)unit, out + written);
+        }
+    }
+    return kt_string_of((KRef)text, out, written);
+}
+
 /* Render any value as bytes. `*storage` receives the heap object that owns the bytes (NULL when
    they are in static storage); a caller that allocates before it has finished with the bytes
    must keep it in a local, so the collector sees a root. */
@@ -1428,6 +1462,64 @@ static kt_boolean kt_is_encoded_surrogate(const char *bytes, unsigned char secon
     return (unsigned char)bytes[0] == 0xEDu && ((unsigned char)bytes[1] & 0xF0u) == second_high_bits;
 }
 
+/* The four-byte encoding of the character whose HIGH half is encoded at `high` and whose LOW half is
+   encoded at `low`, each in its three bytes. Each half's low ten bits are its share of the code
+   point above U+FFFF. */
+static void kt_encode_surrogate_pair(const char *high, const char *low, char *out) {
+    uint32_t high_bits = ((uint32_t)(unsigned char)high[1] & 0x0Fu) << 6 |
+                         ((uint32_t)(unsigned char)high[2] & 0x3Fu);
+    uint32_t low_bits = ((uint32_t)(unsigned char)low[1] & 0x0Fu) << 6 |
+                        ((uint32_t)(unsigned char)low[2] & 0x3Fu);
+    uint32_t code_point = 0x10000u + (high_bits << 10 | low_bits);
+    out[0] = (char)(0xF0u | (code_point >> 18));
+    out[1] = (char)(0x80u | ((code_point >> 12) & 0x3Fu));
+    out[2] = (char)(0x80u | ((code_point >> 6) & 0x3Fu));
+    out[3] = (char)(0x80u | (code_point & 0x3Fu));
+}
+
+/* `sb.reverse()`, by CHARACTER like Java's: the whole byte run is reversed and each multi-byte
+   encoding is then turned back, so a surrogate pair stays together. Answers the builder itself. */
+KRef kt_string_builder_reverse(KRef self) {
+    KStringBuilder *builder = (KStringBuilder *)self;
+    char *bytes = kt_bytes_of((KByteArray *)builder->storage);
+    kt_int length = builder->byte_length;
+    for (kt_int low = 0, high = length - 1; low < high; low++, high--) {
+        char swap = bytes[low];
+        bytes[low] = bytes[high];
+        bytes[high] = swap;
+    }
+    for (kt_int at = 0; at < length;) {
+        /* After the reversal an encoding's continuation bytes (10xxxxxx) precede its lead byte. */
+        kt_int end = at;
+        while (end < length && ((unsigned char)bytes[end] & 0xC0u) == 0x80u) {
+            end++;
+        }
+        kt_int stop = end < length ? end + 1 : end;
+        for (kt_int low = at, high = stop - 1; low < high; low++, high--) {
+            char swap = bytes[low];
+            bytes[low] = bytes[high];
+            bytes[high] = swap;
+        }
+        at = stop;
+    }
+    /* Reversing can bring a lone low half and a lone high half together as a high half then a low
+       one, which is one character: join them as an append does, so equality and a later reversal
+       see the pair. */
+    kt_int written = 0;
+    for (kt_int read = 0; read < length;) {
+        if (read + 6 <= length && kt_is_encoded_surrogate(bytes + read, 0xA0u) &&
+            kt_is_encoded_surrogate(bytes + read + 3, 0xB0u)) {
+            kt_encode_surrogate_pair(bytes + read, bytes + read + 3, bytes + written);
+            written += 4;
+            read += 6;
+        } else {
+            bytes[written++] = bytes[read++];
+        }
+    }
+    builder->byte_length = written;
+    return self;
+}
+
 /* Append UTF-8 bytes, JOINING a surrogate pair that meets at the tail. A character a program
    assembles unit by unit (`for (c in s) sb.append(c)`) arrives as a high half, then a low one, each
    in its own three bytes; stored side by side they would be CESU-8, which no literal of the
@@ -1440,17 +1532,9 @@ static void kt_string_builder_append_bytes(KRef self, const char *bytes, kt_int 
     kt_int at = builder->byte_length;
     if (length >= 3 && at >= 3 && kt_is_encoded_surrogate(bytes, 0xB0u) &&
         kt_is_encoded_surrogate(storage + at - 3, 0xA0u)) {
-        uint32_t high = ((uint32_t)(unsigned char)storage[at - 2] & 0x0Fu) << 6 |
-                        ((uint32_t)(unsigned char)storage[at - 1] & 0x3Fu);
-        uint32_t low = ((uint32_t)(unsigned char)bytes[1] & 0x0Fu) << 6 |
-                       ((uint32_t)(unsigned char)bytes[2] & 0x3Fu);
-        /* Each half's low ten bits are its share of the code point above U+FFFF. */
-        uint32_t code_point = 0x10000u + (high << 10 | low);
         at -= 3;
-        storage[at++] = (char)(0xF0u | (code_point >> 18));
-        storage[at++] = (char)(0x80u | ((code_point >> 12) & 0x3Fu));
-        storage[at++] = (char)(0x80u | ((code_point >> 6) & 0x3Fu));
-        storage[at++] = (char)(0x80u | (code_point & 0x3Fu));
+        kt_encode_surrogate_pair(storage + at, bytes, storage + at);
+        at += 4;
         bytes += 3;
         length -= 3;
     }
@@ -1818,6 +1902,15 @@ static const KType *kt_class_described(KRef self) {
                               " publishes no reflection names consistent with its kind\n");
     }
     return described;
+}
+
+/* `isInstance`: whether `value` is an instance of the class `self` stands for, the test an `is`
+   makes against the class's descriptor. `null` is an instance of no class. */
+kt_boolean kt_class_is_instance(KRef self, KRef value) {
+    if (value == NULL) {
+        return 0;
+    }
+    return kt_is_instance(value, kt_class_described(self));
 }
 
 /* `qualifiedName`: the name the descriptor publishes, which for a nested class is joined with
@@ -2781,6 +2874,11 @@ kt_boolean kt_range_iterator_has_next(KRef iterator) {
         return kt_walk_has_next(iterator);
     }
     if (!kt_is_range_iterator(iterator)) {
+        /* An iterator a LIBRARY body materialized, whose static type is the narrow `IntIterator`
+           or `CharIterator`: its descriptor carries the members the walk contract dispatches. */
+        if (iterator->header.type->walk_has_next != NULL) {
+            return iterator->header.type->walk_has_next(iterator);
+        }
         KT_FAIL("krusty: this value is no iterator\n");
     }
     return ((const KRangeIterator *)iterator)->has_next;
@@ -2795,6 +2893,22 @@ kt_long kt_range_iterator_next(KRef iterator) {
         return kt_walk_next_long(iterator);
     }
     if (!kt_is_range_iterator(iterator)) {
+        if (iterator->header.type->walk_next != NULL) {
+            KRef element = iterator->header.type->walk_next(iterator);
+            if (kt_pending_exception() != NULL || element == NULL) {
+                return 0;
+            }
+            const KType *boxed = element->header.type;
+            if (boxed == &kt_type_char) {
+                return kt_unbox_char(element);
+            }
+            if (boxed == &kt_type_long) {
+                return kt_unbox_long(element);
+            }
+            if (boxed == &kt_type_int) {
+                return kt_unbox_int(element);
+            }
+        }
         KT_FAIL("krusty: this value is no iterator\n");
     }
     KRangeIterator *self = (KRangeIterator *)iterator;
@@ -3018,6 +3132,47 @@ void kt_array_copy_range(KRef source, kt_int from, KRef destination, kt_int to, 
         }
     }
 }
+
+/* `arrayFill`'s own range check, Kotlin/Native's `checkRangeIndexes`: a start before the array or an
+   end past it is an `IndexOutOfBoundsException`, a start past the end an
+   `IllegalArgumentException`, both raised before anything is written. Answers whether the range is
+   usable. The array is never null here: the callee is an internal stdlib function whose caller
+   owns it. */
+static kt_boolean kt_array_fill_range_is_valid(KRef array, kt_int from, kt_int to) {
+    kt_int size = ((const KArray *)array)->length;
+    if (from < 0 || to > size) {
+        kt_throw(kt_throwable_new(&kt_type_index_out_of_bounds_exception,
+                                  kt_bounds_text("fromIndex: ", from, ", toIndex: ", to,
+                                                 ", size: ", size)));
+        return 0;
+    }
+    if (from > to) {
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception,
+                                  kt_bounds_text("fromIndex: ", from, " > toIndex: ", to, NULL, 0)));
+        return 0;
+    }
+    return 1;
+}
+
+#define KT_ARRAY_FILL_RANGE(NAME, TYPE, STORE)                                                  \
+    void NAME(KRef array, kt_int from, kt_int to, TYPE value) {                                  \
+        if (!kt_array_fill_range_is_valid(array, from, to)) {                                    \
+            return;                                                                              \
+        }                                                                                        \
+        STORE *elements = (STORE *)((unsigned char *)(KArray *)array + sizeof(KArray));          \
+        for (kt_int at = from; at < to; at++) {                                                  \
+            elements[at] = value;                                                                \
+        }                                                                                        \
+    }
+KT_ARRAY_FILL_RANGE(kt_array_fill_range, KRef, KRef)
+KT_ARRAY_FILL_RANGE(kt_boolean_array_fill_range, kt_boolean, kt_boolean)
+KT_ARRAY_FILL_RANGE(kt_byte_array_fill_range, kt_byte, kt_byte)
+KT_ARRAY_FILL_RANGE(kt_char_array_fill_range, kt_char, kt_char)
+KT_ARRAY_FILL_RANGE(kt_short_array_fill_range, kt_short, kt_short)
+KT_ARRAY_FILL_RANGE(kt_int_array_fill_range, kt_int, kt_int)
+KT_ARRAY_FILL_RANGE(kt_long_array_fill_range, kt_long, kt_long)
+KT_ARRAY_FILL_RANGE(kt_float_array_fill_range, kt_float, kt_float)
+KT_ARRAY_FILL_RANGE(kt_double_array_fill_range, kt_double, kt_double)
 
 kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source) {
     if (destination == NULL || source == NULL) {

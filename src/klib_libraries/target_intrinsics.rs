@@ -24,6 +24,7 @@ use crate::types::{type_name, Ty, TypeName};
 use super::declaration_signatures::SignedFunction;
 
 mod atomic_array_elements;
+mod char_array_text;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TargetIntrinsicPlatform {
@@ -742,6 +743,13 @@ pub(super) fn authenticate(
             return Some(shape);
         }
     }
+    // The char-array conversions state default arguments of their own (`concatToString`'s two
+    // indices), which a call that supplies them never reads.
+    if platform == Some(TargetIntrinsicPlatform::Wasm) {
+        if let Some(shape) = char_array_text::authenticate(placement, declaration) {
+            return Some(shape);
+        }
+    }
     if declaration.context_count != 0
         || !declaration.context_kinds.is_empty()
         || declaration.is_suspend
@@ -755,15 +763,15 @@ pub(super) fn authenticate(
     {
         return None;
     }
-    // Past the continuation intrinsics above, only `wasm_array_copy` and `interceptedIntrinsic`
-    // are generic: the one type parameter is the GC array type both operands share, or the
+    // Past the continuation intrinsics above, only `wasm_array_copy`, `interceptedIntrinsic` and
+    // Native's `arrayFill` are generic: the one type parameter is the GC array type both operands share, or the
     // continuation's result type.
     match (platform?, declaration.formals.is_empty()) {
         (TargetIntrinsicPlatform::Native, true) => native(placement, declaration),
         (TargetIntrinsicPlatform::Wasm, true) => wasm(placement, declaration),
         (TargetIntrinsicPlatform::Wasm, false) => wasm_array_copy(placement, declaration)
             .or_else(|| wasm_intercepted_continuation(placement, declaration)),
-        (TargetIntrinsicPlatform::Native, false) => None,
+        (TargetIntrinsicPlatform::Native, false) => native_generic(placement, declaration),
     }
 }
 
@@ -1102,6 +1110,94 @@ fn array_copy(
     })
 }
 
+/// Native's `arrayFill` of a specialized primitive array: `(array, fromIndex, toIndex, value)`.
+fn array_fill(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+    element: Ty,
+    element_class: &str,
+    declared: KotlinType,
+) -> Option<KlibIntrinsicShape> {
+    let array = Ty::array(element);
+    if declared.internal().map(type_name) != array.obj_internal() {
+        return None;
+    }
+    let [target, from, to, value] = declaration.params.as_slice() else {
+        return None;
+    };
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/collections"))
+        && declaration.receiver.is_none()
+        && declaration.formals.is_empty()
+        && *target == declared
+        && [from, to]
+            .into_iter()
+            .all(|index| semantic_type(index) == Some(Ty::Int))
+        && exact_type(value, element_class)
+        && exact_type(&declaration.ret, "kotlin/Unit"))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::ArrayFill { array },
+        kind: ExternalCallableKind::TopLevel,
+        receiver: None,
+        params: vec![array, Ty::Int, Ty::Int, element],
+        ret: Ty::Unit,
+    })
+}
+
+/// Native's external intrinsics that declare a type parameter: `arrayFill` of `Array<T>`.
+fn native_generic(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    if !declaration.is_external {
+        return None;
+    }
+    match string_annotation(
+        &declaration.annotation_applications,
+        type_name("kotlin/native/internal/GCUnsafeCall"),
+        "callee",
+    )? {
+        "Kotlin_Array_fillImpl" => array_fill_of_type_parameter(placement, declaration),
+        _ => None,
+    }
+}
+
+/// Native's `arrayFill` of `Array<T>`: `fun <T> arrayFill(array: Array<T>, fromIndex, toIndex,
+/// value: T)`, whose one type parameter is exactly the array's element and the value's type.
+fn array_fill_of_type_parameter(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    let [parameter] = declaration.formals.as_slice() else {
+        return None;
+    };
+    let [target, from, to, value] = declaration.params.as_slice() else {
+        return None;
+    };
+    let is_parameter = |ty: &KotlinType| matches!(ty, KotlinType::Param { id, nullable: false, .. } if *id == parameter.id);
+    let element = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
+    let array = Ty::array(element);
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/collections"))
+        && declaration.receiver.is_none()
+        && matches!(
+            target,
+            KotlinType::Class { internal, args, nullable: false, .. }
+                if type_name(internal) == array.obj_internal().expect("an array is a class")
+                    && matches!(args.as_slice(), [argument] if is_parameter(argument))
+        )
+        && [from, to]
+            .into_iter()
+            .all(|index| semantic_type(index) == Some(Ty::Int))
+        && is_parameter(value)
+        && exact_type(&declaration.ret, "kotlin/Unit"))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::ArrayFill { array },
+        kind: ExternalCallableKind::TopLevel,
+        receiver: None,
+        params: vec![array, Ty::Int, Ty::Int, element],
+        ret: Ty::Unit,
+    })
+}
+
 /// Native's `Char.isHighSurrogate()`/`isLowSurrogate()`: an external `kotlin.text` extension on
 /// `Char` with no parameters and a `Boolean` result.
 fn char_is_surrogate(
@@ -1334,6 +1430,78 @@ fn native(
                     placement,
                     declaration,
                     Ty::Double,
+                    KotlinType::class("kotlin/DoubleArray"),
+                )
+            }
+            "Kotlin_BooleanArray_fillImpl" => {
+                return array_fill(
+                    placement,
+                    declaration,
+                    Ty::Boolean,
+                    "kotlin/Boolean",
+                    KotlinType::class("kotlin/BooleanArray"),
+                )
+            }
+            "Kotlin_ByteArray_fillImpl" => {
+                return array_fill(
+                    placement,
+                    declaration,
+                    Ty::Byte,
+                    "kotlin/Byte",
+                    KotlinType::class("kotlin/ByteArray"),
+                )
+            }
+            "Kotlin_CharArray_fillImpl" => {
+                return array_fill(
+                    placement,
+                    declaration,
+                    Ty::Char,
+                    "kotlin/Char",
+                    KotlinType::class("kotlin/CharArray"),
+                )
+            }
+            "Kotlin_ShortArray_fillImpl" => {
+                return array_fill(
+                    placement,
+                    declaration,
+                    Ty::Short,
+                    "kotlin/Short",
+                    KotlinType::class("kotlin/ShortArray"),
+                )
+            }
+            "Kotlin_IntArray_fillImpl" => {
+                return array_fill(
+                    placement,
+                    declaration,
+                    Ty::Int,
+                    "kotlin/Int",
+                    KotlinType::class("kotlin/IntArray"),
+                )
+            }
+            "Kotlin_LongArray_fillImpl" => {
+                return array_fill(
+                    placement,
+                    declaration,
+                    Ty::Long,
+                    "kotlin/Long",
+                    KotlinType::class("kotlin/LongArray"),
+                )
+            }
+            "Kotlin_FloatArray_fillImpl" => {
+                return array_fill(
+                    placement,
+                    declaration,
+                    Ty::Float,
+                    "kotlin/Float",
+                    KotlinType::class("kotlin/FloatArray"),
+                )
+            }
+            "Kotlin_DoubleArray_fillImpl" => {
+                return array_fill(
+                    placement,
+                    declaration,
+                    Ty::Double,
+                    "kotlin/Double",
                     KotlinType::class("kotlin/DoubleArray"),
                 )
             }
@@ -1632,7 +1800,7 @@ mod tests {
     use crate::metadata::semantic::KotlinModality;
     use crate::types::Visibility;
 
-    fn declaration(
+    pub(super) fn declaration(
         name: &str,
         params: &[&str],
         ret: &str,
@@ -2980,5 +3148,92 @@ mod tests {
         assert!(
             authenticate(native, collections, &copy(any_array, "User_Array_copyImpl")).is_none()
         );
+    }
+
+    #[test]
+    fn native_gc_unsafe_array_fill_requires_the_exact_entry_package_and_element() {
+        let gc_unsafe = |callee: &str| AnnotationApplication {
+            identity: type_name("kotlin/native/internal/GCUnsafeCall"),
+            arguments: vec![(
+                "callee".to_owned(),
+                AnnotationArgument::String(callee.to_owned()),
+            )],
+        };
+        let native = Some(TargetIntrinsicPlatform::Native);
+        let collections =
+            crate::libraries::CallablePlacement::Package(type_name("kotlin/collections"));
+        let fill = |array: &str, value: &str, entry: &str| {
+            let mut declaration = declaration(
+                "arrayFill",
+                &[array, "kotlin/Int", "kotlin/Int", value],
+                "kotlin/Unit",
+                gc_unsafe(entry),
+            );
+            declaration.params[0] = KotlinType::class(array);
+            declaration
+        };
+        for (entry, array, element, value) in [
+            (
+                "Kotlin_ByteArray_fillImpl",
+                "kotlin/ByteArray",
+                Ty::Byte,
+                "kotlin/Byte",
+            ),
+            (
+                "Kotlin_CharArray_fillImpl",
+                "kotlin/CharArray",
+                Ty::Char,
+                "kotlin/Char",
+            ),
+            (
+                "Kotlin_BooleanArray_fillImpl",
+                "kotlin/BooleanArray",
+                Ty::Boolean,
+                "kotlin/Boolean",
+            ),
+        ] {
+            let carried = Ty::array(element);
+            assert_eq!(
+                authenticate(native, collections, &fill(array, value, entry)),
+                Some(KlibIntrinsicShape {
+                    operation: CompilerIntrinsic::ArrayFill { array: carried },
+                    kind: ExternalCallableKind::TopLevel,
+                    receiver: None,
+                    params: vec![carried, Ty::Int, Ty::Int, element],
+                    ret: Ty::Unit,
+                }),
+                "{entry}"
+            );
+            assert!(
+                authenticate(None, collections, &fill(array, value, entry)).is_none(),
+                "{entry}"
+            );
+            assert!(
+                authenticate(
+                    native,
+                    crate::libraries::CallablePlacement::Package(type_name("kotlin")),
+                    &fill(array, value, entry)
+                )
+                .is_none(),
+                "{entry}"
+            );
+            // The value is the element's own type, and the entry names one array kind.
+            assert!(
+                authenticate(native, collections, &fill(array, "kotlin/Long", entry)).is_none(),
+                "{entry}"
+            );
+            assert!(authenticate(
+                native,
+                collections,
+                &fill(array, value, "Kotlin_LongArray_fillImpl")
+            )
+            .is_none());
+        }
+        assert!(authenticate(
+            native,
+            collections,
+            &fill("kotlin/IntArray", "kotlin/Int", "User_IntArray_fillImpl")
+        )
+        .is_none());
     }
 }

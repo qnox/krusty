@@ -154,6 +154,9 @@ pub enum SigExpr {
     },
     Nullable(SigExprId),
     NonNullable(SigExprId),
+    /// The value of a not-null operator (`!!`, the left of `?:`, the receiver of `?.`): narrowing
+    /// that differs from [`Self::NonNullable`] for a nullable intersection fixed below an upper type.
+    NotNullOperator(SigExprId),
     /// A value read after an expression-statement call whose contract proves it non-null for the
     /// rest of the block (`assertNotNull(x)`, `requireNotNull(x)`, a same-module
     /// `returns() implies (x != null)`). The callee is only known once `call` is selected, so the
@@ -314,6 +317,7 @@ impl SignatureGraph {
                 Some(
                     SigExpr::Nullable(value)
                     | SigExpr::NonNullable(value)
+                    | SigExpr::NotNullOperator(value)
                     | SigExpr::Substitute { base: value, .. },
                 ) => pending.push(value),
                 Some(SigExpr::ContractNarrowed { value, call, .. }) => {

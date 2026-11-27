@@ -55,6 +55,10 @@ pub enum IrDebugLocalProvenance {
     /// bound. The retained source name is the expanded callable's. It never grows with nesting: a
     /// debugger reads it as the name of the frame it opens, wherever that frame was cloned to.
     FunctionFrameMarker,
+    /// A statement with no code that stands where an omitted-default call's `$default` stub
+    /// branch for a SUPPLIED parameter was: the branch's code is gone with the supplied value, but
+    /// the line it restated after the inline call its default makes stays in the stub's line table.
+    DeadDefaultBranch,
     /// The inline-depth marker a spliced lambda body opens with, after its parameters are bound.
     /// The retained source name is the inline callable the lambda was passed to; `implementation`
     /// leads to the lambda's [`IrLambdaOrigin`]. `depth` counts the enclosing expansions the
@@ -92,6 +96,7 @@ impl IrDebugLocalProvenance {
             },
             Self::InlineLambdaReceiver { .. }
             | Self::InlineCallableReferenceParameter { .. }
+            | Self::DeadDefaultBranch
             | Self::FunctionFrameMarker => self,
         }
     }

@@ -36,6 +36,7 @@ impl Checker<'_> {
             self.file_index,
             self.lexical_source_class_names(),
         )
+        .with_visibility_suppression(self.visibility_access_suppressed())
         .with_member_access(self)
     }
 

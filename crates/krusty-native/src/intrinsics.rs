@@ -432,6 +432,23 @@ pub(super) fn runtime_function(signature: FunctionSignature<'_>) -> Option<Strin
             _ => None,
         };
     }
+    if signature.owner.package_matches("kotlin/text") {
+        return match (
+            signature.name,
+            signature.params,
+            signature.ret.canonical_semantic(),
+        ) {
+            // The stdlib's own bodyless seam from a `CharArray` slice to a `String`, as every
+            // `String(chars)` and case mapping reaches it. Its operands cross at their own widths.
+            ("unsafeStringFromCharArray", [chars, Ty::Int, Ty::Int], text)
+                if classifier_is(*chars, "kotlin/CharArray")
+                    && classifier_is(text, "kotlin/String") =>
+            {
+                Some("kt_string_from_char_array".to_string())
+            }
+            _ => None,
+        };
+    }
     if signature.owner.package_matches("kotlin/math") {
         return match (
             signature.name,
@@ -2044,6 +2061,33 @@ pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'stati
             _ => {}
         }
     }
+    // `k.isInstance(value)`: the class literal's descriptor tested against the value, which is the
+    // test an `is` makes. The class object is the receiver and the value its one operand.
+    if signature.owner.classifier_matches("kotlin/reflect/KClass") {
+        return match (signature.name, signature.params) {
+            ("isInstance", [_]) => Some("kt_class_is_instance"),
+            _ => None,
+        };
+    }
+    if signature
+        .owner
+        .classifier_matches("kotlin/collections/MutableListIterator")
+    {
+        return match (signature.name, signature.params) {
+            ("set", [_]) => Some("kt_list_iterator_set"),
+            _ => None,
+        };
+    }
+    // The `build()` ending a `buildList` block, which the library declares on `ArrayList` itself.
+    if signature
+        .owner
+        .classifier_matches("kotlin/collections/ArrayList")
+    {
+        return match (signature.name, signature.params) {
+            ("build", []) => Some("kt_mutable_list_build"),
+            _ => None,
+        };
+    }
     if signature
         .owner
         .classifier_matches("kotlin/text/StringBuilder")
@@ -2069,6 +2113,7 @@ pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'stati
             }
             ("appendLine", [_]) => Some("kt_string_builder_append_line"),
             ("appendLine", []) => Some("kt_string_builder_append_new_line"),
+            ("reverse", []) => Some("kt_string_builder_reverse"),
             _ => None,
         };
     }
@@ -2630,6 +2675,26 @@ mod tests {
             "a missing runtime function must produce a diagnostic, never a call to a symbol that \
              does not exist"
         );
+    }
+
+    #[test]
+    fn a_string_is_made_from_a_char_array_slice_by_the_whole_declaration() {
+        let chars = Ty::obj("kotlin/CharArray");
+        let make = |params: &[Ty], ret| {
+            runtime_function(function(
+                package("kotlin/text"),
+                "unsafeStringFromCharArray",
+                params,
+                ret,
+            ))
+        };
+        assert_eq!(
+            make(&[chars, Ty::Int, Ty::Int], Ty::String).as_deref(),
+            Some("kt_string_from_char_array")
+        );
+        assert_eq!(make(&[chars, Ty::Int], Ty::String), None);
+        assert_eq!(make(&[Ty::String, Ty::Int, Ty::Int], Ty::String), None);
+        assert_eq!(make(&[chars, Ty::Int, Ty::Int], Ty::Int), None);
     }
 
     #[test]

@@ -159,6 +159,10 @@ pub struct Options {
     /// `-jvm-target <v>`: the emitted class-file major version (kotlinc maps `1.8`→52, `9`→53, …,
     /// `25`→69). `None` keeps krusty's default (Java 8 / major 52), which runs on the test JDK.
     pub jvm_target_major: Option<u16>,
+    /// `-Xjvm-enable-preview`: every class file is marked as compiled with preview features (minor
+    /// version 65535), which no release JVM loads, and from JVM target 28 carries the identity flag
+    /// on its non-interface `InnerClasses` entries.
+    pub jvm_enable_preview: bool,
     /// `-Xjdk-release=<v>`: the JDK release whose API the sources compile against. kotlinc also
     /// derives the JVM target from it. A release other than the selected JDK's own is read from
     /// that release's signatures in the JDK's `lib/ct.sym` (see [`Options::compilation_inputs`]).
@@ -242,6 +246,7 @@ impl Default for Options {
             no_reflect: false,
             no_jdk: false,
             jvm_target_major: None,
+            jvm_enable_preview: false,
             jdk_release: None,
             kotlin_reference_version: None,
             kotlinc_defects: krusty::kotlin_version::KotlincDefects::Reproduce,
@@ -266,18 +271,31 @@ impl Default for Options {
     }
 }
 
-/// Map a kotlinc `-jvm-target` value to the class-file major version it produces. `1.6`/`1.8` are the
-/// legacy dotted spellings; `9`+ are bare. Unknown values yield `None` (krusty keeps its default).
-pub fn jvm_target_to_major(v: &str) -> Option<u16> {
+/// The newest `-jvm-target` kotlinc accepts; every release this build supports agrees on it.
+const NEWEST_JVM_TARGET: u16 = 26;
+
+/// Map a kotlinc `-jvm-target` value to the class-file major version it produces, or to kotlinc's
+/// own error for a value it refuses: `1.6` is named as no longer supported, and anything else
+/// outside `1.8` and `9..=26` (including the bare `6`, `7` and `8`) is an unknown target.
+pub fn jvm_target_to_major(v: &str) -> Result<u16, String> {
     match v {
-        "1.6" | "6" => Some(50),
-        "1.7" | "7" => Some(51),
-        "1.8" | "8" => Some(52),
+        "1.8" => Ok(52),
+        "1.6" => Err(
+            "JVM target 1.6 is no longer supported. Please migrate to JVM target 1.8 or above"
+                .to_string(),
+        ),
         _ => v
             .parse::<u16>()
             .ok()
-            .filter(|&n| (9..=99).contains(&n))
-            .map(|n| n + 44),
+            .filter(|&n| (9..=NEWEST_JVM_TARGET).contains(&n) && n.to_string() == v)
+            .map(|n| n + 44)
+            .ok_or_else(|| {
+                let supported = (9..=NEWEST_JVM_TARGET)
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("unknown JVM target version: {v}\nSupported versions: 1.8, {supported}")
+            }),
     }
 }
 
@@ -612,6 +630,7 @@ impl Options {
             .unwrap_or_else(|| self.language_settings.language_version.metadata_version());
         JvmBackend::new(classpath)
             .with_class_major(self.jvm_target_major)
+            .with_enable_preview(self.jvm_enable_preview)
             .with_jvm_default(self.jvm_default)
             .with_java_parameters(self.java_parameters)
             .with_lambda_modes(self.lambda_modes)
@@ -2047,22 +2066,15 @@ mod tests {
 
     #[test]
     fn jvm_target_sets_class_major_version() {
-        assert_eq!(jvm_target_to_major("1.8"), Some(52));
-        assert_eq!(jvm_target_to_major("8"), Some(52));
-        assert_eq!(jvm_target_to_major("9"), Some(53));
-        assert_eq!(jvm_target_to_major("21"), Some(65));
-        assert_eq!(jvm_target_to_major("25"), Some(69));
-        assert_eq!(jvm_target_to_major("banana"), None);
+        assert_eq!(jvm_target_to_major("1.8"), Ok(52));
+        assert_eq!(jvm_target_to_major("9"), Ok(53));
+        assert_eq!(jvm_target_to_major("21"), Ok(65));
+        assert_eq!(jvm_target_to_major("26"), Ok(70));
 
-        // The parsed option carries the mapped major; an unknown value is reported, not applied.
+        // The parsed option carries the mapped major.
         let o = parse_args(&["-jvm-target", "25", "f.kt"]);
         assert_eq!(o.jvm_target_major, Some(69));
         assert_eq!(o.sources, vec!["f.kt".to_string()]);
-
-        let bad = parse_args(&["-jvm-target", "banana", "f.kt"]);
-        assert_eq!(bad.jvm_target_major, None);
-        assert!(bad.ignored.contains(&"-jvm-target banana".to_string()));
-        assert_eq!(bad.sources, vec!["f.kt".to_string()]);
     }
 
     #[test]

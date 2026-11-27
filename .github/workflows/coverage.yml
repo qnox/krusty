@@ -12,6 +12,8 @@ on:
 
 permissions:
   contents: read
+  # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+  id-token: write
 
 env:
   KRUSTY_TEST_FAILURE_DIR: ${{ github.workspace }}/test-failures
@@ -133,15 +135,6 @@ jobs:
         with:
           path: ~/.cache/JetBrains/Kotlin/cli
           key: kotlin-toolchain-cli-${{ runner.os }}-${{ hashFiles('scripts/kotlin-toolchain/kotlin') }}
-      # krusty-toolchain's tests run the krusty-build-tools wrapper in a fresh Gradle user home (see
-      # the coverage gate below). Only the wrapper's distribution is kept: a restored Kotlin-DSL
-      # workspace can lack metadata.bin.
-      - name: restore Kotlin Build Tools Gradle distribution
-        id: build-tools-gradle-dists
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/krusty-build-tools-gradle-user-home/wrapper/dists
-          key: build-tools-gradle-dists-${{ runner.os }}-${{ hashFiles('tools/krusty-build-tools/gradle/wrapper/gradle-wrapper.properties') }}
       # The restored archive is replayed, and a test it lacks compiles with kotlinc. The master
       # `e2e` job publishes the archive; this workflow only restores the caches it reads.
       - name: select recorded-byte cache mode
@@ -209,6 +202,15 @@ jobs:
           key: maven-distribution-3.9.11-v1
       - name: install Maven
         run: scripts/install-maven.sh 3.9.11
+      # Maven Central, the Gradle Plugin Portal and the krusty-build-tools wrapper's distribution
+      # through Infragnite's package cache (maven.infragnite.dev), into the Gradle user home the
+      # coverage gate's Gradle builds use.
+      - name: send Gradle's and Maven's downloads through the package cache
+        uses: infragnite/package-cache-action@3301abc273091e9b02fb391abdfd3a887a18ef4f # main
+        env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/krusty-build-tools-gradle-user-home
+        with:
+          maven: 'true'
       - name: coverage gate
         id: coverage
         env:

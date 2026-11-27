@@ -337,11 +337,29 @@ impl BodyLowering<'_, '_, '_> {
                 declaration,
                 params,
                 ret,
+                realization,
                 ..
             } => {
                 let Some(receiver) = dispatch_receiver else {
                     return Err(declined!("a `super` call without a receiver (`{name}`)"));
                 };
+                // The platform's own getter, called nonvirtually, is the field its storage holds.
+                if let krusty::libraries::MemberRealization::Intrinsic(operation) = realization {
+                    let symbol = match operation {
+                        krusty::libraries::CompilerIntrinsic::ThrowableMessage => {
+                            "kt_throwable_message"
+                        }
+                        krusty::libraries::CompilerIntrinsic::ThrowableCause => {
+                            "kt_throwable_cause"
+                        }
+                        _ => {
+                            return Err(declined!(
+                                "a `super` call to the platform operation `{name}`"
+                            ))
+                        }
+                    };
+                    return self.throwable_field_read(symbol, receiver);
+                }
                 let target = dispatch::SuperTarget {
                     owner: *owner,
                     name,

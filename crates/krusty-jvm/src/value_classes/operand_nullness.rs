@@ -6,13 +6,32 @@ use krusty::fx_hash::HashMap;
 use krusty::ir::{Callee, ExprId, IrExpr, ValueClassAdapter};
 use krusty::types::{Ty, TyKind};
 
+impl super::ReprCtx<'_> {
+    /// A selected call is non-null when its checked declaration returns a non-null type, or when
+    /// the lowering recorded it as a value-class construction.
+    pub(super) fn operand_nonnull(&self, id: ExprId) -> bool {
+        operand_nonnull(
+            self.exprs,
+            self.rets,
+            self.fields,
+            self.slots,
+            &|construction| self.types.is_value_construction(construction),
+            id,
+        ) || matches!(
+            self.types.declared_result(id, self.under).map(Ty::kind),
+            Some(TyKind::Obj(..))
+        )
+    }
+}
+
 /// Whether the value the expr at `id` produces is statically NON-NULL — so boxing it (`box-impl`) can't
 /// hit the value class's non-null ctor check. A construction/`!!`/non-nullable slot or return qualifies.
-pub(super) fn operand_nonnull(
+fn operand_nonnull(
     exprs: &[IrExpr],
     rets: &[Ty],
     fields: &[Vec<Ty>],
     slots: &HashMap<u32, Ty>,
+    constructs_value_class: &dyn Fn(ExprId) -> bool,
     id: ExprId,
 ) -> bool {
     let non_null_ty = |t: &Ty| matches!(t.kind(), TyKind::Obj(..));
@@ -49,12 +68,17 @@ pub(super) fn operand_nonnull(
             op: krusty::ir::IrTypeOp::ImplicitCoercion,
             type_operand,
             arg,
-        } => non_null_ty(type_operand) || operand_nonnull(exprs, rets, fields, slots, *arg),
+        } => {
+            non_null_ty(type_operand)
+                || operand_nonnull(exprs, rets, fields, slots, constructs_value_class, *arg)
+        }
+        // A construction the lowering realized as a call of the value class's static
+        // `constructor-impl` (or its `$default` entry) is recorded as that construction.
+        IrExpr::Call { .. } if constructs_value_class(id) => true,
         IrExpr::Call {
             callee: call_callee,
             ..
         } if match &**call_callee {
-            Callee::Static { name, .. } => name == "constructor-impl",
             Callee::ValueClassAdapter { adapter, .. } => *adapter == ValueClassAdapter::Box,
             _ => false,
         } =>
@@ -69,7 +93,9 @@ pub(super) fn operand_nonnull(
             )
             .is_some_and(non_null_ty),
         IrExpr::GetValue(i) => slots.get(i).is_some_and(non_null_ty),
-        IrExpr::Block { value: Some(v), .. } => operand_nonnull(exprs, rets, fields, slots, *v),
+        IrExpr::Block { value: Some(v), .. } => {
+            operand_nonnull(exprs, rets, fields, slots, constructs_value_class, *v)
+        }
         _ => false,
     }
 }

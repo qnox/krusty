@@ -1,5 +1,5 @@
 //! A hand-written JVM class-file writer (the format is well-specified; no external crate).
-//! Targets major version 50 (Java 6). Methods that create lambda objects (new $lambda$N) emit a
+//! Targets major version 52 (Java 8) by default. Methods that create lambda objects (new $lambda$N) emit a
 //! StackMapTable attribute so the type-checking verifier on Java 25+ accepts them.
 
 use crate::fx_hash::{HashMap, HashSet};
@@ -39,6 +39,7 @@ mod pool_noting;
 mod source_map_annotation;
 mod stack_maps;
 mod utf8_pool;
+mod version;
 
 pub use annotation_values::split_declaration_annotations;
 use annotation_values::{NOT_NULL, NULLABLE};
@@ -68,9 +69,7 @@ pub const ACC_STRICT: u16 = 0x0800;
 pub const ACC_SYNTHETIC: u16 = 0x1000;
 pub const ACC_ANNOTATION: u16 = 0x2000;
 pub const ACC_ENUM: u16 = 0x4000;
-
-// Major 52 = Java 8, matching kotlinc's default JVM target.
-pub const MAJOR_JAVA8: u16 = 52;
+pub use version::{ClassFileVersion, ACC_IDENTITY, MAJOR_JAVA8, PREVIEW_MINOR_VERSION};
 
 /// JVM verification type for StackMapTable entries (JVMS §4.7.4).
 #[derive(Clone, PartialEq)]
@@ -508,6 +507,9 @@ pub struct ClassWriter {
     /// class's single `RuntimeVisibleAnnotations` attribute — `@Metadata` and user annotations both append
     /// here so `finish` writes ONE attribute (two would be invalid per JVMS §4.7.16).
     runtime_annotations: Vec<Vec<u8>>,
+    /// The `@Metadata.pn` of a file class that `@file:JvmPackageName` moved out of its Kotlin
+    /// package: that package.
+    metadata_package_name: Option<String>,
     invisible_annotations: Vec<Vec<u8>>,
     /// `BootstrapMethods` entries: `(method_handle_cp_index, static_argument_cp_indices)`.
     /// The index of an entry here is its `bootstrap_method_attr_index` (referenced by InvokeDynamic).
@@ -529,8 +531,9 @@ pub struct ClassWriter {
     annotation_class_refs: crate::fx_hash::HashSet<String>,
     /// Entries for the `PermittedSubclasses` attribute.
     permitted_subclasses: Vec<String>,
-    /// Class-file major version to emit (default v52; set via [`ClassWriter::set_major`]).
-    major: u16,
+    /// Class-file version to emit (default v52, no preview marking; set via
+    /// [`ClassWriter::set_major`] and [`ClassWriter::set_preview`]).
+    version: ClassFileVersion,
     /// Source-file simple name for the `SourceFile` attribute (set via [`ClassWriter::set_source_file`]).
     source_file: Option<String>,
     /// The JSR-045 source map for a class that contains inlined code, accumulated as each inline
@@ -582,6 +585,7 @@ impl ClassWriter {
             class_attributes: Vec::new(),
             class_signature: None,
             runtime_annotations: Vec::new(),
+            metadata_package_name: None,
             invisible_annotations: Vec::new(),
             bootstrap_methods: Vec::new(),
             class_deprecated: false,
@@ -592,7 +596,7 @@ impl ClassWriter {
             value_classes: Rc::default(),
             annotation_class_refs: crate::fx_hash::HashSet::default(),
             permitted_subclasses: Vec::new(),
-            major: MAJOR_JAVA8,
+            version: ClassFileVersion::default(),
             source_file: None,
             source_map: crate::jvm::source_map::SourceMap::default(),
             method_source_map: crate::jvm::source_map::SourceMap::default(),
@@ -604,12 +608,25 @@ impl ClassWriter {
 
     /// Set the class-file major version to emit (kotlinc maps `-jvm-target 25` ⇒ v69). Default v52.
     pub fn set_major(&mut self, major: u16) {
-        self.major = major;
+        self.version.major = major;
+    }
+    /// Mark the class file as compiled with preview features, as `-Xjvm-enable-preview` does for
+    /// every class ([`ClassFileVersion`]).
+    pub fn set_preview(&mut self, preview: bool) {
+        self.version.preview = preview;
+    }
+    /// The class file is marked as compiled with preview features ([`ClassWriter::set_preview`]).
+    pub fn is_preview(&self) -> bool {
+        self.version.preview
+    }
+    /// The version this writer targets.
+    pub fn version(&self) -> ClassFileVersion {
+        self.version
     }
     /// The class-file major version (52 = Java 8, 53 = Java 9, …). Codegen that is gated on the target
     /// — e.g. `invokedynamic` string concatenation, which kotlinc emits only for Java 9+ — reads it.
     pub fn major(&self) -> u16 {
-        self.major
+        self.version.major
     }
 
     /// The class's own source file, for a synthesized class that belongs to it.
@@ -1518,7 +1535,7 @@ impl ClassWriter {
                     u2(&mut body, inner_idx);
                     u2(&mut body, outer_idx);
                     u2(&mut body, name_idx);
-                    u2(&mut body, s.access);
+                    u2(&mut body, self.version.inner_class_access(s.access));
                 }
                 (name, body)
             })
@@ -1622,8 +1639,8 @@ impl ClassWriter {
         });
         let mut out = Vec::new();
         u4(&mut out, 0xCAFEBABE);
-        u2(&mut out, 0); // minor
-        u2(&mut out, self.major);
+        u2(&mut out, self.version.minor());
+        u2(&mut out, self.version.major);
         self.cp.serialize(&mut out);
         u2(&mut out, self.access);
         u2(&mut out, self.this_class);

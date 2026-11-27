@@ -88,6 +88,27 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// A field read with the throw-if-null a `lateinit` field carries. Every read of a `lateinit`
+    /// field is guarded, the default getter's included; only the raw read `isInitialized` makes
+    /// (`LateinitInitialized`) uses [`Self::field_read`] alone.
+    pub(super) fn guarded_field_read(
+        &mut self,
+        receiver: u32,
+        class: ClassId,
+        index: u32,
+    ) -> Result<(), Unsupported> {
+        self.field_read(receiver, class, index)?;
+        let field = &self.ir.classes[class as usize].fields[index as usize];
+        if !field.is_lateinit() {
+            return Ok(());
+        }
+        let name = field.name.clone();
+        let Some(reference @ ValType::Ref { .. }) = carrier(field.ty)? else {
+            return Err("a `lateinit` read without a reference carrier".to_string());
+        };
+        self.guard_lateinit(reference, &name)
+    }
+
     /// Consume one checked enclosing edge through the producer-certified constructor field.
     /// The existing field reader evaluates the receiver exactly once and projects its GC layout.
     pub(super) fn enclosing_instance(
@@ -941,7 +962,7 @@ impl Body<'_> {
                                 class, *property, false, receiver, args,
                             ),
                         _ if args.is_empty() => self.property_read(None, *property, Some(receiver)),
-                        _ => Err("a property getter call with arguments".to_string()),
+                        _ => self.context_member_accessor(*property, false, receiver, args),
                     },
                     IrVirtualTarget::PropertySetter(ResolvedPropertyOverrideTarget::Module(
                         property,
@@ -953,7 +974,7 @@ impl Body<'_> {
                         _ if args.len() == 1 => {
                             self.property_write(None, *property, Some(receiver), args[0])
                         }
-                        _ => Err("a property setter call with the wrong arguments".to_string()),
+                        _ => self.context_member_accessor(*property, true, receiver, args),
                     },
                     _ => Err("a call to a library member".to_string()),
                 }
@@ -981,6 +1002,61 @@ impl Body<'_> {
             },
             Callee::Super { .. } => Err("a `super` call to a library member".to_string()),
             _ => Err("a member call through this calling convention".to_string()),
+        }
+    }
+
+    /// A getter or setter of a class member property that declares context parameters: `args` are
+    /// its contexts, then, for the setter, the written value.
+    fn context_member_accessor(
+        &mut self,
+        property: PropertyId,
+        setter: bool,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let (class, index) = self.member_property(None, property)?;
+        let Some(IrLocalPropertyLayout::Member {
+            context_parameters,
+            ty,
+            ..
+        }) = self.ir.local_property_layouts.get(&property).cloned()
+        else {
+            return Err(
+                "an accessor call with arguments on a property that is not a class member"
+                    .to_string(),
+            );
+        };
+        let mut params = context_parameters;
+        if setter {
+            params.push(ty);
+        }
+        if params.len() != args.len() {
+            return Err("an accessor call whose arguments do not match its parameters".to_string());
+        }
+        let declared = self.ir.classes[class as usize].properties[index].clone();
+        let slot = local_property_target(self.ir, class, index)
+            .filter(|_| !self.ir.classes[class as usize].is_value)
+            .and_then(|target| {
+                let key = if setter {
+                    SlotKey::Setter(target)
+                } else {
+                    SlotKey::Getter(target)
+                };
+                self.file_classes().ok()?.tables.slot(class, &key)
+            });
+        if let Some(slot) = slot {
+            return self.dispatch(class, slot, receiver, args, &params, None);
+        }
+        match if setter {
+            declared.setter
+        } else {
+            declared.getter
+        } {
+            Some(accessor) => self.direct_member_call(accessor, receiver, args),
+            None => Err(format!(
+                "a property with context parameters and no accessor (`{}`)",
+                declared.name
+            )),
         }
     }
 
@@ -1053,6 +1129,18 @@ impl Body<'_> {
                     return Err("a top-level property read that requires an accessor".to_string());
                 }
                 self.code.global_get(storage.global);
+                // A `lateinit` property's storage is read through its guard, as a read of the
+                // storage in its own file is, unless it is the raw read `isInitialized` makes.
+                if operation
+                    .is_none_or(|read| !self.ir.lateinit_initialization_probes.contains(&read))
+                {
+                    if let Some(name) = self.lateinit_top_level_name(target) {
+                        let Some(reference @ ValType::Ref { .. }) = carrier(storage.ty)? else {
+                            return Err("a `lateinit` read without a reference carrier".to_string());
+                        };
+                        self.guard_lateinit(reference, &name)?;
+                    }
+                }
                 return Ok(());
             }
         }
@@ -1092,7 +1180,7 @@ impl Body<'_> {
         }
         match property.backing_field {
             Some(field) => {
-                self.field_read(receiver, class, field)?;
+                self.guarded_field_read(receiver, class, field)?;
                 // The field keeps its storage type. Callers of the read see the public type: the
                 // checker lowers a read of the field itself as a field access, so a property read
                 // that remains is the default getter.
@@ -1217,6 +1305,22 @@ impl Body<'_> {
             return None;
         }
         self.properties.accessor(target)
+    }
+
+    /// The name of the top-level property `target` when it is `lateinit`, as this file declares it
+    /// or as another file of the module declared it.
+    fn lateinit_top_level_name(&self, target: PropertyId) -> Option<String> {
+        if let Some(IrLocalPropertyLayout::TopLevelStorage { storage, .. }) =
+            self.ir.local_property_layouts.get(&target)
+        {
+            let declaration = self.ir.statics.get(*storage as usize)?;
+            return declaration.is_lateinit.then(|| declaration.name.clone());
+        }
+        let reference = self.ir.referenced_module_properties.get(&target)?;
+        reference
+            .flags
+            .has(krusty::fir::DeclarationFlags::LATEINIT)
+            .then(|| reference.name.clone())
     }
 
     /// The storage selected for a receiver-less property in this or an earlier source file.

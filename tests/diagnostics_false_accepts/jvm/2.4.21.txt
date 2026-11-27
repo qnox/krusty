@@ -204,9 +204,7 @@ compiler/testData/diagnostics/tests/classObjects/InnerClassClassObject.kt
 compiler/testData/diagnostics/tests/classObjects/companionObjectOfPrivateClassVisibility.kt
 compiler/testData/diagnostics/tests/classObjects/nestedClassInPrivateClassObject.kt
 compiler/testData/diagnostics/tests/classObjects/selfCallsInCompanionSuperConstructor_error.kt
-compiler/testData/diagnostics/tests/collectionLiterals/collectionLiteralAsReceiver.kt
 compiler/testData/diagnostics/tests/collectionLiterals/collectionLiteralsDisabled/kt34515.kt
-compiler/testData/diagnostics/tests/collectionLiterals/collectionLiteralsDisabled/noCollectionLiterals.kt
 compiler/testData/diagnostics/tests/collectionLiterals/collectionLiteralsDisabled/resolveToFunctionFromBuiltIns.kt
 compiler/testData/diagnostics/tests/collectionLiterals/deprecatedCompanionObject.kt
 compiler/testData/diagnostics/tests/collectionLiterals/emptyArrayAsSpreadInAnnotation.kt
@@ -220,13 +218,10 @@ compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/defaultV
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/deprecatedOfs.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/extensions.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/extraParametersInVarargOverload.kt
-compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/flexibleReturnType.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/inconsistentFunctionalParameterTypes.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/intersectionReturnType.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/irrelevantReturnType.kt
-compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/localTypeApproximation.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/nonCompanionMember.kt
-compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/nullableReturnType.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/suspendMismatches.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/topLevel.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/visibilityMismatches.kt
@@ -523,7 +518,6 @@ compiler/testData/diagnostics/tests/generics/kt30590.kt
 compiler/testData/diagnostics/tests/generics/multipleBoundsMemberScope/conflictingReturnType.kt
 compiler/testData/diagnostics/tests/generics/nullability/considerTypeNotNullOnlyIfItHasNotNullBound.kt
 compiler/testData/diagnostics/tests/generics/nullability/smartCasts.kt
-compiler/testData/diagnostics/tests/generics/nullability/smartCastsOnThis.kt
 compiler/testData/diagnostics/tests/generics/projectionsScope/flexibleProjectedScope.kt
 compiler/testData/diagnostics/tests/generics/projectionsScope/recursiveUpperBoundStar.kt
 compiler/testData/diagnostics/tests/generics/projectionsScope/typeParameterBounds.kt
@@ -1396,7 +1390,6 @@ compiler/testData/diagnostics/testsWithStdLib/contracts/propertyAccessors/annota
 compiler/testData/diagnostics/testsWithStdLib/contracts/propertyAccessors/openSetterNotAllowed.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/propertyAccessors/override.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/smartcasts/catchExceptionSpilling.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/smartcasts/returnsImpliesAndSafeCalls.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/callableReference/property.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/inlineCrossinline/inlineOrdinaryOfNoinlineSuspend.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/irrelevantSuspendDeclarations.kt

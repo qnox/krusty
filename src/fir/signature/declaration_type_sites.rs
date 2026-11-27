@@ -51,7 +51,11 @@ impl DeclarationTypeSites {
                     }
                 }
             }
-            Some(SigExpr::Nullable(inner) | SigExpr::NonNullable(inner)) => {
+            Some(
+                SigExpr::Nullable(inner)
+                | SigExpr::NonNullable(inner)
+                | SigExpr::NotNullOperator(inner),
+            ) => {
                 self.bind(nodes, graph_syntax, inner, declaration_syntax);
             }
             _ => {}
@@ -139,9 +143,9 @@ impl SignatureGraph {
     pub(crate) fn expression_type_syntax(&self, expression: SigExprId) -> Option<HeaderTypeId> {
         match self.expr(expression)? {
             SigExpr::Type { syntax, .. } | SigExpr::ContextualType { syntax, .. } => Some(syntax),
-            SigExpr::Nullable(inner) | SigExpr::NonNullable(inner) => {
-                self.expression_type_syntax(inner)
-            }
+            SigExpr::Nullable(inner)
+            | SigExpr::NonNullable(inner)
+            | SigExpr::NotNullOperator(inner) => self.expression_type_syntax(inner),
             _ => None,
         }
     }

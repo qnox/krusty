@@ -228,6 +228,7 @@ fn property_plan(
         binding: _,
         dispatch_receiver,
         extension_receiver,
+        context_arguments: _,
         mutable,
         substitutions,
         adaptation,

@@ -153,16 +153,18 @@ impl LocalValues {
         Ok(())
     }
 
-    /// Declare the immutable compiler temporary `symbol` of semantic type `ty` in the next slot.
+    /// Declare the compiler temporary `symbol` of semantic type `ty` in the next slot, reassignable
+    /// when `mutable`.
     pub(super) fn temporary(
         &mut self,
         symbol: &KlibIrSymbol,
         ty: Ty,
+        mutable: bool,
     ) -> Result<LocalValue, KlibBodyDeclineReason> {
         let value = LocalValue {
             index: self.next,
             ty,
-            mutable: false,
+            mutable,
         };
         self.declare(symbol, value)?;
         Ok(value)

@@ -330,6 +330,20 @@ kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source);
    overlap within one array. */
 void kt_array_copy_range(KRef source, kt_int from, KRef destination, kt_int to, kt_int count);
 
+/* Kotlin/Native's `arrayFill`: write `value` to `from until to` of `array`. A range outside the
+   array raises `IndexOutOfBoundsException`, and a start past the end `IllegalArgumentException`,
+   before anything is written.
+   One function per array kind; `kt_array_fill_range` is the reference array's. */
+void kt_array_fill_range(KRef array, kt_int from, kt_int to, KRef value);
+void kt_boolean_array_fill_range(KRef array, kt_int from, kt_int to, kt_boolean value);
+void kt_byte_array_fill_range(KRef array, kt_int from, kt_int to, kt_byte value);
+void kt_char_array_fill_range(KRef array, kt_int from, kt_int to, kt_char value);
+void kt_short_array_fill_range(KRef array, kt_int from, kt_int to, kt_short value);
+void kt_int_array_fill_range(KRef array, kt_int from, kt_int to, kt_int value);
+void kt_long_array_fill_range(KRef array, kt_int from, kt_int to, kt_long value);
+void kt_float_array_fill_range(KRef array, kt_int from, kt_int to, kt_float value);
+void kt_double_array_fill_range(KRef array, kt_int from, kt_int to, kt_double value);
+
 /* An index outside `0 until size`: raises Kotlin's `IndexOutOfBoundsException`, with the JVM's
    wording, and returns; the caller returns too. */
 void kt_index_out_of_bounds(kt_int index, kt_int size);
@@ -529,6 +543,8 @@ extern const KType kt_type_mutable_list;
 kt_boolean kt_is_mutable_list(KRef value);
 KRef kt_mutable_list_new(void);
 KRef kt_mutable_list_with_capacity(kt_int capacity);
+/* `ArrayList.build()`: the list a `buildList` block filled. */
+KRef kt_mutable_list_build(KRef self);
 /* A growable list holding a COPY of an array's elements. */
 KRef kt_mutable_list_of(KRef elements);
 /* `ArrayList(elements)`: a growable list holding a copy of any collection's elements. */
@@ -556,6 +572,7 @@ kt_boolean kt_list_iterator_has_previous(KRef iterator);
 KRef kt_list_iterator_previous(KRef iterator);
 kt_int kt_list_iterator_next_index(KRef iterator);
 kt_int kt_list_iterator_previous_index(KRef iterator);
+void kt_list_iterator_set(KRef iterator, KRef element);
 
 /* Iteration through a receiver the generator could only type by the INTERFACE, where either of the
    two iterable things this runtime has may turn up. The descriptor decides which, and `next`
@@ -896,6 +913,10 @@ kt_char kt_string_get(KRef self, kt_int index);
    on its side of the bound, stored as the three bytes its code unit encodes to, as on the JVM. */
 KRef kt_string_substring(KRef self, kt_int start, kt_int end);
 
+/* Kotlin/Native's `unsafeStringFromCharArray(chars, start, size)`: the string of `size` UTF-16
+   units of the `CharArray` from `start`, whose bounds the caller has proven. */
+KRef kt_string_from_char_array(KRef chars, kt_int start, kt_int size);
+
 /* `s.substring(start)`: from there to the end. */
 KRef kt_string_substring_from(KRef self, kt_int start);
 
@@ -995,6 +1016,7 @@ KRef kt_string_builder_append_range(KRef self, KRef value, KRef start_index, KRe
 
 /* `sb.setLength(n)`, by UTF-16 unit as Kotlin counts: shorter truncates, longer pads with NUL. */
 void kt_string_builder_set_length(KRef self, kt_int length);
+KRef kt_string_builder_reverse(KRef self);
 
 /* Whether a value is one, for the entry points that serve both shapes. */
 kt_boolean kt_is_string_builder(KRef value);
@@ -1218,6 +1240,7 @@ KRef kt_class_literal(const KType *type);
    fails loudly and names itself. */
 KRef kt_class_simple_name(KRef self);
 KRef kt_class_qualified_name(KRef self);
+kt_boolean kt_class_is_instance(KRef self, KRef value);
 
 /* `typeOf<T>()`: a `kotlin.reflect.KType`. Each is a static object the generator emits whole
    (see `krusty_rt.c` for its layout) wearing `kt_type_ktype_impl`, which names the `KType` marker

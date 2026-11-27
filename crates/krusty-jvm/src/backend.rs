@@ -82,6 +82,8 @@ pub(crate) struct BackendPassFacts {
     /// Physical constructions selected for Kotlin function-value SAM wrappers.
     sam_wrapper_realizations: crate::sam_wrappers::SamWrapperRealizations,
     local_delegate_access: crate::local_delegate_accessors::HelperAccess,
+    /// The `get<X>$delegate` methods a property-reference delegate still needs.
+    property_reference_delegates: crate::property_reference_delegates::PropertyReferenceDelegates,
     /// Final implementation ordinals of top-level lambdas whose companion initializer was moved
     /// into its enclosing class. Lifted naming consumes this explicit placement fact so a nested
     /// callable keeps its moved parent's physical path.
@@ -280,7 +282,7 @@ fn run_backend_passes_after_plugins(
     }
     // A singleton or constant delegate is evaluated in place, with no `x$delegate` storage. Before
     // companion hoisting and delegate-field naming, which then see only the storage that remains.
-    crate::in_place_delegates::realize(ir);
+    crate::in_place_delegates::realize(ir, &facts.property_reference_delegates);
     // Companion backing-field hoisting is a JVM storage choice. Common IR retains the ordinary
     // property declaration and semantic initializer; this pass selects the outer-static realization.
     crate::companion::lower_companion_properties(
@@ -391,12 +393,17 @@ fn run_backend_passes_after_plugins(
         &facts.property_realizations,
         facts.jvm_default,
     );
+    let storage_properties: krusty::fx_hash::HashSet<_> = callables
+        .value_class_storage_properties()
+        .chain(classifiers.module().source_value_storage().iter().copied())
+        .collect();
     if !crate::value_classes::lower_value_classes(
         ir,
         classifiers,
         crate::value_classes::ModuleValueClasses {
             underlying: module_value_classes,
             readable: module_readable_value_classes,
+            storage_properties: &storage_properties,
         },
         &inherited_default_statics,
         &mut facts.bridge_adaptations,
@@ -570,6 +577,8 @@ pub struct JvmBackend {
     cp: std::rc::Rc<krusty::jvm::classpath::Classpath>,
     /// Class-file major version to emit (`-jvm-target`), or `None` for krusty's default (v52).
     class_major: Option<u16>,
+    /// `-Xjvm-enable-preview`.
+    enable_preview: bool,
     jvm_default: crate::ir_emit::JvmDefaultMode,
     java_parameters: bool,
     lambda_modes: crate::ir_emit::LambdaModes,
@@ -603,6 +612,7 @@ impl JvmBackend {
         JvmBackend {
             cp,
             class_major: None,
+            enable_preview: false,
             jvm_default: crate::ir_emit::JvmDefaultMode::default(),
             java_parameters: false,
             lambda_modes: crate::ir_emit::LambdaModes::default(),
@@ -703,6 +713,12 @@ impl JvmBackend {
         self.class_major = major;
         self
     }
+
+    /// Mark every emitted class as compiled with preview features (`-Xjvm-enable-preview`).
+    pub fn with_enable_preview(mut self, enabled: bool) -> JvmBackend {
+        self.enable_preview = enabled;
+        self
+    }
 }
 
 /// The per-file emit configuration krusty SHIPS with — ONE definition, so an in-process caller (the
@@ -733,6 +749,7 @@ pub fn shipping_emit_options(
     let source_stem = stem.rsplit(['/', '\\']).next().unwrap_or(stem);
     crate::ir_emit::EmitOptions {
         class_major,
+        enable_preview: false,
         source_file: Some(format!(
             "{source_stem}.{}",
             match source_kind {
@@ -964,14 +981,6 @@ impl JvmState {
     }
 }
 
-/// A facade's internal name: its simple name under the file's package (`p/q/FooKt`).
-fn facade_class_name(segment: &str, package: &Option<String>) -> String {
-    match package.as_deref() {
-        Some(package) if !package.is_empty() => format!("{}/{segment}", package.replace('.', "/")),
-        _ => segment.to_string(),
-    }
-}
-
 /// A checked file after every JVM representation pass has selected its physical facts. Keeping the
 /// handoff together makes the boundary explicit: emission consumes this closed product and must not
 /// recover any of its decisions.
@@ -1018,12 +1027,10 @@ impl JvmBackend {
         } = file;
         let stem = &stems[source.raw() as usize];
         let package = ir.package.clone().unwrap_or_default();
-        let facade_name =
-            facade_class_name(&file_classes.containers[source.raw() as usize], &ir.package);
+        let facade = &file_classes.containers[source.raw() as usize];
+        let facade_name = facade.internal_name(ir.package.as_deref());
         let facade_class = krusty::types::type_name(&facade_name);
-        let multifile_facade = file_classes.multifile_facades[source.raw() as usize]
-            .as_deref()
-            .map(|facade| facade_class_name(facade, &ir.package));
+        let multifile_facade = facade.multifile_internal_name(ir.package.as_deref());
         pass_facts.property_realizations = property_realizations;
         if let Err(reason) = run_backend_passes(
             &mut ir,
@@ -1173,6 +1180,7 @@ impl JvmBackend {
             self.class_major,
             self.cp.clone(),
         )
+        .with_enable_preview(self.enable_preview)
         .with_jvm_default(self.jvm_default)
         .with_lambda_modes(self.lambda_modes)
         .with_inline_string_concat(self.inline_string_concat)
@@ -1254,6 +1262,7 @@ impl JvmBackend {
                     part,
                     run.multifile_part.take(),
                     facade_slots,
+                    &package,
                 );
             }
         }
@@ -1264,10 +1273,18 @@ impl JvmBackend {
         if has_facade_members {
             let simple_name =
                 |internal: &str| internal.rsplit('/').next().unwrap_or(internal).to_string();
+            // The module file lists the class under its Kotlin package, and names the JVM package
+            // only when `@file:JvmPackageName` put the class somewhere else.
+            let jvm_package = facade_name
+                .rsplit_once('/')
+                .map_or("", |(directory, _)| directory);
+            let jvm_package =
+                (jvm_package != package.replace('.', "/")).then(|| jvm_package.to_string());
             state.module_packages.entry(package).or_default().push(
                 krusty::metadata::module::PackagePart {
                     name: simple_name(&facade_name),
                     multifile_facade: multifile_facade.as_deref().map(simple_name),
+                    jvm_package,
                 },
             );
         }
@@ -1395,7 +1412,7 @@ impl Backend for JvmBackend {
     ) -> Vec<Artifact> {
         let file_classes = state.file_classes(file.stems, file.classifiers.module());
         let facades = file_classes.containers.clone();
-        let facade = facade_class_name(&facades[file.source.raw() as usize], &file.ir.package);
+        let facade = facades[file.source.raw() as usize].internal_name(file.ir.package.as_deref());
         let facade_class = type_name(&facade);
         crate::local_class_names::realize(&mut file.ir, |source| {
             crate::module_calls::facade_for(source, &facades)
@@ -1433,6 +1450,14 @@ impl Backend for JvmBackend {
             source: file.source,
             package: facade_class.namespace(),
         };
+        // A delegate that is a property reference is read through the referenced accessors before
+        // any reference becomes a class: kotlinc's `PropertyReferenceDelegationLowering`.
+        let property_reference_delegates = crate::property_reference_delegates::lower(
+            &mut file.ir,
+            &file.callables,
+            file.classifiers.module().source_value_classes(),
+            current_source,
+        );
         let delegate_closures = crate::local_delegate_closures::Requirements::collect(&file.ir);
         let mut lambda_methods = match crate::lambda_classes::realize(
             &mut file.ir,
@@ -1456,6 +1481,7 @@ impl Backend for JvmBackend {
             current_source,
             &facades,
             &file.classifiers,
+            &property_reference_delegates,
         ) {
             Ok(access) => access,
             Err(()) => {
@@ -1472,6 +1498,7 @@ impl Backend for JvmBackend {
             &file.callables,
             &facade,
             &local_delegate_access,
+            &property_reference_delegates,
             spliced_getters,
         ) {
             Ok(realizations) => realizations,
@@ -1541,6 +1568,7 @@ impl Backend for JvmBackend {
                 property_reference_realizations,
                 default_call_operands,
                 local_delegate_access,
+                property_reference_delegates,
                 lambda_methods,
                 jvm_default: self.jvm_default,
                 ..BackendPassFacts::default()

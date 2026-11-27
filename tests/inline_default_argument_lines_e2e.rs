@@ -12,7 +12,10 @@ const LIB: &str = "package lib\n\
                    inline fun nested() = 7\n\
                    inline fun withNestedDefault(a: Int = nested()) = a + 1\n\
                    inline fun readsSuppliedOperand(a: Int, b: Int = nested() + a) = a + b\n\
-                   inline fun twoNestedDefaults(a: Int = nested(), b: Int = nested() + a) = a + b\n";
+                   inline fun twoNestedDefaults(a: Int = nested(), b: Int = nested() + a) = a + b\n\
+                   inline fun f4(a: Int = 1, b: Int = nested()) = a + b\n\
+                   inline fun lambdaDefault(a: Int = 1, noinline b: () -> Int = { nested() }) = a + b()\n\
+                   inline fun suppliedMiddle(a: Int = nested(), b: Int = nested(), c: Int = nested() + 1) = a + b + c\n";
 
 fn assert_matches_kotlinc(main: &str) {
     let classes = common::classes_against_kotlinc_module(&[("lib.kt", LIB), ("main.kt", main)]);
@@ -94,6 +97,62 @@ fn a_nested_inline_default_reading_a_supplied_operand_matches_kotlincs_classes()
          \n\
          fun t(): Int {\n\
          \x20   val x = readsSuppliedOperand(1)\n\
+         \x20   return x\n\
+         }\n",
+    );
+}
+
+#[test]
+fn a_supplied_first_parameter_before_a_nested_inline_default_matches_kotlincs_classes() {
+    assert_matches_kotlinc(
+        "package main\n\
+         \n\
+         import lib.twoNestedDefaults\n\
+         \n\
+         fun t(): Int {\n\
+         \x20   val x = twoNestedDefaults(1)\n\
+         \x20   return x\n\
+         }\n",
+    );
+}
+
+#[test]
+fn a_named_argument_after_an_omitted_constant_default_matches_kotlincs_classes() {
+    assert_matches_kotlinc(
+        "package main\n\
+         \n\
+         import lib.f4\n\
+         \n\
+         fun t(): Int {\n\
+         \x20   val x = f4(b = 2)\n\
+         \x20   return x\n\
+         }\n",
+    );
+}
+
+#[test]
+fn a_supplied_parameter_between_omitted_nested_inline_defaults_matches_kotlincs_classes() {
+    assert_matches_kotlinc(
+        "package main\n\
+         \n\
+         import lib.suppliedMiddle\n\
+         \n\
+         fun t(): Int {\n\
+         \x20   val x = suppliedMiddle(b = 3)\n\
+         \x20   return x\n\
+         }\n",
+    );
+}
+
+#[test]
+fn a_supplied_lambda_whose_default_would_call_an_inline_function_matches_kotlincs_classes() {
+    assert_matches_kotlinc(
+        "package main\n\
+         \n\
+         import lib.lambdaDefault\n\
+         \n\
+         fun t(): Int {\n\
+         \x20   val x = lambdaDefault(b = { 2 })\n\
          \x20   return x\n\
          }\n",
     );

@@ -332,12 +332,7 @@ impl JvmLibraries {
                         // declaration. Later phases consume only the external identity and this
                         // typed candidate set.
                         callable.overridden_call_realizations =
-                            crate::jvm::mapped_builtin_declarations::overridden_call_realizations_for_declaration(
-                                scope_name,
-                                &callable.descriptor,
-                                crate::jvm::mapped_builtin_declarations::MappedBuiltinMemberKind::Function,
-                            )
-                            .into_boxed_slice();
+                            self.function_call_realizations(scope_name, &callable);
                         // `params` is the call-site-specialized Kotlin declaration shape; the
                         // classfile descriptor remains the physical ABI. In particular, an
                         // object-erased value-class parameter (`Result<T>` -> `Object`) must not be
@@ -395,6 +390,7 @@ impl JvmLibraries {
                                 is_final: m.is_final(),
                                 deprecated_hidden: m.deprecated_hidden(),
                                 inherited_by_delegation: m.inherited_by_delegation(),
+                                signature_polymorphic: m.is_signature_polymorphic(),
                                 return_value_status: m.return_value_status,
                             },
                             ..FunctionInfo::plain(FnKind::Member, Some(receiver), callable)

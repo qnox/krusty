@@ -82,6 +82,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     current: result, ..
                 }
                 | SigExpr::NonNullable(result)
+                | SigExpr::NotNullOperator(result)
                 | SigExpr::Substitute { base: result, .. } => {
                     evaluated_integer_literal(semantics, result, graph, memo)
                 }
@@ -744,15 +745,19 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
         /// enclosing callable can supply that expectation (`consume(value?.choose { ... })`).
         fn wrapped_contextual_call(expression: SigExprId, graph: &SignatureGraph) -> bool {
             match graph.expr(expression) {
-                Some(SigExpr::Nullable(base) | SigExpr::NonNullable(base)) => {
-                    match graph.expr(base) {
-                        Some(SigExpr::Call { .. } | SigExpr::MemberCall { .. }) => true,
-                        Some(SigExpr::Nullable(_) | SigExpr::NonNullable(_)) => {
-                            wrapped_contextual_call(base, graph)
-                        }
-                        _ => false,
-                    }
-                }
+                Some(
+                    SigExpr::Nullable(base)
+                    | SigExpr::NonNullable(base)
+                    | SigExpr::NotNullOperator(base),
+                ) => match graph.expr(base) {
+                    Some(SigExpr::Call { .. } | SigExpr::MemberCall { .. }) => true,
+                    Some(
+                        SigExpr::Nullable(_)
+                        | SigExpr::NonNullable(_)
+                        | SigExpr::NotNullOperator(_),
+                    ) => wrapped_contextual_call(base, graph),
+                    _ => false,
+                },
                 _ => false,
             }
         }
@@ -1007,7 +1012,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         computing,
                     },
                 )),
-                SigExpr::NonNullable(base) => {
+                SigExpr::NonNullable(base) | SigExpr::NotNullOperator(base) => {
                     let operand_expected = match semantics.make_nullable(expected) {
                         Ok(expected) => expected,
                         Err(error) => return Some(Err(error)),
@@ -1318,7 +1323,9 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
         ) -> Option<String> {
             match graph.expr(expression)? {
                 SigExpr::Type { syntax, .. } => Some(graph.transient_type_ref(syntax)?.name),
-                SigExpr::Nullable(inner) | SigExpr::NonNullable(inner) => {
+                SigExpr::Nullable(inner)
+                | SigExpr::NonNullable(inner)
+                | SigExpr::NotNullOperator(inner) => {
                     class_literal_classifier_spelling(graph, inner)
                 }
                 _ => None,
@@ -2034,6 +2041,10 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     SigExpr::NonNullable(base) => semantics.make_non_nullable(evaluate_expression(
                         semantics, base, graph, demand, memo, computing,
                     )?),
+                    SigExpr::NotNullOperator(base) => not_null_operator_result(
+                        semantics,
+                        evaluate_expression(semantics, base, graph, demand, memo, computing)?,
+                    ),
                     SigExpr::CastNarrowed {
                         value,
                         target,
@@ -2291,7 +2302,9 @@ fn result_abbreviation<S: SignatureSemantics>(
             ) -> Option<ResolvedTypeAbbreviation> {
                 match graph.expr(expression)? {
                     SigExpr::Type { origin, .. } => semantics.type_result_abbreviation(origin),
-                    SigExpr::Nullable(base) | SigExpr::NonNullable(base) => {
+                    SigExpr::Nullable(base)
+                    | SigExpr::NonNullable(base)
+                    | SigExpr::NotNullOperator(base) => {
                         selected_type_abbreviation(semantics, graph, base)
                     }
                     _ => None,
@@ -2310,7 +2323,7 @@ fn result_abbreviation<S: SignatureSemantics>(
         SigExpr::MutableLocalFlow { declared, .. } => {
             result_abbreviation(semantics, graph, declared, memo)
         }
-        SigExpr::Nullable(base) | SigExpr::NonNullable(base) => {
+        SigExpr::Nullable(base) | SigExpr::NonNullable(base) | SigExpr::NotNullOperator(base) => {
             result_abbreviation(semantics, graph, base, memo)
         }
         SigExpr::Join { operands, .. } => {
@@ -2324,6 +2337,21 @@ fn result_abbreviation<S: SignatureSemantics>(
         }
         _ => None,
     }
+}
+
+/// The type of a not-null operator (`!!`, `?:`, `?.`) applied to a value of type `base`, in a
+/// release whose operators keep an intersection's upper type (the extractor emits the operator
+/// expression only for those releases).
+fn not_null_operator_result<S: SignatureSemantics>(
+    semantics: &S,
+    base: ResolvedTy,
+) -> Result<ResolvedTy, DiagnosticId> {
+    let result = base.get().non_null_keeping_intersection_bound();
+    if result == base.get().definitely_non_null() {
+        return semantics.make_non_nullable(base);
+    }
+    Ok(ResolvedTy::new(result)
+        .expect("the bound of a published nullable intersection is publishable"))
 }
 
 fn call_selection_origin(graph: &SignatureGraph, expression: SigExprId) -> Option<OriginId> {

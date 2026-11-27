@@ -27,7 +27,6 @@ mod default_value;
 mod dependency_access_policy;
 mod dependency_body_contract;
 mod dependency_body_modifiers;
-mod enhanced_nullability;
 pub mod function_classifiers;
 mod generic_signature;
 mod inline_body;
@@ -98,10 +97,10 @@ pub(crate) use dependency_body_contract::{
     DependencyBodyProviderRole, DependencyBodyProviderSnapshot, DependencyBodySnapshot,
 };
 pub(crate) use dependency_body_modifiers::KlibBodyDeclarationModifiers;
-pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnhancement};
 pub use inline_kind::InlineKind;
 pub use klib_body_accessor::DependencyGetterSignature;
 pub(crate) use klib_body_accessor::{KlibAccessorRole, KlibBodyAccessor};
+pub use krusty_core::enhanced_nullability::{EnhancedResult, TypeEnhancement};
 pub use param_flags::ParamFlags;
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_abi::PlatformAbi;
@@ -125,8 +124,8 @@ use crate::types::{SemanticCallRole, SemanticCallableOwner, Ty, TyKind, TypeName
 pub(crate) use array_factories::kotlin_array_factory_kind;
 pub(crate) use class_name_property::realize_class_name_property;
 pub use compiler_intrinsic::{
-    AdjacentDirection, AtomicOperation, ClassNameKind, CompilerIntrinsic, IndicesReceiver,
-    ListStorageConstruction, ResultFailureIntrinsic, SurrogateHalf,
+    AdjacentDirection, AtomicOperation, CharArrayRange, ClassNameKind, CompilerIntrinsic,
+    IndicesReceiver, ListStorageConstruction, ResultFailureIntrinsic, SurrogateHalf,
 };
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
@@ -831,30 +830,6 @@ impl LibraryMember {
         }
     }
 
-    #[inline]
-    pub fn ret_nullable(&self) -> bool {
-        self.flags.has(LmFlags::RET_NULLABLE)
-    }
-    #[inline]
-    pub fn is_interface(&self) -> bool {
-        self.flags.has(LmFlags::IS_INTERFACE)
-    }
-    #[inline]
-    pub fn suspend(&self) -> bool {
-        self.flags.has(LmFlags::SUSPEND)
-    }
-    #[inline]
-    pub fn is_operator(&self) -> bool {
-        self.flags.has(LmFlags::IS_OPERATOR)
-    }
-    #[inline]
-    pub fn is_infix(&self) -> bool {
-        self.flags.has(LmFlags::IS_INFIX)
-    }
-    #[inline]
-    pub fn is_member_extension(&self) -> bool {
-        self.flags.has(LmFlags::IS_EXTENSION)
-    }
     /// The semantic extension receiver published by this declaration. Generic signatures retain
     /// the declaration-owned receiver; non-generic members carry it in the logical parameter list
     /// after the context prefix. Physical parameters and descriptors are deliberately irrelevant.
@@ -866,71 +841,6 @@ impl LibraryMember {
             .as_ref()
             .and_then(|signature| signature.receiver)
             .or_else(|| self.params.get(self.context_count).copied())
-    }
-    #[inline]
-    pub fn is_primary_constructor(&self) -> bool {
-        self.flags.has(LmFlags::IS_PRIMARY_CONSTRUCTOR)
-    }
-    #[inline]
-    pub fn deprecated_hidden(&self) -> bool {
-        self.flags.has(LmFlags::DEPRECATED_HIDDEN)
-    }
-
-    pub fn is_classifier_static(&self) -> bool {
-        self.flags.has(LmFlags::IS_CLASSIFIER_STATIC)
-    }
-    #[inline]
-    pub fn set_ret_nullable(&mut self, on: bool) {
-        self.flags = self.flags.with_ret_nullable(on);
-    }
-    #[inline]
-    pub fn set_is_primary_constructor(&mut self, on: bool) {
-        self.flags = self.flags.with_is_primary_constructor(on);
-    }
-    #[inline]
-    pub fn set_deprecated_hidden(&mut self, on: bool) {
-        self.flags = self.flags.with_deprecated_hidden(on);
-    }
-
-    pub fn set_is_classifier_static(&mut self, on: bool) {
-        self.flags = self.flags.with_is_classifier_static(on);
-    }
-    #[inline]
-    pub fn set_is_interface(&mut self, on: bool) {
-        self.flags = self.flags.with_is_interface(on);
-    }
-    #[inline]
-    pub fn set_suspend(&mut self, on: bool) {
-        self.flags = self.flags.with_suspend(on);
-    }
-    pub fn set_is_operator(&mut self, on: bool) {
-        self.flags = self.flags.with_is_operator(on);
-    }
-    pub fn set_is_infix(&mut self, on: bool) {
-        self.flags = self.flags.with_is_infix(on);
-    }
-    pub fn set_is_member_extension(&mut self, on: bool) {
-        self.flags = self.flags.with_is_extension(on);
-    }
-    pub fn is_abstract(&self) -> bool {
-        self.flags.has(LmFlags::IS_ABSTRACT)
-    }
-    pub fn set_is_abstract(&mut self, on: bool) {
-        self.flags = self.flags.with_is_abstract(on);
-    }
-    pub fn is_final(&self) -> bool {
-        self.flags.has(LmFlags::IS_FINAL)
-    }
-    pub fn set_is_final(&mut self, on: bool) {
-        self.flags = self.flags.with_is_final(on);
-    }
-    /// A class delegating an interface that declares this member does not forward it: the
-    /// member's own implementation stays inherited.
-    pub fn inherited_by_delegation(&self) -> bool {
-        self.flags.has(LmFlags::INHERITED_BY_DELEGATION)
-    }
-    pub fn set_inherited_by_delegation(&mut self, on: bool) {
-        self.flags = self.flags.with_inherited_by_delegation(on);
     }
     pub fn owner_name(&self) -> Option<String> {
         self.owner.map(TypeName::render)
@@ -1824,6 +1734,7 @@ impl FunctionInfo {
         member.set_is_abstract(self.flags.is_abstract);
         member.set_is_final(self.flags.is_final);
         member.set_deprecated_hidden(self.flags.deprecated_hidden);
+        member.set_signature_polymorphic(self.flags.signature_polymorphic);
         member.set_is_classifier_static(self.classifier_static);
         member.return_value_status = self.flags.return_value_status;
         // Interface-ness travels with the selected overload for the same reason `suspend` does: it is a
@@ -1883,6 +1794,8 @@ pub struct FnFlags {
     pub deprecated_hidden: bool,
     /// See [`LibraryMember::inherited_by_delegation`].
     pub inherited_by_delegation: bool,
+    /// See [`LibraryMember::is_signature_polymorphic`].
+    pub signature_polymorphic: bool,
     /// See [`LibraryMember::return_value_status`]. A current-module declaration leaves this `None`:
     /// its status is derived from its override edges after they are frozen.
     pub return_value_status: Option<crate::types::ReturnValueStatus>,

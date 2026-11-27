@@ -314,6 +314,16 @@ pub(super) trait CallLinker {
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
 
+    /// The member `callee` a `super` call runs without dispatch. It links as any call of the
+    /// member does, except that a body the unit emits for the call itself is the one it names.
+    fn link_super(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibPublicIdSignature,
+    ) -> Lowered<LinkedCallee> {
+        self.link(ir, callee)
+    }
+
     fn link_reference(
         &mut self,
         _ir: &mut IrFile,
@@ -361,6 +371,19 @@ pub(super) trait CallLinker {
         _signature: &crate::metadata::klib_ir::KlibIrSignature,
     ) -> Lowered<crate::types::TypeName> {
         unsupported("a file-private object value")
+    }
+
+    /// Declare, on the object literal `owner` this library's body serializes at `signature`, the
+    /// members it inherits without overriding them, interface defaults among them, so dispatch
+    /// through the interface members they implement reaches them. A linker that cannot declare
+    /// a dependency body refuses an object literal that inherits one.
+    fn implement_inherited_members(
+        &mut self,
+        _ir: &mut IrFile,
+        _signature: &crate::metadata::klib_ir::KlibIrSignature,
+        _owner: crate::types::TypeName,
+    ) -> Lowered<()> {
+        unsupported("an object literal inheriting a member body")
     }
 
     /// Whether `signature` names a non-public interface of the library of the body being lowered.
@@ -1331,9 +1354,11 @@ impl<'a> BodyLowering<'a> {
         }
         let parameters = self.header.type_parameters();
         // A value of a subtype of `declared`, as `suspendCoroutine` passes its `SafeContinuation`
-        // to a `(Continuation<T>) -> Unit` block, is one by subsumption. It crosses as the checked
-        // source argument does, with the conversion the checker decides for the same two types.
-        if self.linker.is_subtype(parameters, actual, declared) {
+        // to a `(Continuation<T>) -> Unit` block, is one by subsumption, and so is an instance of
+        // a local or anonymous class this body lowers, by its recorded supertypes. It crosses as
+        // the checked source argument does, with the conversion the checker decides for the same
+        // two types.
+        if self.is_supertype_of(declared, actual) {
             return Ok(match crate::types::value_conversion(actual, declared) {
                 None => lowered,
                 Some(_) => self.coercion(lowered, declared),
@@ -1356,7 +1381,7 @@ impl<'a> BodyLowering<'a> {
         // A compiler temporary, such as the cast `other` of a data class's `equals`, is an unnamed
         // immutable local the source never names.
         if variable.base.origin == "IR_TEMPORARY_VARIABLE" {
-            return self.unnamed_local(id);
+            return self.unnamed_variable(id);
         }
         let ty = self.semantic(variable.ty)?;
         let Some(initializer) = variable.initializer else {
@@ -1511,7 +1536,7 @@ struct CaptureSite<'a> {
     formals: &'a [crate::types::TyParamName],
 }
 
-/// A value typed `actual` is one of `expected` through the capture of a star projection: the
+/// A value typed `actual` is one of `expected` through the capture of a star or `in` projection: the
 /// call binds a type parameter of its callee to the star, which the serialized call states as
 /// the type parameter's bound (`Key<*>` passed to `get<E : Element>(key: Key<E>)` is read at
 /// `Key<Element>`).
@@ -1553,17 +1578,25 @@ fn captures_star_projection(actual: Ty, expected: Ty, site: CaptureSite<'_>) -> 
         let crate::types::TyKind::TyParam(name, bound) = declared.kind() else {
             return false;
         };
-        let sole = !declared_args
+        let alone_in_declaration = !declared_args
             .iter()
             .enumerate()
-            .any(|(other, argument)| other != slot && calls::names(*argument, name))
-            && site
-                .parameters
-                .iter()
-                .filter(|parameter| calls::names(**parameter, name))
-                .count()
-                == 1;
-        if !have.is_star_projection() || !site.formals.contains(&name) || !sole || *want != bound {
+            .any(|(other, argument)| other != slot && calls::names(*argument, name));
+        // A star captures apart from every other use of the parameter, so it must be the call's
+        // only one. An `in` projection is approximated by the bound alone, and the parameter's
+        // other uses are each checked against that bound on their own.
+        let capturable = if have.is_star_projection() {
+            alone_in_declaration
+                && site
+                    .parameters
+                    .iter()
+                    .filter(|parameter| calls::names(**parameter, name))
+                    .count()
+                    == 1
+        } else {
+            have.is_in_projection() && alone_in_declaration
+        };
+        if !capturable || !site.formals.contains(&name) || *want != bound {
             return false;
         }
         captured = true;
@@ -1617,6 +1650,23 @@ mod capture_conversion_tests {
         };
         assert!(captures_star_projection(
             key(star()),
+            key(Ty::obj("demo/Element")),
+            site
+        ));
+    }
+
+    #[test]
+    fn an_in_projection_is_captured_by_a_type_parameter_of_the_callee_at_its_bound() {
+        let (name, e) = formal();
+        let declared = key(e);
+        let site = CaptureSite {
+            declared,
+            parameters: &[declared],
+            formals: &[name],
+        };
+        let contravariant = Ty::in_projection(Ty::obj("demo/Element"));
+        assert!(captures_star_projection(
+            key(contravariant),
             key(Ty::obj("demo/Element")),
             site
         ));

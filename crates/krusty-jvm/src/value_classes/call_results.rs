@@ -27,6 +27,7 @@ pub(super) struct CallTypes<'a> {
     property_declarations: &'a HashMap<u32, Ty>,
     statics: &'a [krusty::ir::IrStatic],
     joins: &'a HashMap<u32, Ty>,
+    constructions: &'a krusty::ir::IrFile,
 }
 
 impl<'a> CallTypes<'a> {
@@ -37,6 +38,7 @@ impl<'a> CallTypes<'a> {
             property_declarations: &ir.property_declaration_types,
             statics: &ir.statics,
             joins: &ir.whens.exhaustive,
+            constructions: ir,
         }
     }
 
@@ -65,6 +67,11 @@ impl<'a> CallTypes<'a> {
             .obj_internal()
     }
 
+    /// Whether the lowering recorded the call at `id` as a value-class construction.
+    pub(super) fn is_value_construction(&self, id: ExprId) -> bool {
+        self.constructions.erased_value_construction(id).is_some()
+    }
+
     pub(super) fn get(&self, id: &u32) -> Option<Ty> {
         self.logical.logical(*id)
     }
@@ -82,7 +89,14 @@ impl<'a> CallTypes<'a> {
     /// The call's declared result as the JVM realizes it. A type parameter whose erased upper bound
     /// is a value class is declared as that value class (`T : X?` returns what `X?` returns); any
     /// other type parameter stays generic.
+    ///
+    /// A construction that omitted defaulted arguments calls the class's own `constructor-impl`,
+    /// which declares the carrier's type: the result is the constructed class, not a carrier that
+    /// is itself a value class (`Level(val id: Id = ..)` constructs a `Level`, not an `Id`).
     pub(super) fn declared_result(&self, id: u32, under: &Under) -> Option<Ty> {
+        if let Some(class) = self.constructions.erased_value_construction(id) {
+            return Some(Ty::obj_name(class));
+        }
         self.declared
             .get(&id)
             .map(|declared| super::member_names::value_class_bound_occurrence(*declared, under))
@@ -177,6 +191,7 @@ mod tests {
             property_declarations: &declared,
             statics: &[],
             joins: &declared,
+            constructions: &logical,
         };
         let absent = krusty::ir::IrFile::default();
         assert!(matches!(

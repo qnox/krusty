@@ -14,7 +14,8 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         let pending = self
-            .pending_copied_frames
+            .copied_frames
+            .open
             .pop_if(|frame| frame.block_depth == self.block_depth);
         let default = pending.as_ref().and_then(|frame| frame.default);
         if let Some(enclosing) = pending.as_ref().map(|frame| frame.enclosing_peak) {

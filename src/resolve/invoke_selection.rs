@@ -987,6 +987,21 @@ impl Checker<'_> {
         ) {
             InvokeResolution::Selected(ret) => ret,
             InvokeResolution::Inapplicable(candidates) => {
+                let applicability = self.callable_rung_applicability(
+                    scope,
+                    call_args.call,
+                    call_args.args,
+                    &[],
+                    &candidates,
+                );
+                if self.settle_deferred_constructor_failure(
+                    scope,
+                    call_args.call,
+                    call_args.args,
+                    applicability,
+                ) {
+                    return Ty::Error;
+                }
                 self.diags.error(
                     span,
                     self.inapplicable_member_candidates_message(
@@ -1492,6 +1507,43 @@ impl Checker<'_> {
                 }
             }
         };
+        // A function value named after an inapplicable nested constructor (`C.Name(args)` with a
+        // companion `val Name: (P) -> R`) joins that constructor's failure group when it rejects.
+        if !arguments_already_mapped && self.has_deferred_constructor_failure(call) {
+            let applicability = if params.len() != arg_tys.len() {
+                Some(constructor_rung_failure::RungApplicability::ArgumentMapping)
+            } else {
+                // The function value's positional shape through the shared applicability check,
+                // so argument conversions (an integer literal for a `Long`) apply as for any call.
+                let partial_arg_tys = args
+                    .iter()
+                    .zip(arg_tys)
+                    .map(|(&argument, &actual)| match self.file.expr(argument) {
+                        Expr::Lambda { .. } | Expr::CallableRef { .. } => None,
+                        _ => Some(actual),
+                    })
+                    .collect::<Vec<_>>();
+                super::call_applicability::score(
+                    self,
+                    scope,
+                    &params,
+                    &CallSig::metadata_plain(params.len()),
+                    super::call_applicability::ArgSlots {
+                        args,
+                        partial_arg_tys: &partial_arg_tys,
+                        arg_names: self.file.call_arg_names.get(&call.0).map(Vec::as_slice),
+                        trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
+                    },
+                )
+                .is_none()
+                .then_some(constructor_rung_failure::RungApplicability::TypeMismatch)
+            };
+            if let Some(applicability) = applicability {
+                if self.settle_deferred_constructor_failure(scope, call, args, applicability) {
+                    return InvokeResolution::Selected(Ty::Error);
+                }
+            }
+        }
         // `expect_selected_call_args` has already validated and recorded a selected callable's
         // named/default/vararg mapping. Function values still use exact positional validation.
         if !arguments_already_mapped && params.len() != arg_tys.len() {
@@ -1567,6 +1619,21 @@ impl Checker<'_> {
                 Some(Ty::Error)
             }
             InvokeResolution::Inapplicable(candidates) => {
+                let applicability = self.callable_rung_applicability(
+                    scope,
+                    call_args.call,
+                    call_args.args,
+                    &[],
+                    &candidates,
+                );
+                if self.settle_deferred_constructor_failure(
+                    scope,
+                    call_args.call,
+                    call_args.args,
+                    applicability,
+                ) {
+                    return Some(Ty::Error);
+                }
                 self.diags.error(
                     span,
                     self.inapplicable_member_candidates_message(

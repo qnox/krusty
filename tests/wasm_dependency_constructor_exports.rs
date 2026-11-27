@@ -409,3 +409,23 @@ fn compile_against_official_producer(
         artifacts,
     }
 }
+
+/// An official producer that declares no package writes the root package as one empty segment;
+/// the consumer still finds the bodies its calls select.
+#[test]
+fn wasm_official_root_package_dependency_declarations_run_their_bodies() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/rootPackageDependencyDeclarations.kt"),
+        "RootPackageDependencyDeclarations",
+    );
+}
+
+/// An official producer's anonymous object inherits an interface default that only dispatch
+/// reaches: the consumer declares the inherited body and implements the member with it.
+#[test]
+fn wasm_official_dependency_anonymous_object_runs_its_inherited_interface_default() {
+    run_against_official_producer(
+        include_str!("box_regressions/libraryAnonymousObjectInheritedDefault.kt"),
+        "AnonymousObjectInheritedDefault",
+    );
+}

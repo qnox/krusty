@@ -116,3 +116,31 @@ fn suspend_value_class_default_call_in_a_lambda_inserts_continuation_before_mask
     };
     assert_eq!(output.trim(), "OK", "box() returned {output:?}");
 }
+
+/// Comparing a dependency value class's construction that omits a defaulted argument calls
+/// `equals-impl0` on both carriers, as comparing its plain construction does, with no null guard or
+/// temporary. The program's facade class must be kotlinc's.
+#[test]
+fn dependency_default_construction_compares_with_equals_impl0() {
+    const LIB: &str = "package lib\n\
+         @JvmInline value class Id(val raw: Int)\n\
+         @JvmInline value class Level(val id: Id = Id(9))\n";
+    const MAIN: &str = "import lib.Id\n\
+         import lib.Level\n\
+         fun box(): String {\n\
+         \x20   if (Level() != Level(Id(9))) return \"default\"\n\
+         \x20   if (Level(Id(2)) == Level()) return \"supplied\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    let Some(classes) = common::classes_against_kotlinc_lib("Main", &[("Lib.kt", LIB)], MAIN)
+    else {
+        return;
+    };
+    let main = |classes: &std::collections::BTreeMap<String, Vec<u8>>| {
+        classes
+            .get("MainKt")
+            .expect("the program's facade class")
+            .clone()
+    };
+    assert_eq!(main(&classes.krusty), main(&classes.reference));
+}

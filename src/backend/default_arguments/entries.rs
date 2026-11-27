@@ -195,7 +195,9 @@ fn declares_defaults(ir: &IrFile, function: FunId) -> bool {
 /// entry of a top-level or member declaration with defaults, built whether or not this file
 /// calls it.
 pub fn published_entry(ir: &IrFile, declaration: FunId) -> Option<FunId> {
-    is_publishable(ir, declaration)
+    // A constructor's exported construction entry carries no parameter defaults of its own; the
+    // constructor's declaration owns them, and `super::construction_entries` linked its entry.
+    (is_publishable(ir, declaration) || ir.construction_entries.contains_key(&declaration))
         .then(|| ir.default_entries.get(&declaration).copied())
         .flatten()
 }

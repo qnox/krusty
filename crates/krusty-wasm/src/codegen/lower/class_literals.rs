@@ -9,8 +9,9 @@
 //! facts common IR recorded for it, any other from the declaration name its provider published.
 
 use krusty::backend::class_names::{declared_class, published_classifier};
+use krusty::backend::BackendCallableFact;
 use krusty::libraries::{ClassNameKind, CompilerIntrinsic};
-use krusty::types::{wk, TypeName};
+use krusty::types::{wk, SemanticCallableOwner, TypeName};
 
 use crate::class_tokens::{emit_runtime_info, QUALIFIED_NAME_FIELD, SIMPLE_NAME_FIELD};
 
@@ -97,6 +98,38 @@ impl Body<'_> {
         Ok(global)
     }
 
+    /// `X::class.isInstance(value)`: the test `value is X` makes. A class literal names its
+    /// classifier statically, so the call is that type test. A token that is not a literal wraps
+    /// one record of names and carries no supertype information to test against, so it is
+    /// declined rather than answered from a guess.
+    pub(super) fn class_is_instance_expression(
+        &mut self,
+        call: u32,
+        node: &IrExpr,
+    ) -> Option<Result<(), Unsupported>> {
+        let (receiver, args) = class_is_instance_call(self.callables, node)?;
+        Some(self.class_is_instance(call, receiver, args))
+    }
+
+    fn class_is_instance(
+        &mut self,
+        call: u32,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let [value] = args else {
+            return Err("`KClass.isInstance` without its one operand".to_string());
+        };
+        let Some(target) = class_literal_target(self.ir, receiver) else {
+            return Err(
+                "`KClass.isInstance` of a class token that is not a class literal: the token \
+                 carries no supertype information"
+                    .to_string(),
+            );
+        };
+        self.type_test(call, IrTypeOp::InstanceOf, *value, target)
+    }
+
     /// Which name the external property `target` reads, when its getter is the platform stdlib's
     /// own `KClass` name getter.
     pub(super) fn class_name_property(
@@ -146,4 +179,63 @@ pub(super) fn name_type_infos(
             runtime.objects.type_infos.name(module, classifier, &names);
         }
     }
+}
+
+/// Whether the selected declaration `fact` is `KClass.isInstance(value: Any?): Boolean`.
+pub(in crate::codegen) fn is_class_is_instance(fact: &BackendCallableFact) -> bool {
+    matches!(
+        fact.declaration_owner,
+        Some(SemanticCallableOwner::Classifier(owner)) if owner == wk::kclass()
+    ) && fact.name == "isInstance"
+        && fact.params.as_slice() == [Ty::nullable(objects::any())]
+        && fact.ret == Ty::Boolean
+}
+
+/// The receiver and operands of `node` when it is a call of `KClass.isInstance`.
+fn class_is_instance_call<'n>(
+    callables: &krusty::backend::CheckedBackendCallables,
+    node: &'n IrExpr,
+) -> Option<(u32, &'n [u32])> {
+    let IrExpr::Call {
+        callee,
+        dispatch_receiver: Some(receiver),
+        args,
+    } = node
+    else {
+        return None;
+    };
+    let Callee::External {
+        target, defaults, ..
+    } = &**callee
+    else {
+        return None;
+    };
+    (defaults.is_empty()
+        && callables
+            .callable(*target)
+            .is_some_and(is_class_is_instance))
+    .then_some((*receiver, args.as_slice()))
+}
+
+/// The class a class literal receiver names, when it is a literal of a type.
+fn class_literal_target(ir: &IrFile, receiver: u32) -> Option<Ty> {
+    match ir.expr(receiver) {
+        IrExpr::KClassLiteral {
+            classifier: Some(ty),
+            value: None,
+            type_argument: false,
+        } => Some(ty.non_null()),
+        _ => None,
+    }
+}
+
+/// The class a call of `KClass.isInstance` on a class literal tests: the class its type test
+/// reads, which a cross-file link must name before the body is emitted.
+pub(in crate::codegen) fn class_is_instance_target(
+    ir: &IrFile,
+    callables: &krusty::backend::CheckedBackendCallables,
+    node: &IrExpr,
+) -> Option<Ty> {
+    let (receiver, _) = class_is_instance_call(callables, node)?;
+    class_literal_target(ir, receiver)
 }

@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// Whether a receiver spelling is a `super` qualifier: `super`, `super<T>` or `super@label`.
+pub(super) fn is_super_qualifier(spelling: &str) -> bool {
+    spelling == "super" || spelling.starts_with("super<") || spelling.starts_with("super@")
+}
+
 #[derive(Clone, Debug)]
 pub struct ResolvedSuperCall {
     /// Exact dispatch receiver selected by `super` / `super@Label`. A labeled super may target an
@@ -84,8 +89,11 @@ impl ResolvedSuperCall {
             // only inherits.
             crate::libraries::MemberRealization::Dispatch => (physical_owner, false),
             crate::libraries::MemberRealization::Direct { .. } => (physical_owner, interface),
-            crate::libraries::MemberRealization::Intrinsic(_)
-            | crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
+            // The selected declaration is the platform's own: a nonvirtual call of it means the
+            // operation the target realizes for the declaration, applied to the current instance.
+            // The target that cannot realize it declines the call.
+            crate::libraries::MemberRealization::Intrinsic(_) => (physical_owner, interface),
+            crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
         };
         Some(Self {
             receiver,

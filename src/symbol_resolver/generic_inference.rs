@@ -2078,11 +2078,15 @@ fn infer_generic_return_bindings_impl(
         let actual_satisfies = bounds
             .iter()
             .all(|bound| admits(actual, ty_subst(*bound, &bindings)));
+        // A self-referential bound reads the candidate it checks: `T : Comparable<T>` narrowed
+        // from `String?` to `String` asks for `Comparable<String>`, not `Comparable<String?>`.
+        let mut narrowed_bindings = bindings.clone();
+        narrowed_bindings.insert(crate::types::TyParamName::new(formal), narrowed);
         let narrowed_satisfies = bounds
             .iter()
-            .all(|bound| admits(narrowed, ty_subst(*bound, &bindings)));
+            .all(|bound| admits(narrowed, ty_subst(*bound, &narrowed_bindings)));
         if !actual_satisfies && narrowed_satisfies {
-            bindings.insert(crate::types::TyParamName::new(formal), narrowed);
+            bindings = narrowed_bindings;
         }
     }
     // An expected result is an upper constraint on a produced value. If a return-only variable's

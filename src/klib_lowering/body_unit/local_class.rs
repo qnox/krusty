@@ -242,16 +242,12 @@ impl<'s> Linker<'_, 's> {
                 &member.installed_overrides,
             )?;
         }
-        // A member the class inherits from a superclass this unit installed or materialized
-        // implements the interface declarations the class reaches only through its supertypes.
-        let inherited = self
-            .sources
-            .bodies
-            .inherited_implementations_of(&prepared.key.module, &prepared.key.signature)
-            .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?;
-        for (body, implemented) in &inherited {
-            self.declare_inherited_implementation(ir, prepared.classifier, body, implemented)?;
-        }
+        self.declare_inherited_members_in(
+            ir,
+            &prepared.key.module,
+            &prepared.key.signature,
+            prepared.classifier,
+        )?;
         let constructor = super::super::same_library_class::LocalConstructor {
             declaration: prepared.declaration.clone(),
             access: prepared.access,
@@ -354,6 +350,39 @@ impl<'s> Linker<'_, 's> {
                 crate::metadata::semantic::class_kind(class.base.flags)
                     == crate::libraries::TypeKind::Interface
             })
+    }
+
+    /// Declare on the object literal `owner`, which the body being lowered serializes at
+    /// `signature`, the members it inherits without overriding them.
+    pub(super) fn declare_inherited_members(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+        owner: TypeName,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        let module = self.active_module.clone();
+        self.declare_inherited_members_in(ir, &module, signature, owner)
+    }
+
+    /// Declare on `owner`, the class `module` serializes at `signature`, each member it inherits
+    /// from a supertype without overriding it, with the interface declarations it implements
+    /// with that body: an interface default only dispatch reaches among them.
+    fn declare_inherited_members_in(
+        &mut self,
+        ir: &mut IrFile,
+        module: &str,
+        signature: &KlibIrSignature,
+        owner: TypeName,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        let inherited = self
+            .sources
+            .bodies
+            .inherited_implementations_of(module, signature)
+            .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?;
+        for (body, implemented) in &inherited {
+            self.declare_inherited_implementation(ir, owner, body, implemented)?;
+        }
+        Ok(())
     }
 
     /// Install the non-public interface `signature` of this library in the unit, with its abstract

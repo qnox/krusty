@@ -202,6 +202,11 @@ pub(super) fn is_enum_entries(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/enums/EnumEntries"])
 }
 
+/// `kotlin.collections.RandomAccess`, the marker every runtime list wears.
+pub(super) fn is_random_access(internal: TypeName) -> bool {
+    is_identity(internal, &["kotlin/collections/RandomAccess"])
+}
+
 /// The descriptor of an interface the runtime provides instances of, or marks its own objects
 /// with. This is the one table: a type check against the interface and the interface markers of a
 /// program class that implements it both read it, so a runtime object and a program object answer
@@ -223,6 +228,8 @@ pub(super) fn runtime_interface_descriptor(internal: TypeName) -> Option<&'stati
         "kt_type_kclass"
     } else if is_enum_entries(internal) {
         "kt_type_enum_entries_interface"
+    } else if is_random_access(internal) {
+        "kt_type_random_access_interface"
     } else {
         return None;
     })

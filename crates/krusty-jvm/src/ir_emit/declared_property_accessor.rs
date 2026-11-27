@@ -190,9 +190,10 @@ pub(super) fn emit(
             g.aload(0);
             g.getfield(fref, slot_words(field_jt) as i32);
         }
-        // kotlinc's `LateinitLowering` getter: return the value, or throw and then
-        // `aconst_null; areturn` so the null path has a reference for the verifier. That return
-        // sits on the declaration's last line, so a multi-line declaration gives the getter two.
+        // kotlinc's `LateinitLowering` getter: return the value, or throw and then return the
+        // throw's coerced `Unit` result (`aconst_null`, or `Unit.INSTANCE` for an `Object` slot).
+        // That return sits on the declaration's last line, so a multi-line declaration gives the
+        // getter two.
         if field.is_lateinit() {
             g.dup();
             let missing = g.new_label();
@@ -211,7 +212,11 @@ pub(super) fn emit(
             if let Some((end, _)) = lateinit_end {
                 g.mark_line(end);
             }
-            g.aconst_null();
+            super::field_read::push_uninitialized_lateinit_result(
+                &type_descriptor(getter_jt),
+                &mut g,
+                cw,
+            );
             emit_return(getter_jt, &mut g);
         } else {
             emit_backing_field_read_adaptation(ir, cw, &mut g, property, field_jt, getter_jt);

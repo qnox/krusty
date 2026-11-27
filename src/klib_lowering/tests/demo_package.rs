@@ -56,6 +56,8 @@ pub(super) enum T {
     ListString,
     /// `List<Any?>`.
     ListNullableAny,
+    /// `Comparable<Any?>`.
+    ComparableNullableAny,
     /// The type parameter `P : Any?` of a generic `demo` function.
     P,
     /// `Array<P>`.
@@ -125,6 +127,7 @@ impl T {
             T::NullableString => "String",
             T::NullableNothing => "Nothing",
             T::ListString | T::ListNullableAny => "List",
+            T::ComparableNullableAny => "Comparable",
             T::ArrayP
             | T::ArrayOutString
             | T::ArrayOutNullableAny
@@ -154,7 +157,7 @@ impl T {
     fn arguments(self) -> &'static [T] {
         match self {
             T::ListString => &[T::String],
-            T::ListNullableAny => &[T::NullableAny],
+            T::ListNullableAny | T::ComparableNullableAny => &[T::NullableAny],
             T::ArrayP => &[T::P],
             T::ArrayOutString => &[T::String],
             T::ArrayOutNullableAny => &[T::NullableAny],
