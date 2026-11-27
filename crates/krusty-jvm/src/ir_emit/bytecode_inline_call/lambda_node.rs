@@ -4,7 +4,7 @@
 //! its own type. The inliner places that node at each `invoke` of the lambda.
 
 use super::super::inline_return_frames::LambdaBody;
-use super::super::unified_lambda_splice::placed_lambda_parameters;
+use super::super::unified_lambda_splice::{generated_trailing_arguments, placed_lambda_parameters};
 use super::lambda_route::SpliceReason;
 use super::*;
 use krusty::jvm::classreader::{ExcEntry, MethodLocal};
@@ -172,9 +172,19 @@ impl Emitter<'_> {
             .map(Ty::kind)
         {
             Some(TyKind::Fun(signature)) => (
-                placed_lambda_parameters(signature, arity).ok_or(
-                    "a placed lambda has no checked function type with each argument's type",
-                )?,
+                placed_lambda_parameters(
+                    signature,
+                    arity,
+                    &generated_trailing_arguments(
+                        self.ir,
+                        impl_fn,
+                        captures.len(),
+                        physical_parameters
+                            .get(..arity)
+                            .unwrap_or(physical_parameters),
+                    ),
+                )
+                .ok_or("a placed lambda has no checked function type with each argument's type")?,
                 signature.suspend,
             ),
             _ => {
@@ -228,7 +238,7 @@ impl Emitter<'_> {
         let (capture_types, physical_parameters) = physical.split_at(split);
         // A suspend reference's adapter, like a suspend literal's implementation, takes the
         // continuation its `invoke` is passed after the function type's parameters.
-        let semantic = placed_lambda_parameters(signature, arity)
+        let semantic = placed_lambda_parameters(signature, arity, &[])
             .ok_or("a callable reference has no checked function type with each argument's type")?;
         let result_semantic = self.ir.logical_type(inline_body).unwrap_or(signature.ret);
         let (parameter_types, parameter_coercions) = physical_parameters
