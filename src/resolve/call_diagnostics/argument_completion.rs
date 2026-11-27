@@ -85,11 +85,10 @@ impl Checker<'_> {
                     {
                         continue;
                     }
-                    self.diags.error(
+                    self.diags.report_error(
                         span,
-                        format!(
-                            "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                            crate::types::type_parameter_source_name(formal)
+                        crate::diagnostic_wording::cannot_infer_parameter_type(
+                            crate::types::type_parameter_source_name(formal),
                         ),
                     );
                     affected = true;

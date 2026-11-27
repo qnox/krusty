@@ -143,11 +143,10 @@ pub(in crate::resolve) fn report_inapplicable_callable_candidates(
                         .get(formal.as_str())
                         .is_none_or(|binding| binding.non_null() == Ty::Nothing);
                     if inferred_from_callable_reference && unresolved {
-                        checker.diags.error(
+                        checker.diags.report_error(
                             checker.span(call),
-                            format!(
-                                "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                                crate::types::type_parameter_source_name(formal)
+                            crate::diagnostic_wording::cannot_infer_parameter_type(
+                                crate::types::type_parameter_source_name(formal),
                             ),
                         );
                         return true;

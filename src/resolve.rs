@@ -30014,9 +30014,9 @@ impl<'a> Checker<'a> {
         ) else {
             return false;
         };
-        self.diags.error(
+        self.diags.report_error(
             self.call_callee_name_span(call),
-            format!("cannot infer type for type parameter '{formal}'. Specify it explicitly."),
+            crate::diagnostic_wording::cannot_infer_parameter_type(&formal),
         );
         true
     }
@@ -30113,11 +30113,9 @@ impl<'a> Checker<'a> {
                 })
             });
             if required_dnn {
-                self.diags.error(
+                self.diags.report_error(
                     self.span(call),
-                    format!(
-                        "cannot infer type for type parameter '{name}'. Specify it explicitly."
-                    ),
+                    crate::diagnostic_wording::cannot_infer_parameter_type(name),
                 );
                 bindings.insert(crate::types::TyParamName::new(formal), Ty::Error);
             }
@@ -38368,11 +38366,9 @@ impl<'a> Checker<'a> {
                     .get(type_parameter)
                     .map(|name| crate::types::type_parameter_source_name(name))
                     .unwrap_or("T");
-                self.diags.error(
+                self.diags.report_error(
                     self.span(call),
-                    format!(
-                        "cannot infer type for type parameter '{name}'. Specify it explicitly."
-                    ),
+                    crate::diagnostic_wording::cannot_infer_parameter_type(name),
                 );
                 *binding = Ty::Error;
             }

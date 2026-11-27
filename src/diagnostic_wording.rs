@@ -109,6 +109,16 @@ pub fn argument_type_mismatch(actual: &str, expected: &str) -> NamedMessage {
     }
 }
 
+/// `CANNOT_INFER_PARAMETER_TYPE`: a call's type parameter that inference left without a type.
+pub fn cannot_infer_parameter_type(type_parameter: &str) -> NamedMessage {
+    NamedMessage {
+        name: names::CANNOT_INFER_PARAMETER_TYPE,
+        message: format!(
+            "Cannot infer type for type parameter '{type_parameter}'. Specify it explicitly."
+        ),
+    }
+}
+
 /// `UNINITIALIZED_VARIABLE`: a read of a local that no path has definitely assigned yet.
 pub fn uninitialized_variable(name: &str) -> NamedMessage {
     NamedMessage {

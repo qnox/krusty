@@ -719,7 +719,7 @@ impl ProductionSignatureSemantics<'_> {
         self.record_source_diagnostic(
             scope.owner,
             origin,
-            format!("cannot infer type for type parameter '{formal}'. Specify it explicitly."),
+            crate::diagnostic_wording::cannot_infer_parameter_type(formal),
         )
     }
 

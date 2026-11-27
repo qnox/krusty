@@ -332,11 +332,9 @@ impl Checker<'_> {
                         )
                     });
                 if let Some(formal) = dnn_null_formal {
-                    self.diags.error(
+                    self.diags.report_error(
                         self.call_callee_name_span(call),
-                        format!(
-                            "cannot infer type for type parameter '{formal}'. Specify it explicitly."
-                        ),
+                        crate::diagnostic_wording::cannot_infer_parameter_type(&formal),
                     );
                     return Ok(LibraryConstructorSelection::Rejected(Ty::Error));
                 }

@@ -144,11 +144,10 @@ impl Checker<'_> {
                     continue;
                 }
                 if inferred_from_callable_reference {
-                    self.diags.error(
+                    self.diags.report_error(
                         self.span(call),
-                        format!(
-                            "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                            crate::types::type_parameter_source_name(formal)
+                        crate::diagnostic_wording::cannot_infer_parameter_type(
+                            crate::types::type_parameter_source_name(formal),
                         ),
                     );
                     return true;
@@ -180,11 +179,10 @@ impl Checker<'_> {
     }
 
     pub(super) fn report_uninferred_formal_at(&mut self, span: Span, formal: &str) {
-        self.diags.error(
+        self.diags.report_error(
             span,
-            format!(
-                "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                crate::types::type_parameter_source_name(formal)
+            crate::diagnostic_wording::cannot_infer_parameter_type(
+                crate::types::type_parameter_source_name(formal),
             ),
         );
     }

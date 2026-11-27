@@ -591,11 +591,10 @@ impl Checker<'_> {
         else {
             return;
         };
-        self.diags.error(
+        self.diags.report_error(
             self.call_callee_name_span(branch),
-            format!(
-                "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                crate::types::type_parameter_source_name(formal)
+            crate::diagnostic_wording::cannot_infer_parameter_type(
+                crate::types::type_parameter_source_name(formal),
             ),
         );
     }
