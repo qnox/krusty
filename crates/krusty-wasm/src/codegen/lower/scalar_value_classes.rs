@@ -14,21 +14,23 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
-/// Whether this target answers a library body's read of the storage property of an unsigned
-/// integer class itself: the class travels as the signed value it wraps, so the read is the
-/// receiver's own value ([`Body::scalar_value_storage_read`] lowers it once the provider's
-/// declaration names the property).
-pub(in super::super) fn realizes_unsigned_storage_getter(
+/// Whether this target answers a library body's read of a value class's storage property itself:
+/// the provider's declaration names the property, and the class travels as the scalar it wraps, so
+/// the read is the receiver's own value ([`Body::scalar_value_storage_read`] lowers it).
+pub(in super::super) fn realizes_scalar_value_storage_getter(
     getter: krusty::backend::DependencyGetterSignature<'_>,
 ) -> bool {
-    let underlying = match Ty::obj_name(getter.owner).canonical_semantic() {
-        Ty::UByte => Ty::Byte,
-        Ty::UShort => Ty::Short,
-        Ty::UInt => Ty::Int,
-        Ty::ULong => Ty::Long,
-        _ => return false,
+    let Some(declaration) = getter.value_declaration else {
+        return false;
     };
-    getter.parameters.is_empty() && getter.result == underlying
+    getter.parameters.is_empty()
+        && getter.result == declaration.underlying
+        && matches!(
+            scalar_representation(getter.owner, declaration),
+            Ok(Some(
+                ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64
+            ))
+        )
 }
 
 /// The scalar a value class `classifier` declared as `declaration` travels as, when this target

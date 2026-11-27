@@ -191,14 +191,14 @@ impl Backend for WasmBackend {
     }
 
     /// An array classifier's `storage` property is this target's own array storage, and an
-    /// unsigned integer's is the value it travels as.
+    /// value class's storage is the scalar it travels as.
     fn realizes_dependency_getter(
         &self,
         signature: krusty::backend::DependencyGetterSignature<'_>,
     ) -> bool {
         // An enum constant answers `kotlin.Enum`'s `name` and `ordinal` from its `$Enum` fields.
         lower::realizes_storage_getter(signature)
-            || lower::realizes_unsigned_storage_getter(signature)
+            || lower::realizes_scalar_value_storage_getter(signature)
             || krusty::backend::enums::getter_base_member(signature).is_some()
     }
 

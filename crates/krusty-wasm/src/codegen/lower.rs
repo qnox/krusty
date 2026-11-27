@@ -53,7 +53,7 @@ pub(super) use array_storage::realizes_storage_getter;
 pub(super) use exceptions::runtime_lays_out;
 pub(super) use scalar_instructions::is_scalar_operation;
 pub(super) use scalar_value_classes::{
-    realizes_unsigned_storage_getter, runtime_value_declaration,
+    realizes_scalar_value_storage_getter, runtime_value_declaration,
 };
 pub(super) use shared_cells::parameter_carrier;
 

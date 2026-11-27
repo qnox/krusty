@@ -8,6 +8,9 @@ pub struct DependencyGetterSignature<'a> {
     pub name: &'a str,
     pub parameters: &'a [crate::types::Ty],
     pub result: crate::types::Ty,
+    /// The provider's declaration of `owner` as a value class when this getter reads the property
+    /// that declaration names as the class's storage; `None` for every other getter.
+    pub value_declaration: Option<&'a crate::types::DeclaredValueClass>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
