@@ -1639,7 +1639,11 @@ impl Body<'_> {
 
     /// Replace the reference on the stack with whether it is an instance of the reference type
     /// `tested` — or null, when `nullable`.
-    fn reference_type_test(&mut self, tested: Ty, nullable: bool) -> Result<(), Unsupported> {
+    pub(super) fn reference_type_test(
+        &mut self,
+        tested: Ty,
+        nullable: bool,
+    ) -> Result<(), Unsupported> {
         if let Some(arity) = self.function_arity(tested) {
             self.function_type_test(arity, nullable, self.is_suspend_function_type(tested));
             return Ok(());

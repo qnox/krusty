@@ -147,6 +147,13 @@ pub(super) struct ClassTokens {
     pub(super) structure: u32,
     /// The global holding every token's dispatch table.
     table: u32,
+    /// For each classifier whose class literal this module evaluates, its record's global and the
+    /// function `(ref null eq) -> i32` testing a value against it: what `KClass.isInstance`
+    /// reaches from a token alone.
+    tests: Vec<(u32, u32)>,
+    /// The function `(token, value) -> i32` choosing among [`Self::tests`], declared by the first
+    /// `isInstance` of a token that is not a literal and written when the module is finished.
+    is_instance: Option<u32>,
 }
 
 /// The runtime functions a class token's table calls.
@@ -221,7 +228,64 @@ impl ClassTokens {
         objects.push_type_info(&mut init, None);
         init.struct_new(objects.any_table);
         let table = module.constant_global(ValType::reference(objects.any_table), init);
-        Self { structure, table }
+        Self {
+            structure,
+            table,
+            tests: Vec::new(),
+            is_instance: None,
+        }
+    }
+
+    /// Whether the test of the class whose record is `info` was registered.
+    pub(super) fn has_test(&self, info: u32) -> bool {
+        self.tests.iter().any(|(known, _)| *known == info)
+    }
+
+    /// Record `test` as the function a token over the record `info` answers `isInstance` with.
+    pub(super) fn register_test(&mut self, info: u32, test: u32) {
+        self.tests.push((info, test));
+    }
+
+    /// The function `(token, value) -> i32` answering `KClass.isInstance` for any token, which
+    /// [`Self::finalize`] writes once every class literal of the module has registered its test.
+    pub(super) fn is_instance(&mut self, module: &mut Module) -> u32 {
+        *self.is_instance.get_or_insert_with(|| module.declare())
+    }
+
+    /// Write the function [`Self::is_instance`] declared: the test registered for the token's
+    /// record. A record no class literal of the module registered a test for carries no way to
+    /// test a value, so it traps rather than answer from a guess.
+    pub(super) fn finalize(&self, module: &mut Module, objects: &ObjectRoot) {
+        let Some(function) = self.is_instance else {
+            return;
+        };
+        let token = HeapType::Concrete(self.structure);
+        let record = ValType::reference(objects.type_infos.ty);
+        let mut code = Code::default();
+        // The value is a local the token's record follows.
+        code.local_get(1).ref_is_null().if_(BlockType::Empty);
+        code.i32_const(0).return_().end();
+        code.local_get(0)
+            .ref_cast(false, token)
+            .struct_get(self.structure, INFO_FIELD)
+            .local_set(2);
+        for (info, test) in &self.tests {
+            code.local_get(2)
+                .global_get(*info)
+                .ref_eq()
+                .if_(BlockType::Empty);
+            code.local_get(1).call(*test).return_().end();
+        }
+        code.unreachable();
+        let ty = module.func_type(vec![super::objects::REFERENCE; 2], vec![ValType::I32]);
+        module.define(
+            function,
+            Function {
+                ty,
+                locals: vec![record],
+                code,
+            },
+        );
     }
 
     /// Replace the record on the stack with a new token for it.

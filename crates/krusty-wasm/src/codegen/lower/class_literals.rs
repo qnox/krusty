@@ -62,7 +62,9 @@ impl Body<'_> {
                 let classifier = target
                     .kotlin_class_internal()
                     .ok_or_else(|| format!("a class literal of `{}`", describe(target)))?;
-                self.type_info(classifier)?
+                let info = self.type_info(classifier)?;
+                self.register_class_test(info, target);
+                info
             }
             (None, None) => return Err("a class literal naming neither a type nor a value".into()),
         };
@@ -70,6 +72,38 @@ impl Body<'_> {
         self.code.global_get(info).ref_as_non_null();
         self.class_token();
         Ok(())
+    }
+
+    /// Define, once per record, the function testing a value against the class `tested` that a
+    /// token over the record `info` answers `isInstance` with. A class this body cannot test
+    /// registers nothing, and a token over its record traps if asked.
+    fn register_class_test(&mut self, info: u32, tested: Ty) {
+        if self.runtime.class_tokens.has_test(info) {
+            return;
+        }
+        let saved = (
+            std::mem::take(&mut self.code),
+            std::mem::take(&mut self.locals),
+            self.next_local,
+            self.depth,
+        );
+        self.next_local = 1;
+        self.depth = 0;
+        self.code.local_get(0);
+        let tested = self.reference_type_test(tested, false);
+        let (code, locals) = (
+            std::mem::replace(&mut self.code, saved.0),
+            std::mem::replace(&mut self.locals, saved.1),
+        );
+        self.next_local = saved.2;
+        self.depth = saved.3;
+        if tested.is_err() {
+            return;
+        }
+        let ty = self.module.func_type(vec![REFERENCE], vec![ValType::I32]);
+        let function = self.module.declare();
+        self.module.define(function, Function { ty, locals, code });
+        self.runtime.class_tokens.register_test(info, function);
     }
 
     /// Replace the record on the stack with a new class token for it.
@@ -99,9 +133,9 @@ impl Body<'_> {
     }
 
     /// `X::class.isInstance(value)`: the test `value is X` makes. A class literal names its
-    /// classifier statically, so the call is that type test. A token that is not a literal wraps
-    /// one record of names and carries no supertype information to test against, so it is
-    /// declined rather than answered from a guess.
+    /// classifier statically, so the call is that type test. Any other token wraps one record, and
+    /// the call reaches the test the class literal of that record registered
+    /// ([`Self::register_class_test`]).
     pub(super) fn class_is_instance_expression(
         &mut self,
         call: u32,
@@ -121,11 +155,12 @@ impl Body<'_> {
             return Err("`KClass.isInstance` without its one operand".to_string());
         };
         let Some(target) = class_literal_target(self.ir, receiver) else {
-            return Err(
-                "`KClass.isInstance` of a class token that is not a class literal: the token \
-                 carries no supertype information"
-                    .to_string(),
-            );
+            // A token from elsewhere: the test its class literal registered for its record.
+            self.value(receiver, objects::any())?;
+            self.value(*value, objects::any())?;
+            let function = self.runtime.class_tokens.is_instance(self.module);
+            self.code.call(function);
+            return Ok(());
         };
         self.type_test(call, IrTypeOp::InstanceOf, *value, target)
     }
@@ -229,13 +264,22 @@ fn class_literal_target(ir: &IrFile, receiver: u32) -> Option<Ty> {
     }
 }
 
-/// The class a call of `KClass.isInstance` on a class literal tests: the class its type test
-/// reads, which a cross-file link must name before the body is emitted.
+/// The class a class literal, or a call of `KClass.isInstance` on one, tests a value against: the
+/// class its type test reads, which a cross-file link must name before the body is emitted. A
+/// literal registers that test for every `isInstance` of a token over its record.
 pub(in crate::codegen) fn class_is_instance_target(
     ir: &IrFile,
     callables: &krusty::backend::CheckedBackendCallables,
     node: &IrExpr,
 ) -> Option<Ty> {
+    if let IrExpr::KClassLiteral {
+        classifier: Some(ty),
+        value: None,
+        type_argument: false,
+    } = node
+    {
+        return Some(ty.non_null());
+    }
     let (receiver, _) = class_is_instance_call(callables, node)?;
     class_literal_target(ir, receiver)
 }
