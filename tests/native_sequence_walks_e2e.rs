@@ -12,7 +12,7 @@
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
 use super::common::{
-    expect_box_ok_with_stdlib, expect_native_box, expect_native_decline, kotlinc_box_result,
+    expect_box_ok_with_stdlib, expect_native_box, kotlinc_box_result,
 };
 
 /// Require kotlinc's answer, krusty's JVM answer and the NATIVE answer to agree.
@@ -138,21 +138,19 @@ fn the_interface_type_reaches_the_programs_object() {
     every_backend_agrees_with_kotlinc("ProgramSequenceThroughInterface", source);
 }
 
-/// The narrowing holds for the program's class as it does for the interface: an EAGER walk of a
-/// sequence is not Kotlin's, so `map` declines rather than running the transform for every element.
+/// `map` on a program's `Sequence` is the stdlib's lazy `Sequence.map`, lowered from its KLIB body, so
+/// the transform runs per element on demand exactly as kotlinc's does.
 #[test]
-fn an_eager_member_of_a_program_sequence_declines() {
+fn a_lazy_member_of_a_program_sequence_runs_from_the_library_body() {
     let source = "class Letters : Sequence<String> {\n\
          \x20   override fun iterator() = listOf(\"a\", \"b\").iterator()\n\
          }\n\
          fun box(): String {\n\
-         \x20   val loud = Letters().map { it.uppercase() }\n\
-         \x20   return if (loud.first() == \"A\") \"OK\" else \"fail\"\n\
+         \x20   var seen = 0\n\
+         \x20   val loud = Letters().map { seen++; it.uppercase() }\n\
+         \x20   if (seen != 0) return \"fail eager \" + seen\n\
+         \x20   if (loud.first() != \"A\") return \"fail first\"\n\
+         \x20   return if (seen == 1) \"OK\" else \"fail lazy \" + seen\n\
          }\n";
-    assert_eq!(
-        kotlinc_box_result(source),
-        "OK",
-        "EagerSequenceMember: unexpected kotlinc result"
-    );
-    expect_native_decline(source, "EagerSequenceMember", "map");
+    every_backend_agrees_with_kotlinc("LazySequenceMember", source);
 }
