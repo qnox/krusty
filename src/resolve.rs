@@ -25416,7 +25416,6 @@ struct LambdaCheckMode {
 }
 
 type InnerOwnerTypeParameter = (String, String, Ty, Vec<Ty>);
-type StableReceiverCallableKey = (Ty, String, Vec<TypeName>);
 type DemandReject<'a> = &'a dyn Fn(&str, Span) -> bool;
 type FlowNarrowing = (NarrowPath, Ty);
 type DeclinedFlowNarrowing = (String, Ty);
@@ -25505,10 +25504,11 @@ struct Checker<'a> {
     /// instead of reporting an unresolved reference.
     member_bound_retries: crate::fx_hash::HashSet<(Ty, String)>,
     /// Immutable provider/member queries reused while checking one Pass-2 source unit. The key
-    /// includes lexical class access because visibility can change across nested classifier bodies.
+    /// includes lexical class access and visibility suppression, which change across declarations.
     /// Pass-1 and legacy mutable-symbol checks bypass this cache entirely.
-    stable_receiver_callable_cache:
-        std::cell::RefCell<HashMap<StableReceiverCallableKey, crate::libraries::Callables>>,
+    stable_receiver_callable_cache: std::cell::RefCell<
+        HashMap<checker_symbol_queries::StableReceiverCallableKey, crate::libraries::Callables>,
+    >,
     /// Complete function supertypes of an applied classifier. This is immutable after the Pass-1
     /// declaration index is finalized and is queried for nearly every call argument, including
     /// ordinary primitives whose answer is the same empty set each time.

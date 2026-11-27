@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// The receiver, the name, the lexical classes and whether `@Suppress` exempts invisible members:
+/// a receiver inventory keeps only the callables its scope may see, so that scope is the key.
+pub(super) type StableReceiverCallableKey = (Ty, String, Vec<TypeName>, bool);
+
 impl Checker<'_> {
     pub(super) fn resolver(&self) -> crate::symbol_resolver::SymbolResolver<'_> {
         self.with_stable_symbol_records(
@@ -98,7 +102,12 @@ impl Checker<'_> {
         if self.resolved_index.is_none() {
             return self.resolver().receiver_callables(receiver, name);
         }
-        let key = (receiver, name.to_owned(), self.lexical_source_class_names());
+        let key = (
+            receiver,
+            name.to_owned(),
+            self.lexical_source_class_names(),
+            self.visibility_access_suppressed(),
+        );
         if let Some(callables) = self.stable_receiver_callable_cache.borrow().get(&key) {
             return callables.clone();
         }
