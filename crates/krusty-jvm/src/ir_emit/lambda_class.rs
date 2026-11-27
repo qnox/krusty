@@ -680,7 +680,39 @@ pub(super) fn sam_bridge_descriptors(
             bridges.push(descriptor);
         }
     }
+    // `LambdaMetafactory` adapts a bridge by casting references only: a bridge that would box or
+    // unbox against the interface method is one kotlinc realizes as a class instead.
+    if bridges
+        .iter()
+        .any(|bridge| !bridge_adapts_by_cast(erased, bridge))
+    {
+        return Vec::new();
+    }
     bridges
+}
+
+/// Whether `bridge` differs from `erased` only where both sides are references.
+fn bridge_adapts_by_cast(erased: &str, bridge: &str) -> bool {
+    let (Some((erased_parameters, erased_result)), Some((bridge_parameters, bridge_result))) = (
+        krusty::jvm::names::parse_method_descriptor(erased),
+        krusty::jvm::names::parse_method_descriptor(bridge),
+    ) else {
+        return false;
+    };
+    erased_parameters.len() == bridge_parameters.len()
+        && erased_parameters
+            .iter()
+            .chain(std::iter::once(&erased_result))
+            .zip(
+                bridge_parameters
+                    .iter()
+                    .chain(std::iter::once(&bridge_result)),
+            )
+            .all(|(own, other)| {
+                own == other
+                    || (super::descriptor_is_reference(own)
+                        && super::descriptor_is_reference(other))
+            })
 }
 
 /// Build the erased SAM and instantiated method descriptors once for class-mode selection and
