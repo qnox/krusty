@@ -131,7 +131,6 @@ callableReference/callableReferencetoInnerAndLocal.kt
 callableReference/function/booleanNotIntrinsic.kt
 callableReference/function/enumValueOfMethod.kt
 callableReference/function/genericCallableReferenceArgumentsNonJVM.kt
-callableReference/function/genericCallableReferenceWithReifiedTypeParam.kt
 callableReference/function/genericCallableReferencesWithNullableTypes.kt
 callableReference/function/kt32462.kt
 callableReference/function/local/enumExtendsTrait.kt
