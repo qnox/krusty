@@ -300,7 +300,6 @@ coroutines/bridges/mapSuspendAbstractClear.kt
 coroutines/bridges/mapSuspendClear.kt
 coroutines/captureMutableLocalVariableInsideCoroutineBlock.kt
 coroutines/castWithSuspend.kt
-coroutines/coercionToUnit.kt
 coroutines/controlFlow/breakFinally.kt
 coroutines/controlFlow/breakStatement.kt
 coroutines/controlFlow/doWhileStatement.kt
@@ -336,7 +335,6 @@ coroutines/controlFlow_tryCatch4.kt
 coroutines/controlFlow_tryCatch5.kt
 coroutines/controlFlow_while1.kt
 coroutines/controlFlow_while2.kt
-coroutines/controllerAccessFromInnerLambda.kt
 coroutines/coroutineContext1.kt
 coroutines/coroutineContext2.kt
 coroutines/coroutineContextInInlinedLambda.kt
@@ -347,7 +345,6 @@ coroutines/degenerate1.kt
 coroutines/degenerate2.kt
 coroutines/deserializedSuspendFunctionProperty.kt
 coroutines/doubleColonExpressionsGenerationInBuilderInference.kt
-coroutines/emptyClosure.kt
 coroutines/emptyCommonConstraintSystemForCoroutineInferenceCall.kt
 coroutines/falseUnitCoercion.kt
 coroutines/featureIntersection/breakWithNonEmptyStack.kt
@@ -425,7 +422,6 @@ coroutines/intrinsicSemantics/intercepted.kt
 coroutines/intrinsicSemantics/releaseIntercepted.kt
 coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturnInterception.kt
 coroutines/intrinsicSemantics/suspendCoroutineUninterceptedOrReturn.kt
-coroutines/iterateOverArray.kt
 coroutines/kt21080.kt
 coroutines/kt24135.kt
 coroutines/kt28844.kt
@@ -438,17 +434,11 @@ coroutines/kt46813.kt
 coroutines/kt49168.kt
 coroutines/kt51530.kt
 coroutines/kt51718.kt
-coroutines/lastStatementInc.kt
-coroutines/lastStementAssignment.kt
 coroutines/localFunctions/named/defaultArgument.kt
 coroutines/localFunctions/named/stateMachine.kt
 coroutines/longRangeInSuspendCall.kt
 coroutines/multiModule/inheritFromAnotherModule.kt
 coroutines/multiModule/inlineMultiModuleOverride.kt
-coroutines/multipleInvokeCalls.kt
-coroutines/multipleInvokeCallsInsideInlineLambda1.kt
-coroutines/multipleInvokeCallsInsideInlineLambda2.kt
-coroutines/multipleInvokeCallsInsideInlineLambda3.kt
 coroutines/nestedTryCatch.kt
 coroutines/overrideDefaultArgument.kt
 coroutines/redundantLocalsElimination/ktor_receivedMessage.kt
@@ -486,12 +476,9 @@ coroutines/tryCatchFinallyWithHandleResult.kt
 coroutines/tryCatchWithHandleResult.kt
 coroutines/tryFinallyInsideInlineLambda.kt
 coroutines/tryFinallyWithHandleResult.kt
-coroutines/unitTypeReturn/suspendNonLocalReturn.kt
 coroutines/unsafeTransform.kt
 coroutines/varSpilling/fakeInlinerVariables.kt
 coroutines/varSpilling/kt75926.kt
-coroutines/varValueConflictsWithTable.kt
-coroutines/varValueConflictsWithTableSameSort.kt
 coroutines/withReceiver.kt
 cycles/cycle.kt
 cycles/cycle_do.kt
