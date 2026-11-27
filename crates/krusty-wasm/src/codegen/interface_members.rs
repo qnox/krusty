@@ -288,8 +288,13 @@ fn publish_identities(
                 continue;
             };
             let signature = match layout {
-                IrLocalPropertyLayout::Member { ty, .. } => {
-                    let (params, result) = accessor_types(*ty, setter);
+                IrLocalPropertyLayout::Member {
+                    ty,
+                    context_parameters,
+                    ..
+                } => {
+                    let (params, result) =
+                        operand_accessor_types(context_parameters.iter().copied(), *ty, setter);
                     member_signature(&params, result)?
                 }
                 // A member extension's accessor takes its extension receiver as a parameter.
