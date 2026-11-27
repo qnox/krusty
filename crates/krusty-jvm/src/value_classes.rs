@@ -3773,13 +3773,12 @@ impl ReprCtx<'_> {
         repr(self, id)
     }
 
-    /// A selected call is non-null when its checked declaration returns a non-null type.
+    /// A selected call, or a read of a static, is non-null when its declaration is non-null.
     fn operand_nonnull(&self, id: ExprId) -> bool {
         operand_nonnull(self.exprs, self.rets, self.fields, self.slots, id)
-            || matches!(
-                self.types.declared_result(id, self.under).map(Ty::kind),
-                Some(TyKind::Obj(..))
-            )
+            || self
+                .types
+                .declared_non_null(id, &self.exprs[id as usize], self.under)
     }
 
     /// Non-null value-class identity whose checked value is carried unboxed. Generated local reads
