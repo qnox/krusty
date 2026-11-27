@@ -308,6 +308,7 @@ mod name_read_demand;
 mod named_class_constructors;
 pub(crate) mod operator_calls;
 mod operator_declarations;
+mod operator_of_declarations;
 mod opt_in_usage;
 mod primitive_reference;
 use operator_calls::{
@@ -1255,19 +1256,6 @@ fn builtin_inc_dec_result(operand: Ty) -> Option<Ty> {
 /// which is weaker but never wrong. Box
 /// `callableReference/property/extensionPropertyWithExtensionType.kt` covers it.
 const CALLABLE_INVOKE_OPERATOR: &str = "invoke";
-
-/// The augmented-assignment operator name for a binary op (`+=` → `plusAssign`, etc.). Only the five
-/// arithmetic compound operators have an `…Assign` form.
-fn assign_op_name(op: BinOp) -> Option<&'static str> {
-    Some(match op {
-        BinOp::Add => "plusAssign",
-        BinOp::Sub => "minusAssign",
-        BinOp::Mul => "timesAssign",
-        BinOp::Div => "divAssign",
-        BinOp::Rem => "remAssign",
-        _ => return None,
-    })
-}
 
 fn delegated_getvalue_ret_for_signature(
     file: &File,
@@ -23698,6 +23686,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_fun_rets: HashMap::default(),
         inferred_ext_fun_rets: HashMap::default(),
         inferred_method_rets: HashMap::default(),
+        operator_of_overloads: Vec::new(),
         inferred_source_member_rets: HashMap::default(),
         inferred_stable_declaration_rets: HashMap::default(),
         inferred_declaration_publications: Default::default(),
@@ -24699,6 +24688,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     c.narrow_value_class_receivers();
     c.narrow_script_template_receivers();
     c.publish_member_declaring_receivers();
+    c.report_operator_of_overloads();
     let enhanced_values = c.enhanced_value_heads();
     let builtin_implementations = match builtin_implementation::for_checked_unit(&c) {
         Ok(implementations) => implementations,
@@ -24732,6 +24722,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         inferred_fun_rets,
         inferred_ext_fun_rets,
         inferred_method_rets,
+        operator_of_overloads: _,
         inferred_source_member_rets,
         inferred_stable_declaration_rets,
         inferred_declaration_publications,
@@ -25739,6 +25730,7 @@ struct Checker<'a> {
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
     inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
     inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
+    operator_of_overloads: Vec<operator_of_declarations::OperatorOfOverload>,
     inferred_source_member_rets: HashMap<crate::libraries::SourceMember, Ty>,
     inferred_stable_declaration_rets: HashMap<crate::fir::DeclarationId, Ty>,
     inferred_declaration_publications: declaration_publication::InferredDeclarationPublications,
