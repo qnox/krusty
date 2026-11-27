@@ -2243,7 +2243,7 @@ impl ProductionSignatureSemantics<'_> {
                                 .find(|function| {
                                     function.signature().stable_declaration == Some(scope.owner)
                                 })
-                                .map(|function| function.receiver_ty())
+                                .map(stable_function_index::member_extension_receiver)
                             {
                                 receivers.push(SignatureImplicitReceiver::ordinary(extension));
                             }
