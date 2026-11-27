@@ -126,6 +126,7 @@ fn lower_property_override_plans(
                 .iter()
                 .map(|ty| ty.get())
                 .collect(),
+            declared_context_identities: edge.declared_context_identities.clone(),
             overridden_setter_value: edge.overridden_setter_value.clone(),
             implementation_mutable: edge.implementation_mutable,
             has_kotlin_superclass_override: edge.has_kotlin_superclass_override,

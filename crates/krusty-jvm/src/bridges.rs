@@ -1061,9 +1061,15 @@ fn push_property_bridge(
             .iter()
             .enumerate()
             .map(|(ordinal, ty)| BridgeParameter {
-                identity: krusty::fir::ResolvedParameterIdentity::AnonymousContextParameter {
-                    ordinal: ordinal as u32,
-                },
+                identity: edge
+                    .declared_context_identities
+                    .get(ordinal)
+                    .cloned()
+                    .unwrap_or(
+                        krusty::fir::ResolvedParameterIdentity::AnonymousContextParameter {
+                            ordinal: ordinal as u32,
+                        },
+                    ),
                 semantic: *ty,
             })
             .collect::<Vec<_>>()

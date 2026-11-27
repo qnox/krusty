@@ -499,6 +499,7 @@ fn materialize_delegation(
                             implementation_receiver: extension_receiver,
                             declared_contexts: Vec::new(),
                             implementation_contexts: Vec::new(),
+                            declared_context_identities: Vec::new(),
                             overridden_setter_value: overridden.setter_value.clone(),
                             implementation_mutable: setter.is_some(),
                             has_kotlin_superclass_override: false,

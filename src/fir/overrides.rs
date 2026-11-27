@@ -111,6 +111,9 @@ pub struct ResolvedPropertyOverride {
     /// carries them across a bridge; empty for a property without context parameters.
     pub declared_contexts: Vec<ResolvedTy>,
     pub implementation_contexts: Vec<ResolvedTy>,
+    /// How the overridden property spells its context parameters. A bridge names them so, as a
+    /// function bridge names its parameters after the overridden function's.
+    pub declared_context_identities: Vec<ResolvedParameterIdentity>,
     /// The overridden setter's value parameter, or `None` when the overridden property is a `val`.
     /// A setter bridge names its parameter after it, as a function bridge names its parameters
     /// after the overridden function's.

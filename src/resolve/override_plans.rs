@@ -838,6 +838,7 @@ fn publish_inherited_interface_property_plans(
                     implementation_receiver: None,
                     declared_contexts: Vec::new(),
                     implementation_contexts: Vec::new(),
+                    declared_context_identities: Vec::new(),
                     implementation_mutable: implementation.setter.is_some(),
                     overridden_return_value_status: applied.return_value_status,
                     overridden_visibility: applied.visibility,
@@ -1032,6 +1033,7 @@ fn append_property_override_edges(
                         resolved_ty(*ty, "implementation context parameter entering stable FIR")
                     })
                     .collect(),
+                declared_context_identities: declared.context_parameter_identities.clone(),
                 overridden_setter_value: setter_value(&applied),
                 implementation_mutable,
                 overridden_return_value_status: applied.return_value_status,
