@@ -43025,6 +43025,7 @@ impl<'a> Checker<'a> {
             )
         }) {
             for receiver in self.implicit_receivers_before_value_binding(scope, &n) {
+                let receiver = self.implicit_intersection_property_view(receiver, &n);
                 if let Some(ty) =
                     self.try_member_read(scope, receiver.ty, &n, self.span(e), Some(e))
                 {
@@ -43128,7 +43129,9 @@ impl<'a> Checker<'a> {
                                 }
                                 continue;
                             }
-                            implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
+                            implicit_rungs::ImplicitRung::Receiver(receiver) => {
+                                self.implicit_intersection_property_view(receiver, &n)
+                            }
                         };
                         if let Some(selected_ty) =
                             self.try_member_read(scope, receiver.ty, &n, self.span(e), Some(e))
