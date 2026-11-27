@@ -88,7 +88,6 @@ boxing/boxing6.kt
 boxing/boxing7.kt
 boxing/kt53100_casts.kt
 boxingOptimization/checkcastAndInstanceOf2.kt
-boxingOptimization/kt48394.kt
 boxingOptimization/kt5844.kt
 boxingOptimization/maxMinByOrNull.kt
 boxingOptimization/unsignedArrayForEach.kt
@@ -173,7 +172,6 @@ companionBlocksAndExtensions/multiModule.kt
 companionBlocksAndExtensions/nestedClasses.kt
 constants/comparisonFalse.kt
 constants/divisionByZero.kt
-constants/float.kt
 constants/kt9532.kt
 contextParameters/contextualCallableReference.kt
 contextParameters/explicitPassing.kt
@@ -424,8 +422,6 @@ enum/sortEnumEntries.kt
 evaluate/intrinsicConst/charConstructor.kt
 evaluate/intrinsicConst/constTrim.kt
 evaluate/ubyteOperations.kt
-evaluate/uintOperations.kt
-evaluate/ulongOperations.kt
 evaluate/ushortOperations.kt
 exceptions/rethrow.kt
 exceptions/throw_from_catch.kt
@@ -439,9 +435,6 @@ extensionProperties/genericContextOverride.kt
 fakeOverride/intersectionInLocal.kt
 fir/kt68806.kt
 fir/multipleDefaultsFalsePositiveDelegation.kt
-fp/atan2ZeroGuadrantsDouble.kt
-fp/powDouble.kt
-fp/powFloat.kt
 fp/remainderMixedFpInfinitiesNans.kt
 fp/remainderMixedFpSubnormalDivisor.kt
 fp/remainderMixedIntFp.kt
@@ -546,13 +539,10 @@ inlineClasses/inlineClassCollection/inlineMapOfInlineClass.kt
 inlineClasses/inlineClassCollection/inlineMapOfInlineClassGeneric.kt
 inlineClasses/inlineClassCollection/inlineMutableCollectionBulkAdd.kt
 inlineClasses/kt25771.kt
-inlineClasses/kt27096.kt
-inlineClasses/kt27096Generic.kt
 inlineClasses/kt27113.kt
 inlineClasses/kt27140Generic.kt
 inlineClasses/kt33119Generic.kt
 inlineClasses/kt47762Generic.kt
-inlineClasses/kt47823.kt
 inlineClasses/resultRunCatchingOrElse.kt
 inlineClasses/secondaryConstructorWithVarargGeneric.kt
 inlineClasses/secondaryConstructorsInsideInlineClassWithPrimitiveCarrierTypeGeneric.kt
@@ -571,7 +561,6 @@ innerClass/secondaryConstructor.kt
 intrinsics/throwableParamOrder.kt
 intrinsics/tostring.kt
 intrinsics/trimMarginWithBlankString.kt
-ir/lambdaWithLoop.kt
 ir/recursiveGeneric.kt
 ir/recursiveGeneric2.kt
 ir/serializationRegressions/anonFakeOverride.kt
@@ -598,7 +587,6 @@ localClasses/kt4174.kt
 localClasses/kt45383.kt
 lower/forLoopsLowering/progressions.kt
 lower/forLoopsLowering/withIndex.kt
-lower/forLoopsLowering/withIndexUInt.kt
 mangling/internalOverrideSuperCall.kt
 mangling/publicOverrideSuperCall.kt
 multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
@@ -617,7 +605,6 @@ multiplatform/k2/basic/widerVisibilityInActualClassifier.kt
 multiplatform/k2/defaultArguments/kt67488.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/expectStatic.kt
-multiplatform/k2/expectValueClassWithNoPrimaryConstructor.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
 multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt
@@ -637,7 +624,6 @@ objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlock.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlockOfNestedClass.kt
 objects/kt32749.kt
 objects/objectInLocalAnonymousObject.kt
-operatorConventions/BoundedGenericValueInRangeCheck.kt
 operatorConventions/kt20387.kt
 operatorConventions/kt44647.kt
 package/packageLocalClassNotImportedWithDefaultImport.kt
