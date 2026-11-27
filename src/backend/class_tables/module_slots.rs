@@ -454,6 +454,8 @@ impl Planner<'_> {
                     result,
                     suspend,
                 } => {
+                    // What the physical `invoke` takes, a `suspend` one's continuation included,
+                    // which is the arity a function-slot stand-in must wear.
                     let (parameters, result) = carried(parameters, *result, *suspend);
                     self.function(
                         class,
