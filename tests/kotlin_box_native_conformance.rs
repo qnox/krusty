@@ -554,6 +554,19 @@ fn native_official_dependency_interfaces_installed_by_two_files_keep_distinct_nu
     );
 }
 
+// PLATFORM-SPECIFIC: official Kotlin/Native KLIB production and linking, as above. The complete
+// portable Kotlin input is the shared multi-module regression.
+//
+/// A library lambda's parameter is a class private to the library's file: the lambda's header
+/// names the class as the body that creates it does.
+#[test]
+fn native_official_dependency_lambda_over_file_private_class_runs() {
+    run_native_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyLambdaOverFilePrivateClass.kt"),
+        "dependencyLambdaOverFilePrivateClass",
+    );
+}
+
 /// Run the shared two-module program's consumer against the library the pinned kotlinc-native
 /// produces, after kotlinc has established the program's result.
 fn run_native_against_official_producer(source: &str, stem: &str) {
