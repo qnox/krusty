@@ -8,7 +8,8 @@
 //! classifier: the narrowed class inherits it through a substitution of that classifier's type
 //! parameters, which is a different member from the one the declared type exposes, even when the
 //! substituted signature is unchanged (`x: Base<String>; if (x is Leaf) x.plain()` calls
-//! `Leaf.plain`).
+//! `Leaf.plain`). And so does a protected member that only the narrowed receiver may access from
+//! the calling class (`a: A; if (a is B) a.f()` inside `B`).
 
 use super::scope::PathRoot;
 use super::stable_path::StablePathRead;
@@ -51,7 +52,15 @@ impl Checker<'_> {
                 candidate.kind == crate::libraries::FnKind::Member
                     && crate::symbol_resolver::same_callable_declaration(candidate, selected)
             });
-        exposes_selected.then_some(declared)
+        // A protected member accessed through a smart cast to the accessing class is accessible
+        // only through that narrowed receiver, so the call keeps it.
+        let accessible = self.receiver_callable_accessible(
+            selected.visibility,
+            selected.callable.owner,
+            declared,
+            selected.callable.external_identity,
+        );
+        (exposes_selected && accessible).then_some(declared)
     }
 
     /// The type an explicit receiver read had before the smart cast that narrowed it.
@@ -97,7 +106,7 @@ impl Checker<'_> {
     }
 
     /// `declared` when a smart cast of it to `narrowed` exposes no property `name` of its own:
-    /// both types select the same declaration with the same type.
+    /// both types select the same declaration with the same type, accessible through `declared`.
     pub(super) fn unnarrowed_property_receiver(
         &self,
         declared: Ty,
@@ -132,7 +141,19 @@ impl Checker<'_> {
                     && left.getter.descriptor == right.getter.descriptor
             }
         };
+        let visibility = if write {
+            left.setter_visibility
+        } else {
+            left.visibility
+        };
+        let accessible = self.receiver_property_accessible(
+            visibility,
+            left.owner,
+            declared,
+            left.getter.external_identity,
+        );
         (same_declaration
+            && accessible
             && through_declared.ty == through_narrowed.ty
             && !self.declared_by_generic_classifier(
                 left.getter
