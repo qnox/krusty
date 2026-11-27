@@ -85,7 +85,7 @@ impl Entries {
 
     /// Build the entry of every checked constructor with defaults that another file may build an
     /// instance through, `constructible` says which, and record it by the constructor's
-    /// declaration. Such a constructor is never private, and its class is neither sealed nor an
+    /// class and ordinal. Such a constructor is never private, and its class is neither sealed nor an
     /// enum, so whoever may call it may call its entry.
     pub(super) fn publish_constructors(
         &mut self,
@@ -99,13 +99,36 @@ impl Entries {
             .map(|(&declaration, body)| (declaration, body.class, body.ordinal))
             .collect::<Vec<_>>();
         published.sort_unstable_by_key(|&(declaration, _, _)| declaration.raw());
-        for (declaration, class, ordinal) in published {
+        for (_, class, ordinal) in published {
             let target = IrConstructorTarget {
                 ordinal,
                 access: crate::ir::IrConstructorAccess::Unrestricted,
             };
             if let Some(entry) = self.constructor_entry(ir, class, target) {
-                ir.constructor_default_entries.insert(declaration, entry);
+                ir.constructor_default_entries
+                    .insert((class, ordinal), entry);
+            }
+        }
+    }
+
+    /// Build the default-argument entry of every constructor `exported` that declares defaults and
+    /// record it by the constructor's class and ordinal, for the entry its export is called through.
+    pub(super) fn publish_exported_constructors(
+        &mut self,
+        ir: &mut IrFile,
+        exported: &[super::super::ExportedConstructor],
+    ) {
+        for constructor in exported {
+            let ordinal = constructor
+                .secondary
+                .map_or(0, |secondary| secondary as u32 + 1);
+            let target = IrConstructorTarget {
+                ordinal,
+                access: crate::ir::IrConstructorAccess::Unrestricted,
+            };
+            if let Some(entry) = self.constructor_entry(ir, constructor.class, target) {
+                ir.constructor_default_entries
+                    .insert((constructor.class, ordinal), entry);
             }
         }
     }

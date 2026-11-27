@@ -496,7 +496,6 @@ ranges/contains/inDoubleRangeLiteralVsComparableRangeLiteral.kt
 ranges/contains/inExtensionRange.kt
 ranges/contains/inRangeWithCustomContains.kt
 ranges/forInCharSequenceWithCustomIterator.kt
-ranges/forInCharSequenceWithMultipleGetFunctions.kt
 ranges/forInUntil/kt42533.kt
 ranges/kt47492.kt
 ranges/stepped/expression/downTo/illegalStepNegative.kt
