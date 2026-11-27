@@ -248,6 +248,7 @@ mod generic_call_bindings;
 mod if_expression;
 mod implicit_receiver_calls;
 mod implicit_rungs;
+mod imported_singleton_members;
 mod inline_access;
 mod inline_parameter_usage;
 mod inner_constructor_calls;
@@ -439,6 +440,7 @@ mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
 mod super_calls;
+use super_calls::is_super_qualifier;
 pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
 mod type_parameter_owners;
@@ -536,10 +538,6 @@ const MAX_OVERLOAD_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES: usize = 4 * 1024 * 1024;
 const CONFLICTING_OVERLOAD_PREFIX: &str = "conflicting overloads:";
 const INAPPLICABLE_OVERLOAD_PREFIX: &str = "none of the following candidates is applicable:";
-
-fn is_super_qualifier(spelling: &str) -> bool {
-    spelling == "super" || spelling.starts_with("super<") || spelling.starts_with("super@")
-}
 
 fn lexical_receiver_label(file: &File, reference: &TypeRef) -> String {
     file.alias_spellings
@@ -5475,56 +5473,6 @@ impl<'a> Checker<'a> {
         };
         self.expr_lowers.insert(expression, lowering);
         Some(ty)
-    }
-
-    /// Explicit import of a member declared on a singleton classifier. The import scope has already
-    /// resolved the owner path and alias to stable identities; this only supplies the ordinary value
-    /// receiver used by member/property selection.
-    fn imported_singleton_member(
-        &self,
-        name: &str,
-    ) -> Option<(ImplicitReceiver, String, SingletonValue)> {
-        let mut candidates = self
-            .function_import_scope
-            .explicit_targets(name)
-            .into_iter()
-            .filter_map(|(namespace, declared_name)| {
-                crate::trace_compiler!(
-                    "resolve",
-                    "imported singleton candidate name={name} target={namespace:?}.{declared_name}"
-                );
-                let crate::symbol_source::SymbolNamespace::Classifier(classifier) = namespace
-                else {
-                    return None;
-                };
-                let singleton = self.classifier_singleton_value(classifier)?;
-                (singleton.classifier == classifier).then_some((
-                    ImplicitReceiver {
-                        receiver_role: None,
-                        ty: Ty::obj_name(classifier),
-                        declared_ty: Ty::obj_name(classifier),
-                        identity: (0, 0),
-                        extension_receiver: None,
-                        class_receiver: false,
-                        current: false,
-                        receiver_depth: 0,
-                        dsl_shadowed: false,
-                    },
-                    declared_name,
-                    singleton,
-                ))
-            })
-            .collect::<Vec<_>>();
-        if candidates.len() != 1 {
-            return None;
-        }
-        let (receiver, declared_name, singleton) = candidates.pop()?;
-        crate::trace_compiler!(
-            "resolve",
-            "imported singleton classifier={:?} storage={singleton:?}",
-            singleton.classifier
-        );
-        Some((receiver, declared_name, singleton))
     }
 
     /// A classifier contributed by a star-import level can denote a value when it is an object or
@@ -28356,6 +28304,24 @@ impl<'a> Checker<'a> {
             property.getter_visibility,
             property.setter_visibility,
         );
+        if property.context_count > 0 && !self.file.language.callable_references_to_contextual {
+            return Some(
+                self.report_context_property_reference(
+                    expression,
+                    &property.name,
+                    reference_context_arguments::ContextualPropertyDisplay {
+                        context_names: &property.context_names,
+                        context_types: property.context_types(),
+                        extension_receiver: property
+                            .extension_facade
+                            .as_ref()
+                            .and_then(|_| property.getter.params.first().copied()),
+                        property_type: property.prop_ty,
+                        mutable: property.setter.is_some(),
+                    },
+                ),
+            );
+        }
         if !self.property_reference_exposes_setter(&property, receiver) {
             property.setter = None;
         }
@@ -39974,6 +39940,9 @@ impl<'a> Checker<'a> {
         argument: ExprId,
         ty: Ty,
     ) -> CallArgKind {
+        if let Some(literal) = self.unpostponed_collection_literal_kind(argument, ty) {
+            return literal;
+        }
         if let Some(function) = self.expression_function_type(scope, argument, ty) {
             if function != ty {
                 return CallArgKind::CallableReference {
@@ -45813,12 +45782,25 @@ impl<'a> Checker<'a> {
                     .resolver()
                     .top_level_properties(&name)
                     .into_iter()
-                    .filter(|property| {
-                        property.kind == crate::libraries::PropKind::TopLevel
-                            && property.context_count == 0
-                    })
+                    .filter(|property| property.kind == crate::libraries::PropKind::TopLevel)
                     .collect::<Vec<_>>();
                 if let [property] = top_level_properties.as_slice() {
+                    if property.context_count > 0
+                        && !self.file.language.callable_references_to_contextual
+                    {
+                        let context = property.getter.params[..property.context_count].to_vec();
+                        return self.report_context_property_reference(
+                            e,
+                            &name,
+                            reference_context_arguments::ContextualPropertyDisplay {
+                                context_names: &property.context_param_names,
+                                context_types: &context,
+                                extension_receiver: None,
+                                property_type: property.ty,
+                                mutable: property.setter.is_some(),
+                            },
+                        );
+                    }
                     if let Some(ty) =
                         self.property_ref_ty(0, property.setter.is_some(), &[property.ty])
                     {

@@ -498,10 +498,14 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
             IrCheckedOperation::PropertyReference {
                 dispatch_receiver,
                 extension_receiver,
+                context_arguments,
                 ..
             } => {
                 map_option(dispatch_receiver, &mut map);
                 map_option(extension_receiver, &mut map);
+                context_arguments
+                    .iter_mut()
+                    .for_each(|argument| *argument = map(*argument));
             }
         },
         IrExpr::CallableReference(reference) => {
