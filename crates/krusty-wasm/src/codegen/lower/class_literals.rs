@@ -107,29 +107,8 @@ impl Body<'_> {
         call: u32,
         node: &IrExpr,
     ) -> Option<Result<(), Unsupported>> {
-        let IrExpr::Call {
-            callee,
-            dispatch_receiver: Some(receiver),
-            args,
-        } = node
-        else {
-            return None;
-        };
-        let Callee::External {
-            target, defaults, ..
-        } = &**callee
-        else {
-            return None;
-        };
-        if !defaults.is_empty()
-            || !self
-                .callables
-                .callable(*target)
-                .is_some_and(is_class_is_instance)
-        {
-            return None;
-        }
-        Some(self.class_is_instance(call, *receiver, args))
+        let (receiver, args) = class_is_instance_call(self.callables, node)?;
+        Some(self.class_is_instance(call, receiver, args))
     }
 
     fn class_is_instance(
@@ -141,19 +120,14 @@ impl Body<'_> {
         let [value] = args else {
             return Err("`KClass.isInstance` without its one operand".to_string());
         };
-        let IrExpr::KClassLiteral {
-            classifier: Some(ty),
-            value: None,
-            type_argument: false,
-        } = self.ir.expr(receiver).clone()
-        else {
+        let Some(target) = class_literal_target(self.ir, receiver) else {
             return Err(
                 "`KClass.isInstance` of a class token that is not a class literal: the token \
                  carries no supertype information"
                     .to_string(),
             );
         };
-        self.type_test(call, IrTypeOp::InstanceOf, *value, ty.non_null())
+        self.type_test(call, IrTypeOp::InstanceOf, *value, target)
     }
 
     /// Which name the external property `target` reads, when its getter is the platform stdlib's
@@ -215,4 +189,53 @@ pub(in crate::codegen) fn is_class_is_instance(fact: &BackendCallableFact) -> bo
     ) && fact.name == "isInstance"
         && fact.params.as_slice() == [Ty::nullable(objects::any())]
         && fact.ret == Ty::Boolean
+}
+
+/// The receiver and operands of `node` when it is a call of `KClass.isInstance`.
+fn class_is_instance_call<'n>(
+    callables: &krusty::backend::CheckedBackendCallables,
+    node: &'n IrExpr,
+) -> Option<(u32, &'n [u32])> {
+    let IrExpr::Call {
+        callee,
+        dispatch_receiver: Some(receiver),
+        args,
+    } = node
+    else {
+        return None;
+    };
+    let Callee::External {
+        target, defaults, ..
+    } = &**callee
+    else {
+        return None;
+    };
+    (defaults.is_empty()
+        && callables
+            .callable(*target)
+            .is_some_and(is_class_is_instance))
+    .then_some((*receiver, args.as_slice()))
+}
+
+/// The class a class literal receiver names, when it is a literal of a type.
+fn class_literal_target(ir: &IrFile, receiver: u32) -> Option<Ty> {
+    match ir.expr(receiver) {
+        IrExpr::KClassLiteral {
+            classifier: Some(ty),
+            value: None,
+            type_argument: false,
+        } => Some(ty.non_null()),
+        _ => None,
+    }
+}
+
+/// The class a call of `KClass.isInstance` on a class literal tests: the class its type test
+/// reads, which a cross-file link must name before the body is emitted.
+pub(in crate::codegen) fn class_is_instance_target(
+    ir: &IrFile,
+    callables: &krusty::backend::CheckedBackendCallables,
+    node: &IrExpr,
+) -> Option<Ty> {
+    let (receiver, _) = class_is_instance_call(callables, node)?;
+    class_literal_target(ir, receiver)
 }
