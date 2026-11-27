@@ -1487,6 +1487,15 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.install_local_interface(ir, signature)
     }
 
+    fn implement_inherited_members(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+        owner: TypeName,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        self.declare_inherited_members(ir, signature, owner)
+    }
+
     fn link_local_constructor(
         &mut self,
         ir: &mut IrFile,
@@ -1500,27 +1509,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn inherited_member(&self, callee: &KlibIrSignature) -> Option<KlibIrSignature> {
-        let &KlibIrSignature::FileLocal { file, slot } = callee else {
-            return None;
-        };
-        let signature = KlibDeclarationSignature::FileLocal { file, slot };
-        match self
-            .sources
-            .bodies
-            .linked_origin(&self.active_module, &signature)
-        {
-            KlibCalleeOrigin::Exact(KlibDependencyCallable {
-                declaration: KlibDeclarationSignature::Public(member),
-                ..
-            }) => Some(KlibIrSignature::Public(member)),
-            KlibCalleeOrigin::Exact(KlibDependencyCallable {
-                declaration: KlibDeclarationSignature::Accessor(member),
-                ..
-            }) => Some(KlibIrSignature::Accessor(member)),
-            KlibCalleeOrigin::Exact(_)
-            | KlibCalleeOrigin::Missing
-            | KlibCalleeOrigin::Ambiguous => None,
-        }
+        fake_overrides::inherited_member(self, callee)
     }
 
     fn link_local_function(
