@@ -1786,6 +1786,18 @@ fn assert_determined_member_signatures(ir: &IrFile, c: &krusty::ir::IrClass) {
     }
 }
 
+/// Whether the field stores a capture the inlined call supplies, which kotlinc adds to a
+/// regenerated object by descriptor, so it carries no generic signature.
+fn field_is_inlined_capture(c: &krusty::ir::IrClass, field_index: usize) -> bool {
+    c.ctor_args.iter().any(|argument| {
+        argument.field_index == u32::try_from(field_index).ok()
+            && argument
+                .capture
+                .as_ref()
+                .is_some_and(|capture| capture.inlined)
+    })
+}
+
 /// The identity source map of an anonymous object regenerated at an inline call. Its primary file
 /// is the declaration class, not the `$$inlined$` binary name the copy is emitted under.
 fn start_regenerated_anonymous_source_map(
@@ -1799,9 +1811,31 @@ fn start_regenerated_anonymous_source_map(
     let Some(source) = ir.classes.get(specialization.source as usize) else {
         return;
     };
-    let lines = u16::try_from(ir.source_line_count)
-        .unwrap_or(u16::MAX)
-        .max(1);
+    // The primary file is the declaration's: another file's, when the inline function that
+    // declares the object is a template this file only expands.
+    let declaring = match specialization.inline_callee {
+        krusty::ir::IrInlineCallee::Module(callable) => {
+            ir.checked_callable_functions.get(&callable).copied()
+        }
+        krusty::ir::IrInlineCallee::Dependency(_) => None,
+    }
+    .filter(|function| ir.foreign_inline_templates.contains(function))
+    .and_then(|function| ir.foreign_template_source(function))
+    .and_then(|source| ir.source_debug.file(source.source));
+    let line_count = match declaring {
+        Some(file) => {
+            writer.set_source_file(Some(
+                file.name
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(&file.name)
+                    .to_string(),
+            ));
+            file.line_count
+        }
+        None => ir.source_line_count,
+    };
+    let lines = u16::try_from(line_count).unwrap_or(u16::MAX).max(1);
     writer.start_inline_origin_source_map_at(lines, &source.fq_name());
 }
 
@@ -2074,7 +2108,8 @@ fn emit_class(
                 type_parameter,
                 field_visibility::backs_var_property(c, field_index),
             )
-            .filter(|_| !field.is_property_delegate());
+            .filter(|_| !field.is_property_delegate())
+            .filter(|_| !field_is_inlined_capture(c, field_index));
         let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let field_desc = type_descriptor(jvm_value_ty(ty));
         // Coroutine continuation fields are compiler-generated storage, visited eagerly with no
@@ -3094,7 +3129,8 @@ fn emit_enum_class(
                 f.type_param.as_deref(),
                 field_visibility::backs_var_property(c, field_index),
             )
-            .filter(|_| !f.is_property_delegate());
+            .filter(|_| !f.is_property_delegate())
+            .filter(|_| !field_is_inlined_capture(c, field_index));
         cw.add_field_late_sig(
             access,
             &physical_name,

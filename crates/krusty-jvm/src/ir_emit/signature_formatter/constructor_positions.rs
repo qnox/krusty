@@ -19,6 +19,9 @@ pub(in crate::ir_emit) enum ConstructorParameter {
     OuterInstance(TypeName),
     /// The name or ordinal of an enum constructor.
     EnumSynthetic,
+    /// A capture a regenerated object takes from the inlined call: kotlinc adds it by descriptor,
+    /// so it never makes the signature generic.
+    Descriptor(String),
 }
 
 impl JvmSignatureFormatter<'_> {
@@ -43,6 +46,7 @@ impl JvmSignatureFormatter<'_> {
                         .any(|segment| !segment.variances.is_empty());
                 }
                 ConstructorParameter::EnumSynthetic => generic = true,
+                ConstructorParameter::Descriptor(descriptor) => signature.push_str(descriptor),
             }
         }
         signature.push_str(")V");

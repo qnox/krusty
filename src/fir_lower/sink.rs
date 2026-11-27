@@ -1404,6 +1404,12 @@ impl<'a> CommonIrBodySink<'a> {
                 is_static: class.is_none(),
                 dispatch_receiver: class.map(|class| self.ir.classes[class as usize].fq_name_id()),
             });
+            // A member of a class an inline template declares in another file is compiled only to
+            // be read; its source unit is gone, so it carries no declaration line, but it still
+            // names its receiver, parameters and locals as the declaring file's own does.
+            if anchor.source != self.source {
+                self.ir.fn_debug_locals.insert(function);
+            }
             if let Some(owner) = companion_block_owner {
                 self.ir.classes[owner as usize].methods.push(function);
                 self.ir.note_class_method(owner, function);

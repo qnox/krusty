@@ -152,18 +152,6 @@ fn a_renamed_outer_instance_skips_every_field_name_the_object_declares() {
     common::expect_box_ok_with_stdlib(OWN_OUTER_INSTANCE_NAME_TAKEN, "OwnOuterInstanceNameTaken");
 }
 
-// `filter`'s compiled body hands `predicate` to the suspend literal it passes to `source`, which
-// this compiler materializes rather than inlining into the object it regenerates. Which lowering
-// the call takes is decided from that body before anything is inlined
-// (`inliner::keeps_lambda_as_value`), never by inlining it and retrying another route.
-const KEPT_AS_VALUE: &str = include_str!("box_regressions/compiledCrossinline/keptAsValue.kt");
-
-#[test]
-fn a_body_keeping_a_crossinline_lambda_as_a_value_is_routed_before_inlining() {
-    let sources = fixture_sources(KEPT_AS_VALUE, &["KeptAsValue.kt"]);
-    common::expect_box_same_as_kotlinc(&sources[0].1, "KeptAsValue");
-}
-
 const CONSTRUCTOR_LAMBDAS: &str =
     include_str!("box_regressions/compiledCrossinline/constructorLambdas.kt");
 

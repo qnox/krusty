@@ -97,6 +97,20 @@ pub(super) fn emit_func_ref_class(
             None => cw.set_enclosing_class(&owner),
         }
     }
+    // A reference the inline function itself declares is mapped like the lambdas it declares: the
+    // class carries the function's file as its own source map. One nested in a class or lambda
+    // of that function is the outer class's code, already mapped.
+    if matches!(c.enclosure, Some(krusty::ir::IrEnclosure::Function(function)) if ir.inline_fns.contains(&function))
+    {
+        super::enclosure::start_inline_class_source_map(
+            ir,
+            env.override_results,
+            c,
+            None,
+            facade,
+            &mut cw,
+        );
+    }
     env.inner_classes.register(&mut cw);
     cw.add_interface(&jvm_function_interface(physical_arity));
     if suspend {

@@ -21,6 +21,19 @@ fn function_owner(ir: &IrFile, function: u32, facade: &str) -> Option<String> {
     }
     match first {
         Some(class) => Some(ir.classes.get(class as usize)?.fq_name()),
+        // Another file's inline function, whose template this file expands, belongs to the class
+        // or facade that file declares it in.
+        None if ir.foreign_inline_templates.contains(&function) => Some(
+            match (
+                ir.functions.get(function as usize)?.dispatch_receiver,
+                ir.foreign_template_facade(function),
+            ) {
+                (Some(owner), _) | (None, Some(owner)) => {
+                    krusty::jvm::names::classfile_internal_name_of(owner).to_owned()
+                }
+                (None, None) => facade.to_owned(),
+            },
+        ),
         None => Some(facade.to_owned()),
     }
 }
@@ -261,6 +274,22 @@ fn anonymous_view(
         parent: None,
         consumed_inline_capture: false,
     }
+}
+
+/// The class whose code `function`, a method of a call-site copy of an inline declaration's
+/// lambda or anonymous object, was copied into: the owner of the function that holds the call.
+pub(crate) fn copy_caller_owner(ir: &IrFile, function: u32, facade: &str) -> Option<String> {
+    if let Some(specialization) = ir.specialized_functions.get(&function) {
+        return semantic_owner(ir, specialization, facade);
+    }
+    let class = ir
+        .classes
+        .iter()
+        .position(|class| class.methods.contains(&function))?;
+    let specialization = ir
+        .specialized_anonymous_classes
+        .get(&u32::try_from(class).ok()?)?;
+    semantic_owner(ir, &anonymous_view(specialization), facade)
 }
 
 fn anonymous_peer(

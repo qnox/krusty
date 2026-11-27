@@ -1039,6 +1039,12 @@ fn publish_one_copy(
             nested.push(body);
         }
     }
+    consume_parameterized_lambdas(ir, copy_id)?;
+    let spec = ir
+        .specialized_anonymous_classes
+        .get(&copy_id)
+        .cloned()
+        .ok_or_else(|| malformed(source_name))?;
     consume_parameter_lambdas(ir, copy_id, &spec, source_name)?;
     publish_property_members(ir, source, source_name, copy_name, &clones)?;
     retarget_caller_property_uses(ir, copy_id, &spec, source_name)?;
@@ -2038,6 +2044,68 @@ fn inline_lambda(ir: &crate::ir::IrFile, expression: ExprId) -> Option<(u32, Exp
     }
 }
 
+/// Lift each capturing lambda that takes parameters of its own, once the copy's constructor code
+/// is complete: a lambda that code reads from its parameter stays a value the code can invoke, and
+/// that is only known after the declaration's initializers are cloned. Each call of the lambda's
+/// field then binds its arguments to named locals of the spliced body, as an ordinary inline call
+/// does.
+fn consume_parameterized_lambdas(
+    ir: &mut crate::ir::IrFile,
+    copy_id: ClassId,
+) -> Result<(), super::super::FirLoweringFailure> {
+    let Some(spec) = ir.specialized_anonymous_classes.get(&copy_id).cloned() else {
+        return Ok(());
+    };
+    let class_name = ir.classes[copy_id as usize].fq_name;
+    let construction = spec.order;
+    let mut roots = spec.pending_property_roots.clone();
+    roots.extend(
+        ir.classes[copy_id as usize]
+            .properties
+            .iter()
+            .filter_map(|property| property.initializer),
+    );
+    let mut lifts = Vec::new();
+    for lambda in inline_lambda_arguments(ir, copy_id, construction) {
+        let parameters = ir
+            .functions
+            .get(lambda.impl_fn as usize)
+            .ok_or_else(|| malformed(class_name))?
+            .params
+            .len();
+        if parameters <= lambda.capture_count
+            || ir.suspend_funs.contains(&lambda.impl_fn)
+            || constructor_reads_parameter(ir, copy_id, &roots, lambda.parameter)
+        {
+            continue;
+        }
+        lifts.push(lambda);
+    }
+    lifts.sort_by_key(|lambda| lambda.parameter);
+    let before = ir.classes[copy_id as usize].fields.len();
+    for lambda in lifts.iter().rev() {
+        lift_capturing_lambda(
+            ir,
+            copy_id,
+            construction,
+            &roots,
+            lambda,
+            class_name,
+            &spec.inline_callee_source_name,
+        )?;
+    }
+    let after = ir.classes[copy_id as usize].fields.len();
+    let omitted = u32::try_from(before.saturating_sub(after)).map_err(|_| malformed(class_name))?;
+    let record = ir
+        .specialized_anonymous_classes
+        .get_mut(&copy_id)
+        .ok_or_else(|| malformed(class_name))?;
+    record.omitted_capture_fields += omitted;
+    record.field_count =
+        u32::try_from(after).map_err(|_| malformed(class_name))? + record.omitted_capture_fields;
+    Ok(())
+}
+
 /// Inline a lambda into the copy when every use is a zero-argument call of its capture field.
 ///
 /// A capture-free, parameter-free, non-suspend body with no value slots is spliced as it is. A
@@ -2068,6 +2136,7 @@ fn consume_trivially_spliceable_lambdas(
         }
         let parameters = function.params.len();
         if lambda.capture_count != 0 {
+            // A lambda that takes parameters is lifted once the copy's constructor code is known.
             if parameters != lambda.capture_count {
                 continue;
             }
@@ -2181,7 +2250,7 @@ fn lift_capturing_lambda(
         .ok_or_else(|| malformed(class_name))?
         .params
         .clone();
-    if types.len() != lambda.capture_count {
+    if types.len() < lambda.capture_count {
         return Err(malformed(class_name));
     }
     let identities = ir
@@ -2233,7 +2302,7 @@ fn lift_capturing_lambda(
         class,
         construction,
         &captures,
-        &types,
+        &types[..lambda.capture_count],
         &names,
         class_name,
     )?;
@@ -2288,11 +2357,8 @@ fn capturing_field_invocations(
                 field_reads.insert(expression);
             }
         }
-        if let IrExpr::InvokeFunction { func, args, .. } = ir.expr(expression) {
+        if let IrExpr::InvokeFunction { func, .. } = ir.expr(expression) {
             if let Some(read) = capture_field_read(ir, *func, class, field) {
-                if !args.is_empty() {
-                    return None;
-                }
                 let IrExpr::GetField { receiver, .. } = ir.expr(read) else {
                     return None;
                 };
@@ -2497,11 +2563,55 @@ fn splice_lifted_body(
     let class_name = ir.classes[class as usize].fq_name;
     let (spliced, _) = crate::ir::clone_expression_dag(ir, lambda.inline_body);
     let capture_count = u32::try_from(lambda.capture_count).map_err(|_| malformed(class_name))?;
+    // The call's arguments bind the lambda's own value parameters, after the captures, as the
+    // ordinary inline splice binds them: each is a named local of the spliced body.
+    let IrExpr::InvokeFunction { args, .. } = ir.expr(invocation).clone() else {
+        return Err(malformed(class_name));
+    };
+    let parameter_types = ir
+        .functions
+        .get(lambda.impl_fn as usize)
+        .ok_or_else(|| malformed(class_name))?
+        .params
+        .clone();
+    if parameter_types.len() != lambda.capture_count + args.len() {
+        return Err(malformed(class_name));
+    }
+    let identities = ir
+        .function_parameter_identities(lambda.impl_fn)
+        .map(<[crate::ir::IrParameterIdentity]>::to_vec);
     let temporary = ir.next_value_slot();
-    let formal_slots = (0..capture_count)
+    let mut declarations = Vec::with_capacity(args.len());
+    for (ordinal, argument) in args.iter().copied().enumerate() {
+        let position = lambda.capture_count + ordinal;
+        let source_name = identities
+            .as_ref()
+            .and_then(|identities| identities.get(position))
+            .and_then(|identity| identity.source_name.clone());
+        let declaration = ir.add_expr(IrExpr::Variable {
+            index: temporary
+                + capture_count
+                + u32::try_from(ordinal).map_err(|_| malformed(class_name))?,
+            ty: parameter_types[position],
+            init: Some(argument),
+            named: source_name.is_some(),
+        });
+        ir.call_operand_bindings.insert(declaration);
+        if let Some(name) = source_name {
+            ir.value_names.insert(declaration, name);
+            ir.set_debug_local_provenance(
+                declaration,
+                crate::ir::IrDebugLocalProvenance::InlineLambdaParameter { depth: 0 },
+            );
+        }
+        declarations.push(declaration);
+    }
+    let formal_count =
+        capture_count + u32::try_from(args.len()).map_err(|_| malformed(class_name))?;
+    let formal_slots = (0..formal_count)
         .map(|index| temporary + index)
         .collect::<Vec<_>>();
-    let local_base = temporary + capture_count;
+    let local_base = temporary + formal_count;
     super::super::source_calls::rehome_inline_body_values(ir, spliced, &formal_slots, local_base)
         .ok_or_else(|| malformed(class_name))?;
     replace_lifted_capture_reads(
@@ -2514,7 +2624,21 @@ fn splice_lifted_body(
         field_base,
     );
     ir.exprs[invocation as usize] =
-        spliced_lambda_frame(ir, spliced, lambda.impl_fn, inline_callee);
+        spliced_lambda_frame(ir, spliced, lambda.impl_fn, inline_callee, declarations);
+    // The closing `nop` is the lambda literal's last line (its `}`), as an ordinary splice marks.
+    if let Some(end) = ir.end_line(lambda.expression) {
+        ir.set_end_line(invocation, end);
+    }
+    // The call now ends an inlined body, after which kotlinc forgets the line it ran under.
+    if let Some(origin) = ir.fir_origins.get(&invocation).copied() {
+        ir.fir_origins.insert(
+            invocation,
+            crate::ir::IrNodeOrigin::Synthetic {
+                cause: origin.fir_origin(),
+                kind: crate::fir::SyntheticOriginKind::InlinedCall,
+            },
+        );
+    }
     ir.suspend_calls.remove(&invocation);
     ir.suspend_call_overridden_results.remove(&invocation);
     Ok(())
@@ -2528,6 +2652,7 @@ fn spliced_lambda_frame(
     spliced: ExprId,
     implementation: FunId,
     inline_callee: &str,
+    mut bindings: Vec<ExprId>,
 ) -> IrExpr {
     let marker = ir.add_expr(IrExpr::InlineFrameMarker);
     ir.value_names.insert(marker, inline_callee.to_owned());
@@ -2541,8 +2666,10 @@ fn spliced_lambda_frame(
     // The spliced caller body is copied code: the holder classes it names are not mapped into
     // this class's `InnerClasses`, and its lines are not the declaration's.
     mark_inline_copy_tree(ir, spliced);
+    // The parameter bindings precede the marker in the one frame, so the locals close together.
+    bindings.push(marker);
     IrExpr::Block {
-        stmts: vec![marker],
+        stmts: bindings,
         value: Some(spliced),
     }
 }
@@ -2676,7 +2803,7 @@ fn inline_lambda_into_field_invokes(
     for invocation in invocations {
         let (body, _) = crate::ir::clone_expression_dag(ir, inline_body);
         ir.exprs[invocation as usize] =
-            spliced_lambda_frame(ir, body, implementation, inline_callee);
+            spliced_lambda_frame(ir, body, implementation, inline_callee, Vec::new());
         ir.suspend_calls.remove(&invocation);
         ir.suspend_call_overridden_results.remove(&invocation);
     }

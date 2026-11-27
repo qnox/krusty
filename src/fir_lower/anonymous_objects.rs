@@ -76,6 +76,9 @@ impl BodyLowering<'_> {
         let delegate_count = u32::try_from(delegates.len())
             .map_err(|_| FirLoweringFailure::ValueIdentityOverflow)?;
         let class_decl = &mut self.ir.classes[class as usize];
+        class_decl.decl_line = object.decl_line;
+        class_decl.decl_start_line = object.decl_start_line;
+        class_decl.decl_end_line = object.decl_end_line;
         class_decl.constructor_prefix_count = class_decl
             .constructor_prefix_count
             .checked_add(delegate_count)

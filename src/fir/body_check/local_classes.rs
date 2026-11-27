@@ -1777,6 +1777,9 @@ impl BodyFirChecker<'_> {
             capture_order,
             delegate_arguments: delegate_arguments.into_boxed_slice(),
             super_arguments,
+            decl_line: class.decl_line,
+            decl_start_line: class.decl_start_line,
+            decl_end_line: class.decl_end_line,
         }))
     }
 

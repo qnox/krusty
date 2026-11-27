@@ -315,19 +315,39 @@ impl Emitter<'_> {
             let source = provenance
                 .and_then(|frames| frames.last())
                 .map(|frame| frame.source)
+                .or_else(|| self.foreign_copy_source())
                 .or_else(|| self.ir.source_debug.current());
             if let Some(source) = source {
                 let mapped = if self.ir.source_debug.is_current(source) {
-                    self.ir
-                        .source_debug
-                        .file(source)
-                        .map(|identity| (identity.name.to_string(), self.facade.clone()))
+                    self.ir.source_debug.file(source).map(|identity| {
+                        let owner = self.function.and_then(|function| {
+                            super::lambda_class_names::copy_caller_owner(
+                                self.ir,
+                                function,
+                                &self.facade,
+                            )
+                        });
+                        (
+                            identity.name.to_string(),
+                            owner.unwrap_or_else(|| self.facade.clone()),
+                        )
+                    })
                 } else {
-                    provenance
-                        .and_then(|frames| frames.last())
-                        .and_then(|frame| {
+                    match provenance.and_then(|frames| frames.last()) {
+                        Some(frame) => {
                             self.copied_inline_file(frame.function, frame.owner, frame.source)
-                        })
+                        }
+                        // The copy's own code, in the file that declares the function holding
+                        // the call.
+                        None => self.ir.source_debug.file(source).and_then(|identity| {
+                            let owner = super::lambda_class_names::copy_caller_owner(
+                                self.ir,
+                                self.function?,
+                                &self.facade,
+                            )?;
+                            Some((identity.name.to_string(), owner))
+                        }),
+                    }
                 };
                 if let Some((source_file, path)) = mapped {
                     if let Some(mapped) = self.cw.source_map_for_inlining(1).and_then(|map| {
@@ -404,6 +424,19 @@ impl Emitter<'_> {
             }
             krusty::ir::IrInlineCallee::Dependency(_) => None,
         }
+    }
+
+    /// The source file of a call-site copy this file only reads, because the function holding its
+    /// call is another file's inline template: that file writes the class.
+    fn foreign_copy_source(&self) -> Option<krusty::fir::SourceFileId> {
+        let function = self.function?;
+        let class = self
+            .ir
+            .classes
+            .iter()
+            .find(|class| class.methods.contains(&function))?;
+        let template = crate::inner_classes::foreign_copy_template(self.ir, class)?;
+        Some(self.ir.foreign_template_source(template)?.source)
     }
 
     /// The source file and JVM path a copied inline line is mapped under.
