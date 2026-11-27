@@ -32,7 +32,8 @@ pub enum NativeModulesOutcome {
 /// assigned to their original fragments and its refinement edges are preserved.
 pub fn kotlin_native_multimodule_outcome(source: &str) -> Option<NativeModulesOutcome> {
     let recorded_source = [("modules.kt", source)];
-    let fingerprint_arguments = ["native-module-graph-v8-joint-fragments".to_string()];
+    let fingerprint_arguments =
+        ["native-module-graph-v9-jvm-properties-on-the-compiler-jvm".to_string()];
     let files = recorded(
         CompilationTarget::Native,
         "multimodule-program",
@@ -77,7 +78,13 @@ fn native_module_sources(source: &str) -> (Vec<krusty::conformance::ModuleBlock>
     .expect("Native module directives select a supported compiler configuration");
     let modules = krusty::conformance::split_modules(&prepared)
         .expect("the kotlinc-native multimodule oracle requires a valid // MODULE: graph");
-    (modules, configuration.arguments)
+    // A directive-selected test-only feature needs the JVM property Kotlin's own test runner
+    // supplies; the compiler server sets it on its JVM.
+    let mut arguments = krusty::conformance::reference_jvm_properties(
+        configuration.arguments.iter().map(String::as_str),
+    );
+    arguments.extend(configuration.arguments);
+    (modules, arguments)
 }
 
 fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<String, Vec<u8>>> {
@@ -423,7 +430,10 @@ mod tests {
         )
         .expect("the pinned feature table")
         .language_argument("+CompanionBlocks");
-        assert_eq!(arguments, vec![flag]);
+        let mut expected =
+            krusty::conformance::reference_jvm_properties(std::iter::once(flag.as_str()));
+        expected.push(flag);
+        assert_eq!(arguments, expected);
     }
 
     #[test]

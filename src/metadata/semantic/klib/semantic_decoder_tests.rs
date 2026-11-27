@@ -187,6 +187,27 @@ fn context_and_value_parameter_inline_modifiers_are_retained_exactly() {
 }
 
 #[test]
+fn a_value_parameter_equality_bound_reaches_the_function_declaration() {
+    let (strings, qnames) = kotlin_types(&["Boolean", "Any", "String"]);
+    let boolean = class_type(1);
+    let mut any = class_type(2);
+    int_field(&mut any, 3, 1);
+    let mut parameter = value_parameter(1, &any, 0);
+    bytes_field(&mut parameter, 9, &class_type(3));
+    let mut function = function_with_return(Some(&boolean), None);
+    bytes_field(&mut function, 6, &parameter);
+    let bytes = fragment(&strings, &qnames, &package_with_function(&function, None));
+
+    let package = parse_package_fragment_checked(&bytes).expect("valid equality bound");
+    let [function] = package.functions.as_slice() else {
+        panic!("one function is decoded")
+    };
+    let bound = function.equality_bound.as_ref().expect("the bound is kept");
+    assert_eq!(bound.internal(), Some("kotlin/String"));
+    assert!(!bound.nullable());
+}
+
+#[test]
 fn type_alias_expansion_retains_definitely_non_null_argument_path() {
     let strings = ["Alias", "T", "kotlin", "Array"];
     let qnames = [qname(2, None, 1), qname(3, Some(0), 0)];

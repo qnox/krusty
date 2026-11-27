@@ -862,6 +862,7 @@ fn a_klib_declaration_signature_is_frozen_with_its_callable() {
         annotation_applications: Vec::new(),
         return_value_status: Default::default(),
         contract: None,
+        equality_bound: None,
     };
     let provider = krusty::klib_libraries::KlibLibraries::from_packages(vec![(
         vec!["kotlin".to_string(), "io".to_string()],

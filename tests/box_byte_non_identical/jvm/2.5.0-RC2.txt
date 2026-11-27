@@ -3082,17 +3082,9 @@ specialBuiltins/removeSetInt.kt
 statics/incInClassObject.kt
 statics/inheritedPropertyInClassObject.kt
 strictEquals/abstractBound.kt
-strictEquals/crossModuleInheritance.kt
 strictEquals/delegated.kt
-strictEquals/directEqualsCall.kt
 strictEquals/fullValueClass.kt
 strictEquals/generic.kt
-strictEquals/implicitInvoke.kt
-strictEquals/inheritedExplicit.kt
-strictEquals/inheritedImplicit.kt
-strictEquals/nullableLhs.kt
-strictEquals/referenceEqualityGuard.kt
-strictEquals/simple.kt
 strictEquals/typealiasInBound.kt
 strings/charSequenceGet.kt
 strings/charSequenceSubSequence.kt

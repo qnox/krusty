@@ -282,6 +282,7 @@ mod tests {
             annotation_applications: Vec::new(),
             return_value_status: Default::default(),
             contract: None,
+            equality_bound: None,
         }
     }
 

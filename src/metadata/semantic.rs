@@ -215,6 +215,9 @@ pub struct KotlinFunction {
     pub annotation_applications: Vec<AnnotationApplication>,
     pub return_value_status: crate::types::ReturnValueStatus,
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
+    /// The `@EqualityBound` of the value parameter that declares one: an `equals` returning
+    /// `true` proves its argument has this type.
+    pub equality_bound: Option<KotlinType>,
 }
 
 #[derive(Default)]

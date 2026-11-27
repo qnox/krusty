@@ -768,7 +768,7 @@ fn kotlinc_compile_on(
 /// Split `bin/kotlinc`'s `-D*` JVM system properties out of the compiler argument list.
 ///
 /// `-destination` is the compiler's output-directory alias and stays a compiler argument.
-fn kotlinc_jvm_properties(args: &[String]) -> (Vec<String>, Vec<String>) {
+pub fn kotlinc_jvm_properties(args: &[String]) -> (Vec<String>, Vec<String>) {
     let mut properties = Vec::new();
     let mut compiler_args = Vec::new();
     for arg in args {

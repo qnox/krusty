@@ -1022,6 +1022,7 @@ fn check_and_dispatch_scheduled_function_body_in_session_with_source(
     )
     .map_err(CheckedBodyDriverFailure::Check)?;
     publish_result_type(&mut body, signature.result)?;
+    body.set_header_line(function.sig_line);
     match function.body {
         FunBody::Expr(_) => body.set_implicit_return(),
         // A block body falls off its closing `}`. The line travels with the checked body, so a

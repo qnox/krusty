@@ -1196,7 +1196,6 @@ specialBuiltins/throwable.kt
 specialBuiltins/throwableCause.kt
 specialBuiltins/throwableComplex.kt
 specialBuiltins/throwableImpl.kt
-strictEquals/crossModuleInheritance.kt
 stringTrim/stringTrim.kt
 strings/charSequenceGet.kt
 strings/charSequenceSubSequence.kt

@@ -976,6 +976,8 @@ struct SemanticValueParameter {
     has_default: bool,
     inline_modifier: crate::types::InlineParameterModifier,
     is_vararg: bool,
+    /// `@EqualityBound`: the type an `equals` proves its argument has when it returns `true`.
+    equality_bound: Option<metadata::KotlinType>,
 }
 
 fn semantic_value_parameter(
@@ -1006,14 +1008,17 @@ fn semantic_value_parameter(
             "vararg element type",
         )?;
     }
-    if parameter.equality_bound_body.is_some() || parameter.equality_bound_id.is_some() {
+    let equality_bound = (parameter.equality_bound_body.is_some()
+        || parameter.equality_bound_id.is_some())
+    .then(|| {
         tables.type_ref(
             parameter.equality_bound_body.as_deref(),
             parameter.equality_bound_id,
             type_parameters,
             "value-parameter equality bound",
-        )?;
-    }
+        )
+    })
+    .transpose()?;
     let declared = crate::metadata::DeclaredValueParameter::of_flags(parameter.flags);
     Ok(SemanticValueParameter {
         ty,
@@ -1021,6 +1026,7 @@ fn semantic_value_parameter(
         has_default: declared.declares_default,
         inline_modifier: declared.inline_modifier,
         is_vararg: parameter.vararg_elem_body.is_some() || parameter.vararg_elem_id.is_some(),
+        equality_bound,
     })
 }
 
@@ -1364,9 +1370,11 @@ fn semantic_function(
             "function contains a value parameter that did not decode completely",
         ));
     }
+    let mut equality_bound = None;
     for value in value_bodies {
         let parameter =
             semantic_value_parameter(value, tables, &type_parameters, "function parameter")?;
+        equality_bound = equality_bound.or(parameter.equality_bound);
         let top_index = top_params.len();
         if parameter.is_vararg {
             vararg = Some(top_index);
@@ -1463,6 +1471,7 @@ fn semantic_function(
         annotation_applications,
         return_value_status: function.return_value_status,
         contract,
+        equality_bound,
     };
     Ok((member, declaration))
 }
