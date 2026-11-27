@@ -122,8 +122,9 @@ impl Translation<'_, '_> {
             return None;
         }
         let mut statements = Vec::new();
-        let last = self.temporary(&mut statements, counter, end, false);
+        // The bounds run in source order: `next()..next()` reads its start first.
         let induction = self.temporary(&mut statements, counter, start, true);
+        let last = self.temporary(&mut statements, counter, end, false);
         let id = self.fresh_loop();
         self.frame.loops.push(EnclosingLoop {
             label: Some(found.label.to_owned()),
