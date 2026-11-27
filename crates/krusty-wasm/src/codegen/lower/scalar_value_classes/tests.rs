@@ -58,3 +58,27 @@ fn runtime_array_views_retain_their_own_representation() {
         Ok(None),
     );
 }
+
+#[test]
+fn an_unsigned_class_answers_its_storage_getter_at_the_signed_value_it_wraps() {
+    use krusty::backend::DependencyGetterSignature;
+    let getter = |owner: &str, result: Ty| DependencyGetterSignature {
+        owner: type_name(owner),
+        name: "data",
+        parameters: &[],
+        result,
+    };
+    for (owner, wrapped) in [
+        ("kotlin/UByte", Ty::Byte),
+        ("kotlin/UShort", Ty::Short),
+        ("kotlin/UInt", Ty::Int),
+        ("kotlin/ULong", Ty::Long),
+    ] {
+        assert!(realizes_unsigned_storage_getter(getter(owner, wrapped)));
+        assert!(!realizes_unsigned_storage_getter(getter(owner, Ty::Double)));
+    }
+    assert!(!realizes_unsigned_storage_getter(getter(
+        "sample/Meters",
+        Ty::Int
+    )));
+}

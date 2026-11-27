@@ -12,7 +12,46 @@ pub(super) fn member_operation(
 ) -> Option<IrIntrinsic> {
     match operation {
         krusty::libraries::CompilerIntrinsic::StringGet => Some(IrIntrinsic::StringGet),
+        // The stdlib's comparison over the carrier of an unsigned class orders the unsigned
+        // values those carriers hold.
+        krusty::libraries::CompilerIntrinsic::UnsignedCompare { carrier } => {
+            let operand = match carrier {
+                Ty::Int => Ty::UInt,
+                Ty::Long => Ty::ULong,
+                _ => return None,
+            };
+            Some(IrIntrinsic::UnsignedCompare { operand })
+        }
         _ => None,
+    }
+}
+
+/// The call frame `operation` realizes: a mismatched frame is not the authenticated declaration.
+pub(super) fn call_frame(
+    operation: IrIntrinsic,
+    params: &[Ty],
+    ret: Ty,
+    defaults: &[u32],
+    extension: Option<u32>,
+) -> Result<(), Unsupported> {
+    match operation {
+        IrIntrinsic::UnsignedCompare { operand } => {
+            let carrier = if operand == Ty::ULong {
+                Ty::Long
+            } else {
+                Ty::Int
+            };
+            if params == [carrier, carrier]
+                && ret == Ty::Int
+                && defaults.is_empty()
+                && extension.is_none()
+            {
+                Ok(())
+            } else {
+                Err("an authenticated unsigned comparison with a mismatched call frame".into())
+            }
+        }
+        _ => string_get_frame(params, ret, defaults, extension),
     }
 }
 

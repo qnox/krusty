@@ -14,6 +14,23 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
+/// Whether this target answers a library body's read of the storage property of an unsigned
+/// integer class itself: the class travels as the signed value it wraps, so the read is the
+/// receiver's own value ([`Body::scalar_value_storage_read`] lowers it once the provider's
+/// declaration names the property).
+pub(in super::super) fn realizes_unsigned_storage_getter(
+    getter: krusty::backend::DependencyGetterSignature<'_>,
+) -> bool {
+    let underlying = match Ty::obj_name(getter.owner).canonical_semantic() {
+        Ty::UByte => Ty::Byte,
+        Ty::UShort => Ty::Short,
+        Ty::UInt => Ty::Int,
+        Ty::ULong => Ty::Long,
+        _ => return false,
+    };
+    getter.parameters.is_empty() && getter.result == underlying
+}
+
 /// The scalar a value class `classifier` declared as `declaration` travels as, when this target
 /// carries the class and its underlying type alike; `None` when the class is carried otherwise
 /// (as an object reference) or its declared underlying type uses a different carrier.
