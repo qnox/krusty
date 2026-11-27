@@ -40724,7 +40724,7 @@ impl<'a> Checker<'a> {
                 if t == Ty::Null {
                     return self.set(e, Ty::Nothing);
                 }
-                let narrowed = definitely_non_null_ty(t);
+                let narrowed = t.not_null_operator_result(self.file.reference.quirks());
                 // A successful assertion proves the same stable access path non-null for the rest
                 // of this lexical flow (`x!!.let { use(x) }`, and later statements). Reassignments
                 // invalidate the fact through the ordinary scope machinery; temporaries and
