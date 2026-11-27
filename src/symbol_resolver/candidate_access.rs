@@ -134,15 +134,6 @@ impl SymbolResolver<'_> {
                 properties.extend(extension_properties);
             }
         }
-        if self.visibility_suppressed {
-            // kotlinc ranks an invisible candidate as a visibility error, below every visible one
-            // of the whole tower; the suppression only lets such a candidate stand as the result.
-            functions.extend(inaccessible_extensions.drain(..).map(|mut function| {
-                function.scope_rank = u32::MAX;
-                function.scope_rung = crate::libraries::CallableScopeRung::Import;
-                function
-            }));
-        }
         if let CandidateSelection::Selected(selected) =
             self.scoped_receiver_constructor_classifier(name, &levels)
         {
@@ -231,36 +222,28 @@ impl SymbolResolver<'_> {
         inaccessible.extend(
             candidates
                 .iter()
-                .filter(|(_, _, candidate)| !self.declared_callable_accessible(candidate))
-                .map(|&(rank, _, candidate)| FunctionInfo {
-                    receiver_rank: rank,
-                    ..candidate.clone()
-                }),
+                .filter(|(_, _, candidate)| !self.non_member_callable_accessible(candidate))
+                .map(|(_, _, candidate)| (*candidate).clone()),
         );
-        candidates.retain(|(_, _, candidate)| self.declared_callable_accessible(candidate));
+        candidates.retain(|(_, _, candidate)| self.non_member_callable_accessible(candidate));
     }
 
     /// File/module accessibility for a top-level function or extension declaration.
     pub(crate) fn non_member_callable_accessible(&self, candidate: &FunctionInfo) -> bool {
-        self.visibility_suppressed || self.declared_callable_accessible(candidate)
-    }
-
-    /// Accessibility by declaration alone. A suppressed visibility error does not make an
-    /// invisible candidate visible: kotlinc still prefers any visible candidate of the tower.
-    fn declared_callable_accessible(&self, candidate: &FunctionInfo) -> bool {
-        crate::callable_access::source_callable_accessible(
-            candidate.visibility,
-            candidate.source_file,
-            self.access_file,
-            || {
-                self.lib
-                    .dependency_access_policy()
-                    .internal_callable_accessible(
-                        candidate.callable.external_identity,
-                        candidate.callable.owner,
-                    )
-            },
-        )
+        self.visibility_suppressed
+            || crate::callable_access::source_callable_accessible(
+                candidate.visibility,
+                candidate.source_file,
+                self.access_file,
+                || {
+                    self.lib
+                        .dependency_access_policy()
+                        .internal_callable_accessible(
+                            candidate.callable.external_identity,
+                            candidate.callable.owner,
+                        )
+                },
+            )
     }
 
     /// Candidates that may participate in source-argument mapping for this access context.

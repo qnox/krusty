@@ -178,7 +178,8 @@ fn defect(quirk: Quirk) -> Option<Defect> {
         | Quirk::SyntheticClassXiOmitsVisibility
         | Quirk::AnnotationImplCarriesNullability
         | Quirk::KlibLegacyMetadataVersionBelowLanguage23
-        | Quirk::NotNullOperatorDropsIntersectionApproximation => None,
+        | Quirk::NotNullOperatorDropsIntersectionApproximation
+        | Quirk::InvisibleCandidatesKeepScopeLevels => None,
     }
 }
 

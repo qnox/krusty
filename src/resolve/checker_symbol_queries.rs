@@ -22,7 +22,7 @@ impl Checker<'_> {
         )
         .with_eager_lambda_results(self.file.eager_lambda_analysis)
         .with_visibility_suppression(self.visibility_access_suppressed())
-        .with_member_access(self)
+        .with_callable_access(self)
     }
 
     /// How a reference to `classifier` is invisible here, if it is. A classifier reference is
@@ -53,7 +53,7 @@ impl Checker<'_> {
             self.lexical_source_class_names(),
         )
         .with_visibility_suppression(self.visibility_access_suppressed())
-        .with_member_access(self)
+        .with_callable_access(self)
     }
 
     /// A resolver over this checker's own federation (the module over the platform) shares the
