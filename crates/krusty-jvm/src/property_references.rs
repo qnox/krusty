@@ -109,6 +109,7 @@ pub(super) fn realize(
     callables: &krusty::backend::CheckedBackendCallables,
     current_facade: &str,
     delegate_helpers: &super::local_delegate_accessors::HelperAccess,
+    reflected: &super::property_reference_delegates::PropertyReferenceDelegates,
     mut spliced_getters: SplicedGetters,
 ) -> Result<PropertyReferenceRealizations, PropertyReferenceRealizationTarget> {
     let facades = &file_classes.containers[..];
@@ -172,6 +173,7 @@ pub(super) fn realize(
         } else {
             None
         };
+        let target_module = target.module();
         let (property, realization) = match target {
             FirPropertyReferenceTarget::Module(target) => {
                 // Only lowering-generated delegate metadata uses this unspecialized form. It has
@@ -311,6 +313,45 @@ pub(super) fn realize(
             | FirCallableReferenceBinding::Unbound
             | FirCallableReferenceBinding::Static => {}
         }
+        if let Some(target) = target_module.filter(|_| reflected.is_reflected(raw as u32)) {
+            // A delegate method's reference reflects the property by name and signature, like
+            // a delegated property's metadata, but in place and over its bound receiver.
+            let failure = PropertyReferenceRealizationTarget::Module(target);
+            let declaration = ir
+                .referenced_module_properties
+                .get(&target)
+                .cloned()
+                .ok_or(failure)?;
+            let getter = super::property_reference_delegates::declared_getter(ir, target);
+            // Reflection names the declared getter, not the access bridge a carrier would call.
+            let mut property = property;
+            if realization.accessor_role == PropertyAccessorRole::AccessBridge
+                || realization.bridged_getter.is_some()
+            {
+                property.getter_name = realization.declared_getter_name.clone();
+                property.getter_descriptor = None;
+            }
+            let (_, element, signature) = synthesize_delegated(
+                ir,
+                facades,
+                target,
+                &declaration,
+                property,
+                mutable,
+                receiver,
+            )?;
+            // A getter this file declares publishes its final name once naming has run; another
+            // declaration's default getter is already named as the lowering selected it.
+            match getter {
+                Some(getter) => realizations.record_delegated_getter_signature(signature, getter),
+                None if super::internal_names::module_getter_is_mangled(&declaration) => {
+                    realizations.record_module_suffixed_signature(signature);
+                }
+                None => {}
+            }
+            ir.exprs[raw] = element;
+            continue;
+        }
         if let Some(target) = delegated_target {
             let declaration = ir
                 .referenced_module_properties
@@ -326,7 +367,7 @@ pub(super) fn realize(
                 .getter
                 .ok_or(PropertyReferenceRealizationTarget::Module(target))?;
             let (owner, element, signature) =
-                synthesize_delegated(ir, facades, target, &declaration, property, mutable)?;
+                synthesize_delegated(ir, facades, target, &declaration, property, mutable, None)?;
             realizations.record_delegated_getter_signature(signature, getter);
             delegated_operands.push(delegated_arrays::DelegatedOperand {
                 operand: raw as u32,
@@ -428,6 +469,7 @@ fn synthesize_delegated(
     declaration: &IrModuleProperty,
     property: PropRef,
     mutable: bool,
+    bound: Option<krusty::ir::ExprId>,
 ) -> Result<(TypeName, IrExpr, krusty::ir::ExprId), PropertyReferenceRealizationTarget> {
     let failure = PropertyReferenceRealizationTarget::Module(target);
     if !declaration.context_parameters.is_empty() {
@@ -444,6 +486,12 @@ fn synthesize_delegated(
     } else {
         usize::from(declaration.owner.is_some())
             + usize::from(declaration.extension_receiver.is_some())
+    };
+    // A bound receiver is the reference's own: the class takes one receiver fewer.
+    let receiver_arity = if bound.is_some() {
+        receiver_arity.checked_sub(1).ok_or(failure)?
+    } else {
+        receiver_arity
     };
     if receiver_arity > 2 {
         return Err(failure);
@@ -478,14 +526,31 @@ fn synthesize_delegated(
     let internal = type_name(&format!(
         "kotlin/jvm/internal/{mutability}PropertyReference{receiver_arity}Impl"
     ));
+    let (args, ctor_desc) = match bound {
+        Some(receiver) => {
+            let receiver = ir.add_expr(IrExpr::TypeOp {
+                op: krusty::ir::IrTypeOp::ImplicitCoercion,
+                arg: receiver,
+                type_operand: Ty::nullable(Ty::obj("kotlin/Any")),
+            });
+            (
+                vec![receiver, owner, name, signature, flags],
+                "(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V",
+            )
+        }
+        None => (
+            vec![owner, name, signature, flags],
+            "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V",
+        ),
+    };
     Ok((
         container,
         IrExpr::New {
             internal,
-            args: vec![owner, name, signature, flags],
+            args,
             ctor_params: None,
             declared_params: None,
-            ctor_desc: Some("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".into()),
+            ctor_desc: Some(ctor_desc.into()),
             external_target: None,
             defaults: Box::new([]),
             default_prefix_count: 0,
