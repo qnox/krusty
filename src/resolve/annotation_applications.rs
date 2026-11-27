@@ -707,10 +707,24 @@ impl Checker<'_> {
         let Some(site) = site else {
             // No default site (parameter, property, field) is applicable: the declaration itself
             // is the wrong target.
-            if let (AnnotationApplicationHost::Property { .. }, Some(description)) =
-                (host, declaration_target)
+            if let (
+                AnnotationApplicationHost::Property {
+                    has_backing_field,
+                    constructor_parameter,
+                    ..
+                },
+                Some(description),
+            ) = (host, declaration_target)
             {
-                if !self.suppresses_diagnostic("WRONG_ANNOTATION_TARGET") {
+                let sites = targets.property_declaration_sites(
+                    crate::types::PropertyAnnotationHost {
+                        constructor_parameter,
+                        has_backing_field,
+                    },
+                    self.file.property_annotation_default_target_mode,
+                    None,
+                );
+                if sites.is_empty() && !self.suppresses_diagnostic("WRONG_ANNOTATION_TARGET") {
                     self.diags.error(
                         Span::new(annotation.at, annotation.span.hi),
                         wrong_annotation_target_message(description, targets),
