@@ -57,3 +57,15 @@ fn delegated_infix_forwarder_keeps_the_modifier_an_override_inherits() {
     );
     common::expect_box_same_as_kotlinc(INFIX_SOURCE, "DelegatedInfixThroughOverrideRun");
 }
+
+const OWN_MODIFIERS_SOURCE: &str = include_str!("box_regressions/delegatedOwnOperatorAndInfix.kt");
+
+#[test]
+fn delegated_forwarder_keeps_the_operator_and_infix_a_module_interface_member_declares() {
+    common::assert_class_matches_kotlinc(
+        "DelegatedOwnOperatorAndInfix",
+        OWN_MODIFIERS_SOURCE,
+        "Delegating",
+    );
+    common::expect_box_same_as_kotlinc(OWN_MODIFIERS_SOURCE, "DelegatedOwnOperatorAndInfixRun");
+}
