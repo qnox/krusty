@@ -724,6 +724,11 @@ fn delegated_call(
         dispatch_receiver: Some(receiver),
         args: arguments,
     });
+    // The delegate is read from a field of its own static type, which the call dispatches through
+    // as a source call on that value does, whichever declaration it selects.
+    if let Some(class) = call.receiver.get().non_null().obj_internal() {
+        ir.dispatch_classes.insert(expression, class);
+    }
     match &call.target {
         ResolvedDelegatedCallTarget::Module {
             parameters, result, ..
@@ -737,11 +742,6 @@ fn delegated_call(
         ResolvedDelegatedCallTarget::External(_) => {
             ir.ext_call_source_receiver
                 .insert(expression, call.receiver.get());
-            // The delegate is read from a field of its own static type, which the call dispatches
-            // through as a source call on that value does.
-            if let Some(class) = call.receiver.get().non_null().obj_internal() {
-                ir.dispatch_classes.insert(expression, class);
-            }
             if let Some(declared) = call.declared_result {
                 ir.call_declared_ret.insert(expression, declared.get());
             }
