@@ -32,6 +32,23 @@ enum BoundNarrowing {
     /// The occurrence is a written `T & Any`: the binding becomes `binding & Any`, which keeps a
     /// type parameter's identity (`V` becomes `V & Any`).
     DefinitelyNonNull,
+    /// The occurrence is Java's flexible `T!`: a not-null reference binding becomes its flexible
+    /// `binding!`. A nullable or flexible binding already says all it can, and a type variable
+    /// binding keeps its own identity.
+    Flexible,
+}
+
+/// A binding read at a flexible occurrence `T!`.
+fn flexible_binding(binding: Ty) -> Ty {
+    if !binding.is_nullable()
+        && !binding.is_platform_nullable()
+        && binding.is_reference()
+        && !binding.is_ty_param()
+    {
+        Ty::platform_nullable(binding)
+    } else {
+        binding
+    }
 }
 
 /// Substitute semantic type parameters throughout one type shape. This belongs to the type model:
@@ -40,21 +57,18 @@ fn substitute_type_parameters<F, P, N>(ty: Ty, lookup: F, preserve_unbound: P, n
 where
     F: Fn(&str) -> Option<Ty> + Copy,
     P: Fn(&str) -> bool + Copy,
-    N: Fn(&str) -> BoundNarrowing + Copy,
+    N: Fn(&str, Ty) -> BoundNarrowing + Copy,
 {
     match ty.kind() {
         // A Java raw receiver binds each formal to its erasure: its member reads it as erased.
         TyKind::TyParam(name, bound) | TyKind::Var(name, bound) => lookup(name.as_str())
             .map(Ty::raw_binding_read)
-            .map(|binding| {
-                if bound.upper_bound_admits_null() {
-                    return binding;
-                }
-                match narrowing(name.as_str()) {
-                    BoundNarrowing::Keep => binding,
-                    BoundNarrowing::NonNull => binding.non_null(),
-                    BoundNarrowing::DefinitelyNonNull => binding.non_null().definitely_non_null(),
-                }
+            .map(|binding| match narrowing(name.as_str(), bound) {
+                BoundNarrowing::Flexible => flexible_binding(binding),
+                _ if bound.upper_bound_admits_null() => binding,
+                BoundNarrowing::Keep => binding,
+                BoundNarrowing::NonNull => binding.non_null(),
+                BoundNarrowing::DefinitelyNonNull => binding.non_null().definitely_non_null(),
             })
             .unwrap_or_else(|| {
                 if preserve_unbound(name.as_str()) {
@@ -178,7 +192,7 @@ pub fn ty_subst<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
         ty,
         |name| recorded_binding(bindings, name),
         |_| false,
-        |_| BoundNarrowing::NonNull,
+        |_, _| BoundNarrowing::NonNull,
     )
 }
 
@@ -262,7 +276,7 @@ pub(crate) fn ty_subst_formals<F: TyParamKey, K: TyParamKey>(
         ty,
         |name| recorded_binding(bindings, name),
         |name| !declares_formal(formals, name),
-        |_| BoundNarrowing::NonNull,
+        |_, _| BoundNarrowing::NonNull,
     )
 }
 
@@ -544,7 +558,7 @@ pub(crate) fn ty_subst_keep_unbound<K: TyParamKey>(ty: Ty, bindings: &HashMap<K,
         ty,
         |name| recorded_binding(bindings, name),
         |_| true,
-        |_| BoundNarrowing::NonNull,
+        |_, _| BoundNarrowing::NonNull,
     )
 }
 
@@ -577,7 +591,7 @@ fn closed_substitution<K: TyParamKey>(
             Some(expanded)
         },
         |_| true,
-        |_| BoundNarrowing::NonNull,
+        |_, _| BoundNarrowing::NonNull,
     )
 }
 
@@ -588,7 +602,7 @@ pub(crate) fn ty_subst_applied_lookup<F>(ty: Ty, lookup: F) -> Ty
 where
     F: Fn(&str) -> Option<Ty> + Copy,
 {
-    substitute_type_parameters(ty, lookup, |_| true, |_| BoundNarrowing::Keep)
+    substitute_type_parameters(ty, lookup, |_| true, |_, _| BoundNarrowing::Keep)
 }
 
 /// Apply a classifier's arguments to one of its supertype templates. Like
@@ -596,6 +610,9 @@ where
 /// declared bound. A template occurrence of a formal that is non-null although the formal's
 /// declaration admits null (`open class B<W> : ColumnType<W & Any>()`) is a written `W & Any`, so
 /// it reads the argument's definitely-non-null form: `B<String?>` is a `ColumnType<String>`.
+/// A Java declaration writes its formals flexibly (`class Sub<T> extends J<T>` is `J<T!>`), and its
+/// provider publishes such an occurrence with a platform bound, so `Sub<String>` is a
+/// `J<String!>`, exactly as kotlinc's substitution of the flexible `T!` gives.
 pub(crate) fn ty_subst_supertype_template<F, D>(ty: Ty, lookup: F, written_non_null: D) -> Ty
 where
     F: Fn(&str) -> Option<Ty> + Copy,
@@ -605,8 +622,10 @@ where
         ty,
         lookup,
         |_| true,
-        |name| {
-            if written_non_null(name) {
+        |name, bound| {
+            if bound.is_platform_nullable() {
+                BoundNarrowing::Flexible
+            } else if written_non_null(name) {
                 BoundNarrowing::DefinitelyNonNull
             } else {
                 BoundNarrowing::Keep

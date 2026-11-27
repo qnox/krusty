@@ -63,6 +63,7 @@ impl BodyLowering<'_> {
                 if *deferred {
                     self.ir.deferred_local_types.insert(variable, ty.get());
                 }
+                self.record_local_delegate_storage(*target, variable);
                 variable
             }
             FirStatementKind::Expression(expression) => self.expression(*expression)?,

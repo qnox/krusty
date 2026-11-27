@@ -31,6 +31,7 @@ pub mod names;
 mod optional_annotations;
 pub mod physical_type;
 pub mod protected_dependency_calls;
+mod pure_implementations;
 pub mod reified_arguments;
 pub mod source_map;
 pub mod string_constant;

@@ -206,6 +206,8 @@ pub(crate) struct EmittedBody {
     pub(crate) objects: Vec<KlibPublicIdSignature>,
     pub(crate) sam_classifiers: Vec<(KlibPublicIdSignature, TypeName)>,
     pub(crate) hierarchy_roots: Vec<TypeName>,
+    /// The declarations the body calls with a `super` qualifier, which run without dispatch.
+    pub(crate) super_callables: Vec<KlibDependencyCallable>,
 }
 
 /// Distinct inventories from one authenticated emitted-body traversal. Declaration roots never
@@ -217,6 +219,7 @@ struct EmittedBodyInventory<'a> {
     enum_entries: Vec<&'a KlibIrSymbol>,
     public_hierarchy_roots: Vec<TypeName>,
     sam_declarations: Vec<&'a KlibIrSymbol>,
+    super_callables: Vec<&'a KlibIrSymbol>,
 }
 
 impl KlibDeclarationBodies {
@@ -1271,6 +1274,17 @@ impl KlibDeclarationBodies {
                 },
             )
             .collect();
+        let super_callables = inventory
+            .super_callables
+            .into_iter()
+            .filter_map(|symbol| declaration_signature(&symbol.signature))
+            .filter_map(
+                |declaration| match self.linked_origin(&identity.module, &declaration) {
+                    KlibCalleeOrigin::Exact(callee) => Some(callee),
+                    KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
+                },
+            )
+            .collect();
         let mut seen = crate::fx_hash::HashSet::default();
         let mut objects: Vec<KlibPublicIdSignature> = inventory
             .objects
@@ -1303,6 +1317,7 @@ impl KlibDeclarationBodies {
             objects,
             sam_classifiers,
             hierarchy_roots: inventory.public_hierarchy_roots,
+            super_callables,
         }
     }
 
@@ -1354,6 +1369,7 @@ impl KlibDeclarationBodies {
         let mut objects = arena.emitted_object_symbols(function, forms);
         let mut sams = arena.emitted_sam_classifiers(function, forms);
         let mut entries = arena.emitted_enum_entry_symbols(function, forms);
+        let mut supers = arena.emitted_super_call_symbols(function, forms);
         // Constructor initialization uses these same serialized roots in
         // `constructor_initializer_callables`, even when its fields call no declaration.
         if function.constructor {
@@ -1387,7 +1403,12 @@ impl KlibDeclarationBodies {
                 entries.extend(
                     initializer
                         .arena
-                        .emitted_enum_entry_symbols_from(roots, forms),
+                        .emitted_enum_entry_symbols_from(roots.clone(), forms),
+                );
+                supers.extend(
+                    initializer
+                        .arena
+                        .emitted_super_call_symbols_from(roots, forms),
                 );
             }
         }
@@ -1425,7 +1446,8 @@ impl KlibDeclarationBodies {
                 symbols.extend(class_arena.emitted_callable_symbols_from(roots.clone(), forms));
                 objects.extend(class_arena.emitted_object_symbols_from(roots.clone(), forms));
                 sams.extend(class_arena.emitted_sam_classifiers_from(roots.clone(), forms));
-                entries.extend(class_arena.emitted_enum_entry_symbols_from(roots, forms));
+                entries.extend(class_arena.emitted_enum_entry_symbols_from(roots.clone(), forms));
+                supers.extend(class_arena.emitted_super_call_symbols_from(roots, forms));
             }
         }
         EmittedBodyInventory {
@@ -1434,6 +1456,7 @@ impl KlibDeclarationBodies {
             enum_entries: entries,
             public_hierarchy_roots: classifiers,
             sam_declarations: sams,
+            super_callables: supers,
         }
     }
 

@@ -248,6 +248,7 @@ mod generic_call_bindings;
 mod if_expression;
 mod implicit_receiver_calls;
 mod implicit_rungs;
+mod imported_singleton_members;
 mod inline_access;
 mod inline_parameter_usage;
 mod inner_constructor_calls;
@@ -439,6 +440,7 @@ mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
 mod super_calls;
+use super_calls::is_super_qualifier;
 pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
 mod type_parameter_owners;
@@ -536,10 +538,6 @@ const MAX_OVERLOAD_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES: usize = 4 * 1024 * 1024;
 const CONFLICTING_OVERLOAD_PREFIX: &str = "conflicting overloads:";
 const INAPPLICABLE_OVERLOAD_PREFIX: &str = "none of the following candidates is applicable:";
-
-fn is_super_qualifier(spelling: &str) -> bool {
-    spelling == "super" || spelling.starts_with("super<") || spelling.starts_with("super@")
-}
 
 fn lexical_receiver_label(file: &File, reference: &TypeRef) -> String {
     file.alias_spellings
@@ -5475,56 +5473,6 @@ impl<'a> Checker<'a> {
         };
         self.expr_lowers.insert(expression, lowering);
         Some(ty)
-    }
-
-    /// Explicit import of a member declared on a singleton classifier. The import scope has already
-    /// resolved the owner path and alias to stable identities; this only supplies the ordinary value
-    /// receiver used by member/property selection.
-    fn imported_singleton_member(
-        &self,
-        name: &str,
-    ) -> Option<(ImplicitReceiver, String, SingletonValue)> {
-        let mut candidates = self
-            .function_import_scope
-            .explicit_targets(name)
-            .into_iter()
-            .filter_map(|(namespace, declared_name)| {
-                crate::trace_compiler!(
-                    "resolve",
-                    "imported singleton candidate name={name} target={namespace:?}.{declared_name}"
-                );
-                let crate::symbol_source::SymbolNamespace::Classifier(classifier) = namespace
-                else {
-                    return None;
-                };
-                let singleton = self.classifier_singleton_value(classifier)?;
-                (singleton.classifier == classifier).then_some((
-                    ImplicitReceiver {
-                        receiver_role: None,
-                        ty: Ty::obj_name(classifier),
-                        declared_ty: Ty::obj_name(classifier),
-                        identity: (0, 0),
-                        extension_receiver: None,
-                        class_receiver: false,
-                        current: false,
-                        receiver_depth: 0,
-                        dsl_shadowed: false,
-                    },
-                    declared_name,
-                    singleton,
-                ))
-            })
-            .collect::<Vec<_>>();
-        if candidates.len() != 1 {
-            return None;
-        }
-        let (receiver, declared_name, singleton) = candidates.pop()?;
-        crate::trace_compiler!(
-            "resolve",
-            "imported singleton classifier={:?} storage={singleton:?}",
-            singleton.classifier
-        );
-        Some((receiver, declared_name, singleton))
     }
 
     /// A classifier contributed by a star-import level can denote a value when it is an object or
@@ -28356,6 +28304,24 @@ impl<'a> Checker<'a> {
             property.getter_visibility,
             property.setter_visibility,
         );
+        if property.context_count > 0 && !self.file.language.callable_references_to_contextual {
+            return Some(
+                self.report_context_property_reference(
+                    expression,
+                    &property.name,
+                    reference_context_arguments::ContextualPropertyDisplay {
+                        context_names: &property.context_names,
+                        context_types: property.context_types(),
+                        extension_receiver: property
+                            .extension_facade
+                            .as_ref()
+                            .and_then(|_| property.getter.params.first().copied()),
+                        property_type: property.prop_ty,
+                        mutable: property.setter.is_some(),
+                    },
+                ),
+            );
+        }
         if !self.property_reference_exposes_setter(&property, receiver) {
             property.setter = None;
         }
@@ -28788,15 +28754,7 @@ impl<'a> Checker<'a> {
 
     fn implicit_receivers(&self, scope: &CheckerScope<'_>) -> Vec<ImplicitReceiver> {
         let mut receivers = self.declared_implicit_receivers(scope);
-        // Flow facts for the unqualified `this` value change the semantic type of the nearest
-        // receiver rung, not its runtime identity. Bare member lookup must see that narrowed type
-        // (`fun A?.bar() = if (this != null) foo() else ...`) while FIR continues to materialize the
-        // exact receiver depth selected above.
-        if let Some(narrowed) = self.actual_this_narrow(scope) {
-            if let Some(current) = receivers.iter_mut().find(|receiver| receiver.current) {
-                current.ty = narrowed;
-            }
-        }
+        self.narrow_current_implicit_receiver(scope, &mut receivers);
         receivers
     }
 
@@ -28948,8 +28906,16 @@ impl<'a> Checker<'a> {
     }
 
     fn implicit_receiver_selection(&self, receiver: ImplicitReceiver) -> ImplicitReceiverSelection {
+        // A flow intersection is a semantic view of the receiver value, not a type it can be
+        // loaded as: the value keeps its declared type, and a member owned by one constituent
+        // reaches it through the smart cast recorded in `narrowed_this_member`.
+        let ty = if matches!(receiver.ty.non_null().kind(), TyKind::Intersection(_)) {
+            receiver.declared_ty
+        } else {
+            receiver.ty
+        };
         ImplicitReceiverSelection {
-            ty: receiver.ty,
+            ty,
             current: receiver.current,
             receiver_depth: receiver.receiver_depth,
             classifier: receiver
@@ -33084,27 +33050,13 @@ impl<'a> Checker<'a> {
                 "smartcast",
                 "apply path={path:?} target={ty:?} compound={compound}",
             );
-            // A single `is B` proof on a value declared as `A` produces `A & B` when neither
-            // classifier contains the other. Root narrowing shadows expose only the newest read
-            // projection, so retain the incomparable declaration constituent before replacing it.
-            // Comparable declarations (`Any` then `String`) remain a single minimal fact.
-            // `Nothing?` is the exact null branch, not an unrelated classifier constituent. It is
-            // already the nullable bottom type and must not be widened by re-attaching the local's
-            // declared non-null classifier (`String?` + a null proof is still `Nothing?`, never
-            // `String & Nothing?`). Classifier type-test proofs continue through the intersection
-            // path below.
+            // Root narrowing shadows expose only the newest read projection, so retain the
+            // declaration constituent an incomparable proof keeps before replacing it.
             let declared = StablePathRead::new(self).declared_ty(scope, path);
-            if ty.non_null() != Ty::Nothing {
-                // A nullable test (`is B?`) still admits null, so the declaration keeps its `?`.
-                let keep_null = ty.is_nullable();
-                if let Some(declared) = declared.map(|d| if keep_null { d } else { d.non_null() }) {
-                    let context = crate::assignable::TyCtx::new();
-                    let comparable = crate::assignable::is_subtype(&context, self, declared, *ty)
-                        || crate::assignable::is_subtype(&context, self, *ty, declared);
-                    if !comparable {
-                        scope.narrow_intersection(path.clone(), declared);
-                    }
-                }
+            if let Some(kept) =
+                declared.and_then(|declared| self.declared_constituent_beside_proof(declared, *ty))
+            {
+                scope.narrow_intersection(path.clone(), kept);
             }
             scope.narrow_intersection(path.clone(), *ty);
             self.apply_narrowing_unchecked(scope, path, *ty);
@@ -39974,6 +39926,9 @@ impl<'a> Checker<'a> {
         argument: ExprId,
         ty: Ty,
     ) -> CallArgKind {
+        if let Some(literal) = self.unpostponed_collection_literal_kind(argument, ty) {
+            return literal;
+        }
         if let Some(function) = self.expression_function_type(scope, argument, ty) {
             if function != ty {
                 return CallArgKind::CallableReference {
@@ -43032,6 +42987,7 @@ impl<'a> Checker<'a> {
             )
         }) {
             for receiver in self.implicit_receivers_before_value_binding(scope, &n) {
+                let receiver = self.implicit_intersection_property_view(receiver, &n);
                 if let Some(ty) =
                     self.try_member_read(scope, receiver.ty, &n, self.span(e), Some(e))
                 {
@@ -43135,7 +43091,9 @@ impl<'a> Checker<'a> {
                                 }
                                 continue;
                             }
-                            implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
+                            implicit_rungs::ImplicitRung::Receiver(receiver) => {
+                                self.implicit_intersection_property_view(receiver, &n)
+                            }
                         };
                         if let Some(selected_ty) =
                             self.try_member_read(scope, receiver.ty, &n, self.span(e), Some(e))
@@ -43320,7 +43278,9 @@ impl<'a> Checker<'a> {
                             }
                             continue;
                         }
-                        implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
+                        implicit_rungs::ImplicitRung::Receiver(receiver) => {
+                            self.implicit_intersection_property_view(receiver, &n)
+                        }
                     };
                     if context_receiver_priority::is_context_parameter_receiver(
                         scope,
@@ -45813,12 +45773,25 @@ impl<'a> Checker<'a> {
                     .resolver()
                     .top_level_properties(&name)
                     .into_iter()
-                    .filter(|property| {
-                        property.kind == crate::libraries::PropKind::TopLevel
-                            && property.context_count == 0
-                    })
+                    .filter(|property| property.kind == crate::libraries::PropKind::TopLevel)
                     .collect::<Vec<_>>();
                 if let [property] = top_level_properties.as_slice() {
+                    if property.context_count > 0
+                        && !self.file.language.callable_references_to_contextual
+                    {
+                        let context = property.getter.params[..property.context_count].to_vec();
+                        return self.report_context_property_reference(
+                            e,
+                            &name,
+                            reference_context_arguments::ContextualPropertyDisplay {
+                                context_names: &property.context_param_names,
+                                context_types: &context,
+                                extension_receiver: None,
+                                property_type: property.ty,
+                                mutable: property.setter.is_some(),
+                            },
+                        );
+                    }
                     if let Some(ty) =
                         self.property_ref_ty(0, property.setter.is_some(), &[property.ty])
                     {

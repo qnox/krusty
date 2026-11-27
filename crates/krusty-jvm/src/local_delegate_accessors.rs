@@ -67,8 +67,9 @@ impl HelperAccess {
 pub(crate) fn realize(
     ir: &mut IrFile,
     current_source: IrModuleSource,
-    facades: &[String],
+    facades: &[crate::file_facades::FacadeClass],
     classifiers: &krusty::backend::CheckedBackendClassifiers<'_>,
+    references: &crate::property_reference_delegates::PropertyReferenceDelegates,
 ) -> Result<HelperAccess, ()> {
     let closure_plans = super::local_delegate_closures::bind(ir)?;
     let plans = std::mem::take(&mut ir.local_delegate_plans);
@@ -222,7 +223,9 @@ pub(crate) fn realize(
         // A member-extension convention receives the enclosing instance before the delegate.
         let mut args = Vec::new();
         args.extend(access.dispatch_receiver);
-        args.push(access.delegate);
+        if !references.local_takes_no_storage(*key) {
+            args.push(access.delegate);
+        }
         args.extend(access.value);
         ir.exprs[raw] = IrExpr::Call {
             callee: Box::new(callee),
@@ -339,7 +342,9 @@ fn realize_accessor(
     if accessor.parameters.len() != accessor.parameter_identities.len() {
         return Err(());
     }
-    if accessor.line != 0 {
+    // A body that already states its own position, as an inlined constant states its
+    // declaration's, keeps it; the accessor's line still marks its return.
+    if accessor.line != 0 && ir.source_line(accessor.body).is_none() {
         ir.set_statement_line(accessor.body, accessor.line);
         ir.set_source_line(accessor.body, accessor.line);
         ir.position_generated_tree(accessor.body, accessor.line);

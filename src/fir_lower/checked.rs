@@ -618,8 +618,7 @@ impl BodyLowering<'_> {
     pub(super) fn checked_property_reference(
         &mut self,
         reference: super::property_references::CheckedPropertyReference<'_>,
-        dispatch_receiver: Option<FirReceiver>,
-        extension_receiver: Option<FirReceiver>,
+        receivers: CheckedPropertyReceivers<'_>,
         reflective: bool,
     ) -> Result<ExprId, FirLoweringFailure> {
         match reference.target {
@@ -644,13 +643,22 @@ impl BodyLowering<'_> {
                 }
             }
         }
-        let dispatch_receiver = self.receiver(dispatch_receiver)?;
-        let extension_receiver = self.receiver(extension_receiver)?;
+        let dispatch_receiver = self.receiver(receivers.dispatch_receiver)?;
+        let extension_receiver = self.receiver(receivers.extension_receiver)?;
+        let context_arguments = receivers
+            .context_arguments
+            .iter()
+            .map(|argument| self.receiver(Some(*argument)))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         if !reflective {
             if let Some(function) = self.materialize_property_function_reference(
                 &reference,
                 dispatch_receiver,
                 extension_receiver,
+                &context_arguments,
             )? {
                 return Ok(function);
             }
@@ -662,6 +670,7 @@ impl BodyLowering<'_> {
                 binding: reference.binding,
                 dispatch_receiver,
                 extension_receiver,
+                context_arguments,
                 mutable: reference.mutable,
                 substitutions: lower_substitutions(reference.substitutions),
                 adaptation: reference.adaptation.cloned().map(Box::new),
@@ -1436,7 +1445,7 @@ impl BodyLowering<'_> {
         })
     }
 
-    fn module_substitution_bindings(
+    pub(super) fn module_substitution_bindings(
         &self,
         substitutions: &[FirTypeSubstitution],
     ) -> crate::fx_hash::HashMap<String, crate::types::Ty> {
