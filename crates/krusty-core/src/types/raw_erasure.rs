@@ -12,7 +12,7 @@ use super::{Ty, TyKind, TyParamKey, TypeName};
 /// `Comparable<*>!`) and a bound that is itself one of `formals` erased in turn
 /// (`B extends A`). A formal with no bound, or one in a bound cycle, erases to `Any?`. A Java
 /// bound arrives flexible (`Object` is `Any!`), so its erasure stays flexible.
-pub(crate) fn formal_erasures<F: TyParamKey>(formals: &[F], bounds: &[Vec<Ty>]) -> Vec<Ty> {
+pub fn formal_erasures<F: TyParamKey>(formals: &[F], bounds: &[Vec<Ty>]) -> Vec<Ty> {
     (0..formals.len())
         .map(|index| formal_erasure(formals, bounds, index, &mut Vec::new()))
         .collect()
@@ -84,17 +84,14 @@ fn raw_application<F: TyParamKey>(classifier: TypeName, formals: &[F], bounds: &
 }
 
 /// A classifier's declared formals and, parallel to them, each formal's bounds.
-pub(crate) type DeclaredFormals = (Vec<String>, Vec<Vec<Ty>>);
+pub type DeclaredFormals = (Vec<String>, Vec<Vec<Ty>>);
 
 /// `ty` as a member signature reads it through a raw receiver, once the receiver's formals are
 /// bound to their erasures: every generic application becomes raw (`List<CharSequence!>` is a raw
 /// `List`, `Comparable<*>` a raw `Comparable`), while an array keeps its shape around a raw-read
 /// component. `formals_of` supplies a classifier's declared
 /// formals and bounds; a classifier it does not know keeps its application.
-pub(crate) fn raw_member_type(
-    ty: Ty,
-    formals_of: &dyn Fn(TypeName) -> Option<DeclaredFormals>,
-) -> Ty {
+pub fn raw_member_type(ty: Ty, formals_of: &dyn Fn(TypeName) -> Option<DeclaredFormals>) -> Ty {
     if let (true, Some(element)) = (ty.is_reference_array(), ty.array_elem()) {
         // An array is not a generic application to erase: it keeps its shape and the use-site
         // projection of its component, and only the component is read raw (`String[]` stays an

@@ -81,7 +81,7 @@ use lambda_slots::{boxed_lambda_own_params_from, lambda_sam_params, lambda_slot_
 pub(crate) use member_names::{member_signature_is_mangled, suspend_lambda_invoke_name};
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::*;
-use operand_nullness::{operand_nonnull, operand_null_only};
+use operand_nullness::operand_null_only;
 pub(crate) use representation::{
     boxed_value_class_carrier, boxed_value_class_underlying, instance_representation,
     is_boxed_value_class, type_operation_internal_name,
@@ -3771,15 +3771,6 @@ impl ReprCtx<'_> {
             return Repr::Unboxed(value_class);
         }
         repr(self, id)
-    }
-
-    /// A selected call is non-null when its checked declaration returns a non-null type.
-    fn operand_nonnull(&self, id: ExprId) -> bool {
-        operand_nonnull(self.exprs, self.rets, self.fields, self.slots, id)
-            || matches!(
-                self.types.declared_result(id, self.under).map(Ty::kind),
-                Some(TyKind::Obj(..))
-            )
     }
 
     /// Non-null value-class identity whose checked value is carried unboxed. Generated local reads

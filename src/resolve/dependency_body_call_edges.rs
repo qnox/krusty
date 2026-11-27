@@ -86,6 +86,11 @@ pub(crate) fn for_checked_klib_bodies_reading<'a>(
         pending.extend(bodies.direct_callees(&identity));
         pending.extend(bodies.overridden_callables(&identity));
         pending.extend(emitted.callables);
+        // A local class the body materializes carries the interface defaults it inherits once a
+        // walked body calls a declaration one implements, as the emission closure releases them.
+        inherited_defaults.extend(emitted.inherited_defaults.into_iter().map(
+            |(body, implemented)| crate::klib_lowering::InheritedDefault { body, implemented },
+        ));
 
         // An object the body reads as a value is materialized with its initialization and the
         // members dispatch reaches, as the emission closure walks it.

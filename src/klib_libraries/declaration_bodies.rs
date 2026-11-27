@@ -208,6 +208,9 @@ pub(crate) struct EmittedBody {
     pub(crate) hierarchy_roots: Vec<TypeName>,
     /// The declarations the body calls with a `super` qualifier, which run without dispatch.
     pub(crate) super_callables: Vec<KlibDependencyCallable>,
+    /// The interface defaults the local classes the body materializes inherit, each with the
+    /// interface declarations it implements: dispatch reaches one once a call of those does.
+    pub(crate) inherited_defaults: Vec<(KlibDependencyCallable, Vec<KlibDependencyCallable>)>,
 }
 
 /// Distinct inventories from one authenticated emitted-body traversal. Declaration roots never
@@ -220,6 +223,7 @@ struct EmittedBodyInventory<'a> {
     public_hierarchy_roots: Vec<TypeName>,
     sam_declarations: Vec<&'a KlibIrSymbol>,
     super_callables: Vec<&'a KlibIrSymbol>,
+    inherited_defaults: Vec<(KlibDependencyCallable, Vec<KlibDependencyCallable>)>,
 }
 
 impl KlibDeclarationBodies {
@@ -1141,6 +1145,18 @@ impl KlibDeclarationBodies {
         found.unwrap_or(LocatedMember::Missing)
     }
 
+    /// Whether `identity` is a member with a body of an interface: a default a `super` call names,
+    /// or one a class inherits.
+    pub(crate) fn is_interface_default(&self, identity: &KlibDependencyCallable) -> bool {
+        self.function_has_body(identity) == Some(true)
+            && matches!(
+                self.member_owner(identity),
+                LocatedMember::One { class, .. }
+                    if crate::metadata::semantic::class_kind(class.base.flags)
+                        == crate::libraries::TypeKind::Interface
+            )
+    }
+
     /// The class that directly declares the exact linked member `identity`, function or accessor.
     pub(crate) fn member_owner(&self, identity: &KlibDependencyCallable) -> LocatedMember<'_> {
         self.function_owner(&identity.module, &ir_signature(&identity.declaration))
@@ -1318,6 +1334,7 @@ impl KlibDeclarationBodies {
             sam_classifiers,
             hierarchy_roots: inventory.public_hierarchy_roots,
             super_callables,
+            inherited_defaults: inventory.inherited_defaults,
         }
     }
 
@@ -1417,6 +1434,7 @@ impl KlibDeclarationBodies {
         // class. Its object value is the unit's own, so it leaves the read objects.
         let mut classes = crate::fx_hash::HashSet::default();
         let mut read_objects = Vec::new();
+        let mut inherited_defaults = Vec::new();
         let (mut next_symbol, mut next_object) = (0, 0);
         loop {
             let local = if let Some(symbol) = symbols.get(next_symbol).copied() {
@@ -1441,6 +1459,16 @@ impl KlibDeclarationBodies {
                         class_identity(&KlibIrSignature::Public(signature.clone()))
                     }),
                 );
+                // A class whose supertypes do not resolve declines where it is materialized.
+                if let Ok(inherited) =
+                    self.inherited_implementations(&identity.module, class_arena, class)
+                {
+                    inherited_defaults.extend(
+                        inherited
+                            .into_iter()
+                            .filter(|(body, _)| self.is_interface_default(body)),
+                    );
+                }
                 let mut roots = class_arena.class_member_roots(class);
                 roots.extend(class_arena.class_superclass_delegations(class));
                 symbols.extend(class_arena.emitted_callable_symbols_from(roots.clone(), forms));
@@ -1457,6 +1485,7 @@ impl KlibDeclarationBodies {
             public_hierarchy_roots: classifiers,
             sam_declarations: sams,
             super_callables: supers,
+            inherited_defaults,
         }
     }
 

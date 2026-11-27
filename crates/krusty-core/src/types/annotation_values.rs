@@ -81,7 +81,7 @@ impl std::fmt::Debug for AnnotationValue {
 /// A floating value whose `Debug` form is distinct for distinct bits. Rust prints every NaN as
 /// `NaN`, but a class file can carry any NaN payload and the compiler emits the bits it read, so a
 /// NaN also shows its bits. Every other value already prints distinctly, `-0.0` included.
-pub(crate) enum ExactFloat {
+pub enum ExactFloat {
     Single(f32),
     Double(f64),
 }

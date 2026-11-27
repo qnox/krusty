@@ -17,7 +17,6 @@ fn local(ty: Ty, flow: u32, lexical: u32) -> Local {
         lexical_capture_identity: Some(lexical),
         lexical_declaration: None,
         flow_identity: flow,
-        safe_call_origin: None,
     }
 }
 

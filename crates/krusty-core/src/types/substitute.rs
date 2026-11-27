@@ -6,7 +6,7 @@ use crate::types::TyKind;
 use super::{intern, Ty, TyParamName};
 
 /// A substitution of type parameters, keyed by their semantic identity.
-pub(crate) type TyParamBindings = HashMap<TyParamName, Ty>;
+pub type TyParamBindings = HashMap<TyParamName, Ty>;
 
 fn compose_in_projection(inner: Ty) -> Ty {
     match inner.kind() {
@@ -179,7 +179,7 @@ impl TyParamKey for TyParamName {}
 impl TyParamKey for String {}
 
 /// Whether `formals` declares the type parameter `name`.
-pub(crate) fn declares_formal<K: TyParamKey>(formals: &[K], name: &str) -> bool {
+pub fn declares_formal<K: TyParamKey>(formals: &[K], name: &str) -> bool {
     formals.iter().any(|formal| formal.borrow() == name)
 }
 
@@ -202,7 +202,7 @@ pub fn ty_subst<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
 /// function parameter/result, the function component consumes the projection and keeps its
 /// underlying semantic type (`typealias F<T> = () -> T; F<*>` returns the star's `Any?` bound).
 /// Projections below a classifier remain written generic arguments and must survive.
-pub(crate) fn ty_subst_alias_expansion<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
+pub fn ty_subst_alias_expansion<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
     fn normalize(ty: Ty) -> Ty {
         match ty.kind() {
             TyKind::Fun(signature) => Ty::fun_with_shape(
@@ -267,7 +267,7 @@ pub(crate) fn ty_subst_alias_expansion<K: TyParamKey>(ty: Ty, bindings: &HashMap
 /// does. Every other type parameter belongs to a declaration enclosing the call (`T` of the class
 /// whose member is called through `this`); it is in scope at the call site, not a variable of the
 /// call, so it stays as written.
-pub(crate) fn ty_subst_formals<F: TyParamKey, K: TyParamKey>(
+pub fn ty_subst_formals<F: TyParamKey, K: TyParamKey>(
     ty: Ty,
     formals: &[F],
     bindings: &HashMap<K, Ty>,
@@ -287,7 +287,7 @@ pub fn ty_subst_all<K: TyParamKey>(types: &[Ty], bindings: &HashMap<K, Ty>) -> V
 /// Replace the inline bounds carried by type-parameter references throughout a type shape. Signature
 /// decoders first discover formal declarations and type uses independently; this single type-model
 /// operation joins them without each decoder growing its own recursive walk.
-pub(crate) fn ty_with_param_bounds<K: TyParamKey>(ty: Ty, bounds: &HashMap<K, Ty>) -> Ty {
+pub fn ty_with_param_bounds<K: TyParamKey>(ty: Ty, bounds: &HashMap<K, Ty>) -> Ty {
     match ty.kind() {
         TyKind::TyParam(name, current) | TyKind::Var(name, current) => {
             ty.with_symbol_bound(bounds.get(name.as_str()).copied().unwrap_or(current))
@@ -341,10 +341,7 @@ pub(crate) fn ty_with_param_bounds<K: TyParamKey>(ty: Ty, bounds: &HashMap<K, Ty
 /// hydrating references between formals. A declaration such as `T : U, U : A, B` therefore gives
 /// occurrences of `T` the full transitive proof. Cycles retain their first repeated occurrence and
 /// terminate without inventing a bound.
-pub(crate) fn ty_with_transitive_param_bounds<K: TyParamKey>(
-    ty: Ty,
-    bounds: &HashMap<K, Ty>,
-) -> Ty {
+pub fn ty_with_transitive_param_bounds<K: TyParamKey>(ty: Ty, bounds: &HashMap<K, Ty>) -> Ty {
     fn hydrate<K: TyParamKey>(
         ty: Ty,
         bounds: &HashMap<K, Ty>,
@@ -413,7 +410,7 @@ pub(crate) fn ty_with_transitive_param_bounds<K: TyParamKey>(
 /// inline upper bounds carried by nested `TyParam` nodes. Renaming only the outer occurrence leaves
 /// chains such as `D : B, B : A` partly keyed by source spelling and breaks bound member lookup.
 /// An inference variable keeps its kind; only its identity is renamed.
-pub(crate) fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>) -> Ty {
+pub fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>) -> Ty {
     ty_map_symbols(ty, &|symbol, bound| {
         let (TyKind::TyParam(name, _) | TyKind::Var(name, _)) = symbol.kind() else {
             unreachable!("only type parameters and variables are mapped")
@@ -430,7 +427,7 @@ pub(crate) fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>)
 
 /// Rebuild every type-parameter and inference-variable occurrence of `ty`, innermost bound first:
 /// `rebuild` receives the original occurrence and its already-mapped bound.
-pub(crate) fn ty_map_symbols(ty: Ty, rebuild: &dyn Fn(Ty, Ty) -> Ty) -> Ty {
+pub fn ty_map_symbols(ty: Ty, rebuild: &dyn Fn(Ty, Ty) -> Ty) -> Ty {
     let map = |ty: Ty| ty_map_symbols(ty, rebuild);
     match ty.kind() {
         TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => rebuild(ty, map(bound)),
@@ -472,7 +469,7 @@ pub(crate) fn ty_map_symbols(ty: Ty, rebuild: &dyn Fn(Ty, Ty) -> Ty) -> Ty {
 /// maps rebuilt as that replacement. `specialized` is `declared` after substitution, so the two
 /// share their shape down to those positions; wherever the shapes part, `specialized` is kept.
 /// Walking the declaration keeps two parameters that were given the same type apart.
-pub(crate) fn ty_replace_formals_along(
+pub fn ty_replace_formals_along(
     declared: Ty,
     specialized: Ty,
     replacement: &dyn Fn(&str) -> Option<Ty>,
@@ -539,7 +536,7 @@ pub(crate) fn ty_replace_formals_along(
 /// Canonicalize declaration-owned type-parameter identities by their ordinal. This is used for
 /// declaration-shape equality: two independently declared `<T>` parameters have different semantic
 /// identities during inference, but occupy the same slot when comparing callable signatures.
-pub(crate) fn ty_canonicalize_params<F: TyParamKey>(ty: Ty, formals: &[F]) -> Ty {
+pub fn ty_canonicalize_params<F: TyParamKey>(ty: Ty, formals: &[F]) -> Ty {
     let identities = formals
         .iter()
         .enumerate()
@@ -553,7 +550,7 @@ pub(crate) fn ty_canonicalize_params<F: TyParamKey>(ty: Ty, formals: &[F]) -> Ty
     ty_rename_params(ty, &identities)
 }
 
-pub(crate) fn ty_subst_keep_unbound<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
+pub fn ty_subst_keep_unbound<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
     substitute_type_parameters(
         ty,
         |name| recorded_binding(bindings, name),
@@ -567,7 +564,7 @@ pub(crate) fn ty_subst_keep_unbound<K: TyParamKey>(ty: Ty, bindings: &HashMap<K,
 /// expanded inside its own expansion. A binding that names its own variable, such as `T := Out<T>`
 /// for `interface Out<out T : Out<T>>`, denotes a recursive type; substituting it again and again
 /// only builds an ever larger type and never reaches a fixpoint.
-pub(crate) fn ty_subst_keep_unbound_closed<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
+pub fn ty_subst_keep_unbound_closed<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
     let expanding = std::cell::RefCell::new(Vec::new());
     closed_substitution(ty, bindings, &expanding)
 }
@@ -598,7 +595,7 @@ fn closed_substitution<K: TyParamKey>(
 /// Apply arguments from an already-validated classifier use without narrowing them against the
 /// inline bound carried by a symbolic occurrence. Type checking validated `KFunction1<String?, R>`
 /// when the classifier was formed; projecting its `invoke` shape must retain `String?` exactly.
-pub(crate) fn ty_subst_applied_lookup<F>(ty: Ty, lookup: F) -> Ty
+pub fn ty_subst_applied_lookup<F>(ty: Ty, lookup: F) -> Ty
 where
     F: Fn(&str) -> Option<Ty> + Copy,
 {
@@ -613,7 +610,7 @@ where
 /// A Java declaration writes its formals flexibly (`class Sub<T> extends J<T>` is `J<T!>`), and its
 /// provider publishes such an occurrence with a platform bound, so `Sub<String>` is a
 /// `J<String!>`, exactly as kotlinc's substitution of the flexible `T!` gives.
-pub(crate) fn ty_subst_supertype_template<F, D>(ty: Ty, lookup: F, written_non_null: D) -> Ty
+pub fn ty_subst_supertype_template<F, D>(ty: Ty, lookup: F, written_non_null: D) -> Ty
 where
     F: Fn(&str) -> Option<Ty> + Copy,
     D: Fn(&str) -> bool + Copy,

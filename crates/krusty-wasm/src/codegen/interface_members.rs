@@ -869,18 +869,31 @@ impl FileRecorder<'_, '_, '_> {
                 if self.implements(member.member) {
                     continue;
                 }
-                // A default the interface publishes, which the class does not override, is its own
-                // implementation: the exported body, not a slot of the class. So is an inherited
-                // default overriding the member, such as `CoroutineContext.Element.fold` for
+                // A default an interface publishes, which the class does not override, is its own
+                // implementation: the declared or exported body, not a slot of the class. That is
+                // the overridden member's own default, or an inherited interface's default
+                // overriding it, such as `CoroutineContext.Element.fold` for
                 // `CoroutineContext.fold`.
-                let implemented = if edge.implementation == edge.overridden
-                    && edge.implementation_function.is_some_and(|function| {
+                let interface_default = match edge.implementation {
+                    ResolvedFunctionOverrideTarget::External(implementation) => (implementation
+                        == target
+                        || self
+                            .recording
+                            .callables
+                            .callable(implementation)
+                            .is_some_and(|fact| fact.owner_is_interface))
+                    .then_some(implementation),
+                    ResolvedFunctionOverrideTarget::Module(_) => None,
+                };
+                let implemented = if let Some(default) = interface_default.filter(|_| {
+                    edge.implementation_function.is_some_and(|function| {
                         ir.functions[function as usize].dispatch_receiver
                             != Some(ir.classes[owner as usize].fq_name_id())
-                    }) {
+                    })
+                }) {
                     self.dependency_default_implementation(
                         member,
-                        target,
+                        default,
                         edge.implementation_function,
                     )
                 } else if let Some(default) = self.inherited_interface_default(edge) {
