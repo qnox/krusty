@@ -556,6 +556,7 @@ kt_boolean kt_list_iterator_has_previous(KRef iterator);
 KRef kt_list_iterator_previous(KRef iterator);
 kt_int kt_list_iterator_next_index(KRef iterator);
 kt_int kt_list_iterator_previous_index(KRef iterator);
+void kt_list_iterator_set(KRef iterator, KRef element);
 
 /* Iteration through a receiver the generator could only type by the INTERFACE, where either of the
    two iterable things this runtime has may turn up. The descriptor decides which, and `next`

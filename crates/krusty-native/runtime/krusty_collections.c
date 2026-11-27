@@ -286,6 +286,8 @@ typedef struct KListIterator {
     /* The list's modification count when this iterator was made; see `KMutableList`. An immutable
        list never changes, so this stays zero and the comparison always holds. */
     uint32_t modifications;
+    /* The index `next()` or `previous()` last answered, which `set` replaces; -1 before either. */
+    kt_int last;
 } KListIterator;
 
 static const uint32_t kt_list_iterator_offsets[] = {offsetof(KListIterator, list)};
@@ -998,6 +1000,7 @@ KRef kt_list_iterator(KRef list) {
     KListIterator *iterator = (KListIterator *)kt_gc_allocate(type, sizeof(KListIterator));
     iterator->list = list;
     iterator->at = 0;
+    iterator->last = -1;
     iterator->modifications = kt_list_version(list);
     return (KRef)iterator;
 }
@@ -1057,6 +1060,7 @@ KRef kt_list_iterator_next(KRef iterator) {
         kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, NULL));
         return NULL;
     }
+    self->last = self->at;
     return kt_list_get(self->list, self->at++);
 }
 
@@ -1099,7 +1103,24 @@ KRef kt_list_iterator_previous(KRef iterator) {
         kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, NULL));
         return NULL;
     }
-    return kt_list_get(self->list, --self->at);
+    self->last = --self->at;
+    return kt_list_get(self->list, self->at);
+}
+
+/* `MutableListIterator.set`: replaces the element the last `next()` or `previous()` answered. As
+   Kotlin/Native's does, it raises `ConcurrentModificationException` when the list changed under
+   the iterator and `IllegalStateException` when there is no such element yet. */
+void kt_list_iterator_set(KRef iterator, KRef element) {
+    KListIterator *self = kt_list_iterator_of(iterator);
+    if (kt_list_version(self->list) != self->modifications) {
+        kt_throw(kt_throwable_new(&kt_type_concurrent_modification_exception, NULL));
+        return;
+    }
+    if (self->last < 0) {
+        kt_illegal_state(kt_string_utf8("Call next() or previous() before replacing an element.", 54));
+        return;
+    }
+    (void)kt_mutable_list_set(self->list, self->last, element);
 }
 
 kt_int kt_list_iterator_next_index(KRef iterator) { return kt_list_iterator_of(iterator)->at; }

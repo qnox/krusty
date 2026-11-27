@@ -124,6 +124,11 @@ impl Ty {
     pub fn is_star_projection(self) -> bool {
         matches!(self.kind(), TyKind::StarProjection(_))
     }
+
+    /// Whether this is a contravariant (`in`) projection argument.
+    pub fn is_in_projection(self) -> bool {
+        matches!(self.kind(), TyKind::InProjection(_))
+    }
 }
 
 impl From<TyKind> for Ty {
