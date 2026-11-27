@@ -156,19 +156,48 @@ impl Emitter<'_> {
     /// the omitted parameters among `statements` take theirs together, ahead of the temporaries
     /// their defaults use.
     pub(super) fn reserve_defaulted_parameter_slots(&mut self, statements: &[u32]) {
-        for &statement in statements {
-            let IrExpr::Variable { index, ty, .. } = *self.ir.expr(statement) else {
-                continue;
-            };
-            if !is_defaulted_parameter(self.ir, statement) {
-                continue;
-            }
-            let slot_ty = slot_type(self.ir, statement, ty);
-            let slot = self
-                .frame
-                .enter(super::frame_map::FrameKey::CallOperand(index), slot_ty);
-            self.slots.insert(index, (slot, slot_ty));
+        self.pending_default_slots.clear();
+        for (index, statement) in self.defaulted_parameters(statements) {
+            self.reserve_defaulted_parameter_slot(index, statement);
         }
+    }
+
+    /// The omitted parameters among `statements`, by the index of the local that holds each.
+    pub(super) fn defaulted_parameters(&self, statements: &[u32]) -> Vec<(u32, u32)> {
+        statements
+            .iter()
+            .filter(|&&statement| is_defaulted_parameter(self.ir, statement))
+            .filter_map(|&statement| match *self.ir.expr(statement) {
+                IrExpr::Variable { index, .. } => Some((index, statement)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn reserve_defaulted_parameter_slot(&mut self, index: u32, statement: u32) {
+        if self.slots.contains_key(&index) {
+            return;
+        }
+        let IrExpr::Variable { ty, .. } = *self.ir.expr(statement) else {
+            return;
+        };
+        let slot_ty = slot_type(self.ir, statement, ty);
+        let slot = self
+            .frame
+            .enter(super::frame_map::FrameKey::CallOperand(index), slot_ty);
+        self.slots.insert(index, (slot, slot_ty));
+    }
+
+    /// The stub owns its parameters' slots in parameter order: a supplied operand stored before
+    /// the frame opens takes its slot after those of the omitted parameters ahead of it.
+    fn reserve_defaulted_slots_before(&mut self, operand: u32) {
+        let pending = std::mem::take(&mut self.pending_default_slots);
+        let (before, after): (Vec<_>, Vec<_>) =
+            pending.into_iter().partition(|&(index, _)| index < operand);
+        for (index, statement) in before {
+            self.reserve_defaulted_parameter_slot(index, statement);
+        }
+        self.pending_default_slots = after;
     }
 
     pub(super) fn emit_local_variable(
@@ -262,6 +291,9 @@ impl Emitter<'_> {
                     self.frame
                         .enter(super::frame_map::FrameKey::Value(link), ty);
                 }
+            }
+            if entered.is_none() && holds_operand {
+                self.reserve_defaulted_slots_before(index);
             }
             let slot = entered
                 .unwrap_or_else(|| self.enter_unassigned_value(index, slot_ty, holds_operand));
