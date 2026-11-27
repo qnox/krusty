@@ -98,6 +98,76 @@ enum Outcome {
     NotScored(String),
 }
 
+/// A case's source as both compilers receive it ([`prepare`]), and where each of its lines came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PreparedCase {
+    pub(super) text: String,
+    /// One entry per line of `text`, in order.
+    pub(super) origins: Vec<LineOrigin>,
+}
+
+/// Where a line of a [`PreparedCase`] came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LineOrigin {
+    /// Line `n` (0-based) of the case's marker-free text, unchanged.
+    Case(usize),
+    /// Line `n` of the case's marker-free text, rewritten by the JVM corpus placeholders.
+    Rewritten(usize),
+    /// A line the preparation added: a directory default, a helper file or its `// FILE:` header.
+    Added,
+}
+
+/// Text assembled from the lines of a case and the text a preparation adds around them. Each
+/// chunk is one source line with its terminator (the last may have none) and its case line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Assembled {
+    chunks: Vec<(String, Option<usize>)>,
+}
+
+impl Assembled {
+    fn of_case(text: &str) -> Assembled {
+        Assembled {
+            chunks: text
+                .split_inclusive('\n')
+                .enumerate()
+                .map(|(line, chunk)| (chunk.to_string(), Some(line)))
+                .collect(),
+        }
+    }
+
+    fn added(text: &str) -> impl Iterator<Item = (String, Option<usize>)> + '_ {
+        text.split_inclusive('\n')
+            .map(|chunk| (chunk.to_string(), None))
+    }
+
+    fn text(&self) -> String {
+        self.chunks
+            .iter()
+            .map(|(chunk, _)| chunk.as_str())
+            .collect()
+    }
+
+    /// The case line of each line of [`Assembled::text`]. A line joined from several chunks (added
+    /// text without a final newline running into the next chunk) is added text.
+    fn line_origins(&self) -> Vec<Option<usize>> {
+        let mut origins = Vec::new();
+        let mut parts = 0;
+        let mut origin = None;
+        for (chunk, line) in &self.chunks {
+            parts += 1;
+            origin = *line;
+            if chunk.ends_with('\n') {
+                origins.push(origin.filter(|_| parts == 1));
+                parts = 0;
+            }
+        }
+        if parts > 0 {
+            origins.push(origin.filter(|_| parts == 1));
+        }
+        origins
+    }
+}
+
 /// The case's source as both compilers receive it: markers stripped, the directive-selected helper
 /// sources added to each module, and the JVM corpus placeholders applied.
 pub(super) fn prepare(
@@ -105,7 +175,7 @@ pub(super) fn prepare(
     file: &Path,
     source: &str,
     stem: &str,
-) -> Result<String, String> {
+) -> Result<PreparedCase, String> {
     let mut helpers = Vec::new();
     for (directive, path) in HELPERS {
         if krusty::conformance::directive(source, directive) {
@@ -120,17 +190,35 @@ pub(super) fn prepare(
     }
     let source = with_directory_defaults(
         &box_inventory::key(root, file),
-        &strip_diagnostic_markers(source),
+        Assembled::of_case(&strip_diagnostic_markers(source)),
     );
     let source = if helpers.is_empty() {
         source
     } else {
-        with_helper_files(&source, stem, &helpers.concat())
+        with_helper_files(source, stem, &helpers.concat())
     };
-    Ok(krusty::conformance::prepare_test_source(
-        &source,
-        TestTarget::Jvm,
-    ))
+    Ok(with_placeholders(&source))
+}
+
+/// `source` with the JVM corpus placeholders applied. They rewrite within a line and append whole
+/// lines, so every line keeps its index.
+fn with_placeholders(source: &Assembled) -> PreparedCase {
+    let assembled = source.text();
+    let text = krusty::conformance::prepare_test_source(&assembled, TestTarget::Jvm);
+    let before: Vec<&str> = assembled.lines().collect();
+    let line_origins = source.line_origins();
+    let origins = text
+        .lines()
+        .enumerate()
+        .map(
+            |(index, line)| match line_origins.get(index).copied().flatten() {
+                Some(case) if before.get(index) == Some(&line) => LineOrigin::Case(case),
+                Some(case) => LineOrigin::Rewritten(case),
+                None => LineOrigin::Added,
+            },
+        )
+        .collect();
+    PreparedCase { text, origins }
 }
 
 /// The return-value checker mode JetBrains' runner configures for a whole directory of cases
@@ -148,44 +236,53 @@ const DIRECTORY_CHECKER_MODES: [(&str, &str); 3] = [
 /// `source` with the directory-wide defaults of the case at `key` spelled as the directives the
 /// box lane's argument selection already reads, so the reference compile, its cache identity and
 /// krusty's compile all see the one effective configuration.
-fn with_directory_defaults(key: &str, source: &str) -> String {
+fn with_directory_defaults(key: &str, mut source: Assembled) -> Assembled {
     let Some((_, mode)) = DIRECTORY_CHECKER_MODES
         .iter()
         .find(|(directory, _)| key.starts_with(directory))
     else {
-        return source.to_string();
+        return source;
     };
-    if source.lines().any(|line| {
+    if source.chunks.iter().any(|(line, _)| {
         line.trim_start()
             .starts_with("// RETURN_VALUE_CHECKER_MODE:")
     }) {
-        return source.to_string();
+        return source;
     }
-    format!("// RETURN_VALUE_CHECKER_MODE: {mode}\n{source}")
+    source
+        .chunks
+        .insert(0, (format!("// RETURN_VALUE_CHECKER_MODE: {mode}\n"), None));
+    source
 }
 
 /// `source` with `helpers` (`// FILE:` blocks) closing each of its modules. A case without
 /// `// FILE:` markers becomes the single file its runner names after the case.
-fn with_helper_files(source: &str, stem: &str, helpers: &str) -> String {
-    let mut out = String::new();
-    if !source.contains("// FILE:") && !source.contains("// MODULE:") {
-        out.push_str(&format!("// FILE: {stem}.kt\n"));
+fn with_helper_files(source: Assembled, stem: &str, helpers: &str) -> Assembled {
+    let mut out = Vec::new();
+    if !source
+        .chunks
+        .iter()
+        .any(|(line, _)| line.contains("// FILE:") || line.contains("// MODULE:"))
+    {
+        out.extend(Assembled::added(&format!("// FILE: {stem}.kt\n")));
     }
     let mut in_module = false;
-    for line in source.split_inclusive('\n') {
+    for (line, origin) in source.chunks {
         if line.starts_with("// MODULE:") {
             if in_module {
-                out.push_str(helpers);
+                out.extend(Assembled::added(helpers));
             }
             in_module = true;
         }
-        out.push_str(line);
+        out.push((line, origin));
     }
-    if !out.ends_with('\n') {
-        out.push('\n');
+    match out.last_mut() {
+        Some((line, _)) if !line.ends_with('\n') => line.push('\n'),
+        Some(_) => {}
+        None => out.push(("\n".to_string(), None)),
     }
-    out.push_str(helpers);
-    out
+    out.extend(Assembled::added(helpers));
+    Assembled { chunks: out }
 }
 
 /// kotlinc's verdict: the box oracle's reference compile of the same topology and arguments.
@@ -263,6 +360,7 @@ fn worker_verdict(root: &Path, jdks: &BoxJdkRoots, file: &Path) -> String {
         Ok(prepared) => prepared,
         Err(reason) => return format!("F\t{reason}"),
     };
+    let prepared = prepared.text;
     let classpath = common::classpath_jars_for(&prepared);
     match krusty(&prepared, stem, &classpath, jdks.select(&prepared)) {
         Verdict::Accepted => "A".to_string(),
@@ -359,8 +457,9 @@ fn run_case(
     let source = std::fs::read_to_string(file)
         .map_err(|error| fatal(format!("read {}: {error}", file.display())))?;
     let stem = case_stem(file);
-    let prepared =
-        prepare(root, file, &source, stem).map_err(|reason| fatal(format!("prepare: {reason}")))?;
+    let prepared = prepare(root, file, &source, stem)
+        .map_err(|reason| fatal(format!("prepare: {reason}")))?
+        .text;
     let classpath = common::classpath_jars_for(&prepared);
     let jdk = jdks.select(&prepared);
     let reference = reference(&prepared, stem, &classpath, jdk).map_err(fatal)?;
@@ -728,7 +827,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                with_directory_defaults(key, case),
+                with_directory_defaults(key, Assembled::of_case(case)).text(),
                 format!("// RETURN_VALUE_CHECKER_MODE: {mode}\n{case}"),
                 "{key}"
             );
@@ -737,12 +836,54 @@ mod tests {
             "compiler/testData/diagnostics/tests/crvDifferent/a.kt",
             "compiler/testData/diagnostics/tests/other/a.kt",
         ] {
-            assert_eq!(with_directory_defaults(key, case), case, "{key}");
+            assert_eq!(
+                with_directory_defaults(key, Assembled::of_case(case)).text(),
+                case,
+                "{key}"
+            );
         }
         let explicit = "// RETURN_VALUE_CHECKER_MODE: FULL\nfun f() {}\n";
         assert_eq!(
-            with_directory_defaults("compiler/testData/diagnostics/tests/crv/a.kt", explicit),
+            with_directory_defaults(
+                "compiler/testData/diagnostics/tests/crv/a.kt",
+                Assembled::of_case(explicit)
+            )
+            .text(),
             explicit
+        );
+    }
+
+    #[test]
+    fn a_prepared_case_knows_the_case_line_of_each_of_its_lines() {
+        let case = "// MODULE: a\nOPTIONAL_JVM_INLINE_ANNOTATION value class A(val a: Int)\n// MODULE: b(a)\nclass B";
+        let assembled = with_helper_files(
+            with_directory_defaults(
+                "compiler/testData/diagnostics/tests/crv/a.kt",
+                Assembled::of_case(case),
+            ),
+            "case",
+            "// FILE: h.kt\nfun h() = 1\n",
+        );
+        let prepared = with_placeholders(&assembled);
+        assert_eq!(
+            prepared,
+            PreparedCase {
+                text: "// RETURN_VALUE_CHECKER_MODE: CHECKER\n// MODULE: a\n\
+                       @JvmInline value class A(val a: Int)\n// FILE: h.kt\nfun h() = 1\n\
+                       // MODULE: b(a)\nclass B\n// FILE: h.kt\nfun h() = 1\n"
+                    .to_string(),
+                origins: vec![
+                    LineOrigin::Added,
+                    LineOrigin::Case(0),
+                    LineOrigin::Rewritten(1),
+                    LineOrigin::Added,
+                    LineOrigin::Added,
+                    LineOrigin::Case(2),
+                    LineOrigin::Case(3),
+                    LineOrigin::Added,
+                    LineOrigin::Added,
+                ],
+            }
         );
     }
 
