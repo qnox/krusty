@@ -10,7 +10,10 @@ impl Checker<'_> {
     /// Narrowings from a `!= null`/`== null` proof on `operand`: the operand's whole ACCESS PATH
     /// (`a.b != null` proves `a.b` non-null) — and, for a SAFE-CALL chain (`a?.b?.c != null`),
     /// every prefix too, since a non-null safe-call result means every link held (kotlinc narrows
-    /// the root receiver in the branch). Only stable paths narrow soundly.
+    /// the root receiver in the branch). Only stable paths narrow soundly. A call's non-null
+    /// result proves its contract's `returnsNotNull()` effect, and a stable value's proves what
+    /// the value's initializer implies. Every non-null proof (`!= null`, `!!`, `?: return`, a
+    /// contract's `value != null`) goes through here or [`Checker::null_proof_or_decline`].
     pub(super) fn null_check_narrowings(
         &self,
         scope: &CheckerScope<'_>,
@@ -19,6 +22,14 @@ impl Checker<'_> {
         declined: &mut Vec<(String, Ty)>,
     ) {
         let Some(path) = self.expr_access_path(operand) else {
+            // A call's non-null result proves its contract's `returnsNotNull() implies …`.
+            self.contract_result_narrowings(
+                scope,
+                operand,
+                crate::contracts::ReturnsValue::NotNull,
+                out,
+                declined,
+            );
             // Not a property path. A SAFE-CALL chain ending in a method (`u?.f() != null`,
             // `u?.f() ?: return`) is no property read, but a non-null result still proves the
             // chain's ROOT receiver non-null — it only completes when every `?.` held.

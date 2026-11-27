@@ -1,109 +1,69 @@
-//! Binding-owned implications carried by nullable safe-call results.
+//! What proving a stable value non-null or null proves.
 //!
-//! If an immutable local `result` is initialized by `origin?.selector`, proving `result` non-null
-//! also proves that exact `origin` binding non-null. The edge is stored on `result`'s lexical
-//! binding by the checker; this module owns syntax extraction and cycle-safe graph traversal.
+//! A null check on a stable value applies the value's own proof and the implications recorded
+//! where the value was bound (`value_implications`): after `val result = origin?.selector`,
+//! proving `result` non-null proves `origin` non-null, and after `val selector = selectorFor(s)`
+//! it proves the conclusion of the call's `returnsNotNull()` effect. Every consumer of a non-null
+//! proof (`!= null`, `!!`, a `?.` receiver, `?: return`, `requireNotNull`) goes through
+//! [`Checker::null_proof_or_decline`], and every consumer of a null proof through
+//! [`Checker::implied_null_narrowings`].
 
-use crate::fx_hash::HashSet;
-
-use crate::ast::{Expr, ExprId};
 use crate::diag::Span;
 use crate::types::{Ty, TyKind};
 
-use super::lexical_bindings::BindingIdentity;
-use super::scope::{NarrowPath, Ns, PathRoot};
-use super::{Checker, CheckerScope, Local, ReceiverFnValueOrigin, ScopeBinding};
+use super::scope::{ImplyingQuestion, NarrowPath};
+use super::{Checker, CheckerScope, Local};
 
 impl Checker<'_> {
-    pub(super) fn attach_safe_call_origin(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-        origin: BindingIdentity,
-    ) {
-        scope.rebind_nearest(name, Ns::Value, |binding, _| match binding {
-            ScopeBinding::Value(mut local) => {
-                local.safe_call_origin = Some(origin);
-                ScopeBinding::Value(local)
-            }
-            other => other.clone(),
-        });
-    }
-
-    /// Record only implications between immutable, direct lexical value slots. In particular, a
-    /// local delegated `val` is a `getValue` call and can change between the safe call and proof.
-    pub(super) fn safe_call_origin_for_initializer(
-        &self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-        result_is_var: bool,
-    ) -> Option<BindingIdentity> {
-        if result_is_var {
-            return None;
-        }
-        let Expr::SafeCall { receiver, .. } = self.file.expr(expression) else {
-            return None;
-        };
-        let mut base = *receiver;
-        while let Expr::SafeCall { receiver, .. } = self.file.expr(base) {
-            base = *receiver;
-        }
-        let Expr::Name(name) = self.file.expr(base) else {
-            return None;
-        };
-        self.lookup(scope, name)
-            .filter(|origin| {
-                !origin.is_var
-                    && origin.delegate_storage_ty.is_none()
-                    && matches!(origin.origin, ReceiverFnValueOrigin::Local)
-            })
-            .and_then(|origin| origin.lexical_capture_identity)
-            .map(BindingIdentity::new)
-    }
-
-    /// Binding-identified safe-call origins reachable from one root-only lexical result.
-    fn safe_call_origin_paths(
+    /// The facts recorded for the stable value at `path` that its being non-null (`non_null`) or
+    /// null proves, each passing the stability gate at this proof.
+    fn implied_null_check_facts(
         &self,
         scope: &CheckerScope<'_>,
         path: &NarrowPath,
-    ) -> Vec<NarrowPath> {
-        let (PathRoot::Value(root), true) = (&path.root, path.segments.is_empty()) else {
-            return Vec::new();
-        };
-        let Some(start) = self
-            .visible_flow_value(scope, *root)
-            .and_then(|(_, local)| local.lexical_capture_identity)
-            .map(BindingIdentity::new)
+        non_null: bool,
+        out: &mut Vec<(NarrowPath, Ty)>,
+        declined: &mut Vec<(String, Ty)>,
+        site: Span,
+    ) {
+        let Some(implications) = scope
+            .value_implications(path)
+            .filter(|implications| implications.question == ImplyingQuestion::NonNull)
         else {
-            return Vec::new();
+            return;
         };
-        origin_chain(start, |identity| {
-            self.visible_local_binding(scope, identity)?
-                .1
-                .safe_call_origin
-        })
-        .into_iter()
-        .filter_map(|identity| {
-            self.visible_local_binding(scope, identity)
-                .map(|(_, local)| NarrowPath::root_only(PathRoot::Value(local.flow_identity)))
-        })
-        .collect()
+        for (implied, ty) in &implications.facts(non_null).narrowings {
+            if self.is_proof_stable_or_decline(scope, implied, *ty, declined, site) {
+                out.push((implied.clone(), *ty));
+            }
+        }
     }
 
-    /// Narrow every binding-identified safe-call origin reachable from `path` on a branch that has
-    /// already proven `path` non-null.
-    pub(super) fn apply_safe_call_origin_narrowing(
+    /// What proving the stable value at `path` null proves through its recorded implications
+    /// (a `returns(null) implies …` effect of the call it holds).
+    pub(super) fn implied_null_narrowings(
+        &self,
+        scope: &CheckerScope<'_>,
+        path: &NarrowPath,
+        out: &mut Vec<(NarrowPath, Ty)>,
+        declined: &mut Vec<(String, Ty)>,
+        site: Span,
+    ) {
+        self.implied_null_check_facts(scope, path, false, out, declined, site);
+    }
+
+    /// Narrow what `path`'s implications prove on a branch that has already proven `path`
+    /// non-null itself: the selector of a `?.` whose receiver is `path`.
+    pub(super) fn apply_implied_non_null_narrowing(
         &mut self,
         scope: &CheckerScope<'_>,
         path: &NarrowPath,
         site: Span,
     ) {
-        for origin in self.safe_call_origin_paths(scope, path) {
-            if let Some(TyKind::Nullable(inner)) =
-                self.stable_path_ty(scope, &origin, site).map(Ty::kind)
-            {
-                self.apply_narrowing_unchecked(scope, &origin, inner);
-            }
+        let mut implied = Vec::new();
+        self.implied_null_check_facts(scope, path, true, &mut implied, &mut Vec::new(), site);
+        for (path, ty) in implied {
+            self.apply_narrowing_unchecked(scope, &path, ty);
         }
     }
 
@@ -115,27 +75,24 @@ impl Checker<'_> {
         declined: &mut Vec<(String, Ty)>,
         site: Span,
     ) {
-        let origins = self.safe_call_origin_paths(scope, path);
-        for path in std::iter::once(path.clone()).chain(origins) {
-            match self
-                .stable_path_ty(scope, &path, site)
-                .and_then(proven_non_null)
-            {
-                Some(proven) => out.push((path, proven)),
-                None => {
-                    if let Some((name, mutated)) = self.closure_mutated_decline(scope, &path, site)
-                    {
-                        if let Some(proven) = proven_non_null(mutated) {
-                            if self.closure_writes_conform(&name, site, proven) {
-                                out.push((path, proven));
-                            } else {
-                                declined.push((name, proven));
-                            }
+        match self
+            .stable_path_ty(scope, path, site)
+            .and_then(proven_non_null)
+        {
+            Some(proven) => out.push((path.clone(), proven)),
+            None => {
+                if let Some((name, mutated)) = self.closure_mutated_decline(scope, path, site) {
+                    if let Some(proven) = proven_non_null(mutated) {
+                        if self.closure_writes_conform(&name, site, proven) {
+                            out.push((path.clone(), proven));
+                        } else {
+                            declined.push((name, proven));
                         }
                     }
                 }
             }
         }
+        self.implied_null_check_facts(scope, path, true, out, declined, site);
     }
 }
 
@@ -153,62 +110,5 @@ fn proven_non_null(ty: Ty) -> Option<Ty> {
 impl Local {
     pub(super) const fn has_unstable_delegated_read(self) -> bool {
         self.delegate_storage_ty.is_some()
-    }
-}
-
-/// Follow binding-to-binding implications once each. Source declaration order makes a correctly
-/// identified graph acyclic, but explicit cycle detection keeps malformed/intermediate graphs
-/// finite without imposing an arbitrary maximum on valid chains.
-fn origin_chain(
-    start: BindingIdentity,
-    mut origin_of: impl FnMut(BindingIdentity) -> Option<BindingIdentity>,
-) -> Vec<BindingIdentity> {
-    let mut seen = HashSet::from_iter([start]);
-    let mut current = start;
-    let mut origins = Vec::new();
-    while let Some(origin) = origin_of(current) {
-        if !seen.insert(origin) {
-            break;
-        }
-        origins.push(origin);
-        current = origin;
-    }
-    origins
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::fx_hash::HashMap;
-
-    #[test]
-    fn traversal_has_no_valid_depth_cap() {
-        let edges = (1..=32)
-            .map(|identity| {
-                (
-                    BindingIdentity::new(identity),
-                    BindingIdentity::new(identity - 1),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let chain = origin_chain(BindingIdentity::new(32), |identity| {
-            edges.get(&identity).copied()
-        });
-        assert_eq!(chain.len(), 32);
-        assert_eq!(chain.last(), Some(&BindingIdentity::new(0)));
-    }
-
-    #[test]
-    fn traversal_stops_at_a_cycle() {
-        let edges = HashMap::from_iter([
-            (BindingIdentity::new(1), BindingIdentity::new(2)),
-            (BindingIdentity::new(2), BindingIdentity::new(1)),
-        ]);
-        assert_eq!(
-            origin_chain(BindingIdentity::new(1), |identity| edges
-                .get(&identity)
-                .copied()),
-            vec![BindingIdentity::new(2)]
-        );
     }
 }

@@ -6,7 +6,9 @@
 //! (`val empty = s.isNullOrEmpty()` proves `s != null` when `empty` is false). A stable value
 //! holding a call's result carries the call's `returnsNotNull()` and `returns(null)` effects the
 //! same way: after `val selector = selectorFor(channel)`, or a `val` property initialized so in
-//! `init`, `if (selector != null)` proves what `if (selectorFor(channel) != null)` would.
+//! `init`, `if (selector != null)` proves what `if (selectorFor(channel) != null)` would, and after
+//! `val result = origin?.selector` a non-null `result` proves `origin` non-null. Every null proof
+//! of such a value applies them (`safe_call_flow`).
 //!
 //! The facts are computed once, where the value is bound, and recorded on the flow frame that
 //! binds it. A fact the stability gate declines there is no fact at all. A write in the value's
@@ -15,7 +17,7 @@
 //! condition, and a closure that mutates the value in between declines the cast there
 //! (SMARTCAST_IMPOSSIBLE).
 
-use crate::ast::{BinOp, Expr, ExprId};
+use crate::ast::{Expr, ExprId};
 use crate::contracts::ReturnsValue;
 use crate::types::Ty;
 
@@ -44,6 +46,7 @@ impl Checker<'_> {
         } else if bound_ty.is_nullable() {
             (ImplyingQuestion::NonNull, &|non_null| {
                 let mut narrowings = Vec::new();
+                let mut declined = Vec::new();
                 let result = if non_null {
                     ReturnsValue::NotNull
                 } else {
@@ -54,8 +57,12 @@ impl Checker<'_> {
                     init,
                     result,
                     &mut narrowings,
-                    &mut Vec::new(),
+                    &mut declined,
                 );
+                // A non-null safe-call result proves every `?.` of its chain held.
+                if non_null && matches!(self.file.expr(init), Expr::SafeCall { .. }) {
+                    self.null_check_narrowings(scope, init, &mut narrowings, &mut declined);
+                }
                 ConditionFacts {
                     narrowings,
                     exclusions: Vec::new(),
@@ -74,39 +81,21 @@ impl Checker<'_> {
             .then_some(implications)
     }
 
-    /// The implications recorded for the stable value `condition` reads, with the answer the
-    /// condition being `truth` gives to their question: a `Boolean` value read directly, or a
-    /// value compared with `null`.
+    /// The implications recorded for the `Boolean` stable value `condition` reads. A value compared
+    /// with `null` applies its implications through the null proof itself
+    /// (`null_proof_or_decline`, `implied_null_narrowings`).
     fn read_value_implications(
         &self,
         scope: &CheckerScope<'_>,
         condition: ExprId,
-        truth: bool,
-    ) -> Option<(ValueImplications, bool)> {
-        let (value, question, answer) = match self.file.expr(condition) {
-            Expr::Name(_) => (condition, ImplyingQuestion::Truth, truth),
-            Expr::Binary {
-                op: op @ (BinOp::Eq | BinOp::Ne),
-                lhs,
-                rhs,
-                ..
-            } => {
-                let value = match (self.file.expr(*lhs), self.file.expr(*rhs)) {
-                    (_, Expr::NullLit) => *lhs,
-                    (Expr::NullLit, _) => *rhs,
-                    _ => return None,
-                };
-                (
-                    value,
-                    ImplyingQuestion::NonNull,
-                    (*op == BinOp::Ne) == truth,
-                )
-            }
-            _ => return None,
-        };
-        let path = self.expr_access_path(value)?;
-        let implications = scope.value_implications(&path)?;
-        (implications.question == question).then_some((implications, answer))
+    ) -> Option<ValueImplications> {
+        if !matches!(self.file.expr(condition), Expr::Name(_)) {
+            return None;
+        }
+        let path = self.expr_access_path(condition)?;
+        scope
+            .value_implications(&path)
+            .filter(|implications| implications.question == ImplyingQuestion::Truth)
     }
 
     /// Narrowings a stable value read as `condition` proves when it is `truth`. Each fact
@@ -120,12 +109,11 @@ impl Checker<'_> {
         out: &mut Vec<(NarrowPath, Ty)>,
         declined: &mut Vec<(String, Ty)>,
     ) {
-        let Some((implications, answer)) = self.read_value_implications(scope, condition, truth)
-        else {
+        let Some(implications) = self.read_value_implications(scope, condition) else {
             return;
         };
         let site = self.span(condition);
-        for (path, ty) in &implications.facts(answer).narrowings {
+        for (path, ty) in &implications.facts(truth).narrowings {
             if self.is_proof_stable_or_decline(scope, path, *ty, declined, site) {
                 out.push((path.clone(), *ty));
             }
@@ -139,13 +127,12 @@ impl Checker<'_> {
         condition: ExprId,
         truth: bool,
     ) -> Vec<(NarrowPath, FlowExclusion)> {
-        let Some((implications, answer)) = self.read_value_implications(scope, condition, truth)
-        else {
+        let Some(implications) = self.read_value_implications(scope, condition) else {
             return Vec::new();
         };
         let site = self.span(condition);
         implications
-            .facts(answer)
+            .facts(truth)
             .exclusions
             .iter()
             .filter(|(path, _)| self.stable_path_ty(scope, path, site).is_some())

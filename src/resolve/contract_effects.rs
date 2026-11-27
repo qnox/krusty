@@ -285,7 +285,6 @@ impl Checker<'_> {
     /// conclusion when the call's truth value matches the effect's return constant. The contract
     /// is decoded from same-file source or from `@Metadata` (`!s.isNullOrBlank()` narrows `s`
     /// through the deserialized kotlin.text contract — no per-function special cases).
-    /// `nn(x) != null` likewise applies `returnsNotNull() implies …`.
     pub(super) fn contract_condition_narrowings(
         &self,
         scope: &CheckerScope<'_>,
@@ -294,33 +293,9 @@ impl Checker<'_> {
         out: &mut Vec<(NarrowPath, Ty)>,
         declined: &mut Vec<(String, Ty)>,
     ) {
-        use crate::contracts::ReturnsValue;
-        // A Boolean call proves the effect for its own value; a call compared with `null` proves
-        // `returnsNotNull()` when it is not null and `returns(null)` when it is.
-        let (call, result) = match self.file.expr(cond) {
-            Expr::Binary {
-                op: op @ (BinOp::Eq | BinOp::Ne),
-                lhs,
-                rhs,
-                ..
-            } => {
-                let call = match (self.file.expr(*lhs), self.file.expr(*rhs)) {
-                    (_, Expr::NullLit) => *lhs,
-                    (Expr::NullLit, _) => *rhs,
-                    _ => return,
-                };
-                let not_null = (*op == BinOp::Ne) == truth;
-                (
-                    call,
-                    if not_null {
-                        ReturnsValue::NotNull
-                    } else {
-                        ReturnsValue::Null
-                    },
-                )
-            }
-            _ => (cond, ReturnsValue::Bool(truth)),
-        };
+        // A call compared with `null` proves its `returnsNotNull()`/`returns(null)` effects through
+        // the null proof of its value (`null_check_narrowings`, `null_branch_narrowings`).
+        let (call, result) = (cond, crate::contracts::ReturnsValue::Bool(truth));
         self.contract_result_narrowings(scope, call, result, out, declined);
     }
 

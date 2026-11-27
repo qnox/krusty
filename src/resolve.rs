@@ -3483,8 +3483,6 @@ struct Local {
     /// Identity smart-cast facts about this value are keyed by. Every declaration allocates one,
     /// whatever its origin; a narrowing shadow keeps the identity of the value it narrows.
     flow_identity: u32,
-    /// Immutable origin identity implied by this safe-call result; follows lexical shadowing.
-    safe_call_origin: Option<lexical_bindings::BindingIdentity>,
 }
 
 /// The receiver stack a lambda body is checked under: any context receivers, the extension
@@ -13704,11 +13702,6 @@ impl<'a> Checker<'a> {
                 format!("krusty: conflicting local declaration '{name}'"),
             );
         }
-        // Keep the implication on the result's eventual binding, but resolve its origin before the
-        // result is declared: `val x = x?.p` refers to the OUTER `x` on the right-hand side.
-        // The bounded path accepts immutable lexical roots only. A mutable root needs edge
-        // invalidation and branch joins; declining it is conservative and cannot invent a cast.
-        let safe_call_origin = self.safe_call_origin_for_initializer(scope, init, is_var);
         let declared = ty.as_ref().map(|r| self.type_ref_ty(scope, r));
         // An UNRESOLVED annotation must fail the file, not silently bind `Error`: the local
         // would otherwise take its initializer's shape while every use site's checks are
@@ -13836,9 +13829,6 @@ impl<'a> Checker<'a> {
         if declared.is_none() {
             self.record_enhanced_local(flow_identity, init, bound_ty);
             self.record_flexible_local(flow_identity, init, bound_ty);
-        }
-        if let Some(origin) = safe_call_origin {
-            self.attach_safe_call_origin(scope, &name, origin);
         }
         if let Some(implications) = value_implications {
             scope.record_value_implications(
@@ -32882,7 +32872,7 @@ impl<'a> Checker<'a> {
                     if narrows_then != for_else {
                         self.null_check_narrowings(scope, operand, &mut out, declined);
                     } else {
-                        self.null_branch_narrowings(scope, operand, &mut out);
+                        self.null_branch_narrowings(scope, operand, &mut out, declined);
                     }
                 } else if matches!(op, BinOp::Eq | BinOp::RefEq) != for_else {
                     // `x?.p == v` holds only when every `?.` held, as long as `v` cannot be null:
@@ -40624,7 +40614,14 @@ impl<'a> Checker<'a> {
                 // of this lexical flow (`x!!.let { use(x) }`, and later statements). Reassignments
                 // invalidate the fact through the ordinary scope machinery; temporaries and
                 // unstable properties never produce a reusable path.
+                // The assertion proves what `operand != null` would: a safe-call chain's links, a
+                // call's `returnsNotNull()` effect, and a stable value's initializer implications.
                 if narrowed != Ty::Error {
+                    let mut proven = Vec::new();
+                    self.null_check_narrowings(scope, operand, &mut proven, &mut Vec::new());
+                    for (path, ty) in proven {
+                        self.apply_narrowing_unchecked(scope, &path, ty);
+                    }
                     if let Some(path) = self.expr_access_path(operand).filter(|path| {
                         self.stable_path_ty(scope, path, self.span(operand))
                             .is_some()
@@ -42249,7 +42246,7 @@ impl<'a> Checker<'a> {
                 // stored in a local (`val parent = explicit?.let { … }`) is null whenever its base
                 // is, so reaching the selector proves the base non-null too. Without it,
                 // `parent?.let { explicit.name }` reads `explicit` as still nullable.
-                self.apply_safe_call_origin_narrowing(&selector_scope, &path, self.span(receiver));
+                self.apply_implied_non_null_narrowing(&selector_scope, &path, self.span(receiver));
             }
             let scope = &selector_scope;
             // Diagnostic checkpoint for the "nothing resolved, nothing reported" report below. Taken
