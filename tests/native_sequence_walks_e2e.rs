@@ -11,9 +11,7 @@
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
-use super::common::{
-    expect_box_ok_with_stdlib, expect_native_box, kotlinc_box_result,
-};
+use super::common::{expect_box_ok_with_stdlib, expect_native_box, kotlinc_box_result};
 
 /// Require kotlinc's answer, krusty's JVM answer and the NATIVE answer to agree.
 fn every_backend_agrees_with_kotlinc(stem: &str, source: &str) {
