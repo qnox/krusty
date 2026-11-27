@@ -464,7 +464,7 @@ impl BodyLowering<'_> {
                 internal: recovery.classifier,
                 args: vec![value],
                 ctor_params: Some(vec![constructor_parameter.get()]),
-                declared_params: None,
+                declared_params: Some(Box::new([constructor_parameter.get()])),
                 ctor_desc: None,
                 external_target: Some(recovery.constructor),
                 defaults: Box::new([]),

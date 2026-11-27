@@ -8,7 +8,7 @@
 //! over its own class; a sealed class's is a `SealedClassSerializer` over its subclasses. None has
 //! a generated `$serializer` class.
 
-use super::class_ty;
+use super::{class_ty, declare_runtime_call};
 use crate::ir::{Callee, ClassId, ExprId, FunId, IrConst, IrExpr, IrFile, IrFunction, IrTypeOp};
 use crate::libraries::InlineKind;
 use crate::types::{type_name, Ty, TypeName};
@@ -97,6 +97,14 @@ pub(super) fn add_cached_serializer_delegate(
         dispatch_receiver: None,
         args: vec![mode, block],
     });
+    declare_runtime_call(
+        ir,
+        lazy,
+        &[
+            class_ty("kotlin/LazyThreadSafetyMode"),
+            class_ty("kotlin/jvm/functions/Function0"),
+        ],
+    );
     ir.statics.push(crate::ir::IrStatic {
         name: CACHED_SERIALIZER_DELEGATE.to_string(),
         ty: lazy_ty,
@@ -272,7 +280,7 @@ pub(super) fn kclass_literal(ir: &mut IrFile, classifier: TypeName) -> ExprId {
     let classlit = ir.add_expr(IrExpr::ClassConst {
         internal: Some(classifier),
     });
-    ir.add_expr(IrExpr::Call {
+    let call = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::Static {
             owner: type_name("kotlin/jvm/internal/Reflection"),
             name: "getOrCreateKotlinClass".to_string(),
@@ -281,7 +289,9 @@ pub(super) fn kclass_literal(ir: &mut IrFile, classifier: TypeName) -> ExprId {
         }),
         dispatch_receiver: None,
         args: vec![classlit],
-    })
+    });
+    declare_runtime_call(ir, call, &[class_ty("java/lang/Class")]);
+    call
 }
 
 /// `new PolymorphicSerializer(<classifier>::class, <annotations>)`.

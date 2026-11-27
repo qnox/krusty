@@ -13,8 +13,8 @@ use super::type_argument_serializers::declared_type_spelling;
 use super::type_parameter_serializers::TypeParameterSerializers;
 use super::value_class_types::inline_prim_methods;
 use super::{
-    class_ty, complete_generated_body, declared_serializer_of, property_is_contextual,
-    synthesized_accessor, ty_descriptor, virtual_iface,
+    class_ty, complete_generated_body, declare_runtime_call, declared_serializer_of,
+    property_is_contextual, synthesized_accessor, ty_descriptor, virtual_iface,
 };
 use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile};
 use crate::plugins::PluginContext;
@@ -137,6 +137,13 @@ impl ValueClassBody<'_> {
             dispatch_receiver: Some(encoder),
             args: vec![descriptor],
         });
+        declare_runtime_call(
+            ir,
+            inline_encoder,
+            &[class_ty(
+                "kotlinx/serialization/descriptors/SerialDescriptor",
+            )],
+        );
         let coding = self.coding(ir, ctx);
         let value = ir.add_expr(IrExpr::GetValue(2));
         let owner = ir.classes[self.serialized_class as usize].fq_name_id();
@@ -244,6 +251,13 @@ impl ValueClassBody<'_> {
             dispatch_receiver: Some(decoder),
             args: vec![descriptor],
         });
+        declare_runtime_call(
+            ir,
+            inline_decoder,
+            &[class_ty(
+                "kotlinx/serialization/descriptors/SerialDescriptor",
+            )],
+        );
         let underlying = match self.coding(ir, ctx) {
             Coding::Direct {
                 decode: (method, method_descriptor),
@@ -280,6 +294,11 @@ impl ValueClassBody<'_> {
                     dispatch_receiver: Some(inline_decoder),
                     args: vec![serializer],
                 });
+                declare_runtime_call(
+                    ir,
+                    decoded,
+                    &[class_ty("kotlinx/serialization/DeserializationStrategy")],
+                );
                 // A scalar underlying value (`UInt`) is decoded as its box.
                 let decoded_ty = if ty.is_jvm_scalar() {
                     Ty::nullable(*ty)
@@ -298,7 +317,7 @@ impl ValueClassBody<'_> {
             internal,
             args: vec![underlying],
             ctor_params: None,
-            declared_params: None,
+            declared_params: Some(Box::new([*ty])),
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),

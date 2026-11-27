@@ -234,16 +234,25 @@ pub(super) fn specialize(
         (NULLABLE, [inner], [], []) => {
             let wrapped = wrap_nullable_serializer(ir, *inner);
             ir.exprs[index] = ir.exprs[wrapped as usize].clone();
+            move_declared_parameters(ir, wrapped, index);
             true
         }
         (GENERAL, [], [], [ty]) => {
             if let Some(serializer) = super::element_serializer_expr(ir, ctx, ty) {
                 ir.exprs[index] = ir.exprs[serializer as usize].clone();
+                move_declared_parameters(ir, serializer, index);
             }
             true
         }
         (CONSTRUCTED | NULLABLE | GENERAL, ..) => true,
         _ => false,
+    }
+}
+
+/// An expression copied over `target` keeps the checked declared parameters of the call it copies.
+fn move_declared_parameters(ir: &mut IrFile, source: ExprId, target: usize) {
+    if let Some(declared) = ir.call_declared_params.get(&source).cloned() {
+        ir.call_declared_params.insert(target as ExprId, declared);
     }
 }
 
