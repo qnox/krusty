@@ -324,9 +324,10 @@ fn analyze(
 }
 
 /// Whether the compiled inline body `callee`, with the call's lambdas bound in `parameters`,
-/// passes one of them to an operation that keeps it as a value: anything but the receiver of a
-/// `FunctionN.invoke`, a field store or parameter null check the inliner removes, and the
-/// constructor of an anonymous object regenerated around it. kotlinc's frontend rules such a use
+/// passes one of them to a call that keeps it as a value: any method call or `invokedynamic`
+/// except a `FunctionN.invoke` on it, the parameter null check the inliner removes, and the
+/// constructor of an anonymous object regenerated around it. A store or load of the lambda is
+/// not such a use: the inliner deletes it. kotlinc's frontend rules such a use
 /// out of its own bodies (a non-inlinable use of an inline parameter), so its `MethodInliner`
 /// never meets one; a body this compiler wrote can still capture the parameter in a lambda it
 /// materialized by `invokedynamic`, directly or in a method of an anonymous object the lambda is
