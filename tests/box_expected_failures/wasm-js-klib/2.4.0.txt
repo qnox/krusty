@@ -117,7 +117,6 @@ callableReference/adaptedReferences/innerConstructorWithVararg.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithContextParameterAsAPropertyType.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithExtensionProperty.kt
 callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction.kt
-callableReference/adaptedReferences/unitCoercionOverloads.kt
 callableReference/arrayOfNulls.kt
 callableReference/bound/boundReferenceToOverloadedFunction.kt
 callableReference/bound/emptyLHS.kt
@@ -162,14 +161,12 @@ classes/nestedInitBlocksWithLambda.kt
 closures/captureInSuperConstructorCall/kt4174a.kt
 closures/closuresAsSingleton.kt
 closures/kt11634_4.kt
-closures/localFunctionInInitBlock.kt
 collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collections/addCollectionStubWithCovariantOverride.kt
 collections/clashWithInternalMapMethod.kt
 collections/internalRemove.kt
 collections/removeClash.kt
-companionBlocksAndExtensions/lateinit.kt
 constants/comparisonFalse.kt
 constants/divisionByZero.kt
 constants/float.kt
@@ -214,7 +211,6 @@ coroutines/bridges/mapSuspendAbstractClear.kt
 coroutines/bridges/mapSuspendClear.kt
 coroutines/captureMutableLocalVariableInsideCoroutineBlock.kt
 coroutines/castWithSuspend.kt
-coroutines/coercionToUnit.kt
 coroutines/controlFlow/breakFinally.kt
 coroutines/controlFlow/breakStatement.kt
 coroutines/controlFlow/doWhileStatement.kt
@@ -249,7 +245,6 @@ coroutines/controlFlow_tryCatch4.kt
 coroutines/controlFlow_tryCatch5.kt
 coroutines/controlFlow_while1.kt
 coroutines/controlFlow_while2.kt
-coroutines/controllerAccessFromInnerLambda.kt
 coroutines/coroutineContext1.kt
 coroutines/coroutineContext2.kt
 coroutines/coroutineContextInInlinedLambda.kt
@@ -258,7 +253,6 @@ coroutines/defaultParameterLambdaInSuspend.kt
 coroutines/defaultParametersInSuspend.kt
 coroutines/deserializedSuspendFunctionProperty.kt
 coroutines/doubleColonExpressionsGenerationInBuilderInference.kt
-coroutines/emptyClosure.kt
 coroutines/emptyCommonConstraintSystemForCoroutineInferenceCall.kt
 coroutines/falseUnitCoercion.kt
 coroutines/featureIntersection/breakWithNonEmptyStack.kt
@@ -331,7 +325,6 @@ coroutines/intrinsicSemantics/intercepted.kt
 coroutines/intrinsicSemantics/releaseIntercepted.kt
 coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturnInterception.kt
 coroutines/intrinsicSemantics/suspendCoroutineUninterceptedOrReturn.kt
-coroutines/iterateOverArray.kt
 coroutines/kt21080.kt
 coroutines/kt24135.kt
 coroutines/kt28844.kt
@@ -343,17 +336,11 @@ coroutines/kt46813.kt
 coroutines/kt49168.kt
 coroutines/kt51530.kt
 coroutines/kt51718.kt
-coroutines/lastStatementInc.kt
-coroutines/lastStementAssignment.kt
 coroutines/localFunctions/named/defaultArgument.kt
 coroutines/localFunctions/named/stateMachine.kt
 coroutines/longRangeInSuspendCall.kt
 coroutines/multiModule/inheritFromAnotherModule.kt
 coroutines/multiModule/inlineMultiModuleOverride.kt
-coroutines/multipleInvokeCalls.kt
-coroutines/multipleInvokeCallsInsideInlineLambda1.kt
-coroutines/multipleInvokeCallsInsideInlineLambda2.kt
-coroutines/multipleInvokeCallsInsideInlineLambda3.kt
 coroutines/nestedTryCatch.kt
 coroutines/overrideDefaultArgument.kt
 coroutines/redundantLocalsElimination/ktor_receivedMessage.kt
@@ -388,12 +375,9 @@ coroutines/tryCatchFinallyWithHandleResult.kt
 coroutines/tryCatchWithHandleResult.kt
 coroutines/tryFinallyInsideInlineLambda.kt
 coroutines/tryFinallyWithHandleResult.kt
-coroutines/unitTypeReturn/suspendNonLocalReturn.kt
 coroutines/unsafeTransform.kt
 coroutines/varSpilling/fakeInlinerVariables.kt
 coroutines/varSpilling/kt75926.kt
-coroutines/varValueConflictsWithTable.kt
-coroutines/varValueConflictsWithTableSameSort.kt
 dataClasses/hashCode/byte.kt
 dataClasses/hashCode/char.kt
 dataClasses/hashCode/double.kt
@@ -433,7 +417,6 @@ delegatedProperty/valByMapDelegatedProperty.kt
 delegation/delegationDifferentModule.kt
 delegation/kt30102_comparable.kt
 delegation/kt44199.kt
-devirtualization/lateinitInterface.kt
 diagnostics/functions/tailRecursion/whenWithIs.kt
 elvis/ofNonNullableResultType.kt
 elvis/primitive.kt
@@ -544,7 +527,6 @@ inline/typeParameterSymbolIsUnbound.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
 inlineArgsInPlace/kt49370.kt
 inlineClasses/UIntArraySortExampleGeneric.kt
-inlineClasses/anonymousObjectAsDefaultParamFull.kt
 inlineClasses/anySuperCall.kt
 inlineClasses/anySuperCallGeneric.kt
 inlineClasses/boxImplDoesNotExecuteInSecondaryConstructorGeneric.kt
@@ -595,7 +577,6 @@ innerClass/inheritanceMultipleModules1.kt
 innerClass/multipleModules.kt
 innerClass/noPrimaryConstructor.kt
 innerClass/secondaryConstructor.kt
-innerNested/kt63732.kt
 intrinsics/throwableParamOrder.kt
 intrinsics/tostring.kt
 intrinsics/trimMarginWithBlankString.kt
@@ -619,12 +600,7 @@ lambda/lambda5.kt
 lambda/lambda6.kt
 lambda/lambda_kt49360_withFlow.kt
 lateinit/globalIsInitialized.kt
-lateinit/innerIsInitialized.kt
 lateinit/isInitialized.kt
-lateinit/localCapturedInitialized.kt
-lateinit/localCapturedNotInitialized.kt
-lateinit/localInitialized.kt
-lateinit/localNotInitialized.kt
 lateinit/notInitialized.kt
 literals/strdedup1.kt
 localClasses/closureWithSelfInstantiation.kt
@@ -653,7 +629,6 @@ multiplatform/k2/basic/overridesOfExpectMembers.kt
 multiplatform/k2/basic/substitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/widerVisibilityInActualClassifier.kt
 multiplatform/k2/defaultArguments/kt67488.kt
-multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
@@ -710,20 +685,9 @@ properties/lateinit/accessorExceptionPublic.kt
 properties/lateinit/exceptionField.kt
 properties/lateinit/exceptionGetter.kt
 properties/lateinit/kt30548.kt
-properties/lateinit/local/capturedLocalLateinit.kt
 properties/lateinit/local/kt23260.kt
-properties/lateinit/local/localLateinit.kt
-properties/lateinit/local/uninitializedCapturedMemberAccess.kt
-properties/lateinit/local/uninitializedCapturedRead.kt
-properties/lateinit/local/uninitializedMemberAccess.kt
-properties/lateinit/local/uninitializedRead.kt
 properties/lateinit/localClass.kt
 properties/lateinit/overrideException.kt
-properties/lateinit/topLevel/accessorException.kt
-properties/lateinit/topLevel/accessorForTopLevelLateinit.kt
-properties/lateinit/topLevel/topLevelLateinit.kt
-properties/lateinit/topLevel/uninitializedMemberAccess.kt
-properties/lateinit/topLevel/uninitializedRead.kt
 properties/lazyInitialization.kt
 properties/lazyInitializationCyclicImports.kt
 properties/lazyInitializationSplitPerModule.kt
@@ -1127,7 +1091,6 @@ regressions/kt2060.kt
 regressions/kt32949.kt
 regressions/kt5056.kt
 regressions/kt6434.kt
-regressions/kt68727.kt
 regressions/lambdaWrongReturnType.kt
 regressions/multimodule/inlineAssertFailsWithBlock.kt
 regressions/multimodule/inlineAssertFailsWithCompletedBlock.kt
@@ -1157,7 +1120,6 @@ sam/funInterfaceExtendsSuspendFunction2.kt
 sam/samWithAbstractToString.kt
 sam/samWithAbstractToString2.kt
 sam/samWithAbstractToString3.kt
-sam/topLevelConversions.kt
 secondaryConstructors/enums.kt
 secondaryConstructors/innerClasses.kt
 secondaryConstructors/innerClassesInheritance.kt

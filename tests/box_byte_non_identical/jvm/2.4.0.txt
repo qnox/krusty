@@ -2192,6 +2192,8 @@ regressions/kt47279.kt
 regressions/kt6153.kt
 regressions/kt6434.kt
 regressions/kt789.kt
+regressions/lambdaTailGuardIntersectionPublishesAny.kt
+regressions/lambdaTailSmartCastPublishedType.kt
 regressions/libraryArrayLoops.kt
 regressions/libraryClassInheritedDefaults.kt
 regressions/libraryInterfaceTypeTests.kt

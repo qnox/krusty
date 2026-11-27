@@ -1389,7 +1389,6 @@ compiler/testData/diagnostics/testsWithStdLib/contracts/propertyAccessors/annota
 compiler/testData/diagnostics/testsWithStdLib/contracts/propertyAccessors/openSetterNotAllowed.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/propertyAccessors/override.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/smartcasts/catchExceptionSpilling.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/smartcasts/returnsImpliesAndSafeCalls.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/callableReference/property.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/inlineCrossinline/inlineOrdinaryOfNoinlineSuspend.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/irrelevantSuspendDeclarations.kt

@@ -17,10 +17,11 @@ pub enum RuntimeExceptionKind {
     ClassCast,
     NoSuchElement,
     ConcurrentModification,
+    UninitializedPropertyAccess,
 }
 
 impl RuntimeExceptionKind {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::Throwable,
         Self::Exception,
         Self::RuntimeException,
@@ -34,6 +35,7 @@ impl RuntimeExceptionKind {
         Self::ClassCast,
         Self::NoSuchElement,
         Self::ConcurrentModification,
+        Self::UninitializedPropertyAccess,
     ];
 
     /// The role whose language-runtime declaration is `classifier`, if any.
@@ -60,6 +62,7 @@ impl RuntimeExceptionKind {
             Self::ClassCast => "kotlin/ClassCastException",
             Self::NoSuchElement => "kotlin/NoSuchElementException",
             Self::ConcurrentModification => "kotlin/ConcurrentModificationException",
+            Self::UninitializedPropertyAccess => "kotlin/UninitializedPropertyAccessException",
         })
     }
 }
@@ -94,12 +97,13 @@ mod tests {
             RuntimeExceptionKind::ClassCast => 10,
             RuntimeExceptionKind::NoSuchElement => 11,
             RuntimeExceptionKind::ConcurrentModification => 12,
+            RuntimeExceptionKind::UninitializedPropertyAccess => 13,
         };
         let positions: Vec<usize> = RuntimeExceptionKind::ALL
             .into_iter()
             .map(position)
             .collect();
-        assert_eq!(positions, (0..13).collect::<Vec<_>>());
+        assert_eq!(positions, (0..14).collect::<Vec<_>>());
         for kind in RuntimeExceptionKind::ALL {
             assert_eq!(RuntimeExceptionKind::of(kind.classifier()), Some(kind));
         }

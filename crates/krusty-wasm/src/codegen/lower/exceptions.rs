@@ -187,6 +187,57 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// The guard every read of a `lateinit` property carries, over an operand that produces the
+    /// field's raw value.
+    pub(super) fn lateinit_check(&mut self, operand: u32, name: &str) -> Result<(), Unsupported> {
+        let Some(reference @ ValType::Ref { .. }) = self.carrier_of(operand)? else {
+            return Err("a `lateinit` read without a reference carrier".to_string());
+        };
+        self.expression(operand)?;
+        self.guard_lateinit(reference, name)
+    }
+
+    /// Guard the raw `lateinit` value on the stack: a null one throws the Kotlin
+    /// `UninitializedPropertyAccessException` naming the property, and any other is the read's own
+    /// non-null value.
+    pub(super) fn guard_lateinit(
+        &mut self,
+        reference: ValType,
+        name: &str,
+    ) -> Result<(), Unsupported> {
+        let failure = self.runtime.exception_class(
+            self.module,
+            self.classifiers,
+            krusty::libraries::RuntimeExceptionKind::UninitializedPropertyAccess.classifier(),
+        )?;
+        let value = self.local(reference);
+        let message = self.local(ValType::Ref {
+            nullable: true,
+            heap: HeapType::Concrete(self.runtime.string),
+        });
+        self.code
+            .local_set(value)
+            .local_get(value)
+            .ref_is_null()
+            .if_(BlockType::Empty);
+        self.string_constant(&format!(
+            "lateinit property {name} has not been initialized"
+        ));
+        self.code.local_set(message);
+        self.runtime.exceptions.construct_class(
+            &mut self.code,
+            failure,
+            Some(message),
+            self.runtime.string,
+        )?;
+        self.code
+            .throw(self.runtime.exceptions.tag)
+            .end()
+            .local_get(value)
+            .ref_as_non_null();
+        Ok(())
+    }
+
     pub(super) fn new_object(
         &mut self,
         site: u32,
@@ -194,12 +245,18 @@ impl Body<'_> {
         args: &[u32],
         params: Option<&[Ty]>,
         external: Option<ExternalCallableId>,
-        defaults: &[u32],
+        omitted: super::dependency_exports::OmittedArguments<'_>,
     ) -> Result<(), Unsupported> {
         // The shared default-argument lowering rewrites every construction with omitted
         // arguments it can realize to construct through its constructor's entry.
-        if !defaults.is_empty() {
-            return Err("a constructor call with omitted arguments".to_string());
+        if !omitted.ordinals.is_empty() {
+            // Only another module's constructor is reached through its own default entry.
+            return match external
+                .and_then(|target| self.dependency_construction(target, internal, args, omitted))
+            {
+                Some(constructed) => constructed,
+                None => Err("a constructor call with omitted arguments".to_string()),
+            };
         }
         let Some((declaration, kind, message)) = external
             .and_then(|target| self.callables.callable(target))
@@ -220,8 +277,8 @@ impl Body<'_> {
             {
                 return self.string_builder_construction(target, args);
             }
-            if let Some(constructed) =
-                external.and_then(|target| self.dependency_construction(target, internal, args))
+            if let Some(constructed) = external
+                .and_then(|target| self.dependency_construction(target, internal, args, omitted))
             {
                 return constructed;
             }
