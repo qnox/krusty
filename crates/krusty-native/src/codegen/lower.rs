@@ -47,6 +47,7 @@ pub(super) use lists::realizes_dependency_getter;
 mod local_delegates;
 mod maps;
 mod module_abi;
+mod nominal_descriptors;
 mod object_entries;
 mod objects;
 mod ranges;
@@ -372,6 +373,7 @@ pub fn lower_file(
         type_of_objects: HashMap::default(),
         static_classes: HashMap::default(),
         comdat_objects: Vec::new(),
+        nominal_descriptors: HashMap::default(),
         strings: HashMap::default(),
         string_objects: HashMap::default(),
         classes: Vec::new(),
@@ -603,6 +605,8 @@ struct FileLowering<'a> {
     static_classes: HashMap<DataId, DataId>,
     /// The program-wide static objects this file emits, each the COMDAT group of its own section.
     comdat_objects: Vec<DataId>,
+    /// The nominal descriptors of dependency classes this file asked about, by symbol.
+    nominal_descriptors: HashMap<String, DataId>,
     /// String literal data, deduplicated by content.
     strings: HashMap<Vec<u8>, DataId>,
     /// The interned string OBJECT for each distinct literal text — one slot per text, filled on

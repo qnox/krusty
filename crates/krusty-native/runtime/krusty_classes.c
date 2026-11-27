@@ -235,18 +235,33 @@ kt_int kt_builtin_hash_code(KRef self) {
     return kt_any_hash_code(self);
 }
 
+/* A nominal descriptor stands for a class by its qualified name, so another descriptor of that
+   class, such as the runtime's own, is the same type. */
+static bool kt_same_nominal(const KType *at, const KType *type) {
+    if (type->nominal == 0 || at->qualified_name == NULL ||
+        at->qualified_name_length != type->qualified_name_length) {
+        return false;
+    }
+    for (uint32_t i = 0; i < type->qualified_name_length; i++) {
+        if (at->qualified_name[i] != type->qualified_name[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 kt_boolean kt_is_instance(KRef object, const KType *type) {
     if (object == NULL) {
         return false;
     }
     for (const KType *at = object->header.type; at != NULL; at = at->super) {
-        if (at == type) {
+        if (at == type || kt_same_nominal(at, type)) {
             return true;
         }
         /* An interface is not on the super chain, so each type carries the ones it implements.
            The list is already transitive, so this is a scan and not a second walk. */
         for (uint32_t i = 0; i < at->interface_count; i++) {
-            if (at->interfaces[i] == type) {
+            if (at->interfaces[i] == type || kt_same_nominal(at->interfaces[i], type)) {
                 return true;
             }
         }
