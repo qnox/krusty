@@ -101,7 +101,8 @@ impl Checker<'_> {
             f.reified_type_params.contains(name)
         });
         let owned_type_parameters = self.publish_function_type_parameter_owner(scope, f);
-        let suppression_depth = self.check_function_annotation_applications(scope, f, "function");
+        let suppression_depth =
+            self.check_function_annotation_applications(scope, f, "member function");
         if finalized_local_header {
             if let Some(declaration) = stable_declaration {
                 if !self.record_finalized_type_parameter_bounds(

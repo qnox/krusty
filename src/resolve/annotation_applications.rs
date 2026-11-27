@@ -138,6 +138,28 @@ enum AnnotationApplicationHost {
 }
 
 impl Checker<'_> {
+    /// kotlinc's WRONG_ANNOTATION_TARGET on a declaration that is no property: the annotation class
+    /// must list one of the targets `hosts` the declaration denotes.
+    fn check_non_property_target(
+        &mut self,
+        annotation: &AnnotationRef,
+        targets: crate::types::AnnotationTargets,
+        description: &'static str,
+        hosts: &[crate::types::KotlinTarget],
+    ) -> bool {
+        if hosts.iter().any(|&host| targets.allows(host))
+            || self.suppresses_diagnostic("WRONG_ANNOTATION_TARGET")
+        {
+            return true;
+        }
+        self.diags.error(
+            Span::new(annotation.at, annotation.span.hi),
+            wrong_annotation_target_message(description, targets),
+        );
+        self.discard_annotation_application(annotation);
+        false
+    }
+
     fn discard_annotation_application(&mut self, annotation: &AnnotationRef) {
         self.applied_annotations.discard(annotation);
     }
@@ -158,7 +180,10 @@ impl Checker<'_> {
         );
         for (annotation, arguments) in function.annotations.iter().zip(&function.annotation_args) {
             self.check_non_property_annotation_application(
-                scope, annotation, arguments, "function",
+                scope,
+                annotation,
+                arguments,
+                "local function",
             );
         }
         for parameter in &function.params {
@@ -664,7 +689,38 @@ impl Checker<'_> {
             } => targets.property_declaration_site(constructor_parameter),
             _ => None,
         });
-        let Some(site) = site else { return true };
+        if site.is_none() {
+            if let AnnotationApplicationHost::NonProperty {
+                declaration_target, ..
+            } = host
+            {
+                if let Some(hosts) = non_property_host_targets(declaration_target) {
+                    return self.check_non_property_target(
+                        annotation,
+                        targets,
+                        declaration_target,
+                        hosts,
+                    );
+                }
+            }
+        }
+        let Some(site) = site else {
+            // No default site (parameter, property, field) is applicable: the declaration itself
+            // is the wrong target.
+            if let (AnnotationApplicationHost::Property { .. }, Some(description)) =
+                (host, declaration_target)
+            {
+                if !self.suppresses_diagnostic("WRONG_ANNOTATION_TARGET") {
+                    self.diags.error(
+                        Span::new(annotation.at, annotation.span.hi),
+                        wrong_annotation_target_message(description, targets),
+                    );
+                    self.discard_annotation_application(annotation);
+                    return false;
+                }
+            }
+            return true;
+        };
         let wrong_target_suppression = if annotation.property_site.is_some() {
             "WRONG_ANNOTATION_TARGET_WITH_USE_SITE_TARGET"
         } else {
@@ -777,7 +833,12 @@ impl Checker<'_> {
         let container = self.enter_annotation_class_rung(owner.and_then(TypeName::nested_owner));
         let annotated = std::mem::replace(&mut self.annotated_classifier, owner);
         for (annotation, arguments) in class.annotations.iter().zip(&class.annotation_args) {
-            self.check_non_property_annotation_application(scope, annotation, arguments, "class");
+            self.check_non_property_annotation_application(
+                scope,
+                annotation,
+                arguments,
+                class_target_description(class),
+            );
         }
         self.annotated_classifier = annotated;
         self.exit_annotation_class_rung(container);
@@ -806,6 +867,39 @@ impl Checker<'_> {
             debug_assert_eq!(removed, rung);
         }
     }
+}
+
+/// How kotlinc's diagnostics name the declaration kind of `class`.
+fn class_target_description(class: &ClassDecl) -> &'static str {
+    match class.kind {
+        crate::ast::ClassKind::Annotation => "annotation class",
+        crate::ast::ClassKind::Enum => "enum class",
+        crate::ast::ClassKind::Interface => "interface",
+        crate::ast::ClassKind::Class if class.singleton => "standalone object",
+        crate::ast::ClassKind::Class => "class",
+    }
+}
+
+/// The annotation targets a declaration kind denotes, named as kotlinc's diagnostics name it. An
+/// annotation class accepts `class` too, and an enum entry is a field or property.
+fn non_property_host_targets(description: &str) -> Option<&'static [crate::types::KotlinTarget]> {
+    use crate::types::KotlinTarget as Target;
+    Some(match description {
+        "class" | "interface" | "standalone object" | "enum class" | "companion object" => {
+            &[Target::Class]
+        }
+        "annotation class" => &[Target::AnnotationClass, Target::Class],
+        "constructor" => &[Target::Constructor],
+        "enum entry" => &[Target::Property, Target::Field],
+        "function" | "top level function" | "member function" | "local function" => {
+            &[Target::Function]
+        }
+        "value parameter" => &[Target::ValueParameter],
+        "local variable" => &[Target::LocalVariable],
+        "type parameter" => &[Target::TypeParameter],
+        "type usage" => &[Target::Type],
+        _ => return None,
+    })
 }
 
 /// The retention of an annotation classifier: the module's own normalized fact for a source

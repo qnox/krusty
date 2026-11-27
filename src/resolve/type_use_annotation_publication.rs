@@ -180,7 +180,8 @@ fn application_range(file: &File, annotation: &AnnotationRef) -> Span {
         .filter_map(|&argument| file.expr_span(argument))
         .map(|span| span.hi)
         .fold(annotation.span.hi, u32::max);
-    Span::new(annotation.span.lo, hi)
+    // A diagnostic about the application itself starts at its `@`.
+    Span::new(annotation.at.min(annotation.span.lo), hi)
 }
 
 fn application_arguments<'f>(file: &'f File, annotation: &AnnotationRef) -> &'f [ExprId] {
@@ -221,7 +222,12 @@ impl Checker<'_> {
                 continue;
             }
             let arguments = application_arguments(file, &annotation);
-            self.check_annotation_application(scope, &annotation, arguments);
+            self.check_non_property_annotation_application(
+                scope,
+                &annotation,
+                arguments,
+                "type usage",
+            );
         }
     }
 

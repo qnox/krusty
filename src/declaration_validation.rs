@@ -1,8 +1,8 @@
 //! Target-neutral semantic validation of declaration headers.
 
 use crate::ast::{ClassDecl, ClassKind, FunDecl, PropDecl, TypeAliasDecl};
-use crate::types::Visibility;
 use crate::diag::Span;
+use crate::types::Visibility;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DeclarationDiagnostic {
