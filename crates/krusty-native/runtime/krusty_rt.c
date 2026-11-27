@@ -3099,6 +3099,47 @@ void kt_array_copy_range(KRef source, kt_int from, KRef destination, kt_int to, 
     }
 }
 
+/* `arrayFill`'s own range check, Kotlin/Native's `checkRangeIndexes`: a start before the array or an
+   end past it is an `IndexOutOfBoundsException`, a start past the end an
+   `IllegalArgumentException`, both raised before anything is written. Answers whether the range is
+   usable. The array is never null here: the callee is an internal stdlib function whose caller
+   owns it. */
+static kt_boolean kt_array_fill_range_is_valid(KRef array, kt_int from, kt_int to) {
+    kt_int size = ((const KArray *)array)->length;
+    if (from < 0 || to > size) {
+        kt_throw(kt_throwable_new(&kt_type_index_out_of_bounds_exception,
+                                  kt_bounds_text("fromIndex: ", from, ", toIndex: ", to,
+                                                 ", size: ", size)));
+        return 0;
+    }
+    if (from > to) {
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception,
+                                  kt_bounds_text("fromIndex: ", from, " > toIndex: ", to, NULL, 0)));
+        return 0;
+    }
+    return 1;
+}
+
+#define KT_ARRAY_FILL_RANGE(NAME, TYPE, STORE)                                                  \
+    void NAME(KRef array, kt_int from, kt_int to, TYPE value) {                                  \
+        if (!kt_array_fill_range_is_valid(array, from, to)) {                                    \
+            return;                                                                              \
+        }                                                                                        \
+        STORE *elements = (STORE *)((unsigned char *)(KArray *)array + sizeof(KArray));          \
+        for (kt_int at = from; at < to; at++) {                                                  \
+            elements[at] = value;                                                                \
+        }                                                                                        \
+    }
+KT_ARRAY_FILL_RANGE(kt_array_fill_range, KRef, KRef)
+KT_ARRAY_FILL_RANGE(kt_boolean_array_fill_range, kt_boolean, kt_boolean)
+KT_ARRAY_FILL_RANGE(kt_byte_array_fill_range, kt_byte, kt_byte)
+KT_ARRAY_FILL_RANGE(kt_char_array_fill_range, kt_char, kt_char)
+KT_ARRAY_FILL_RANGE(kt_short_array_fill_range, kt_short, kt_short)
+KT_ARRAY_FILL_RANGE(kt_int_array_fill_range, kt_int, kt_int)
+KT_ARRAY_FILL_RANGE(kt_long_array_fill_range, kt_long, kt_long)
+KT_ARRAY_FILL_RANGE(kt_float_array_fill_range, kt_float, kt_float)
+KT_ARRAY_FILL_RANGE(kt_double_array_fill_range, kt_double, kt_double)
+
 kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source) {
     if (destination == NULL || source == NULL) {
         kt_null_receiver();

@@ -425,7 +425,6 @@ inlineClasses/boxReturnValueOnOverride/kt35234.kt
 inlineClasses/boxReturnValueOnOverride/kt35234Generic.kt
 inlineClasses/boxReturnValueOnOverride/kt35234a.kt
 inlineClasses/bridgesWhenInlineClassImplementsGenericInterfaceGeneric.kt
-inlineClasses/defaultParameterValues/kt26554.kt
 inlineClasses/dnnInValue.kt
 inlineClasses/funInterface/kt51121.kt
 inlineClasses/funInterface/kt51121_2.kt

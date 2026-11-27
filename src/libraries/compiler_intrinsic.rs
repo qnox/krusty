@@ -328,6 +328,12 @@ pub enum CompilerIntrinsic {
     ArrayCopy {
         array: crate::types::Ty,
     },
+    /// Native's runtime fill of `fromIndex until toIndex` of an array of one kind, a specialized
+    /// primitive array or `Array<Any?>`, with one value (`kotlin.collections.arrayFill`, a
+    /// `@GCUnsafeCall` external without a body). It checks the range itself, before writing.
+    ArrayFill {
+        array: crate::types::Ty,
+    },
     /// A fully normalized `Result` helper reached from an expanded library inline body.
     ResultFailure(ResultFailureIntrinsic),
     /// The `exception` property getter on the compiler-builtin `Result.Failure` carrier. The
