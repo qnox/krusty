@@ -1,6 +1,6 @@
-// A library class stores a function-typed constructor property. The KLIB writer has no IR type
-// for a function type yet, so it keeps the file's bodies unwritten instead of failing, and a
-// program linked against the KLIB reaches the class through the library's metadata.
+// A library class stores a function-typed constructor property, which a member invokes and a
+// top-level function fills with a lambda. The KLIB records the property's function type and the
+// bodies that build and call it, and the program runs the library's code from its KLIB.
 // MODULE: lib
 // FILE: Library.kt
 package fixture

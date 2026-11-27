@@ -613,6 +613,7 @@ fn prepared_property(
                 name: "<set-?>".to_owned(),
                 ty,
                 default_null: false,
+                vararg_element: None,
             }],
             Ty::Unit,
             overridden_setters,
