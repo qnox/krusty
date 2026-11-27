@@ -133,7 +133,6 @@ boxingOptimization/simpleUninitializedMerge.kt
 boxingOptimization/unsafeRemoving.kt
 boxingOptimization/unsignedArrayForEach.kt
 boxingOptimization/variables.kt
-bridges/covariantGenericDiamond.kt
 bridges/delegationComplexWithList.kt
 bridges/genericProperty.kt
 bridges/internalMethodFakeOverrideInFriendModule.kt
@@ -499,9 +498,6 @@ dataflow/scope1.kt
 dataflow/uninitialized_val.kt
 deadCodeElimination/emptyVariableRange.kt
 defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
-defaultArguments/implementedByFake.kt
-defaultArguments/implementedByFake2.kt
-defaultArguments/implementedByFake3.kt
 defaultArguments/useThisInLambda.kt
 delegatedProperty/callableReferenceAsSecondArgumentOfDelegate.kt
 delegatedProperty/correctFieldsOrder.kt
@@ -872,11 +868,9 @@ inlineClasses/kt33119Generic.kt
 inlineClasses/kt47762Generic.kt
 inlineClasses/kt47823.kt
 inlineClasses/kt51157.kt
-inlineClasses/overridingFunCallingPrivateFunGeneric.kt
 inlineClasses/resultRunCatchingOrElse.kt
 inlineClasses/secondaryConstructorWithVarargGeneric.kt
 inlineClasses/secondaryConstructorsInsideInlineClassWithPrimitiveCarrierTypeGeneric.kt
-inlineClasses/smartCastOnThisOfInlineClassTypeGeneric.kt
 inlineClasses/toStringCallingPrivateFunGeneric.kt
 inlineClasses/unboxGenericParameter/funInterface/primitive.kt
 inlineClasses/unboxGenericParameter/lambda/primitive.kt
