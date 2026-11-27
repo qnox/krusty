@@ -1555,6 +1555,28 @@ fn fewest_omitted_defaults_per_supplied_shape<'a>(
         .collect()
 }
 
+/// Applicable candidates whose instantiated shapes do not order are still ordered by their
+/// declarations, as kotlinc ranks them (see [`super::declaration_dominance_maxima`]): `l.h(l)` reads
+/// `Collection<Int>?` against the vararg element `Int` once both are instantiated, but the
+/// declarations order. A vararg standing for several arguments keeps the tie.
+fn by_declaration_specificity<'a>(
+    src: &dyn SymbolSource,
+    tied: Vec<&'a FunctionInfo>,
+    arguments: usize,
+) -> CandidateSelectionWithTies<&'a FunctionInfo> {
+    let Some(shapes) = tied
+        .iter()
+        .map(|candidate| super::declared_call_shape(candidate, arguments).map(Some))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return CandidateSelectionWithTies::Ambiguous(tied);
+    };
+    match super::declaration_dominance_maxima(src, &shapes).as_slice() {
+        [selected] => CandidateSelectionWithTies::Selected(tied[*selected]),
+        _ => CandidateSelectionWithTies::Ambiguous(tied),
+    }
+}
+
 fn declaration_specificity_params(candidate: &FunctionInfo) -> Vec<Ty> {
     let signature = candidate.semantic_signature();
     let mut params = signature
@@ -1763,7 +1785,7 @@ fn best_by_args_at_priority_with_ties<'a>(
             return CandidateSelectionWithTies::Selected(candidate);
         }
         CandidateSelectionWithTies::Ambiguous(candidates) => {
-            return CandidateSelectionWithTies::Ambiguous(candidates);
+            return by_declaration_specificity(src, candidates, args.len());
         }
         CandidateSelectionWithTies::None => {}
     }

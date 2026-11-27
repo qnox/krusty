@@ -60,12 +60,13 @@ def duration(value):
 
 def held_back(inputs):
     """Why the krusty integration left a compile action on the project's builder, from its inputs:
-    Java sources, source jars, or else build-supplied compiler plugins, the integration's three
-    conditions."""
-    if any(path.endswith('.java') for path in inputs):
-        return 'Java sources'
+    Java sources without Kotlin ones, source jars, or else build-supplied compiler plugins, the
+    integration's three conditions. A mixed Kotlin and Java target is krusty's."""
     if any(path.endswith('.srcjar') for path in inputs):
         return 'source jars'
+    if (any(path.endswith('.java') for path in inputs)
+            and not any(path.endswith('.kt') for path in inputs)):
+        return 'Java-only target'
     return 'compiler plugins'
 
 

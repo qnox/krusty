@@ -307,6 +307,7 @@ private fun replaceKotlinJvmCompiles(
             configureCompilation()
             fixKotlincDefects.set(defectFixes)
             destinationDirectory.set(kotlinTask.destinationDirectory)
+            kotlinTaskPath.set(kotlinTask.path)
             handoff.set(project.layout.buildDirectory.file("krusty/${kotlinTask.name}/handoff.txt"))
             dependsOn(compilePrerequisites)
             dependsOn(supportCheck)
@@ -395,7 +396,7 @@ private fun replaceKotlinJvmCompiles(
         // Preserve the public task graph: callers and downstream tasks can still depend on
         // compileKotlin/compileTestKotlin. A skipped task runs its dependencies but none of its own
         // compiler actions, so no private action list is mutated. kotlinc runs only for a compile
-        // whose request krusty refused, or whose module a native compiler plugin pass handed back.
+        // whose request krusty refused, or whose module krusty did not compile.
         kotlinTask.dependsOn(replacement)
         val handedBack = replacement.flatMap { it.handoff }
         kotlinTask.onlyIf("krusty refused part of the compile's request, handed the module back, or the build verifies krusty") {
@@ -563,11 +564,13 @@ abstract class KrustyCompileTask @Inject constructor(
     @get:OutputDirectory
     abstract val destinationDirectory: DirectoryProperty
 
+    /** The Kotlin task this compile replaces, which compiles the module with kotlinc on a handoff. */
+    @get:Internal
+    abstract val kotlinTaskPath: Property<String>
+
     /**
-     * Empty when krusty compiled the module. Otherwise the errors of a native compiler plugin pass
-     * that does not implement a construct of the module yet, which krusty reports with its own exit
-     * status, [PLUGIN_REFUSAL_EXIT_STATUS]: the Kotlin task then compiles the module with kotlinc.
-     * Any other failure of krusty fails the build.
+     * Empty when krusty compiled the module. Otherwise why it did not ([KotlincHandoff]): the Kotlin
+     * task then compiles the module with kotlinc. A krusty failure never fails the build.
      */
     @get:OutputFile
     abstract val handoff: RegularFileProperty
@@ -585,33 +588,41 @@ abstract class KrustyCompileTask @Inject constructor(
         handoff.get().asFile.writeText("")
         if (sources.isEmpty()) return
 
+        classpathFingerprintFailure(classpathFingerprint.get().asFile)?.let { reason ->
+            handOff(internalErrorHandoff("$FINGERPRINT_FAILURE\n$reason"))
+            return
+        }
         val executable = binary.get().asFile.absolutePath
         val errors = ByteArrayOutputStream()
-        val result = execOperations.exec {
-            this.executable = executable
-            args(arguments)
-            errorOutput = TeeOutputStream(System.err, errors)
-            isIgnoreExitValue = true
-        }
-        when (result.exitValue) {
-            0 -> return
-            PLUGIN_REFUSAL_EXIT_STATUS -> {
-                val refused = errors.toString(Charsets.UTF_8).lines().filter { ": error: " in it }
-                logger.warn(
-                    "krusty: task '{}' is handed to kotlinc: a krusty compiler plugin does not implement " +
-                        "everything the module uses\n{}",
-                    path,
-                    refused.joinToString("\n") { "  $it" },
-                )
-                handoff.get().asFile.writeText(refused.joinToString("\n", postfix = "\n"))
+        val result = try {
+            execOperations.exec {
+                this.executable = executable
+                args(arguments)
+                errorOutput = TeeOutputStream(System.err, errors)
+                isIgnoreExitValue = true
             }
-            else -> throw GradleException("$executable exited with ${result.exitValue} for $path")
+        } catch (failure: GradleException) {
+            handOff(internalErrorHandoff("$executable could not be run: ${failure.message}"))
+            return
         }
+        if (result.exitValue == 0) return
+        // kotlinc writes the module's classes into the same directory; nothing krusty wrote stays.
+        fileSystemOperations.delete { delete(destination) }
+        destination.mkdirs()
+        handOff(kotlincHandoff(result.exitValue, errors.toString(Charsets.UTF_8)))
+    }
+
+    private fun handOff(handoff: KotlincHandoff) {
+        // The same line the support check logs for a request krusty refuses up front.
+        logger.warn(
+            "krusty: task '{}' is left to kotlinc: {}\n{}",
+            kotlinTaskPath.get(),
+            handoff.failure.description,
+            handoff.details.joinToString("\n") { "  $it" },
+        )
+        this.handoff.get().asFile.writeText(handoff.record())
     }
 }
-
-/** krusty's exit status for a compile that failed only on a native plugin pass's refusals. */
-private const val PLUGIN_REFUSAL_EXIT_STATUS = 3
 
 /** Writes to both streams, so krusty's report reaches the build output and the task keeps it. */
 private class TeeOutputStream(private val first: OutputStream, private val second: OutputStream) : OutputStream() {
@@ -692,13 +703,24 @@ abstract class KrustyClasspathFingerprintTask @Inject constructor(
             isIgnoreExitValue = true
         }
         if (result.exitValue != 0) {
-            throw GradleException(
-                "$executable classpath-fingerprint exited with ${result.exitValue} for $path\n" +
-                    errors.toString(Charsets.UTF_8).trimEnd(),
+            // Not a build failure: the compile keyed on this fingerprint hands its module to kotlinc.
+            fingerprint.get().asFile.writeText(
+                "$FINGERPRINT_FAILURE\n$executable classpath-fingerprint exited with ${result.exitValue} for $path\n" +
+                    errors.toString(Charsets.UTF_8).trimEnd() + "\n",
             )
+            return
         }
         fingerprint.get().asFile.writeText(output.toString(Charsets.UTF_8))
     }
+}
+
+/** The first line of a fingerprint krusty could not take; what follows it says why. */
+private const val FINGERPRINT_FAILURE = "krusty classpath-fingerprint failed"
+
+/** Why krusty could not fingerprint a compile's classpath, or null when the fingerprint is one. */
+private fun classpathFingerprintFailure(fingerprint: File): String? {
+    val text = fingerprint.readText()
+    return if (text.startsWith("$FINGERPRINT_FAILURE\n")) text.removePrefix("$FINGERPRINT_FAILURE\n") else null
 }
 
 private fun normalized(file: File): File = file.toPath().toAbsolutePath().normalize().toFile()
@@ -802,10 +824,12 @@ abstract class KrustySupportCheckTask @Inject constructor(
         when (result.exitValue) {
             0 -> refusals.get().asFile.writeText("")
             1 -> record(refused)
-            // A command line kotlinc itself rejects is no refusal: the build fails with the
-            // errors the compilation would report, and neither compiler runs.
-            2 -> throw GradleException(errors.toString(Charsets.UTF_8).trimEnd())
-            else -> throw GradleException("$executable exited with ${result.exitValue} for $path")
+            // A command line krusty rejects is left to kotlinc too: kotlinc reports it if it is
+            // invalid, and compiles it if krusty was wrong to reject it.
+            2 -> record(listOf("krusty rejects the command line") + errorLines(errors))
+            else -> record(
+                listOf("krusty refusals exited with ${result.exitValue}") + errorLines(errors),
+            )
         }
     }
 
@@ -827,6 +851,9 @@ abstract class KrustySupportCheckTask @Inject constructor(
 }
 
 private fun File.refuses(): Boolean = length() > 0
+
+private fun errorLines(errors: ByteArrayOutputStream): List<String> =
+    errors.toString(Charsets.UTF_8).lines().map(String::trimEnd).filter(String::isNotBlank)
 
 /**
  * KGP's compiler-plugin request: the resolved plugin classpath (`-Xplugin`) and the structured

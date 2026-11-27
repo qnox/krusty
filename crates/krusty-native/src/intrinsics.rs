@@ -70,6 +70,17 @@ impl DeclarationOwner {
         self.semantic == Some(SemanticCallableOwner::Package(package))
     }
 
+    /// Whether this declares its members on one of the unsigned arrays (`UIntArray`, …).
+    fn is_unsigned_array_class(self) -> bool {
+        match self.semantic {
+            Some(SemanticCallableOwner::Classifier(owner)) => {
+                krusty::types::prim_array_element(owner).is_some_and(Ty::is_unsigned)
+            }
+            Some(SemanticCallableOwner::Package(_)) => false,
+            None => false,
+        }
+    }
+
     fn classifier_matches(self, kotlin: &str) -> bool {
         match self.semantic {
             Some(SemanticCallableOwner::Classifier(owner)) => classifier_matches(owner, kotlin),
@@ -1734,12 +1745,17 @@ pub(super) fn array_member(
     // The unsigned arrays get their own package: Kotlin declares `UIntArray.reversed()` in
     // `kotlin.collections.unsigned`, apart from the signed one it answers identically to. The
     // runtime reads the element's type from the array's descriptor, so both reach one entry.
+    let reference = Ty::nullable(Ty::obj("kotlin/Any"));
+    // An unsigned array is a value class over its carrier, whose own `Collection.isEmpty` asks the
+    // carrier's length, the same question the facade's extension answers.
+    if owner.is_unsigned_array_class() && name == "isEmpty" && params.is_empty() {
+        return Some(("kt_array_is_empty", vec![reference], Ty::Boolean));
+    }
     if !owner.package_is(krusty::types::wk::kotlin_collections_package())
         && !owner.package_is(krusty::types::wk::kotlin_collections_unsigned_package())
     {
         return None;
     }
-    let reference = Ty::nullable(Ty::obj("kotlin/Any"));
     Some(match (name, params) {
         ("toList", []) => ("kt_array_to_list", vec![reference], reference),
         ("reversed", []) => ("kt_array_reversed", vec![reference], reference),

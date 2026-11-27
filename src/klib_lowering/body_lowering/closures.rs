@@ -167,7 +167,7 @@ impl BodyLowering<'_> {
         lowering.instance_storage = self
             .instance_storage
             .as_ref()
-            .and_then(super::instance_storage::InstanceStorageFrame::nested_initializer);
+            .and_then(super::instance_storage::InstanceStorageFrame::nested);
         lowering.enclosing_returns = enclosing_returns;
         let body = lowering.body(statements)?;
         self.ir.functions[implementation as usize].body = Some(body);

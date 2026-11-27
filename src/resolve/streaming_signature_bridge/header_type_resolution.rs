@@ -43,9 +43,9 @@ impl ProductionSignatureSemantics<'_> {
             | crate::fir::SigExpr::ContextualType { syntax, .. } => self
                 .selected_types
                 .graph_spelling(graph.written_type_id(syntax)),
-            crate::fir::SigExpr::Nullable(inner) | crate::fir::SigExpr::NonNullable(inner) => {
-                self.expression_spelling(graph, inner)
-            }
+            crate::fir::SigExpr::Nullable(inner)
+            | crate::fir::SigExpr::NonNullable(inner)
+            | crate::fir::SigExpr::NotNullOperator(inner) => self.expression_spelling(graph, inner),
             crate::fir::SigExpr::Known(_)
             | crate::fir::SigExpr::ClassifierType { .. }
             | crate::fir::SigExpr::DeclarationType(_)
@@ -573,6 +573,9 @@ impl ProductionSignatureSemantics<'_> {
             crate::fir::SigExpr::NonNullable(base) => {
                 super::super::definitely_non_null_ty(self.resolve_compact_graph_type(graph, base)?)
             }
+            crate::fir::SigExpr::NotNullOperator(base) => self
+                .resolve_compact_graph_type(graph, base)?
+                .non_null_keeping_intersection_bound(),
             _ => return None,
         };
         if resolved.mentions_error() || resolved.mentions_pending() {

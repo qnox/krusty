@@ -220,15 +220,38 @@ fn sign_type_parameters(
     selected: Option<KlibBodyCallable<'_>>,
     is_interface: &mut dyn FnMut(TypeName) -> Result<bool, KlibBodyDeclineReason>,
 ) -> Result<(), KlibBodyDeclineReason> {
-    let Some(selected) = selected else {
-        return Err(KlibBodyDeclineReason::UnsupportedOperation(
-            "a call of a generic inline function whose type parameters are not selected",
-        ));
+    // A declaration no provider records, a private one, binds the formals its own header mints
+    // and writes which of them are reified in its own serialized type parameters.
+    let (formals, reified) = match selected {
+        Some(selected) => (
+            selected.type_parameters().to_vec(),
+            selected.reified_type_parameter_ordinals().to_vec(),
+        ),
+        None => {
+            let mut formals = Vec::with_capacity(declaration.type_parameters.len());
+            for serialized in &declaration.type_parameters {
+                formals.push(
+                    header
+                        .type_parameters()
+                        .bound(&serialized.base.symbol)
+                        .ok_or_else(|| {
+                            KlibBodyDeclineReason::SignatureMismatch(
+                                "the inline function's header binds no formal for a type parameter"
+                                    .to_owned(),
+                            )
+                        })?,
+                );
+            }
+            let reified = (0..)
+                .zip(&declaration.type_parameters)
+                .filter(|(_, serialized)| serialized.is_reified())
+                .map(|(ordinal, _)| ordinal)
+                .collect();
+            (formals, reified)
+        }
     };
-    let formals = selected.type_parameters();
     if formals.len() != declaration.type_parameters.len()
-        || selected
-            .reified_type_parameter_ordinals()
+        || reified
             .iter()
             .any(|&ordinal| ordinal as usize >= formals.len())
     {
@@ -270,9 +293,7 @@ fn sign_type_parameters(
             bounds,
             // Kotlin declares no variance on a function's type parameter.
             variance: crate::types::TypeVariance::Invariant,
-            reified: selected
-                .reified_type_parameter_ordinals()
-                .contains(&(index as u32)),
+            reified: reified.contains(&(index as u32)),
             captured_from_enclosing: false,
         });
     }

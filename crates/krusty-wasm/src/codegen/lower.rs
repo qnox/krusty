@@ -1733,6 +1733,16 @@ impl<'a> Body<'a> {
                         if op == IrTypeOp::CastNonNull && matches!(target, ValType::Ref { .. }) {
                             self.require_nonnull_reference(target)?;
                         }
+                        // An inline expansion keeps the declaration type parameter a coercion
+                        // names while its checked result is the call's substitution; the value
+                        // is read at that type from here on.
+                        if op == IrTypeOp::ImplicitCoercion {
+                            if let Some(result) = self.type_of(id)? {
+                                if result != type_operand && carrier(result)? != Some(target) {
+                                    self.coerce_emitted_value(type_operand, result)?;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2608,6 +2618,8 @@ fn checked_operation_name(operation: &krusty::ir::IrCheckedOperation) -> &'stati
         IrCheckedOperation::ComparableRangeContains { .. } => "ComparableRangeContains",
         IrCheckedOperation::IllegalProgressionStep { .. } => "IllegalProgressionStep",
         IrCheckedOperation::AtomicField { .. } => "AtomicField",
+        IrCheckedOperation::FieldDesignation { .. } => "FieldDesignation",
+        IrCheckedOperation::AtomicFieldThrough { .. } => "AtomicFieldThrough",
         IrCheckedOperation::AtomicArrayElement { .. } => "AtomicArrayElement",
         IrCheckedOperation::RangeLoop { .. } => "RangeLoop",
         IrCheckedOperation::PropertyReference { .. } => "PropertyReference",
