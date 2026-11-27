@@ -32,7 +32,6 @@ coroutines/throwOnFailureSuspendLambdaInCatch.kt
 coroutines/throwOnFailureSuspendLambdaTryCatchOutside.kt
 coroutines/throwOnFailureSuspendLambdaTryFinallyOutside.kt
 deadCodeElimination/unusedPrimitiveAndObjectEquals.kt
-defaultArguments/maskAndArgumentElimination.kt
 defaultArguments/noAnonymousObjectRegenerationInDefaultStub.kt
 enum/enumEntriesIntrinsicForJava.kt
 falseSmartCast.kt
@@ -78,7 +77,6 @@ inline/syntheticPropertyReference.kt
 inlineClasses/assertionsForExposedBoxedParameters.kt
 inlineClasses/assertionsForExposedBoxedParametersOfNullableUnderlyingTypes.kt
 inlineClasses/boxingForNonLocalAndLabeledReturnsOfInlineClasses.kt
-inlineClasses/defaultParametersDontBox.kt
 inlineClasses/equalsIsCalledByInlineClass.kt
 inlineClasses/isCheckForInlineClass.kt
 inlineClasses/noManglingForFunctionsWithJvmName.kt

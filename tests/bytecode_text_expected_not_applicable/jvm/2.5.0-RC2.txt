@@ -31,4 +31,3 @@ notNullAssertions/noAssertionForNullableGenericMethod.kt
 # the nested classes (found 0 of the expected 2 for A$B and A$C); with it the class files carry
 # the flag (inner-class flags 0x39 and 0x29 for target 28), so the reference is right and this
 # is a harness gap. The sibling target-27 case expects no identity flag and passes.
-innerClasses/identityFlagWithJvmPreviewTarget28.kt

@@ -1,4 +1,4 @@
-# Kotlin 2.5.0-RC codegen/box files expected to be not-applicable on native-klib, relative to
+# Kotlin 2.5.0-RC2 codegen/box files expected to be not-applicable on native-klib, relative to
 # compiler/testData/codegen/box. Later releases with no file of their own read this one.
 # Owned fixtures use regressions/<path relative to tests/box_regressions>.
 # Regenerate both exact inventories with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local
