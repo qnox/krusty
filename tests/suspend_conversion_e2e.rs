@@ -196,7 +196,8 @@ fun box(): String {
 /// must return `OK` under kotlinc and krusty.
 #[test]
 fn a_null_function_value_converts_as_kotlinc_does() {
-    let quirks = krusty::kotlin_version::Quirks::target();
+    let quirks =
+        krusty::kotlin_version::Quirks::of_release(krusty::kotlin_version::environment_release());
     let programs = if !quirks.has(krusty::kotlin_version::Quirk::NullFunctionValueConvertsToAdapter)
     {
         [

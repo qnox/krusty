@@ -41,13 +41,13 @@ impl Checker<'_> {
     /// nullable function type each have a release range that converts it to an adapter instead
     /// ([`crate::kotlin_version::Quirk::NullTypeParameterFunctionValueIsDereferenced`],
     /// [`crate::kotlin_version::Quirk::NullFunctionValueConvertsToAdapter`]).
-    fn null_function_value_stays(nominal: Ty) -> bool {
+    fn null_function_value_stays(&self, nominal: Ty) -> bool {
         let converts = if nominal.is_ty_param() {
             crate::kotlin_version::Quirk::NullTypeParameterFunctionValueIsDereferenced
         } else {
             crate::kotlin_version::Quirk::NullFunctionValueConvertsToAdapter
         };
-        !crate::kotlin_version::Quirks::target().has(converts)
+        !self.file.reference.quirks().has(converts)
     }
 
     /// Commit the type of a selected call's argument. Reaching this seam means the call has
@@ -66,7 +66,7 @@ impl Checker<'_> {
             Some(source) => {
                 if !matches!(self.file.expr(argument), Expr::CallableRef { .. }) {
                     let keeps_null =
-                        source.admits_null() && Self::null_function_value_stays(nominal);
+                        source.admits_null() && self.null_function_value_stays(nominal);
                     self.selected_function_value_conversions
                         .insert(argument, (source, expected, keeps_null));
                 }
@@ -251,7 +251,7 @@ impl Checker<'_> {
                 // value then stays, in the releases that do not convert it as if it were present.
                 if nominal.upper_bound_admits_null()
                     && !candidate.admits_null()
-                    && Self::null_function_value_stays(nominal)
+                    && self.null_function_value_stays(nominal)
                 {
                     Ty::nullable(candidate)
                 } else {
