@@ -7,8 +7,8 @@
 
 use super::{desc, erase, repr_of_ty, Repr, Under};
 use krusty::fx_hash::HashMap;
-use krusty::ir::{Callee, ExprId, IrFile};
-use krusty::types::{Ty, TypeName};
+use krusty::ir::{Callee, ExprId, IrExpr, IrFile};
+use krusty::types::{Ty, TyKind, TypeName};
 
 /// The per-expression type facts lowering hands the representation analysis. They always travel
 /// together, and none alone can classify a value-class result: `logical` says WHICH value class a
@@ -65,6 +65,26 @@ impl<'a> CallTypes<'a> {
             .erased_declared_ty?
             .non_null()
             .obj_internal()
+    }
+
+    /// Whether the value `expression` (the node at `id`) produces is non-null by its declaration:
+    /// a call whose callee declares a non-null result, or a read of a static realized over a value
+    /// class's carrier and declared non-null. `var s: S` reads a carrier that is always a value,
+    /// while `var s: S?` erased to the same carrier may hold null.
+    pub(super) fn declared_non_null(&self, id: u32, expression: &IrExpr, under: &Under) -> bool {
+        if let IrExpr::GetStatic(index) = expression {
+            let declared = self
+                .statics
+                .get(*index as usize)
+                .and_then(|s| s.erased_declared_ty);
+            if declared.is_some_and(|declared| !declared.is_nullable()) {
+                return true;
+            }
+        }
+        matches!(
+            self.declared_result(id, under).map(Ty::kind),
+            Some(TyKind::Obj(..))
+        )
     }
 
     pub(super) fn get(&self, id: &u32) -> Option<Ty> {
