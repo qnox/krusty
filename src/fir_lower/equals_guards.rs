@@ -84,12 +84,55 @@ impl super::BodyLowering<'_> {
                     .has(crate::fir::DeclarationFlags::VALUE_KEYWORD)
             });
         let other_slot = self.value_slot(guard.parameter);
-        Ok(identity_and_type_guards(
+        let guards = identity_and_type_guards(
             self.ir,
             this_slot,
             other_slot,
             guard.bound.get(),
             !value_class,
-        ))
+        );
+        // kotlinc generates the guards for the declaration, so they stand on its header line, not
+        // on the body's first statement.
+        let line = self.body.header_line();
+        if line != 0 {
+            for &guard in &guards {
+                self.ir.set_statement_line(guard, line);
+                self.ir.position_generated_tree(guard, line);
+            }
+        }
+        Ok(guards)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn equality_bound_guards_stand_on_the_declaration_header_line() {
+        let ir = crate::fir_lower::single_source_lowering::lower_single_source_with_jvm_stdlib(
+            "// LANGUAGE: +StrictEquals\n\
+             class A(val n: Int) {\n\
+                 override fun equals(\n\
+                     @EqualityBound(A::class) other: Any?\n\
+                 ): Boolean {\n\
+                     return n == other.n\n\
+                 }\n\
+             }\n",
+            "EqualityBoundGuardLines",
+        );
+        let equals = ir
+            .functions
+            .iter()
+            .find(|function| function.name == "equals")
+            .expect("the source equals");
+        let body = equals.body.expect("a lowered body");
+        let crate::ir::IrExpr::Block { stmts, .. } = ir.expr(body) else {
+            panic!("a block body");
+        };
+        let guards = stmts
+            .iter()
+            .take(2)
+            .map(|&statement| (ir.statement_line(statement), ir.source_line(statement)))
+            .collect::<Vec<_>>();
+        assert_eq!(guards, [(Some(3), Some(3)), (Some(3), Some(3))]);
     }
 }

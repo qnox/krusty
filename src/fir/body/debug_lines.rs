@@ -82,6 +82,9 @@ pub(super) struct FirBodyDebugLines {
     statements: Vec<FirStatementDebugLines>,
     /// 1-based line of a block body's closing `}` (0 = unknown).
     close_line: u32,
+    /// 1-based line of the declaration's header, where kotlinc maps code it generates for the
+    /// declaration itself ahead of the body (0 = unknown).
+    header_line: u32,
 }
 
 impl FirBodyDebugLines {
@@ -134,6 +137,16 @@ impl FirBody {
     /// falling off its end gets; 0 when there is none.
     pub const fn close_line(&self) -> u32 {
         self.debug_lines.close_line
+    }
+
+    /// The line of the declaration's header, where kotlinc maps the code it generates for the
+    /// declaration ahead of its body; 0 when there is none.
+    pub const fn header_line(&self) -> u32 {
+        self.debug_lines.header_line
+    }
+
+    pub(crate) fn set_header_line(&mut self, line: u32) {
+        self.debug_lines.header_line = line;
     }
 
     pub(crate) fn set_close_line(&mut self, line: u32) {

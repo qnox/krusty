@@ -10,6 +10,16 @@ open class Named(val key: String) {
     override fun hashCode(): Int = key.hashCode()
 }
 
+open class Keyed(val id: Int) {
+    override fun equals(
+        @EqualityBound(Keyed::class) other: Any?
+    ): Boolean {
+        return id == other.id
+    }
+
+    override fun hashCode(): Int = id
+}
+
 // MODULE: main(lib)
 // FILE: Main.kt
 import fixture.*
@@ -26,5 +36,7 @@ fun box(): String {
     if (Tagged("a", 1) == Tagged("a", 2)) return "different tags"
     if (!sameKey(Tagged("b", 1), Named("b"))) return "sameKey"
     if (sameKey(Named("b"), "b")) return "a String reached Named.equals"
+    if (Keyed(1) != Keyed(1)) return "Keyed"
+    if (Keyed(1) == Keyed(2)) return "different ids"
     return "OK"
 }
