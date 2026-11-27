@@ -21,5 +21,7 @@ const MATCH_RESULT_SOURCE: &str = include_str!("box_regressions/delegatedMatchRe
 #[test]
 fn delegating_match_result_matches_kotlinc() {
     common::assert_class_matches_kotlinc("DelegatedMatchResult", MATCH_RESULT_SOURCE, "Matched");
+    // A read-only collection `by` forwarder signs `containsAll` star-projected, as an override does.
+    common::assert_class_matches_kotlinc("DelegatedMatchGroups", MATCH_RESULT_SOURCE, "Groups");
     common::expect_box_same_as_kotlinc(MATCH_RESULT_SOURCE, "DelegatedMatchResultRun");
 }
