@@ -64,6 +64,9 @@ pub(crate) struct ModuleForwarder {
     /// The declarations it realizes, the delegated interface member first. A class member among
     /// them gives up its slot to the forwarder.
     pub(crate) realizes: Box<[ForwardedMember]>,
+    /// The language role of the member it realizes: an interface's redeclared `equals`,
+    /// `hashCode` or `toString` keeps `kotlin.Any`'s, so its forwarder answers at that fixed slot.
+    pub(crate) overridden_role: Option<SemanticCallRole>,
 }
 
 /// A declaration a forwarder realizes.
@@ -684,6 +687,10 @@ fn forwarders(delegations: &[ResolvedInterfaceDelegation]) -> Box<[ModuleForward
                             .iter()
                             .map(|declaration| ForwardedMember::Function(declaration.target))
                             .collect(),
+                        overridden_role: function
+                            .overridden
+                            .iter()
+                            .find_map(|declaration| declaration.semantic_role),
                     });
                 }
                 ResolvedDelegatedMember::Property(property) => {
@@ -713,6 +720,7 @@ fn forwarders(delegations: &[ResolvedInterfaceDelegation]) -> Box<[ModuleForward
                             .iter()
                             .map(|&p| ForwardedMember::Getter(p))
                             .collect(),
+                        overridden_role: None,
                     });
                     if property.setter.is_some() {
                         parameters.push(ty);
@@ -724,6 +732,7 @@ fn forwarders(delegations: &[ResolvedInterfaceDelegation]) -> Box<[ModuleForward
                                 .iter()
                                 .map(|&p| ForwardedMember::Setter(p))
                                 .collect(),
+                            overridden_role: None,
                         });
                     }
                 }

@@ -1,8 +1,7 @@
-//! Which operands of a classpath inline call are inline parameters (kotlinc's
-//! `InlineUtil.isInlineParameter`): a parameter whose declared type is a non-null function type
-//! and that did not write `noinline`. A literal lambda passed anywhere else is an ordinary value,
-//! even when the call's type arguments make the parameter a function type there (`with({ "" })
-//! { … }` passes the lambda as the receiver `T`).
+//! Which operands of a classpath inline call are inline parameters, by the one rule
+//! [`krusty::types::is_inline_parameter`] states. A literal lambda passed anywhere else is an
+//! ordinary value, even when the call's type arguments make the parameter a function type there
+//! (`with({ "" }) { … }` passes the lambda as the receiver `T`).
 
 use krusty::ir::{ExprId, IrFile};
 use krusty::types::{InlineParameterModifier, SemanticCallRole};
@@ -13,7 +12,7 @@ use krusty::types::{InlineParameterModifier, SemanticCallRole};
 pub(crate) fn is_inline_parameter(ir: &IrFile, call: ExprId, parameter: usize) -> Option<bool> {
     let modifier = *ir.call_inline_modifiers.get(&call)?.get(parameter)?;
     let declared = *ir.call_declared_params.get(&call)?.get(parameter)?;
-    Some(modifier != InlineParameterModifier::Noinline && declared.is_fun())
+    Some(krusty::types::is_inline_parameter(modifier, declared))
 }
 
 /// Whether operand `parameter` of the realized inline call `call` is a `crossinline` parameter.

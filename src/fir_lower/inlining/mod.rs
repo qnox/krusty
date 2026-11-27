@@ -147,6 +147,47 @@ fn directly_spliceable_invocations(
 }
 
 impl BodyLowering<'_> {
+    /// Whether evaluating `default` runs an inline call, after which kotlinc's `$default` stub
+    /// writes its own line again.
+    fn restates_line_after_inline_call(&self, default: ExprId) -> bool {
+        let mut pending = vec![default];
+        while let Some(expression) = pending.pop() {
+            if self.ir.compiled_inline_call(expression).is_some()
+                || self.ir.is_inline_copy(expression)
+                || self.ir.external_inline_expansions.contains(&expression)
+            {
+                return true;
+            }
+            // A lambda literal's body runs where the lambda is called, not where it is created.
+            if let IrExpr::Lambda { captures, .. } = self.ir.expr(expression) {
+                pending.extend(captures);
+                continue;
+            }
+            crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));
+        }
+        false
+    }
+
+    /// The code-free statement standing where a supplied parameter's default branch was.
+    fn dead_default_branch(
+        &mut self,
+        default: ExprId,
+        function: crate::ir::FunId,
+        frame: &inline_callee::InlineFrame,
+    ) -> ExprId {
+        let branch = self.ir.add_expr(IrExpr::Block {
+            stmts: Vec::new(),
+            value: None,
+        });
+        if let Some(line) = self.ir.source_line(default).filter(|line| *line != 0) {
+            self.ir.set_source_line(branch, line);
+        }
+        frame.record_copy(self.ir, branch, function);
+        self.ir
+            .set_debug_local_provenance(branch, IrDebugLocalProvenance::DeadDefaultBranch);
+        branch
+    }
+
     /// Declare an omitted parameter's local, initialized by a copy of the declaration's checked
     /// default. The copy reads the expansion's preceding parameter locals and moves its own locals
     /// above the current temporaries. The checker numbers only parameters in scope before this
@@ -412,6 +453,26 @@ impl BodyLowering<'_> {
         } else {
             vec![None; operands.len()]
         };
+        // The defaults of the parameters this call supplies: the stub still restates a line after
+        // a default's inline call, and that mark outlives the removed branch.
+        let supplied_defaults = if operands.iter().any(Option::is_none) {
+            let receiver_offset =
+                operands.len() - self.ir.functions[function as usize].params.len();
+            let declared = self.ir.param_defaults(function)?;
+            operands
+                .iter()
+                .enumerate()
+                .map(|(index, operand)| {
+                    operand.as_ref()?;
+                    declared
+                        .get(index.checked_sub(receiver_offset)?)
+                        .copied()
+                        .flatten()
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![None; operands.len()]
+        };
         // Decide every operand BEFORE anything is allocated. A declined expansion must leave the
         // arena exactly as it found it: a copy made for a parameter the expansion then refuses is
         // an orphan node, and a temporary allocated for it shifts every local index after it.
@@ -591,7 +652,17 @@ impl BodyLowering<'_> {
             default_lambda_implementations.push(impl_fn);
             inline_lambdas[index] = Some(lambda);
         }
-        for (index, slot) in defaulted {
+        let mut defaulted = defaulted.into_iter().peekable();
+        for index in 0..operands.len() {
+            let Some((_, slot)) = defaulted.next_if(|&(defaulted, _)| defaulted == index) else {
+                if let Some(default) = supplied_defaults[index]
+                    .filter(|&default| self.restates_line_after_inline_call(default))
+                {
+                    let branch = self.dead_default_branch(default, function, &frame);
+                    operand_declarations.push(branch);
+                }
+                continue;
+            };
             let default = defaults[index]?;
             let (declaration, cloned) = self.inline_default_declaration(
                 default,

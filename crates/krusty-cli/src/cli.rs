@@ -271,18 +271,41 @@ impl Default for Options {
     }
 }
 
-/// Map a kotlinc `-jvm-target` value to the class-file major version it produces. `1.6`/`1.8` are the
-/// legacy dotted spellings; `9`+ are bare. Unknown values yield `None` (krusty keeps its default).
-pub fn jvm_target_to_major(v: &str) -> Option<u16> {
+/// The newest `-jvm-target` the reference release accepts.
+fn newest_jvm_target(release: KotlinVersion) -> u16 {
+    if krusty::kotlin_version::Quirks::of_release(release)
+        .has(krusty::kotlin_version::Quirk::JvmTargetsEndAt26)
+    {
+        26
+    } else {
+        28
+    }
+}
+
+/// Map a kotlinc `-jvm-target` value to the class-file major version it produces under the
+/// reference `release`, or to kotlinc's own error for a value it refuses: `1.6` is named as no
+/// longer supported, and anything else outside `1.8` and `9` up to [`newest_jvm_target`]
+/// (including the bare `6`, `7` and `8`) is an unknown target.
+pub fn jvm_target_to_major(v: &str, release: KotlinVersion) -> Result<u16, String> {
+    let newest = newest_jvm_target(release);
     match v {
-        "1.6" | "6" => Some(50),
-        "1.7" | "7" => Some(51),
-        "1.8" | "8" => Some(52),
+        "1.8" => Ok(52),
+        "1.6" => Err(
+            "JVM target 1.6 is no longer supported. Please migrate to JVM target 1.8 or above"
+                .to_string(),
+        ),
         _ => v
             .parse::<u16>()
             .ok()
-            .filter(|&n| (9..=99).contains(&n))
-            .map(|n| n + 44),
+            .filter(|&n| (9..=newest).contains(&n) && n.to_string() == v)
+            .map(|n| n + 44)
+            .ok_or_else(|| {
+                let supported = (9..=newest)
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("unknown JVM target version: {v}\nSupported versions: 1.8, {supported}")
+            }),
     }
 }
 
@@ -467,7 +490,7 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
         })
         .collect();
     finish_warning_policy(&mut opts, &parsed);
-    finish_jvm_target(&mut opts, &parsed);
+    finish_jvm_target(&mut opts, &parsed, reference_version);
     finish_language_settings(&mut opts, parsed, catalog, &tokenized.explicit, lifecycle);
     // kotlinc reports a repeated source root after the configuration warnings.
     opts.warnings.append(&mut duplicate_roots);
@@ -2130,22 +2153,35 @@ mod tests {
 
     #[test]
     fn jvm_target_sets_class_major_version() {
-        assert_eq!(jvm_target_to_major("1.8"), Some(52));
-        assert_eq!(jvm_target_to_major("8"), Some(52));
-        assert_eq!(jvm_target_to_major("9"), Some(53));
-        assert_eq!(jvm_target_to_major("21"), Some(65));
-        assert_eq!(jvm_target_to_major("25"), Some(69));
-        assert_eq!(jvm_target_to_major("banana"), None);
+        let stable = KotlinVersion::new(2, 4, 21);
+        assert_eq!(jvm_target_to_major("1.8", stable), Ok(52));
+        assert_eq!(jvm_target_to_major("9", stable), Ok(53));
+        assert_eq!(jvm_target_to_major("21", stable), Ok(65));
+        assert_eq!(jvm_target_to_major("26", stable), Ok(70));
+        assert_eq!(
+            jvm_target_to_major("27", stable),
+            Err(
+                "unknown JVM target version: 27\nSupported versions: 1.8, 9, 10, 11, 12, 13, \
+                 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26"
+                    .to_string()
+            )
+        );
+        // kotlinc 2.5 accepts targets 27 and 28, and lists them among the supported versions.
+        let next = KotlinVersion::new(2, 5, 0);
+        assert_eq!(jvm_target_to_major("28", next), Ok(72));
+        assert_eq!(
+            jvm_target_to_major("29", next),
+            Err(
+                "unknown JVM target version: 29\nSupported versions: 1.8, 9, 10, 11, 12, 13, \
+                 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28"
+                    .to_string()
+            )
+        );
 
-        // The parsed option carries the mapped major; an unknown value is reported, not applied.
+        // The parsed option carries the mapped major.
         let o = parse_args(&["-jvm-target", "25", "f.kt"]);
         assert_eq!(o.jvm_target_major, Some(69));
         assert_eq!(o.sources, vec!["f.kt".to_string()]);
-
-        let bad = parse_args(&["-jvm-target", "banana", "f.kt"]);
-        assert_eq!(bad.jvm_target_major, None);
-        assert!(bad.ignored.contains(&"-jvm-target banana".to_string()));
-        assert_eq!(bad.sources, vec!["f.kt".to_string()]);
     }
 
     #[test]

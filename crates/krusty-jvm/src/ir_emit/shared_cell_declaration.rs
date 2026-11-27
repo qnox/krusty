@@ -211,6 +211,10 @@ impl Emitter<'_> {
             name,
             descriptor,
             inline_operand,
+            parameter_order: matches!(
+                provenance,
+                Some(krusty::ir::IrDebugLocalProvenance::InlineValue { .. })
+            ) && inline_operand,
             inline_frame,
             opens_inline_frame: marker,
             precedes_recorded_locals,

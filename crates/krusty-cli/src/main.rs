@@ -124,7 +124,7 @@ fn main() {
     }
     if let Some(report) = error_report(&opts) {
         eprint!("{report}");
-        std::process::exit(2);
+        std::process::exit(if fails_kotlinc_too(&opts) { 1 } else { 2 });
     }
     eprint!("{}", parse_report(&opts));
     if opts.sources.is_empty() && !opts.allow_no_source_files {
@@ -246,9 +246,7 @@ fn run_refusals(argv: Vec<String>) {
 fn refusals(opts: &cli::Options) -> Result<Vec<String>, String> {
     let invalid = argument_error_report(opts)
         .or_else(|| {
-            opts.errors
-                .iter()
-                .any(|error| !opts.refusals.contains(error))
+            fails_kotlinc_too(opts)
                 .then(|| error_report(opts))
                 .flatten()
         })
@@ -613,6 +611,15 @@ fn argument_error_report(opts: &cli::Options) -> Option<String> {
     }
     report.push_str("info: use -help for more information\n");
     Some(report)
+}
+
+/// Whether an option error is kotlinc's own rather than a refusal of something kotlinc compiles.
+/// kotlinc exits with `COMPILATION_ERROR` (1) once its configuration reports any error, so such a
+/// command line exits 1 here too; one whose every error is a refusal exits 2.
+fn fails_kotlinc_too(opts: &cli::Options) -> bool {
+    opts.errors
+        .iter()
+        .any(|error| !opts.refusals.contains(error))
 }
 
 /// The options krusty reports and exits on before compiling: invalid ones, and ones it refuses.

@@ -793,7 +793,6 @@ specialBuiltins/notEmptyMap.kt
 specialBuiltins/throwableComplex.kt
 specialBuiltins/throwableImpl.kt
 strictEquals/crossModuleInheritance.kt
-strictEquals/delegated.kt
 strings/kt2592.kt
 strings/kt3571.kt
 strings/surrogatePair.kt

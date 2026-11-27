@@ -427,7 +427,11 @@ pub(super) fn finish_warning_policy(opts: &mut Options, parsed: &ParsedSettings)
 /// Settle the JVM target from `-jvm-target` and `-Xjdk-release`, as kotlinc's
 /// `configureJvmTargetAndRelease` does: a release names the target unless it predates 1.8, and an
 /// explicit target must agree with it.
-pub(super) fn finish_jvm_target(opts: &mut Options, parsed: &ParsedSettings) {
+pub(super) fn finish_jvm_target(
+    opts: &mut Options,
+    parsed: &ParsedSettings,
+    reference_version: KotlinVersion,
+) {
     let target = parsed.jvm_target.as_deref();
     let target = match parsed.jdk_release.as_deref() {
         None => target,
@@ -456,7 +460,7 @@ pub(super) fn finish_jvm_target(opts: &mut Options, parsed: &ParsedSettings) {
                 }
                 _ => opts
                     .errors
-                    .push(format!("Unknown JDK release version: {release}")),
+                    .push(format!("unknown JDK release version: {release}")),
             }
             match release {
                 "6" | "1.6" | "7" | "1.7" => {
@@ -473,12 +477,11 @@ pub(super) fn finish_jvm_target(opts: &mut Options, parsed: &ParsedSettings) {
             }
         }
     };
-    // Honor the target: it sets the emitted class-file version. An unrecognized value is reported
-    // like any other ignored option rather than silently defaulting.
+    // Honor the target: it sets the emitted class-file version, and a value kotlinc refuses is its error.
     if let Some(target) = target {
-        match jvm_target_to_major(target) {
-            Some(major) => opts.jvm_target_major = Some(major),
-            None => opts.ignored.push(format!("-jvm-target {target}")),
+        match jvm_target_to_major(target, reference_version) {
+            Ok(major) => opts.jvm_target_major = Some(major),
+            Err(error) => opts.errors.push(error),
         }
     }
 }

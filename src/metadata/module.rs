@@ -35,6 +35,9 @@ pub fn kotlin_module_file_name(module_name: &str) -> String {
 pub struct PackagePart {
     pub name: String,
     pub multifile_facade: Option<String>,
+    /// The slash-separated JVM package of a class that sits outside its Kotlin package, as
+    /// `@file:JvmPackageName` places it; `None` for a class in its own package.
+    pub jvm_package: Option<String>,
 }
 
 impl From<&str> for PackagePart {
@@ -48,7 +51,50 @@ impl From<String> for PackagePart {
         PackagePart {
             name,
             multifile_facade: None,
+            jvm_package: None,
         }
+    }
+}
+
+/// ModuleMapping uses the JVM's String ordering. Rust's `str` order agrees for BMP text but not
+/// when a name contains a supplementary-plane character: Java compares the leading surrogate
+/// before a later BMP code unit, while Rust compares Unicode scalar values.
+fn jvm_order(left: &str, right: &str) -> std::cmp::Ordering {
+    left.encode_utf16().cmp(right.encode_utf16())
+}
+
+/// `parts` grouped by multifile facade, facades in name order and plain parts last, and sorted
+/// by name within each group.
+fn by_facade(mut parts: Vec<&PackagePart>) -> Vec<&PackagePart> {
+    parts.sort_by(|left, right| {
+        match (&left.multifile_facade, &right.multifile_facade) {
+            (Some(left), Some(right)) => jvm_order(left, right),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+        .then_with(|| jvm_order(&left.name, &right.name))
+    });
+    parts
+}
+
+/// The multifile facade names of one package's parts, numbered from 1 in the order they are first
+/// named.
+#[derive(Default)]
+struct FacadeIds<'a> {
+    names: Vec<&'a str>,
+}
+
+impl<'a> FacadeIds<'a> {
+    fn id(&mut self, facade: &'a str) -> u64 {
+        let position = match self.names.iter().position(|known| *known == facade) {
+            Some(position) => position,
+            None => {
+                self.names.push(facade);
+                self.names.len() - 1
+            }
+        };
+        position as u64 + 1
     }
 }
 
@@ -59,52 +105,84 @@ impl From<String> for PackagePart {
 /// caller's insertion order is source-file order). Each multifile part then records its facade
 /// as a 1-based index into the facade names that follow.
 pub fn build_kotlin_module(packages: &[(String, Vec<PackagePart>)], version: [i32; 3]) -> Vec<u8> {
-    // ModuleMapping uses the JVM's String ordering. Rust's `str` order agrees for BMP text but
-    // not when a name contains a supplementary-plane character: Java compares the leading
-    // surrogate before a later BMP code unit, while Rust compares Unicode scalar values.
-    fn jvm_order(left: &str, right: &str) -> std::cmp::Ordering {
-        left.encode_utf16().cmp(right.encode_utf16())
-    }
     let mut out = Vec::new();
     for v in [3i32, version[0], version[1], version[2], 0] {
         out.extend_from_slice(&v.to_be_bytes()); // version length-prefixed + flags=0
     }
     let mut module = Pb::new();
+    let mut jvm_packages: Vec<String> = Vec::new();
     for (pkg, parts) in packages {
         let mut pp = Pb::new();
         pp.field_bytes(1, pkg.as_bytes()); // package_fq_name
-        let mut parts: Vec<&PackagePart> = parts.iter().collect();
-        parts.sort_by(|left, right| {
-            match (&left.multifile_facade, &right.multifile_facade) {
-                (Some(left), Some(right)) => jvm_order(left, right),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            }
-            .then_with(|| jvm_order(&left.name, &right.name))
-        });
-        let mut facades: Vec<&str> = Vec::new();
-        let mut facade_ids = Vec::new();
-        for part in &parts {
+
+        // kotlinc's `PackageParts.addTo`: the parts in the package, then those a
+        // `@file:JvmPackageName` moved out of it. Each is grouped by multifile facade (facades in
+        // name order, plain parts last) and sorted by name. Both lists number their facades from
+        // one table.
+        let (within, outside): (Vec<&PackagePart>, Vec<&PackagePart>) =
+            parts.iter().partition(|part| part.jvm_package.is_none());
+        let mut facades = FacadeIds::default();
+        let mut within_facade_ids = Vec::new();
+        for part in by_facade(within) {
             pp.field_bytes(2, part.name.as_bytes()); // short_class_name
             if let Some(facade) = part.multifile_facade.as_deref() {
-                let id = match facades.iter().position(|known| *known == facade) {
-                    Some(id) => id,
-                    None => {
-                        facades.push(facade);
-                        facades.len() - 1
-                    }
-                };
-                facade_ids.push(id as u64 + 1);
+                within_facade_ids.push(facades.id(facade));
             }
         }
-        if !facade_ids.is_empty() {
-            pp.field_packed_varints(3, &facade_ids); // multifile_facade_short_name_id
+        let mut outside_names = Vec::new();
+        let mut outside_facade_ids = Vec::new();
+        let mut package_ids = Vec::new();
+        let mut by_package: Vec<(&str, Vec<&PackagePart>)> = Vec::new();
+        for part in outside {
+            let package = part.jvm_package.as_deref().unwrap_or_default();
+            match by_package.iter_mut().find(|(known, _)| *known == package) {
+                Some((_, group)) => group.push(part),
+                None => by_package.push((package, vec![part])),
+            }
         }
-        for facade in facades {
+        by_package.sort_by(|(left, _), (right, _)| jvm_order(left, right));
+        for (package, group) in by_package {
+            let dotted = package.replace('/', ".");
+            let id = match jvm_packages.iter().position(|known| *known == dotted) {
+                Some(id) => id,
+                None => {
+                    jvm_packages.push(dotted);
+                    jvm_packages.len() - 1
+                }
+            };
+            for part in by_facade(group) {
+                outside_names.push(part.name.as_str());
+                if let Some(facade) = part.multifile_facade.as_deref() {
+                    outside_facade_ids.push(facades.id(facade));
+                }
+                package_ids.push(id as u64);
+            }
+        }
+        // The last package id stands for every trailing part of the same package.
+        while package_ids.len() > 1
+            && package_ids[package_ids.len() - 1] == package_ids[package_ids.len() - 2]
+        {
+            package_ids.pop();
+        }
+        if !within_facade_ids.is_empty() {
+            pp.field_packed_varints(3, &within_facade_ids); // multifile_facade_short_name_id
+        }
+        for facade in &facades.names {
             pp.field_bytes(4, facade.as_bytes()); // multifile_facade_short_name
         }
+        for name in outside_names {
+            pp.field_bytes(5, name.as_bytes()); // class_with_jvm_package_name_short_name
+        }
+        if !package_ids.is_empty() {
+            pp.field_packed_varints(6, &package_ids); // class_with_jvm_package_name_package_id
+        }
+        if !outside_facade_ids.is_empty() {
+            pp.field_packed_varints(7, &outside_facade_ids); // ..._multifile_facade_short_name_id
+        }
         module.repeated_message(1, &pp); // Module.package_parts
+    }
+    for package in &jvm_packages {
+        module.field_bytes(3, package.as_bytes()); // Module.jvm_package_name
     }
     // Trailing empty fields kotlinc always emits (metadata_parts / string table placeholders).
     module.field_bytes(4, &[]);
@@ -234,6 +312,7 @@ mod tests {
         let part = |name: &str, facade: &str| PackagePart {
             name: name.to_string(),
             multifile_facade: Some(facade.to_string()),
+            jvm_package: None,
         };
         let got = build_kotlin_module(
             &[(
