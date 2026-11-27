@@ -96,6 +96,7 @@ impl Classpath {
         if classifiers.is_empty() {
             return;
         }
+        self.forget_external_identities(&classifiers.iter().copied().collect());
         {
             let mut resolved = self.resolved_types.borrow_mut();
             for types in resolved.values_mut() {
