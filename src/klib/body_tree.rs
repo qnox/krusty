@@ -80,7 +80,7 @@ pub(super) enum ValueRef {
 }
 
 /// The callee a call names by exact signature.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) enum CallTarget {
     Public(KlibPublicIdSignature),
     Accessor(KlibAccessorIdSignature),
@@ -793,48 +793,7 @@ impl Translation<'_, '_> {
         property: crate::fir::PropertyId,
         setter: bool,
     ) -> Option<CallTarget> {
-        let exports = self.scope.exports;
-        // A written accessor is the function its body was checked as.
-        let written = match self.scope.ir.local_property_layouts.get(&property)? {
-            crate::ir::IrLocalPropertyLayout::Member {
-                getter,
-                setter: written_setter,
-                ..
-            }
-            | crate::ir::IrLocalPropertyLayout::TopLevelStorage {
-                getter,
-                setter: written_setter,
-                ..
-            } => {
-                if setter {
-                    *written_setter
-                } else {
-                    *getter
-                }
-            }
-            _ => return None,
-        };
-        let identity = match written {
-            Some(function) => exports.callable(function)?,
-            None => {
-                let operation = if setter {
-                    crate::backend::ExportedPropertyAccessor::Setter(property)
-                } else {
-                    crate::backend::ExportedPropertyAccessor::Getter(property)
-                };
-                &exports
-                    .property_accessors()
-                    .iter()
-                    .find(|(exported, _)| *exported == operation)?
-                    .1
-            }
-        };
-        match &identity.declaration {
-            KlibDeclarationSignature::Accessor(signature) => {
-                Some(CallTarget::Accessor(signature.clone()))
-            }
-            _ => None,
-        }
+        property_accessor(self.scope.ir, self.scope.exports, property, setter)
     }
 
     /// `C(args)` of a class of this file, by the constructor checking selected.
@@ -894,6 +853,56 @@ impl Translation<'_, '_> {
 }
 
 /// The identity this file publishes for the constructor `target` of its class `class`.
+/// The identity of a property of this file's getter, or its setter.
+pub(super) fn property_accessor(
+    ir: &IrFile,
+    exports: &crate::backend::DependencyExportSignatures,
+    property: crate::fir::PropertyId,
+    setter: bool,
+) -> Option<CallTarget> {
+    // A written accessor is the function its body was checked as.
+    let written = match ir.local_property_layouts.get(&property)? {
+        crate::ir::IrLocalPropertyLayout::Member {
+            getter,
+            setter: written_setter,
+            ..
+        }
+        | crate::ir::IrLocalPropertyLayout::TopLevelStorage {
+            getter,
+            setter: written_setter,
+            ..
+        } => {
+            if setter {
+                *written_setter
+            } else {
+                *getter
+            }
+        }
+        _ => return None,
+    };
+    let identity = match written {
+        Some(function) => exports.callable(function)?,
+        None => {
+            let operation = if setter {
+                crate::backend::ExportedPropertyAccessor::Setter(property)
+            } else {
+                crate::backend::ExportedPropertyAccessor::Getter(property)
+            };
+            &exports
+                .property_accessors()
+                .iter()
+                .find(|(exported, _)| *exported == operation)?
+                .1
+        }
+    };
+    match &identity.declaration {
+        KlibDeclarationSignature::Accessor(signature) => {
+            Some(CallTarget::Accessor(signature.clone()))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn constructor_target(
     scope: &BodyScope<'_>,
     class: crate::types::TypeName,

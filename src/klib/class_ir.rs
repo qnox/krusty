@@ -9,7 +9,8 @@
 
 use super::body_encoding::BodyEncoder;
 use super::body_tree::{
-    constructor_body, BodyKind, BodyScope, BodyStatement, CallTarget, FunctionBody, ValueRef,
+    constructor_body, property_accessor, supported_type, BodyKind, BodyScope, BodyStatement,
+    CallTarget, FunctionBody, ValueRef,
 };
 use super::inline_ir::{
     prepared_function, BodyFacts, Component, DeclarationSignatures, FileWriter, PreparedFunction,
@@ -19,6 +20,7 @@ use super::ir_tables::{
     lattice, symbol, CLASS_SYMBOL, CONSTRUCTOR_SYMBOL, FIELD_SYMBOL, PROPERTY_SYMBOL,
     RECEIVER_PARAMETER_SYMBOL, VALUE_PARAMETER_SYMBOL,
 };
+use crate::fir::ResolvedPropertyOverrideTarget;
 use crate::ir::{CtorDelegateTarget, IrClass, IrFile, IrLocalPropertyLayout, IrProperty};
 use crate::libraries::KlibDeclarationSignature;
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
@@ -30,6 +32,7 @@ const PRIMARY_CONSTRUCTOR: u64 = 1 << 15;
 
 pub(super) struct PreparedClass {
     signature: KlibPublicIdSignature,
+    source_order: u32,
     name: String,
     flags: u64,
     self_type: Ty,
@@ -107,6 +110,12 @@ fn prepared_class(
         .iter()
         .map(|argument| Some((argument.name.clone()?, argument.ty)))
         .collect::<Option<Vec<_>>>()?;
+    if !primary_parameters
+        .iter()
+        .all(|(_, ty)| supported_type(*ty, &[]))
+    {
+        return None;
+    }
     let slots = std::iter::once(self_type)
         .chain(primary_parameters.iter().map(|(_, ty)| *ty))
         .collect::<Vec<_>>();
@@ -148,7 +157,9 @@ fn prepared_class(
             return None;
         }
         let parameters = constructor.named_params.clone();
-        if parameters.len() != constructor.params.len() {
+        if parameters.len() != constructor.params.len()
+            || !parameters.iter().all(|(_, ty)| supported_type(*ty, &[]))
+        {
             return None;
         }
         let slots = std::iter::once(self_type)
@@ -211,6 +222,7 @@ fn prepared_class(
     members.extend(body_members.into_iter().map(|(_, _, member)| member));
     Some(PreparedClass {
         signature,
+        source_order: ir.class_source_order(class_id)?,
         name: class_name(class)?,
         flags: crate::metadata::declaration_flags::class_flags(ir, class),
         self_type,
@@ -421,6 +433,10 @@ fn prepared_property(
     let signature = getter_signature.property().clone();
     let self_type = Ty::obj_name(class.fq_name);
     let ty = property.ty;
+    if !supported_type(ty, &[]) {
+        return None;
+    }
+    let (overridden_getters, overridden_setters) = overridden_accessors(ir, class, id, facts)?;
     let modality = match modifiers.modality {
         crate::ir::IrPropertyModality::Final => 0,
         crate::ir::IrPropertyModality::Open => 1,
@@ -448,6 +464,7 @@ fn prepared_property(
                              name: String,
                              parameters: Vec<PreparedParameter>,
                              result: Ty,
+                             overridden: Vec<CallTarget>,
                              body: FunctionBody| PreparedFunction {
         signature: CallTarget::Accessor(signature),
         name,
@@ -462,7 +479,8 @@ fn prepared_property(
         extension_parameter: None,
         result,
         type_parameters: Vec::new(),
-        overridden: Vec::new(),
+        overridden,
+        source_order: None,
         body,
     };
     let getter = accessor_function(
@@ -470,6 +488,7 @@ fn prepared_property(
         format!("<get-{}>", property.name),
         Vec::new(),
         ty,
+        overridden_getters,
         getter_body,
     );
     let setter = if property.is_var {
@@ -494,6 +513,7 @@ fn prepared_property(
                 default_null: false,
             }],
             Ty::Unit,
+            overridden_setters,
             body,
         ))
     } else {
@@ -514,6 +534,84 @@ fn prepared_property(
         getter,
         setter,
     })
+}
+
+/// The accessors of the direct supertypes' properties that the getter and the setter of `property`
+/// override, as kotlinc names them. A setter overrides only a `var`'s setter. `None` when an
+/// overridden accessor has no identity this writer can name.
+fn overridden_accessors(
+    ir: &IrFile,
+    class: &IrClass,
+    property: crate::fir::PropertyId,
+    facts: &BodyFacts<'_>,
+) -> Option<(Vec<CallTarget>, Vec<CallTarget>)> {
+    let mut getters = Vec::new();
+    let mut setters = Vec::new();
+    let edges = ir
+        .property_overrides
+        .values()
+        .flatten()
+        .filter(|edge| edge.implementation == ResolvedPropertyOverrideTarget::Module(property));
+    for edge in edges {
+        if edge.implementation_getter.is_some() || edge.implementation_setter.is_some() {
+            return None;
+        }
+        let accessor = |setter: bool| -> Option<KlibAccessorIdSignature> {
+            let target = match edge.overridden {
+                ResolvedPropertyOverrideTarget::Module(overridden) => {
+                    property_accessor(ir, facts.exports, overridden, setter)?
+                }
+                // An external edge names the overridden getter; its setter is not named yet.
+                ResolvedPropertyOverrideTarget::External(getter) => {
+                    if setter {
+                        return None;
+                    }
+                    let accessor = getter;
+                    match &facts
+                        .callables
+                        .callable(accessor)?
+                        .dependency_callable
+                        .as_ref()?
+                        .declaration
+                    {
+                        KlibDeclarationSignature::Accessor(signature) => {
+                            CallTarget::Accessor(signature.clone())
+                        }
+                        _ => return None,
+                    }
+                }
+            };
+            match target {
+                CallTarget::Accessor(signature) => Some(signature),
+                CallTarget::Public(_) => None,
+            }
+        };
+        let names = super::inline_ir::inherited_names(ir, facts, class, edge.overridden_owner)?;
+        let record = |signature: KlibAccessorIdSignature, into: &mut Vec<CallTarget>| {
+            for name in &names {
+                let named = CallTarget::Accessor(match name {
+                    None => signature.clone(),
+                    Some(supertype) => signature.as_member_of(supertype)?,
+                });
+                if !into.contains(&named) {
+                    into.push(named);
+                }
+            }
+            Some(())
+        };
+        record(accessor(false)?, &mut getters)?;
+        if edge.overridden_setter_value.is_some() {
+            record(accessor(true)?, &mut setters)?;
+        }
+    }
+    Some((getters, setters))
+}
+
+impl PreparedClass {
+    /// The class's place among its file's declarations, shared with functions.
+    pub(super) fn source_order(&self) -> u32 {
+        self.source_order
+    }
 }
 
 /// Writes classes into one file's tables.

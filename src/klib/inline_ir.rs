@@ -18,7 +18,7 @@ use crate::ir::{FunId, IrExpr, IrFile, IrParameterRole, IrTypeOp};
 use crate::klib_lowering::ir_builtins::IrBuiltinOperators;
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::protobuf::Pb;
-use crate::types::{Ty, TypeVariance};
+use crate::types::{Ty, TypeName, TypeVariance};
 
 const MAIN_PREFIX: &str = "default/ir/";
 const PREPARED_PREFIX: &str = "default/ir_inlinable_functions/";
@@ -69,7 +69,9 @@ pub(super) struct PreparedFunction {
     pub(super) result: Ty,
     pub(super) type_parameters: Vec<PreparedTypeParameter>,
     /// The members of the direct supertypes this member overrides.
-    pub(super) overridden: Vec<KlibPublicIdSignature>,
+    pub(super) overridden: Vec<CallTarget>,
+    /// The declaration's place among its file's declarations, shared with classes.
+    pub(super) source_order: Option<u32>,
     pub(super) body: FunctionBody,
 }
 
@@ -319,21 +321,21 @@ pub(super) fn prepared_function(
             })
             .collect(),
         overridden,
+        source_order: ir.fn_source_order.get(&function).copied(),
         body,
     })
 }
 
 /// The members of `function`'s owner's direct supertypes that it overrides, by the identities
-/// their declarations publish. A top-level function overrides nothing. `None` when an overridden
-/// member has no identity this writer can name, or is reached only through an intermediate
-/// supertype: the list a member records must be exact.
+/// kotlinc records. A top-level function overrides nothing. `None` when an overridden member has
+/// no identity this writer can name: the list a member records must be exact.
 fn overridden_members(
     ir: &IrFile,
     declarations: &DeclarationSignatures,
     facts: &BodyFacts<'_>,
     function: FunId,
     dispatch_receiver: Option<Ty>,
-) -> Option<Vec<KlibPublicIdSignature>> {
+) -> Option<Vec<CallTarget>> {
     let edges = ir
         .function_overrides
         .values()
@@ -352,42 +354,84 @@ fn overridden_members(
     }
     let owner = dispatch_receiver?.obj_internal()?;
     let class = &ir.classes[ir.class_id_by_name(owner)? as usize];
-    edges
-        .iter()
-        .map(|edge| {
-            let direct = edge.overridden_owner == class.superclass
-                || class
-                    .interfaces
-                    .iter()
-                    .any(|interface| interface == edge.overridden_owner);
-            if !direct || edge.implementation_function.is_some() {
+    let mut overridden = Vec::new();
+    for edge in edges {
+        if edge.implementation_function.is_some() {
+            return None;
+        }
+        let signature = match edge.overridden {
+            crate::fir::ResolvedFunctionOverrideTarget::Module(callable) => {
+                let overridden = *ir.checked_callable_functions.get(&callable)?;
+                let (signature, Some(_)) = declarations.get(overridden)? else {
+                    return None;
+                };
+                signature.clone()
+            }
+            crate::fir::ResolvedFunctionOverrideTarget::External(callable) => match &facts
+                .callables
+                .callable(callable)?
+                .dependency_callable
+                .as_ref()?
+                .declaration
+            {
+                crate::libraries::KlibDeclarationSignature::Public(signature) => signature.clone(),
+                _ => return None,
+            },
+        };
+        for named in inherited_names(ir, facts, class, edge.overridden_owner)? {
+            let named = CallTarget::Public(match named {
+                None => signature.clone(),
+                Some(supertype) => signature.as_member_of(supertype)?,
+            });
+            if !overridden.contains(&named) {
+                overridden.push(named);
+            }
+        }
+    }
+    Some(overridden)
+}
+
+/// How each direct supertype of `class` that reaches `owner` names a member `owner` declares:
+/// `None` for `owner` itself, or the class signature of a supertype that only inherits it, under
+/// whose paths kotlinc names the inherited (fake-override) member with the declaration's member
+/// id. `None` overall when such a path crosses a class this writer cannot name.
+pub(super) fn inherited_names<'f>(
+    ir: &IrFile,
+    facts: &BodyFacts<'f>,
+    class: &crate::ir::IrClass,
+    owner: TypeName,
+) -> Option<Vec<Option<&'f KlibPublicIdSignature>>> {
+    let mut names = Vec::new();
+    for supertype in std::iter::once(class.superclass).chain(class.interfaces.iter()) {
+        if supertype == owner {
+            names.push(None);
+        } else if inherits(ir, supertype, owner)? {
+            let inheriting = ir.class_id_by_name(supertype)?;
+            if !ir.classes[inheriting as usize].type_params.is_empty() {
                 return None;
             }
-            match edge.overridden {
-                crate::fir::ResolvedFunctionOverrideTarget::Module(callable) => {
-                    let overridden = *ir.checked_callable_functions.get(&callable)?;
-                    let (signature, Some(_)) = declarations.get(overridden)? else {
-                        return None;
-                    };
-                    Some(signature.clone())
-                }
-                crate::fir::ResolvedFunctionOverrideTarget::External(callable) => {
-                    match &facts
-                        .callables
-                        .callable(callable)?
-                        .dependency_callable
-                        .as_ref()?
-                        .declaration
-                    {
-                        crate::libraries::KlibDeclarationSignature::Public(signature) => {
-                            Some(signature.clone())
-                        }
-                        _ => None,
-                    }
-                }
-            }
-        })
-        .collect()
+            names.push(Some(&facts.exports.classifier(inheriting)?.signature));
+        }
+    }
+    Some(names)
+}
+
+/// Whether the module class `class` inherits from `ancestor` through a proper supertype, or
+/// `None` when the path would cross a class of another module this writer cannot walk.
+fn inherits(ir: &IrFile, class: TypeName, ancestor: TypeName) -> Option<bool> {
+    let Some(id) = ir.class_id_by_name(class) else {
+        // A class of another module cannot inherit this module's classes, and `kotlin.Any` has
+        // no supertypes; any other dependency class is not walked here.
+        let unrelated = class.matches("kotlin/Any") || ir.class_id_by_name(ancestor).is_some();
+        return unrelated.then_some(false);
+    };
+    let declaration = &ir.classes[id as usize];
+    for supertype in std::iter::once(declaration.superclass).chain(declaration.interfaces.iter()) {
+        if supertype == ancestor || inherits(ir, supertype, ancestor)? {
+            return Some(true);
+        }
+    }
+    Some(false)
 }
 
 /// Common lowering preserves the checked conversion from literal `null` to its declared nullable
@@ -512,12 +556,23 @@ fn component_artifacts(
     component: Component,
 ) -> Vec<(String, Vec<u8>)> {
     let mut writer = FileWriter::default();
-    let mut declarations = Vec::with_capacity(functions.len() + classes.len());
-    for class in classes {
-        declarations.push(super::class_ir::ClassWriter::new(&mut writer).class(class));
-    }
-    for function in functions {
-        declarations.push(writer.function(function, component));
+    // Kotlin lists a file's classes and functions in source order.
+    let mut ordered = classes
+        .iter()
+        .map(|class| (Some(class.source_order()), Ok(class)))
+        .chain(
+            functions
+                .iter()
+                .map(|function| (function.source_order, Err(function))),
+        )
+        .collect::<Vec<_>>();
+    ordered.sort_by_key(|(order, _)| order.unwrap_or(u32::MAX));
+    let mut declarations = Vec::with_capacity(ordered.len());
+    for (_, declaration) in ordered {
+        declarations.push(match declaration {
+            Ok(class) => super::class_ir::ClassWriter::new(&mut writer).class(class),
+            Err(function) => writer.function(function, component),
+        });
     }
     let ids = declarations
         .iter()
@@ -743,7 +798,13 @@ impl FileWriter {
         let overridden = function
             .overridden
             .iter()
-            .map(|signature| symbol(self.tables.public_signature(signature), FUNCTION_SYMBOL))
+            .map(|target| {
+                let signature = match target {
+                    CallTarget::Public(signature) => self.tables.public_signature(signature),
+                    CallTarget::Accessor(signature) => self.tables.accessor_signature(signature),
+                };
+                symbol(signature, FUNCTION_SYMBOL)
+            })
             .collect::<Vec<_>>();
         function_wrapper.field_packed_varints(2, &overridden);
         if matches!(component, Component::Prepared) {
@@ -1086,6 +1147,7 @@ mod tests {
                     reified: true,
                 }],
                 overridden: Vec::new(),
+                source_order: None,
                 body: returning(|body| {
                     let argument = body.push(
                         Ty::nullable(Ty::obj("kotlin/Any")),
