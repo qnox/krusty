@@ -46,6 +46,7 @@ mod tests {
     fn class_with_fields(names: &[&str]) -> ClassNode {
         ClassNode {
             major: 52,
+            preview: false,
             access: 0,
             name: "Owner".to_string(),
             signature: None,
