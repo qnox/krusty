@@ -1876,3 +1876,69 @@ actual typealias Unsigned = UInt
     assert_eq!(reference, Vec::new(), "the reference compiler is silent");
     assert_eq!(krusty, reference);
 }
+
+/// kotlinc requires an implementation to state the `operator`, `infix` and `inline` its `expect`
+/// member states, and lets it state more: `Int.plus` is `operator` and `Int.shl` is `infix`, and
+/// each implements an `expect` member that is neither.
+#[test]
+fn an_actual_typealias_target_may_state_more_function_modifiers_than_the_expect_member() {
+    let common_source = "\
+expect class Number {
+    fun plus(other: Number): Number
+    fun shl(bitCount: Int): Number
+}
+";
+    let (reference, krusty) = both_split(
+        "alias_target_states_more_modifiers",
+        &[("Common.kt", common_source)],
+        &[("Platform.kt", "actual typealias Number = Int\n")],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}
+
+/// `UInt.compareTo` is an `inline operator`: an inline dependency member implements an `expect`
+/// operator that does not state `inline`.
+#[test]
+fn an_inline_dependency_member_implements_an_expect_operator() {
+    let common_source = "\
+expect class Signed
+expect value class Unsigned internal constructor(internal val data: Signed) {
+    operator fun compareTo(other: Unsigned): Int
+}
+";
+    let platform = "\
+actual typealias Signed = Int
+actual typealias Unsigned = UInt
+";
+    let (reference, krusty) = both_split(
+        "alias_inline_operator",
+        &[("Common.kt", common_source)],
+        &[("Platform.kt", platform)],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}
+
+/// An `expect` member that states `inline` is implemented by an inline dependency member
+/// (`UInt.plus`).
+#[test]
+fn an_inline_dependency_member_implements_an_expect_inline_member() {
+    let common_source = "\
+expect class Signed
+expect value class Unsigned internal constructor(internal val data: Signed) {
+    inline operator fun plus(other: Unsigned): Unsigned
+}
+";
+    let platform = "\
+actual typealias Signed = Int
+actual typealias Unsigned = UInt
+";
+    let (reference, krusty) = both_split(
+        "alias_inline_member",
+        &[("Common.kt", common_source)],
+        &[("Platform.kt", platform)],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}

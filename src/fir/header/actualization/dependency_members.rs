@@ -25,10 +25,11 @@ pub struct InheritedDependencyMember {
     pub(crate) result: Ty,
     /// A property declared `var`; always false for a function.
     pub(crate) mutable: bool,
-    /// A function declared `operator` or `infix`: kotlinc requires the implementation to state the
-    /// same, so the two sides must agree on both.
+    /// A function declared `operator`, `infix` or `inline`. kotlinc requires an implementation to
+    /// state each of these its `expect` member states, and lets it state more.
     pub(crate) operator: bool,
     pub(crate) infix: bool,
+    pub(crate) inline: bool,
 }
 
 /// The inherited members, of the one name `name`, that implement `expect`.
@@ -64,8 +65,7 @@ fn implements(
     if member.kind != expect.kind
         || !named_alike
         || carries_unprojected_modifier(expect)
-        || member.operator != expect.flags.has(DeclarationFlags::OPERATOR)
-        || member.infix != expect.flags.has(DeclarationFlags::INFIX)
+        || !states_expected_modifiers(expect, member)
     {
         return false;
     }
@@ -161,13 +161,25 @@ fn implements(
     }
 }
 
+/// Whether `member` states every function modifier `expect` states that kotlinc requires the
+/// implementation to state too (its `FunctionModifiersNotSubset` check). The rule is one-directional:
+/// `Int.plus` is `operator`, and implements an `expect fun plus` that is not.
+fn states_expected_modifiers(expect: &DeclarationStub, member: &InheritedDependencyMember) -> bool {
+    [
+        (DeclarationFlags::OPERATOR, member.operator),
+        (DeclarationFlags::INFIX, member.infix),
+        (DeclarationFlags::INLINE, member.inline),
+    ]
+    .into_iter()
+    .all(|(flag, stated)| stated || !expect.flags.has(flag))
+}
+
 /// A declaration modifier the inherited-member record does not carry. The record cannot prove the
 /// two sides agree on it, so an `expect` member that states one is never discharged by an
 /// inherited member, whatever else matches; the dependency side refuses the same forms.
 fn carries_unprojected_modifier(expect: &DeclarationStub) -> bool {
     [
         DeclarationFlags::SUSPEND,
-        DeclarationFlags::INLINE,
         DeclarationFlags::EXTERNAL,
         DeclarationFlags::TAILREC,
         DeclarationFlags::LATEINIT,

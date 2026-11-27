@@ -459,6 +459,7 @@ fn dependency_constructors(
             mutable: false,
             operator: false,
             infix: false,
+            inline: false,
         })
         .collect()
 }
@@ -539,6 +540,7 @@ fn inherited_members(
             mutable: false,
             operator: function.flags.operator,
             infix: function.flags.infix,
+            inline: function.flags.inline != crate::libraries::InlineKind::None,
         });
     let properties = callables
         .properties()
@@ -565,6 +567,7 @@ fn inherited_members(
             mutable: property.setter.is_some(),
             operator: false,
             infix: false,
+            inline: false,
         });
     functions.chain(properties).collect()
 }
