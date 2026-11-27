@@ -46,7 +46,9 @@ fn rejects_naming_the_declared_receiver(src: &str, context: &str) {
         ),
         "length",
         Some("Any"),
-    );
+    )
+    .printed(krusty::diag::DiagnosticNames::Hidden)
+    .into_owned();
     assert_eq!(
         diagnostics,
         [krusty_expected],

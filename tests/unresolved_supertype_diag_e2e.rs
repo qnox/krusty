@@ -1,7 +1,7 @@
 //! Unresolved supertypes report the first failed segment at the supertype's source span.
 
 use super::common;
-use krusty::diag::DiagSink;
+use krusty::diag::{DiagSink, DiagnosticNames};
 use krusty::frontend::analyze_source_set;
 use krusty::libraries::EmptySymbolSource;
 
@@ -64,7 +64,7 @@ fn qualified_supertype_uses_the_failed_segment_span() {
                 diagnostic.file,
                 diagnostic.span.lo,
                 diagnostic.span.hi,
-                diagnostic.msg,
+                diagnostic.message(DiagnosticNames::Hidden).into_owned(),
             )
         })
         .collect::<Vec<_>>();

@@ -20,16 +20,21 @@ struct BoundImport {
 
 /// Validate and bind one import from left to right. The successful product contains only selected
 /// identities; later checks cannot reopen the source spelling or provider lookup.
+/// One import diagnostic: where, kotlinc's name for it where krusty names it, and its message.
+type ImportReport = (Span, Option<crate::diag::DiagnosticName>, String);
+
 fn bind_import_path(
     import: &crate::ast::ImportPath,
     source: &dyn SymbolSource,
     resolver: &crate::symbol_resolver::SymbolResolver<'_>,
     access_package: TypeName,
-) -> Result<BoundImport, (Span, String)> {
+) -> Result<BoundImport, ImportReport> {
     use crate::libraries::Callables;
     use crate::symbol_source::SymbolNamespace;
-    let unresolved =
-        |segment: &str, span: Span| (span, format!("unresolved reference '{segment}'."));
+    let unresolved = |segment: &str, span: Span| {
+        let report = crate::diagnostic_wording::unresolved_import(segment);
+        (span, Some(report.name), report.message)
+    };
     let mut prefix = ResolvedQualifier::Package(TypeName::ROOT);
     let mut classifiers = Vec::new();
     let mut imports_classifier = false;
@@ -48,6 +53,7 @@ fn bind_import_path(
                             {
                                 return Err((
                                     *span,
+                                    None,
                                     format!(
                                         "cannot access '{}': it is package-private in file.",
                                         classifier_access_display_from_shape(classifier, &shape),
@@ -116,6 +122,7 @@ fn bind_import_path(
                 if instance_member {
                     return Err((
                         *span,
+                        None,
                         format!(
                             "cannot import '{segment}'. Functions and properties can only be imported from packages or objects."
                         ),
@@ -135,6 +142,7 @@ fn bind_import_path(
             {
                 return Err((
                     *span,
+                    None,
                     format!("cannot import on demand from object '{segment}'."),
                 ));
             }
@@ -157,7 +165,7 @@ fn reports(
     libraries: &dyn SemanticPlatform,
     resolver: &crate::symbol_resolver::SymbolResolver<'_>,
     access_package: TypeName,
-) -> (Vec<(Span, String)>, Vec<BoundImport>) {
+) -> (Vec<ImportReport>, Vec<BoundImport>) {
     let source =
         crate::symbol_source::CompositeSource::new(vec![module, libraries as &dyn SymbolSource]);
     let mut reports = Vec::new();
@@ -211,22 +219,23 @@ fn reports(
         };
         reports.push((
             *span,
+            None,
             format!("conflicting import: imported name '{visible}' is ambiguous."),
         ));
     }
     (reports, bound)
 }
 
-fn emit(diags: &mut DiagSink, file: u32, reports: Vec<(Span, String)>) {
+fn emit(diags: &mut DiagSink, file: u32, reports: Vec<ImportReport>) {
     diags.set_file(file);
-    for (span, message) in reports {
+    for (span, name, message) in reports {
         let identity = crate::diag::DiagnosticIdentity::ImportResolution { reference: span };
         let already_reported = diags
             .diags
             .iter()
             .any(|diagnostic| diagnostic.file == file && diagnostic.identity == Some(identity));
         if !already_reported {
-            diags.error_with_identity(span, identity, message);
+            diags.error_with(span, name, Some(identity), message);
         }
     }
 }

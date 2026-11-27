@@ -40,9 +40,9 @@ pub(super) fn rejected_name(
         && !receiver_tower::reject_unsafe_implicit_receiver_member(checker, scope, expression, name)
     {
         let _ = checker.demand_name.and_then(|demand| demand(name));
-        checker.diags.error(
+        checker.diags.report_error(
             checker.span(expression),
-            format!("unresolved reference '{name}'."),
+            crate::diagnostic_wording::unresolved_reference(name),
         );
     }
     Ty::Error

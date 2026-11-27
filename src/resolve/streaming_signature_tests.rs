@@ -4189,7 +4189,7 @@ fn invalid_undemanded_local_bound_keeps_its_exact_publication_diagnostic() {
             0,
             crate::diag::Span::new(start, start + 26),
             crate::diag::Severity::Error,
-            "unresolved reference 'DefinitelyAbsentLocalBound'.",
+            "Unresolved reference 'DefinitelyAbsentLocalBound'.",
         )]
     );
 }
@@ -5880,7 +5880,7 @@ fun broken() = run { undefinedCall(); 1 }
             .iter()
             .map(|diagnostic| diagnostic.msg.as_str())
             .collect::<Vec<_>>(),
-        vec!["unresolved reference 'undefinedCall'."]
+        vec!["Unresolved reference 'undefinedCall'."]
     );
     let ret = analysis
         .symbols
@@ -6014,7 +6014,7 @@ fun destructured(line: String) = run {
                 None,
                 crate::diag::Severity::Error,
                 crate::diag::DiagnosticKind::Compiler,
-                "unresolved reference 'undefinedCall'.".to_string(),
+                "Unresolved reference 'undefinedCall'.".to_string(),
                 None,
             ),
             (
@@ -6023,7 +6023,7 @@ fun destructured(line: String) = run {
                 None,
                 crate::diag::Severity::Error,
                 crate::diag::DiagnosticKind::Compiler,
-                "unresolved reference 'undefinedMember'.".to_string(),
+                "Unresolved reference 'undefinedMember'.".to_string(),
                 None,
             ),
             (

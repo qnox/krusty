@@ -135,6 +135,21 @@ impl Diagnostic {
     }
 }
 
+/// One kotlinc factory's report: its name and its rendered `renderMessage()`. A wording function
+/// that renders a factory's message returns it named, so its report cannot lose the name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedMessage {
+    pub name: DiagnosticName,
+    pub message: String,
+}
+
+impl NamedMessage {
+    /// The text kotlinc prints for this message ([`render_message`]).
+    pub fn printed(&self, names: DiagnosticNames) -> Cow<'_, str> {
+        render_message(Some(self.name), &self.message, names)
+    }
+}
+
 /// A diagnostic about the compilation's configuration rather than a source position. It is reported
 /// as a warning; `-Xwarning-level` may promote it to an error.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -291,6 +306,11 @@ impl DiagSink {
         });
     }
 
+    /// Report a factory's error under its name.
+    pub fn report_error(&mut self, span: Span, report: NamedMessage) {
+        self.error_named(span, report.name, report.message);
+    }
+
     /// Report an error under its kotlinc name. `msg` is kotlinc's `renderMessage()`.
     pub fn error_named(&mut self, span: Span, name: DiagnosticName, msg: impl Into<String>) {
         if !self.accepts(span) {
@@ -366,13 +386,25 @@ impl DiagSink {
         identity: DiagnosticIdentity,
         msg: impl Into<String>,
     ) {
+        self.error_with(span, None, Some(identity), msg);
+    }
+
+    /// Report an error under its kotlinc name and with the identity that deduplicates it, each
+    /// where the report has one.
+    pub fn error_with(
+        &mut self,
+        span: Span,
+        name: Option<DiagnosticName>,
+        identity: Option<DiagnosticIdentity>,
+        msg: impl Into<String>,
+    ) {
         if !self.accepts(span) {
             return;
         }
         let msg = msg.into();
         crate::trace_compiler!(
             "diagnostic",
-            "file={} span={span:?} kind={:?} identity={identity:?} message={msg}",
+            "file={} span={span:?} kind={:?} name={name:?} identity={identity:?} message={msg}",
             self.current_file,
             DiagnosticKind::Compiler,
         );
@@ -380,10 +412,10 @@ impl DiagSink {
             span,
             editor_span: None,
             severity: Severity::Error,
-            name: None,
+            name,
             kind: DiagnosticKind::Compiler,
             msg,
-            identity: Some(identity),
+            identity,
             file: self.current_file,
         });
     }

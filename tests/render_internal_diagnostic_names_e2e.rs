@@ -285,6 +285,47 @@ fun f5(b: Boolean) = ra(if (b) C12() else D12())
             ],
             errors: 10,
         },
+        // Every position krusty reports an unresolved name from: an import, an annotation, a
+        // supertype, a declared type, a read, a call, a member read, call and write, a callable
+        // reference and an operator convention.
+        Case {
+            file: "Unresolved.kt",
+            source: "\
+import missing.Thing
+
+@Absent
+class C : Base()
+
+class Box { var v = 1 }
+
+fun f(b: Box, s: String, n: Number?): Missing {
+    val a = unknown
+    nothing()
+    b.absent
+    b.absent()
+    b.gone = 2
+    val r = ::lost
+    var m = s
+    m++
+    return a
+}
+",
+            arguments: &[],
+            diagnostics: &[
+                "Unresolved.kt:1:8: error: [UNRESOLVED_IMPORT] Unresolved reference 'missing'.",
+                "Unresolved.kt:3:2: error: [UNRESOLVED_REFERENCE] Unresolved reference 'Absent'.",
+                "Unresolved.kt:4:11: error: [UNRESOLVED_REFERENCE] Unresolved reference 'Base'.",
+                "Unresolved.kt:8:39: error: [UNRESOLVED_REFERENCE] Unresolved reference 'Missing'.",
+                "Unresolved.kt:9:13: error: [UNRESOLVED_REFERENCE] Unresolved reference 'unknown'.",
+                "Unresolved.kt:10:5: error: [UNRESOLVED_REFERENCE] Unresolved reference 'nothing'.",
+                "Unresolved.kt:11:7: error: [UNRESOLVED_REFERENCE] Unresolved reference 'absent' on receiver of type 'Box'.",
+                "Unresolved.kt:12:7: error: [UNRESOLVED_REFERENCE] Unresolved reference 'absent' on receiver of type 'Box'.",
+                "Unresolved.kt:13:7: error: [UNRESOLVED_REFERENCE] Unresolved reference 'gone' on receiver of type 'Box'.",
+                "Unresolved.kt:14:15: error: [UNRESOLVED_REFERENCE] Unresolved reference 'lost'.",
+                "Unresolved.kt:16:6: error: [UNRESOLVED_REFERENCE] Unresolved reference 'inc' for operator '++' on receiver of type 'String'.",
+            ],
+            errors: 11,
+        },
         Case {
             file: "Forbidden.kt",
             source: "\
