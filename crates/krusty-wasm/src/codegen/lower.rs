@@ -25,6 +25,7 @@ mod array_storage;
 mod arrays;
 mod boxing;
 mod callable_reference_identity;
+mod char_array_text;
 mod class_literals;
 mod dependency_exports;
 mod enums;
@@ -68,6 +69,10 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCompare
         || operation == krusty::backend::BackendCompilerIntrinsic::StringPlus
         || operation == krusty::backend::BackendCompilerIntrinsic::StringSubSequence
+        || matches!(
+            operation,
+            krusty::backend::BackendCompilerIntrinsic::CharArrayToString(_)
+        )
         || operation
             == krusty::backend::BackendCompilerIntrinsic::StartCoroutineUninterceptedOrReturn
         || matches!(
@@ -1515,6 +1520,24 @@ impl<'a> Body<'a> {
                 self.string_of(receiver)?;
                 self.string_of(other)?;
                 self.code.call(self.runtime.string_concat);
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target, defaults, ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && let Some(krusty::backend::BackendCompilerIntrinsic::CharArrayToString(range)) =
+                    self.callables
+                        .callable(*target)
+                        .and_then(|fact| fact.compiler_operation()) =>
+            {
+                // The extension form carries its receiver as the dispatch receiver or as the
+                // first argument; either way it is the char array, first.
+                let operands: Vec<u32> = dispatch_receiver.into_iter().chain(args).collect();
+                self.char_array_to_string(range, &operands)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,

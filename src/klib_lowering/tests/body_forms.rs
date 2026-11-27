@@ -1038,6 +1038,46 @@ fn klib_primitive_upcast_retains_the_common_representation_coercion() {
     );
 }
 
+/// The cast the declaring compilation proved of a primitive to a supertype classifier that applies
+/// other type arguments than the primitive's hierarchy does (`Int` as `Comparable<Any?>`, which the
+/// stdlib's `CodePoint.compareTo` states) is the coercion that boxes it, as the upcast to the
+/// classifier is.
+#[test]
+fn an_implicit_cast_of_a_primitive_to_another_application_of_its_supertype_boxes_it() {
+    struct IntIsComparable;
+    impl crate::assignable::TypeOracle for IntIsComparable {
+        fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
+            if ty == Ty::Int {
+                vec![Ty::obj_args("kotlin/Comparable", &[Ty::Int])]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+    let demo = demo(&[("f", &[T::Int], T::ComparableNullableAny)], |_, body| {
+        let value = body.param(0);
+        let cast = body.type_operator(
+            KlibIrTypeOperator::ImplicitCast,
+            value,
+            T::ComparableNullableAny,
+        );
+        Some(vec![body.ret(cast)])
+    });
+    let classes = IntIsComparable;
+    let facts = KlibCalleeFacts::default().with_type_oracle(&classes);
+    let mut unit = DependencyBodyUnit::default();
+    let function = unit
+        .lower_function(demo.callable("f"), &demo.bodies, &facts)
+        .unwrap();
+    validated(unit.ir());
+    assert_eq!(
+        lowered_body(&unit, function),
+        "scope {scope {return@Some(0) ImplicitCoercion<Obj(TypeName(\"kotlin/Comparable\"), \
+         [Nullable(Obj(TypeName(\"kotlin/Any\"), []))])>(v0!: Int): Obj(TypeName(\"kotlin/Comparable\"), \
+         [Nullable(Obj(TypeName(\"kotlin/Any\"), []))]): Nothing}: Nothing}"
+    );
+}
+
 #[test]
 fn an_implicit_cast_to_the_value_type_adds_nothing() {
     let demo = demo(&[("f", &[T::Int], T::Int)], |_, body| {

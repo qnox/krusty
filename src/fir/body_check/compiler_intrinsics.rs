@@ -46,6 +46,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::StringPlus
         | CompilerIntrinsic::StringCompare
         | CompilerIntrinsic::StringSubSequence
+        | CompilerIntrinsic::CharArrayToString(_)
         | CompilerIntrinsic::NullableAnyToString
         | CompilerIntrinsic::NumericConversion
         | CompilerIntrinsic::PrimitiveUnary(_)
