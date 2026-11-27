@@ -752,9 +752,10 @@ fn check_function_invocation_support(
     id: ClassId,
 ) -> Result<(), Unsupported> {
     let class = &ir.classes[id as usize];
-    // An interface has no instances to invoke: a class implementing it is the one that must
-    // carry the checked invocation, and it is checked as that class's own supertype.
-    if class.is_interface {
+    // An interface or an abstract class has no instances to invoke: the concrete class below it
+    // is the one that must carry the checked invocation, and it is checked as that class's own
+    // supertype.
+    if class.is_interface || class.is_abstract {
         return Ok(());
     }
     for supertype in &class.supertypes {
