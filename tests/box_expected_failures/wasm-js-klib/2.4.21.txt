@@ -341,7 +341,6 @@ coroutines/intrinsicSemantics/releaseIntercepted.kt
 coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturnInterception.kt
 coroutines/intrinsicSemantics/suspendCoroutineUninterceptedOrReturn.kt
 coroutines/kt21080.kt
-coroutines/kt24135.kt
 coroutines/kt28844.kt
 coroutines/kt31784.kt
 coroutines/kt42028.kt
@@ -352,7 +351,6 @@ coroutines/kt49168.kt
 coroutines/kt51530.kt
 coroutines/kt51718.kt
 coroutines/localFunctions/named/defaultArgument.kt
-coroutines/localFunctions/named/stateMachine.kt
 coroutines/longRangeInSuspendCall.kt
 coroutines/multiModule/inheritFromAnotherModule.kt
 coroutines/multiModule/inlineMultiModuleOverride.kt
