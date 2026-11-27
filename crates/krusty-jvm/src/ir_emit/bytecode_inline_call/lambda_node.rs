@@ -281,9 +281,6 @@ impl Emitter<'_> {
         // A suspension in the lambda needs the splice's state-machine markers until the coroutine
         // transformer runs on inlined bytecode; a suspend lambda's `Continuation` parameter is the
         // one its arity does not count.
-        if self.suspends_within(lambda.inline_body) || lambda.parameter_types.len() != arity {
-            return Ok(Some(SpliceReason::SuspendingLambda));
-        }
         self.ir
             .lambda_exit(lambda.inline_body)
             .ok_or("an inline lambda reached emission without its recorded non-local exit")?;
@@ -742,7 +739,10 @@ impl Emitter<'_> {
         self.crossinline_lambda_body |= crossinline;
         self.export_private_calls |= crossinline;
         let result = self.in_lambda_body(LambdaBody::Method, |emitter| {
-            emitter.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch)
+            // A suspend lambda's `Continuation` is the method's last parameter and no value of
+            // its checked body: the body's own locals take the value indices after the others.
+            let values = parameter_slots.len() - usize::from(suspend);
+            emitter.emit_fn_body_inline(inline_body, &parameter_slots[..values], &mut scratch)
         });
         self.crossinline_lambda_body = caller_crossinline;
         self.leave_inline_lambda_body(caller_in_lambda);

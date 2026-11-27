@@ -332,6 +332,10 @@ impl Emitter<'_> {
                 self.unbox_on_resume(value_class, carrier, code);
             }
             code.inline_call_marker(false);
+        } else if self.transformed_suspensions.kept_for_inlining {
+            // The invoke of an inline lambda parameter in a body kept for inlining: the lambda
+            // replaces it, and kotlinc marks where its result is on the stack.
+            self.written_suspend_marker(SuspendMarker::AfterInlineSuspend, code);
         }
         let block = self.is_transformed_block(e);
         if block {

@@ -117,30 +117,13 @@ impl BodyLowering<'_> {
         if header.flags.has(DeclarationFlags::SUSPEND) {
             return Some(ExpansionReason::SuspendCallee);
         }
-        let suspend_function =
-            |ty: Ty| matches!(ty.non_null().kind(), TyKind::Fun(signature) if signature.suspend);
         let Some(signature) = self.index.signature(declaration) else {
             return Some(ExpansionReason::NoTemplate);
         };
+        let _ = signature;
         let Some(function) = function else {
             return Some(ExpansionReason::NoTemplate);
         };
-        let modifiers = self.ir.declared_inline_modifiers(function);
-        if signature
-            .parameters
-            .iter()
-            .enumerate()
-            .any(|(index, parameter)| {
-                suspend_function(parameter.get())
-                    && modifiers.get(index) != Some(&InlineParameterModifier::Noinline)
-            })
-            || callable
-                .shape
-                .extension_receiver
-                .is_some_and(|receiver| suspend_function(receiver.get()))
-        {
-            return Some(ExpansionReason::SuspendFunctionParameter);
-        }
         let Some(body) = self
             .ir
             .functions
