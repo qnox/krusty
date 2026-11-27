@@ -29,7 +29,7 @@ use crate::ir::FunId;
 use crate::types::{SemanticCallRole, Ty, TypeName};
 
 use super::members::any_slot;
-use super::{AnyMember, Representation, Unsupported, FUNCTION_SLOT};
+use super::{function_slot, AnyMember, Representation, Unsupported};
 
 /// A member's identity in a planned table, the same in every file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -411,8 +411,11 @@ impl Planner<'_> {
             }
             None => None,
         };
-        // One fixed function slot holds one `invoke`: a class overriding the `invoke` of two
-        // function types, named directly or through interfaces, declines as `class_vtable` does.
+        // A function slot holds one `invoke`. A target reserving one number declines a class
+        // overriding the `invoke` of two function types, named directly or through interfaces, as
+        // `class_vtable` does; one reserving a number per physical operand count declines only
+        // where two of them carry the same count.
+        let reserved = self.representation.function_slots();
         let function_types = class
             .function_overrides
             .iter()
@@ -420,10 +423,29 @@ impl Planner<'_> {
                 edge.overridden_role == Some(SemanticCallRole::KotlinFunctionInvoke)
                     && matches!(edge.overridden, ResolvedFunctionOverrideTarget::External(_))
             })
-            .map(|edge| edge.overridden_owner)
+            .map(|edge| (edge.overridden_owner, edge.implementation))
             .collect::<HashSet<_>>();
-        if class.function_type_arities.len() > 1
-            || function_types.len() > 1
+        let function_slots = function_types
+            .iter()
+            .map(|&(_, implementation)| {
+                class.members.iter().find_map(|member| match member {
+                    ModuleMember::Function {
+                        callable,
+                        parameters,
+                        suspend,
+                        ..
+                    } if *callable == implementation => {
+                        Some(parameters.len() + usize::from(*suspend))
+                    }
+                    _ => None,
+                })
+            })
+            .map(|operands| operands.and_then(|operands| function_slot(reserved, operands)))
+            .collect::<Vec<_>>();
+        let colliding = function_types.len() > 1
+            && function_slots.iter().collect::<HashSet<_>>().len() != function_slots.len();
+        if (reserved <= 1 && (class.function_type_arities.len() > 1 || function_types.len() > 1))
+            || colliding
             || class.function_type_arities.iter().any(|&arity| arity > 22)
         {
             return Err(format!(
@@ -441,7 +463,7 @@ impl Planner<'_> {
                 AnyMember::ALL
                     .map(PlannedSlot::Any)
                     .into_iter()
-                    .chain([PlannedSlot::Reserved])
+                    .chain((0..self.representation.function_slots()).map(|_| PlannedSlot::Reserved))
                     .collect(),
                 HashMap::default(),
             ),
@@ -556,7 +578,11 @@ impl Planner<'_> {
             .iter()
             .all(|parameter| self.representation.is_reference(*parameter))
             && self.representation.is_reference(carriers.1);
-        let fixed = any_replaces.or((invoke && carries_references).then_some(FUNCTION_SLOT));
+        let fixed = any_replaces.or(if invoke && carries_references {
+            function_slot(self.representation.function_slots(), carriers.0.len())
+        } else {
+            None
+        });
         let function_bridge = (fixed.is_none() && invoke).then_some(carriers.0.len());
         let mut class_replaces = None;
         let mut bridged: Vec<(_, _, Box<[Ty]>, Ty)> = Vec::new();
@@ -600,7 +626,9 @@ impl Planner<'_> {
             return Err("a dependency member overridden by no declaration of this module".into());
         };
         if let Some(arity) = function_bridge {
-            entries[FUNCTION_SLOT as usize] = PlannedSlot::FunctionBridge {
+            let function_number = function_slot(self.representation.function_slots(), arity)
+                .ok_or("a function type with more operands than the table has function slots")?;
+            entries[function_number as usize] = PlannedSlot::FunctionBridge {
                 arity,
                 target_slot: slot,
                 target,

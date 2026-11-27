@@ -75,6 +75,26 @@ pub trait Representation {
     /// Whether a class may extend `superclass` although no class of the file declares it: a base
     /// whose storage and `kotlin.Any` members the target's runtime owns.
     fn owns_base(&self, superclass: TypeName) -> bool;
+    /// How many consecutive tables slots, from [`FUNCTION_SLOT`], a function value's `invoke`
+    /// can stand in: one per physical operand count, so a class implementing several function
+    /// types holds each one's body at the number its callers read. One means every function type
+    /// shares [`FUNCTION_SLOT`], and a class implementing two of them is declined.
+    fn function_slots(&self) -> u32 {
+        1
+    }
+}
+
+/// The table number a function value's `invoke` takes when it has `operands` physical operands
+/// (a `suspend` one's continuation included), in a target whose tables reserve `reserved` function
+/// slots.
+pub fn function_slot(reserved: u32, operands: usize) -> Option<u32> {
+    // A function type wider than the numbers reserved shares the first: it is the one a class
+    // naming it can implement, because every other function type of the class is declined beside
+    // it.
+    match u32::try_from(operands) {
+        Ok(operands) if operands < reserved => Some(FUNCTION_SLOT + operands),
+        _ => Some(FUNCTION_SLOT),
+    }
 }
 
 /// Which of `kotlin.Any`'s three members a slot answers.
@@ -300,8 +320,12 @@ pub fn build_numbered(
             continue;
         }
         let table = &mut tables[id];
-        table.vtable.truncate(FUNCTION_SLOT as usize + 1);
-        table.slots.retain(|_, slot| *slot <= FUNCTION_SLOT);
+        table
+            .vtable
+            .truncate((FUNCTION_SLOT + representation.function_slots()) as usize);
+        table
+            .slots
+            .retain(|_, slot| *slot < FUNCTION_SLOT + representation.function_slots());
         table.interface_bridges.clear();
     }
     let members = tables

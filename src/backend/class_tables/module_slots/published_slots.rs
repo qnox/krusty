@@ -74,7 +74,7 @@ fn table(
     declarations: &CheckedBackendCallables,
     physical: &PublishedClassSlots,
 ) -> Result<PlannedTable, Unsupported> {
-    if physical.count < FUNCTION_SLOT + 1 {
+    if physical.count < super::super::FUNCTION_SLOT + representation.function_slots() {
         return Err("a published class table missing its common prefix".into());
     }
     let mut entries = (0..physical.count)
@@ -191,6 +191,7 @@ fn table(
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::FUNCTION_SLOT;
     use super::*;
 
     struct Exact;

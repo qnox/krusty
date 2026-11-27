@@ -315,3 +315,20 @@ fn a_value_classs_member_implementing_a_dependency_interface_keeps_its_slot() {
     assert_eq!(vtable[4], Slot::Function(implemented));
     assert!(!vtable.contains(&Slot::Function(own)));
 }
+
+#[test]
+fn function_slots_follow_the_operand_count_where_the_target_reserves_them() {
+    // One reserved number: every function type shares `FUNCTION_SLOT`.
+    for operands in [0, 1, 5, 40] {
+        assert_eq!(function_slot(1, operands), Some(FUNCTION_SLOT));
+    }
+    // A number per operand count, so a class implementing `() -> Unit` and `(Int) -> Unit` holds
+    // each body where its own callers read it.
+    assert_eq!(function_slot(24, 0), Some(FUNCTION_SLOT));
+    assert_eq!(function_slot(24, 1), Some(FUNCTION_SLOT + 1));
+    assert_eq!(function_slot(24, 23), Some(FUNCTION_SLOT + 23));
+    // Wider than the numbers reserved: the first, which the one function type such a class names
+    // keeps to itself.
+    assert_eq!(function_slot(24, 24), Some(FUNCTION_SLOT));
+    assert_eq!(function_slot(24, 31), Some(FUNCTION_SLOT));
+}

@@ -426,8 +426,6 @@ coroutines/simpleWithDefaultValue.kt
 coroutines/stackUnwinding/rethrowInFinallyWithSuspension.kt
 coroutines/stopAfter.kt
 coroutines/suspendConversion.kt
-coroutines/suspendConversion/intersectionTypeToSubtypeConversion.kt
-coroutines/suspendConversion/subtypeOfFunctionalTypeToSuspendConversion.kt
 coroutines/suspendConversion/suspendConversionBetweenFunInterfaces.kt
 coroutines/suspendCoroutineFromStateMachine.kt
 coroutines/suspendFunctionAsCoroutine/handleException.kt
@@ -555,7 +553,6 @@ funInterface/basicFunInterfaceConversionClash.kt
 funInterface/funInterfaceWithSuspendMethod.kt
 funInterface/implIsNotFunction.kt
 funInterface/inlinedSamWrapper.kt
-funInterface/intersectionTypeToFunInterfaceConversion.kt
 funInterface/kt49384.kt
 funInterface/kt49384_getSame.kt
 funInterface/kt77685-sam.kt

@@ -42,7 +42,7 @@ use krusty::types::{Ty, TypeName};
 use super::laid_out_classes::{LaidOutClass, LaidOutClasses};
 
 pub(super) use krusty::backend::class_tables::{
-    function_key, local_property_target, AnyMember, SlotKey, FUNCTION_SLOT,
+    function_key, local_property_target, AnyMember, SlotKey,
 };
 
 /// The construct a lowering declined, phrased for a diagnostic.
@@ -460,7 +460,16 @@ impl Representation for NativeRepresentation<'_> {
     fn owns_base(&self, superclass: TypeName) -> bool {
         superclass == krusty::types::wk::kotlin_enum() || external_base(superclass).is_some()
     }
+
+    fn function_slots(&self) -> u32 {
+        FUNCTION_SLOTS
+    }
 }
+
+/// A function value's `invoke` holds the table number its physical operand count names, from zero
+/// operands to a function type of 22 parameters with its continuation: [`FUNCTION_SLOT`] plus the
+/// count. The runtime's `KT_SLOT_INVOKE` is the first.
+pub(super) const FUNCTION_SLOTS: u32 = 24;
 
 #[derive(Clone, Debug)]
 pub(super) struct ClassLayout {
@@ -786,6 +795,9 @@ mod tests {
         add_method, class, field, function, record_override, record_semantic_override,
         stored_property,
     };
+    use krusty::backend::class_tables::FUNCTION_SLOT;
+    /// The first table number a method of a class takes: after `kotlin.Any`'s and the function slots.
+    const FIRST: u32 = FUNCTION_SLOT + FUNCTION_SLOTS;
     use krusty::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
     use krusty::ir::IrProperty;
 
@@ -822,13 +834,16 @@ mod tests {
         let layout = model.layout(point);
         assert_eq!(
             layout.vtable,
-            vec![
+            [
                 Slot::Runtime("kt_any_equals"),
                 Slot::Runtime("kt_any_hash_code"),
                 Slot::Runtime("kt_any_to_string"),
-                // The function slot, reserved in every table so no member ever stands there.
-                Slot::Abstract,
             ]
+            .into_iter()
+            // The function slots, one per operand count, reserved in every table so no member
+            // ever stands there.
+            .chain((0..FUNCTION_SLOTS).map(|_| Slot::Abstract))
+            .collect::<Vec<_>>()
         );
         assert_eq!(layout.instance_size, HEADER_SIZE);
     }
@@ -845,32 +860,35 @@ mod tests {
         record_override(&mut ir, b, b_name, a_name);
 
         let model = build(&ir).expect("layout");
-        assert_eq!(model.slot(a, &SlotKey::Function(a_name)), Some(4));
-        assert_eq!(model.slot(a, &SlotKey::Function(a_other)), Some(5));
-        assert_eq!(model.layout(a).vtable[4], Slot::Function(a_name));
+        assert_eq!(model.slot(a, &SlotKey::Function(a_name)), Some(FIRST));
+        assert_eq!(model.slot(a, &SlotKey::Function(a_other)), Some(FIRST + 1));
+        assert_eq!(
+            model.layout(a).vtable[FIRST as usize],
+            Slot::Function(a_name)
+        );
 
         let b_layout = model.layout(b);
         assert_eq!(
-            b_layout.vtable[4],
+            b_layout.vtable[FIRST as usize],
             Slot::Function(b_name),
             "the override takes the slot its base assigned"
         );
         assert_eq!(
-            b_layout.vtable[5],
+            b_layout.vtable[FIRST as usize + 1],
             Slot::Function(a_other),
             "inherited unchanged"
         );
         assert_eq!(
-            b_layout.vtable[6],
+            b_layout.vtable[FIRST as usize + 2],
             Slot::Function(b_extra),
             "new members append"
         );
         assert_eq!(
             model.slot(b, &SlotKey::Function(a_name)),
-            Some(4),
+            Some(FIRST),
             "a call naming the base method finds the same slot on the subclass"
         );
-        assert_eq!(model.slot(b, &SlotKey::Function(b_name)), Some(4));
+        assert_eq!(model.slot(b, &SlotKey::Function(b_name)), Some(FIRST));
     }
 
     #[test]
@@ -885,16 +903,22 @@ mod tests {
         record_override(&mut ir, c, c_f, a_f);
 
         let model = build(&ir).expect("layout");
-        assert_eq!(model.layout(a).vtable[4], Slot::Abstract);
-        assert_eq!(model.layout(b).vtable[4], Slot::Abstract);
-        assert_eq!(model.layout(b).vtable[5], Slot::Function(b_g));
+        assert_eq!(model.layout(a).vtable[FIRST as usize], Slot::Abstract);
+        assert_eq!(model.layout(b).vtable[FIRST as usize], Slot::Abstract);
         assert_eq!(
-            model.layout(c).vtable[4],
+            model.layout(b).vtable[FIRST as usize + 1],
+            Slot::Function(b_g)
+        );
+        assert_eq!(
+            model.layout(c).vtable[FIRST as usize],
             Slot::Function(c_f),
             "an override two levels down replaces the slot the root declared"
         );
-        assert_eq!(model.layout(c).vtable[5], Slot::Function(b_g));
-        assert_eq!(model.layout(c).vtable.len(), 6);
+        assert_eq!(
+            model.layout(c).vtable[FIRST as usize + 1],
+            Slot::Function(b_g)
+        );
+        assert_eq!(model.layout(c).vtable.len(), FIRST as usize + 2);
         assert_eq!(model.order, vec![a, b, c]);
     }
 
@@ -921,7 +945,10 @@ mod tests {
         );
         let model = build(&ir).expect("layout");
         assert_eq!(model.layout(p).vtable[2], Slot::Function(display));
-        assert_eq!(model.layout(p).vtable[4], Slot::Function(overload));
+        assert_eq!(
+            model.layout(p).vtable[FIRST as usize],
+            Slot::Function(overload)
+        );
     }
 
     #[test]
@@ -1103,7 +1130,7 @@ mod tests {
         );
         let model = build(&ir).expect("layout");
         assert_eq!(
-            model.layout(a).vtable[4],
+            model.layout(a).vtable[FIRST as usize],
             Slot::FieldGetter { class: a, field: 0 }
         );
         assert_eq!(
@@ -1111,7 +1138,7 @@ mod tests {
                 a,
                 &SlotKey::Getter(ResolvedPropertyOverrideTarget::Module(property))
             ),
-            Some(4)
+            Some(FIRST)
         );
     }
 
