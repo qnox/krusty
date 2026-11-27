@@ -55,6 +55,7 @@ impl BodyLowering<'_> {
             .get(&object.declaration)
             .copied()
             .ok_or(FirLoweringFailure::MissingLocalClass(object.declaration))?;
+        self.settle_class_name(object.declaration, class);
         self.ir.classes[class as usize]
             .ctor_args
             .extend(delegates.iter().map(|(_, ty)| IrCtorArg {

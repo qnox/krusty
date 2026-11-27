@@ -10,7 +10,7 @@ use crate::resolve::implicit_rungs::ImplicitRung;
 use crate::resolve::selected_result_aliases::SelectionInputs;
 use crate::resolve::selected_result_publication::whole_array_arguments;
 use crate::resolve::selected_result_publication::{
-    CompactSelectedResultPublication, SelectedSignature,
+    CompactSelectedResultPublication, SelectedMember, SelectedSignature,
 };
 
 mod cast_narrowing;
@@ -3588,7 +3588,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     result,
                     Some(member),
                     None,
-                    None,
                     argument_types,
                     postponed_bindings,
                     None,
@@ -3606,7 +3605,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             Some((
                 result,
                 None,
-                selected.source_key,
                 selected.stable_declaration,
                 argument_types,
                 postponed_bindings,
@@ -3618,7 +3616,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             Ok((
                 result,
                 member,
-                source,
                 source_declaration,
                 argument_types,
                 postponed_bindings,
@@ -3667,7 +3664,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 (
                     result,
                     member,
-                    source,
                     source_declaration,
                     argument_types,
                     publication,
@@ -3839,19 +3835,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     );
             }
         };
-        let (result, member, source, source_declaration, argument_types, publication) = selected;
+        let selected = SelectedMember::new(receiver, selected);
         self.finish_selected_member_publication(
             scope,
             origin,
-            receiver,
             &type_arguments,
             expected,
-            result,
-            member,
-            source,
-            source_declaration,
-            argument_types,
-            publication,
+            selected,
             demand,
         )
     }

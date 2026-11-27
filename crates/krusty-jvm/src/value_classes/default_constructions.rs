@@ -8,6 +8,7 @@
 //! declared parameters with the same materializer.
 
 use super::{desc, erase, Under};
+use crate::default_call_operands::{DefaultCallOperand, DefaultCallOperands};
 use krusty::ir::{Callee, ExprId, IrExpr, IrFile};
 use krusty::libraries::InlineKind;
 use krusty::types::{Ty, TypeName};
@@ -23,7 +24,13 @@ pub(super) struct DefaultConstruction {
 }
 
 impl DefaultConstruction {
-    pub(super) fn realize(self, ir: &mut IrFile, construction: ExprId, under: &Under) -> IrExpr {
+    pub(super) fn realize(
+        self,
+        ir: &mut IrFile,
+        construction: ExprId,
+        under: &Under,
+        default_call_operands: &mut DefaultCallOperands,
+    ) -> IrExpr {
         let Self {
             owner,
             underlying,
@@ -42,7 +49,14 @@ impl DefaultConstruction {
                 dispatch_receiver: None,
                 args,
             },
-            None => sibling_call(ir, construction, owner, underlying, args, &omitted, under),
+            None => {
+                let (call, plan) =
+                    sibling_call(ir, construction, owner, underlying, args, &omitted, under);
+                // Emission marks the construction's line where its synthesized operands begin, as
+                // it does for every other realized default call.
+                default_call_operands.record(construction, plan);
+                call
+            }
         }
     }
 }
@@ -61,13 +75,13 @@ fn sibling_call(
     args: Vec<ExprId>,
     omitted: &[u32],
     under: &Under,
-) -> IrExpr {
+) -> (IrExpr, Vec<DefaultCallOperand>) {
     let declared = ir
         .construction_declared_params(construction)
         .expect("a checked construction records its declared parameters")
         .to_vec();
     let physical = declared.iter().map(|p| erase(p, under)).collect();
-    let (mut parameters, args, _) =
+    let (mut parameters, args, plan) =
         crate::module_calls::realize_default_arguments(ir, physical, args, omitted, None, &[])
             .expect("a checked construction's omissions fit its constructor's parameters");
     *parameters
@@ -86,7 +100,7 @@ fn sibling_call(
         .collect();
     ir.call_declared_params.insert(construction, boundary);
     let parameters: String = parameters.iter().map(desc).collect();
-    IrExpr::Call {
+    let call = IrExpr::Call {
         callee: Box::new(Callee::Static {
             owner,
             name: "constructor-impl$default".to_string(),
@@ -95,5 +109,6 @@ fn sibling_call(
         }),
         dispatch_receiver: None,
         args,
-    }
+    };
+    (call, plan)
 }

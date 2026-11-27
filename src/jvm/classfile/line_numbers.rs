@@ -213,8 +213,18 @@ impl CodeBuilder {
         if self.dead || self.bytes.len() > u16::MAX as usize {
             return false;
         }
-        self.line_marks.push((self.bytes.len() as u16, line));
+        let pc = self.bytes.len() as u16;
+        self.line_marks.push((pc, line));
+        self.line_binds.entry(pc).or_insert(self.next_bind);
         true
+    }
+
+    /// Whether label `index`, bound at `pc`, was bound after that offset's first line entry, so
+    /// that it stands after the line number rather than in the run of labels ahead of it.
+    pub(crate) fn bound_after_line(&self, index: usize, pc: u16) -> bool {
+        self.line_binds
+            .get(&pc)
+            .is_some_and(|&binds| self.bind_sequence(index) > binds)
     }
 
     /// The method's line mapper, for the node-kind line rule the JVM backend states.

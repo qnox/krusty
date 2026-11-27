@@ -146,6 +146,30 @@ quirks! {
         fixed_in: Some(KotlinVersion::V2_4_20),
         defect: false,
     }
+    /// A `null` function value suspend-converted to a nullable suspend function type converts to an
+    /// adapter whose `invoke` yields `null`, instead of staying `null` (KT-89451).
+    NullFunctionValueConvertsToAdapter {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_5_0),
+        defect: true,
+    }
+    /// A function value held by a type parameter with a nullable function bound, passed where a
+    /// suspend function type is expected, is not converted at all: the value is cast to the suspend
+    /// function's class, so `null` stays `null` and any other value throws `ClassCastException`.
+    TypeParameterFunctionValueSkipsSuspendConversion {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: true,
+    }
+    /// A `null` function value held by a type parameter with a nullable function bound, passed
+    /// where a suspend function type is expected, converts to an adapter that invokes it without a
+    /// null check: calling it throws `NullPointerException`. Earlier releases do not convert the
+    /// value ([`Quirk::TypeParameterFunctionValueSkipsSuspendConversion`]).
+    NullTypeParameterFunctionValueIsDereferenced {
+        since: Some(KotlinVersion::V2_4_20),
+        fixed_in: Some(KotlinVersion::V2_5_0),
+        defect: true,
+    }
     /// A library compiled below language 2.3 stamps KLIB `metadata_version` `1.4.1` instead of the
     /// language level's own (read off `kotlinc-native -p library -Xmetadata-klib`).
     KlibLegacyMetadataVersionBelowLanguage23 {

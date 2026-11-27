@@ -1,5 +1,5 @@
 use krusty::fir::ExternalCallableId;
-use krusty::ir::{Callee, IrCheckedOperation, IrExpr, IrFile};
+use krusty::ir::{Callee, ExprId, IrCheckedOperation, IrExpr, IrFile};
 use krusty::jvm::classpath::{Classpath, ExternalCallableKind};
 use krusty::types::{InlineParameterModifier, Ty};
 
@@ -209,6 +209,19 @@ fn realize_expressions(
                 else {
                     unreachable!()
                 };
+                if !defaults.is_empty() {
+                    // A value class's `constructor-impl$default` owns its placeholders, masks
+                    // and marker as any defaulted construction does.
+                    default_call_operands.record(
+                        expression,
+                        constructor_default_plan(
+                            &realized_args,
+                            &suffix,
+                            &defaults,
+                            default_prefix_count,
+                        ),
+                    );
+                }
                 *args = realized_args;
                 args.extend(suffix);
                 let args = std::mem::take(args);
@@ -287,27 +300,15 @@ fn realize_expressions(
             if default.is_some() {
                 // The placeholders, masks and marker belong to the construction, as a defaulted
                 // call's do: emission puts the construction's line back at each run of them.
-                let operand_plan = realized_arguments
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .map(|(position, argument)| {
-                        let parameter = (position as u32).checked_sub(default_prefix_count);
-                        match parameter.filter(|parameter| defaults.contains(parameter)) {
-                            Some(parameter) => {
-                                DefaultCallOperand::synthesized_default(argument, parameter)
-                            }
-                            None => DefaultCallOperand::supplied(argument),
-                        }
-                    })
-                    .chain(
-                        realization_operands
-                            .iter()
-                            .copied()
-                            .map(DefaultCallOperand::synthesized_abi),
-                    )
-                    .collect();
-                default_call_operands.record(expression, operand_plan);
+                default_call_operands.record(
+                    expression,
+                    constructor_default_plan(
+                        &realized_arguments,
+                        &realization_operands,
+                        &defaults,
+                        default_prefix_count,
+                    ),
+                );
             }
             let IrExpr::New {
                 args,
@@ -1586,6 +1587,34 @@ fn realize_expressions(
         )?);
     }
     Ok(())
+}
+
+/// Which operands of a defaulted dependency construction its realization synthesized: the
+/// placeholders for the omitted parameters and the ABI `suffix` of masks and marker.
+fn constructor_default_plan(
+    arguments: &[ExprId],
+    suffix: &[ExprId],
+    defaults: &[u32],
+    default_prefix_count: u32,
+) -> Vec<DefaultCallOperand> {
+    arguments
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(position, argument)| {
+            let parameter = (position as u32).checked_sub(default_prefix_count);
+            match parameter.filter(|parameter| defaults.contains(parameter)) {
+                Some(parameter) => DefaultCallOperand::synthesized_default(argument, parameter),
+                None => DefaultCallOperand::supplied(argument),
+            }
+        })
+        .chain(
+            suffix
+                .iter()
+                .copied()
+                .map(DefaultCallOperand::synthesized_abi),
+        )
+        .collect()
 }
 
 /// The wrapper's static `hashCode` and its descriptor that hash a non-null scalar receiver

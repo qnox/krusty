@@ -7,15 +7,18 @@
 //! common-IR shape Krusty can currently serialize completely: `return value is/!is T` in an inline
 //! function with a reified own type parameter.
 
+use super::body_encoding::BodyEncoder;
+use super::body_tree::{BodyScope, FunctionBody};
 use super::ir_tables::{
     declaration_table, entry_table, lattice, per_file, symbol, IrTables, CONSTRUCTOR_SYMBOL,
     FUNCTION_SYMBOL, RECEIVER_PARAMETER_SYMBOL, TYPE_PARAMETER_SYMBOL, VALUE_PARAMETER_SYMBOL,
 };
 use crate::fx_hash::HashMap;
-use crate::ir::{FunId, IrExpr, IrFile, IrParameterRole, IrTypeOp, IrTypeParameter};
+use crate::ir::{FunId, IrExpr, IrFile, IrParameterRole, IrTypeOp};
+use crate::klib_lowering::ir_builtins::IrBuiltinOperators;
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::protobuf::Pb;
-use crate::types::{Ty, TyKind, TypeVariance};
+use crate::types::{Ty, TypeVariance};
 
 const MAIN_PREFIX: &str = "default/ir/";
 const PREPARED_PREFIX: &str = "default/ir_inlinable_functions/";
@@ -43,7 +46,7 @@ impl DeclarationSignatures {
         );
     }
 
-    fn get(&self, function: FunId) -> Option<&(KlibPublicIdSignature, Option<Ty>)> {
+    pub(super) fn get(&self, function: FunId) -> Option<&(KlibPublicIdSignature, Option<Ty>)> {
         self.functions.get(&function)
     }
 }
@@ -63,7 +66,7 @@ pub(super) struct PreparedFunction {
     extension_parameter: Option<usize>,
     result: Ty,
     type_parameters: Vec<PreparedTypeParameter>,
-    body: PreparedBody,
+    body: FunctionBody,
 }
 
 #[derive(Clone)]
@@ -82,37 +85,28 @@ struct PreparedTypeParameter {
     reified: bool,
 }
 
-/// The body shapes the writer serializes: a block that returns one value.
-#[derive(Clone)]
-enum PreparedBody {
-    ReifiedTypeTest(ReifiedTypeTest),
-    Return(PreparedValue),
+/// The facts a body names its callees by, beside the file it belongs to.
+pub(super) struct BodyFacts<'a> {
+    pub(super) callables: &'a crate::backend::CheckedBackendCallables,
+    pub(super) builtins: &'a IrBuiltinOperators,
 }
 
-/// The value a returning body produces.
-#[derive(Clone)]
-enum PreparedValue {
-    Constant(crate::ir::IrConst, Ty),
-    /// Read of a physical parameter slot (the dispatch receiver is slot zero when present).
-    Parameter(u32),
-}
-
-#[derive(Clone, Copy)]
-struct ReifiedTypeTest {
-    value_slot: u32,
-    type_parameter: usize,
-    negated: bool,
+/// The compiler built-in operators bodies call, signed once per process.
+pub(super) fn builtin_operators() -> &'static IrBuiltinOperators {
+    static BUILTINS: std::sync::OnceLock<IrBuiltinOperators> = std::sync::OnceLock::new();
+    BUILTINS.get_or_init(IrBuiltinOperators::new)
 }
 
 /// Serialize every exact supported inline template from one checked file.
 ///
 /// Unsupported inline bodies remain metadata-only. The returned functions are later combined into
-/// matching ordinary and prepared-inline components. Ordinary functions whose body is a supported
-/// shape are serialized as well, as kotlinc does.
+/// matching ordinary and prepared-inline components. Ordinary functions whose body the body
+/// writer translates are serialized as well, as kotlinc does.
 pub(super) fn collect(
     ir: &IrFile,
     file_name: &str,
     declarations: &DeclarationSignatures,
+    facts: &BodyFacts<'_>,
 ) -> Vec<PreparedFunction> {
     let mut functions = Vec::new();
     let mut ids = ir
@@ -122,7 +116,8 @@ pub(super) fn collect(
         .collect::<Vec<_>>();
     ids.sort_unstable();
     for function in ids {
-        let Some(prepared) = prepared_function(ir, file_name, declarations, function, true) else {
+        let Some(prepared) = prepared_function(ir, file_name, declarations, facts, function, true)
+        else {
             continue;
         };
         functions.push(prepared);
@@ -135,6 +130,7 @@ pub(super) fn collect(
             ir,
             file_name,
             declarations,
+            facts,
             package_function.function,
             false,
         ) {
@@ -148,6 +144,7 @@ fn prepared_function(
     ir: &IrFile,
     file_name: &str,
     declarations: &DeclarationSignatures,
+    facts: &BodyFacts<'_>,
     function: FunId,
     inline: bool,
 ) -> Option<PreparedFunction> {
@@ -196,13 +193,27 @@ fn prepared_function(
             &own_signature
         }
     };
-    let physical_arity =
-        generic.params.len() + usize::from(declaration.dispatch_receiver.is_some());
-    let body = if inline {
-        PreparedBody::ReifiedTypeTest(reified_type_test(ir, function, declaration.body?, generic)?)
-    } else {
-        PreparedBody::Return(returned_value(ir, declaration.body?, physical_arity)?)
-    };
+    // Inline bodies beyond a reified type test need the prepared copy's inlining contract, which
+    // this writer does not record yet.
+    if inline && !is_reified_type_test(ir, function, declaration.body?, generic) {
+        return None;
+    }
+    let slots = dispatch_receiver
+        .iter()
+        .copied()
+        .chain(generic.params.iter().copied())
+        .collect::<Vec<_>>();
+    let body = super::body_tree::function_body(
+        &BodyScope {
+            ir,
+            declarations,
+            callables: facts.callables,
+            builtins: facts.builtins,
+            parameters: &slots,
+            type_parameters: &generic.type_params,
+        },
+        declaration.body?,
+    )?;
     let identities = ir.function_parameter_identities(function)?;
     if identities.len() != generic.params.len() || generic.params.len() != declaration.params.len()
     {
@@ -228,11 +239,13 @@ fn prepared_function(
                 Some(default) if is_null_default(ir, default) => true,
                 Some(_) => return None,
             };
-            supported_type(ty, &generic.type_params).then_some(PreparedParameter {
-                name,
-                ty,
-                default_null,
-            })
+            super::body_tree::supported_type(ty, &generic.type_params).then_some(
+                PreparedParameter {
+                    name,
+                    ty,
+                    default_null,
+                },
+            )
         })
         .collect::<Option<Vec<_>>>()?;
     if ir
@@ -242,16 +255,18 @@ fn prepared_function(
         return None;
     }
     let result = generic.ret?;
-    if !supported_type(result, &generic.type_params)
+    if !super::body_tree::supported_type(result, &generic.type_params)
         || generic
             .type_params
             .iter()
             .flat_map(|parameter| parameter.bounds.iter().map(|(bound, _)| *bound))
-            .any(|bound| !supported_type(bound, &generic.type_params))
+            .any(|bound| !super::body_tree::supported_type(bound, &generic.type_params))
     {
         return None;
     }
-    if dispatch_receiver.is_some_and(|ty| !supported_type(ty, &generic.type_params)) {
+    if dispatch_receiver
+        .is_some_and(|ty| !super::body_tree::supported_type(ty, &generic.type_params))
+    {
         return None;
     }
     let context_count = ir.declared_parameters(function).context_count;
@@ -325,116 +340,42 @@ fn is_null_default(ir: &IrFile, expression: u32) -> bool {
     }
 }
 
-fn reified_type_test(
+/// Whether an inline body is `return value is T` (or `!is`) over one of the function's own
+/// parameters and a reified type parameter: the inline shape whose prepared copy this writer
+/// records.
+fn is_reified_type_test(
     ir: &IrFile,
     function: FunId,
     body: u32,
     generic: &crate::ir::IrGenericSig,
-) -> Option<ReifiedTypeTest> {
+) -> bool {
     let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
-        return None;
+        return false;
     };
     let [returned] = stmts.as_slice() else {
-        return None;
+        return false;
     };
     let IrExpr::Return(Some(operation)) = ir.expr(*returned) else {
-        return None;
+        return false;
     };
     let IrExpr::TypeOp {
-        op,
+        op: IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf,
         arg,
         type_operand,
     } = ir.expr(*operation)
     else {
-        return None;
-    };
-    let negated = match op {
-        IrTypeOp::InstanceOf => false,
-        IrTypeOp::NotInstanceOf => true,
-        _ => return None,
+        return false;
     };
     let IrExpr::GetValue(value_slot) = ir.expr(*arg) else {
-        return None;
+        return false;
     };
     let physical_arity = generic.params.len()
         + usize::from(ir.functions[function as usize].dispatch_receiver.is_some());
-    if usize::try_from(*value_slot).ok()? >= physical_arity {
-        return None;
-    }
-    let type_parameter = generic
-        .type_params
-        .iter()
-        .position(|parameter| parameter.reified && parameter.ty() == *type_operand)?;
-    Some(ReifiedTypeTest {
-        value_slot: *value_slot,
-        type_parameter,
-        negated,
-    })
-}
-
-/// `{ return <constant or parameter> }`, however many single-statement blocks wrap it: the one body shape the ordinary writer serializes.
-fn returned_value(ir: &IrFile, body: u32, physical_arity: usize) -> Option<PreparedValue> {
-    // A source body is a block holding the written block; both only group their one statement.
-    let mut statement = body;
-    while let IrExpr::Block { stmts, value: None } = ir.expr(statement) {
-        let [only] = stmts.as_slice() else {
-            return None;
-        };
-        statement = *only;
-    }
-    let IrExpr::Return(Some(value)) = ir.expr(statement) else {
-        return None;
-    };
-    match ir.expr(*value) {
-        IrExpr::Const(constant) => {
-            let ty = constant_type(constant)?;
-            Some(PreparedValue::Constant(constant.clone(), ty))
-        }
-        IrExpr::GetValue(slot) if usize::try_from(*slot).ok()? < physical_arity => {
-            Some(PreparedValue::Parameter(*slot))
-        }
-        _ => None,
-    }
-}
-
-fn constant_type(constant: &crate::ir::IrConst) -> Option<Ty> {
-    use crate::ir::IrConst;
-    Some(match constant {
-        IrConst::Boolean(_) => Ty::Boolean,
-        IrConst::Int(_) => Ty::Int,
-        IrConst::Long(_) => Ty::Long,
-        IrConst::Double(_) => Ty::Double,
-        // A string with a lone surrogate has no UTF-8 spelling in the string table.
-        IrConst::String(value) if value.as_str().is_some() => Ty::String,
-        _ => return None,
-    })
-}
-
-fn supported_type(ty: Ty, parameters: &[IrTypeParameter]) -> bool {
-    match ty.kind() {
-        TyKind::Unit | TyKind::Nothing | TyKind::BOOLEAN => true,
-        TyKind::Obj(_, arguments) => arguments.iter().all(|argument| match argument.kind() {
-            TyKind::InProjection(inner)
-            | TyKind::OutProjection(inner)
-            | TyKind::StarProjection(inner) => supported_type(inner, parameters),
-            _ => supported_type(*argument, parameters),
-        }),
-        TyKind::Nullable(inner) => supported_type(inner, parameters),
-        TyKind::InProjection(_)
-        | TyKind::OutProjection(_)
-        | TyKind::StarProjection(_)
-        | TyKind::RawProjection(_) => false,
-        TyKind::TyParam(..) => parameters.iter().any(|parameter| parameter.ty() == ty),
-        TyKind::Null
-        | TyKind::Error
-        | TyKind::Pending
-        | TyKind::Var(..)
-        | TyKind::Fun(_)
-        | TyKind::DefinitelyNotNull(_)
-        | TyKind::PlatformNullable(_)
-        | TyKind::MutabilityFlexible(_)
-        | TyKind::Intersection(_) => false,
-    }
+    usize::try_from(*value_slot).is_ok_and(|slot| slot < physical_arity)
+        && generic
+            .type_params
+            .iter()
+            .any(|parameter| parameter.reified && parameter.ty() == *type_operand)
 }
 
 #[derive(Clone, Copy)]
@@ -769,9 +710,7 @@ impl FileWriter {
         let mut expression = Pb::new();
         expression.field_varint(2, u64::from(ty));
         expression.field_message(5, &constant);
-        let id = u32::try_from(self.tables.bodies.len()).expect("body table fits u32");
-        self.tables.bodies.push(expression.canonical().into_bytes());
-        id
+        self.tables.body(expression.canonical().into_bytes())
     }
 
     fn body(
@@ -781,108 +720,11 @@ impl FileWriter {
         values: &[u64],
         parameters: &[(usize, &PreparedTypeParameter, u64)],
     ) -> u32 {
-        let value = match &function.body {
-            PreparedBody::ReifiedTypeTest(test) => {
-                self.reified_type_test(function, test, values, parameters)
-            }
-            PreparedBody::Return(value) => self.returned_value(function, value, values, parameters),
-        };
-        let mut returned = Pb::new();
-        returned.field_varint(1, declaration);
-        returned.field_message(2, &value);
-        let mut return_expression = Pb::new();
-        let nothing = self.ty(Ty::Nothing, parameters);
-        return_expression.field_varint(2, u64::from(nothing));
-        return_expression.field_message(12, &returned);
-        let mut statement = Pb::new();
-        statement.field_message(3, &return_expression);
-        let mut block = Pb::new();
-        block.repeated_message(1, &statement);
-        let mut body = Pb::new();
-        body.field_message(4, &block);
-        let id = u32::try_from(self.tables.bodies.len()).expect("body table fits u32");
-        self.tables.bodies.push(body.canonical().into_bytes());
-        id
-    }
-
-    /// The expression a physical parameter slot reads, typed as the parameter is declared.
-    fn parameter_read(
-        &mut self,
-        function: &PreparedFunction,
-        slot: usize,
-        values: &[u64],
-        parameters: &[(usize, &PreparedTypeParameter, u64)],
-    ) -> Pb {
-        let ty = if let (0, Some(dispatch)) = (slot, function.dispatch_receiver) {
-            dispatch
-        } else {
-            function.parameters[slot - usize::from(function.dispatch_receiver.is_some())].ty
-        };
-        let ty = self.ty(ty, parameters);
-        let mut get = Pb::new();
-        get.field_varint(1, values[slot]);
-        let mut expression = Pb::new();
-        expression.field_varint(2, u64::from(ty));
-        expression.field_message(6, &get);
-        expression
-    }
-
-    fn returned_value(
-        &mut self,
-        function: &PreparedFunction,
-        value: &PreparedValue,
-        values: &[u64],
-        parameters: &[(usize, &PreparedTypeParameter, u64)],
-    ) -> Pb {
-        match value {
-            PreparedValue::Parameter(slot) => {
-                let slot = usize::try_from(*slot).expect("value slot fits usize");
-                self.parameter_read(function, slot, values, parameters)
-            }
-            PreparedValue::Constant(constant, ty) => {
-                use crate::ir::IrConst;
-                let mut encoded = Pb::new();
-                match constant {
-                    IrConst::Boolean(value) => encoded.field_varint(2, u64::from(*value)),
-                    IrConst::Int(value) => encoded.field_varint(6, i64::from(*value) as u64),
-                    IrConst::Long(value) => encoded.field_varint(7, *value as u64),
-                    IrConst::Double(value) => encoded.field_fixed64(9, value.to_bits()),
-                    IrConst::String(value) => {
-                        let index = self
-                            .tables
-                            .string(value.as_str().expect("filtered to well-formed strings"));
-                        encoded.field_varint(10, u64::from(index));
-                    }
-                    _ => unreachable!("unsupported constants are filtered before serialization"),
-                }
-                let ty = self.ty(*ty, parameters);
-                let mut expression = Pb::new();
-                expression.field_varint(2, u64::from(ty));
-                expression.field_message(5, &encoded);
-                expression
-            }
-        }
-    }
-
-    fn reified_type_test(
-        &mut self,
-        function: &PreparedFunction,
-        test: &ReifiedTypeTest,
-        values: &[u64],
-        parameters: &[(usize, &PreparedTypeParameter, u64)],
-    ) -> Pb {
-        let boolean = self.ty(Ty::Boolean, parameters);
-        let slot = usize::try_from(test.value_slot).expect("value slot fits usize");
-        let argument = self.parameter_read(function, slot, values, parameters);
-        let operand = self.ty(function.type_parameters[test.type_parameter].ty, parameters);
-        let mut operation = Pb::new();
-        operation.field_varint(1, if test.negated { 8 } else { 7 });
-        operation.field_varint(2, u64::from(operand));
-        operation.field_message(3, &argument);
-        let mut tested = Pb::new();
-        tested.field_varint(2, u64::from(boolean));
-        tested.field_message(14, &operation);
-        tested
+        let scope = parameters
+            .iter()
+            .map(|(_, parameter, symbol)| (parameter.ty, *symbol))
+            .collect::<Vec<_>>();
+        BodyEncoder::new(&mut self.tables, declaration, values, &scope).block_body(&function.body)
     }
 
     fn ty(&mut self, ty: Ty, parameters: &[(usize, &PreparedTypeParameter, u64)]) -> u32 {
@@ -899,6 +741,7 @@ mod tests {
     use std::borrow::Cow;
 
     use super::*;
+    use crate::klib::body_tree::{BodyExprId, BodyKind, FunctionBody, TypeOperator, ValueRef};
     use crate::metadata::id_signature::{
         callable_signature, CallableShape, DeclarationContainer, Placement, SignatureType,
         TypeParameterShape, TypeView,
@@ -1129,14 +972,33 @@ mod tests {
                     variance: TypeVariance::Invariant,
                     reified: true,
                 }],
-                body: PreparedBody::ReifiedTypeTest(ReifiedTypeTest {
-                    value_slot: 0,
-                    type_parameter: 0,
-                    negated: false,
+                body: returning(|body| {
+                    let argument = body.push(
+                        Ty::nullable(Ty::obj("kotlin/Any")),
+                        BodyKind::GetValue(ValueRef::Parameter(0)),
+                    );
+                    body.push(
+                        Ty::Boolean,
+                        BodyKind::TypeOperator {
+                            operator: TypeOperator::InstanceOf,
+                            operand: parameter,
+                            argument,
+                        },
+                    )
                 }),
             },
             signature,
         )
+    }
+
+    /// A block body that returns `value`.
+    fn returning(value: impl FnOnce(&mut FunctionBody) -> BodyExprId) -> FunctionBody {
+        let mut body = FunctionBody::default();
+        let value = value(&mut body);
+        let returned = body.push(Ty::Nothing, BodyKind::Return(value));
+        body.statements
+            .push(crate::klib::body_tree::BodyStatement::Expression(returned));
+        body
     }
 
     fn fixture() -> (PreparedFunction, KlibPublicIdSignature) {
@@ -1448,34 +1310,44 @@ mod tests {
 
         let bodies = [
             (
-                PreparedBody::Return(PreparedValue::Constant(
-                    crate::ir::IrConst::Int(-7),
-                    Ty::Int,
-                )),
+                returning(|body| body.push(Ty::Int, BodyKind::Const(crate::ir::IrConst::Int(-7)))),
                 Some(KlibIrConstant::Int(-7)),
             ),
             (
-                PreparedBody::Return(PreparedValue::Constant(
-                    crate::ir::IrConst::Long(1 << 40),
-                    Ty::Long,
-                )),
+                returning(|body| {
+                    body.push(Ty::Long, BodyKind::Const(crate::ir::IrConst::Long(1 << 40)))
+                }),
                 Some(KlibIrConstant::Long(1 << 40)),
             ),
             (
-                PreparedBody::Return(PreparedValue::Constant(
-                    crate::ir::IrConst::Boolean(true),
-                    Ty::Boolean,
-                )),
+                returning(|body| {
+                    body.push(
+                        Ty::Boolean,
+                        BodyKind::Const(crate::ir::IrConst::Boolean(true)),
+                    )
+                }),
                 Some(KlibIrConstant::Boolean(true)),
             ),
             (
-                PreparedBody::Return(PreparedValue::Constant(
-                    crate::ir::IrConst::String(crate::kt_string::KtString::from("ok")),
-                    Ty::String,
-                )),
+                returning(|body| {
+                    body.push(
+                        Ty::String,
+                        BodyKind::Const(crate::ir::IrConst::String(
+                            crate::kt_string::KtString::from("ok"),
+                        )),
+                    )
+                }),
                 Some(KlibIrConstant::String("ok".to_owned())),
             ),
-            (PreparedBody::Return(PreparedValue::Parameter(0)), None),
+            (
+                returning(|body| {
+                    body.push(
+                        Ty::obj("kotlin/Any"),
+                        BodyKind::GetValue(ValueRef::Parameter(0)),
+                    )
+                }),
+                None,
+            ),
         ];
         for (index, (body, constant)) in bodies.into_iter().enumerate() {
             let (mut function, signature) = fixture();

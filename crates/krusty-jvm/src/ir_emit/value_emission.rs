@@ -405,7 +405,9 @@ impl super::Emitter<'_> {
                         }
                     }
                     self.release_operand_spills(&temps);
-                    if use_accessor || !default_parameters.is_empty() {
+                    // The accessor's own marker is not a default operand: alone, it leaves the
+                    // line to the `invokespecial`, as kotlinc marks it.
+                    if !default_parameters.is_empty() {
                         self.mark_synthesized_run_start(e, true, &mut inside_run, code);
                     }
                     if use_accessor {
@@ -469,7 +471,9 @@ impl super::Emitter<'_> {
                             );
                         }
                     }
-                    if use_accessor || !default_parameters.is_empty() {
+                    // The accessor's own marker is not a default operand: alone, it leaves the
+                    // line to the `invokespecial`, as kotlinc marks it.
+                    if !default_parameters.is_empty() {
                         self.mark_synthesized_run_start(e, true, &mut inside_run, code);
                     }
                     if use_accessor {
