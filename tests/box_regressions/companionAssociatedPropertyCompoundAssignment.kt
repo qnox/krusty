@@ -1,5 +1,4 @@
-// KOTLINC_VERSION: [2.5.0,)
-// LANGUAGE: +CompanionBlocks +CompanionExtensions
+// LANGUAGE: +CompanionBlocksAndExtensions
 // A compound assignment to a companion-associated property reads and writes it through the
 // classifier: a companion extension `var` and a companion block `var`.
 
