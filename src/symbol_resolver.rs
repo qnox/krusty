@@ -83,7 +83,8 @@ pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
 };
 pub(crate) use declaration_specificity::{
-    declarations_equally_specific, retain_most_specific_declarations,
+    declaration_dominance_maxima, declarations_equally_specific, declarations_incomparable,
+    declared_call_shape, retain_most_specific_declarations,
 };
 use extension_specialization::{
     bind_defaulted_ext_ret, bind_defaulted_ext_ret_slots, bind_ext_ret, bind_ext_ret_tracking,
@@ -1656,7 +1657,13 @@ impl<'a> SymbolResolver<'a> {
                 let method_ref = member_dispatch
                     .then(|| select_instance_reference_from_functions(ty, callables.functions()))
                     .flatten();
-                let property_ref = member_property
+                // A reference may name a property with context parameters: whether the language
+                // binds them is decided where the reference is checked, not by which declarations
+                // the family offers.
+                let referenced_property = member_dispatch
+                    .then(|| self.declared_member_property_for_reference(ty, name, &callables))
+                    .flatten();
+                let property_ref = referenced_property
                     .as_ref()
                     .filter(|_| ty.kotlin_class_internal() != Some(crate::types::wk::any()))
                     .and_then(|property| {
@@ -2850,6 +2857,23 @@ pub struct ResolvedPropertyRef {
     /// `None` for an instance property; `Some(None)` for a same-file extension property;
     /// `Some(Some(owner))` for an extension property emitted on another facade.
     pub extension_facade: Option<Option<TypeName>>,
+    /// Leading context parameters of the declaration's accessors. A reference to a declaration
+    /// that has them can only be formed where `CallableReferencesToContextual` binds them.
+    pub context_count: usize,
+    /// Source names of those context parameters, for diagnostics only.
+    pub context_names: Vec<String>,
+}
+
+impl ResolvedPropertyRef {
+    /// The declared types of the leading context parameters. An extension property's accessors
+    /// list their receiver first in the semantic model, the contexts after it.
+    pub fn context_types(&self) -> &[Ty] {
+        let start = usize::from(self.extension_facade.is_some());
+        self.getter
+            .params
+            .get(start..start + self.context_count)
+            .unwrap_or_default()
+    }
 }
 
 fn select_extension_property_ref(property: PropertyInfo) -> Option<ResolvedPropertyRef> {
@@ -2868,12 +2892,14 @@ fn select_extension_property_ref(property: PropertyInfo) -> Option<ResolvedPrope
         getter.suspend,
         getter.default_call,
     );
-    if getter.suspend || getter.default_call || getter.params.len() != 1 {
+    let context_count = property.context_count;
+    let context_names = property.context_param_names;
+    if getter.suspend || getter.default_call || getter.params.len() != context_count + 1 {
         return None;
     }
-    let setter = property
-        .setter
-        .filter(|setter| setter.params.len() == 2 && setter.physical_ret == Ty::Unit);
+    let setter = property.setter.filter(|setter| {
+        setter.params.len() == context_count + 2 && setter.physical_ret == Ty::Unit
+    });
     let prop_ty = getter.ret;
     let reflection_owner = *getter.params.first()?;
     let facade = (!getter.owner.matches("")).then_some(getter.owner);
@@ -2888,6 +2914,8 @@ fn select_extension_property_ref(property: PropertyInfo) -> Option<ResolvedPrope
         prop_ty,
         source_key,
         stable_declaration: property.stable_declaration,
+        context_count,
+        context_names,
     })
 }
 
@@ -2907,11 +2935,10 @@ fn build_property_reference_from_declaration(
     let getter_visibility = property.visibility;
     let setter_visibility = property.setter_visibility;
     let getter = property.getter.clone();
-    let setter = property
-        .setter
-        .clone()
-        .filter(|setter| setter.params.len() == 1 && setter.physical_ret == Ty::Unit);
-    if !getter.params.is_empty() {
+    let setter = property.setter.clone().filter(|setter| {
+        setter.params.len() == property.context_count + 1 && setter.physical_ret == Ty::Unit
+    });
+    if getter.params.len() != property.context_count {
         crate::trace_compiler!(
             "resolve",
             "property ref rejected {recv:?}.{name}: getter {}.{}{} is not a plain zero-argument accessor",
@@ -2932,6 +2959,8 @@ fn build_property_reference_from_declaration(
         source_key: property.source_key,
         stable_declaration: property.stable_declaration,
         extension_facade: None,
+        context_count: property.context_count,
+        context_names: property.context_param_names.clone(),
     })
 }
 
@@ -3003,6 +3032,16 @@ fn resolved_member_from_info_tracking(
         ResolvedMember::from_function(recv, &o, member, ret),
         bindings,
     )
+}
+
+/// The member property of a family a reference names, with or without context parameters.
+fn referenced_member_property_from_callables(callables: &Callables) -> Option<PropertyInfo> {
+    callables
+        .properties()
+        .iter()
+        .filter(|property| property.kind == PropKind::Member && property.readable())
+        .min_by_key(|property| property.receiver_rank)
+        .cloned()
 }
 
 fn member_property_from_callables(

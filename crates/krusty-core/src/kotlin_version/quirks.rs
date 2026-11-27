@@ -7,7 +7,7 @@
 //!
 //! The releases a quirk spans are recorded once, in the `quirks!` table below, and nowhere else. A
 //! release's whole profile is resolved once into a [`Quirks`] bit set ([`Quirks::of_release`]);
-//! the process reproduces [`Quirks::target`], and consumers test one bit and never compare
+//! a compilation reproduces its [`super::ReferenceProfile::quirks`], and consumers test one bit and never compare
 //! versions themselves.
 //!
 //! - **A new quirk** is one entry in that table and one `has` test at the place that implements
@@ -179,6 +179,15 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: false,
     }
+    /// A not-null operator (`!!`, the left of `?:`, the receiver of `?.`) applied to a nullable
+    /// intersection fixed below an upper type (`pick(a, b)!!` with `S : Base`) narrows it to a new
+    /// intersection that publishes `Any`. From 2.5 kotlinc keeps the upper type, so the result still
+    /// approximates to the bound; a smart cast (`if (x != null) x`) still publishes `Any`.
+    NotNullOperatorDropsIntersectionApproximation {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
     /// The Kotlin/Native and Kotlin/Wasm standard library's `ArrayList.addAll` makes room for the
     /// new elements before it reads the argument, so a range of the list being appended to is
     /// invalidated first: `list.addAll(list.subList(0, 2))` raises
@@ -214,15 +223,6 @@ impl Quirks {
             index += 1;
         }
         Self(bits)
-    }
-
-    /// The profile this process reproduces: the reference release's ([`super::target`]), without
-    /// its defects when the process fixes them ([`super::kotlinc_defects`]). Resolved on first use.
-    /// Both settings are process-wide, so this is the profile every phase reproduces; a hot path
-    /// may hoist the copy, but reading it is one load and a bit test.
-    pub fn target() -> Self {
-        static TARGET: std::sync::OnceLock<Quirks> = std::sync::OnceLock::new();
-        *TARGET.get_or_init(|| Self::of_release(super::target()).under(super::kotlinc_defects()))
     }
 
     /// This profile as a compilation under `defects` reproduces it: unchanged, or without its

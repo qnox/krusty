@@ -192,14 +192,23 @@ refusals, the replacement is skipped, and the Kotlin task, which otherwise skips
 `krustyCompile` aggregate depends on the Kotlin tasks, so it reaches whichever compiler runs.
 Every other compile of the build stays with krusty.
 
-A module that applies a partly implemented plugin is tried with krusty first. When every error krusty
-reports is its native plugin pass refusing a construct of valid source that it does not implement yet
-(`DiagnosticKind::PluginRefusal`), krusty exits with status 3 and writes no classes. The replacement
-task records those errors in `build/krusty/<task>/handoff.txt`, logs
-`krusty: task '…' is handed to kotlinc: a krusty compiler plugin does not implement everything the
-module uses` with them, and the Kotlin task, which otherwise skips itself, runs on kotlinc. The status
-alone tells the two apart: any other krusty error exits 1 and fails the build, and `krusty
-verify-compile` records the refusal as unsupported, not failed.
+A compile krusty takes never fails the build because of krusty. When krusty does not compile the
+module, the replacement task records why in `build/krusty/<task>/handoff.txt`, logs
+`krusty: task '…' is left to kotlinc: <why>` followed by the report lines that say so, and the Kotlin
+task, which otherwise skips itself, compiles the module with kotlinc. The reason keeps the failure's
+kind, so a report tells guidance for work from krusty bugs:
+
+- `krusty does not implement everything the module uses`: every error krusty reports is a construct
+  of valid source it does not implement yet, such as a native plugin pass's refusal
+  (`DiagnosticKind::PluginRefusal`). krusty exits with status 3 and writes no classes, and
+  `krusty verify-compile` records the compile as unsupported, not failed.
+- `krusty failed with an internal error`: a panic, an internal error, an exit status krusty never
+  chooses, or a classpath fingerprint krusty could not take.
+- `krusty reported errors`: any other compile error. kotlinc then decides: if it compiles the module,
+  krusty reported an error kotlinc does not; otherwise kotlinc fails the build with its own errors.
+
+The support check treats a command line it rejects the same way: the compile is left to kotlinc,
+which reports the command line if it is invalid.
 
 Build correctness rests on these contracts:
 

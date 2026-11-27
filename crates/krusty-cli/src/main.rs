@@ -8,6 +8,7 @@ use krusty::diag::DiagSink;
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty_cli::staged_output::StagedOutput;
+use krusty_cli::worker::{FailureKind, WorkFailure};
 use krusty_cli::{cli, kotlinc_arguments, verify};
 
 /// The compiler's allocation pattern (many short-lived vectors and strings) runs markedly faster on
@@ -103,7 +104,7 @@ fn main() {
         .iter()
         .any(|argument| argument == "--persistent_worker")
     {
-        run_persistent_worker();
+        run_persistent_worker(&argv);
         return;
     }
     let opts = cli::parse(argv);
@@ -177,22 +178,19 @@ impl std::fmt::Display for CompileError {
 
 /// Compile what the `kotlinc-native` arguments describe, or print the diagnostics and exit 1.
 fn run_kotlinc_native(arguments: &[String]) {
-    let (options, defects) = match krusty_cli::kotlinc_native::parse(arguments) {
+    let options = match krusty_cli::kotlinc_native::parse(arguments) {
         Ok(krusty_cli::kotlinc_native::Invocation::Help) => {
             println!("{}", krusty_cli::kotlinc_native::HELP);
             return;
         }
-        Ok(krusty_cli::kotlinc_native::Invocation::Compile(options, defects)) => (options, defects),
+        Ok(krusty_cli::kotlinc_native::Invocation::Compile(options)) => options,
         Err(error) => {
             eprintln!("error: {error}");
             eprintln!("info: use krusty kotlinc-native -help for more information");
             std::process::exit(1);
         }
     };
-    if let Err(error) = krusty::kotlin_version::configured_target()
-        .and_then(krusty::kotlin_version::set_target)
-        .and_then(|()| krusty::kotlin_version::set_kotlinc_defects(defects))
-    {
+    if let Err(error) = krusty::kotlin_version::validate_release(options.features.release()) {
         eprintln!("error: {error}");
         std::process::exit(1);
     }
@@ -485,8 +483,16 @@ fn run_verify_report(argv: &[String]) {
 /// Serve Bazel work requests until stdin closes.
 ///
 /// The process is REUSED across requests, which is the point of a worker: the classpath decoding a
-/// compilation pays for is still warm for the next target that shares those jars.
-fn run_persistent_worker() {
+/// compilation pays for is still warm for the next target that shares those jars. `startup` is the
+/// worker's own command line, which configures every request (`krusty_cli::worker::WorkerSetup`).
+fn run_persistent_worker(startup: &[String]) {
+    let setup = match krusty_cli::worker::WorkerSetup::from_startup(startup) {
+        Ok(setup) => setup,
+        Err(error) => {
+            eprintln!("krusty: worker: {error}");
+            std::process::exit(2);
+        }
+    };
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut input = stdin.lock();
@@ -502,18 +508,22 @@ fn run_persistent_worker() {
                     .map(|s| s.to_string())
                     .or_else(|| payload.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "panic".to_string());
-                Err(format!("krusty: internal compiler panic: {detail}\n"))
+                Err(WorkFailure::new(
+                    FailureKind::Internal,
+                    format!("krusty: internal compiler panic: {detail}\n"),
+                ))
             })
     };
-    if let Err(error) = krusty_cli::worker::run(&mut input, &mut output, &serve) {
+    if let Err(error) = krusty_cli::worker::run(&mut input, &mut output, &setup, &serve) {
         eprintln!("krusty: worker: {error}");
         std::process::exit(1);
     }
 }
 
 /// Run one translated work request: compile, then satisfy the outputs bazel declared for the action.
-fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
+fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), WorkFailure> {
     let argv = unit.compiler_arguments();
+    let failed = |report: String| WorkFailure::new(FailureKind::Errors, report);
 
     // A module with no Kotlin sources (an export wrapper, or a jar that only carries resources)
     // still has a declared output. Running the compiler would also demand a Kotlin distribution
@@ -522,10 +532,10 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
         StagedOutput::new(&unit.output_jar)
             .commit()
             .map_err(|error| {
-                format!(
+                failed(format!(
                     "krusty: cannot write output to {}: {error}\n",
                     unit.output_jar.display()
-                )
+                ))
             })?;
     } else {
         let opts = cli::parse(argv);
@@ -536,22 +546,55 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
             .map(String::as_str)
             .collect();
         if !errors.is_empty() {
-            return Err(format!("krusty: {}\n", errors.join("; ")));
+            return Err(WorkFailure::new(
+                FailureKind::CommandLine,
+                format!("krusty: {}\n", errors.join("; ")),
+            ));
         }
-        compile(&opts).map_err(|error| error.report)?;
+        compile(&opts).map_err(|error| {
+            let kind = if error.plugin_refusal {
+                FailureKind::Unimplemented
+            } else {
+                FailureKind::Errors
+            };
+            WorkFailure::new(kind, error.report)
+        })?;
+    }
+    // A mixed target's Java compiles against the Kotlin classes just written, into the same jar.
+    if !unit.java.sources.is_empty() {
+        let java_home = std::env::var_os("JAVA_HOME")
+            .filter(|home| !home.is_empty())
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| {
+                failed(
+                    "krusty: the target has Java sources, and compiling them needs JAVA_HOME\n"
+                        .to_string(),
+                )
+            })?;
+        unit.java
+            .compile_into(&java_home, &unit.classpath, &unit.output_jar)
+            .map_err(|error| failed(format!("krusty: {error}\n")))?;
     }
     krusty_cli::worker::package_resources(&unit.output_jar, &unit.resources)
-        .map_err(|error| format!("krusty: {error}\n"))?;
+        .map_err(|error| failed(format!("krusty: {error}\n")))?;
 
     // Bazel fails an action whose DECLARED outputs are missing, so both must exist even though
     // krusty has nothing distinct to put in them.
     if let Some(abi_jar) = &unit.abi_jar {
-        std::fs::copy(&unit.output_jar, abi_jar)
-            .map_err(|error| format!("krusty: cannot write {}: {error}\n", abi_jar.display()))?;
+        std::fs::copy(&unit.output_jar, abi_jar).map_err(|error| {
+            failed(format!(
+                "krusty: cannot write {}: {error}\n",
+                abi_jar.display()
+            ))
+        })?;
     }
     if let Some(cri_file) = &unit.cri_file {
-        std::fs::write(cri_file, b"")
-            .map_err(|error| format!("krusty: cannot write {}: {error}\n", cri_file.display()))?;
+        std::fs::write(cri_file, b"").map_err(|error| {
+            failed(format!(
+                "krusty: cannot write {}: {error}\n",
+                cri_file.display()
+            ))
+        })?;
     }
     Ok(())
 }
@@ -666,8 +709,7 @@ pub fn compile(opts: &cli::Options) -> Result<usize, CompileError> {
         None => krusty::kotlin_version::configured_target()
             .map_err(|error| format!("krusty: {error}\n"))?,
     };
-    krusty::kotlin_version::set_target(version).map_err(|error| format!("krusty: {error}\n"))?;
-    krusty::kotlin_version::set_kotlinc_defects(opts.kotlinc_defects)
+    krusty::kotlin_version::validate_release(version)
         .map_err(|error| format!("krusty: {error}\n"))?;
     let mut diags = DiagSink::new();
     let mut sources = Vec::new();
@@ -697,6 +739,10 @@ pub fn compile(opts: &cli::Options) -> Result<usize, CompileError> {
     let plugins = opts.resolve_plugins(&effective_classpath);
     for note in &plugins.notes {
         eprintln!("info: {note}");
+    }
+    // kotlinc announces the argument before it compiles anything.
+    if opts.jvm_enable_preview {
+        eprintln!("info: using preview Java language features");
     }
     if !plugins.errors.is_empty() {
         return Err(plugins

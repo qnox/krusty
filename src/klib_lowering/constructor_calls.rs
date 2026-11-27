@@ -11,7 +11,10 @@ use crate::libraries::{
     ExternalCallableKind, KlibBodyCallable, KlibBodyClassParameters, KlibDependencyCallable,
     ParamFlags,
 };
-use crate::metadata::klib_ir::tree::{KlibIrFunction, KlibIrNullability, KlibIrType};
+use crate::metadata::klib_ir::tree::{
+    KlibIrArguments, KlibIrExprId, KlibIrFunction, KlibIrMemberAccess, KlibIrNullability,
+    KlibIrType,
+};
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
 use crate::types::{Ty, TyKind, TypeName};
 
@@ -58,8 +61,7 @@ pub(super) fn authenticate(
             "constructor-owned type parameters",
         ));
     }
-    if function.dispatch_receiver.is_some()
-        || function.extension_receiver.is_some()
+    if function.extension_receiver.is_some()
         || !function.context_parameters.is_empty()
         || selected.context_count() != 0
         || function.companion_extension_class.is_some()
@@ -68,6 +70,23 @@ pub(super) fn authenticate(
             "a constructor receiver or context",
         ));
     }
+    // Only an inner class's constructor takes the outer instance, as its dispatch receiver.
+    let outer = match (&function.dispatch_receiver, header.outer) {
+        (Some(receiver), Some(outer)) => {
+            if semantic_type(header.arena, &header.types, receiver.ty)? != outer.ty {
+                return Err(mismatch(
+                    "an inner class constructor receives another outer instance",
+                ));
+            }
+            Some(outer.ty)
+        }
+        (None, None) => None,
+        _ => {
+            return Err(mismatch(
+                "a constructor's outer instance disagrees with its class being inner",
+            ))
+        }
+    };
     if function.name != selected.name()
         || crate::metadata::semantic::declaration_visibility(function.base.flags)
             != selected.visibility()
@@ -124,7 +143,10 @@ pub(super) fn authenticate(
             "a constructor result is not its declared class application",
         ));
     }
-    Ok(declaration)
+    Ok(match outer {
+        Some(outer) => declaration.with_outer_instance(outer),
+        None => declaration,
+    })
 }
 
 /// Declaration authentication for an already defined initializer. This does not authorize
@@ -360,6 +382,14 @@ impl ConstructorDeclaration {
         self
     }
 
+    /// The published declaration of an inner class, whose parameters do not list the outer
+    /// instance of type `outer` it takes first.
+    fn with_outer_instance(mut self, outer: Ty) -> Self {
+        self.params.insert(0, outer);
+        self.defaults.insert(0, false);
+        self.with_enclosing_instance()
+    }
+
     pub(super) fn default_allowed(&self, ordinal: usize) -> bool {
         self.defaults.get(ordinal).copied().unwrap_or(false)
     }
@@ -420,6 +450,32 @@ impl ConstructorDeclaration {
             .iter()
             .map(|parameter| crate::types::ty_subst_applied_arguments(*parameter, &bindings))
             .collect())
+    }
+}
+
+/// A constructor call's arguments in its constructor's parameter order: an inner class's outer
+/// instance, its dispatch receiver, comes first, as a flat argument list already orders it.
+pub(super) fn constructor_arguments(
+    access: &KlibIrMemberAccess,
+    enclosing_instance: bool,
+) -> Result<Vec<Option<KlibIrExprId>>, KlibBodyDeclineReason> {
+    match &access.arguments {
+        KlibIrArguments::Flat(values) => Ok(values.clone()),
+        KlibIrArguments::Split {
+            dispatch_receiver: None,
+            extension_receiver: None,
+            values,
+        } if !enclosing_instance => Ok(values.clone()),
+        KlibIrArguments::Split {
+            dispatch_receiver: Some(outer),
+            extension_receiver: None,
+            values,
+        } if enclosing_instance => Ok(std::iter::once(Some(*outer))
+            .chain(values.iter().copied())
+            .collect()),
+        _ => Err(mismatch(
+            "a constructor call supplies a dispatch or extension receiver",
+        )),
     }
 }
 

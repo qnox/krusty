@@ -173,7 +173,7 @@ impl Lane for WasmLane {
     }
 
     fn not_applicable(&self, src: &str) -> Option<&'static str> {
-        self.not_applicable_for(krusty::kotlin_version::target(), src)
+        self.not_applicable_for(krusty::kotlin_version::environment_release(), src)
     }
 
     fn harness_limitation(&self, _src: &str) -> Option<&'static str> {
@@ -219,7 +219,7 @@ impl Lane for WasmLane {
             Ok(backend) => backend.with_entry_module(entry_module.name.clone()),
             Err(outcome) => return outcome,
         };
-        let features = krusty::features::LangFeatures::from_source(directive_source);
+        let features = krusty::features::LangFeatures::from_source_in_environment(directive_source);
         let platform = match self.target {
             WasmTarget::Js => krusty::klib::write::KlibPlatform::WasmJs,
             WasmTarget::Wasi => krusty::klib::write::KlibPlatform::WasmWasi,
@@ -227,7 +227,7 @@ impl Lane for WasmLane {
         let metadata = krusty::klib::backend::KlibBackend::new(
             platform,
             krusty::klib::write::KlibStamp::new(
-                krusty::kotlin_version::target(),
+                krusty::kotlin_version::environment_release(),
                 features.language_version(),
             ),
         )
@@ -267,7 +267,7 @@ fn wasm_applicability_reads_both_the_family_and_the_exact_target() {
             TestTarget::WasmWasi,
             format!(
                 "kotlin-stdlib-wasm-wasi-{}.klib",
-                krusty::kotlin_version::target()
+                krusty::kotlin_version::environment_release()
             ),
         ),
     ] {
@@ -1404,7 +1404,7 @@ fn expect_reference_array_bounds(source: &str, name: &str) {
     ]);
     assert_eq!(DEFAULTS.check(), Ok(()));
     let default = *DEFAULTS
-        .get(krusty::kotlin_version::target())
+        .get(krusty::kotlin_version::environment_release())
         .expect("supported release");
     for target in WasmTarget::ALL {
         let lane = WasmLane { target };
@@ -1934,6 +1934,27 @@ fn wasm_runtime_list_iterator_is_a_list_iterator() {
         include_str!("wasm_regressions/arrayListListIteratorInterfaces.kt"),
         "wasmArrayListListIteratorInterfaces",
     );
+}
+
+// PLATFORM-SPECIFIC: kotlinc's Wasm analyzer services import `kotlin.js.*` on both Wasm targets,
+// but only the wasm-js stdlib declares `JsAny` there, so this program runs on wasm-js alone.
+#[test]
+fn wasm_js_kotlin_js_declarations_resolve_without_an_import() {
+    let stem = "wasmUnqualifiedJsAny";
+    let src = include_str!("wasm_regressions/unqualifiedJsAny.kt");
+    let lane = WasmLane {
+        target: WasmTarget::Js,
+    };
+    if !focused_wasm_lane_available(&lane, stem) {
+        return;
+    }
+    let outcome = lane.compile_and_run(
+        &std::env::temp_dir(),
+        stem,
+        &[(format!("{stem}.kt"), src.to_string())],
+        src,
+    );
+    assert_eq!(outcome, Outcome::Pass, "{stem} on {}", lane.target.name());
 }
 
 #[path = "wasm_unsigned_decimal.rs"]

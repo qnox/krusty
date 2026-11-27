@@ -905,6 +905,8 @@ mod tests {
             "inline_expansion",
             "ir",
             "klib_libraries",
+            // The unit lowers under the reference profile its compilation was checked against.
+            "kotlin_version",
             "libraries",
             "metadata",
             "symbol_source",
@@ -1268,6 +1270,14 @@ mod tests {
         ];
         assert_allowed_crate_modules("src/plugin_ir.rs", &allowed);
         assert_allowed_crate_modules_in_tree("src/plugin_ir", &allowed);
+    }
+
+    #[test]
+    fn the_analysis_round_reads_only_the_parsed_declarations() {
+        // It lists a module's declarations as positions: the outline of each parsed file and the
+        // offsets kotlinc measures. It resolves nothing and reaches no backend.
+        let allowed = ["diag", "features", "frontend", "libraries"];
+        assert_allowed_crate_modules("src/analysis_round.rs", &allowed);
     }
 
     #[test]

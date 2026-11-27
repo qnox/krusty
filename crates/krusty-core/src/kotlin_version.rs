@@ -4,21 +4,21 @@
 //! compilers do not agree on everything a user can observe. kotlinc 2.4.20, for instance, rewords
 //! a batch of diagnostics and reports NO_VALUE_FOR_PARAMETER at a different position than 2.4.10.
 //! A behavior that differs between reference versions is a [`Quirk`]: its releases are recorded
-//! once, in the quirk table, and code tests the reproduced profile ([`Quirks::target`]) instead of
+//! once, in the quirk table, and code tests the reproduced profile ([`ReferenceProfile::quirks`]) instead of
 //! comparing versions. Diagnostic wording lives in [`crate::diagnostic_wording`], keyed by version.
 //!
-//! The target is process-wide, like the reference toolchain [`crate::toolchain`] already selects:
-//! the `-Xkotlin-reference-version=` flag ([`set_target`]) wins, then `KRUSTY_LANGUAGE_VERSION`
-//! (already part of the build-cache key), then the newest stable manifest entry. A pre-release
-//! stays supported, but it is not the default. A worker or daemon therefore serves one reference
-//! version for its lifetime.
+//! The reference profile is a value, never process state: [`ReferenceProfile`] pairs the release a
+//! compilation reproduces with its defects mode, and travels with the compilation's language
+//! features. Several compilations with different profiles can therefore run in one process,
+//! concurrently. A driver chooses the release (a flag, [`REFERENCE_VERSION_VARIABLE`], or the newest
+//! stable manifest entry) and builds the profile once. A pre-release stays supported, but it is not
+//! the default.
 //!
 //! A compilation reproduces its release's defects too, unless it asks krusty to fix them
-//! (`-Xfix-kotlinc-defects`, [`set_kotlinc_defects`]); that choice is process-wide in the same way.
+//! (`-Xfix-kotlinc-defects`, [`KotlincDefects::Fix`]).
 
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
 mod quirks;
 
@@ -59,6 +59,11 @@ impl KotlinVersion {
         patch: 0,
         pre: PreRelease::Rc(2),
     };
+
+    /// Whether this is a pre-release (`-BetaN`, `-RC`, `-RCN`) rather than a stable release.
+    pub const fn is_pre_release(self) -> bool {
+        !matches!(self.pre, PreRelease::Stable)
+    }
 
     pub const fn new(major: u16, minor: u16, patch: u16) -> Self {
         Self {
@@ -263,32 +268,18 @@ fn newest_file(
         .find(|path| path.exists())
 }
 
-static TARGET: OnceLock<KotlinVersion> = OnceLock::new();
-
-/// Fix the reference version for this process. Must run before anything reads [`target`]; a
-/// version the manifest does not list is refused, since krusty makes no claim about it.
-pub fn set_target(version: KotlinVersion) -> Result<(), String> {
+/// Refuse a release the manifest does not list: krusty makes no claim about it.
+pub fn validate_release(version: KotlinVersion) -> Result<KotlinVersion, String> {
     let supported = KotlinVersion::supported();
-    if !supported.contains(&version) {
+    if supported.contains(&version) {
+        Ok(version)
+    } else {
         let listed: Vec<String> = supported.iter().map(ToString::to_string).collect();
-        return Err(format!(
+        Err(format!(
             "unsupported Kotlin reference version {version}; supported: {}",
             listed.join(", ")
-        ));
-    }
-    let chosen = *TARGET.get_or_init(|| version);
-    if chosen == version {
-        Ok(())
-    } else {
-        Err(format!(
-            "the Kotlin reference version is already {chosen} in this process; cannot switch to {version}"
         ))
     }
-}
-
-/// The reference version this process reproduces.
-pub fn target() -> KotlinVersion {
-    *TARGET.get_or_init(|| configured_target().unwrap_or_else(|error| panic!("{error}")))
 }
 
 /// Whether a compilation reproduces the reference release's defects ([`Quirk::is_defect`]) or fixes
@@ -300,39 +291,66 @@ pub enum KotlincDefects {
     Fix,
 }
 
-static DEFECTS: OnceLock<KotlincDefects> = OnceLock::new();
+/// What one compilation reproduces of kotlinc: its reference release and whether it keeps that
+/// release's defects. The quirk profile is derived once, so consumers test one bit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ReferenceProfile {
+    release: KotlinVersion,
+    defects: KotlincDefects,
+    quirks: Quirks,
+}
 
-/// Fix whether this process reproduces or fixes kotlinc's defects. Must run before anything reads
-/// [`kotlinc_defects`] or [`Quirks::target`]; a second, different choice is refused.
-pub fn set_kotlinc_defects(defects: KotlincDefects) -> Result<(), String> {
-    let chosen = *DEFECTS.get_or_init(|| defects);
-    if chosen == defects {
-        Ok(())
-    } else {
-        Err(match chosen {
-            KotlincDefects::Reproduce => {
-                "this process already reproduces kotlinc's defects; cannot fix them".to_string()
-            }
-            KotlincDefects::Fix => {
-                "this process already fixes kotlinc's defects; cannot reproduce them".to_string()
-            }
-        })
+impl ReferenceProfile {
+    pub fn new(release: KotlinVersion, defects: KotlincDefects) -> Self {
+        Self {
+            release,
+            defects,
+            quirks: Quirks::of_release(release).under(defects),
+        }
+    }
+
+    /// `release`, reproducing its defects.
+    pub fn of_release(release: KotlinVersion) -> Self {
+        Self::new(release, KotlincDefects::Reproduce)
+    }
+
+    pub fn release(&self) -> KotlinVersion {
+        self.release
+    }
+
+    pub fn defects(&self) -> KotlincDefects {
+        self.defects
+    }
+
+    pub fn quirks(&self) -> Quirks {
+        self.quirks
+    }
+
+    /// Whether the release is `version` or newer. A behavior difference is a [`Quirk`] instead;
+    /// this answers the wording table and tests.
+    pub fn at_least(&self, version: KotlinVersion) -> bool {
+        self.release >= version
+    }
+
+    /// This profile's release, with `defects` instead.
+    pub fn with_defects(self, defects: KotlincDefects) -> Self {
+        Self::new(self.release, defects)
     }
 }
 
-/// Whether this process reproduces or fixes kotlinc's defects: [`KotlincDefects::Reproduce`]
-/// unless [`set_kotlinc_defects`] chose otherwise first.
-pub fn kotlinc_defects() -> KotlincDefects {
-    *DEFECTS.get_or_init(KotlincDefects::default)
+impl Default for ReferenceProfile {
+    /// The newest release krusty models, reproducing its defects.
+    fn default() -> Self {
+        Self::of_release(KotlinVersion::newest())
+    }
 }
 
 /// The environment variable that selects the reference version when no flag does.
 pub const REFERENCE_VERSION_VARIABLE: &str = "KRUSTY_LANGUAGE_VERSION";
 
-/// Validate the environment-selected reference version without fixing the process-wide target.
-/// Drivers use this to turn a bad build configuration into an ordinary compilation error; library
-/// callers that read [`target`] directly still fail loudly instead of silently compiling as a
-/// different Kotlin release.
+/// The environment-selected reference release, or the newest supported one. Only a driver or test
+/// harness calls this, once, to choose a compilation's [`ReferenceProfile`]; the pipeline never
+/// reads the environment.
 pub fn configured_target() -> Result<KotlinVersion, String> {
     match std::env::var(REFERENCE_VERSION_VARIABLE) {
         Ok(value) => target_from(Some(value)),
@@ -347,14 +365,15 @@ pub fn configured_target() -> Result<KotlinVersion, String> {
 /// Whether a class's static state initializes in program order around its `companion object`, as
 /// kotlinc does from 2.5, rather than with every block property before the companion's body
 /// ([`Quirk::ClassStaticsInitializeBeforeCompanionBody`]).
-pub fn class_statics_in_program_order() -> bool {
-    !Quirks::target().has(Quirk::ClassStaticsInitializeBeforeCompanionBody)
+pub fn class_statics_in_program_order(quirks: Quirks) -> bool {
+    !quirks.has(Quirk::ClassStaticsInitializeBeforeCompanionBody)
 }
 
-/// Whether the reference version is `version` or newer. A behavior difference is a [`Quirk`]
-/// instead; this answers the wording table and tests.
-pub fn at_least(version: KotlinVersion) -> bool {
-    target() >= version
+/// [`configured_target`], failing loudly on an invalid environment. Reference-toolchain locators and
+/// conformance harnesses, which select a provisioned kotlinc by the environment's release, use this;
+/// a compilation never does: it carries its own [`ReferenceProfile`].
+pub fn environment_release() -> KotlinVersion {
+    configured_target().unwrap_or_else(|error| panic!("{error}"))
 }
 
 fn target_from(env: Option<String>) -> Result<KotlinVersion, String> {
@@ -401,6 +420,8 @@ mod tests {
         assert!(version("2.5.0-RC") < version("2.5.0-RC2"));
         assert!(version("2.5.0-RC2") < version("2.5.0"));
         assert_eq!(version("2.5.0-RC2"), KotlinVersion::V2_5_0_RC2);
+        assert!(version("2.5.0-RC").is_pre_release());
+        assert!(!version("2.5.0").is_pre_release());
         assert_eq!(version("2.5.0-RC").to_string(), "2.5.0-RC");
         assert_eq!(version("2.5.0-RC2").to_string(), "2.5.0-RC2");
     }
@@ -461,6 +482,20 @@ mod tests {
         );
         assert_eq!(RECORDS.get(KotlinVersion::new(2, 4, 99)), None);
         assert_eq!(RECORDS.get(KotlinVersion::new(2, 3, 0)), None);
+    }
+
+    #[test]
+    fn profiles_with_different_settings_coexist_in_one_process() {
+        let newest = KotlinVersion::newest();
+        let reproduce = ReferenceProfile::new(newest, KotlincDefects::Reproduce);
+        let fix = ReferenceProfile::new(newest, KotlincDefects::Fix);
+        let older = ReferenceProfile::of_release(KotlinVersion::V2_4_0);
+        assert_eq!(reproduce.defects(), KotlincDefects::Reproduce);
+        assert_eq!(fix.defects(), KotlincDefects::Fix);
+        assert_eq!(reproduce.release(), fix.release());
+        assert_eq!(older.release(), KotlinVersion::V2_4_0);
+        assert_eq!(fix.quirks(), reproduce.quirks().under(KotlincDefects::Fix));
+        assert_eq!(fix.with_defects(KotlincDefects::Reproduce), reproduce);
     }
 
     #[test]

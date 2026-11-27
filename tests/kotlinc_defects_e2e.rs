@@ -106,6 +106,37 @@ const LIST_ADD_ALL_OF_ITS_RANGE: &str = "fun box(): String {\n\
     \x20   return \"$answer $list\"\n\
     }\n";
 
+/// KT-89466: a platform module's class over the class of a library its common module depends on.
+/// kotlinc-native builds the library, then crashes actualizing the application's fragments.
+const PLATFORM_CLASS_OVER_LIBRARY_CLASS: &str = r#"// LANGUAGE: +MultiPlatformProjects
+
+// MODULE: lib-common
+class Some(val origin: String = "common")
+
+object Single {
+    fun origin(): String = "common"
+}
+
+// MODULE: lib-platform()()(lib-common)
+
+// MODULE: app-common(lib-common)
+fun accept(s: Some) {}
+
+// MODULE: app-platform(lib-platform)()(app-common)
+class Some(val origin: String = "platform")
+
+object Single {
+    fun origin(): String = "platform"
+}
+
+fun box(): String {
+    val some: Any = Some()
+    if (some !is Some) return "type test"
+    if (Single.origin() != "platform") return "object"
+    return if (Some().origin == "platform") "OK" else "constructor"
+}
+"#;
+
 /// The program that shows `quirk`, for a defect. Every quirk is named, so a new one has to say
 /// here whether it is a defect and, if so, which program shows it.
 fn defect(quirk: Quirk) -> Option<Defect> {
@@ -145,13 +176,14 @@ fn defect(quirk: Quirk) -> Option<Defect> {
         | Quirk::SyntheticClassXiOmitsVisibility
         | Quirk::AnnotationImplCarriesNullability
         | Quirk::KlibLegacyMetadataVersionBelowLanguage23
-        | Quirk::ClassStaticsInitializeBeforeCompanionBody => None,
+        | Quirk::ClassStaticsInitializeBeforeCompanionBody
+        | Quirk::NotNullOperatorDropsIntersectionApproximation => None,
     }
 }
 
 /// Every defect, with what the reference release gives for its program.
 fn defects() -> Vec<(Quirk, Defect, Outcome)> {
-    let release = Quirks::of_release(krusty::kotlin_version::target());
+    let release = Quirks::of_release(krusty::kotlin_version::environment_release());
     Quirk::ALL
         .iter()
         .filter_map(|&quirk| {
@@ -184,7 +216,7 @@ fn kotlinc_has_each_defect_in_the_releases_the_table_names() {
                     outcome,
                     reference,
                     "{quirk:?} on {platform:?} kotlinc {}",
-                    krusty::kotlin_version::target()
+                    krusty::kotlin_version::environment_release()
                 );
             }
         }
@@ -354,5 +386,23 @@ fn collect_classes(root: &Path, dir: &Path, classes: &mut Vec<(String, Vec<u8>)>
                 .replace(std::path::MAIN_SEPARATOR, "/");
             classes.push((name, std::fs::read(&path).expect("read a class")));
         }
+    }
+}
+
+/// kotlinc-native's report for [`PLATFORM_CLASS_OVER_LIBRARY_CLASS`]: its HMPP actualizer looks up
+/// the platform fragment's module in a map that holds only the library's.
+#[test]
+fn kotlinc_native_cannot_actualize_a_platform_class_over_a_library_class() {
+    if let Some(outcome) =
+        common::kotlin_native_multimodule_outcome(PLATFORM_CLASS_OVER_LIBRARY_CLASS)
+    {
+        assert_eq!(
+            outcome,
+            common::NativeModulesOutcome::Rejected(
+                "exception: java.util.NoSuchElementException: Key Module <app-platform> is \
+                 missing in the map."
+                    .to_string()
+            )
+        );
     }
 }

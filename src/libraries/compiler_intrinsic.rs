@@ -19,6 +19,43 @@ pub enum ClassNameKind {
     Qualified,
 }
 
+/// Which characters of a `CharArray` an authenticated conversion to a `String` reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CharArrayRange {
+    /// The whole array: `concatToString()`.
+    Whole,
+    /// `concatToString(startIndex, endIndex)`, the characters from `startIndex` until `endIndex`.
+    StartEnd,
+}
+
+/// Which neighbour of a floating-point value an authenticated `nextUp`/`nextDown` answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdjacentDirection {
+    /// `nextUp()`, the adjacent representable value toward positive infinity.
+    Up,
+    /// `nextDown()`, the adjacent representable value toward negative infinity.
+    Down,
+}
+
+/// Which half of a UTF-16 surrogate pair an authenticated `Char` predicate recognizes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurrogateHalf {
+    /// `Char.isHighSurrogate()`, the leading half `\uD800..=\uDBFF`.
+    High,
+    /// `Char.isLowSurrogate()`, the trailing half `\uDC00..=\uDFFF`.
+    Low,
+}
+
+impl SurrogateHalf {
+    /// The inclusive UTF-16 code-unit range of this half.
+    pub fn code_units(self) -> std::ops::RangeInclusive<u16> {
+        match self {
+            Self::High => 0xD800..=0xDBFF,
+            Self::Low => 0xDC00..=0xDFFF,
+        }
+    }
+}
+
 /// Storage supplied by a target for an authenticated stdlib collection factory. The selected
 /// declaration distinguishes one array element from a packed array of elements before substitution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +132,20 @@ pub enum CompilerIntrinsic {
     FloatingIsInfinite {
         operand: crate::types::Ty,
     },
+    /// Native's exact `GCUnsafeCall` `nextUp`/`nextDown` declaration: the adjacent representable
+    /// value of the extension receiver, at the receiver's own width.
+    FloatingAdjacent {
+        operand: crate::types::Ty,
+        direction: AdjacentDirection,
+    },
+    /// Native's exact `GCUnsafeCall` `countLeadingZeroBits` declaration of `Int` or `Long`: the
+    /// zero bits above the highest set one, the whole width for zero.
+    CountLeadingZeroBits {
+        operand: crate::types::Ty,
+    },
+    /// Native's exact `GCUnsafeCall` `Char` surrogate predicate declaration. A target answers it
+    /// with a range test of the receiver's code unit.
+    CharIsSurrogate(SurrogateHalf),
     /// Exact Kotlin array-factory declaration whose implementation is supplied by the compiler.
     /// The kind distinguishes reference/primitive varargs and the other language array creators;
     /// selected call-site types remain ordinary semantic types and are recorded in checked FIR.
@@ -122,6 +173,12 @@ pub enum CompilerIntrinsic {
     /// units. A target that lays out strings itself orders them itself, as it reads their length
     /// and code units.
     StringCompare,
+    /// `String.subSequence(Int, Int): CharSequence`, the characters between two indices of a
+    /// string, which is itself a string. A target that lays out strings itself copies them.
+    StringSubSequence,
+    /// `CharArray.concatToString` of `kotlin.text`: the string of a range of a char array's units. A target that lays out strings itself checks the
+    /// range as the stdlib does and copies the units.
+    CharArrayToString(CharArrayRange),
     NullableAnyToString,
     /// Exact builtin numeric/character conversion declaration selected from Kotlin builtins.
     /// The source and target types remain call-site semantic facts on FIR; this marker only states
@@ -167,6 +224,10 @@ pub enum CompilerIntrinsic {
         platform_default: crate::types::AssertionCompilation,
     },
     AssertFailsWith,
+    /// The Native/Wasm stdlib's `isAssertionThrowingErrorEnabled()` and
+    /// `isAssertionArgumentEvaluationEnabled()`, which the compiler answers for the whole build.
+    /// Both answer the assertion switch of kotlinc's default build, which is off.
+    AssertionSwitch,
     Print,
     Println,
     StartCoroutine,
@@ -307,4 +368,24 @@ pub enum IndicesReceiver {
     Array,
     Collection,
     CharSequence,
+}
+
+impl IndicesReceiver {
+    /// The property `IndicesHandler` bounds a loop over the indices of this receiver kind with.
+    pub fn bound_property(self) -> &'static str {
+        match self {
+            Self::Array | Self::Collection => crate::types::wk::SIZE,
+            Self::CharSequence => crate::types::wk::CHAR_SEQUENCE_LENGTH,
+        }
+    }
+
+    /// The one class declaring that property for every receiver of this kind. An array kind
+    /// spans many array classes, so none names it.
+    pub fn bound_class(self) -> Option<crate::types::TypeName> {
+        match self {
+            Self::Array => None,
+            Self::Collection => Some(crate::types::wk::collection()),
+            Self::CharSequence => Some(crate::types::wk::char_sequence()),
+        }
+    }
 }

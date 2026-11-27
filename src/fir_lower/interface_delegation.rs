@@ -147,7 +147,7 @@ pub(super) fn finalize_interface_delegations(
                 class,
                 ordinal,
             };
-            materialize_delegation(delegate, delegation, &mut parameter_stores, ir)?;
+            materialize_delegation(index, delegate, delegation, &mut parameter_stores, ir)?;
         }
         prepend_initializers(ir, class, parameter_stores);
     }
@@ -163,6 +163,7 @@ struct DelegationSite {
 }
 
 fn materialize_delegation(
+    index: &ResolvedModuleIndex,
     site: DelegationSite,
     delegation: &ResolvedInterfaceDelegation,
     parameter_stores: &mut Vec<u32>,
@@ -272,6 +273,19 @@ fn materialize_delegation(
                     result,
                 );
                 ir.fn_source_names.insert(function, member.name.to_string());
+                // The forwarder's status is the shared override rule over the declarations it
+                // overrides, read from the published index.
+                let status = index.delegated_function_status(&member.overridden);
+                if status.return_value != crate::types::ReturnValueStatus::Unspecified {
+                    ir.fn_return_value_statuses
+                        .insert(function, status.return_value);
+                }
+                if status.operator {
+                    ir.operator_fns.insert(function);
+                }
+                if status.infix {
+                    ir.infix_fns.insert(function);
+                }
                 let parameter_identities = member
                     .parameter_identities
                     .iter()
@@ -364,6 +378,8 @@ fn materialize_delegation(
                     return Err(FirFileLoweringFailure::MissingClassifier(declaration));
                 };
                 let name = property.name.to_string();
+                let return_value_status =
+                    index.delegated_property_return_value_status(&property.overridden);
                 let ty = property.ty.get();
                 let context_params = property
                     .context_parameters
@@ -519,12 +535,13 @@ fn materialize_delegation(
                             context_params,
                             is_var: setter.is_some(),
                             is_abstract: false,
-                            modifiers: DELEGATION_PROPERTY_MODIFIERS,
+                            modifiers: delegation_property_modifiers(&property.overridden),
                             delegate_field: None,
                             getter,
                             setter,
                             visibility: crate::types::Visibility::Public,
                             type_params,
+                            return_value_status,
                             accessor_annotations: Default::default(),
                         });
                     continue;
@@ -542,14 +559,14 @@ fn materialize_delegation(
                     ty,
                     type_params,
                     visibility: crate::types::Visibility::Public,
-                    return_value_status: Default::default(),
+                    return_value_status,
                     annotations: Box::new([]),
                     initializer: None,
                     storage_ty: None,
                     backing_field: None,
                     is_var: property.setter.is_some(),
                     is_open: true,
-                    modifiers: DELEGATION_PROPERTY_MODIFIERS,
+                    modifiers: delegation_property_modifiers(&property.overridden),
                     delegate_field: None,
                     has_constant_initializer: false,
                     is_private: false,
@@ -880,16 +897,22 @@ fn add_forwarder(
 }
 
 /// A delegated property is an overridable override, whatever the delegating class's modality, and
-/// Kotlin metadata records it as a delegation member rather than a declaration.
-const DELEGATION_PROPERTY_MODIFIERS: crate::ir::IrPropertyModifiers =
+/// Kotlin metadata records it as a delegation member rather than a declaration. The accessors of
+/// the delegated declaration (the first overridden) that have bodies make the forwarder's own
+/// non-default, as kotlinc writes them.
+fn delegation_property_modifiers(
+    overridden: &[crate::fir::ResolvedDelegatedPropertyDeclaration],
+) -> crate::ir::IrPropertyModifiers {
+    let delegated = overridden.first();
     crate::ir::IrPropertyModifiers {
         modality: crate::ir::IrPropertyModality::Open,
-        declared_getter: false,
-        declared_setter: false,
+        declared_getter: delegated.is_some_and(|declaration| declaration.getter_has_body),
+        declared_setter: delegated.is_some_and(|declaration| declaration.setter_has_body),
         delegated: false,
         lateinit: false,
         member_kind: crate::ir::IrMemberKind::Delegation,
-    };
+    }
+}
 
 fn stamp_generated(ir: &mut IrFile, first: usize) {
     let cause = crate::fir::OriginId::from_raw(0);

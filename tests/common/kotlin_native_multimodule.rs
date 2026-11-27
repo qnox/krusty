@@ -10,20 +10,29 @@ use krusty::fx_hash::{HashMap, HashSet};
 use krusty::kotlin_version::KotlinVersion;
 
 use super::reference_recording_support::{
-    kotlin_native_program_arguments, kotlin_native_root, recorded,
+    kotlin_native_program_arguments, kotlin_native_root, recorded, run_program_bounded,
 };
 
-/// What `box()` answers when kotlinc-native builds an exact `// MODULE:` graph as KLIB
-/// dependencies and a final native program. `None` when kotlin-native is not provisioned and no
-/// recording exists.
+/// What kotlinc-native makes of an exact `// MODULE:` graph.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeModulesOutcome {
+    /// The final module's compilation fails; the compiler's own report.
+    Rejected(String),
+    /// `box()`'s answer.
+    Answer(String),
+}
+
+/// What kotlinc-native makes of an exact `// MODULE:` graph built as KLIB dependencies and a final
+/// native program. `None` when kotlin-native is not provisioned and no recording exists.
 ///
-/// Every non-final [`krusty::conformance::ModuleUnit`] is a real KLIB. The final unit sees only its
-/// declared dependency closure, with declared friends also passed through the Native compiler's
-/// friend-module channel. A folded `dependsOn` chain remains an HMPP compilation: its source files
-/// are assigned to their original fragments and its refinement edges are preserved.
-pub fn kotlin_native_multimodule_box(source: &str) -> Option<String> {
+/// Every non-final [`krusty::conformance::ModuleUnit`] is a real KLIB and must build. The final
+/// unit sees only its declared dependency closure, with declared friends also passed through the
+/// Native compiler's friend-module channel; if it fails, the failure is the outcome, recorded like
+/// an answer. A folded `dependsOn` chain remains an HMPP compilation: its source files are
+/// assigned to their original fragments and its refinement edges are preserved.
+pub fn kotlin_native_multimodule_outcome(source: &str) -> Option<NativeModulesOutcome> {
     let recorded_source = [("modules.kt", source)];
-    let fingerprint_arguments = ["native-module-graph-v6-prepared-platform-settings".to_string()];
+    let fingerprint_arguments = ["native-module-graph-v7-prepared-platform-settings".to_string()];
     let files = recorded(
         CompilationTarget::Native,
         "multimodule-program",
@@ -31,6 +40,11 @@ pub fn kotlin_native_multimodule_box(source: &str) -> Option<String> {
         &fingerprint_arguments,
         |work| kotlin_native_multimodule_live(work, source),
     )?;
+    if let Some(reason) = files.get("rejected") {
+        return Some(NativeModulesOutcome::Rejected(
+            String::from_utf8(reason.clone()).expect("recorded text is UTF-8"),
+        ));
+    }
     let stdout = files
         .get("stdout")
         .expect("a multimodule box recording holds the program's stdout");
@@ -42,7 +56,7 @@ pub fn kotlin_native_multimodule_box(source: &str) -> Option<String> {
         !answer.contains(krusty::backend::BOX_RESULT_FRAME),
         "a multimodule box program prints exactly one result frame"
     );
-    Some(answer.to_string())
+    Some(NativeModulesOutcome::Answer(answer.to_string()))
 }
 
 #[derive(Clone)]
@@ -164,7 +178,7 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         order_libraries_for_native_linker(
             &mut libraries,
             &friend_paths,
-            krusty::kotlin_version::target(),
+            krusty::kotlin_version::environment_release(),
         );
 
         // Only the arguments are used: the persistent server runs the compiler.
@@ -211,6 +225,21 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         }
         let arguments = command.get_args().map(OsString::from).collect::<Vec<_>>();
         let output = super::common::kotlin_native_server::kotlinc_native(&native_root, &arguments);
+        if final_unit && output.status != 0 {
+            // Only a failure the compiler itself reports is its rejection of the program. A crash
+            // or a refused launch without such a line is an environment failure, and recording it
+            // would cache it as the oracle's answer.
+            if let Some(reason) = output
+                .stderr
+                .lines()
+                .find(|line| line.starts_with("exception:") || line.starts_with("error:"))
+            {
+                return Some(BTreeMap::from([(
+                    "rejected".to_string(),
+                    reason.as_bytes().to_vec(),
+                )]));
+            }
+        }
         assert!(
             output.status == 0,
             "kotlinc-native rejected module {} (status {}):\n{}",
@@ -236,9 +265,7 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
     }
 
     let executable = work.join("program.kexe");
-    let run = Command::new(&executable)
-        .output()
-        .expect("run the kotlinc-native multimodule program");
+    let run = run_program_bounded(&executable);
     assert!(
         run.status.success(),
         "the kotlinc-native multimodule program exited with {}:\n{}",
@@ -481,9 +508,11 @@ mod tests {
             },
         ];
         assert_eq!(modules, expected);
-        let flag = krusty::features::FeatureTable::for_version(krusty::kotlin_version::target())
-            .expect("the pinned feature table")
-            .language_argument("+CompanionBlocks");
+        let flag = krusty::features::FeatureTable::for_version(
+            krusty::kotlin_version::environment_release(),
+        )
+        .expect("the pinned feature table")
+        .language_argument("+CompanionBlocks");
         assert_eq!(arguments, vec![flag]);
     }
 

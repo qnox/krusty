@@ -301,7 +301,7 @@ class ResultContinuation : Continuation<Any?> {
 /// needs `@JvmInline`. The JVM runner inserts it only while `FullValueClasses` is disabled; Native
 /// and Wasm always expand it to nothing because their `value class` needs no JVM annotation.
 pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
-    prepare_test_source_for(src, target, crate::kotlin_version::target())
+    prepare_test_source_for(src, target, crate::kotlin_version::environment_release())
 }
 
 /// The name Kotlin's runner gives its JVM `TargetBackend`, which `BACKEND_UNDER_TEST` spells. Kotlin
@@ -321,7 +321,7 @@ fn prepare_test_source_for(
     release: crate::kotlin_version::KotlinVersion,
 ) -> String {
     let full_value_classes =
-        crate::features::LangFeatures::from_source(src).has("FullValueClasses");
+        crate::features::LangFeatures::from_source_in_environment(src).has("FullValueClasses");
     let jvm = jvm_backend_under_test(release);
     let (value_class_annotation, backend) = match target {
         TestTarget::Jvm if !full_value_classes => ("@JvmInline", jvm),

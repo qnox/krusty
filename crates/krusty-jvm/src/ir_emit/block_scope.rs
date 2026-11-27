@@ -4,8 +4,9 @@ use krusty::fx_hash::{HashMap, HashSet};
 
 use super::declaration_types::jvm_is_erased_top;
 use super::frame_map::{FrameKey, Mark, TempRole, TempSlot};
+use super::local_variable_representation::is_defaulted_parameter;
 use super::{ir_ty_to_jvm, CodeBuilder, Emitter, Label, Ty};
-use krusty::ir::{IrDebugLocalProvenance, IrExpr};
+use krusty::ir::{IrDebugLocalProvenance, IrExpr, IrInlineLocalRole};
 
 impl Emitter<'_> {
     /// Emit a block statement node, marking its start first when kotlinc's rule says a block of
@@ -229,6 +230,7 @@ impl Emitter<'_> {
             let mut normalize_at_lambda_frame = delays_stack_normalization;
             let opening = self.external_inline_body_opening(block, stmts);
             let mut bound_operands = 0;
+            let mut copied_frame_open = false;
             for (index, &statement) in stmts.iter().enumerate() {
                 if bound_operands > 0 {
                     bound_operands -= 1;
@@ -238,6 +240,8 @@ impl Emitter<'_> {
                 self.enter_copied_function_frame(
                     copied_caller.is_some().then_some(block),
                     statement,
+                    &stmts[index..],
+                    &mut copied_frame_open,
                     code,
                 );
                 // The lambda-frame line owns any caller-stack stores that FixStack inserts at the
@@ -1016,19 +1020,35 @@ impl Emitter<'_> {
         &mut self,
         copied_function: Option<u32>,
         statement: u32,
+        following: &[u32],
+        frame_open: &mut bool,
         code: &mut CodeBuilder,
     ) {
         let Some(block) = copied_function else {
             return;
         };
+        // The callee's frame opens where its operands end: at an omitted parameter's default, which
+        // kotlinc evaluates inside the frame, or at the marker when every parameter was supplied.
         let opens_frame = matches!(
             self.ir.debug_local_provenance(statement),
-            Some(IrDebugLocalProvenance::FunctionFrameMarker)
+            Some(
+                IrDebugLocalProvenance::FunctionFrameMarker
+                    | IrDebugLocalProvenance::InlineValue {
+                        role: IrInlineLocalRole::DefaultedValue,
+                        ..
+                    }
+            )
         );
         if !opens_frame {
-            self.copied_operand_binding = Some(statement);
+            if !*frame_open {
+                self.copied_operand_binding = Some(statement);
+            }
             return;
         }
+        if *frame_open {
+            return;
+        }
+        *frame_open = true;
         self.inside_condition = false;
         if code.is_dead() {
             return;
@@ -1037,6 +1057,16 @@ impl Emitter<'_> {
             self.mark_expression_line(block, line, code);
             code.nop();
         }
+        let default = is_defaulted_parameter(self.ir, statement).then_some(statement);
+        if default.is_some() {
+            self.reserve_defaulted_parameter_slots(following);
+        }
+        self.pending_copied_frames.push(PendingCopiedFrame {
+            block_depth: self.block_depth,
+            start: u16::try_from(code.bytes.len()).ok(),
+            default,
+            enclosing_peak: self.frame.begin_peak(),
+        });
     }
 
     /// kotlinc's `markLineNumberAfterInlineIfNeeded` after a same-module inline expansion: inside a
@@ -1397,6 +1427,7 @@ impl Emitter<'_> {
         let enclosing_operands = self.enter_external_operand_scope(block);
         let optimized_postfix = self.emit_postfix_iinc(block, true, code);
         let mut bound_operands = 0;
+        let mut copied_frame_open = false;
         let mut unit_switch_value = false;
         for (index, statement) in stmts.iter().copied().enumerate() {
             if optimized_postfix {
@@ -1407,7 +1438,13 @@ impl Emitter<'_> {
                 continue;
             }
             self.open_external_inline_body(opening, index, statement, code);
-            self.enter_copied_function_frame(copied_function, statement, code);
+            self.enter_copied_function_frame(
+                copied_function,
+                statement,
+                &stmts[index..],
+                &mut copied_frame_open,
+                code,
+            );
             // FixStack replaces the opening marker with the saved caller stack. Keep that
             // generated store inside the lambda frame's mapped line interval.
             self.mark_statement_line(statement, code);
@@ -2244,4 +2281,21 @@ struct CopiedFunctionCaller {
     line: Option<u16>,
     inside_condition: bool,
     operand_binding: Option<u32>,
+}
+
+/// A same-module callee's frame that has opened and awaits its frame marker.
+pub(super) struct PendingCopiedFrame {
+    /// The block holding the expansion's statements, and so its marker: a marker in a deeper
+    /// block belongs to an inline call evaluated inside it.
+    pub(super) block_depth: usize,
+    /// Where the frame opened, once an omitted parameter's default has begun it ahead of the
+    /// marker; the supplied operands' debug ranges start there.
+    pub(super) start: Option<u16>,
+    /// The first omitted parameter's declaration, when the frame opened at its default. kotlinc
+    /// inlines the callee's real body inside its `$default` stub, so the line mapper has forgotten
+    /// the default's line when the body begins and writes it again.
+    pub(super) default: Option<u32>,
+    /// The frame's measurement of how far the callee's defaults reached, which the real body's
+    /// marker lies above: the stub's locals keep their slots to its end.
+    pub(super) enclosing_peak: u16,
 }

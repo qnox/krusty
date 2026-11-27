@@ -7,20 +7,18 @@
 //! common-IR shape Krusty can currently serialize completely: `return value is/!is T` in an inline
 //! function with a reified own type parameter.
 
+use super::ir_tables::{
+    declaration_table, entry_table, lattice, per_file, symbol, IrTables, CONSTRUCTOR_SYMBOL,
+    FUNCTION_SYMBOL, RECEIVER_PARAMETER_SYMBOL, TYPE_PARAMETER_SYMBOL, VALUE_PARAMETER_SYMBOL,
+};
 use crate::fx_hash::HashMap;
 use crate::ir::{FunId, IrExpr, IrFile, IrParameterRole, IrTypeOp, IrTypeParameter};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::protobuf::Pb;
-use crate::types::{Ty, TyKind, TypeName, TypeVariance};
+use crate::types::{Ty, TyKind, TypeVariance};
 
 const MAIN_PREFIX: &str = "default/ir/";
 const PREPARED_PREFIX: &str = "default/ir_inlinable_functions/";
-const FUNCTION_SYMBOL: u64 = 0;
-const CONSTRUCTOR_SYMBOL: u64 = 1;
-const VALUE_PARAMETER_SYMBOL: u64 = 4;
-const CLASS_SYMBOL: u64 = 6;
-const TYPE_PARAMETER_SYMBOL: u64 = 7;
-const RECEIVER_PARAMETER_SYMBOL: u64 = 11;
 
 /// Exact metadata identities of declarations written into the KLIB fragment, including an
 /// `@InlineOnly` template that deliberately has no standalone target realization.
@@ -57,13 +55,15 @@ pub(super) struct PreparedFunction {
     file_name: String,
     flags: u64,
     inline_only: bool,
+    /// Whether the declaration is `inline`, and so also owns a prepared copy.
+    inline: bool,
     dispatch_receiver: Option<Ty>,
     parameters: Vec<PreparedParameter>,
     context_count: usize,
     extension_parameter: Option<usize>,
     result: Ty,
     type_parameters: Vec<PreparedTypeParameter>,
-    body: ReifiedTypeTest,
+    body: PreparedBody,
 }
 
 #[derive(Clone)]
@@ -82,6 +82,21 @@ struct PreparedTypeParameter {
     reified: bool,
 }
 
+/// The body shapes the writer serializes: a block that returns one value.
+#[derive(Clone)]
+enum PreparedBody {
+    ReifiedTypeTest(ReifiedTypeTest),
+    Return(PreparedValue),
+}
+
+/// The value a returning body produces.
+#[derive(Clone)]
+enum PreparedValue {
+    Constant(crate::ir::IrConst, Ty),
+    /// Read of a physical parameter slot (the dispatch receiver is slot zero when present).
+    Parameter(u32),
+}
+
 #[derive(Clone, Copy)]
 struct ReifiedTypeTest {
     value_slot: u32,
@@ -92,7 +107,8 @@ struct ReifiedTypeTest {
 /// Serialize every exact supported inline template from one checked file.
 ///
 /// Unsupported inline bodies remain metadata-only. The returned functions are later combined into
-/// matching ordinary and prepared-inline components.
+/// matching ordinary and prepared-inline components. Ordinary functions whose body is a supported
+/// shape are serialized as well, as kotlinc does.
 pub(super) fn collect(
     ir: &IrFile,
     file_name: &str,
@@ -106,10 +122,24 @@ pub(super) fn collect(
         .collect::<Vec<_>>();
     ids.sort_unstable();
     for function in ids {
-        let Some(prepared) = prepared_function(ir, file_name, declarations, function) else {
+        let Some(prepared) = prepared_function(ir, file_name, declarations, function, true) else {
             continue;
         };
         functions.push(prepared);
+    }
+    for package_function in &ir.package_functions {
+        if package_function.inline {
+            continue;
+        }
+        if let Some(prepared) = prepared_function(
+            ir,
+            file_name,
+            declarations,
+            package_function.function,
+            false,
+        ) {
+            functions.push(prepared);
+        }
     }
     functions
 }
@@ -119,6 +149,7 @@ fn prepared_function(
     file_name: &str,
     declarations: &DeclarationSignatures,
     function: FunId,
+    inline: bool,
 ) -> Option<PreparedFunction> {
     let (signature, dispatch_receiver) = declarations.get(function)?;
     let declaration = ir.functions.get(function as usize)?;
@@ -150,8 +181,28 @@ fn prepared_function(
         // The prepared wrapper's overridden-symbol list must be complete for virtual members.
         return None;
     }
-    let generic = ir.signatures.get(&function)?;
-    let body = reified_type_test(ir, function, declaration.body?, generic)?;
+    // Only a generic function records a generic signature; any other function's signature is
+    // exactly its declaration's physical parameters and result.
+    let own_signature;
+    let generic = match ir.signatures.get(&function) {
+        Some(generic) => generic,
+        None => {
+            own_signature = crate::ir::IrGenericSig {
+                type_params: Vec::new(),
+                params: declaration.params.clone(),
+                ret: Some(declaration.ret),
+                supers: Vec::new(),
+            };
+            &own_signature
+        }
+    };
+    let physical_arity =
+        generic.params.len() + usize::from(declaration.dispatch_receiver.is_some());
+    let body = if inline {
+        PreparedBody::ReifiedTypeTest(reified_type_test(ir, function, declaration.body?, generic)?)
+    } else {
+        PreparedBody::Return(returned_value(ir, declaration.body?, physical_arity)?)
+    };
     let identities = ir.function_parameter_identities(function)?;
     if identities.len() != generic.params.len() || generic.params.len() != declaration.params.len()
     {
@@ -239,6 +290,7 @@ fn prepared_function(
         file_name: file_name.to_owned(),
         flags,
         inline_only,
+        inline,
         dispatch_receiver: *dispatch_receiver,
         parameters,
         context_count,
@@ -320,6 +372,44 @@ fn reified_type_test(
     })
 }
 
+/// `{ return <constant or parameter> }`, however many single-statement blocks wrap it: the one body shape the ordinary writer serializes.
+fn returned_value(ir: &IrFile, body: u32, physical_arity: usize) -> Option<PreparedValue> {
+    // A source body is a block holding the written block; both only group their one statement.
+    let mut statement = body;
+    while let IrExpr::Block { stmts, value: None } = ir.expr(statement) {
+        let [only] = stmts.as_slice() else {
+            return None;
+        };
+        statement = *only;
+    }
+    let IrExpr::Return(Some(value)) = ir.expr(statement) else {
+        return None;
+    };
+    match ir.expr(*value) {
+        IrExpr::Const(constant) => {
+            let ty = constant_type(constant)?;
+            Some(PreparedValue::Constant(constant.clone(), ty))
+        }
+        IrExpr::GetValue(slot) if usize::try_from(*slot).ok()? < physical_arity => {
+            Some(PreparedValue::Parameter(*slot))
+        }
+        _ => None,
+    }
+}
+
+fn constant_type(constant: &crate::ir::IrConst) -> Option<Ty> {
+    use crate::ir::IrConst;
+    Some(match constant {
+        IrConst::Boolean(_) => Ty::Boolean,
+        IrConst::Int(_) => Ty::Int,
+        IrConst::Long(_) => Ty::Long,
+        IrConst::Double(_) => Ty::Double,
+        // A string with a lone surrogate has no UTF-8 spelling in the string table.
+        IrConst::String(value) if value.as_str().is_some() => Ty::String,
+        _ => return None,
+    })
+}
+
 fn supported_type(ty: Ty, parameters: &[IrTypeParameter]) -> bool {
     match ty.kind() {
         TyKind::Unit | TyKind::Nothing | TyKind::BOOLEAN => true,
@@ -377,19 +467,19 @@ pub(super) fn artifacts(
     functions: &[PreparedFunction],
     complete_main_ir: bool,
 ) -> Vec<(String, Vec<u8>)> {
-    if functions.is_empty() {
-        return Vec::new();
+    let inline = functions
+        .iter()
+        .filter(|function| function.inline)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut artifacts = Vec::new();
+    if complete_main_ir && !functions.is_empty() {
+        artifacts.extend(component_artifacts(functions, Component::Main));
     }
-    let components = if complete_main_ir {
-        [Some(Component::Main), Some(Component::Prepared)]
-    } else {
-        [None, Some(Component::Prepared)]
-    };
-    components
-        .into_iter()
-        .flatten()
-        .flat_map(|component| component_artifacts(functions, component))
-        .collect()
+    if !inline.is_empty() {
+        artifacts.extend(component_artifacts(&inline, Component::Prepared));
+    }
+    artifacts
 }
 
 fn component_artifacts(
@@ -415,20 +505,20 @@ fn component_artifacts(
                 "one ordinary IrFile cannot contain declarations from different packages"
             );
             if package.is_empty() {
-                vec![u64::from(writer.string(""))]
+                vec![u64::from(writer.tables.string(""))]
             } else {
                 package
                     .segments()
                     .iter()
-                    .map(|segment| u64::from(writer.string(segment)))
+                    .map(|segment| u64::from(writer.tables.string(segment)))
                     .collect::<Vec<_>>()
             }
         }
         // Kotlin's prepared-inline component uses one synthetic root file rather than any
         // declaration's source package. Its IrFile records that root as one empty segment.
-        Component::Prepared => vec![u64::from(writer.string(""))],
+        Component::Prepared => vec![u64::from(writer.tables.string(""))],
     };
-    let root_file_entry = writer.file_entry(component.root_file_name());
+    let root_file_entry = writer.tables.file_entry(component.root_file_name());
     let mut file = Pb::new();
     file.field_packed_varints(1, &ids);
     file.field_packed_varints(3, &package);
@@ -437,19 +527,23 @@ fn component_artifacts(
         ("files.knf", per_file(file.into_bytes())),
         (
             "fileEntries.knf",
-            per_file(entry_table(&writer.file_entries)),
+            per_file(entry_table(&writer.tables.file_entries)),
         ),
-        ("bodies.knb", per_file(entry_table(&writer.bodies))),
+        ("bodies.knb", per_file(entry_table(&writer.tables.bodies))),
         (
             "irDeclarations.knd",
             per_file(declaration_table(&declarations)),
         ),
-        ("types.knt", per_file(entry_table(&writer.types))),
-        ("signatures.knt", per_file(entry_table(&writer.signatures))),
+        ("types.knt", per_file(entry_table(&writer.tables.types))),
+        (
+            "signatures.knt",
+            per_file(entry_table(&writer.tables.signatures)),
+        ),
         (
             "strings.knt",
             per_file(entry_table(
                 &writer
+                    .tables
                     .strings
                     .iter()
                     .map(|value| value.as_bytes().to_vec())
@@ -466,21 +560,17 @@ fn component_artifacts(
 
 #[derive(Default)]
 struct FileWriter {
-    strings: Vec<String>,
-    signatures: Vec<Vec<u8>>,
-    types: Vec<Vec<u8>>,
-    bodies: Vec<Vec<u8>>,
-    file_entries: Vec<Vec<u8>>,
+    tables: IrTables,
 }
 
 impl FileWriter {
     fn function(&mut self, function: &PreparedFunction, component: Component) -> (u32, Vec<u8>) {
-        let declaration_signature = self.public_signature(&function.signature);
+        let declaration_signature = self.tables.public_signature(&function.signature);
         let symbol_signature = match component {
             Component::Main => declaration_signature,
             Component::Prepared => {
-                let file = self.file_signature();
-                self.composite_signature(file, declaration_signature)
+                let file = self.tables.file_signature();
+                self.tables.composite_signature(file, declaration_signature)
             }
         };
         let declaration_symbol = symbol(symbol_signature, FUNCTION_SYMBOL);
@@ -494,7 +584,9 @@ impl FileWriter {
                 // identity beneath its private file-scoped function identity; a bare scoped
                 // local cannot be matched to the callee's type parameter during reified
                 // substitution.
-                let signature = self.type_parameter_signature(symbol_signature, index);
+                let signature = self
+                    .tables
+                    .type_parameter_signature(symbol_signature, index);
                 let symbol = symbol(signature, TYPE_PARAMETER_SYMBOL);
                 (index, parameter, symbol)
             })
@@ -502,7 +594,7 @@ impl FileWriter {
         let parameter_symbols = (0..function.parameters.len()
             + usize::from(function.dispatch_receiver.is_some()))
             .map(|slot| {
-                let signature = self.local_signature();
+                let signature = self.tables.local_signature();
                 let logical_slot =
                     slot.checked_sub(usize::from(function.dispatch_receiver.is_some()));
                 let receiver = function.dispatch_receiver.is_some_and(|_| slot == 0)
@@ -521,7 +613,7 @@ impl FileWriter {
             .collect::<Vec<_>>();
         let mut base = Pb::new();
         base.field_varint(1, declaration_symbol);
-        base.field_varint(2, u64::from(self.string("DEFINED")));
+        base.field_varint(2, u64::from(self.tables.string("DEFINED")));
         let flags = match component {
             Component::Main => function.flags,
             // A prepared declaration is a private copy even when the metadata and ordinary IR
@@ -537,12 +629,12 @@ impl FileWriter {
         let result = self.ty(function.result, &type_parameters);
         let mut function_base = Pb::new();
         function_base.field_message(1, &base);
-        let name = self.string(&function.name);
+        let name = self.tables.string(&function.name);
         function_base.field_varint(2, lattice(name, result));
         for (_, parameter, parameter_symbol) in &type_parameters {
             let mut declaration = Pb::new();
             declaration.field_varint(1, *parameter_symbol);
-            declaration.field_varint(2, u64::from(self.string("DEFINED")));
+            declaration.field_varint(2, u64::from(self.tables.string("DEFINED")));
             let variance = match parameter.variance {
                 TypeVariance::In => 0,
                 TypeVariance::Out => 1,
@@ -551,7 +643,7 @@ impl FileWriter {
             declaration.field_varint(4, (variance << 1) | (u64::from(parameter.reified) << 3));
             let mut encoded = Pb::new();
             encoded.field_message(1, &declaration);
-            encoded.field_varint(2, u64::from(self.string(&parameter.name)));
+            encoded.field_varint(2, u64::from(self.tables.string(&parameter.name)));
             let bounds = parameter
                 .bounds
                 .iter()
@@ -600,7 +692,7 @@ impl FileWriter {
         let mut function_wrapper = Pb::new();
         function_wrapper.field_message(1, &function_base);
         if matches!(component, Component::Prepared) {
-            let file_entry = self.file_entry(&function.file_name);
+            let file_entry = self.tables.file_entry(&function.file_name);
             function_wrapper.field_varint(3, u64::from(file_entry));
         }
         let mut declaration = Pb::new();
@@ -618,9 +710,9 @@ impl FileWriter {
     ) -> Pb {
         let mut base = Pb::new();
         base.field_varint(1, symbol);
-        base.field_varint(2, u64::from(self.string("DEFINED")));
+        base.field_varint(2, u64::from(self.tables.string("DEFINED")));
         let ty = self.ty(ty, parameters);
-        let name = self.string(name);
+        let name = self.tables.string(name);
         let mut parameter = Pb::new();
         parameter.field_message(1, &base);
         parameter.field_varint(2, lattice(name, ty));
@@ -661,7 +753,7 @@ impl FileWriter {
             },
         )
         .expect("InlineOnly has an empty signable constructor");
-        let constructor = symbol(self.public_signature(&signature), CONSTRUCTOR_SYMBOL);
+        let constructor = symbol(self.tables.public_signature(&signature), CONSTRUCTOR_SYMBOL);
         let mut annotation = Pb::new();
         annotation.field_varint(1, constructor);
         annotation.field_varint(2, 0);
@@ -677,8 +769,8 @@ impl FileWriter {
         let mut expression = Pb::new();
         expression.field_varint(2, u64::from(ty));
         expression.field_message(5, &constant);
-        let id = u32::try_from(self.bodies.len()).expect("body table fits u32");
-        self.bodies.push(expression.canonical().into_bytes());
+        let id = u32::try_from(self.tables.bodies.len()).expect("body table fits u32");
+        self.tables.bodies.push(expression.canonical().into_bytes());
         id
     }
 
@@ -689,37 +781,15 @@ impl FileWriter {
         values: &[u64],
         parameters: &[(usize, &PreparedTypeParameter, u64)],
     ) -> u32 {
-        let boolean = self.ty(Ty::Boolean, parameters);
-        let value_slot = usize::try_from(function.body.value_slot).expect("value slot fits usize");
-        let argument_ty = if let (0, Some(dispatch)) = (value_slot, function.dispatch_receiver) {
-            dispatch
-        } else {
-            let index = value_slot - usize::from(function.dispatch_receiver.is_some());
-            function.parameters[index].ty
+        let value = match &function.body {
+            PreparedBody::ReifiedTypeTest(test) => {
+                self.reified_type_test(function, test, values, parameters)
+            }
+            PreparedBody::Return(value) => self.returned_value(function, value, values, parameters),
         };
-        let argument_ty = self.ty(argument_ty, parameters);
-        let operand = self.ty(
-            function.type_parameters[function.body.type_parameter].ty,
-            parameters,
-        );
-
-        let mut get = Pb::new();
-        get.field_varint(1, values[value_slot]);
-        let mut argument = Pb::new();
-        argument.field_varint(2, u64::from(argument_ty));
-        argument.field_message(6, &get);
-
-        let mut operation = Pb::new();
-        operation.field_varint(1, if function.body.negated { 8 } else { 7 });
-        operation.field_varint(2, u64::from(operand));
-        operation.field_message(3, &argument);
-        let mut tested = Pb::new();
-        tested.field_varint(2, u64::from(boolean));
-        tested.field_message(14, &operation);
-
         let mut returned = Pb::new();
         returned.field_varint(1, declaration);
-        returned.field_message(2, &tested);
+        returned.field_message(2, &value);
         let mut return_expression = Pb::new();
         let nothing = self.ty(Ty::Nothing, parameters);
         return_expression.field_varint(2, u64::from(nothing));
@@ -730,249 +800,97 @@ impl FileWriter {
         block.repeated_message(1, &statement);
         let mut body = Pb::new();
         body.field_message(4, &block);
-        let id = u32::try_from(self.bodies.len()).expect("body table fits u32");
-        self.bodies.push(body.canonical().into_bytes());
+        let id = u32::try_from(self.tables.bodies.len()).expect("body table fits u32");
+        self.tables.bodies.push(body.canonical().into_bytes());
         id
     }
 
+    /// The expression a physical parameter slot reads, typed as the parameter is declared.
+    fn parameter_read(
+        &mut self,
+        function: &PreparedFunction,
+        slot: usize,
+        values: &[u64],
+        parameters: &[(usize, &PreparedTypeParameter, u64)],
+    ) -> Pb {
+        let ty = if let (0, Some(dispatch)) = (slot, function.dispatch_receiver) {
+            dispatch
+        } else {
+            function.parameters[slot - usize::from(function.dispatch_receiver.is_some())].ty
+        };
+        let ty = self.ty(ty, parameters);
+        let mut get = Pb::new();
+        get.field_varint(1, values[slot]);
+        let mut expression = Pb::new();
+        expression.field_varint(2, u64::from(ty));
+        expression.field_message(6, &get);
+        expression
+    }
+
+    fn returned_value(
+        &mut self,
+        function: &PreparedFunction,
+        value: &PreparedValue,
+        values: &[u64],
+        parameters: &[(usize, &PreparedTypeParameter, u64)],
+    ) -> Pb {
+        match value {
+            PreparedValue::Parameter(slot) => {
+                let slot = usize::try_from(*slot).expect("value slot fits usize");
+                self.parameter_read(function, slot, values, parameters)
+            }
+            PreparedValue::Constant(constant, ty) => {
+                use crate::ir::IrConst;
+                let mut encoded = Pb::new();
+                match constant {
+                    IrConst::Boolean(value) => encoded.field_varint(2, u64::from(*value)),
+                    IrConst::Int(value) => encoded.field_varint(6, i64::from(*value) as u64),
+                    IrConst::Long(value) => encoded.field_varint(7, *value as u64),
+                    IrConst::Double(value) => encoded.field_fixed64(9, value.to_bits()),
+                    IrConst::String(value) => {
+                        let index = self
+                            .tables
+                            .string(value.as_str().expect("filtered to well-formed strings"));
+                        encoded.field_varint(10, u64::from(index));
+                    }
+                    _ => unreachable!("unsupported constants are filtered before serialization"),
+                }
+                let ty = self.ty(*ty, parameters);
+                let mut expression = Pb::new();
+                expression.field_varint(2, u64::from(ty));
+                expression.field_message(5, &encoded);
+                expression
+            }
+        }
+    }
+
+    fn reified_type_test(
+        &mut self,
+        function: &PreparedFunction,
+        test: &ReifiedTypeTest,
+        values: &[u64],
+        parameters: &[(usize, &PreparedTypeParameter, u64)],
+    ) -> Pb {
+        let boolean = self.ty(Ty::Boolean, parameters);
+        let slot = usize::try_from(test.value_slot).expect("value slot fits usize");
+        let argument = self.parameter_read(function, slot, values, parameters);
+        let operand = self.ty(function.type_parameters[test.type_parameter].ty, parameters);
+        let mut operation = Pb::new();
+        operation.field_varint(1, if test.negated { 8 } else { 7 });
+        operation.field_varint(2, u64::from(operand));
+        operation.field_message(3, &argument);
+        let mut tested = Pb::new();
+        tested.field_varint(2, u64::from(boolean));
+        tested.field_message(14, &operation);
+        tested
+    }
+
     fn ty(&mut self, ty: Ty, parameters: &[(usize, &PreparedTypeParameter, u64)]) -> u32 {
-        let (inner, nullability) = match ty.kind() {
-            TyKind::Nullable(inner) => (inner, 0),
-            _ => (ty, 1),
-        };
-        let (classifier, arguments) = match inner.kind() {
-            TyKind::Unit => (self.class_symbol(TypeName::from("kotlin/Unit")), &[][..]),
-            TyKind::Nothing => (self.class_symbol(TypeName::from("kotlin/Nothing")), &[][..]),
-            TyKind::BOOLEAN => (self.class_symbol(TypeName::from("kotlin/Boolean")), &[][..]),
-            TyKind::Obj(classifier, arguments) => {
-                (self.class_symbol(classifier), arguments.as_slice())
-            }
-            TyKind::TyParam(..) => {
-                let (_, _, symbol) = parameters
-                    .iter()
-                    .find(|(_, parameter, _)| parameter.ty == inner)
-                    .expect("supported type parameter is declared by the function");
-                (*symbol, &[][..])
-            }
-            _ => unreachable!("unsupported types are filtered before serialization"),
-        };
-        let mut simple = Pb::new();
-        simple.field_varint(2, classifier);
-        // `MARKED_NULLABLE` is protobuf zero, so omission does not mean non-null. Kotlin writes
-        // `NOT_SPECIFIED` explicitly for an ordinary type-parameter occurrence.
-        simple.field_varint(3, nullability);
-        let arguments = arguments
+        let scope = parameters
             .iter()
-            .map(|argument| {
-                let (variance, ty) = match argument.kind() {
-                    TyKind::InProjection(inner) => (2, inner),
-                    TyKind::OutProjection(inner) => (3, inner),
-                    TyKind::StarProjection(_) => return 0,
-                    _ => (1, *argument),
-                };
-                (u64::from(self.ty(ty, parameters)) << 2) | variance
-            })
+            .map(|(_, parameter, symbol)| (parameter.ty, *symbol))
             .collect::<Vec<_>>();
-        simple.field_packed_varints(4, &arguments);
-        let mut encoded = Pb::new();
-        encoded.field_message(5, &simple);
-        let bytes = encoded.canonical().into_bytes();
-        if let Some(index) = self.types.iter().position(|existing| existing == &bytes) {
-            return u32::try_from(index).expect("type table fits u32");
-        }
-        let index = u32::try_from(self.types.len()).expect("type table fits u32");
-        self.types.push(bytes);
-        index
-    }
-
-    fn class_symbol(&mut self, classifier: TypeName) -> u64 {
-        let signature = KlibPublicIdSignature::classifier(classifier);
-        let slot = self.public_signature(&signature);
-        symbol(slot, CLASS_SYMBOL)
-    }
-
-    fn public_signature(&mut self, signature: &KlibPublicIdSignature) -> u32 {
-        let package = signature
-            .package()
-            .segments()
-            .iter()
-            .map(|segment| u64::from(self.string(segment)))
-            .collect::<Vec<_>>();
-        let declaration = signature
-            .declaration()
-            .segments()
-            .iter()
-            .map(|segment| u64::from(self.string(segment)))
-            .collect::<Vec<_>>();
-        let mut common = Pb::new();
-        common.field_packed_varints(1, &package);
-        common.field_packed_varints(2, &declaration);
-        if let Some(member) = signature.member_id() {
-            common.field_fixed64(6, member);
-        }
-        if signature.mask() != 0 {
-            common.field_varint(4, signature.mask());
-        }
-        let mut encoded = Pb::new();
-        encoded.field_message(1, &common);
-        self.signature(encoded.canonical().into_bytes())
-    }
-
-    fn file_signature(&mut self) -> u32 {
-        let mut encoded = Pb::new();
-        encoded.field_message(7, &Pb::new());
-        self.signature(encoded.into_bytes())
-    }
-
-    fn composite_signature(&mut self, container: u32, inner: u32) -> u32 {
-        let mut composite = Pb::new();
-        composite.field_varint(1, u64::from(container));
-        composite.field_varint(2, u64::from(inner));
-        let mut encoded = Pb::new();
-        encoded.field_message(5, &composite);
-        self.signature(encoded.canonical().into_bytes())
-    }
-
-    fn type_parameter_signature(&mut self, function: u32, index: usize) -> u32 {
-        let name = self.string("<TP>");
-        let mut local = Pb::new();
-        local.field_packed_varints(1, &[u64::from(name)]);
-        local.field_varint(
-            2,
-            u64::try_from(index).expect("type-parameter index fits u64"),
-        );
-        let mut encoded = Pb::new();
-        encoded.field_message(6, &local);
-        let local = self.signature(encoded.canonical().into_bytes());
-        self.composite_signature(function, local)
-    }
-
-    fn local_signature(&mut self) -> u32 {
-        let mut encoded = Pb::new();
-        encoded.field_varint(4, self.signatures.len() as u64);
-        self.signature(encoded.into_bytes())
-    }
-
-    fn signature(&mut self, bytes: Vec<u8>) -> u32 {
-        if let Some(index) = self
-            .signatures
-            .iter()
-            .position(|existing| existing == &bytes)
-        {
-            return u32::try_from(index).expect("signature table fits u32");
-        }
-        let index = u32::try_from(self.signatures.len()).expect("signature table fits u32");
-        self.signatures.push(bytes);
-        index
-    }
-
-    fn string(&mut self, value: &str) -> u32 {
-        if let Some(index) = self.strings.iter().position(|existing| existing == value) {
-            return u32::try_from(index).expect("string table fits u32");
-        }
-        let index = u32::try_from(self.strings.len()).expect("string table fits u32");
-        self.strings.push(value.to_owned());
-        index
-    }
-
-    fn file_entry(&mut self, name: &str) -> u32 {
-        let name = self.string(name);
-        let mut entry = Pb::new();
-        entry.field_varint(4, u64::from(name));
-        let bytes = entry.into_bytes();
-        if let Some(index) = self
-            .file_entries
-            .iter()
-            .position(|existing| existing == &bytes)
-        {
-            return u32::try_from(index).expect("file-entry table fits u32");
-        }
-        let index = u32::try_from(self.file_entries.len()).expect("file-entry table fits u32");
-        self.file_entries.push(bytes);
-        index
-    }
-}
-
-fn symbol(signature: u32, kind: u64) -> u64 {
-    (u64::from(signature) << 8) | kind
-}
-
-/// Kotlin IR's `BinaryLattice`: even bits carry the name, odd bits the type index.
-fn lattice(name: u32, ty: u32) -> u64 {
-    fn spread(mut value: u64) -> u64 {
-        value &= 0xffff_ffff;
-        value = (value | (value << 16)) & 0x0000_ffff_0000_ffff;
-        value = (value | (value << 8)) & 0x00ff_00ff_00ff_00ff;
-        value = (value | (value << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
-        value = (value | (value << 2)) & 0x3333_3333_3333_3333;
-        (value | (value << 1)) & 0x5555_5555_5555_5555
-    }
-    spread(u64::from(name)) | (spread(u64::from(ty)) << 1)
-}
-
-fn entry_table(entries: &[Vec<u8>]) -> Vec<u8> {
-    let count = i32::try_from(entries.len()).expect("entry count fits i32");
-    let mut bytes = (-count).to_be_bytes().to_vec();
-    for entry in entries {
-        leb128(
-            u64::try_from(entry.len()).expect("entry length fits u64"),
-            &mut bytes,
-        );
-    }
-    for entry in entries {
-        bytes.extend_from_slice(entry);
-    }
-    bytes
-}
-
-fn declaration_table(declarations: &[(u32, Vec<u8>)]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(
-        &u32::try_from(declarations.len())
-            .expect("declaration count fits u32")
-            .to_be_bytes(),
-    );
-    let mut offset = 4 + declarations.len() * 12;
-    for (signature, declaration) in declarations {
-        bytes.extend_from_slice(&signature.to_be_bytes());
-        bytes.extend_from_slice(
-            &u32::try_from(offset)
-                .expect("declaration offset fits u32")
-                .to_be_bytes(),
-        );
-        bytes.extend_from_slice(
-            &u32::try_from(declaration.len())
-                .expect("declaration length fits u32")
-                .to_be_bytes(),
-        );
-        offset += declaration.len();
-    }
-    for (_, declaration) in declarations {
-        bytes.extend_from_slice(declaration);
-    }
-    bytes
-}
-
-fn per_file(file: Vec<u8>) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8 + file.len());
-    bytes.extend_from_slice(&1u32.to_be_bytes());
-    bytes.extend_from_slice(
-        &u32::try_from(file.len())
-            .expect("per-file data fits u32")
-            .to_be_bytes(),
-    );
-    bytes.extend(file);
-    bytes
-}
-
-fn leb128(mut value: u64, bytes: &mut Vec<u8>) {
-    loop {
-        let byte = (value & 0x7f) as u8;
-        value >>= 7;
-        bytes.push(byte | if value == 0 { 0 } else { 0x80 });
-        if value == 0 {
-            return;
-        }
+        self.tables.ty(ty, &scope)
     }
 }
 
@@ -990,6 +908,7 @@ mod tests {
         read_declaration_trees, read_inlinable_declaration_trees,
         read_inlinable_declaration_trees_where, KlibIrSignature,
     };
+    use crate::types::TypeName;
 
     fn take_varint(bytes: &[u8], cursor: &mut usize) -> u64 {
         let mut value = 0u64;
@@ -1193,6 +1112,7 @@ mod tests {
                 file_name: "Probe.kt".to_owned(),
                 flags: 1030,
                 inline_only: false,
+                inline: true,
                 dispatch_receiver: None,
                 parameters: vec![PreparedParameter {
                     name: "value".to_owned(),
@@ -1209,11 +1129,11 @@ mod tests {
                     variance: TypeVariance::Invariant,
                     reified: true,
                 }],
-                body: ReifiedTypeTest {
+                body: PreparedBody::ReifiedTypeTest(ReifiedTypeTest {
                     value_slot: 0,
                     type_parameter: 0,
                     negated: false,
-                },
+                }),
             },
             signature,
         )
@@ -1518,5 +1438,106 @@ mod tests {
         );
         assert_eq!(annotation.constructor_type_arguments, 0);
         std::fs::remove_dir_all(root).expect("remove fixture directory");
+    }
+
+    /// A non-inline function owns only the ordinary component, and its returned constant or
+    /// parameter reads back exactly.
+    #[test]
+    fn ordinary_function_bodies_round_trip_constants_and_parameter_reads() {
+        use crate::metadata::klib_ir::KlibIrConstant;
+
+        let bodies = [
+            (
+                PreparedBody::Return(PreparedValue::Constant(
+                    crate::ir::IrConst::Int(-7),
+                    Ty::Int,
+                )),
+                Some(KlibIrConstant::Int(-7)),
+            ),
+            (
+                PreparedBody::Return(PreparedValue::Constant(
+                    crate::ir::IrConst::Long(1 << 40),
+                    Ty::Long,
+                )),
+                Some(KlibIrConstant::Long(1 << 40)),
+            ),
+            (
+                PreparedBody::Return(PreparedValue::Constant(
+                    crate::ir::IrConst::Boolean(true),
+                    Ty::Boolean,
+                )),
+                Some(KlibIrConstant::Boolean(true)),
+            ),
+            (
+                PreparedBody::Return(PreparedValue::Constant(
+                    crate::ir::IrConst::String(crate::kt_string::KtString::from("ok")),
+                    Ty::String,
+                )),
+                Some(KlibIrConstant::String("ok".to_owned())),
+            ),
+            (PreparedBody::Return(PreparedValue::Parameter(0)), None),
+        ];
+        for (index, (body, constant)) in bodies.into_iter().enumerate() {
+            let (mut function, signature) = fixture();
+            function.inline = false;
+            function.inline_only = false;
+            function.type_parameters.clear();
+            function.parameters[0].ty = Ty::obj("kotlin/Any");
+            function.parameters[0].default_null = false;
+            function.result = Ty::obj("kotlin/Any");
+            function.body = body;
+            let artifacts = artifacts(&[function], true);
+            assert!(
+                artifacts
+                    .iter()
+                    .all(|(name, _)| name.starts_with("default/ir/")),
+                "a function that is not inline has no prepared copy: {:?}",
+                artifacts.iter().map(|(name, _)| name).collect::<Vec<_>>()
+            );
+            let root = std::env::temp_dir().join(format!(
+                "krusty-ordinary-ir-{}-{index}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            let mut writer = crate::klib::write::KlibWriter::native_test_fixture("fixture");
+            for (name, bytes) in artifacts {
+                writer.add_file(&name, bytes);
+            }
+            for (name, bytes) in writer.entries() {
+                let path = root.join(name);
+                std::fs::create_dir_all(path.parent().expect("entry has a parent"))
+                    .expect("create fixture directory");
+                std::fs::write(path, bytes).expect("write fixture entry");
+            }
+            let archive = crate::klib::KlibArchive::open(&root).expect("open generated KLIB");
+            let trees = read_declaration_trees(&archive).expect("decode ordinary IR");
+            let (arena, decoded) = trees
+                .function(&KlibIrSignature::Public(signature))
+                .expect("the declaration keeps its exact public identity");
+            let KlibIrBody::Block(statements) = decoded.body.as_ref().expect("function has a body")
+            else {
+                panic!("function body is a block")
+            };
+            let [crate::metadata::klib_ir::tree::KlibIrStatement::Expression(returned)] =
+                statements.as_slice()
+            else {
+                panic!("function body is one expression statement")
+            };
+            let KlibIrExprKind::Return { value, .. } = &arena.expr(*returned).kind else {
+                panic!("body expression is a return")
+            };
+            match (&arena.expr(*value).kind, constant) {
+                (KlibIrExprKind::Const(actual), Some(expected)) => assert_eq!(actual, &expected),
+                (KlibIrExprKind::GetValue { symbol, .. }, None) => {
+                    assert_eq!(
+                        symbol.signature,
+                        decoded.regular_parameters[0].base.symbol.signature
+                    )
+                }
+                (other, _) => panic!("unexpected returned expression {other:?}"),
+            }
+            std::fs::remove_dir_all(root).expect("remove fixture directory");
+        }
     }
 }

@@ -29,10 +29,10 @@ action. The worker speaks the argument surface of intellij-community's own `jvm-
 `--x_no_param_assertions`, …), so a `jvm_library` target's existing options carry over unchanged, and
 it keeps its decoded classpath warm across requests.
 
-Two limits hold in both modes. krusty has no Java front end, so a target mixing `.java` and `.kt`
-sources cannot be built by this rule at all — the worker REFUSES such a request rather than emitting
-a jar missing those classes. And no reduced ABI jar is produced: `--abi-out` receives a copy of the
-full jar, so a dependent rebuilds on any change rather than only on an ABI change.
+Two limits hold in both modes. This rule takes only `.kt` sources: it has no javac step, while the
+worker, serving intellij-community's own rule, compiles a mixed target's Java with the action JDK's
+javac after krusty. And no reduced ABI jar is produced: `--abi-out` receives a copy of the full jar,
+so a dependent rebuilds on any change rather than only on an ABI change.
 
 The compiler is the `@krusty//:toolchain_type` toolchain a released module registers for the
 execution platform, unless `--@krusty//:krusty_binary` names another executable. `JAVA_HOME`, which
@@ -165,7 +165,7 @@ krusty_jvm_library = rule(
     implementation = _krusty_jvm_library_impl,
     attrs = {
         "srcs": attr.label_list(
-            doc = "Kotlin sources. krusty has no Java front end, so `.java` sources are rejected.",
+            doc = "Kotlin sources. The rule runs no javac, so `.java` sources are rejected.",
             allow_files = [".kt"],
             mandatory = True,
         ),

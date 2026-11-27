@@ -54,6 +54,10 @@ pub(super) fn realize_member(
             .or_else(|| member_rules::primitive_iterator_next(&facts()))
             .or_else(|| {
                 member_rules::string_compare_intrinsic(&facts()).map(MemberRealization::Intrinsic)
+            })
+            .or_else(|| {
+                member_rules::string_sub_sequence_intrinsic(&facts())
+                    .map(MemberRealization::Intrinsic)
             }),
         realization => Some(realization),
     };

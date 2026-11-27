@@ -314,7 +314,10 @@ fn emit_interface_storage_class(
             index,
         );
     }
-    let xi = synthetic_class_xi(super::metadata_policy::SYNTHETIC_PRIVATE);
+    let xi = synthetic_class_xi(
+        ir.reference.quirks(),
+        super::metadata_policy::SYNTHETIC_PRIVATE,
+    );
     cw.set_kotlin_metadata(3, opts.metadata_stamp(), xi, &[], &[]);
     Some((holder, env.run.finish_class(cw)))
 }

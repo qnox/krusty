@@ -14,6 +14,8 @@ pub(crate) use body_splice::{
     fresh_value_base, splice_inline_body, InlineBodySplice, InlineBodySpliceFailure, InlineOperand,
     SplicedResult,
 };
-pub(crate) use result_frame::{frame_exit, produce_sole_tail_return, InlineReturn};
+pub(crate) use result_frame::{
+    frame_exit, leaves_inline_frame, produce_sole_tail_return, InlineReturn,
+};
 pub(crate) use specialization::specialize_inline_copy;
 pub(crate) use value_numbering::{mark_subtree, rebase_values, value_indices};

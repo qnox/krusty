@@ -103,6 +103,7 @@ impl Drop for Repo {
 
 const FAILURES: &str = "tests/box_expected_failures/native-klib/2.4.20.txt";
 const NOT_APPLICABLE: &str = "tests/box_expected_not_applicable/jvm/2.4.20.txt";
+const BYTE_IDENTITY: &str = "tests/box_byte_non_identical/jvm/2.4.20.txt";
 const CLI_FAILURES: &str = "tests/cli_expected_failures/jvm/2.4.20.txt";
 const CLI_NOT_APPLICABLE: &str = "tests/cli_expected_not_applicable/jvm/2.4.20.txt";
 const FALSE_ACCEPTS: &str = "tests/diagnostics_false_accepts/jvm/2.4.20.txt";
@@ -355,6 +356,111 @@ fn removing_entries_passes() {
     let base = repo.commit();
     repo.write(FAILURES, "# header, reworded\nb/two.kt\n");
     repo.write(NOT_APPLICABLE, "");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stderr, b"");
+}
+
+fn byte_identity_gain(key: &str) -> String {
+    format!(
+        "outcome-lists: {BYTE_IDENTITY} gains 1 entry:\n    {key}\n\
+         outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n"
+    )
+}
+
+#[test]
+fn a_byte_identity_row_for_a_program_the_change_adds_passes() {
+    let repo = Repo::new("byte-identity-added-program");
+    repo.write(BYTE_IDENTITY, "boxing/boxing2.kt\n");
+    let base = repo.commit();
+    repo.write(
+        "tests/box_regressions/addedProgram.kt",
+        "fun box() = \"OK\"\n",
+    );
+    repo.write(
+        BYTE_IDENTITY,
+        "boxing/boxing2.kt\nregressions/addedProgram.kt\n",
+    );
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stderr, b"");
+}
+
+#[test]
+fn a_byte_identity_row_for_an_upstream_case_under_the_regressions_prefix_fails() {
+    // `regressions/kt1172.kt` is an upstream corpus case: no owned file backs it, so the base
+    // already scored it and a regression cannot be listed.
+    let repo = Repo::new("byte-identity-upstream-prefix");
+    repo.write(BYTE_IDENTITY, "boxing/boxing2.kt\n");
+    let base = repo.commit();
+    repo.write(BYTE_IDENTITY, "boxing/boxing2.kt\nregressions/kt1172.kt\n");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        byte_identity_gain("regressions/kt1172.kt")
+    );
+}
+
+#[test]
+fn a_byte_identity_row_for_a_program_the_base_already_has_fails() {
+    let repo = Repo::new("byte-identity-existing-program");
+    repo.write("tests/box_regressions/scored.kt", "fun box() = \"OK\"\n");
+    repo.write(BYTE_IDENTITY, "boxing/boxing2.kt\n");
+    let base = repo.commit();
+    repo.write(BYTE_IDENTITY, "boxing/boxing2.kt\nregressions/scored.kt\n");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        byte_identity_gain("regressions/scored.kt")
+    );
+}
+
+#[test]
+fn a_byte_identity_row_for_a_renamed_program_fails() {
+    let repo = Repo::new("byte-identity-renamed-program");
+    let program = "fun box(): String {\n    val values = listOf(1, 2, 3)\n    return if (values.sum() == 6) \"OK\" else \"no\"\n}\n";
+    repo.write("tests/box_regressions/before.kt", program);
+    repo.write(BYTE_IDENTITY, "boxing/boxing2.kt\n");
+    let base = repo.commit();
+    repo.git(&[
+        "mv",
+        "tests/box_regressions/before.kt",
+        "tests/box_regressions/after.kt",
+    ]);
+    repo.write(BYTE_IDENTITY, "boxing/boxing2.kt\nregressions/after.kt\n");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        byte_identity_gain("regressions/after.kt")
+    );
+}
+
+#[test]
+fn a_byte_identity_row_for_a_case_the_base_did_not_apply_passes() {
+    let repo = Repo::new("byte-identity-not-applicable");
+    repo.write(NOT_APPLICABLE, "jvm/nowApplied.kt\n");
+    repo.write(BYTE_IDENTITY, "boxing/boxing2.kt\n");
+    let base = repo.commit();
+    repo.write(NOT_APPLICABLE, "");
+    repo.write(BYTE_IDENTITY, "boxing/boxing2.kt\njvm/nowApplied.kt\n");
     let head = repo.commit();
 
     let output = repo.check(&base, &head);

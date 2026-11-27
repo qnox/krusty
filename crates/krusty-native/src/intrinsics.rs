@@ -70,6 +70,17 @@ impl DeclarationOwner {
         self.semantic == Some(SemanticCallableOwner::Package(package))
     }
 
+    /// Whether this declares its members on one of the unsigned arrays (`UIntArray`, …).
+    fn is_unsigned_array_class(self) -> bool {
+        match self.semantic {
+            Some(SemanticCallableOwner::Classifier(owner)) => {
+                krusty::types::prim_array_element(owner).is_some_and(Ty::is_unsigned)
+            }
+            Some(SemanticCallableOwner::Package(_)) => false,
+            None => false,
+        }
+    }
+
     fn classifier_matches(self, kotlin: &str) -> bool {
         match self.semantic {
             Some(SemanticCallableOwner::Classifier(owner)) => classifier_matches(owner, kotlin),
@@ -417,6 +428,23 @@ pub(super) fn runtime_function(signature: FunctionSignature<'_>) -> Option<Strin
             ("TODO", [], Ty::Nothing) => Some("kt_not_implemented".to_string()),
             ("TODO", [reason], Ty::Nothing) if classifier_is(*reason, "kotlin/String") => {
                 Some("kt_not_implemented_reason".to_string())
+            }
+            _ => None,
+        };
+    }
+    if signature.owner.package_matches("kotlin/text") {
+        return match (
+            signature.name,
+            signature.params,
+            signature.ret.canonical_semantic(),
+        ) {
+            // The stdlib's own bodyless seam from a `CharArray` slice to a `String`, as every
+            // `String(chars)` and case mapping reaches it. Its operands cross at their own widths.
+            ("unsafeStringFromCharArray", [chars, Ty::Int, Ty::Int], text)
+                if classifier_is(*chars, "kotlin/CharArray")
+                    && classifier_is(text, "kotlin/String") =>
+            {
+                Some("kt_string_from_char_array".to_string())
             }
             _ => None,
         };
@@ -1717,12 +1745,17 @@ pub(super) fn array_member(
     // The unsigned arrays get their own package: Kotlin declares `UIntArray.reversed()` in
     // `kotlin.collections.unsigned`, apart from the signed one it answers identically to. The
     // runtime reads the element's type from the array's descriptor, so both reach one entry.
+    let reference = Ty::nullable(Ty::obj("kotlin/Any"));
+    // An unsigned array is a value class over its carrier, whose own `Collection.isEmpty` asks the
+    // carrier's length, the same question the facade's extension answers.
+    if owner.is_unsigned_array_class() && name == "isEmpty" && params.is_empty() {
+        return Some(("kt_array_is_empty", vec![reference], Ty::Boolean));
+    }
     if !owner.package_is(krusty::types::wk::kotlin_collections_package())
         && !owner.package_is(krusty::types::wk::kotlin_collections_unsigned_package())
     {
         return None;
     }
-    let reference = Ty::nullable(Ty::obj("kotlin/Any"));
     Some(match (name, params) {
         ("toList", []) => ("kt_array_to_list", vec![reference], reference),
         ("reversed", []) => ("kt_array_reversed", vec![reference], reference),
@@ -2042,6 +2075,15 @@ pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'stati
             // The range form, `append(value: CharSequence?, startIndex, endIndex)`, the builder's one
             // three-operand `append`: its bounds cross boxed like every operand here.
             ("append", [_, Ty::Int, Ty::Int]) => Some("kt_string_builder_append_range"),
+            // `appendRange(value: CharSequence, startIndex, endIndex)` is what that `append` calls
+            // with `value ?: "null"`: the same bounds checks and copy, of a value never null. The
+            // `CharArray` overload copies an array instead and is not this function.
+            ("appendRange", [value, Ty::Int, Ty::Int])
+                if matches!(value.kind(), TyKind::Obj(owner, _)
+                    if classifier_matches(owner, "kotlin/CharSequence")) =>
+            {
+                Some("kt_string_builder_append_range")
+            }
             ("appendLine", [_]) => Some("kt_string_builder_append_line"),
             ("appendLine", []) => Some("kt_string_builder_append_new_line"),
             _ => None,
@@ -2608,6 +2650,26 @@ mod tests {
     }
 
     #[test]
+    fn a_string_is_made_from_a_char_array_slice_by_the_whole_declaration() {
+        let chars = Ty::obj("kotlin/CharArray");
+        let make = |params: &[Ty], ret| {
+            runtime_function(function(
+                package("kotlin/text"),
+                "unsafeStringFromCharArray",
+                params,
+                ret,
+            ))
+        };
+        assert_eq!(
+            make(&[chars, Ty::Int, Ty::Int], Ty::String).as_deref(),
+            Some("kt_string_from_char_array")
+        );
+        assert_eq!(make(&[chars, Ty::Int], Ty::String), None);
+        assert_eq!(make(&[Ty::String, Ty::Int, Ty::Int], Ty::String), None);
+        assert_eq!(make(&[chars, Ty::Int, Ty::Int], Ty::Int), None);
+    }
+
+    #[test]
     fn console_input_is_matched_by_its_whole_declaration() {
         let read =
             |name, ret| runtime_function(function(facade("kotlin/io/ConsoleKt"), name, &[], ret));
@@ -2695,6 +2757,24 @@ mod tests {
                 function(appendable(), "append", &[text, Ty::Int, Ty::Int], answer)
             ),
             Some("kt_string_builder_append_range")
+        );
+    }
+
+    /// `appendRange` of a `CharSequence` is the range `append` without its `null` case; the
+    /// `CharArray` overload copies an array and has no runtime function.
+    #[test]
+    fn the_builder_realizes_only_the_char_sequence_append_range() {
+        let builder = || member("kotlin/text/StringBuilder");
+        let answer = Ty::obj("kotlin/text/StringBuilder");
+        let sequence = [Ty::obj("kotlin/CharSequence"), Ty::Int, Ty::Int];
+        let array = [Ty::obj("kotlin/CharArray"), Ty::Int, Ty::Int];
+        assert_eq!(
+            runtime_member(function(builder(), "appendRange", &sequence, answer)),
+            Some("kt_string_builder_append_range")
+        );
+        assert_eq!(
+            runtime_member(function(builder(), "appendRange", &array, answer)),
+            None
         );
     }
 

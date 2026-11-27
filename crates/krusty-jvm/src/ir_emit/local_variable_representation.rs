@@ -8,7 +8,7 @@
 //! the type test chooses its result. Ordinary source declarations still materialize their type.
 
 use super::*;
-use krusty::ir::{ExprId, IrExpr};
+use krusty::ir::{ExprId, IrDebugLocalProvenance, IrExpr, IrInlineLocalRole};
 use krusty::types::TyKind;
 
 /// The JVM type of the slot a `Variable` declaration owns. A declaration always stores a value, so
@@ -16,6 +16,17 @@ use krusty::types::TyKind;
 /// Every reader of a declaration's representation asks here: the live slot map when the slot is
 /// entered, and the body-wide declaration table ([`super::collect_body_var_types`]) once its scope has
 /// closed or before it opens.
+/// Whether `declaration` binds an omitted parameter to a copy of its default.
+pub(super) fn is_defaulted_parameter(ir: &IrFile, declaration: ExprId) -> bool {
+    matches!(
+        ir.debug_local_provenance(declaration),
+        Some(IrDebugLocalProvenance::InlineValue {
+            role: IrInlineLocalRole::DefaultedValue,
+            ..
+        })
+    )
+}
+
 pub(super) fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
     if let Some((_, _, slot)) = shared_cell_snapshot(ir, declaration) {
         return slot;
@@ -141,6 +152,25 @@ fn emit_deferred_zero(
 }
 
 impl Emitter<'_> {
+    /// The callee's `$default` stub owns every parameter's slot before it evaluates any default, so
+    /// the omitted parameters among `statements` take theirs together, ahead of the temporaries
+    /// their defaults use.
+    pub(super) fn reserve_defaulted_parameter_slots(&mut self, statements: &[u32]) {
+        for &statement in statements {
+            let IrExpr::Variable { index, ty, .. } = *self.ir.expr(statement) else {
+                continue;
+            };
+            if !is_defaulted_parameter(self.ir, statement) {
+                continue;
+            }
+            let slot_ty = slot_type(self.ir, statement, ty);
+            let slot = self
+                .frame
+                .enter(super::frame_map::FrameKey::CallOperand(index), slot_ty);
+            self.slots.insert(index, (slot, slot_ty));
+        }
+    }
+
     pub(super) fn emit_local_variable(
         &mut self,
         declaration: ExprId,
@@ -402,7 +432,11 @@ impl Emitter<'_> {
         // start, narrows the value to the slot (`checkcast` of an erased result), and marks the
         // declaration before the store. A same-module inline call's operand is stored into its
         // parameter slot as kotlinc's `genValueAndPut` does, with no line of the declaration's.
-        let marks_line = self.copied_operand_binding != Some(declaration) && !default_value;
+        // An omitted parameter's default is the callee's `$default` stub assigning the parameter:
+        // its line is marked ahead of the value only, never again at the store.
+        let marks_line = self.copied_operand_binding != Some(declaration)
+            && !default_value
+            && !is_defaulted_parameter(self.ir, declaration);
         if marks_line {
             self.mark_expression_start(initializer, code);
         }

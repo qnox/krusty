@@ -150,7 +150,7 @@ impl BodyFirChecker<'_> {
         })?;
         let mut substitutions = HashMap::default();
         let mut approximations = HashMap::default();
-        for (ordinal, value) in self.info.materialized_call_type_arguments(expression) {
+        for (ordinal, value) in self.materialized_call_type_arguments(expression) {
             let approximation = self
                 .info
                 .published_call_type_argument_approximation(expression, ordinal);
@@ -1542,7 +1542,11 @@ impl BodyFirChecker<'_> {
                 )
             })?;
             let value = self.expression(*argument)?;
-            if !crate::kotlin_version::Quirks::target()
+            if !self
+                .file
+                .language
+                .reference
+                .quirks()
                 .has(crate::kotlin_version::Quirk::ContextArgumentEvaluatedBeforeExtensionReceiver)
             {
                 self.body.record_receiver_ordered_context_argument(value);

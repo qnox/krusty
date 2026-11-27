@@ -1282,7 +1282,7 @@ impl CheckedBackendCallables {
 
     /// Freeze the `CharSequence` members resolution selected for a target whose `StringBuilder`
     /// reads an appended sequence through them
-    /// ([`crate::backend::Backend::appends_char_sequences_by_index`]); no source call need name
+    /// ([`crate::backend::Backend::reads_char_sequence_members`]); no source call need name
     /// them.
     pub(crate) fn freeze_char_sequence_protocol(
         &mut self,
@@ -1488,6 +1488,17 @@ impl CheckedBackendCallables {
         self.callables
             .get(&identity)
             .or_else(|| self.sam_declarations.get(&identity))
+    }
+
+    /// The dependency properties that store their value class's underlying value, by their
+    /// getters' identity, as their providers normalized them.
+    pub fn value_class_storage_properties(
+        &self,
+    ) -> impl Iterator<Item = crate::fir::ResolvedPropertyOverrideTarget> + '_ {
+        self.properties
+            .values()
+            .filter(|property| property.declares_value_class_storage)
+            .map(|property| crate::fir::ResolvedPropertyOverrideTarget::External(property.getter))
     }
 
     /// The fact for a dependency property identity this file's IR holds. `None` means the identity

@@ -65,6 +65,9 @@ pub struct KlibIrModuleTrees {
     local_classes: HashMap<KlibIrSignature, (usize, KlibIrClassId)>,
     /// The container and id each file-local signature of this library serializes.
     file_local_origins: HashMap<KlibIrSignature, super::symbols::KlibFileLocalOrigin>,
+    /// The public identity each file-private signature scopes to its file.
+    file_private_identities:
+        HashMap<KlibIrSignature, crate::metadata::id_signature::KlibPublicIdSignature>,
     classes: super::class_index::KlibIrClassIndex,
 }
 
@@ -176,6 +179,41 @@ impl KlibIrModuleTrees {
         }
         let package = self.file_package(*file)?;
         Some((package, tree.arena.class(class)))
+    }
+
+    /// The public identity the file-private `signature` (`Composite(File, Public)`) scopes to its
+    /// file: the identity of a declaration private to its file, or of a member of a class private
+    /// to its file, including a fake override no declaration defines.
+    pub(crate) fn file_private_identity(
+        &self,
+        signature: &KlibIrSignature,
+    ) -> Option<&crate::metadata::id_signature::KlibPublicIdSignature> {
+        self.file_private_identities.get(signature)
+    }
+
+    /// The class private to the serialized file `file` whose file-private identity has the paths
+    /// `path`. `None` unless exactly one class has them.
+    pub(crate) fn file_private_class_at(
+        &self,
+        file: u32,
+        path: &crate::metadata::id_signature::KlibDeclarationPath,
+    ) -> Option<(&KlibIrArena, &super::tree::KlibIrClass)> {
+        let mut found = None;
+        for (signature, &(tree, class)) in &self.local_classes {
+            if !matches!(signature, KlibIrSignature::FileLocal { file: owner, .. } if *owner == file)
+                || self
+                    .file_private_identities
+                    .get(signature)
+                    .is_none_or(|identity| identity.declaration_path() != *path)
+            {
+                continue;
+            }
+            let arena = &self.trees[tree].arena;
+            if found.replace((arena, arena.class(class))).is_some() {
+                return None;
+            }
+        }
+        found
     }
 
     /// Every file-local class this library serializes, with the arena that owns it.
@@ -555,6 +593,9 @@ fn read_declaration_trees_from(
         module
             .file_local_origins
             .extend(file.signatures.take_origins());
+        module
+            .file_private_identities
+            .extend(file.signatures.take_file_private_identities());
     }
     module.index()?;
     for (tree, function, identity) in prepared_roots {
@@ -996,7 +1037,23 @@ impl<'t, 'a> TreeDecoder<'t, 'a> {
             }
             (None, None) => return Err(msg.error("expression has no operation")),
         };
-        let kind = self.operation(number, &operation)?;
+        let mut kind = self.operation(number, &operation)?;
+        if let KlibIrExprKind::FunctionReference {
+            access,
+            reflection_target,
+        } = &kind
+        {
+            let signatures = &mut self.file.signatures;
+            if let Some(rich) = super::reference_upgrade::upgrade(
+                &mut self.arena,
+                ty,
+                access,
+                reflection_target.as_ref(),
+                &mut || signatures.synthetic_local(),
+            ) {
+                kind = rich;
+            }
+        }
         Ok(self.push(ty, kind))
     }
 
