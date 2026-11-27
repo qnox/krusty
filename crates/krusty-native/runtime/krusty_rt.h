@@ -137,6 +137,11 @@ typedef struct KType {
        0, for a reference binding none. */
     const uint32_t *reference_context_offsets;
     uint32_t reference_context_count;
+    /* Nonzero on a descriptor the compiler emits for a dependency class it names by identity alone
+       (no layout of its own, or one a runtime type subclasses without the compiler's help). A
+       check against it also accepts any type on an object's chain that publishes the same
+       qualified name. */
+    uint32_t nominal;
 } KType;
 
 /* The read-only members of `Map` a program class answers, each a thunk with the fixed signature
@@ -161,6 +166,7 @@ _Static_assert(offsetof(KType, itable) == 160, "KType.itable moved");
 _Static_assert(offsetof(KType, map_members) == 168, "KType.map_members moved");
 _Static_assert(offsetof(KType, reference_context_offsets) == 176, "KType.reference_context_offsets moved");
 _Static_assert(offsetof(KType, reference_context_count) == 184, "KType.reference_context_count moved");
+_Static_assert(offsetof(KType, nominal) == 188, "KType.nominal moved");
 _Static_assert(sizeof(KType) == 192, "KType changed size");
 _Static_assert(offsetof(KMapMembers, entries) == 56, "KMapMembers.entries moved");
 
