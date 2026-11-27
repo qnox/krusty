@@ -203,6 +203,11 @@ impl Checker<'_> {
         if let [(bound, _)] = member_families.as_slice() {
             return Some(*bound);
         }
+        if let Some(overriding) =
+            self.overriding_constituent(member_families.iter().map(|(bound, _)| *bound))
+        {
+            return Some(overriding);
+        }
         let single = member_families
             .iter()
             .filter_map(|(bound, members)| match members.as_slice() {
@@ -266,6 +271,11 @@ impl Checker<'_> {
         if let [(bound, _)] = properties.as_slice() {
             return Some(*bound);
         }
+        if let Some(overriding) =
+            self.overriding_constituent(properties.iter().map(|(bound, _)| *bound))
+        {
+            return Some(overriding);
+        }
         let context = crate::assignable::TyCtx::new();
         let winners = properties
             .iter()
@@ -277,34 +287,32 @@ impl Checker<'_> {
             .collect::<Vec<_>>();
         match winners.as_slice() {
             [winner] => Some(winner.0),
-            // Incomparable results (`Source<T>.value: T` beside `IntBox.value: Int`) belong to one
-            // property overridden down the class hierarchy. kotlinc dispatches it through the
-            // overriding constituent: the one whose classifier inherits every other contributor.
-            [] => {
-                let overriding = properties
-                    .iter()
-                    .filter(|(bound, _)| {
-                        properties.iter().all(|(other, _)| {
-                            other == bound
-                                || crate::assignable::applied_supertype(
-                                    self,
-                                    bound.non_null(),
-                                    other.non_null(),
-                                )
-                                .is_some()
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                match overriding.as_slice() {
-                    [overriding] => Some(overriding.0),
-                    _ => None,
-                }
-            }
             _ if winners.windows(2).all(|pair| pair[0].1 == pair[1].1) => winners
                 .into_iter()
                 .map(|winner| winner.0)
                 .min_by_key(|bound| bound.source_name()),
             _ => None,
         }
+    }
+
+    /// The constituent whose classifier inherits every other contributor of a member. The member
+    /// is then one declaration overridden down the class hierarchy (`Source<T>.value` beside
+    /// `IntBox.value`, `Buildee<T>.getTypeVariable()` beside its fake override in
+    /// `DerivedBuildee<*>`), and kotlinc dispatches it through that overriding constituent
+    /// whatever the results' type arguments.
+    fn overriding_constituent(&self, contributors: impl Iterator<Item = Ty> + Clone) -> Option<Ty> {
+        let mut overriding = contributors.clone().filter(|bound| {
+            contributors.clone().all(|other| {
+                other == *bound
+                    || crate::assignable::applied_supertype(
+                        self,
+                        bound.non_null(),
+                        other.non_null(),
+                    )
+                    .is_some()
+            })
+        });
+        let found = overriding.next()?;
+        overriding.next().is_none().then_some(found)
     }
 }
