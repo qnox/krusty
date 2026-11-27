@@ -92,6 +92,13 @@ pub(crate) fn marks_line_at_start(ir: &IrFile, expression: ExprId) -> bool {
         // An `invokedynamic` concatenation has no constructor to mark. The `StringBuilder` form
         // marks its own `new`; the first operand marks an indy concatenation.
         | IrExpr::StringConcat(_) => false,
+        // An empty vararg marks nothing, and the call it is passed to marks its line at the
+        // invoke: kotlinc builds an omitted vararg's array, and an empty factory's (`arrayOf()`),
+        // without offsets. `emptyArray()` is a call of its own and marks its line.
+        IrExpr::Vararg { elements, .. } => {
+            !elements.is_empty()
+                || (ir.source_line(expression).is_some() && ir.factory_line(expression).is_none())
+        }
         _ => true,
     }
 }

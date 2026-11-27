@@ -145,6 +145,7 @@ fn unsigned_array_literal_is_checked_array_fir_not_a_value_class_call() {
     let FirExprKind::ArrayLiteral {
         array_type,
         elements,
+        ..
     } = &root.kind
     else {
         panic!("an unsigned array literal must be checked array FIR")
@@ -168,6 +169,7 @@ fn array_of_unsigned_values_retains_the_semantic_reference_array_type() {
     let FirExprKind::ArrayLiteral {
         array_type,
         elements,
+        ..
     } = &root.kind
     else {
         panic!("arrayOf must be represented as checked array FIR")
@@ -215,6 +217,7 @@ fn spread_collection_literal_uses_the_vararg_array_expectation() {
     let FirExprKind::ArrayLiteral {
         array_type,
         elements,
+        ..
     } = &root.kind
     else {
         panic!("arrayOf must retain checked array FIR")

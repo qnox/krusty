@@ -331,10 +331,7 @@ closures/kt47894_inlineFunWithObjectWithNothing.kt
 closures/localClassFunClosure.kt
 closures/localFunctionInInitBlock.kt
 closures/subclosuresWithinInitializers.kt
-collectionLiterals/array.kt
-collectionLiterals/primitiveArrays.kt
 collectionLiterals/resolvesToOperator.kt
-collectionLiterals/unsignedArrays.kt
 collections/addCollectionStubWithCovariantOverride.kt
 collections/clashWithInternalMapMethod.kt
 collections/inheritFromAbstractMutableListInt.kt
@@ -459,11 +456,7 @@ controlStructures/tryCatchInExpressions/tryCatchAfterWhileTrue.kt
 controlStructures/tryCatchInExpressions/tryInsideCatch.kt
 controlStructures/tryCatchInExpressions/tryInsideTry.kt
 controlflow/break.kt
-controlflow/for_loops_array_break_continue.kt
-controlflow/for_loops_array_indices.kt
-controlflow/for_loops_array_nested.kt
 controlflow/for_loops_array_nullable.kt
-controlflow/for_loops_array_side_effects.kt
 controlflow/for_loops_call_order.kt
 controlflow/for_loops_coroutines.kt
 controlflow/for_loops_errors.kt
@@ -928,7 +921,6 @@ diagnostics/functions/tailRecursion/tailrecWithExplicitCompanionObjectDispatcher
 diagnostics/functions/tailRecursion/tailrecWithExplicitObjectDispatcher.kt
 diagnostics/functions/tailRecursion/thisReferences.kt
 diagnostics/functions/tailRecursion/whenWithIs.kt
-diagnostics/vararg/kt4172.kt
 directInvokeOptimization/boundInnerContructorRef.kt
 directInvokeOptimization/boundMemberRef.kt
 directInvokeOptimization/capturingLambda.kt
@@ -1235,7 +1227,6 @@ inline/safeCall.kt
 inline/severalClosures.kt
 inline/severalUsage.kt
 inline/typeParameterSymbolIsUnbound.kt
-inline/vararg.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
 inlineArgsInPlace/kotlinReflect.kt
 inlineArgsInPlace/kt49370.kt
@@ -1442,7 +1433,6 @@ inlineClasses/kt70461.kt
 inlineClasses/kt71649.kt
 inlineClasses/mangledDefaultParameterFunction.kt
 inlineClasses/mangledDefaultParameterFunctionGeneric.kt
-inlineClasses/multifileClass.kt
 inlineClasses/nullableWrapperEquality.kt
 inlineClasses/nullableWrapperEqualityGeneric.kt
 inlineClasses/nullableWrapperEqualityGeneric2.kt
@@ -1465,8 +1455,6 @@ inlineClasses/safeAsOfTypeParameterWithInlineClassBound.kt
 inlineClasses/safeAsOfTypeParameterWithInlineClassBoundGeneric.kt
 inlineClasses/samWrapperDifferentModule.kt
 inlineClasses/samWrapperDifferentModuleGeneric.kt
-inlineClasses/secondaryConstructorWithVararg.kt
-inlineClasses/secondaryConstructorWithVarargGeneric.kt
 inlineClasses/smartCastOnThisOfInlineClassType.kt
 inlineClasses/smartCastOnThisOfInlineClassTypeGeneric.kt
 inlineClasses/toStringCallingPrivateFunGeneric.kt
@@ -1664,7 +1652,6 @@ multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt
 multiplatform/k2/hmpp/expectActualChainExtra3-3.kt
 multiplatform/k2/hmpp/expectRefinement.kt
 multiplatform/k2/hmpp/moveToDiagnostic/deprecationActualTypealias2-2.kt
-multiplatform/k2/hmpp/stdlibRegressions.kt
 multiplatform/k2/kt59613.kt
 multiplatform/k2/kt66970.kt
 multiplatform/k2/mergedOverrides.kt
@@ -2078,7 +2065,6 @@ regressions/arrayListRange.kt
 regressions/arrayListThroughCollectionInterfaces.kt
 regressions/arrayListValueMembers.kt
 regressions/arrayLiteralSpread.kt
-regressions/arrayLiteralSpreadsInSourceOrder.kt
 regressions/atomicCompareExchange.kt
 regressions/callableReferenceToImplicitReceiverUnitCoercion.kt
 regressions/captureStorageDefaultMetadata.kt

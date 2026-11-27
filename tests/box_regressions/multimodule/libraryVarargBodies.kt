@@ -23,7 +23,7 @@ fun listed(): Int = total(1, 2, 3)
 
 fun spread(values: IntArray): Int = total(10, *values, 20)
 
-fun none(): Int = 0 + count()
+fun none(): Int = count()
 
 fun spelled(): String = words("a", "b", "c")
 
