@@ -187,66 +187,69 @@ pub(crate) fn function_shape_matches(src: &dyn SymbolSource, actual: Ty, declare
         && component_matches(declared.ret, actual.ret, &mut bindings)
 }
 
+/// The supertype closure of a classifier receiver, each applied supertype at its rung.
+fn supertype_ranks(src: &dyn SymbolSource, recv: Ty) -> Vec<(Ty, u32)> {
+    let mut ranks = Vec::new();
+    let Some(internal) = recv.erased_recv().kotlin_class_internal() else {
+        return ranks;
+    };
+    let root = if recv.non_null().obj_internal().is_some() {
+        recv.non_null()
+    } else {
+        Ty::obj_name(internal)
+    };
+    let mut frontier = vec![root];
+    let mut seen = crate::fx_hash::HashSet::default();
+    let mut rung = 0u32;
+    while !frontier.is_empty() {
+        let mut next = Vec::new();
+        for ty in frontier {
+            let Some(internal) = ty.kotlin_class_internal() else {
+                continue;
+            };
+            if !seen.insert(internal) {
+                continue;
+            }
+            ranks.push((ty, rung));
+            next.extend(direct_supertypes(src, ty));
+        }
+        frontier = next;
+        rung += 1;
+    }
+    ranks
+}
+
+/// The supertype closure of an intersection receiver: a value proved to be several types is each
+/// of them, so every constituent's closure starts at rung 0. No constituent outranks another, so
+/// extensions declared on two unrelated constituents (`A.cast()` and `B.cast()` on `A & B`) tie
+/// here and the call is ambiguous, as in kotlinc. A classifier several constituents reach keeps
+/// its nearest rung.
+fn intersection_ranks(src: &dyn SymbolSource, parts: impl Iterator<Item = Ty>) -> Vec<(Ty, u32)> {
+    let mut ranks: Vec<(Ty, u32)> = Vec::new();
+    for part in parts {
+        for (applied, rung) in supertype_ranks(src, part) {
+            let internal = applied.kotlin_class_internal();
+            match ranks
+                .iter_mut()
+                .find(|(seen, _)| seen.kotlin_class_internal() == internal)
+            {
+                Some(seen) if rung < seen.1 => *seen = (applied, rung),
+                Some(_) => {}
+                None => ranks.push((applied, rung)),
+            }
+        }
+    }
+    ranks.sort_by_key(|&(_, rung)| rung);
+    ranks
+}
+
 impl ReceiverMro {
     pub(crate) fn new(src: &dyn SymbolSource, recv: Ty) -> ReceiverMro {
-        // An intersection is every one of its constituents, in the order the flow proved them
-        // (the declared type first). A declared extension receiver is met through the first
-        // constituent whose supertype closure reaches it: a later constituent starts after every
-        // rung of the earlier ones, so a candidate applicable to the declared type outranks one
-        // that needs the smart cast (`A.cast()` over `B.cast()` for an `A` proved to be `B`).
-        if let TyKind::Intersection(parts) = recv.non_null().kind() {
-            let mut ranks: Vec<(Ty, u32)> = Vec::new();
-            let mut offset = 0u32;
-            for &part in parts.iter() {
-                let closure = ReceiverMro::new(src, part).ranks;
-                let depth = closure
-                    .iter()
-                    .map(|&(_, rung)| rung)
-                    .max()
-                    .map_or(0, |rung| rung + 1);
-                for (applied, rung) in closure {
-                    let internal = applied.kotlin_class_internal();
-                    if !ranks
-                        .iter()
-                        .any(|(seen, _)| seen.kotlin_class_internal() == internal)
-                    {
-                        ranks.push((applied, offset + rung));
-                    }
-                }
-                offset += depth;
-            }
-            return ReceiverMro {
-                recv,
-                ranks,
-                type_variables: Vec::new(),
-            };
-        }
-        let mut ranks = Vec::new();
-        if let Some(internal) = recv.erased_recv().kotlin_class_internal() {
-            let root = if recv.non_null().obj_internal().is_some() {
-                recv.non_null()
-            } else {
-                Ty::obj_name(internal)
-            };
-            let mut frontier = vec![root];
-            let mut seen = crate::fx_hash::HashSet::default();
-            let mut rung = 0u32;
-            while !frontier.is_empty() {
-                let mut next = Vec::new();
-                for ty in frontier {
-                    let Some(internal) = ty.kotlin_class_internal() else {
-                        continue;
-                    };
-                    if !seen.insert(internal) {
-                        continue;
-                    }
-                    ranks.push((ty, rung));
-                    next.extend(direct_supertypes(src, ty));
-                }
-                frontier = next;
-                rung += 1;
-            }
-        }
+        let ranks = if let TyKind::Intersection(parts) = recv.non_null().kind() {
+            intersection_ranks(src, parts.iter().copied())
+        } else {
+            supertype_ranks(src, recv)
+        };
         ReceiverMro {
             recv,
             ranks,

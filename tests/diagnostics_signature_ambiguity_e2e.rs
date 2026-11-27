@@ -76,3 +76,12 @@ fn a_generic_ambiguity_names_inferred_results_once() {
         "fun <T> f(a: T, b: String) = listOf(a)\nfun <T> f(a: String, b: T) = b\nfun x() = f(\"\", \"\")\n",
     );
 }
+
+/// A smart-cast intersection is every constituent at once: extensions declared on two unrelated
+/// constituents apply equally, so neither outranks the other and the call is ambiguous.
+#[test]
+fn extensions_on_unrelated_intersection_constituents_are_ambiguous() {
+    assert_one_identical_ambiguity(
+        "interface A\ninterface B\nfun A.cast(): String = \"a\"\nfun B.cast(): String = \"b\"\nfun f(x: A): String = if (x is B) x.cast() else \"no\"\n",
+    );
+}

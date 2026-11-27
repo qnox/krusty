@@ -18,9 +18,13 @@ pub(crate) fn unify_receiver_from_symbols(
     receiver: Ty,
     bindings: &mut GSigBinds,
 ) {
-    // A value proved to be several types is each of them: every constituent constrains the
-    // declared receiver's formals.
-    if let TyKind::Intersection(parts) = receiver.non_null().kind() {
+    // A value proved to be several types is each of them, so every constituent constrains the
+    // formals of a classifier-shaped declared receiver (`Holder<T>` reached through one of them).
+    // A bare formal receiver (`<T> T.also`) is the whole value: it binds to the intersection,
+    // nullability included, as any other receiver binds a bare formal.
+    if let (true, TyKind::Intersection(parts)) =
+        (is_classifier_shaped(declared), receiver.non_null().kind())
+    {
         for &part in parts.iter() {
             unify_receiver_from_symbols(source, declared, part, bindings);
         }
@@ -63,6 +67,17 @@ pub(crate) fn unify_receiver_from_symbols(
         solved.insert(formal.into(), solution);
     }
     bindings.extend(solved);
+}
+
+/// Whether `ty` is a classifier application, possibly nullable, rather than a bare formal.
+fn is_classifier_shaped(ty: Ty) -> bool {
+    match ty.kind() {
+        TyKind::Obj(..) => true,
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner) => is_classifier_shaped(inner),
+        _ => false,
+    }
 }
 
 /// Collect one constraint per type-parameter occurrence in a declared receiver: the type the actual
