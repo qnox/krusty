@@ -29,7 +29,8 @@ pub(crate) enum CallArgKind {
     /// A collection literal whose construction waits for the selected parameter. `provisional` is
     /// its expectation-free reading (`List<T>`); `factory_classifiers` are the classifiers among
     /// the candidates' parameters that supply a literal construction (a standard factory or an
-    /// `operator fun of`). Arrays always supply one.
+    /// `operator fun of`). Arrays always supply one. The list is empty until the literal is
+    /// postponed against a call's candidates.
     CollectionLiteral {
         provisional: Ty,
         factory_classifiers: std::sync::Arc<[TypeName]>,

@@ -321,6 +321,20 @@ impl SymbolResolver<'_> {
         super::member_property_from_callables(callables, PropertyAccess::Read)
     }
 
+    /// The member property a reference names. Unlike a read it may carry context parameters:
+    /// whether the language binds them is decided where the reference is checked.
+    pub(super) fn declared_member_property_for_reference(
+        &self,
+        receiver: Ty,
+        name: &str,
+        callables: &crate::libraries::Callables,
+    ) -> Option<crate::libraries::PropertyInfo> {
+        if hierarchy_projection::intersection_components(receiver.non_null()).is_some() {
+            return self.declared_member_property(receiver, name, callables);
+        }
+        super::referenced_member_property_from_callables(callables)
+    }
+
     pub(super) fn declared_member_property_for_write(
         &self,
         receiver: Ty,

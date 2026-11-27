@@ -28,8 +28,10 @@ use std::path::PathBuf;
 use krusty_jvm::ir_emit::JvmDefaultMode;
 
 pub mod java_compilation;
+mod jps_handoff;
 
 pub use java_compilation::JavaCompilation;
+pub use jps_handoff::{FailureKind, Handoff, WorkFailure};
 
 /// One compilation the worker was asked to perform, in krusty's terms.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -759,10 +761,58 @@ fn append_entries(jar: &std::path::Path, planned: Vec<(String, PathBuf)>) -> Res
 pub struct WorkRequest {
     #[serde(default)]
     pub arguments: Vec<String>,
+    /// The action's inputs with their digests, which a handoff forwards to the JPS builder.
+    #[serde(default)]
+    pub inputs: Vec<WorkInput>,
     #[serde(default)]
     pub request_id: i32,
     #[serde(default)]
     pub cancel: bool,
+}
+
+/// One input of a work request: its path and its digest, base64 in the JSON protocol.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct WorkInput {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub digest: String,
+}
+
+/// What the worker's own command line configures for every request it serves: kotlinc arguments
+/// the build adds to each target's (`--kotlinc-arg`), and the JPS builder a target krusty does not
+/// compile is handed to (`--jps-builder`, one argument of its command at a time).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct WorkerSetup {
+    pub kotlinc_args: Vec<String>,
+    pub handoff: Option<Handoff>,
+}
+
+impl WorkerSetup {
+    /// Read the worker's startup arguments; bazel appends `--persistent_worker` to them.
+    pub fn from_startup(arguments: &[String]) -> Result<Self, String> {
+        let mut setup = Self::default();
+        let mut builder = Vec::new();
+        let mut arguments = arguments.iter();
+        while let Some(argument) = arguments.next() {
+            let mut value = || {
+                arguments
+                    .next()
+                    .cloned()
+                    .ok_or_else(|| format!("{argument} needs a value"))
+            };
+            match argument.as_str() {
+                "--persistent_worker" => {}
+                "--kotlinc-arg" => setup.kotlinc_args.push(value()?),
+                "--jps-builder" => builder.push(value()?),
+                other => return Err(format!("unknown worker startup argument `{other}`")),
+            }
+        }
+        if !builder.is_empty() {
+            setup.handoff = Some(Handoff::new(builder)?);
+        }
+        Ok(setup)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
@@ -773,10 +823,12 @@ pub struct WorkResponse {
     pub request_id: i32,
 }
 
-/// Serve one request. Returns the response bazel should receive.
+/// Serve one request. Returns the response bazel should receive. A request krusty does not
+/// compile is handed to the JPS builder when `setup` names one, and fails otherwise.
 pub fn serve(
     request: &WorkRequest,
-    compile: &dyn Fn(WorkUnit) -> Result<(), String>,
+    setup: &WorkerSetup,
+    compile: &dyn Fn(WorkUnit) -> Result<(), WorkFailure>,
 ) -> WorkResponse {
     let arguments = match expand_flagfiles(&request.arguments) {
         Ok(arguments) => arguments,
@@ -788,8 +840,8 @@ pub fn serve(
             }
         }
     };
-    match translate(&arguments).map_err(|refusal| refusal.to_string()) {
-        Ok(unit) => {
+    let (note, label, failure) = match translate(&arguments) {
+        Ok(mut unit) => {
             // Report what was understood but had no effect. `WorkResponse::output` is the channel
             // bazel prints, and silently dropping an option the target set is the habit this module
             // exists to avoid.
@@ -804,22 +856,32 @@ pub fn serve(
                     unit.inert.join(" ")
                 ));
             }
+            // The build's own arguments come first, so a target's kotlinc options override them.
+            unit.kotlinc_args
+                .splice(0..0, setup.kotlinc_args.iter().cloned());
+            let label = unit.target_label.clone();
             match compile(unit) {
-                Ok(()) => WorkResponse {
-                    exit_code: 0,
-                    output: note,
-                    request_id: request.request_id,
-                },
-                Err(error) => WorkResponse {
-                    exit_code: 1,
-                    output: format!("{note}{error}"),
-                    request_id: request.request_id,
-                },
+                Ok(()) => {
+                    return WorkResponse {
+                        exit_code: 0,
+                        output: note,
+                        request_id: request.request_id,
+                    }
+                }
+                Err(failure) => (note, label, failure),
             }
         }
-        Err(error) => WorkResponse {
+        Err(refusal) => (
+            String::new(),
+            None,
+            WorkFailure::new(FailureKind::CommandLine, format!("krusty: {refusal}")),
+        ),
+    };
+    match &setup.handoff {
+        Some(handoff) => handoff.compile(request, label.as_deref(), &failure, &note),
+        None => WorkResponse {
             exit_code: 1,
-            output: format!("krusty: {error}"),
+            output: format!("{note}{}", failure.report),
             request_id: request.request_id,
         },
     }
@@ -829,7 +891,8 @@ pub fn serve(
 pub fn run(
     input: &mut dyn BufRead,
     output: &mut dyn Write,
-    compile: &dyn Fn(WorkUnit) -> Result<(), String>,
+    setup: &WorkerSetup,
+    compile: &dyn Fn(WorkUnit) -> Result<(), WorkFailure>,
 ) -> std::io::Result<()> {
     let mut line = String::new();
     loop {
@@ -848,7 +911,7 @@ pub fn run(
                 output: String::new(),
                 request_id: request.request_id,
             },
-            Ok(request) => serve(&request, compile),
+            Ok(request) => serve(&request, setup, compile),
             Err(error) => WorkResponse {
                 exit_code: 1,
                 output: format!("krusty: unreadable work request: {error}"),
@@ -1803,10 +1866,11 @@ mod tests {
                 "--out",
                 "o.jar",
             ]),
+            inputs: Vec::new(),
             request_id: 4,
             cancel: false,
         };
-        let response = serve(&request, &|_unit| Ok(()));
+        let response = serve(&request, &WorkerSetup::default(), &|_unit| Ok(()));
         assert_eq!(
             response,
             WorkResponse {
@@ -1828,10 +1892,11 @@ mod tests {
                 "--out",
                 "o.jar",
             ]),
+            inputs: Vec::new(),
             request_id: 5,
             cancel: false,
         };
-        let response = serve(&request, &|_unit| Ok(()));
+        let response = serve(&request, &WorkerSetup::default(), &|_unit| Ok(()));
         assert_eq!(
             response,
             WorkResponse {
@@ -1856,10 +1921,11 @@ mod tests {
                 "--out",
                 "o.jar",
             ]),
+            inputs: Vec::new(),
             request_id: 6,
             cancel: false,
         };
-        let response = serve(&request, &|_unit| Ok(()));
+        let response = serve(&request, &WorkerSetup::default(), &|_unit| Ok(()));
         assert_eq!(
             response,
             WorkResponse {
@@ -1919,6 +1985,7 @@ mod tests {
         run(
             &mut std::io::BufReader::new(requests.as_bytes()),
             &mut output,
+            &WorkerSetup::default(),
             &|_unit| Ok(()),
         )
         .expect("worker loop");
@@ -1943,7 +2010,8 @@ mod tests {
         run(
             &mut std::io::BufReader::new(requests.as_bytes()),
             &mut output,
-            &|_unit| Err("two errors".to_string()),
+            &WorkerSetup::default(),
+            &|_unit| Err(WorkFailure::new(FailureKind::Errors, "two errors")),
         )
         .expect("worker loop");
         let lines: Vec<&str> = std::str::from_utf8(&output).unwrap().lines().collect();
@@ -1953,11 +2021,133 @@ mod tests {
     }
 
     #[test]
+    fn the_startup_command_line_configures_every_request() {
+        let setup = WorkerSetup::from_startup(&args(&[
+            "--kotlinc-arg",
+            "-no-stdlib",
+            "--jps-builder",
+            "java",
+            "--jps-builder",
+            "builder.jar",
+            "--persistent_worker",
+        ]))
+        .unwrap();
+        assert_eq!(
+            setup,
+            WorkerSetup {
+                kotlinc_args: args(&["-no-stdlib"]),
+                handoff: Some(Handoff::new(args(&["java", "builder.jar"])).unwrap()),
+            }
+        );
+        assert_eq!(
+            WorkerSetup::from_startup(&args(&["--persistent_worker"])),
+            Ok(WorkerSetup::default())
+        );
+        assert_eq!(
+            WorkerSetup::from_startup(&args(&["--jps-builder"])),
+            Err("--jps-builder needs a value".to_string())
+        );
+        assert_eq!(
+            WorkerSetup::from_startup(&args(&["--srcs"])),
+            Err("unknown worker startup argument `--srcs`".to_string())
+        );
+    }
+
+    /// The build's kotlinc arguments precede the target's own, so the target's override them.
+    #[test]
+    fn startup_kotlinc_arguments_precede_the_targets() {
+        let request = WorkRequest {
+            arguments: args(&[
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+                "--kotlinc-arg",
+                "-progressive",
+            ]),
+            ..WorkRequest::default()
+        };
+        let setup = WorkerSetup {
+            kotlinc_args: args(&["-no-stdlib"]),
+            handoff: None,
+        };
+        let response = serve(&request, &setup, &|unit| {
+            assert_eq!(unit.kotlinc_args, args(&["-no-stdlib", "-progressive"]));
+            Ok(())
+        });
+        assert_eq!(response.exit_code, 0, "{}", response.output);
+    }
+
+    /// A target krusty fails, or whose command line it rejects, is compiled by the JPS builder,
+    /// and the response records why.
+    #[cfg(unix)]
+    #[test]
+    fn a_target_krusty_does_not_compile_is_handed_to_the_jps_builder() {
+        let setup = WorkerSetup {
+            kotlinc_args: Vec::new(),
+            handoff: Some(
+                Handoff::new(args(&[
+                    "sh",
+                    "-c",
+                    r"cat >/dev/null; printf '\012\010\000\022\006built\n'",
+                ]))
+                .unwrap(),
+            ),
+        };
+        let failing = WorkRequest {
+            arguments: args(&[
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+                "--target_label",
+                "//a:a",
+            ]),
+            request_id: 3,
+            ..WorkRequest::default()
+        };
+        let response = serve(&failing, &setup, &|_unit| {
+            Err(WorkFailure::new(
+                FailureKind::Unimplemented,
+                "A.kt:1:1: error: e\n",
+            ))
+        });
+        assert_eq!(
+            response,
+            WorkResponse {
+                exit_code: 0,
+                output: "krusty: target '//a:a' is left to the JPS builder: krusty does not \
+                         implement everything the target uses\nA.kt:1:1: error: e\nbuilt\n"
+                    .to_string(),
+                request_id: 3,
+            }
+        );
+        let rejected = WorkRequest {
+            arguments: args(&["--srcs", "B.kts", "--out", "o.jar"]),
+            ..WorkRequest::default()
+        };
+        let response = serve(&rejected, &setup, &|_unit| Ok(()));
+        assert_eq!(
+            response,
+            WorkResponse {
+                exit_code: 0,
+                output:
+                    "krusty: target 'this target' is left to the JPS builder: krusty rejects the \
+                         command line\nkrusty: unsupported by krusty: --srcs B.kts: the worker \
+                         compiles only .kt and .java sources\nbuilt\n"
+                        .to_string(),
+                request_id: 0,
+            }
+        );
+    }
+
+    #[test]
     fn an_unreadable_request_is_answered_not_fatal() {
         let mut output = Vec::new();
         run(
             &mut std::io::BufReader::new(&b"not json\n"[..]),
             &mut output,
+            &WorkerSetup::default(),
             &|_unit| Ok(()),
         )
         .expect("worker loop");
