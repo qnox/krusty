@@ -46,10 +46,24 @@ pub fn kotlinc_box_files_result_with_classpath(
     main_class: &str,
     classpath: &[PathBuf],
 ) -> String {
+    kotlinc_box_files_result_with_classpath_and_args(sources, main_class, classpath, &[])
+}
+
+/// [`kotlinc_box_files_result_with_classpath`] with additional kotlinc options for the consumer,
+/// such as `-Xskip-prerelease-check` for a dependency compiled with a pre-release language feature.
+pub fn kotlinc_box_files_result_with_classpath_and_args(
+    sources: &[(&str, &str)],
+    main_class: &str,
+    classpath: &[PathBuf],
+    options: &[&str],
+) -> String {
     let work = common::scratch_dir().expect("cannot allocate reference-runtime fixture");
     let source_paths = write_fixture_sources(&work, sources);
     let output = work.join("out");
-    let mut extra_args = Vec::new();
+    let mut extra_args = options
+        .iter()
+        .map(|option| (*option).to_owned())
+        .collect::<Vec<_>>();
     if !classpath.is_empty() {
         extra_args.push("-cp".to_string());
         extra_args.push(
