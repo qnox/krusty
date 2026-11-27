@@ -10,7 +10,7 @@
 //! the convenient ones. So most of these programs put the throw somewhere the check is easy to
 //! forget: behind a call, behind two, inside a constructor, inside a lambda, inside a loop.
 
-use super::common::expect_native_box;
+use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
 #[test]
 fn a_catch_of_the_thrown_type_takes_it() {
@@ -714,18 +714,19 @@ fn a_long_try_in_a_reference_position_is_boxed() {
     );
 }
 
+/// The JVM/kotlinc oracle accepts the program before the strict Native assertion. It is not in
+/// `tests/box_regressions` yet: Wasm does not realize `KClass.isInstance`, and a shared program
+/// must pass every lane.
 #[test]
 fn a_class_literal_tests_whether_a_value_is_an_instance() {
-    expect_native_box(
-        "fun box(): String {\n\
+    const SOURCE: &str = "fun box(): String {\n\
          \x20   val e: Any? = IllegalStateException(\"boom\")\n\
          \x20   if (!IllegalStateException::class.isInstance(e)) return \"fail: same class\"\n\
          \x20   if (!RuntimeException::class.isInstance(e)) return \"fail: supertype\"\n\
          \x20   if (NumberFormatException::class.isInstance(e)) return \"fail: unrelated\"\n\
          \x20   if (IllegalStateException::class.isInstance(null)) return \"fail: null\"\n\
          \x20   return \"OK\"\n\
-         }\n",
-        "ClassLiteralIsInstance",
-        "OK",
-    );
+         }\n";
+    expect_box_ok_with_stdlib(SOURCE, "ClassLiteralIsInstanceOracle");
+    expect_native_box(SOURCE, "ClassLiteralIsInstance", "OK");
 }
