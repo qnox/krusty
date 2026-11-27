@@ -2239,6 +2239,7 @@ regressions/memberExtensionNullableReceiverOverload.kt
 regressions/memberExtensionRecursiveOpenBound.kt
 regressions/memberLocalFunctions.kt
 regressions/moduleDelegationForwarderSlots.kt
+regressions/moduleDelegationSuspendForwarderSlots.kt
 regressions/multimodule/boundExtensionReferences.kt
 regressions/multimodule/delegatedPropertiesExpandInlineLibraryConventions.kt
 regressions/multimodule/dependencyArrayView.kt
