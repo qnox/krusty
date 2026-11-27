@@ -12,9 +12,10 @@
 //! check runs where the host links Native programs, as every Native test does. A Kotlin/Wasm
 //! program runs under the exact kotlinc-wasm and Node.js.
 //!
-//! GAP: krusty's Wasm runtime lays out its own `ArrayList`, which reads `addAll`'s argument before it
-//! grows, so krusty's Wasm programs are not checked here yet. They will be once the target stdlib's
-//! `ArrayList` body replaces that runtime list (#3836).
+//! krusty compiles Kotlin/Wasm programs in process only, under the default defect mode, so its
+//! Wasm programs are checked by the Wasm lane's own test (`tests/wasm_kotlinc_defects.rs`), which
+//! requires them to give what kotlinc-wasm gives. No krusty entry point compiles Kotlin/Wasm under
+//! `-Xfix-kotlinc-defects` yet.
 
 use std::path::Path;
 
@@ -92,19 +93,7 @@ fun box(): String {
 "#;
 
 /// `ArrayListAddAllGrowsBeforeReadingItsArgument`: a list appends a range of itself.
-const LIST_ADD_ALL_OF_ITS_RANGE: &str = "fun box(): String {\n\
-    \x20   val list = ArrayList<Int>()\n\
-    \x20   list.add(1)\n\
-    \x20   list.add(2)\n\
-    \x20   list.add(3)\n\
-    \x20   val answer = try {\n\
-    \x20       list.addAll((list as List<Int>).subList(0, 2))\n\
-    \x20       \"appended\"\n\
-    \x20   } catch (e: ConcurrentModificationException) {\n\
-    \x20       \"raised\"\n\
-    \x20   }\n\
-    \x20   return \"$answer $list\"\n\
-    }\n";
+const LIST_ADD_ALL_OF_ITS_RANGE: &str = include_str!("kotlinc_defects/listAddAllOfItsRange.kt");
 
 /// A platform module's class over the class of a library its common module depends on. Compiled
 /// with `-Xseparate-kmp-compilation`, kotlinc-native crashes actualizing the application's
@@ -300,8 +289,8 @@ fn kotlinc_wasm_outcome(target: CompilationTarget, source: &str) -> Option<Outco
 }
 
 /// Compile `source` for `platform` with the krusty CLI under `arguments` and run its `box()`;
-/// `None` for Native where this host links no Native program, and for Kotlin/Wasm (the GAP in the
-/// module documentation).
+/// `None` for Native where this host links no Native program, and for Kotlin/Wasm, which the Wasm
+/// lane checks (see the module documentation).
 fn krusty_outcome(platform: Platform, source: &str, arguments: &[&str]) -> Option<Outcome> {
     match platform {
         Platform::Jvm => Some(krusty_jvm_outcome(source, arguments)),
