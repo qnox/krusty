@@ -2008,16 +2008,18 @@ impl BodyScope<'_> {
                  not a composable function type",
             )
         } else if supplied_arguments(callee, args).any(|(parameter, argument)| {
-            // A placed lambda is invoked with its captures alone: its own parameters and its
-            // receiver have no values in its caller to place.
+            // A placed lambda takes a receiver after its captures; value parameters of its own
+            // are not placed yet.
             self.places_lambda(ir, call, argument)
                 && params.get(parameter as usize).is_some_and(|ty| {
-                    matches!(ty.kind(), TyKind::Fun(signature) if !signature.params.is_empty())
+                    matches!(ty.kind(), TyKind::Fun(signature)
+                        if signature.context_count > 0
+                            || signature.params.len() > usize::from(signature.has_receiver))
                 })
         }) {
             Some(
                 "a call to an inline library composable function with a composable lambda that \
-                 takes parameters or has a receiver",
+                 takes parameters",
             )
         } else if let Some(placement) = shape
             .inline

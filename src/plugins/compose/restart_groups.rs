@@ -378,36 +378,42 @@ fn place_lambda(
             .expect("a function that passes its parameters on reads them")
     });
     let captures = lambda.captures;
+    let values = lambda.parameters.len() as u32;
     let extra = u32::from(dirty.is_some());
     let slots = Slots {
-        first: captures,
-        composer: captures + extra,
-        changed: captures + extra + 1,
+        first: captures + extra,
+        composer: captures + extra + values,
+        changed: captures + extra + values + 1,
         changed_ints: 1,
         default: None,
         dirty: dirty.map(|_| captures),
     };
-    // The values the lambda captures, the caller's `$dirty` last, then the two it is called with.
+    // The values the lambda captures, the caller's `$dirty` last, then the ones it is called with,
+    // then the two the composer adds.
     let dirty_capture = dirty.map(|slot| ir.add_expr(IrExpr::GetValue(slot)));
     let function = lambda.implementation;
     let declaration = &mut ir.functions[function as usize];
-    debug_assert_eq!(declaration.params.len(), captures as usize);
-    declaration.params.extend(
-        dirty
-            .map(|_| Ty::Int)
-            .into_iter()
-            .chain([Ty::nullable(runtime::composer()), Ty::Int]),
-    );
+    debug_assert_eq!(declaration.params.len(), (captures + values) as usize);
+    if dirty.is_some() {
+        declaration.params.insert(captures as usize, Ty::Int);
+    }
+    declaration
+        .params
+        .extend([Ty::nullable(runtime::composer()), Ty::Int]);
     declaration
         .param_checks
-        .resize(captures as usize + extra as usize + 2, None);
+        .resize((captures + values + extra) as usize + 2, None);
     let body = declaration.body.expect("a lambda has a body");
-    crate::ir::shift_value_indices(ir, body, captures, extra + 2);
-    crate::ir::shift_value_indices(ir, template, captures, extra + 2);
+    for expression in [body, template] {
+        crate::ir::shift_value_indices(ir, expression, captures, extra);
+        crate::ir::shift_value_indices(ir, expression, captures + extra + values, 2);
+    }
     let identities = &mut ir.fn_params.entry(function).or_default().identities;
-    identities.truncate(captures as usize);
     if dirty.is_some() {
-        identities.push(IrParameterIdentity::producer_value("$dirty"));
+        identities.insert(
+            captures as usize,
+            IrParameterIdentity::producer_value("$dirty"),
+        );
     }
     identities.extend([
         IrParameterIdentity::producer_value("$composer"),
@@ -421,7 +427,7 @@ fn place_lambda(
     else {
         unreachable!("a composable lambda is a lambda");
     };
-    *arity = 2;
+    *arity = composer_arity(lambda.parameters.len());
     captured.extend(dirty_capture);
     // The standalone function is never emitted, and its library calls lack the composer.
     retire_library_calls(ir, body);
@@ -486,7 +492,7 @@ fn add_lambda_composer_parameters(ir: &mut IrFile, lambda: &ComposableLambda) {
     else {
         unreachable!("a composable lambda is a lambda");
     };
-    *arity = (lambda.parameters.len() + 2) as u8;
+    *arity = composer_arity(lambda.parameters.len());
     // The value is called through the runtime's wrapper, never inlined.
     let template = inline_body.take();
     if let Some(template) = template {
@@ -1615,4 +1621,10 @@ fn mark_line(ir: &mut IrFile, expression: ExprId, line: u32) {
     if line != 0 {
         ir.set_statement_line(expression, line);
     }
+}
+
+/// The arity of a composable lambda that takes `values` of its own, then the composer and its
+/// `$changed` mask. A lambda's arity is a byte in the IR, as the JVM's parameter limit bounds it.
+fn composer_arity(values: usize) -> u8 {
+    u8::try_from(values + 2).expect("a composable lambda's arity fits the JVM parameter limit")
 }
