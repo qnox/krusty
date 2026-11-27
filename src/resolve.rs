@@ -36828,12 +36828,20 @@ impl<'a> Checker<'a> {
                 for &argument in &entry.args {
                     self.finish_executable_root(argument);
                 }
+                // The entry's own annotations (`@OptIn(M::class) ENTRY`) accept what its call needs.
+                let entry_policy_depth = self.push_declaration_policies(
+                    scope,
+                    &entry.annotations,
+                    &entry.annotation_args,
+                );
                 self.record_enum_entry_constructor(
                     entry.span,
+                    entry.explicit_call,
                     streamed_enum_owner,
                     enum_signature.as_ref(),
                     selected,
                 );
+                self.active_lexical_policies.truncate(entry_policy_depth);
             }
             self.static_companion_this = previous_static_this;
         }

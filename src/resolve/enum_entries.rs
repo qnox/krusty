@@ -13,6 +13,7 @@ impl Checker<'_> {
     pub(super) fn record_enum_entry_constructor(
         &mut self,
         entry_span: Span,
+        explicit_call: bool,
         streamed_enum_owner: Option<crate::fir::DeclarationId>,
         enum_signature: Option<&ClassSig>,
         selected: ResolvedCtorDelegation,
@@ -61,6 +62,7 @@ impl Checker<'_> {
                 unreachable!("an enum entry selects a constructor of its enum class")
             }
         };
+        self.check_enum_entry_opt_in(entry_span, explicit_call, stable_declaration);
         self.resolved_enum_entry_constructors.insert(
             (entry_span.lo, entry_span.hi),
             ResolvedConstructor::Source {
