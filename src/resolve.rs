@@ -270,6 +270,7 @@ mod intersection_inference;
 mod intersection_receiver_selection;
 mod invoke_selection;
 mod lexical_value_invoke;
+mod unnarrowed_member_receiver;
 use lexical_value_invoke::{DeferredInvokePeers, DeferredLexicalInvoke, LexicalInvokeSite};
 mod lambda_call_shapes;
 mod property_read_selection;
@@ -1439,6 +1440,9 @@ pub struct TypeInfo {
     /// and ordinary stable-local smart casts. FIR publishes the selected target view as a checked
     /// conversion; lowering never reconstructs flow facts from the source condition.
     pub(crate) selected_value_smartcasts: HashMap<ExprId, Ty>,
+    /// Member accesses (an assignment by its receiver) that dispatch on their smart-cast receiver's
+    /// unnarrowed type, with that type; FIR drops the cast. See `unnarrowed_member_receiver`.
+    pub(crate) unnarrowed_dispatch_calls: HashMap<ExprId, Ty>,
     /// Context-selected conversion of a folded integer constant expression to its declaration or
     /// argument target. The expression itself may still be an `Int` operator tree; checked FIR
     /// carries this boundary explicitly so lowering never repeats constant-expression inference.
@@ -14493,7 +14497,13 @@ impl<'a> Checker<'a> {
         if inferred_intersection.len() > 1 {
             receiver_ty = Ty::intersection(&inferred_intersection);
         }
-        if let Some(projected) = self
+        // A write has no access expression of its own: its receiver keys the decision.
+        let access = (receiver, receiver);
+        if let Some(declared) =
+            self.unnarrowed_explicit_property_receiver(scope, access, receiver_ty, &name, true)
+        {
+            receiver_ty = declared;
+        } else if let Some(projected) = self
             .flow_intersection_property_receiver(scope, receiver, &name, true)
             .or_else(|| self.type_parameter_member_receiver(scope, receiver_ty, &name))
         {
@@ -23706,6 +23716,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         selected_generic_calls: HashMap::default(),
         inferred_expression_intersections: HashMap::default(),
         selected_value_smartcasts: HashMap::default(),
+        unnarrowed_dispatch_calls: Default::default(),
         selected_numeric_conversions: HashMap::default(),
         deferred_constructor_failures: HashMap::default(),
         selected_function_value_conversions: HashMap::default(),
@@ -24731,6 +24742,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         equality_bound_parameters,
         selected_generic_calls,
         selected_value_smartcasts,
+        unnarrowed_dispatch_calls,
         selected_numeric_conversions,
         selected_function_value_conversions,
         narrowed_this_member,
@@ -25049,6 +25061,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         checked_local_supertypes,
         selected_generic_calls,
         selected_value_smartcasts,
+        unnarrowed_dispatch_calls,
         selected_numeric_conversions,
         selected_function_value_conversions,
         generated_class_names,
@@ -25813,6 +25826,7 @@ struct Checker<'a> {
     inferred_expression_intersections:
         HashMap<ExprId, intersection_inference::InferredIntersection>,
     selected_value_smartcasts: HashMap<ExprId, Ty>,
+    unnarrowed_dispatch_calls: HashMap<ExprId, Ty>,
     selected_numeric_conversions: HashMap<ExprId, Ty>,
     /// A qualified call's inapplicable nested-constructor rung, kept while its later rungs select.
     deferred_constructor_failures:
@@ -42821,7 +42835,7 @@ impl<'a> Checker<'a> {
             )
         }) {
             for receiver in self.implicit_receivers_before_value_binding(scope, &n) {
-                let receiver = self.implicit_intersection_property_view(receiver, &n);
+                let receiver = self.implicit_property_receiver_view(receiver, &n);
                 if let Some(ty) =
                     self.try_member_read(scope, receiver.ty, &n, self.span(e), Some(e))
                 {
@@ -42926,7 +42940,7 @@ impl<'a> Checker<'a> {
                                 continue;
                             }
                             implicit_rungs::ImplicitRung::Receiver(receiver) => {
-                                self.implicit_intersection_property_view(receiver, &n)
+                                self.implicit_property_receiver_view(receiver, &n)
                             }
                         };
                         if let Some(selected_ty) =
@@ -43113,7 +43127,7 @@ impl<'a> Checker<'a> {
                             continue;
                         }
                         implicit_rungs::ImplicitRung::Receiver(receiver) => {
-                            self.implicit_intersection_property_view(receiver, &n)
+                            self.implicit_property_receiver_view(receiver, &n)
                         }
                     };
                     if context_receiver_priority::is_context_parameter_receiver(
@@ -43987,7 +44001,11 @@ impl<'a> Checker<'a> {
             if inferred_intersection.len() > 1 {
                 rt = Ty::intersection(&inferred_intersection);
             }
-            if let Some(projected) = self
+            if let Some(declared) =
+                self.unnarrowed_explicit_property_receiver(scope, (e, receiver), rt, &name, false)
+            {
+                rt = declared;
+            } else if let Some(projected) = self
                 .flow_intersection_property_receiver(scope, receiver, &name, false)
                 .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
             {
