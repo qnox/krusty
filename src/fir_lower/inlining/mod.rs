@@ -158,6 +158,11 @@ impl BodyLowering<'_> {
             {
                 return true;
             }
+            // A lambda literal's body runs where the lambda is called, not where it is created.
+            if let IrExpr::Lambda { captures, .. } = self.ir.expr(expression) {
+                pending.extend(captures);
+                continue;
+            }
             crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));
         }
         false
