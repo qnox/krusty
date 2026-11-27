@@ -1791,7 +1791,7 @@ impl Emitter<'_> {
         let operands = locals
             .iter()
             .enumerate()
-            .filter(|(_, local)| local.inline_operand && !local.opens_inline_frame)
+            .filter(|(_, local)| local.parameter_order)
             .map(|(position, _)| position)
             .collect::<Vec<_>>();
         let mut sorted = operands.clone();
@@ -2289,6 +2289,9 @@ pub(super) struct OpenLocal {
     /// This local binds an inline call operand and starts with the next emitted inline frame,
     /// after all operands have been evaluated, rather than at its own store.
     pub(super) inline_operand: bool,
+    /// This local is a parameter of an expanded function: the inliner lists those in parameter
+    /// order, unlike the operands of a spliced lambda's invocation, which it stores last first.
+    pub(super) parameter_order: bool,
     /// Identity of the inline frame this entry belongs to. This is emission provenance, not a JVM
     /// spelling: locals opened before a frame marker are rebound when that marker is emitted.
     pub(super) inline_frame: Option<u64>,
