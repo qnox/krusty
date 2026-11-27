@@ -212,20 +212,6 @@ impl Constructor {
         Ok(fields)
     }
 
-    /// The captured field the constructor, called through `call_desc`, stores its argument at
-    /// `index` in: the field a copy that inlines a lambda passed there reads it from.
-    pub(super) fn field_of_argument(&self, call_desc: &str, index: usize) -> Option<&str> {
-        let slot = 1 + argument_descriptors(call_desc)?
-            .get(..index)?
-            .iter()
-            .map(|argument| descriptor_words(argument))
-            .sum::<u16>();
-        self.fields
-            .iter()
-            .find(|field| field.slot == slot)
-            .map(|field| field.name.as_str())
-    }
-
     /// The order the copy takes the lambdas passed as the arguments at `lambda_arguments` of
     /// `call_desc` in, as positions in `lambda_arguments`: first each lambda the original keeps in
     /// a field, in the order it stores the fields (`findCapturedFieldAssignmentInstructions`), then

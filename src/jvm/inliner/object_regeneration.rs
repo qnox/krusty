@@ -100,13 +100,6 @@ pub(super) struct PendingConstructor {
     captured_loads: Vec<Insn>,
 }
 
-impl PendingConstructor {
-    /// Whether this is the constructor of `class`, the copy that keeps the call's lambdas.
-    pub(super) fn constructs(&self, class: &str) -> bool {
-        self.class == class
-    }
-}
-
 /// Regenerate every anonymous object `node` constructs and rename the references to it. Each
 /// `new`, in instruction order as kotlinc visits them, takes a fresh copy; its own constructor
 /// call is renamed to that copy, and every other reference names the latest copy of its class.

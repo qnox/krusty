@@ -597,7 +597,7 @@ fn inline_lambda(
     let mut node = super::preprocess_node_before_inline(node)?;
     preparation::remove_fake_variable_initializations(&mut node);
     returns::normalize_local_returns(&mut node)?;
-    let invokes = super::functional_arguments::mark_places(&mut node, &parameters, &[])?;
+    let invokes = super::functional_arguments::mark_places(&mut node, &parameters)?;
     let context = Context {
         parameters: &parameters,
         lambdas: &[],

@@ -51,6 +51,10 @@ pub(in super::super) enum ExpansionReason {
     /// numbered by every `when` of that class in source order; this file's emission sees only the
     /// callee's.
     EnumSwitchInBody,
+    /// The callee's body captures one of its inlined function parameters in a suspend literal.
+    /// The literal is a state machine of its own, which only an expanded body can place in the
+    /// caller's frame.
+    SuspendLiteralKeepsParameter,
 }
 
 impl BodyLowering<'_> {
@@ -164,9 +168,43 @@ impl BodyLowering<'_> {
             if foreign && self.ir.enum_switch_when(expression).is_some() {
                 return Some(ExpansionReason::EnumSwitchInBody);
             }
+            if self.suspend_literal_keeps_parameter(function, expression) {
+                return Some(ExpansionReason::SuspendLiteralKeepsParameter);
+            }
             crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));
         }
         None
+    }
+
+    /// Whether `expression`, in the template of `function`, is a suspend literal that captures one
+    /// of the function's inlined function-typed parameters.
+    fn suspend_literal_keeps_parameter(&self, function: FunId, expression: ExprId) -> bool {
+        let IrExpr::Lambda {
+            impl_fn, captures, ..
+        } = self.ir.expr(expression)
+        else {
+            return false;
+        };
+        if !self.ir.suspend_funs.contains(impl_fn) {
+            return false;
+        }
+        let Some(callee) = self.ir.functions.get(function as usize) else {
+            return false;
+        };
+        let modifiers = self.ir.declared_inline_modifiers(function);
+        let first = usize::from(callee.dispatch_receiver.is_some());
+        captures.iter().any(|&capture| {
+            let IrExpr::GetValue(value) = self.ir.expr(capture) else {
+                return false;
+            };
+            let Some(index) = (*value as usize).checked_sub(first) else {
+                return false;
+            };
+            callee.params.get(index).is_some_and(|ty| {
+                matches!(ty.non_null().kind(), TyKind::Fun(_))
+                    && modifiers.get(index) != Some(&InlineParameterModifier::Noinline)
+            })
+        })
     }
 
     /// Record the call-site value of each type parameter of `function`, which `call` inlines from
