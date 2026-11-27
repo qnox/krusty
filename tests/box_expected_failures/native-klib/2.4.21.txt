@@ -119,7 +119,6 @@ companionBlocksAndExtensions/multipleBlocks.kt
 companionBlocksAndExtensions/nestedClasses.kt
 companionBlocksAndExtensions/resolutionPriority.kt
 companionBlocksAndExtensions/visibility.kt
-compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt
 compileKotlinAgainstKotlin/inlineClasses/funInterface.kt
 compileKotlinAgainstKotlin/inlineClasses/suspendFunWithDefaultMangling.kt
@@ -420,7 +419,6 @@ inline/sharedVar.kt
 inline/typeParameterSymbolIsUnbound.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
 inlineArgsInPlace/kt49370.kt
-inlineClasses/anonymousObjectAsDefaultParamFull.kt
 inlineClasses/boxReturnValueOnOverride/covariantOverrideListVsMutableList.kt
 inlineClasses/boxReturnValueOnOverride/covariantOverrideListVsMutableListGeneric.kt
 inlineClasses/boxReturnValueOnOverride/kt31585.kt
@@ -494,7 +492,6 @@ multiplatform/k2/basic/overridesOfExpectMembers.kt
 multiplatform/k2/basic/substitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/widerVisibilityInActualClassifier.kt
 multiplatform/k2/defaultArguments/kt67488.kt
-multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
 multiplatform/k2/expectStatic.kt
@@ -737,7 +734,6 @@ regressions/kt2246.kt
 regressions/kt344.kt
 regressions/kt5056.kt
 regressions/kt6434.kt
-regressions/kt68727.kt
 regressions/multimodule/inlineAssertFailsWithBlock.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 reified/callableReferenceInlinedFun.kt

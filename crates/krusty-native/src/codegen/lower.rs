@@ -2012,10 +2012,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 default_prefix_count,
                 ..
             } => {
-                if let Some(constructed) = external_target
-                    .filter(|_| defaults.is_empty())
-                    .and_then(|target| self.dependency_construction(target, internal, &args))
-                {
+                if let Some(constructed) = external_target.and_then(|target| {
+                    self.dependency_construction(
+                        target,
+                        internal,
+                        &args,
+                        &defaults,
+                        default_prefix_count,
+                    )
+                }) {
                     return constructed;
                 }
                 // A construction's `defaults` name SOURCE-value ordinals, which begin after the
