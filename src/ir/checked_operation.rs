@@ -129,6 +129,27 @@ pub enum IrCheckedOperation {
         index: u32,
         operands: Vec<ExprId>,
     },
+    /// A property reference whose only use is to designate the instance field `index` of `class`
+    /// on `receiver`, of storage type `ty`, for an atomic access ([`Self::AtomicFieldThrough`]).
+    /// A library lambda that returns such a reference to an inline atomic helper is expanded
+    /// into the helper's accesses; KLIB body lowering then resolves each access to
+    /// [`Self::AtomicField`] and no designation remains. No target realizes one.
+    FieldDesignation {
+        receiver: ExprId,
+        class: crate::ir::ClassId,
+        index: u32,
+        ty: crate::types::Ty,
+        final_: bool,
+    },
+    /// The atomic access `operation` through the property reference `reference` evaluates to,
+    /// before inline expansion has made that reference a [`Self::FieldDesignation`]. KLIB body
+    /// lowering resolves it to [`Self::AtomicField`] after expansion, as kotlinc lowers an atomic
+    /// intrinsic only after inlining; one it cannot resolve declines. No target realizes one.
+    AtomicFieldThrough {
+        operation: crate::libraries::AtomicOperation,
+        reference: ExprId,
+        operands: Vec<ExprId>,
+    },
     /// One atomic access to the element `index` of `array`, which the target stdlib declares as an
     /// intrinsic over that array. `operands` follow [`crate::libraries::AtomicOperation`] and are
     /// the array's element; the array, the index and then each operand are evaluated in order.

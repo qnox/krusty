@@ -48,6 +48,8 @@ pub struct KlibCalleeFacts<'a> {
     /// The prepared-inline copies of the loaded libraries' inline functions, which a call of a
     /// suspend inline function expands from.
     expansion_copies: Option<&'a crate::klib_libraries::KlibDeclarationBodies>,
+    /// The interface defaults a materialized object declares and emits.
+    object_defaults: Rc<HashSet<KlibDependencyCallable>>,
 }
 
 #[derive(Clone)]
@@ -193,6 +195,19 @@ impl<'a> KlibCalleeFacts<'a> {
         classifier: crate::types::TypeName,
     ) -> Option<&crate::libraries::KlibBodyClassContract> {
         self.private_member_classes.get(&classifier)
+    }
+
+    pub(crate) fn with_object_defaults(
+        mut self,
+        defaults: impl IntoIterator<Item = KlibDependencyCallable>,
+    ) -> Self {
+        self.object_defaults = Rc::new(defaults.into_iter().collect());
+        self
+    }
+
+    /// Whether the closure released `identity`, an interface default an object inherits.
+    pub(crate) fn is_object_default(&self, identity: &KlibDependencyCallable) -> bool {
+        self.object_defaults.contains(identity)
     }
 
     /// The object or enum class `classifier`, when the closed bodies read an instance of it.
@@ -529,6 +544,18 @@ impl<'a> KlibCalleeFacts<'a> {
         bodies: &crate::klib_libraries::KlibDeclarationBodies,
     ) -> Result<Vec<KlibDependencyCallable>, super::decline::KlibBodyDeclineReason> {
         super::class_initialization::declared_instances_dispatched_members(class, bodies, self)
+    }
+
+    /// The interface defaults the object `class` inherits, with what each implements.
+    pub(crate) fn object_inherited_defaults(
+        &self,
+        class: &crate::libraries::KlibBodyClassContract,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<
+        Vec<super::class_initialization::InheritedDefault>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        super::class_initialization::object_inherited_defaults(class, bodies, self)
     }
 
     /// The declarations the overrides of the object or enum class `class` override.

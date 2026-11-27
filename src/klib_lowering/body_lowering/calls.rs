@@ -169,16 +169,36 @@ impl BodyLowering<'_> {
             });
             return Ok(self.typed(array, ty));
         }
-        if !access.type_arguments.is_empty() {
+        let reference_literal = primitive.operation == CommonPrimitive::ReferenceArrayLiteral;
+        if reference_literal {
+            if access.type_arguments.len() != 1 || !ty.is_reference_array() {
+                return Err(mismatch(
+                    "a reference array factory is called with another shape than its declaration's",
+                ));
+            }
+        } else if !access.type_arguments.is_empty() {
             return Err(mismatch("a common primitive is called with type arguments"));
         }
+        // The packed array of a reference array literal is `Array<out E>` for the `Array<E>` the
+        // call has, as the declaration's vararg parameter states it.
+        let literal_params = [match ty.type_args() {
+            &[element] if reference_literal => {
+                Ty::obj_args("kotlin/Array", &[Ty::out_projection(element)])
+            }
+            _ => ty,
+        }];
+        let params = if reference_literal {
+            &literal_params[..]
+        } else {
+            &primitive.params
+        };
         let operands = self.call_operands(
             access,
             ty,
             CalleeShape {
                 receiver: primitive.receiver,
-                params: &primitive.params,
-                ret: primitive.ret,
+                params,
+                ret: if reference_literal { ty } else { primitive.ret },
                 context_count: 0,
                 class_type_parameters: &primitive.class_type_parameters,
                 parameter_defaults: &[],
@@ -189,7 +209,10 @@ impl BodyLowering<'_> {
         // source call of it to an array literal. Every other primitive is a member operation.
         let (Some(receiver), Some(receiver_type)) = (operands.receiver, primitive.receiver) else {
             return match (primitive.operation, operands.args.as_slice()) {
-                (CommonPrimitive::ArrayLiteral, &[array]) => Ok(self.typed(array, operands.ret)),
+                (
+                    CommonPrimitive::ArrayLiteral | CommonPrimitive::ReferenceArrayLiteral,
+                    &[array],
+                ) => Ok(self.typed(array, operands.ret)),
                 _ => Err(mismatch(
                     "a member primitive is called without its dispatch receiver",
                 )),
@@ -233,7 +256,9 @@ impl BodyLowering<'_> {
                 )))
             }
             // A numeric conversion, as checked FIR lowers the source conversion.
-            CommonPrimitive::ArrayLiteral | CommonPrimitive::EmptyArray => {
+            CommonPrimitive::ArrayLiteral
+            | CommonPrimitive::ReferenceArrayLiteral
+            | CommonPrimitive::EmptyArray => {
                 return Err(mismatch(
                     "an array factory is called with a dispatch receiver",
                 ))

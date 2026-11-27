@@ -537,6 +537,19 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
         }
         compile(&opts).map_err(|error| error.report)?;
     }
+    // A mixed target's Java compiles against the Kotlin classes just written, into the same jar.
+    if !unit.java.sources.is_empty() {
+        let java_home = std::env::var_os("JAVA_HOME")
+            .filter(|home| !home.is_empty())
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| {
+                "krusty: the target has Java sources, and compiling them needs JAVA_HOME\n"
+                    .to_string()
+            })?;
+        unit.java
+            .compile_into(&java_home, &unit.classpath, &unit.output_jar)
+            .map_err(|error| format!("krusty: {error}\n"))?;
+    }
     krusty_cli::worker::package_resources(&unit.output_jar, &unit.resources)
         .map_err(|error| format!("krusty: {error}\n"))?;
 
@@ -693,6 +706,10 @@ pub fn compile(opts: &cli::Options) -> Result<usize, CompileError> {
     let plugins = opts.resolve_plugins(&effective_classpath);
     for note in &plugins.notes {
         eprintln!("info: {note}");
+    }
+    // kotlinc announces the argument before it compiles anything.
+    if opts.jvm_enable_preview {
+        eprintln!("info: using preview Java language features");
     }
     if !plugins.errors.is_empty() {
         return Err(plugins

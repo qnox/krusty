@@ -29,9 +29,9 @@ index 0000000000..c0c19a5f3c
 +
 +Unset, the repository holds a stub and `KRUSTY_ENABLED` is false, so `jvm_library` keeps the
 +JPS builder. `KRUSTY_KOTLIN_VERSION` is the build's Kotlin release, which krusty reproduces. Set to an absolute path of a built `krusty` executable and the same rules compile
-+Kotlin-only, plugin-free targets with that binary. Java sources, source jars, and compiler
-+plugins stay on the JPS builder: krusty has no Java front end and does not load build-supplied
-+plugins.
++Kotlin and mixed Kotlin/Java, plugin-free targets with that binary; krusty reads the `.java` files
++as declarations and runs the action JDK's javac over them, as the JPS builder does. Java-only
++targets, source jars, and build-supplied compiler plugins stay on the JPS builder.
 +"""
 +
 +def _krusty_compiler_impl(rctx):
@@ -122,11 +122,11 @@ index e68fed938c..31fb2d4379 100644
 -            args,
 -        ],
 -        progress_message = "compile %%{label} (kt: %d, java: %d)" % (len(srcs.kt), javaCount),
-+    # Java sources, source jars, and build-supplied plugins stay on the JPS builder. krusty
-+    # refuses those shapes, and a mixed target must still compile.
++    # Java-only targets, source jars, and build-supplied plugins stay on the JPS builder. A mixed
++    # target's Java is compiled by javac inside the krusty action, against krusty's classes.
 +    krusty_ready = (
 +        KRUSTY_ENABLED and
-+        javaCount == 0 and
++        (javaCount == 0 or len(srcs.kt) > 0) and
 +        len(srcs.src_jars) == 0 and
 +        not plugins.stubs_phase and
 +        not plugins.compile_phase.classpath
@@ -155,7 +155,7 @@ index e68fed938c..31fb2d4379 100644
 +                "requires-worker-protocol": "json",
 +            },
 +            arguments = [args],
-+            progress_message = "compile %%{label} with krusty (kt: %d)" % len(srcs.kt),
++            progress_message = "compile %%{label} with krusty (kt: %d, java: %d)" % (len(srcs.kt), javaCount),
 +        )
 +    else:
 +        ctx.actions.run(

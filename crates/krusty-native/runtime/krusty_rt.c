@@ -1043,6 +1043,40 @@ static kt_int kt_render_char(kt_char unit, char *buffer) {
     return 3;
 }
 
+/* Kotlin/Native's `unsafeStringFromCharArray`: the text of `size` UTF-16 units of `chars` from
+   `start`, the bounds already proven by the caller. A high surrogate followed by a low one is the
+   one character they encode; any other surrogate is a lone unit, stored as the three bytes it
+   encodes to, as every lone unit of a string is. `chars` is a root in the caller's frame across
+   the allocation. */
+KRef kt_string_from_char_array(KRef chars, kt_int start, kt_int size) {
+    /* Three bytes bound a unit, and a pair's four bytes fit within the six its two units bound.
+       Multiplied out in 64 bits: a slice of more than a third of the largest array would wrap the
+       capacity, and text longer than any array can hold is memory the runtime cannot provide. */
+    uint64_t capacity = (uint64_t)size * 3u;
+    if (capacity > (uint64_t)INT32_MAX) {
+        kt_fail_oom();
+    }
+    KByteArray *text = kt_bytes_new((kt_int)capacity);
+    char *out = kt_bytes_of(text);
+    const kt_char *units = (const kt_char *)((const KArray *)kt_array_storage(chars) + 1) + start;
+    kt_int written = 0;
+    for (kt_int at = 0; at < size; at++) {
+        uint32_t unit = units[at];
+        if (unit >= 0xD800u && unit < 0xDC00u && at + 1 < size && units[at + 1] >= 0xDC00u
+            && units[at + 1] < 0xE000u) {
+            uint32_t code = 0x10000u + ((unit - 0xD800u) << 10) + (units[at + 1] - 0xDC00u);
+            out[written++] = (char)(0xF0 | (code >> 18));
+            out[written++] = (char)(0x80 | ((code >> 12) & 0x3F));
+            out[written++] = (char)(0x80 | ((code >> 6) & 0x3F));
+            out[written++] = (char)(0x80 | (code & 0x3F));
+            at++;
+        } else {
+            written += kt_render_char((kt_char)unit, out + written);
+        }
+    }
+    return kt_string_of((KRef)text, out, written);
+}
+
 /* Render any value as bytes. `*storage` receives the heap object that owns the bytes (NULL when
    they are in static storage); a caller that allocates before it has finished with the bytes
    must keep it in a local, so the collector sees a root. */

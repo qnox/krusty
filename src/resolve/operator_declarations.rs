@@ -266,6 +266,9 @@ impl Checker<'_> {
             );
         }
         self.check_assignment_declaration(function, ret, site.call_receiver());
+        if let OperatorDeclarationSite::Member(declaration, _) = site {
+            self.record_operator_of_overload(function, ret, declaration);
+        }
         if !function.is_operator() {
             return;
         }

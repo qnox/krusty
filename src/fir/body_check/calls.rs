@@ -1364,13 +1364,24 @@ impl BodyFirChecker<'_> {
         }
     }
 
+    /// The selected type arguments of the call published for `expression`. The range builder of
+    /// `x in a..b` shares its expression key with the `contains` call, so it reads none.
+    pub(super) fn materialized_call_type_arguments(
+        &self,
+        expression: ExprId,
+    ) -> impl Iterator<Item = (usize, Ty)> + '_ {
+        let published = self.range_builder_expression != Some(expression);
+        self.info
+            .materialized_call_type_arguments(expression)
+            .filter(move |_| published)
+    }
+
     pub(super) fn call_substitutions(
         &self,
         expression: ExprId,
         declaration: DeclarationId,
     ) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
-        self.info
-            .materialized_call_type_arguments(expression)
+        self.materialized_call_type_arguments(expression)
             .map(|(ordinal, argument)| {
                 let additional_bounds = self
                     .info
@@ -1532,7 +1543,6 @@ impl BodyFirChecker<'_> {
             .map(resolved)
             .collect::<Result<Vec<_>, _>>()?;
         let substitutions = self
-            .info
             .materialized_call_type_arguments(expression)
             .map(|(ordinal, argument)| {
                 let additional_bounds = self
@@ -2308,6 +2318,21 @@ impl BodyFirChecker<'_> {
         };
         *default_provider = selected.member.external_default_provider;
         Ok((target, substitutions))
+    }
+
+    /// The range operator call of `a..b` inside `x in a..b`. The expression IS the `contains` call,
+    /// which owns the expression's generic-call record, so the range builder carries none.
+    pub(super) fn source_range_operator_call(
+        &mut self,
+        expression: ExprId,
+        convention: &str,
+        receiver: ExprId,
+        operands: &[ExprId],
+    ) -> Result<FirExprKind, BodyCheckFailure> {
+        let outer = self.range_builder_expression.replace(expression);
+        let range = self.source_member_operator_call(expression, convention, receiver, operands);
+        self.range_builder_expression = outer;
+        range
     }
 
     pub(super) fn source_member_operator_call(

@@ -24,6 +24,9 @@ impl LmFlags {
     pub(super) const DEPRECATED_HIDDEN: u16 = 1 << 10;
     /// A receiver-less platform declaration published in a classifier's static namespace.
     pub(super) const IS_CLASSIFIER_STATIC: u16 = 1 << 11;
+    /// A signature-polymorphic method (JLS 15.12.3): its call's descriptor comes from the call
+    /// site's argument types.
+    pub(super) const SIGNATURE_POLYMORPHIC: u16 = 1 << 12;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -85,7 +88,114 @@ impl LmFlags {
         self.with(Self::DEPRECATED_HIDDEN, on)
     }
     #[inline]
+    pub const fn with_signature_polymorphic(self, on: bool) -> Self {
+        self.with(Self::SIGNATURE_POLYMORPHIC, on)
+    }
+    #[inline]
     pub const fn with_is_classifier_static(self, on: bool) -> Self {
         self.with(Self::IS_CLASSIFIER_STATIC, on)
+    }
+}
+
+/// The member accessors over [`LmFlags`], kept with the flag set they read and write.
+impl super::LibraryMember {
+    #[inline]
+    pub fn ret_nullable(&self) -> bool {
+        self.flags.has(LmFlags::RET_NULLABLE)
+    }
+    #[inline]
+    pub fn is_interface(&self) -> bool {
+        self.flags.has(LmFlags::IS_INTERFACE)
+    }
+    #[inline]
+    pub fn suspend(&self) -> bool {
+        self.flags.has(LmFlags::SUSPEND)
+    }
+    #[inline]
+    pub fn is_operator(&self) -> bool {
+        self.flags.has(LmFlags::IS_OPERATOR)
+    }
+    #[inline]
+    pub fn is_infix(&self) -> bool {
+        self.flags.has(LmFlags::IS_INFIX)
+    }
+    #[inline]
+    pub fn is_member_extension(&self) -> bool {
+        self.flags.has(LmFlags::IS_EXTENSION)
+    }
+    #[inline]
+    pub fn is_primary_constructor(&self) -> bool {
+        self.flags.has(LmFlags::IS_PRIMARY_CONSTRUCTOR)
+    }
+    #[inline]
+    pub fn deprecated_hidden(&self) -> bool {
+        self.flags.has(LmFlags::DEPRECATED_HIDDEN)
+    }
+
+    /// Whether the declaration is signature-polymorphic (JLS 15.12.3).
+    #[inline]
+    pub fn is_signature_polymorphic(&self) -> bool {
+        self.flags.has(LmFlags::SIGNATURE_POLYMORPHIC)
+    }
+    #[inline]
+    pub fn set_signature_polymorphic(&mut self, on: bool) {
+        self.flags = self.flags.with_signature_polymorphic(on);
+    }
+
+    pub fn is_classifier_static(&self) -> bool {
+        self.flags.has(LmFlags::IS_CLASSIFIER_STATIC)
+    }
+    #[inline]
+    pub fn set_ret_nullable(&mut self, on: bool) {
+        self.flags = self.flags.with_ret_nullable(on);
+    }
+    #[inline]
+    pub fn set_is_primary_constructor(&mut self, on: bool) {
+        self.flags = self.flags.with_is_primary_constructor(on);
+    }
+    #[inline]
+    pub fn set_deprecated_hidden(&mut self, on: bool) {
+        self.flags = self.flags.with_deprecated_hidden(on);
+    }
+
+    pub fn set_is_classifier_static(&mut self, on: bool) {
+        self.flags = self.flags.with_is_classifier_static(on);
+    }
+    #[inline]
+    pub fn set_is_interface(&mut self, on: bool) {
+        self.flags = self.flags.with_is_interface(on);
+    }
+    #[inline]
+    pub fn set_suspend(&mut self, on: bool) {
+        self.flags = self.flags.with_suspend(on);
+    }
+    pub fn set_is_operator(&mut self, on: bool) {
+        self.flags = self.flags.with_is_operator(on);
+    }
+    pub fn set_is_infix(&mut self, on: bool) {
+        self.flags = self.flags.with_is_infix(on);
+    }
+    pub fn set_is_member_extension(&mut self, on: bool) {
+        self.flags = self.flags.with_is_extension(on);
+    }
+    pub fn is_abstract(&self) -> bool {
+        self.flags.has(LmFlags::IS_ABSTRACT)
+    }
+    pub fn set_is_abstract(&mut self, on: bool) {
+        self.flags = self.flags.with_is_abstract(on);
+    }
+    pub fn is_final(&self) -> bool {
+        self.flags.has(LmFlags::IS_FINAL)
+    }
+    pub fn set_is_final(&mut self, on: bool) {
+        self.flags = self.flags.with_is_final(on);
+    }
+    /// A class delegating an interface that declares this member does not forward it: the
+    /// member's own implementation stays inherited.
+    pub fn inherited_by_delegation(&self) -> bool {
+        self.flags.has(LmFlags::INHERITED_BY_DELEGATION)
+    }
+    pub fn set_inherited_by_delegation(&mut self, on: bool) {
+        self.flags = self.flags.with_inherited_by_delegation(on);
     }
 }
