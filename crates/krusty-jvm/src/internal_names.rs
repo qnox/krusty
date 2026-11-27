@@ -120,6 +120,7 @@ pub(crate) fn mangle_internal_members(
     // to move with it. A property reference is the same kind of stored spelling (`getX`).
     retarget_renamed_bridges(ir, &old_names);
     retarget_property_bridges(ir, &old_names, &synthesized, &suffix);
+    property_references.suffix_reflected_signatures(ir, &suffix);
     rewrite_property_references(
         ir,
         &old_names,

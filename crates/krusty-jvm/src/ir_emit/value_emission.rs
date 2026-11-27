@@ -1003,7 +1003,7 @@ impl super::Emitter<'_> {
                     };
                     self.mark_call_start(e, code);
                     code.invokestatic(m, aw, physical_call_result_words(ret));
-                    self.guard_private_lateinit_read(e, code);
+                    self.guard_private_lateinit_read(e, &desc, code);
                 }
                 Callee::Module { .. }
                 | Callee::ModuleDefaultEntry { .. }
@@ -1127,7 +1127,7 @@ impl super::Emitter<'_> {
                     };
                     self.mark_call_start(e, code);
                     code.invokestatic(m, aw, slot_words(ret) as i32);
-                    self.guard_private_lateinit_read(e, code);
+                    self.guard_private_lateinit_read(e, &descriptor, code);
                 }
                 Callee::Virtual { .. } => {
                     self.emit_virtual_call(e, callee, *dispatch_receiver, args, code);
@@ -1418,9 +1418,6 @@ impl super::Emitter<'_> {
                         self.ir.functions[*impl_fn as usize].name
                     ));
                     return code.aconst_null();
-                }
-                if lambda_mode == LambdaMode::Indy {
-                    self.run.used_indy_lambdas.borrow_mut().insert(*impl_fn);
                 }
                 let f = &self.ir.functions[*impl_fn as usize];
                 let impl_name = f.name.clone();

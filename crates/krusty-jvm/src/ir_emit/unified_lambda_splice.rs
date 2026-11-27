@@ -26,7 +26,7 @@ use krusty::jvm::inline::SplicedFrame;
 use krusty::types::TyKind;
 
 mod placed_lambda_parameters;
-pub(super) use placed_lambda_parameters::placed_lambda_parameters;
+pub(super) use placed_lambda_parameters::{generated_trailing_arguments, placed_lambda_parameters};
 
 /// The checked facts the placement of one selected literal reads.
 #[derive(Debug, PartialEq)]
@@ -95,7 +95,11 @@ fn literal_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts, &'static s
         .map(|ty| ty.non_null())
         .map(Ty::kind)
     {
-        Some(TyKind::Fun(signature)) => placed_lambda_parameters(signature, arity),
+        Some(TyKind::Fun(signature)) => placed_lambda_parameters(
+            signature,
+            arity,
+            &generated_trailing_arguments(ir, *impl_fn, captures.len(), arguments),
+        ),
         _ => None,
     }
     .ok_or("a placed lambda has no checked function type with each argument's type")?;
@@ -127,7 +131,7 @@ fn callable_reference_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts,
     let TyKind::Fun(signature) = function_type.non_null().kind() else {
         return Err("a placed callable reference has no function type");
     };
-    let semantic = placed_lambda_parameters(signature, arity).ok_or(
+    let semantic = placed_lambda_parameters(signature, arity, &[]).ok_or(
         "a placed callable reference has no checked function type with each argument's type",
     )?;
     let physical = jvm_function_params(ir, adapter);

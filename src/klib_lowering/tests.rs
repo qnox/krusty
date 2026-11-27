@@ -33,6 +33,7 @@ mod safe_calls;
 mod sam_conversions;
 mod sam_dispatch;
 mod same_library_class;
+mod super_call_roots;
 mod support;
 mod target_calls;
 mod target_members;

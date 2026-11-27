@@ -456,7 +456,7 @@ pub(super) fn finish_jvm_target(opts: &mut Options, parsed: &ParsedSettings) {
                 }
                 _ => opts
                     .errors
-                    .push(format!("Unknown JDK release version: {release}")),
+                    .push(format!("unknown JDK release version: {release}")),
             }
             match release {
                 "6" | "1.6" | "7" | "1.7" => {
@@ -473,12 +473,11 @@ pub(super) fn finish_jvm_target(opts: &mut Options, parsed: &ParsedSettings) {
             }
         }
     };
-    // Honor the target: it sets the emitted class-file version. An unrecognized value is reported
-    // like any other ignored option rather than silently defaulting.
+    // Honor the target: it sets the emitted class-file version, and a value kotlinc refuses is its error.
     if let Some(target) = target {
         match jvm_target_to_major(target) {
-            Some(major) => opts.jvm_target_major = Some(major),
-            None => opts.ignored.push(format!("-jvm-target {target}")),
+            Ok(major) => opts.jvm_target_major = Some(major),
+            Err(error) => opts.errors.push(error),
         }
     }
 }

@@ -514,7 +514,9 @@ impl Planner<'_> {
                     ));
                 }
             }
-            let slot = place(&mut entries, replaces, PlannedSlot::Member(key));
+            // One realizing a redeclared `kotlin.Any` member answers at that member's fixed slot.
+            let fixed = any_slot(forwarder.overridden_role);
+            let slot = place(&mut entries, fixed.or(replaces), PlannedSlot::Member(key));
             slots.insert(key, slot);
         }
         Ok(PlannedTable {

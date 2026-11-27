@@ -270,12 +270,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.file.model.is_direct(function) {
             return self.direct_method_call(function, receiver, args);
         }
-        let class = self.file.ir.class_id_by_name(owner).ok_or_else(|| {
-            declined!(
+        let Some(class) = self.file.ir.class_id_by_name(owner) else {
+            // No class of this file realizes the owner, so no table numbers the member: it is an
+            // interface default the unit emitted for the `super` calls that name it, which run it
+            // without dispatch.
+            if self.file.functions[function as usize].is_some() {
+                return self.direct_method_call(function, receiver, args);
+            }
+            return Err(declined!(
                 "a member of `{}` this file does not declare",
                 owner.render().replace('/', ".")
-            )
-        })?;
+            ));
+        };
         // A member the class's table does not dispatch is a direct call, as in a call through the
         // class itself.
         if self.file.model.is_direct(function)
