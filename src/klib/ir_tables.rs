@@ -27,6 +27,9 @@ pub(super) struct IrTables {
     pub(super) types: Vec<Vec<u8>>,
     pub(super) bodies: Vec<Vec<u8>>,
     pub(super) file_entries: Vec<Vec<u8>>,
+    /// Loops written so far. Kotlin IR identifies a loop, the target of its jumps, within its whole
+    /// file.
+    loops: u32,
 }
 
 impl IrTables {
@@ -36,6 +39,8 @@ impl IrTables {
             TyKind::Nullable(inner) => (inner, 0),
             _ => (ty, 1),
         };
+        // Kotlin IR writes a function type as its function class.
+        let inner = super::body_tree::function_type_class(inner).unwrap_or(inner);
         let (classifier, arguments) = match inner.kind() {
             TyKind::Unit => (self.class_symbol(TypeName::from("kotlin/Unit")), &[][..]),
             TyKind::Nothing => (self.class_symbol(TypeName::from("kotlin/Nothing")), &[][..]),
@@ -129,6 +134,13 @@ impl IrTables {
         let mut encoded = Pb::new();
         encoded.field_message(3, &accessor);
         self.signature(encoded.canonical().into_bytes())
+    }
+
+    /// A loop id no other loop of the file has.
+    pub(super) fn loop_id(&mut self) -> u32 {
+        let id = self.loops;
+        self.loops += 1;
+        id
     }
 
     /// Append one body-table entry and answer its index.

@@ -2117,10 +2117,9 @@ fn wasm_keeps_a_generic_call_s_caller_out_of_its_klib_s_bodies() {
     }
 }
 
-#[test]
-fn wasm_links_a_library_s_top_level_function_bodies_from_its_klib() {
-    let source = include_str!("box_regressions/multimodule/libraryTopLevelFunctionBodies.kt");
-    let stem = "wasmLibraryTopLevelFunctionBodies";
+/// Every Wasm target runs `source`'s main module linked against the KLIB krusty writes for its
+/// library module, after the exact Kotlin compiler runs the whole program.
+fn expect_wasm_klib_route(source: &str, stem: &str) {
     super::box_reference_classes::checked_box(source, stem)
         .expect("the exact Kotlin compiler must run the whole library-bodies program");
     let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
@@ -2135,4 +2134,44 @@ fn wasm_links_a_library_s_top_level_function_bodies_from_its_klib() {
             target.name(),
         );
     }
+}
+
+#[test]
+fn wasm_links_a_library_s_top_level_function_bodies_from_its_klib() {
+    expect_wasm_klib_route(
+        include_str!("box_regressions/multimodule/libraryTopLevelFunctionBodies.kt"),
+        "wasmLibraryTopLevelFunctionBodies",
+    );
+}
+
+#[test]
+fn wasm_links_a_library_s_loops_from_its_klib() {
+    expect_wasm_klib_route(
+        include_str!("box_regressions/multimodule/libraryLoopBodies.kt"),
+        "wasmLibraryLoopBodies",
+    );
+}
+
+#[test]
+fn wasm_links_a_library_s_try_and_throw_from_its_klib() {
+    expect_wasm_klib_route(
+        include_str!("box_regressions/multimodule/libraryTryBodies.kt"),
+        "wasmLibraryTryBodies",
+    );
+}
+
+#[test]
+fn wasm_links_a_library_s_varargs_and_arrays_from_its_klib() {
+    expect_wasm_klib_route(
+        include_str!("box_regressions/multimodule/libraryVarargBodies.kt"),
+        "wasmLibraryVarargBodies",
+    );
+}
+
+#[test]
+fn wasm_links_a_library_s_lambdas_from_its_klib() {
+    expect_wasm_klib_route(
+        include_str!("box_regressions/multimodule/libraryLambdaBodies.kt"),
+        "wasmLibraryLambdaBodies",
+    );
 }

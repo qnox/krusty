@@ -1183,10 +1183,9 @@ fn native_string_comparison_runs_the_whole_portable_program_through_klib() {
     );
 }
 
-#[test]
-fn native_links_a_library_s_top_level_function_bodies_from_its_klib() {
-    let source = include_str!("box_regressions/multimodule/libraryTopLevelFunctionBodies.kt");
-    let stem = "nativeLibraryTopLevelFunctionBodies";
+/// Native runs `source`'s main module linked against the KLIB krusty writes for its library
+/// module, after the exact Kotlin compiler runs the whole program.
+fn expect_native_klib_route(source: &str, stem: &str) {
     super::box_reference_classes::checked_box(source, stem)
         .expect("the exact Kotlin compiler must run the whole library-bodies program");
     let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
@@ -1200,33 +1199,57 @@ fn native_links_a_library_s_top_level_function_bodies_from_its_klib() {
 }
 
 #[test]
+fn native_links_a_library_s_top_level_function_bodies_from_its_klib() {
+    expect_native_klib_route(
+        include_str!("box_regressions/multimodule/libraryTopLevelFunctionBodies.kt"),
+        "nativeLibraryTopLevelFunctionBodies",
+    );
+}
+
+#[test]
+fn native_links_a_library_s_loops_from_its_klib() {
+    expect_native_klib_route(
+        include_str!("box_regressions/multimodule/libraryLoopBodies.kt"),
+        "nativeLibraryLoopBodies",
+    );
+}
+
+#[test]
+fn native_links_a_library_s_try_and_throw_from_its_klib() {
+    expect_native_klib_route(
+        include_str!("box_regressions/multimodule/libraryTryBodies.kt"),
+        "nativeLibraryTryBodies",
+    );
+}
+
+#[test]
+fn native_links_a_library_s_varargs_and_arrays_from_its_klib() {
+    expect_native_klib_route(
+        include_str!("box_regressions/multimodule/libraryVarargBodies.kt"),
+        "nativeLibraryVarargBodies",
+    );
+}
+
+#[test]
+fn native_links_a_library_s_lambdas_from_its_klib() {
+    expect_native_klib_route(
+        include_str!("box_regressions/multimodule/libraryLambdaBodies.kt"),
+        "nativeLibraryLambdaBodies",
+    );
+}
+
+#[test]
 fn native_links_a_library_s_class_bodies_from_its_klib() {
-    let source = include_str!("box_regressions/multimodule/libraryClassBodies.kt");
-    let stem = "nativeLibraryClassBodies";
-    super::box_reference_classes::checked_box(source, stem)
-        .expect("the exact Kotlin compiler must run the whole library-classes program");
-    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
-    let units = krusty::conformance::module_units(&modules);
-    let lane = NativeLane { target: host() };
-    assert_eq!(lane.unavailable(), None);
-    assert_eq!(
-        lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
-        Outcome::Pass
+    expect_native_klib_route(
+        include_str!("box_regressions/multimodule/libraryClassBodies.kt"),
+        "nativeLibraryClassBodies",
     );
 }
 
 #[test]
 fn native_links_a_library_s_interfaces_abstract_classes_and_objects_from_its_klib() {
-    let source = include_str!("box_regressions/multimodule/libraryClassForms.kt");
-    let stem = "nativeLibraryClassForms";
-    super::box_reference_classes::checked_box(source, stem)
-        .expect("the exact Kotlin compiler must run the whole library class-forms program");
-    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
-    let units = krusty::conformance::module_units(&modules);
-    let lane = NativeLane { target: host() };
-    assert_eq!(lane.unavailable(), None);
-    assert_eq!(
-        lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
-        Outcome::Pass
+    expect_native_klib_route(
+        include_str!("box_regressions/multimodule/libraryClassForms.kt"),
+        "nativeLibraryClassForms",
     );
 }
