@@ -849,7 +849,6 @@ coroutines/varargCallFromSuspend.kt
 coroutines/withReceiver.kt
 cycles/cycle_for.kt
 dataClasses/components/kt49812.kt
-dataClasses/dataClassWithManyFields.kt
 dataClasses/dnnInPropertyType.kt
 dataClasses/propertyOfDnnType.kt
 dataClasses/toString/arrayParams.kt
@@ -858,13 +857,8 @@ dataClasses/unitComponent.kt
 deadCodeElimination/intersectingVariableRange.kt
 defaultArguments/captureInTailrec.kt
 defaultArguments/constructor/anonymousObjectAsDefaultParam.kt
-defaultArguments/constructor/innerClass32Args.kt
 defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
 defaultArguments/function/defaultLambdaInline.kt
-defaultArguments/function/extensionFunctionManyArgs.kt
-defaultArguments/function/innerExtentionFunctionManyArgs.kt
-defaultArguments/function/memberFunctionManyArgs.kt
-defaultArguments/function/topLevelManyArgs.kt
 defaultArguments/implementedByFake.kt
 defaultArguments/implementedByFake2.kt
 defaultArguments/implementedByFake3.kt
@@ -2385,8 +2379,6 @@ specialBuiltins/removeSetInt.kt
 statics/incInClassObject.kt
 strings/charSequenceGet.kt
 strings/charSequenceSubSequence.kt
-strings/concatDynamicWithConstants.kt
-strings/concatDynamicWithSpecialSymbols.kt
 strings/kt3571.kt
 strings/rawStringsWithManyQuotes.kt
 strings/trimOptimization.kt
