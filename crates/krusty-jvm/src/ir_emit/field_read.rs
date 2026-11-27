@@ -5,7 +5,7 @@ use super::{
     type_descriptor, Emitter,
 };
 use krusty::ir::ClassId;
-use krusty::jvm::classfile::CodeBuilder;
+use krusty::jvm::classfile::{ClassWriter, CodeBuilder};
 
 impl Emitter<'_> {
     pub(super) fn emit_get_field(
@@ -61,16 +61,21 @@ impl Emitter<'_> {
         // A `lateinit var` read throws while the field is still null. The bridge above performs a
         // raw field read, so the use site keeps the same guard as a direct read.
         if is_lateinit {
-            self.emit_lateinit_use_guard(&source_name, code);
+            self.emit_lateinit_use_guard(&source_name, &type_descriptor(field_ty), code);
         }
     }
 
     /// The guard kotlinc puts on a `lateinit` read that loads the field (or a raw field bridge)
     /// rather than calling the getter: the value is on the stack, and a null one is replaced by the
-    /// throw, whose `Nothing` result is the `aconst_null` the join expects.
+    /// throw, whose result is the value [`push_uninitialized_lateinit_result`] leaves for the join.
     /// A private `lateinit` module property read through its owner's `access$get<X>$p` yields the
     /// raw field, so the use site throws while it is unset, as it does after its own class's read.
-    pub(super) fn guard_private_lateinit_read(&mut self, expression: u32, code: &mut CodeBuilder) {
+    pub(super) fn guard_private_lateinit_read(
+        &mut self,
+        expression: u32,
+        method_descriptor: &str,
+        code: &mut CodeBuilder,
+    ) {
         let Some(krusty::ir::IrModuleMemberAccess::Property {
             target,
             write: false,
@@ -86,11 +91,17 @@ impl Emitter<'_> {
             && property.flags.has(krusty::fir::DeclarationFlags::LATEINIT)
         {
             let name = property.name.clone();
-            self.emit_lateinit_use_guard(&name, code);
+            self.emit_lateinit_use_guard(&name, returned_descriptor(method_descriptor), code);
         }
     }
 
-    pub(super) fn emit_lateinit_use_guard(&mut self, name: &str, code: &mut CodeBuilder) {
+    /// The guard on a raw `lateinit` read of a `descriptor`-typed value already on the stack.
+    pub(super) fn emit_lateinit_use_guard(
+        &mut self,
+        name: &str,
+        descriptor: &str,
+        code: &mut CodeBuilder,
+    ) {
         code.dup();
         let initialized = code.new_label();
         code.ifnonnull(initialized);
@@ -102,7 +113,30 @@ impl Emitter<'_> {
             "(Ljava/lang/String;)V",
         );
         code.invokestatic(throw, 1, 0);
-        code.aconst_null();
+        push_uninitialized_lateinit_result(descriptor, code, self.cw);
         self.bind(initialized, code);
+    }
+}
+
+/// The returned type of a JVM method descriptor: what a bridge such as `access$get<X>$p` loads.
+pub(super) fn returned_descriptor(method_descriptor: &str) -> &str {
+    method_descriptor
+        .rsplit_once(')')
+        .map_or(method_descriptor, |(_, returned)| returned)
+}
+
+/// The value an uninitialized `lateinit` read leaves after its throw, for the join or the
+/// getter's return. kotlinc coerces the throw call's `Unit` result to the read's JVM type: an
+/// `Object` slot gets `Unit.INSTANCE`, and any narrower reference gets `null`.
+pub(super) fn push_uninitialized_lateinit_result(
+    descriptor: &str,
+    code: &mut CodeBuilder,
+    cw: &mut ClassWriter,
+) {
+    if descriptor == "Ljava/lang/Object;" {
+        let unit = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
+        code.getstatic(unit, 1);
+    } else {
+        code.aconst_null();
     }
 }
