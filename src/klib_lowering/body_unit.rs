@@ -50,6 +50,7 @@ mod local_class;
 mod private_members;
 mod sam_placement;
 mod static_properties;
+mod super_calls;
 
 pub(crate) use private_members::is_private_class_member;
 
@@ -360,21 +361,6 @@ pub(super) struct MemberClass<'a> {
     pub(super) contract: &'a crate::libraries::KlibBodyClassContract,
     /// An inner class's outer instance, which its bodies read from the field after `fields`.
     pub(super) outer: Option<super::same_library_class::OuterInstance<'a>>,
-}
-
-impl<'a> MemberClass<'a> {
-    /// The outer instance of the class `header` declares, kept after its declared `fields`.
-    fn outer_instance(
-        header: &super::class_headers::ClassMemberHeader<'_, 'a>,
-        fields: &[&'a KlibIrField],
-    ) -> Option<super::same_library_class::OuterInstance<'a>> {
-        header
-            .outer
-            .map(|outer| super::same_library_class::OuterInstance {
-                symbol: outer.this,
-                field: u32::try_from(fields.len()).expect("a field list fits u32"),
-            })
-    }
 }
 
 impl DependencyBodyUnit {
@@ -1898,6 +1884,14 @@ impl<'s> CallLinker for Linker<'_, 's> {
             _ => Ok(self.sources.callees.is_selected(&identity)
                 || self.sources.externals.contains_key(&identity)),
         }
+    }
+
+    fn link_super(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+        self.link_super_call(ir, callee)
     }
 
     fn link(

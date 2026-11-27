@@ -271,18 +271,31 @@ impl Default for Options {
     }
 }
 
-/// Map a kotlinc `-jvm-target` value to the class-file major version it produces. `1.6`/`1.8` are the
-/// legacy dotted spellings; `9`+ are bare. Unknown values yield `None` (krusty keeps its default).
-pub fn jvm_target_to_major(v: &str) -> Option<u16> {
+/// The newest `-jvm-target` kotlinc accepts; every release this build supports agrees on it.
+const NEWEST_JVM_TARGET: u16 = 26;
+
+/// Map a kotlinc `-jvm-target` value to the class-file major version it produces, or to kotlinc's
+/// own error for a value it refuses: `1.6` is named as no longer supported, and anything else
+/// outside `1.8` and `9..=26` (including the bare `6`, `7` and `8`) is an unknown target.
+pub fn jvm_target_to_major(v: &str) -> Result<u16, String> {
     match v {
-        "1.6" | "6" => Some(50),
-        "1.7" | "7" => Some(51),
-        "1.8" | "8" => Some(52),
+        "1.8" => Ok(52),
+        "1.6" => Err(
+            "JVM target 1.6 is no longer supported. Please migrate to JVM target 1.8 or above"
+                .to_string(),
+        ),
         _ => v
             .parse::<u16>()
             .ok()
-            .filter(|&n| (9..=99).contains(&n))
-            .map(|n| n + 44),
+            .filter(|&n| (9..=NEWEST_JVM_TARGET).contains(&n) && n.to_string() == v)
+            .map(|n| n + 44)
+            .ok_or_else(|| {
+                let supported = (9..=NEWEST_JVM_TARGET)
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("unknown JVM target version: {v}\nSupported versions: 1.8, {supported}")
+            }),
     }
 }
 
@@ -2130,22 +2143,15 @@ mod tests {
 
     #[test]
     fn jvm_target_sets_class_major_version() {
-        assert_eq!(jvm_target_to_major("1.8"), Some(52));
-        assert_eq!(jvm_target_to_major("8"), Some(52));
-        assert_eq!(jvm_target_to_major("9"), Some(53));
-        assert_eq!(jvm_target_to_major("21"), Some(65));
-        assert_eq!(jvm_target_to_major("25"), Some(69));
-        assert_eq!(jvm_target_to_major("banana"), None);
+        assert_eq!(jvm_target_to_major("1.8"), Ok(52));
+        assert_eq!(jvm_target_to_major("9"), Ok(53));
+        assert_eq!(jvm_target_to_major("21"), Ok(65));
+        assert_eq!(jvm_target_to_major("26"), Ok(70));
 
-        // The parsed option carries the mapped major; an unknown value is reported, not applied.
+        // The parsed option carries the mapped major.
         let o = parse_args(&["-jvm-target", "25", "f.kt"]);
         assert_eq!(o.jvm_target_major, Some(69));
         assert_eq!(o.sources, vec!["f.kt".to_string()]);
-
-        let bad = parse_args(&["-jvm-target", "banana", "f.kt"]);
-        assert_eq!(bad.jvm_target_major, None);
-        assert!(bad.ignored.contains(&"-jvm-target banana".to_string()));
-        assert_eq!(bad.sources, vec!["f.kt".to_string()]);
     }
 
     #[test]
