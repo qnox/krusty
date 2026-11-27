@@ -1961,7 +1961,6 @@ fn emit_class(
     let ctor_signature = continuation_metadata
         .map(|_| {
             if let Some(receiver) = continuation_receiver {
-                // The receiver is the member's class applied to its own type parameters.
                 let receiver = signature_formatter
                     .parameter_ty(&receiver.ty)
                     .expect("a continuation's receiver type has a signature form");

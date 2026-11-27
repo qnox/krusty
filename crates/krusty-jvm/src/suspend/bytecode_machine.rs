@@ -146,7 +146,7 @@ pub(super) fn route(
         route.machines.record_transformed(fid, machine(suspensions));
         return Routed::Taken;
     }
-    build_continuation_class(
+    if build_continuation_class(
         ir,
         &continuation_class,
         &SpillLayout::default(),
@@ -157,7 +157,11 @@ pub(super) fn route(
             static_owner,
             params: &declared_params,
         },
-    );
+    )
+    .is_none()
+    {
+        return Routed::Failed;
+    }
     // The continuation belongs to the method that carries the machine, `$completion` included: an
     // overridable member's is the `$suspendImpl` its body moves to, which takes the receiver first.
     let function = &ir.functions[fid as usize];
