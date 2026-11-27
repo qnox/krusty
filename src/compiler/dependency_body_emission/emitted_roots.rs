@@ -131,6 +131,9 @@ pub(super) struct FrozenClosure {
     /// The classes declaring a private member a class nested in them calls, which the unit
     /// materializes to emit that member.
     pub(super) private_member_classes: Vec<crate::libraries::KlibBodyClassContract>,
+    /// The interface defaults an object inherits that a walked body reached: the object declares
+    /// and emits exactly these.
+    pub(super) object_defaults: Vec<KlibDependencyCallable>,
 }
 
 /// Where a unit's closure starts: the callables the emitted source selects, and the library
@@ -180,6 +183,8 @@ pub(super) fn declarations(
             })
             .map(|root| root.identity().clone())
             .collect(),
+        inherited_defaults: Vec::new(),
+        object_defaults: HashSet::default(),
         capabilities,
     };
     // An object the emitted source reads as a value is materialized as one a body reads.
@@ -192,7 +197,7 @@ pub(super) fn declarations(
             &mut state,
         )?;
     }
-    while let Some((identity, member_class)) = state.pending.pop_front() {
+    while let Some((identity, member_class)) = next_pending(&mut state, &mut visited) {
         if !visited.insert(identity.clone()) {
             continue;
         }
@@ -449,8 +454,12 @@ pub(super) fn declarations(
         // has no other such leaf: body lowering declines a call of one, as it declines any
         // unmodelled form.
         let emitted_default = state.emitted_defaults.contains(&identity);
+        // A default an object emits is also the declaration its callers dispatch through, so it
+        // keeps the edge a call of it needs.
+        let object_default = state.object_defaults.contains(&identity);
         let outside_edge = if member
-            || (!emitted_default && is_outside_units(platform, bodies, &facts, selected)?)
+            || ((!emitted_default || object_default)
+                && is_outside_units(platform, bodies, &facts, selected)?)
         {
             Some(member_edge(&facts, selected)?)
         } else {
@@ -466,7 +475,7 @@ pub(super) fn declarations(
         }
         let emits_body = !externals.contains_key(&identity)
             && !member
-            && !external_member
+            && (!external_member || object_default)
             && !constructor
             && (dispatched_member || primitive.is_none())
             && target.is_none()
@@ -530,7 +539,13 @@ pub(super) fn declarations(
                     .map(|callee| (callee, member_class.clone())),
             );
         }
-        state.declarations.push((declaration_target, realization));
+        if !state
+            .declarations
+            .iter()
+            .any(|(target, _)| *target == declaration_target)
+        {
+            state.declarations.push((declaration_target, realization));
+        }
     }
     Ok(FrozenClosure {
         declarations: state.declarations,
@@ -539,6 +554,7 @@ pub(super) fn declarations(
         read_classes: state.read_classes,
         dispatched: state.dispatched.into_iter().collect(),
         private_member_classes: state.private_member_classes,
+        object_defaults: state.object_defaults.into_iter().collect(),
     })
 }
 
@@ -571,6 +587,15 @@ struct ClosureState<'c, 'u> {
     /// Interface default bodies a class of the file inherits, emitted for its dispatch record
     /// though no support unit materializes the interface.
     emitted_defaults: HashSet<KlibDependencyCallable>,
+    /// Interface defaults a materialized object inherits, each with the object that emits it, not
+    /// yet released: a default is dispatched to only once a walked body calls a declaration it
+    /// implements, so reaching it earlier would walk a body nothing can run.
+    inherited_defaults: Vec<(
+        crate::klib_lowering::InheritedDefault,
+        crate::libraries::KlibBodyClassContract,
+    )>,
+    /// The inherited defaults released, whose bodies their object emits.
+    object_defaults: HashSet<KlibDependencyCallable>,
     capabilities: &'c super::DependencyLeafCapabilities<'u>,
 }
 
@@ -663,6 +688,44 @@ fn private_member_class(
         .filter(|class| crate::klib_lowering::is_private_class_member(bodies, identity, class))
 }
 
+/// The next callee to walk. When none is pending, the inherited interface defaults a walked body
+/// now reaches through a declaration they implement are released: each is emitted with its
+/// object, as a member dispatch reaches.
+fn next_pending(
+    state: &mut ClosureState<'_, '_>,
+    visited: &mut HashSet<KlibDependencyCallable>,
+) -> Option<(
+    KlibDependencyCallable,
+    Option<crate::libraries::KlibBodyClassContract>,
+)> {
+    loop {
+        if let Some(next) = state.pending.pop_front() {
+            return Some(next);
+        }
+        let (released, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut state.inherited_defaults)
+            .into_iter()
+            .partition(|(default, _)| {
+                default
+                    .implemented
+                    .iter()
+                    .any(|callee| visited.contains(callee))
+            });
+        state.inherited_defaults = waiting;
+        if released.is_empty() {
+            return None;
+        }
+        for (default, class) in released {
+            // The call that released it may have reached the default first, as a declaration
+            // only: it is walked again, now as a body its object emits.
+            visited.remove(&default.body);
+            state.emitted_defaults.insert(default.body.clone());
+            state.object_defaults.insert(default.body.clone());
+            state.dispatched.insert(default.body.clone());
+            state.pending.push_back((default.body, Some(class)));
+        }
+    }
+}
+
 fn walk_declared_instances(
     platform: &dyn SemanticPlatform,
     bodies: &KlibDeclarationBodies,
@@ -687,6 +750,13 @@ fn walk_declared_instances(
         facts
             .declared_instances_dispatched_members(&class, bodies)
             .map_err(|reason| format!("an invalid object member: {reason:?}"))?,
+    );
+    walk.inherited_defaults.extend(
+        facts
+            .object_inherited_defaults(&class, bodies)
+            .map_err(|reason| format!("an invalid object member: {reason:?}"))?
+            .into_iter()
+            .map(|default| (default, class.clone())),
     );
     for overridden in facts
         .declared_instances_overridden_declarations(&class, bodies)

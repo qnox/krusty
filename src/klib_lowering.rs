@@ -56,6 +56,7 @@ pub(crate) use callee_facts::CallEdge;
 pub use callee_facts::KlibCalleeFacts;
 pub(crate) use class_initialization::{
     delegated_superclass_constructor, initializing_constructors, value_class_overrides,
+    InheritedDefault,
 };
 pub(crate) use closure_forms::emitted_closure_function;
 pub(crate) use indices_bounds::bound_member as indices_bound_member;

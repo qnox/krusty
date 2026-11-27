@@ -971,7 +971,12 @@ impl<'u, 's> Linker<'u, 's> {
                     if crate::metadata::semantic::class_kind(class.base.flags)
                         == crate::libraries::TypeKind::Class
             );
-            if from_class && self.declared_member(body).is_none() {
+            // An interface default is declared with the class only when a call reaches it; one
+            // nothing calls has no frozen declaration, and nothing dispatches to it.
+            let reached_default = !from_class
+                && contract.kind == crate::libraries::TypeKind::Object
+                && self.sources.callees.is_object_default(body);
+            if (from_class || reached_default) && self.declared_member(body).is_none() {
                 if let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) {
                     let selected = callables[0];
                     // A superclass an earlier unit realized keeps its members there: this unit's
