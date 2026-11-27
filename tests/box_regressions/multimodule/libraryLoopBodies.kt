@@ -74,6 +74,17 @@ fun firstPair(n: Int): String {
     return found
 }
 
+fun advance(cursor: IntArray): Int {
+    cursor[0] = cursor[0] + 1
+    return cursor[0]
+}
+
+fun boundsInOrder(cursor: IntArray): Int {
+    var sum = 0
+    for (i in advance(cursor)..advance(cursor) + 2) sum = sum + i
+    return sum
+}
+
 // MODULE: main(lib)
 // FILE: Main.kt
 import fixture.*
@@ -93,5 +104,6 @@ fun box(): String {
     if (joined(arrayOf("a", "skip", "b")) != "ab") return "joined"
     if (firstPair(3) != "2*3") return "firstPair 3"
     if (firstPair(2) != "none") return "firstPair 2"
+    if (boundsInOrder(intArrayOf(0)) != 1 + 2 + 3 + 4) return "boundsInOrder"
     return "OK"
 }
