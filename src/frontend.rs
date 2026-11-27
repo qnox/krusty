@@ -19,7 +19,9 @@ mod header_validation;
 mod inline_preparation;
 mod library_classifiers;
 mod local_class_names;
-pub(crate) use local_class_names::{settle_generated_class_names, SettledGeneratedClassNames};
+pub(crate) use local_class_names::{
+    settle_generated_class_names, ResolvedNamingFacts, SettledGeneratedClassNames,
+};
 mod local_function_names;
 mod modifier_containing_declarations;
 mod no_expect_for_actual;

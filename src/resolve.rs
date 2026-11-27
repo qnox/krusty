@@ -24690,7 +24690,8 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     c.narrow_script_template_receivers();
     c.publish_member_declaring_receivers();
     c.report_operator_of_overloads();
-    let enhanced_values = c.enhanced_value_heads();
+    let (enhanced_values, contract_descriptions) =
+        (c.enhanced_value_heads(), c.contract_description_calls());
     let builtin_implementations = match builtin_implementation::for_checked_unit(&c) {
         Ok(implementations) => implementations,
         Err(error) => {
@@ -25016,13 +25017,12 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_sam_conversions.keys().collect::<Vec<_>>(),
         resolved_constructors.keys().collect::<Vec<_>>(),
     );
-    let generated_class_names = crate::frontend::settle_generated_class_names(
-        file,
-        &selected_function_value_conversions
-            .keys()
-            .copied()
-            .collect(),
-    );
+    let converted = HashSet::from_iter(selected_function_value_conversions.keys().copied());
+    let naming = crate::frontend::ResolvedNamingFacts {
+        converted,
+        contract_descriptions,
+    };
+    let generated_class_names = crate::frontend::settle_generated_class_names(file, naming);
     TypeInfo {
         expr_types,
         callable_reference_types,

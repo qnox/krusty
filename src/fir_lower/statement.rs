@@ -256,6 +256,9 @@ impl BodyLowering<'_> {
             crate::ir::IrNodePosition::default(),
         );
         self.record_capture_order(declaration, captures.len(), capture_order)?;
+        if let Some(&class) = self.ir.checked_classifier_classes.get(&declaration) {
+            self.settle_class_name(declaration, class);
+        }
         self.local_class_captures.insert(classifier, values);
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: Vec::new(),

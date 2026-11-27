@@ -1576,6 +1576,9 @@ pub struct FirBody {
     /// Naming provenance of each expression the reference compiler realizes as a class of its own
     /// (a callable reference). A naming fact, not a lowering decision.
     generated_class_provenance: HashMap<FirExprId, FirGeneratedClassProvenance>,
+    /// Settled naming provenance of each local or anonymous class this body declares, where
+    /// resolution changed what the naming walk numbered before it.
+    settled_class_names: HashMap<DeclarationId, FirGeneratedClassProvenance>,
     /// Source forms checking normalized away, which metadata's constant-initializer rule reads.
     source_forms: HashMap<FirExprId, FirSourceForm>,
     /// Local-storage blocks originating from postfix `++`/`--`, whose checked shape snapshots the
@@ -1670,6 +1673,7 @@ impl FirBody {
             destructuring_loop_containers: HashSet::default(),
             debug_lines: Default::default(),
             generated_class_provenance: HashMap::default(),
+            settled_class_names: HashMap::default(),
             source_forms: HashMap::default(),
             postfix_updates: HashSet::default(),
             implicit_context_arguments: HashSet::default(),
@@ -2417,6 +2421,20 @@ impl FirBody {
         expression: FirExprId,
     ) -> Option<&FirGeneratedClassProvenance> {
         self.generated_class_provenance.get(&expression)
+    }
+
+    pub(crate) fn set_settled_class_name(
+        &mut self,
+        class: DeclarationId,
+        provenance: FirGeneratedClassProvenance,
+    ) {
+        self.settled_class_names.insert(class, provenance);
+    }
+
+    /// The settled naming provenance of local or anonymous class `class`, when it replaces the one
+    /// published with the class's declaration.
+    pub fn settled_class_name(&self, class: DeclarationId) -> Option<&FirGeneratedClassProvenance> {
+        self.settled_class_names.get(&class)
     }
 
     pub fn expr(&self, id: FirExprId) -> Option<&FirExpr> {

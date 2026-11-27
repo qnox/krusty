@@ -1588,7 +1588,32 @@ impl BodyLowering<'_> {
         &self,
         expression_id: crate::fir::FirExprId,
     ) -> Option<crate::ir::IrLocalClassNameProvenance> {
-        let provenance = self.body.generated_class_provenance(expression_id)?;
+        self.ir_class_name_provenance(self.body.generated_class_provenance(expression_id)?)
+    }
+
+    /// Name local or anonymous class `declaration`, realized as `class`, from the provenance this
+    /// body settled for it, which replaces the one published with its declaration.
+    pub(super) fn settle_class_name(
+        &mut self,
+        declaration: crate::fir::DeclarationId,
+        class: crate::ir::ClassId,
+    ) {
+        let Some(provenance) = self
+            .body
+            .settled_class_name(declaration)
+            .and_then(|provenance| self.ir_class_name_provenance(provenance))
+        else {
+            return;
+        };
+        self.ir
+            .local_class_name_provenance
+            .insert(class, provenance);
+    }
+
+    fn ir_class_name_provenance(
+        &self,
+        provenance: &crate::fir::FirGeneratedClassProvenance,
+    ) -> Option<crate::ir::IrLocalClassNameProvenance> {
         let lexical_owner = match provenance.lexical_owner {
             Some(owner) => match self.ir.checked_classifier_classes.get(&owner) {
                 Some(&class) => Some(crate::ir::IrLocalClassOwner::Class(class)),
