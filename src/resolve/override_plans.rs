@@ -1115,6 +1115,8 @@ fn property_override_plans(
             .declared_props
             .get(name)
             .map(|property| property.stable_declaration);
+        // A context-parameter property is overloadable by its context shape: every declaration
+        // under the name is an implementation candidate.
         let contextual = class
             .contextual_props
             .get(name)
