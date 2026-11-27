@@ -585,7 +585,6 @@ localClass/noPrimaryConstructor.kt
 localClasses/closureWithSelfInstantiation.kt
 localClasses/kt4174.kt
 localClasses/kt45383.kt
-lower/forLoopsLowering/progressions.kt
 lower/forLoopsLowering/withIndex.kt
 mangling/internalOverrideSuperCall.kt
 mangling/publicOverrideSuperCall.kt
@@ -662,7 +661,6 @@ ranges/contains/inComparableRange.kt
 ranges/contains/inDoubleRangeLiteralVsComparableRangeLiteral.kt
 ranges/contains/inExtensionRange.kt
 ranges/contains/smartCastOnBothEndsGeneric.kt
-ranges/contains/userDefinedContainsExtension.kt
 ranges/forInCharSequenceLengthDecreasedInLoopBody.kt
 ranges/forInCharSequenceWithCustomIterator.kt
 ranges/forInDownTo/forNullableIntInDownTo.kt
