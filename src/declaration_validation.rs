@@ -123,7 +123,7 @@ pub(crate) fn enum_constructor_diagnostics(class: &ClassDecl) -> Vec<Declaration
     let primary = class
         .primary_ctor_visibility_span
         .filter(|_| class.primary_ctor_visibility != Visibility::Private)
-        .and_then(|_| class.primary_constructor_signature_span);
+        .and(class.primary_constructor_signature_span);
     let secondary = class
         .secondary_ctors
         .iter()
