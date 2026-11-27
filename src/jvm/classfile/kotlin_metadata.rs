@@ -46,6 +46,12 @@ impl ClassWriter {
         self.set_kotlin_metadata_elements((4, stamp, xi), Some(parts), None, None);
     }
 
+    /// The Kotlin package of a file class `@file:JvmPackageName` moved out of it, which the class's
+    /// `@Metadata` records as `pn`. Set before the metadata it belongs to.
+    pub fn set_metadata_package_name(&mut self, package: &str) {
+        self.metadata_package_name = Some(package.to_string());
+    }
+
     fn set_kotlin_metadata_elements(
         &mut self,
         (k, stamp, xi): (i32, MetadataStamp, i32),
@@ -63,10 +69,16 @@ impl ClassWriter {
         // `finish` writes a single `RuntimeVisibleAnnotations` attribute even alongside user annotations.
         let mut body = Vec::new();
         u2(&mut body, anno_type);
-        let elements = 3 + [d1.is_some(), d2.is_some(), xs.is_some()]
-            .into_iter()
-            .filter(|&present| present)
-            .count() as u16;
+        let package_name = self.metadata_package_name.take();
+        let elements = 3 + [
+            d1.is_some(),
+            d2.is_some(),
+            xs.is_some(),
+            package_name.is_some(),
+        ]
+        .into_iter()
+        .filter(|&present| present)
+        .count() as u16;
         u2(&mut body, elements);
         let n_mv = self.cp.utf8("mv");
         u2(&mut body, n_mv);
@@ -91,6 +103,11 @@ impl ClassWriter {
             let n_xs = self.cp.utf8("xs");
             u2(&mut body, n_xs);
             self.ev_str(&mut body, xs);
+        }
+        if let Some(package) = package_name {
+            let n_pn = self.cp.utf8("pn");
+            u2(&mut body, n_pn);
+            self.ev_str(&mut body, &package);
         }
         self.runtime_annotations.push(body);
     }

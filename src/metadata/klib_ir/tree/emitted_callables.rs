@@ -30,6 +30,8 @@ struct EmittedWalk<'a> {
     objects: Vec<&'a KlibIrSymbol>,
     sams: Vec<&'a KlibIrSymbol>,
     enum_entries: Vec<&'a KlibIrSymbol>,
+    /// The declarations called with a `super` qualifier, which run without dispatch.
+    supers: Vec<&'a KlibIrSymbol>,
 }
 
 impl KlibIrArena {
@@ -132,6 +134,26 @@ impl KlibIrArena {
         self.emitted_function_walk(function, forms).enum_entries
     }
 
+    /// The declarations `function`'s body calls with a `super` qualifier: each runs without
+    /// dispatch, so its body is emitted wherever the receiver's class does not realize it.
+    pub(crate) fn emitted_super_call_symbols<'a>(
+        &'a self,
+        function: &'a KlibIrFunction,
+        forms: EmittedCallForms,
+    ) -> Vec<&'a KlibIrSymbol> {
+        self.emitted_function_walk(function, forms).supers
+    }
+
+    /// [`Self::emitted_super_call_symbols`] of the bodies reached from `roots`, as a file
+    /// initializer or a local class member is.
+    pub(crate) fn emitted_super_call_symbols_from(
+        &self,
+        roots: Vec<KlibIrExprId>,
+        forms: EmittedCallForms,
+    ) -> Vec<&KlibIrSymbol> {
+        self.emitted_walk(roots, forms, HashSet::default()).supers
+    }
+
     fn emitted_function_walk<'a>(
         &'a self,
         function: &'a KlibIrFunction,
@@ -183,11 +205,19 @@ impl KlibIrArena {
         let mut objects = Vec::new();
         let mut sams = Vec::new();
         let mut enum_entries = Vec::new();
+        let mut supers = Vec::new();
         while let Some(id) = pending.pop() {
             if !expressions.insert(id) {
                 continue;
             }
             let expression = self.expr(id);
+            if let KlibIrExprKind::Call {
+                access,
+                super_qualifier: Some(_),
+            } = &expression.kind
+            {
+                supers.push(&access.symbol);
+            }
             match &expression.kind {
                 KlibIrExprKind::GetObject(symbol) => objects.push(symbol),
                 KlibIrExprKind::GetEnumValue(symbol) => enum_entries.push(symbol),
@@ -222,6 +252,7 @@ impl KlibIrArena {
             objects,
             sams,
             enum_entries,
+            supers,
         }
     }
 

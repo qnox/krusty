@@ -81,6 +81,9 @@ struct Part {
     /// The methods the part declares before its synthetic accessors, by name and descriptor.
     members: Vec<(String, String)>,
     constants: Vec<FacadeConstant>,
+    /// The Kotlin package the part's file declares, which the facade records as `pn` when
+    /// `@file:JvmPackageName` put the facade elsewhere.
+    kotlin_package: String,
     /// The forwarded methods with the declarations they realize, checked across the facade.
     slots: Vec<FacadeSlot>,
 }
@@ -99,6 +102,7 @@ impl MultifileParts {
         class: &[u8],
         (members, constants): (Vec<(String, String)>, Vec<FacadeConstant>),
         slots: Vec<FacadeSlot>,
+        kotlin_package: &str,
     ) {
         self.facades
             .entry(facade.to_string())
@@ -108,6 +112,7 @@ impl MultifileParts {
                 class: class.to_vec(),
                 members,
                 constants,
+                kotlin_package: kotlin_package.to_string(),
                 slots,
             });
     }
@@ -202,6 +207,12 @@ fn write_facade(facade: &str, parts: &[Part], stamp: MetadataStamp) -> Result<Ve
         .iter()
         .map(|part| part.internal.clone())
         .collect::<Vec<_>>();
+    if let Some(package) = parts
+        .first()
+        .and_then(|part| crate::file_facades::relocated_package_name(facade, &part.kotlin_package))
+    {
+        cw.set_metadata_package_name(&package);
+    }
     cw.set_multifile_facade_metadata(stamp, 48, &part_names);
     Ok(cw.finish())
 }

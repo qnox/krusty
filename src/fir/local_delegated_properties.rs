@@ -54,6 +54,8 @@ pub(crate) struct FirLocalDelegatePlan {
     /// bodies that share this plan. Body-local vector positions are not semantic identities.
     pub(crate) declaration: LocalDelegatedPropertyId,
     pub(crate) storage_name: Box<str>,
+    /// The local value holding the delegate, declared by the property's statement.
+    pub(crate) storage: super::header::LocalValueId,
     pub(crate) storage_type: ResolvedTy,
     pub(crate) property_type: ResolvedTy,
     /// A checked reference carrying this property's stable declaration identity and source order.

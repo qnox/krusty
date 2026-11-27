@@ -128,3 +128,30 @@ impl Checker<'_> {
         }
     }
 }
+
+impl Checker<'_> {
+    /// The declared constituent a type-test proof keeps beside the proven type, if any. This is
+    /// the single comparability rule for every stable value, `this` included.
+    ///
+    /// kotlinc types a smart cast as the intersection of the declared type and the proof, then
+    /// drops a constituent that is a supertype of another. So `is B` on a value declared `A`
+    /// keeps `A & B` unless one is a subtype of the other: a type-parameter declaration `M : A`
+    /// stays `M & B`, and `Source<T>` proven `IntBox : Source<Int>` stays `Source<T> & IntBox`
+    /// (its `value` is both a `T` and an `Int`). A non-null proof strips the declaration's `?`;
+    /// a nullable test (`is B?`) still admits null, so the declaration keeps it. `Nothing?` is
+    /// the exact null branch, never widened by re-attaching the declared classifier.
+    pub(super) fn declared_constituent_beside_proof(&self, declared: Ty, proof: Ty) -> Option<Ty> {
+        if proof.non_null() == Ty::Nothing {
+            return None;
+        }
+        let declared = if proof.is_nullable() {
+            declared
+        } else {
+            declared.non_null()
+        };
+        let context = crate::assignable::TyCtx::new();
+        let comparable = crate::assignable::is_subtype(&context, self, declared, proof)
+            || crate::assignable::is_subtype(&context, self, proof, declared);
+        (!comparable).then_some(declared)
+    }
+}
