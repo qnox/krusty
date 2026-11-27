@@ -289,8 +289,6 @@ coroutines/suspendFunctionAsCoroutine/superCall.kt
 coroutines/suspendFunctionAsCoroutine/superCallAbstractClass.kt
 coroutines/suspendFunctionAsCoroutine/superCallInterface.kt
 coroutines/suspendFunctionAsCoroutine/superCallOverload.kt
-coroutines/suspendFunctionAsSupertype.kt
-coroutines/suspendFunctionAsSupertypeWithInlinedFunInKlib.kt
 coroutines/suspendFunctionTypeCall/manyParametersNoCapture.kt
 coroutines/suspensionInsideSafeCallWithElvis.kt
 coroutines/tailCallOptimizations/crossinline.kt
