@@ -991,7 +991,6 @@ directInvokeOptimization/simpleLambda.kt
 directInvokeOptimization/unboundInnerContructorRef.kt
 directInvokeOptimization/unboundMemberRef.kt
 elvis/genericElvisWithNullLHS.kt
-elvis/kt6694ExactAnnotationForElvis.kt
 elvis/ofNonNullableResultType.kt
 elvis/withNothingConstraintAndExpectedType.kt
 enum/deepInnerClassInEnumEntryClass.kt
@@ -1087,7 +1086,6 @@ extensionProperties/kt9897.kt
 extensionProperties/kt9897_topLevel.kt
 fakeOverride/kt40180_2.kt
 fakeOverride/kt40180_3.kt
-fakeOverride/kt49371.kt
 fakeOverride/privateFakeOverrides0.kt
 fakeOverride/privateFakeOverrides1.kt
 finally/decrementInFinally.kt
@@ -1457,10 +1455,7 @@ inlineClasses/interfaceDelegation/memberFunDelegationToInlineClassWithInlineClas
 inlineClasses/interfaceDelegation/memberFunDelegationToInlineClassWithInlineClassParameterTypesGeneric.kt
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypes.kt
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypesGeneric.kt
-inlineClasses/interfaceMethodCalls/genericDefaultInterfaceExtensionFunCall.kt
 inlineClasses/interfaceMethodCalls/genericDefaultInterfaceExtensionFunCallGeneric.kt
-inlineClasses/interfaceMethodCalls/genericDefaultInterfaceMethodCall.kt
-inlineClasses/interfaceMethodCalls/genericDefaultInterfaceMethodCallGeneric.kt
 inlineClasses/interfaceMethodCalls/interfaceSuperCallGeneric.kt
 inlineClasses/iterateOverArrayOfInlineClassValues.kt
 inlineClasses/iterateOverArrayOfInlineClassValuesGeneric.kt
@@ -2278,7 +2273,6 @@ regressions/propertyReferenceGetAndName.kt
 regressions/propertyReferenceIdentityAcrossModules.kt
 regressions/propertySmartCastKeepsDeclaredType.kt
 regressions/rangeEqualityThroughProgression.kt
-regressions/receiverParameterMemberKeepsDefinitelyNonNull.kt
 regressions/referenceArrayStoreEvaluatesValueBeforeBoundsCheck.kt
 regressions/runtimeArrayListInterfaceTests.kt
 regressions/runtimeExceptionConstructors.kt
@@ -2373,7 +2367,6 @@ serialization/deserializedMembers.kt
 serialization/serializedDefaultArgs.kt
 smartCasts/avoidSmartCastToDerivedForPrivate.kt
 smartCasts/falseSmartCast.kt
-smartCasts/genericInheritanceWithNonGenericNoAmbiguity.kt
 smartCasts/genericSet.kt
 smartCasts/implicitMemberReceiver.kt
 smartCasts/invokeRecieverSmartcastK2.kt
@@ -2452,7 +2445,6 @@ traits/kt2399.kt
 traits/multiple.kt
 traits/receiverOfIntersectionType.kt
 traits/traitImplDelegationWithCovariantOverride.kt
-traits/traitImplGenericDelegation.kt
 traits/traitWithPrivateExtension.kt
 traits/traitWithPrivateMember.kt
 traits/traitWithPrivateMemberAccessFromLambda.kt
