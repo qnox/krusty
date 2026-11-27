@@ -258,7 +258,11 @@ pub(in crate::resolve) fn compact_declaration_lexical_class_names(
 
     let mut classes = Vec::new();
     for candidate in stable_chain {
-        let Some(stub) = headers.stub(candidate) else {
+        // The walk passes through functions and properties; only classifiers own a body scope.
+        let Some(stub) = headers
+            .stub(candidate)
+            .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
+        else {
             continue;
         };
         let Some((_, internal)) = compact_classifier_identity(headers, stub) else {

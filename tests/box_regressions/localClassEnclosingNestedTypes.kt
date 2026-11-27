@@ -21,6 +21,21 @@ class Api {
     }
 }
 
+// A nested classifier named like the declaring function is not an enclosing scope of its local
+// class: `Token` is `Outer.Token`, not `Outer.make.Token`.
+class Outer {
+    interface Token { fun text(): String = "outer" }
+
+    class make {
+        interface Token { fun text(): String }
+    }
+
+    fun make(seed: Int): String {
+        class Local : Token
+        return Local().text() + seed
+    }
+}
+
 fun describe(): String {
     data class Failure(val error: String)
     return Failure("x").toString()
@@ -28,6 +43,7 @@ fun describe(): String {
 
 fun box(): String {
     if (describe() != "Failure(error=x)") return describe()
+    if (Outer().make(1) != "outer1") return Outer().make(1)
     val api = Api()
     val ok = api.run(false) as Result.Ok<String>
     val error = api.run(true) as Result.Error<Api.Problem>
