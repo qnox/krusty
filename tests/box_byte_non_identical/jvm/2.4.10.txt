@@ -871,18 +871,6 @@ delegatedProperty/callableReferenceAsSecondArgumentOfDelegate.kt
 delegatedProperty/capturePropertyInClosure.kt
 delegatedProperty/delegateByOtherProperty.kt
 delegatedProperty/delegateByTopLevelProperty.kt
-delegatedProperty/delegateToAnother/custom.kt
-delegatedProperty/delegateToAnother/kt49793_companionObject.kt
-delegatedProperty/delegateToAnother/kt49793_interfaceCompanionObject.kt
-delegatedProperty/delegateToAnother/kt49793_object.kt
-delegatedProperty/delegateToAnother/kt79979_memberExtension.kt
-delegatedProperty/delegateToAnother/mutable.kt
-delegatedProperty/delegateToAnother/openProperty.kt
-delegatedProperty/delegateToAnother/simple.kt
-delegatedProperty/delegateToAnother/withSideEffects.kt
-delegatedProperty/delegateToAnother/withSideEffectsFromFileClass.kt
-delegatedProperty/delegateToConstVal.kt
-delegatedProperty/delegateToConstructorParameter.kt
 delegatedProperty/delegateToFinalProperty/chain.kt
 delegatedProperty/delegateToFinalProperty/delegateToFinalInstanceProperty.kt
 delegatedProperty/delegateToFinalProperty/delegateToFinalObjectProperty.kt
@@ -893,7 +881,6 @@ delegatedProperty/delegateToThis/delegateToThis.kt
 delegatedProperty/delegateToThis/delegateToThisByExtension.kt
 delegatedProperty/delegateWithPrivateSet.kt
 delegatedProperty/delegatedByExtensionMemberProperty.kt
-delegatedProperty/delegatedByExtensionProperty.kt
 delegatedProperty/delegatedOverride.kt
 delegatedProperty/extensionPropertyAndExtensionGetValue.kt
 delegatedProperty/genericDelegateUncheckedCast1.kt
@@ -907,7 +894,6 @@ delegatedProperty/local/kt16864.kt
 delegatedProperty/local/kt21085.kt
 delegatedProperty/local/kt23117.kt
 delegatedProperty/local/kt78073.kt
-delegatedProperty/localDelegatedBoundValueWithSideEffect.kt
 delegatedProperty/map.kt
 delegatedProperty/observable.kt
 delegatedProperty/optimizedDelegatedProperties/definedInSources.kt
@@ -1213,7 +1199,6 @@ inference/pcla/issues/kt65300g.kt
 inference/pcla/issues/kt65300i.kt
 inference/pcla/issues/kt65300j.kt
 inference/pcla/issues/kt66272.kt
-inference/pcla/issues/kt67993.kt
 inference/pcla/issues/kt74819e.kt
 inference/pcla/issues/kt76058.kt
 inference/pcla/memberScope.kt
@@ -1255,7 +1240,6 @@ inline/fakeOverrideInliningCrossModule.kt
 inline/getClass.kt
 inline/inline16.kt
 inline/inline21.kt
-inline/inline24.kt
 inline/inline26.kt
 inline/inline5.kt
 inline/inlineCallInsideStringTemplate.kt
@@ -1828,7 +1812,6 @@ properties/lateinit/local/uninitializedCapturedMemberAccess.kt
 properties/lateinit/local/uninitializedCapturedRead.kt
 properties/lateinit/local/uninitializedMemberAccess.kt
 properties/lateinit/local/uninitializedRead.kt
-properties/lateinit/localClass.kt
 properties/primitiveOverrideDelegateAccessor.kt
 properties/privateAccessorOfOverriddenProperty.kt
 properties/privatePropertyWithoutBackingField.kt

@@ -156,6 +156,7 @@ impl BodyFirChecker<'_> {
             .add_local_delegate_plan(crate::fir::FirLocalDelegatePlan {
                 declaration,
                 storage_name: storage_name.clone().into(),
+                storage: storage.value,
                 storage_type: storage_ty,
                 property_type: property_ty,
                 reference,

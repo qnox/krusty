@@ -171,7 +171,7 @@ fn a_conflicting_jvm_target_is_reported_in_kotlincs_words() {
 
     let output = fixture.work.join("krusty");
     let result = fixture.krusty("krusty", &extra);
-    assert_eq!(result.status.code(), Some(2));
+    assert_eq!(result.status.code(), Some(code), "kotlinc's exit status");
     assert_eq!(
         String::from_utf8_lossy(&result.stderr),
         format!("krusty: error: {message}\n")

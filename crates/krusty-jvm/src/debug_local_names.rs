@@ -143,7 +143,8 @@ fn marker_name(ir: &IrFile, declaration: ExprId) -> Option<String> {
         | IrDebugLocalProvenance::InlineLambdaReceiver { .. }
         | IrDebugLocalProvenance::InlineLambdaParameter { .. }
         | IrDebugLocalProvenance::InlineLambdaContinuation { .. }
-        | IrDebugLocalProvenance::InlineCallableReferenceParameter { .. } => None,
+        | IrDebugLocalProvenance::InlineCallableReferenceParameter { .. }
+        | IrDebugLocalProvenance::DeadDefaultBranch => None,
     }
 }
 
@@ -247,7 +248,8 @@ pub(super) fn render(
         ),
         // A marker is named by [`marker_name`], which knows the class it is emitted into.
         Some(
-            IrDebugLocalProvenance::FunctionFrameMarker
+            IrDebugLocalProvenance::DeadDefaultBranch
+            | IrDebugLocalProvenance::FunctionFrameMarker
             | IrDebugLocalProvenance::LambdaFrameMarker { .. },
         ) => None,
         None => source.map(str::to_owned),

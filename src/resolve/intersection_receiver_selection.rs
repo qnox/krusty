@@ -35,6 +35,46 @@ impl Checker<'_> {
         self.intersection_property_receiver(&bounds, name, write)
     }
 
+    /// The receiver view of a bare property `name` read through an implicit receiver whose flow
+    /// type is an intersection (`this is B` on an incomparable declaration): the same projection
+    /// an explicit receiver's flow intersection gets, so checked FIR casts `this` to the
+    /// constituent that owns the selected property.
+    pub(super) fn implicit_intersection_property_view(
+        &self,
+        receiver: ImplicitReceiver,
+        name: &str,
+    ) -> ImplicitReceiver {
+        self.implicit_intersection_view(receiver, |bounds| {
+            self.intersection_property_receiver(bounds, name, false)
+        })
+    }
+
+    /// [`Self::implicit_intersection_property_view`] for a bare call of the member `name`.
+    pub(super) fn implicit_intersection_call_view(
+        &self,
+        receiver: ImplicitReceiver,
+        name: &str,
+    ) -> ImplicitReceiver {
+        self.implicit_intersection_view(receiver, |bounds| {
+            self.intersection_member_receiver(bounds, name)
+        })
+    }
+
+    /// A nullable intersection stays whole: a bare member through it is an unsafe call.
+    fn implicit_intersection_view(
+        &self,
+        receiver: ImplicitReceiver,
+        project: impl FnOnce(&[Ty]) -> Option<Ty>,
+    ) -> ImplicitReceiver {
+        if receiver.ty.is_nullable() {
+            return receiver;
+        }
+        let TyKind::Intersection(bounds) = receiver.ty.kind() else {
+            return receiver;
+        };
+        project(bounds.as_slice()).map_or(receiver, |ty| ImplicitReceiver { ty, ..receiver })
+    }
+
     /// The path whose flow type `receiver` reads. A cast `(x as T)` denotes `x`'s path, but its
     /// value has the cast's target type, never the flow intersection proven for `x`.
     fn flow_read_path(&self, receiver: ExprId) -> Option<NarrowPath> {
@@ -163,6 +203,11 @@ impl Checker<'_> {
         if let [(bound, _)] = member_families.as_slice() {
             return Some(*bound);
         }
+        if let Some(overriding) =
+            self.overriding_constituent(member_families.iter().map(|(bound, _)| *bound))
+        {
+            return Some(overriding);
+        }
         let single = member_families
             .iter()
             .filter_map(|(bound, members)| match members.as_slice() {
@@ -226,6 +271,11 @@ impl Checker<'_> {
         if let [(bound, _)] = properties.as_slice() {
             return Some(*bound);
         }
+        if let Some(overriding) =
+            self.overriding_constituent(properties.iter().map(|(bound, _)| *bound))
+        {
+            return Some(overriding);
+        }
         let context = crate::assignable::TyCtx::new();
         let winners = properties
             .iter()
@@ -237,12 +287,32 @@ impl Checker<'_> {
             .collect::<Vec<_>>();
         match winners.as_slice() {
             [winner] => Some(winner.0),
-            [] => None,
             _ if winners.windows(2).all(|pair| pair[0].1 == pair[1].1) => winners
                 .into_iter()
                 .map(|winner| winner.0)
                 .min_by_key(|bound| bound.source_name()),
             _ => None,
         }
+    }
+
+    /// The constituent whose classifier inherits every other contributor of a member. The member
+    /// is then one declaration overridden down the class hierarchy (`Source<T>.value` beside
+    /// `IntBox.value`, `Buildee<T>.getTypeVariable()` beside its fake override in
+    /// `DerivedBuildee<*>`), and kotlinc dispatches it through that overriding constituent
+    /// whatever the results' type arguments.
+    fn overriding_constituent(&self, contributors: impl Iterator<Item = Ty> + Clone) -> Option<Ty> {
+        let mut overriding = contributors.clone().filter(|bound| {
+            contributors.clone().all(|other| {
+                other == *bound
+                    || crate::assignable::applied_supertype(
+                        self,
+                        bound.non_null(),
+                        other.non_null(),
+                    )
+                    .is_some()
+            })
+        });
+        let found = overriding.next()?;
+        overriding.next().is_none().then_some(found)
     }
 }

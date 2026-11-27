@@ -3018,16 +3018,14 @@ pub fn byte_diff_against_kotlinc_cp_target(
     )?
     .pop()?;
 
-    // kotlinc's `-jvm-target` → class-file major (the CLI's table; the CLI crate is a binary, so
-    // the mapping is restated here).
+    // kotlinc's `-jvm-target` → class-file major (the CLI's table, which is kotlinc's: `1.8` and `9..=26`; the CLI
+    // crate is a binary, so the mapping is restated here).
     let class_major = jvm_target.map(|target| match target {
-        "1.6" | "6" => 50,
-        "1.7" | "7" => 51,
-        "1.8" | "8" => 52,
+        "1.8" => 52,
         other => other
             .parse::<u16>()
             .ok()
-            .filter(|n| (9..=99).contains(n))
+            .filter(|n| (9..=26).contains(n))
             .map(|n| n + 44)
             .unwrap_or_else(|| panic!("{name}: unknown -jvm-target {other}")),
     });

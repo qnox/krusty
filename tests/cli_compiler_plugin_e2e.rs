@@ -1332,26 +1332,68 @@ fn assert_inline_library_call_rejects_all(
     assert_eq!(compiled.classes, Vec::<String>::new());
 }
 
-/// A lambda an inline library composable places in its caller is invoked with its captures
-/// alone, so a composable lambda that takes a parameter or has a receiver is declined.
+/// A lambda an inline library composable places in its caller takes its captures and its
+/// receiver, so a composable lambda that takes value parameters of its own is declined.
 #[test]
-fn an_inline_library_composable_declines_a_lambda_with_parameters_or_a_receiver() {
+fn an_inline_library_composable_declines_a_lambda_with_parameters() {
     assert_inline_library_call_rejects(
         "compose-inline-library-lambda-parameter",
         "@Composable inline fun Each(content: @Composable (Int) -> Unit) {\ncontent(1)\n}\n",
         "import lib.Each\n@Composable fun Leaf() {}\n@Composable fun Screen() {\nEach { _ -> Leaf() }\n}\n",
         "6:1: error: krusty's Compose compiler plugin does not support a call to an inline \
-         library composable function with a composable lambda that takes parameters or has a \
-         receiver yet",
+         library composable function with a composable lambda that takes parameters yet",
     );
     assert_inline_library_call_rejects(
-        "compose-inline-library-lambda-receiver",
-        "class Scope\n@Composable inline fun Within(content: @Composable Scope.() -> Unit) {\nScope().content()\n}\n",
-        "import lib.Within\n@Composable fun Leaf() {}\n@Composable fun Screen() {\nWithin { Leaf() }\n}\n",
+        "compose-inline-library-receiver-lambda-parameter",
+        "class Scope\n@Composable inline fun Each(content: @Composable Scope.(Int) -> Unit) {\nScope().content(1)\n}\n",
+        "import lib.Each\n@Composable fun Leaf() {}\n@Composable fun Screen() {\nEach { _ -> Leaf() }\n}\n",
         "6:1: error: krusty's Compose compiler plugin does not support a call to an inline \
-         library composable function with a composable lambda that takes parameters or has a \
-         receiver yet",
+         library composable function with a composable lambda that takes parameters yet",
     );
+}
+
+/// An inline library composable whose content lambda has a receiver (`RowScope.() -> Unit`, the
+/// shape of foundation-layout's `Row`) places the lambda in its caller too: the receiver is a value
+/// the placed body reads, and the class is the one kotlinc emits.
+#[test]
+fn an_inline_library_composable_places_a_lambda_with_a_receiver() {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let switches = vec![format!("-Xplugin={}", compose.display())];
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let producer = Probe::new(
+        "compose-inline-receiver-library",
+        "package lib\nimport androidx.compose.runtime.Composable\n\
+         class Scope { val gap = 4 }\n\
+         @Composable fun Leaf(name: String, scope: String) {}\n\
+         @Composable inline fun Row(content: @Composable Scope.() -> Unit) {\n\
+         Scope().content()\n}\n",
+    );
+    producer.kotlinc_classes(&classpath, &switches);
+    classpath.push(producer.dir.join("kotlinc"));
+    let probe = Probe::new(
+        "compose-inline-receiver-caller",
+        "package probe\nimport androidx.compose.runtime.Composable\n\
+         import lib.Leaf\nimport lib.Row\n\
+         @Composable fun Screen(name: String) {\nRow {\nLeaf(name, toString())\n}\n}\n",
+    );
+    let reference = probe.kotlinc_classes(&classpath, &switches);
+    let compiled = probe.krusty(&classpath, &switches);
+    let partial = PluginDiagnostic::PartialSubstitution {
+        plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
+    }
+    .message();
+    assert_eq!(compiled.stderr, format!("info: {partial}\n"));
+    assert_eq!(compiled.code, Some(0));
+    assert_eq!(compiled.classes, reference);
+    for class in &reference {
+        assert_eq!(
+            std::fs::read(probe.dir.join("krusty").join(class)).expect("krusty's class"),
+            std::fs::read(probe.dir.join("kotlinc").join(class)).expect("kotlinc's class"),
+            "{class} differs from kotlinc's"
+        );
+    }
 }
 
 /// The declaration says which lambdas an inline library composable inlines: one passed to a

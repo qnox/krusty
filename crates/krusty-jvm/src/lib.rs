@@ -75,6 +75,7 @@ mod platform_visible_constructors;
 mod private_static_access;
 pub mod property_annotations;
 mod property_realizations;
+mod property_reference_delegates;
 mod property_references;
 pub mod property_storage;
 mod ranges;

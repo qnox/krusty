@@ -12,6 +12,32 @@ use super::*;
 use crate::types::TyKind;
 
 impl Checker<'_> {
+    /// Applies the flow facts for the unqualified `this` value to the nearest receiver rung.
+    ///
+    /// The facts change that rung's semantic type, not its runtime identity: bare member lookup
+    /// sees the narrowed type (`fun A?.bar() = if (this != null) foo() else ...`) while FIR keeps
+    /// materializing the exact receiver depth selected by the tower.
+    pub(super) fn narrow_current_implicit_receiver(
+        &self,
+        scope: &CheckerScope<'_>,
+        receivers: &mut [ImplicitReceiver],
+    ) {
+        let Some(narrowed) = self.actual_this_narrow(scope) else {
+            return;
+        };
+        let Some(current) = receivers.iter_mut().find(|receiver| receiver.current) else {
+            return;
+        };
+        // An `is B` proof on a receiver of an incomparable declared type keeps both: bare
+        // members of the declaration and of `B` stay visible (`check(this is B); field = x`).
+        current.ty = match self.declared_constituent_beside_proof(current.declared_ty, narrowed) {
+            Some(kept) => Ty::intersection(&[narrowed, kept]),
+            None => narrowed,
+        };
+    }
+}
+
+impl Checker<'_> {
     /// The access path a checked expression denotes: the value its name read selected, followed by
     /// the member properties selected through plain (`.`) and safe (`?.`) reads. `None` for
     /// anything else (a call result, an indexed read, a temporary) — a proof on it says nothing

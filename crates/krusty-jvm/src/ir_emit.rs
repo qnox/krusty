@@ -352,9 +352,6 @@ pub(crate) struct EmitRun {
     /// to the function object, so the method is written despite its `inline_only` mark, whichever
     /// class or facade owns it.
     rescued_lambdas: std::cell::RefCell<krusty::fx_hash::HashSet<u32>>,
-    /// Subset of live closures actually realized with `invokedynamic`. A class-strategy closure still
-    /// keeps its implementation method but does not impose the JVM-7 classfile requirement.
-    used_indy_lambdas: std::cell::RefCell<krusty::fx_hash::HashSet<u32>>,
     /// Lambda classes to synthesize for `-Xlambdas=class`, recorded as their `invokedynamic`
     /// replacement is emitted and drained by the class driver. They cannot be written inline: the
     /// emitter is mid-way through the ENCLOSING class's writer when it reaches a lambda.
@@ -1040,24 +1037,12 @@ fn emit_all_with_class_meta_impl(
         value_classes: std::rc::Rc::new(value_class_descriptors::of(ir)),
         ..opts.clone()
     };
-    // Pass 1 (discovery): emit everything, recording live closure implementations and the subset that
-    // actually uses `invokedynamic`. A lambda spliced by the inliner emits neither realization.
+    // Pass 1 (discovery): emit everything, recording live closure implementations. A lambda spliced by the inliner emits neither realization.
     env.run.used_lambdas.borrow_mut().clear();
-    env.run.used_indy_lambdas.borrow_mut().clear();
     env.run.dead_lambdas.borrow_mut().clear();
     env.run.rescued_lambdas.borrow_mut().clear();
     let first = emit_pass(ir, facade, env, metadata, opts, class_meta)?;
     let used = env.run.used_lambdas.borrow().clone();
-    let used_indy = env.run.used_indy_lambdas.borrow().clone();
-    // `invokedynamic` was added in class-file version 51 (Java 7). Do not return a version-50 class
-    // containing an opcode that its declared target cannot represent. This check uses the emitter's
-    // discovery result rather than the source/IR lambda count: an inline-only lambda that was fully
-    // spliced emitted no call site and therefore remains valid for the older target.
-    if opts.class_major.is_some_and(|major| major < 51) && !used_indy.is_empty() {
-        env.run
-            .set_emit_error("krusty: invokedynamic requires JVM target 1.7 or newer".to_string());
-        return None;
-    }
     // A MUST-INLINE message lambda whose call-site splice FELL BACK to a real `invokedynamic`
     // (pass 1 recorded the use): its impl was pre-marked `inline_only` on the assumption the splice
     // always succeeds — emitting the reference without the method would be a broken class
@@ -1292,14 +1277,7 @@ fn emit_pass(
     // empty one is an ABI divergence (spurious extra class). A facade static is owner-less.
     let facade_has_static = ir.statics.iter().any(|s| s.is_facade_owned());
     if facade_has_method || facade_has_static || metadata.is_some() {
-        if let Some(multifile_facade) = env.multifile_facade {
-            multifile_facades::write_part_header(&mut cw, ir, metadata, multifile_facade);
-        } else {
-            cw.set_class_annotations(&ir.file_annotations);
-            if let Some(m) = metadata {
-                cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
-            }
-        }
+        crate::file_facades::write_header(&mut cw, ir, metadata, facade, env.multifile_facade);
         out.push((facade.to_string(), env.run.finish_class(cw)));
         out.extend(drain_lambda_classes(env, opts));
         out.extend(env.run.machine_classes.borrow_mut().drain(..));
@@ -4477,7 +4455,7 @@ struct Emitter<'a> {
     /// The same-module callee frames that have opened but not yet reached their frame marker,
     /// innermost last. A default evaluated ahead of the marker can run an inline call of its own,
     /// so each expansion keeps its own entry.
-    pending_copied_frames: Vec<block_scope::PendingCopiedFrame>,
+    copied_frames: block_scope::CopiedFrames,
     /// The `&&`/`||` operand whose line is marked again before the jump that consumes it.
     short_circuit_operand_line: Option<ExprId>,
     /// A plain local operand of an unsigned bitwise member is being loaded, so it records no line.
@@ -4609,7 +4587,7 @@ impl<'a> Emitter<'a> {
             render_initializer_boundaries: false,
             inside_condition: false,
             copied_operand_binding: None,
-            pending_copied_frames: Vec::new(),
+            copied_frames: Default::default(),
             short_circuit_operand_line: None,
             suppress_unsigned_local_line: false,
             this_uninitialized: false,

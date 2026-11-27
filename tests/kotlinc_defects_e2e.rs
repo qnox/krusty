@@ -116,8 +116,10 @@ const INLINE_OBJECT_NESTED_FIELD: &str = r#"inline fun <reified T> untyped(): An
 fun box(): String = if (untyped<Int>() is Any) "OK" else "untyped"
 "#;
 
-/// KT-89466: a platform module's class over the class of a library its common module depends on.
-/// kotlinc-native builds the library, then crashes actualizing the application's fragments.
+/// A platform module's class over the class of a library its common module depends on. Compiled
+/// with `-Xseparate-kmp-compilation`, kotlinc-native crashes actualizing the application's
+/// fragments (KT-89466); compiled the way kotlinc's own Native box runner compiles a unit, with its
+/// fragments together, it builds the program.
 const PLATFORM_CLASS_OVER_LIBRARY_CLASS: &str = r#"// LANGUAGE: +MultiPlatformProjects
 
 // MODULE: lib-common
@@ -409,20 +411,17 @@ fn collect_classes(root: &Path, dir: &Path, classes: &mut Vec<(String, Vec<u8>)>
     }
 }
 
-/// kotlinc-native's report for [`PLATFORM_CLASS_OVER_LIBRARY_CLASS`]: its HMPP actualizer looks up
-/// the platform fragment's module in a map that holds only the library's.
+/// kotlinc-native runs [`PLATFORM_CLASS_OVER_LIBRARY_CLASS`] when the oracle compiles each unit's
+/// fragments together, as kotlinc's own Native box runner does: the KT-89466 crash belongs to
+/// separate KMP compilation, which that runner never uses.
 #[test]
-fn kotlinc_native_cannot_actualize_a_platform_class_over_a_library_class() {
+fn kotlinc_native_actualizes_a_platform_class_over_a_library_class_like_its_own_runner() {
     if let Some(outcome) =
         common::kotlin_native_multimodule_outcome(PLATFORM_CLASS_OVER_LIBRARY_CLASS)
     {
         assert_eq!(
             outcome,
-            common::NativeModulesOutcome::Rejected(
-                "exception: java.util.NoSuchElementException: Key Module <app-platform> is \
-                 missing in the map."
-                    .to_string()
-            )
+            common::NativeModulesOutcome::Answer("OK".to_string())
         );
     }
 }

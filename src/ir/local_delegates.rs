@@ -42,6 +42,9 @@ pub struct IrLocalDelegatePlan {
     /// identity rather than creating another declaration at the caller.
     pub reference: super::IrLocalPropertyReference,
     pub storage_name: Box<str>,
+    /// The `Variable` declaring the delegate's storage, once the declaring body is lowered. Inline
+    /// copies and closure realizations retain the template's declaration.
+    pub storage: Option<ExprId>,
     pub getter: IrLocalDelegateAccessorPlan,
     pub setter: Option<IrLocalDelegateAccessorPlan>,
 }
