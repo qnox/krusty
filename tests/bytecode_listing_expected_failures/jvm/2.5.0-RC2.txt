@@ -51,7 +51,6 @@ coroutines/spilling/select.kt
 coroutines/spilling/unreachable.kt
 coroutines/tcoContinuation.kt
 defaultArguments/primitiveTypeParameterUpperBound.kt
-delegatedProperty/delegateMethodIsNonOverridable.kt
 delegatedProperty/localDelegatedProperty.kt
 delegationToJavaInterfaceWithWildcardType.kt
 deprecated/deprecatedEnumEntryFields.kt
