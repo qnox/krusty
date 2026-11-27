@@ -706,7 +706,7 @@ impl BodyLowering<'_> {
                 "a `super` call names a member its qualifier does not declare",
             ));
         }
-        let linked = self.linker.link(self.ir, callee)?;
+        let linked = self.linker.link_super(self.ir, callee)?;
         if !matches!(linked.callee, Callee::Local(_)) {
             return unsupported("a `super` call of a member this unit does not implement");
         }
