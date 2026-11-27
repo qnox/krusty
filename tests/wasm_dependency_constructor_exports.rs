@@ -409,3 +409,13 @@ fn wasm_official_root_package_dependency_declarations_run_their_bodies() {
         "RootPackageDependencyDeclarations",
     );
 }
+
+/// An official producer's anonymous object inherits an interface default that only dispatch
+/// reaches: the consumer declares the inherited body and implements the member with it.
+#[test]
+fn wasm_official_dependency_anonymous_object_runs_its_inherited_interface_default() {
+    run_against_official_producer(
+        include_str!("box_regressions/libraryAnonymousObjectInheritedDefault.kt"),
+        "AnonymousObjectInheritedDefault",
+    );
+}

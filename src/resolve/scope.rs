@@ -224,9 +224,7 @@ impl ConditionFacts {
     }
 }
 
-/// What a stable local `Boolean` `val` implies about other values, by the value it holds: the
-/// facts its initializer proved for `true` and for `false` (Kotlin's data-flow implications bound
-/// to a stable boolean variable).
+/// The execution a flow fact was established in.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct FlowExecutionIdentity {
     /// A named local function is a separate execution even though entering it clears the enclosing
@@ -238,8 +236,21 @@ pub(super) struct FlowExecutionIdentity {
     pub(super) lambdas: Vec<ExprId>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(super) struct BooleanImplications {
+/// Which question about a stable value its implications answer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ImplyingQuestion {
+    /// The `Boolean` value itself: `if (ok)`.
+    Truth,
+    /// Whether the value is non-null: `if (selector != null)`.
+    NonNull,
+}
+
+/// What a stable value implies about other values, by the value it holds: the facts its
+/// initializer proved when the answer to `question` is yes and when it is no (Kotlin's data-flow
+/// implications bound to a stable variable).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ValueImplications {
+    pub(super) question: ImplyingQuestion,
     pub(super) when_true: ConditionFacts,
     pub(super) when_false: ConditionFacts,
     /// The execution the val was declared in: the materialized (not inline-spliced) lambdas
@@ -249,7 +260,7 @@ pub(super) struct BooleanImplications {
     pub(super) execution: FlowExecutionIdentity,
 }
 
-impl BooleanImplications {
+impl ValueImplications {
     pub(super) fn facts(&self, truth: bool) -> &ConditionFacts {
         if truth {
             &self.when_true
@@ -285,9 +296,9 @@ pub(crate) struct Flow {
     /// later nullable-receiver use reports kotlinc's SMARTCAST_IMPOSSIBLE instead of the plain
     /// unsafe-call error.
     declined: Vec<(String, Ty)>,
-    /// Implications of stable Boolean `val`s declared in this frame, by the val's flow identity.
-    /// They live as long as the val and lose a fact when the value it talks about is written.
-    boolean_implications: HashMap<u32, BooleanImplications>,
+    /// Implications of stable values bound in this frame, by the value's access path. They live
+    /// as long as the binding and lose a fact when the value it talks about is written.
+    value_implications: HashMap<NarrowPath, ValueImplications>,
 }
 
 /// A short-lived copy of the flow frames on one lexical scope chain. Control-flow constructs use
@@ -517,8 +528,8 @@ impl<'p, B> Scope<'p, B> {
                     .locals
                     .retain(|name, ty| other.locals.get(name) == Some(ty));
                 frame.declined.retain(|fact| other.declined.contains(fact));
-                frame.boolean_implications.retain(|identity, implications| {
-                    other.boolean_implications.get(identity) == Some(implications)
+                frame.value_implications.retain(|path, implications| {
+                    other.value_implications.get(path) == Some(implications)
                 });
             }
         }
@@ -590,9 +601,9 @@ impl<'p, B> Scope<'p, B> {
             apply_map_delta(&mut target.exclusions, &entry.exclusions, &exit.exclusions);
             apply_map_delta(&mut target.locals, &entry.locals, &exit.locals);
             apply_map_delta(
-                &mut target.boolean_implications,
-                &entry.boolean_implications,
-                &exit.boolean_implications,
+                &mut target.value_implications,
+                &entry.value_implications,
+                &exit.value_implications,
             );
             target
                 .declined
@@ -1009,7 +1020,7 @@ impl<'p, B> Scope<'p, B> {
         is_inline_spliced: impl Fn(ExprId) -> bool,
     ) {
         for rung in self.ancestors() {
-            for implications in rung.flow.borrow_mut().boolean_implications.values_mut() {
+            for implications in rung.flow.borrow_mut().value_implications.values_mut() {
                 let same_execution = implications.execution.local_function
                     == execution.local_function
                     && implications
@@ -1031,28 +1042,22 @@ impl<'p, B> Scope<'p, B> {
         }
     }
 
-    /// Bind a stable Boolean `val`'s implications to the frame declaring it.
-    pub(super) fn record_boolean_implications(
+    /// Bind a stable value's implications to the frame binding it.
+    pub(super) fn record_value_implications(
         &self,
-        identity: u32,
-        implications: BooleanImplications,
+        path: NarrowPath,
+        implications: ValueImplications,
     ) {
         self.flow
             .borrow_mut()
-            .boolean_implications
-            .insert(identity, implications);
+            .value_implications
+            .insert(path, implications);
     }
 
-    /// The implications recorded for the val with flow identity `identity`, from the frame that
-    /// declared it.
-    pub(super) fn boolean_implications(&self, identity: u32) -> Option<BooleanImplications> {
-        self.ancestors().find_map(|rung| {
-            rung.flow
-                .borrow()
-                .boolean_implications
-                .get(&identity)
-                .cloned()
-        })
+    /// The implications recorded for the stable value at `path`, from the frame that bound it.
+    pub(super) fn value_implications(&self, path: &NarrowPath) -> Option<ValueImplications> {
+        self.ancestors()
+            .find_map(|rung| rung.flow.borrow().value_implications.get(path).cloned())
     }
 
     /// Record a continuation fact on THIS frame only. A control-flow join uses this for a type

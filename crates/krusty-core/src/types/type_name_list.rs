@@ -33,7 +33,7 @@ impl TypeNameList {
         self.iter_ids().map(TypeName::render)
     }
 
-    pub(crate) fn remap(&mut self, mut map: impl FnMut(TypeName) -> TypeName) {
+    pub fn remap(&mut self, mut map: impl FnMut(TypeName) -> TypeName) {
         for name in &mut self.names {
             *name = map(*name);
         }

@@ -274,7 +274,6 @@ impl Checker<'_> {
                 lexical_capture_identity,
                 lexical_declaration: None,
                 flow_identity,
-                safe_call_origin: None,
             }),
         );
         flow_identity
@@ -323,7 +322,6 @@ impl Checker<'_> {
                 lexical_capture_identity,
                 lexical_declaration: None,
                 flow_identity,
-                safe_call_origin: None,
             }),
         );
         flow_identity
@@ -355,7 +353,6 @@ impl Checker<'_> {
             Some(local) => local.flow_identity,
             None => self.allocate_flow_identity(),
         };
-        let safe_call_origin = previous.and_then(|local| local.safe_call_origin);
         let declared_ty = previous.map(|local| local.declared_ty).unwrap_or(ty);
         let write_ty = previous.and_then(|local| local.write_ty);
         let is_var = previous.map(|local| local.is_var).unwrap_or(false);
@@ -380,7 +377,6 @@ impl Checker<'_> {
                 lexical_capture_identity,
                 lexical_declaration: previous.and_then(|local| local.lexical_declaration),
                 flow_identity,
-                safe_call_origin,
             }),
         );
     }

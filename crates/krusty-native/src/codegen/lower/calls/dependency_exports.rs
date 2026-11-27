@@ -399,12 +399,15 @@ impl BodyLowering<'_, '_, '_> {
     }
 
     /// Another module's class, constructed through the entry its module exports under the
-    /// selected constructor's identity; `None` when that module published none.
+    /// selected constructor's identity, or through that constructor's default-argument entry when
+    /// the construction leaves arguments out; `None` when that module published none.
     pub(in super::super) fn dependency_construction(
         &mut self,
         target: krusty::fir::ExternalCallableId,
         internal: krusty::types::TypeName,
         args: &[u32],
+        defaults: &[u32],
+        default_prefix_count: u32,
     ) -> Option<Result<Option<Value>, Unsupported>> {
         if self.file.ir.class_id_by_name(internal).is_some() {
             return None;
@@ -416,19 +419,68 @@ impl BodyLowering<'_, '_, '_> {
             .dependency_callable
             .as_ref()?;
         let export = self.file.dependency_symbols.get(identity)?;
+        let entry = match defaults.is_empty() {
+            true => None,
+            false => Some(export.default_entry.as_deref()?),
+        };
         Some((|| {
             let parameters = export.signature.parameters().to_vec();
             let result = export.signature.result();
-            if parameters.len() != args.len() {
+            if parameters.len() != args.len() + defaults.len() {
                 return Err(
                     "a dependency construction whose operands disagree with its constructor".into(),
                 );
             }
-            let arguments = self.arguments(args, &parameters)?;
+            // The ordinals number the source parameters, which follow the compiler's leading
+            // operands; the masks number the source parameters alone.
+            let prefix = default_prefix_count as usize;
+            let omitted = defaults
+                .iter()
+                .map(|&ordinal| ordinal as usize + prefix)
+                .collect::<Vec<_>>();
+            let supplied = parameters
+                .iter()
+                .enumerate()
+                .filter(|(position, _)| !omitted.contains(position))
+                .map(|(_, ty)| *ty)
+                .collect::<Vec<_>>();
+            let arguments = self.arguments(args, &supplied)?;
             if self.terminated {
                 return Ok(None);
             }
-            let id = self.file.import(&export.symbol, &parameters, result)?;
+            let (symbol, signature, arguments) = match entry {
+                Some(entry) => {
+                    // A zero in each omitted slot and its bit in the mask; the entry evaluates
+                    // the marked defaults in the declaring module, in declaration order.
+                    let mut supplied = arguments.into_iter();
+                    let mut operands = Vec::new();
+                    for (position, ty) in parameters.iter().enumerate() {
+                        if omitted.contains(&position) {
+                            operands.push(self.zero_of(*ty));
+                        } else {
+                            operands.push(supplied.next().expect("one value per supplied operand"));
+                        }
+                    }
+                    for mask in krusty::backend::default_arguments::omission_masks(
+                        parameters.len() - prefix,
+                        omitted.iter().map(|&position| position - prefix),
+                    ) {
+                        operands.push(
+                            self.builder
+                                .ins()
+                                .iconst(types::I32, i64::from(mask as i32)),
+                        );
+                    }
+                    let mut signature = parameters.clone();
+                    signature.extend(std::iter::repeat_n(
+                        Ty::Int,
+                        krusty::backend::default_arguments::mask_words(parameters.len() - prefix),
+                    ));
+                    (entry, signature, operands)
+                }
+                None => (export.symbol.as_str(), parameters.clone(), arguments),
+            };
+            let id = self.file.import(symbol, &signature, result)?;
             let func_ref = self.func_ref(id);
             let call = self.emit_call(func_ref, &arguments)?;
             match self.builder.inst_results(call).first().copied() {
