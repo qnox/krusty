@@ -33,18 +33,20 @@ static inline kt_boolean took(const KType *expected) {
     return thrown != NULL && type_of(thrown) == expected;
 }
 
-/* A function value: an object whose descriptor puts `invoke` in the one slot a function value
-   declares beyond `kotlin.Any`'s three. `IDENTIFIER_type` is the descriptor and `IDENTIFIER` an
-   instance of it, which needs no fields because every function here keeps its state in statics. */
+/* A function value: an object whose descriptor puts `invoke` in the slots a function value declares
+   beyond `kotlin.Any`'s three, one per operand count the runtime calls back with (none, one, two:
+   `KT_SLOT_INVOKE_N`). `IDENTIFIER_type` is the descriptor and `IDENTIFIER` an instance of it, which
+   needs no fields because every function here keeps its state in statics. */
 #define FUNCTION_VALUE(identifier, invoke)                                                         \
-    static const kt_fn identifier##_vtable[] = {NULL, NULL, NULL, (kt_fn)(invoke)};               \
+    static const kt_fn identifier##_vtable[] = {NULL,           NULL,          NULL,               \
+                                                (kt_fn)(invoke), (kt_fn)(invoke), (kt_fn)(invoke)};   \
     static const KType identifier##_type = {                                                       \
         .name = #identifier,                                                                       \
         .name_length = sizeof(#identifier) - 1,                                                    \
         .instance_size = sizeof(KObjectHeader),                                                    \
         .super = &kt_type_any,                                                                     \
         .vtable = identifier##_vtable,                                                             \
-        .vtable_length = 4,                                                                        \
+        .vtable_length = 6,                                                                        \
     };                                                                                             \
     static KObjectHeader identifier##_object = {&identifier##_type};                               \
     static KRef const identifier = (KRef)&identifier##_object;

@@ -461,15 +461,11 @@ impl Representation for NativeRepresentation<'_> {
         superclass == krusty::types::wk::kotlin_enum() || external_base(superclass).is_some()
     }
 
-    fn function_slots(&self) -> u32 {
-        FUNCTION_SLOTS
+    /// The runtime's own callbacks call function values of up to two operands.
+    fn min_function_slots(&self) -> u32 {
+        3
     }
 }
-
-/// A function value's `invoke` holds the table number its physical operand count names, from zero
-/// operands to a function type of 22 parameters with its continuation: [`FUNCTION_SLOT`] plus the
-/// count. The runtime's `KT_SLOT_INVOKE` is the first.
-pub(super) const FUNCTION_SLOTS: u32 = 24;
 
 #[derive(Clone, Debug)]
 pub(super) struct ClassLayout {
@@ -517,6 +513,8 @@ pub(super) struct ClassModel {
     direct_methods: HashSet<FunId>,
     /// The module's interface numbers, extended with the interfaces this file installed.
     numbers: ModuleInterfaces,
+    /// How many function slots follow `kotlin.Any`'s in every table.
+    function_slots: u32,
 }
 
 /// Which table a member dispatches through, and at which index.
@@ -529,6 +527,17 @@ pub(super) enum Dispatch {
 }
 
 impl ClassModel {
+    /// How many function slots follow `kotlin.Any`'s in every table: a function value's `invoke`
+    /// holds the one its physical operand count names.
+    pub fn function_slots(&self) -> u32 {
+        self.function_slots
+    }
+
+    /// The table number a call through a function type of `operands` physical operands reads.
+    pub fn function_slot(&self, operands: usize) -> u32 {
+        class_tables::function_slot(self.function_slots, operands)
+    }
+
     /// Whether `function` is a method its class's table does not dispatch, which a call reaches
     /// directly.
     pub(super) fn is_direct(&self, function: FunId) -> bool {
@@ -692,6 +701,7 @@ pub(super) fn build(
         interfaces: numbered.interfaces,
         implemented: numbered.interface_tables.implemented,
         numbers: numbered.numbers,
+        function_slots: numbered.function_slots,
         callables: ir
             .checked_callable_functions
             .iter()
@@ -797,7 +807,7 @@ mod tests {
     };
     use krusty::backend::class_tables::FUNCTION_SLOT;
     /// The first table number a method of a class takes: after `kotlin.Any`'s and the function slots.
-    const FIRST: u32 = FUNCTION_SLOT + FUNCTION_SLOTS;
+    const FIRST: u32 = FUNCTION_SLOT + 3;
     use krusty::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
     use krusty::ir::IrProperty;
 
@@ -842,7 +852,7 @@ mod tests {
             .into_iter()
             // The function slots, one per operand count, reserved in every table so no member
             // ever stands there.
-            .chain((0..FUNCTION_SLOTS).map(|_| Slot::Abstract))
+            .chain((0..3).map(|_| Slot::Abstract))
             .collect::<Vec<_>>()
         );
         assert_eq!(layout.instance_size, HEADER_SIZE);

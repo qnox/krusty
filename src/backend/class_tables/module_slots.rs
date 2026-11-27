@@ -140,6 +140,9 @@ pub struct ModuleSlotPlan {
     /// What each planned member takes after its dispatch receiver and answers.
     signatures: HashMap<PlanKey, (Box<[Ty]>, Ty)>,
     interfaces: ModuleInterfaces,
+    /// How many function slots every table of the module reserves; `None` for a plan that numbers
+    /// nothing.
+    function_slots: Option<u32>,
 }
 
 /// What a planned slot's entry takes after the dispatch receiver and answers, as every file reads
@@ -222,11 +225,13 @@ impl ModuleSlotPlan {
                 ],
             })
             .collect();
+        let function_slots = module_function_slots(classes, representation);
         let mut planner = Planner {
             classes,
             representation,
             carriers,
             tables,
+            function_slots,
         };
         // Planning is a pure function of each class, so the order classes are visited in only
         // decides which table is computed first.
@@ -283,7 +288,15 @@ impl ModuleSlotPlan {
             tables: planner.tables,
             signatures,
             interfaces: ModuleInterfaces::build(classes, representation),
+            function_slots: Some(function_slots),
         }
+    }
+
+    /// How many function slots every table of the module reserves: one per physical operand count
+    /// up to the widest function type a class of the module implements. `None` for a plan that
+    /// numbers nothing, whose file decides from its own classes ([`local_function_slots`]).
+    pub fn function_slots(&self) -> Option<u32> {
+        self.function_slots
     }
 
     /// The signature of slot `slot` of `table`, one of this plan's tables; `None` when the slot is
@@ -369,6 +382,8 @@ struct Planner<'c> {
     representation: &'c dyn Representation,
     carriers: HashMap<PlanKey, (Box<[Ty]>, Ty)>,
     tables: HashMap<TypeName, Result<PlannedTable, Unsupported>>,
+    /// How many function slots every table reserves ([`module_function_slots`]).
+    function_slots: u32,
 }
 
 impl Planner<'_> {
@@ -411,11 +426,11 @@ impl Planner<'_> {
             }
             None => None,
         };
-        // A function slot holds one `invoke`. A target reserving one number declines a class
-        // overriding the `invoke` of two function types, named directly or through interfaces, as
-        // `class_vtable` does; one reserving a number per physical operand count declines only
-        // where two of them carry the same count.
-        let reserved = self.representation.function_slots();
+        // A function slot holds one `invoke`, and each physical operand count has a slot of its
+        // own, so a class overriding the `invoke` of two function types, named directly or through
+        // interfaces, is declined only where two of them carry the same count, as `class_vtable`
+        // does.
+        let reserved = self.function_slots;
         let function_types = class
             .function_overrides
             .iter()
@@ -440,14 +455,11 @@ impl Planner<'_> {
                     _ => None,
                 })
             })
-            .map(|operands| operands.and_then(|operands| function_slot(reserved, operands)))
+            .map(|operands| operands.map(|operands| function_slot(reserved, operands)))
             .collect::<Vec<_>>();
         let colliding = function_types.len() > 1
             && function_slots.iter().collect::<HashSet<_>>().len() != function_slots.len();
-        if (reserved <= 1 && (class.function_type_arities.len() > 1 || function_types.len() > 1))
-            || colliding
-            || class.function_type_arities.iter().any(|&arity| arity > 22)
-        {
+        if colliding || class.function_type_arities.iter().any(|&arity| arity > 22) {
             return Err(format!(
                 "a class implementing more than one function type, or one of more than 22 \
                  parameters (`{}`)",
@@ -463,7 +475,7 @@ impl Planner<'_> {
                 AnyMember::ALL
                     .map(PlannedSlot::Any)
                     .into_iter()
-                    .chain((0..self.representation.function_slots()).map(|_| PlannedSlot::Reserved))
+                    .chain((0..self.function_slots).map(|_| PlannedSlot::Reserved))
                     .collect(),
                 HashMap::default(),
             ),
@@ -581,7 +593,7 @@ impl Planner<'_> {
             .all(|parameter| self.representation.is_reference(*parameter))
             && self.representation.is_reference(carriers.1);
         let fixed = any_replaces.or(if invoke && carries_references {
-            function_slot(self.representation.function_slots(), carriers.0.len())
+            Some(function_slot(self.function_slots, carriers.0.len()))
         } else {
             None
         });
@@ -628,8 +640,7 @@ impl Planner<'_> {
             return Err("a dependency member overridden by no declaration of this module".into());
         };
         if let Some(arity) = function_bridge {
-            let function_number = function_slot(self.representation.function_slots(), arity)
-                .ok_or("a function type with more operands than the table has function slots")?;
+            let function_number = function_slot(self.function_slots, arity);
             entries[function_number as usize] = PlannedSlot::FunctionBridge {
                 arity,
                 target_slot: slot,
@@ -766,4 +777,75 @@ fn place(entries: &mut Vec<PlannedSlot>, replaces: Option<u32>, entry: PlannedSl
             (entries.len() - 1) as u32
         }
     }
+}
+
+/// How many function slots a module's tables reserve: one per physical operand count up to the
+/// widest function type a class implements, a `suspend` one's continuation included, and at least
+/// as many as the target's own runtime calls function values with.
+fn module_function_slots(classes: &ModuleClasses, representation: &dyn Representation) -> u32 {
+    let widest = classes
+        .iter()
+        .flat_map(|(_, class)| {
+            // A class's own `invoke` overrides, by the physical operands each takes; one named
+            // only among its supertypes may carry a continuation as well.
+            let overrides = class
+                .function_overrides
+                .iter()
+                .filter(|edge| {
+                    edge.overridden_role == Some(SemanticCallRole::KotlinFunctionInvoke)
+                        && matches!(edge.overridden, ResolvedFunctionOverrideTarget::External(_))
+                })
+                .filter_map(|edge| {
+                    class.members.iter().find_map(|member| match member {
+                        ModuleMember::Function {
+                            callable,
+                            parameters,
+                            suspend,
+                            ..
+                        } if *callable == edge.implementation => {
+                            Some(parameters.len() + usize::from(*suspend))
+                        }
+                        _ => None,
+                    })
+                });
+            let named = class
+                .function_type_arities
+                .iter()
+                .copied()
+                .filter(|&arity| arity <= 22)
+                .map(|arity| arity + 1);
+            overrides.chain(named).collect::<Vec<_>>()
+        })
+        .max();
+    let needed = widest.map_or(1, |operands| operands as u32 + 1);
+    needed.max(representation.min_function_slots())
+}
+
+/// How many function slots the tables of a file no module plan covers reserve, from the function
+/// types its own classes implement.
+pub(super) fn local_function_slots(
+    ir: &crate::ir::IrFile,
+    representation: &dyn Representation,
+) -> u32 {
+    let widest = ir
+        .function_overrides
+        .values()
+        .flatten()
+        .filter(|edge| {
+            edge.overridden_semantic_role == Some(SemanticCallRole::KotlinFunctionInvoke)
+                && matches!(edge.overridden, ResolvedFunctionOverrideTarget::External(_))
+        })
+        .filter_map(|edge| {
+            edge.implementation_function
+                .or_else(|| match &edge.implementation {
+                    ResolvedFunctionOverrideTarget::Module(callable) => {
+                        ir.checked_callable_functions.get(callable).copied()
+                    }
+                    ResolvedFunctionOverrideTarget::External(_) => None,
+                })
+        })
+        .map(|function| ir.functions[function as usize].params.len())
+        .max();
+    let needed = widest.map_or(1, |operands| operands as u32 + 1);
+    needed.max(representation.min_function_slots())
 }
