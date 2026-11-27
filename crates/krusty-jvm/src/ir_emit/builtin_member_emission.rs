@@ -23,8 +23,21 @@ impl Emitter<'_> {
     ) {
         match operation {
             krusty::ir::IrIntrinsic::ArraySize => {
-                self.emit_value(receiver, code);
-                self.coerce_array_dispatch_receiver(self.value_ty(receiver), code);
+                // `size` consumes its receiver at its own dispatch slot: `[Ljava/lang/Object;` for
+                // `Array<T>`, the array itself for a primitive array. A generic result reaches it
+                // in its declaration's erased slot, cast only when that slot is not an array.
+                let value = self.value_ty(receiver);
+                let stack = self.emit_consumed_operand(receiver, code);
+                if type_descriptor(stack).starts_with('[') {
+                    self.coerce_array_dispatch_receiver(stack, code);
+                } else {
+                    let slot = if value.non_null().is_reference_array() {
+                        Ty::array(Ty::nullable(Ty::obj("kotlin/Any")))
+                    } else {
+                        value
+                    };
+                    self.coerce_reference_on_stack(stack, slot, code);
+                }
                 self.mark_intrinsic_instruction(expression, code);
                 code.arraylength();
             }
