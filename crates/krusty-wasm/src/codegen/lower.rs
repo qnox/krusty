@@ -41,6 +41,7 @@ mod scalar_value_classes;
 mod shared_cells;
 mod string_builders;
 mod string_slices;
+pub(super) use class_literals::class_is_instance_target;
 pub(super) use shared_cells::cell_reference;
 pub(super) use string_builders::{declared_by_string_builder, is_string_builder};
 mod string_conversion;
