@@ -291,6 +291,35 @@ mod tests {
     }
 
     #[test]
+    fn a_tail_point_after_an_earlier_generic_point_binds_only_the_tail() {
+        let mut nodes = mark(SuspendMarker::BeforeSuspend);
+        nodes.extend(mark(SuspendMarker::BeforeSuspendGenericCall));
+        nodes.extend(mark(SuspendMarker::AfterSuspend));
+        nodes.push(Node::Insn(Insn::Op(
+            crate::jvm::bytecode_passes::opcodes::POP,
+        )));
+        nodes.extend(mark(SuspendMarker::BeforeSuspend));
+        nodes.extend(mark(SuspendMarker::BeforeSuspendGenericCall));
+        nodes.extend(mark(SuspendMarker::AfterSuspend));
+        nodes.push(Node::Insn(Insn::Op(
+            crate::jvm::bytecode_passes::opcodes::ARETURN,
+        )));
+        bind_generic_suspend_call_to_unit(&mut nodes);
+        let ids = nodes.iter().filter_map(int_constant).collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                SuspendMarker::BeforeSuspend as i32,
+                SuspendMarker::BeforeSuspendGenericCall as i32,
+                SuspendMarker::AfterSuspend as i32,
+                SuspendMarker::BeforeSuspend as i32,
+                SuspendMarker::BeforeSuspendUnitCall as i32,
+                SuspendMarker::AfterSuspend as i32,
+            ]
+        );
+    }
+
+    #[test]
     fn a_nested_generic_suspend_marker_is_left_alone() {
         let mut nodes = mark(SuspendMarker::BeforeSuspend);
         nodes.extend(mark(SuspendMarker::BeforeSuspendGenericCall));
