@@ -561,17 +561,8 @@ impl ProductionSignatureSemantics<'_> {
             }
             None => (stub.source.raw(), stub.range),
         };
-        let message = format!("variable '{spelling}' must be initialized.");
-        let mut diagnostics = self.diagnostics.borrow_mut();
-        if let Some(index) = diagnostics.iter().position(|diagnostic| {
-            diagnostic.file == file && diagnostic.span == span && diagnostic.message == message
-        }) {
-            return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
-        }
-        diagnostics.push(ProductionSignatureDiagnostic::conditional(
-            owner, file, span, message,
-        ));
-        crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
+        let report = crate::diagnostic_wording::uninitialized_variable(spelling);
+        self.record_source_finding_at(owner, (file, span), report.into(), None)
     }
 
     fn record_unresolved_reference_at(

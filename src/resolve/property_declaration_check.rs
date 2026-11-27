@@ -545,8 +545,10 @@ impl Checker<'_> {
             }
             Some(PropertyInferenceFailure::UninitializedReads(reads)) => {
                 for (span, name) in reads {
-                    self.diags
-                        .error(span, format!("variable '{name}' must be initialized."));
+                    self.diags.report_error(
+                        span,
+                        crate::diagnostic_wording::uninitialized_variable(&name),
+                    );
                 }
             }
             Some(PropertyInferenceFailure::Untypeable) | None
