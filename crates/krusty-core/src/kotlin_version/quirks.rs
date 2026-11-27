@@ -179,6 +179,13 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: false,
     }
+    /// `-jvm-target` accepts `1.8` and `9` through `26`; `27` and `28` are unknown targets. From
+    /// 2.5 kotlinc also accepts `27` and `28`.
+    JvmTargetsEndAt26 {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
     /// A not-null operator (`!!`, the left of `?:`, the receiver of `?.`) applied to a nullable
     /// intersection fixed below an upper type (`pick(a, b)!!` with `S : Base`) narrows it to a new
     /// intersection that publishes `Any`. From 2.5 kotlinc keeps the upper type, so the result still

@@ -9,7 +9,7 @@ use super::{Ty, TyKind};
 
 /// How a value of one semantic type crosses into a slot of another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ValueConversion {
+pub enum ValueConversion {
     /// Into `Unit`: the value is evaluated for its effect.
     CoerceToUnit,
     /// A numeric value into a wider numeric type or a numeric supertype.
@@ -25,7 +25,7 @@ pub(crate) enum ValueConversion {
 /// The conversion a value of `actual` needs in a slot of `target`, or `None` when the value
 /// crosses unchanged: identical types, a bottom value, or a reference into a non-null reference
 /// supertype.
-pub(crate) fn value_conversion(actual: Ty, target: Ty) -> Option<ValueConversion> {
+pub fn value_conversion(actual: Ty, target: Ty) -> Option<ValueConversion> {
     let actual = actual.canonical_semantic();
     let target = target.canonical_semantic();
     if actual == target || matches!(actual, Ty::Nothing | Ty::Null) {

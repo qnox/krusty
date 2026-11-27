@@ -518,7 +518,6 @@ compiler/testData/diagnostics/tests/generics/kt30590.kt
 compiler/testData/diagnostics/tests/generics/multipleBoundsMemberScope/conflictingReturnType.kt
 compiler/testData/diagnostics/tests/generics/nullability/considerTypeNotNullOnlyIfItHasNotNullBound.kt
 compiler/testData/diagnostics/tests/generics/nullability/smartCasts.kt
-compiler/testData/diagnostics/tests/generics/nullability/smartCastsOnThis.kt
 compiler/testData/diagnostics/tests/generics/projectionsScope/flexibleProjectedScope.kt
 compiler/testData/diagnostics/tests/generics/projectionsScope/recursiveUpperBoundStar.kt
 compiler/testData/diagnostics/tests/generics/projectionsScope/typeParameterBounds.kt
@@ -1391,7 +1390,6 @@ compiler/testData/diagnostics/testsWithStdLib/contracts/propertyAccessors/annota
 compiler/testData/diagnostics/testsWithStdLib/contracts/propertyAccessors/openSetterNotAllowed.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/propertyAccessors/override.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/smartcasts/catchExceptionSpilling.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/smartcasts/returnsImpliesAndSafeCalls.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/callableReference/property.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/inlineCrossinline/inlineOrdinaryOfNoinlineSuspend.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/irrelevantSuspendDeclarations.kt

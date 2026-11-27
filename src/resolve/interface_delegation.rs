@@ -911,7 +911,10 @@ fn delegation_members(
                     .zip(declaration.applied_parameters.iter())
                 {
                     let (enhanced, marks) =
-                        crate::libraries::enhance_from_overridden(parameter.get(), declared.get());
+                        krusty_core::enhanced_nullability::enhance_from_overridden(
+                            parameter.get(),
+                            declared.get(),
+                        );
                     if marks.is_none() {
                         continue;
                     }

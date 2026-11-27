@@ -79,21 +79,23 @@ pub(super) fn publish_write_self(
 /// `GeneratedSerializer` declaration it overrides. The runtime decides it: a core that marks its
 /// serializer API must-use makes every generated override must-use, and an older core leaves them
 /// unspecified.
-impl SerializationGeneratedMemberStatuses {
-    /// Record the inherited statuses on the members [`add_serializer_members`] declared.
-    pub(super) fn record(self, ir: &mut IrFile, members: GeneratedSerializerMembers) {
-        for (function, status) in [
-            (members.serialize, self.serialize),
-            (members.deserialize, self.deserialize),
-            (members.child_serializers, self.child_serializers),
-            (
-                members.type_parameter_serializers,
-                self.type_parameter_serializers,
-            ),
-        ] {
-            if status != ReturnValueStatus::Unspecified {
-                ir.fn_return_value_statuses.insert(function, status);
-            }
+/// Record the inherited statuses on the members [`add_serializer_members`] declared.
+pub(super) fn record_inherited_statuses(
+    statuses: SerializationGeneratedMemberStatuses,
+    ir: &mut IrFile,
+    members: GeneratedSerializerMembers,
+) {
+    for (function, status) in [
+        (members.serialize, statuses.serialize),
+        (members.deserialize, statuses.deserialize),
+        (members.child_serializers, statuses.child_serializers),
+        (
+            members.type_parameter_serializers,
+            statuses.type_parameter_serializers,
+        ),
+    ] {
+        if status != ReturnValueStatus::Unspecified {
+            ir.fn_return_value_statuses.insert(function, status);
         }
     }
 }

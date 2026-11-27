@@ -206,6 +206,11 @@ pub(crate) struct EmittedBody {
     pub(crate) objects: Vec<KlibPublicIdSignature>,
     pub(crate) sam_classifiers: Vec<(KlibPublicIdSignature, TypeName)>,
     pub(crate) hierarchy_roots: Vec<TypeName>,
+    /// The declarations the body calls with a `super` qualifier, which run without dispatch.
+    pub(crate) super_callables: Vec<KlibDependencyCallable>,
+    /// The interface defaults the local classes the body materializes inherit, each with the
+    /// interface declarations it implements: dispatch reaches one once a call of those does.
+    pub(crate) inherited_defaults: Vec<(KlibDependencyCallable, Vec<KlibDependencyCallable>)>,
 }
 
 /// Distinct inventories from one authenticated emitted-body traversal. Declaration roots never
@@ -217,6 +222,8 @@ struct EmittedBodyInventory<'a> {
     enum_entries: Vec<&'a KlibIrSymbol>,
     public_hierarchy_roots: Vec<TypeName>,
     sam_declarations: Vec<&'a KlibIrSymbol>,
+    super_callables: Vec<&'a KlibIrSymbol>,
+    inherited_defaults: Vec<(KlibDependencyCallable, Vec<KlibDependencyCallable>)>,
 }
 
 impl KlibDeclarationBodies {
@@ -1138,6 +1145,18 @@ impl KlibDeclarationBodies {
         found.unwrap_or(LocatedMember::Missing)
     }
 
+    /// Whether `identity` is a member with a body of an interface: a default a `super` call names,
+    /// or one a class inherits.
+    pub(crate) fn is_interface_default(&self, identity: &KlibDependencyCallable) -> bool {
+        self.function_has_body(identity) == Some(true)
+            && matches!(
+                self.member_owner(identity),
+                LocatedMember::One { class, .. }
+                    if crate::metadata::semantic::class_kind(class.base.flags)
+                        == crate::libraries::TypeKind::Interface
+            )
+    }
+
     /// The class that directly declares the exact linked member `identity`, function or accessor.
     pub(crate) fn member_owner(&self, identity: &KlibDependencyCallable) -> LocatedMember<'_> {
         self.function_owner(&identity.module, &ir_signature(&identity.declaration))
@@ -1271,6 +1290,17 @@ impl KlibDeclarationBodies {
                 },
             )
             .collect();
+        let super_callables = inventory
+            .super_callables
+            .into_iter()
+            .filter_map(|symbol| declaration_signature(&symbol.signature))
+            .filter_map(
+                |declaration| match self.linked_origin(&identity.module, &declaration) {
+                    KlibCalleeOrigin::Exact(callee) => Some(callee),
+                    KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => None,
+                },
+            )
+            .collect();
         let mut seen = crate::fx_hash::HashSet::default();
         let mut objects: Vec<KlibPublicIdSignature> = inventory
             .objects
@@ -1303,6 +1333,8 @@ impl KlibDeclarationBodies {
             objects,
             sam_classifiers,
             hierarchy_roots: inventory.public_hierarchy_roots,
+            super_callables,
+            inherited_defaults: inventory.inherited_defaults,
         }
     }
 
@@ -1354,6 +1386,7 @@ impl KlibDeclarationBodies {
         let mut objects = arena.emitted_object_symbols(function, forms);
         let mut sams = arena.emitted_sam_classifiers(function, forms);
         let mut entries = arena.emitted_enum_entry_symbols(function, forms);
+        let mut supers = arena.emitted_super_call_symbols(function, forms);
         // Constructor initialization uses these same serialized roots in
         // `constructor_initializer_callables`, even when its fields call no declaration.
         if function.constructor {
@@ -1387,7 +1420,12 @@ impl KlibDeclarationBodies {
                 entries.extend(
                     initializer
                         .arena
-                        .emitted_enum_entry_symbols_from(roots, forms),
+                        .emitted_enum_entry_symbols_from(roots.clone(), forms),
+                );
+                supers.extend(
+                    initializer
+                        .arena
+                        .emitted_super_call_symbols_from(roots, forms),
                 );
             }
         }
@@ -1396,6 +1434,7 @@ impl KlibDeclarationBodies {
         // class. Its object value is the unit's own, so it leaves the read objects.
         let mut classes = crate::fx_hash::HashSet::default();
         let mut read_objects = Vec::new();
+        let mut inherited_defaults = Vec::new();
         let (mut next_symbol, mut next_object) = (0, 0);
         loop {
             let local = if let Some(symbol) = symbols.get(next_symbol).copied() {
@@ -1420,12 +1459,23 @@ impl KlibDeclarationBodies {
                         class_identity(&KlibIrSignature::Public(signature.clone()))
                     }),
                 );
+                // A class whose supertypes do not resolve declines where it is materialized.
+                if let Ok(inherited) =
+                    self.inherited_implementations(&identity.module, class_arena, class)
+                {
+                    inherited_defaults.extend(
+                        inherited
+                            .into_iter()
+                            .filter(|(body, _)| self.is_interface_default(body)),
+                    );
+                }
                 let mut roots = class_arena.class_member_roots(class);
                 roots.extend(class_arena.class_superclass_delegations(class));
                 symbols.extend(class_arena.emitted_callable_symbols_from(roots.clone(), forms));
                 objects.extend(class_arena.emitted_object_symbols_from(roots.clone(), forms));
                 sams.extend(class_arena.emitted_sam_classifiers_from(roots.clone(), forms));
-                entries.extend(class_arena.emitted_enum_entry_symbols_from(roots, forms));
+                entries.extend(class_arena.emitted_enum_entry_symbols_from(roots.clone(), forms));
+                supers.extend(class_arena.emitted_super_call_symbols_from(roots, forms));
             }
         }
         EmittedBodyInventory {
@@ -1434,6 +1484,8 @@ impl KlibDeclarationBodies {
             enum_entries: entries,
             public_hierarchy_roots: classifiers,
             sam_declarations: sams,
+            super_callables: supers,
+            inherited_defaults,
         }
     }
 

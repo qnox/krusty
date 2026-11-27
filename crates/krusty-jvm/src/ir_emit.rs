@@ -122,6 +122,7 @@ mod inline_scope_frames;
 mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;
 mod inherited_default_forwarders;
+mod inherited_member_target;
 mod interface_compatibility;
 mod intrinsic_probes;
 mod lambda_class;
@@ -347,9 +348,6 @@ pub(crate) struct EmitRun {
     /// emit-run decision: it includes class-owned helpers whose every use was spliced, and is cleared
     /// before the next independent emission of the same IR.
     dead_lambdas: std::cell::RefCell<krusty::fx_hash::HashSet<u32>>,
-    /// Subset of live closures actually realized with `invokedynamic`. A class-strategy closure still
-    /// keeps its implementation method but does not impose the JVM-7 classfile requirement.
-    used_indy_lambdas: std::cell::RefCell<krusty::fx_hash::HashSet<u32>>,
     /// Lambda classes to synthesize for `-Xlambdas=class`, recorded as their `invokedynamic`
     /// replacement is emitted and drained by the class driver. They cannot be written inline: the
     /// emitter is mid-way through the ENCLOSING class's writer when it reaches a lambda.
@@ -1082,10 +1080,8 @@ fn emit_all_with_class_meta_impl(
         value_classes: std::rc::Rc::new(value_class_descriptors::of(ir)),
         ..opts.clone()
     };
-    // Pass 1 (discovery): emit everything, recording live closure implementations and the subset that
-    // actually uses `invokedynamic`. A lambda spliced by the inliner emits neither realization.
+    // Pass 1 (discovery): emit everything, recording live closure implementations. A lambda spliced by the inliner emits neither realization.
     env.run.used_lambdas.borrow_mut().clear();
-    env.run.used_indy_lambdas.borrow_mut().clear();
     env.run.dead_lambdas.borrow_mut().clear();
     let empty = krusty::fx_hash::HashSet::default();
     let first = emit_pass(
@@ -1101,16 +1097,6 @@ fn emit_all_with_class_meta_impl(
         },
     )?;
     let used = env.run.used_lambdas.borrow().clone();
-    let used_indy = env.run.used_indy_lambdas.borrow().clone();
-    // `invokedynamic` was added in class-file version 51 (Java 7). Do not return a version-50 class
-    // containing an opcode that its declared target cannot represent. This check uses the emitter's
-    // discovery result rather than the source/IR lambda count: an inline-only lambda that was fully
-    // spliced emitted no call site and therefore remains valid for the older target.
-    if opts.class_major.is_some_and(|major| major < 51) && !used_indy.is_empty() {
-        env.run
-            .set_emit_error("krusty: invokedynamic requires JVM target 1.7 or newer".to_string());
-        return None;
-    }
     // A MUST-INLINE message lambda whose call-site splice FELL BACK to a real `invokedynamic`
     // (pass 1 recorded the use): its impl was pre-marked `inline_only` on the assumption the splice
     // always succeeds — emitting the reference without the method would be a broken class
@@ -1382,14 +1368,7 @@ fn emit_pass(
     // empty one is an ABI divergence (spurious extra class). A facade static is owner-less.
     let facade_has_static = ir.statics.iter().any(|s| s.is_facade_owned());
     if facade_has_method || facade_has_static || metadata.is_some() {
-        if let Some(multifile_facade) = env.multifile_facade {
-            multifile_facades::write_part_header(&mut cw, ir, metadata, multifile_facade);
-        } else {
-            cw.set_class_annotations(&ir.file_annotations);
-            if let Some(m) = metadata {
-                cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
-            }
-        }
+        crate::file_facades::write_header(&mut cw, ir, metadata, facade, env.multifile_facade);
         out.push((facade.to_string(), env.run.finish_class(cw)));
         out.extend(drain_lambda_classes(env, opts));
         out.extend(env.run.machine_classes.borrow_mut().drain(..));
@@ -3052,10 +3031,9 @@ fn emit_interface_class(
                 parameter_names: &parameter_names,
                 ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
                 varargs: method_access::varargs_access(ir, fid),
-                // A split interface member's source declaration is the trampoline, while
-                // `suspend_funs` stays with the `$suspendImpl` body carrier that the coroutine
-                // transformer owns. The copied declared signature is the exact semantic fact
-                // this declaration-side bridge needs; do not recover it from the CPS descriptor.
+                // A split interface member's declaration is the trampoline; `suspend_funs` stays
+                // with the coroutine transformer's `$suspendImpl` carrier. The copied declared
+                // signature is the exact fact this bridge needs, never the CPS descriptor.
                 suspend: ir.suspend_declared_sigs.contains_key(&fid),
             },
         );
@@ -3066,7 +3044,7 @@ fn emit_interface_class(
             c,
             &mut cw,
             &mut default_impls,
-            env.dependency_callables,
+            env,
             opts,
         );
     }
@@ -4572,7 +4550,7 @@ struct Emitter<'a> {
     /// The same-module callee frames that have opened but not yet reached their frame marker,
     /// innermost last. A default evaluated ahead of the marker can run an inline call of its own,
     /// so each expansion keeps its own entry.
-    pending_copied_frames: Vec<block_scope::PendingCopiedFrame>,
+    copied_frames: block_scope::CopiedFrames,
     /// The `&&`/`||` operand whose line is marked again before the jump that consumes it.
     short_circuit_operand_line: Option<ExprId>,
     /// A plain local operand of an unsigned bitwise member is being loaded, so it records no line.
@@ -4703,7 +4681,7 @@ impl<'a> Emitter<'a> {
             render_initializer_boundaries: false,
             inside_condition: false,
             copied_operand_binding: None,
-            pending_copied_frames: Vec::new(),
+            copied_frames: Default::default(),
             short_circuit_operand_line: None,
             suppress_unsigned_local_line: false,
             this_uninitialized: false,

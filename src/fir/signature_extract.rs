@@ -7,6 +7,7 @@ mod compound_assignments;
 mod condition_facts;
 mod evaluated_casts;
 mod expression_stack;
+mod guard_narrowing;
 mod integer_literals;
 mod local_alias_header_dependencies;
 mod mutable_local_flow;
@@ -1159,22 +1160,7 @@ impl SignatureConstraintExtractor {
         if bindings.is_empty() {
             return self.expression(file, expression, scope, origin);
         }
-        for fact in &mut bindings {
-            if fact.completion_clauses.is_empty() {
-                continue;
-            }
-            let Some(value) = self.compact_value_for_binding(&fact.binding) else {
-                continue;
-            };
-            for clause in fact.completion_clauses.drain(..) {
-                let completions = self.graph.add_operands(clause);
-                fact.value = self.graph.add_expr(SigExpr::CompletionNarrowed {
-                    value,
-                    narrowed: fact.value,
-                    completions,
-                });
-            }
-        }
+        self.complete_smartcast_facts(&mut bindings);
         let receiver = bindings
             .iter()
             .rev()
@@ -2071,6 +2057,7 @@ impl SignatureConstraintExtractor {
                 self.lexical_callables.push(HashMap::default());
                 self.lexical_types.push(HashMap::default());
                 let mut effects = Vec::new();
+                let mut guard_narrowings = Vec::new();
                 let mut terminal_lambda_return = false;
                 let mut prefix_reachable = true;
                 for (statement_index, statement) in stmts.iter().enumerate() {
@@ -2420,6 +2407,9 @@ impl SignatureConstraintExtractor {
                     self.unreachable_statement_depth = previous_unreachable_depth;
                     if statement_reachable {
                         self.narrow_after_normal_completion(file, *statement, scope, origin)?;
+                        guard_narrowings.extend(
+                            self.narrow_after_jumping_guard(file, *statement, scope, origin)?,
+                        );
                     }
                     prefix_reachable &=
                         crate::ast::definitely_evaluated::statement_may_complete_normally(
@@ -2435,6 +2425,7 @@ impl SignatureConstraintExtractor {
                     }
                 };
                 self.leave_boolean_val_scope();
+                self.restore_guard_narrowings(guard_narrowings);
                 self.lexical_values.pop();
                 self.lexical_callables.pop();
                 self.lexical_types.pop();

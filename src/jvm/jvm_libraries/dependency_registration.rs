@@ -51,12 +51,7 @@ impl JvmLibraries {
         }
         if callable.overridden_call_realizations.is_empty() {
             callable.overridden_call_realizations =
-                super::super::mapped_builtin_declarations::overridden_call_realizations_for_declaration(
-                    &callable.name,
-                    &callable.descriptor,
-                    super::super::mapped_builtin_declarations::MappedBuiltinMemberKind::Function,
-                )
-                .into_boxed_slice();
+                self.function_call_realizations(&callable.name, callable);
         }
         if let Some(plan) = callable.inline_body_plan.as_deref_mut() {
             self.register_inline_body_plan_dependencies(plan);
@@ -324,5 +319,49 @@ impl JvmLibraries {
         self.cp
             .find_name(property.owner)
             .is_some_and(|class| !class.meta.is_present())
+    }
+}
+
+impl JvmLibraries {
+    /// The inherited-call realizations of a function declared under the Kotlin name `name`
+    /// (`CharSequence.get` realized as `charAt`, `MutableList.removeAt` as `remove`). kotlinc's
+    /// Java class scope makes a Java method with the builtin's JVM name the builtin's override; a
+    /// Java class that declares that method AND one with the Kotlin name (as `java.nio.CharBuffer`
+    /// declares `charAt(int)` and `get(int)`) has a `get` of its own, which overrides no renamed
+    /// builtin and keeps its own name at a call (JavaClassUseSiteMemberScope's CharBuffer case).
+    /// Which methods the owner declares is read from its class file, which every query sees
+    /// alike; an owner with no class file declares none.
+    pub(super) fn function_call_realizations(
+        &self,
+        name: &str,
+        callable: &LibraryCallable,
+    ) -> Box<[crate::libraries::OverriddenCallRealization]> {
+        let own_physical_name = callable.physical_name.as_deref().unwrap_or(&callable.name);
+        let java_class = self
+            .cp
+            .find_name(callable.owner)
+            .filter(|class| !class.meta.is_present());
+        let declares_jvm_name = |physical_name: &str| {
+            java_class.as_ref().is_some_and(|class| {
+                class.methods.iter().any(|method| {
+                    method.name == physical_name
+                        && super::super::mapped_builtin_declarations::same_descriptor_parameters(
+                            &method.descriptor,
+                            &callable.descriptor,
+                        )
+                })
+            })
+        };
+        super::super::mapped_builtin_declarations::overridden_call_realizations_for_declaration(
+            name,
+            &callable.descriptor,
+            super::super::mapped_builtin_declarations::MappedBuiltinMemberKind::Function,
+        )
+        .into_iter()
+        .filter(|realization| {
+            realization.physical_name == own_physical_name
+                || !declares_jvm_name(&realization.physical_name)
+        })
+        .collect()
     }
 }

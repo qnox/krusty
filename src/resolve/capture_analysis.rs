@@ -282,20 +282,31 @@ impl<'a> Checker<'a> {
     /// narrows to `Nothing?` (kotlinc's exact receiver wording there). A root-only local made
     /// unstable only by closure writes still narrows when every such write stores null — the
     /// proven null joined with the writes kotlinc can interleave stays `Nothing?`. A SAFE-CALL
-    /// chain proves nothing here: a null result means SOME link failed, not which one.
+    /// chain proves nothing here: a null result means SOME link failed, not which one. A stable
+    /// value also proves what its recorded implications say about a null value.
     pub(super) fn null_branch_narrowings(
         &self,
         scope: &CheckerScope<'_>,
         operand: ExprId,
         out: &mut Vec<(NarrowPath, Ty)>,
+        declined: &mut Vec<(String, Ty)>,
     ) {
         if matches!(self.file.expr(operand), Expr::SafeCall { .. }) {
             return;
         }
         let Some(path) = self.expr_access_path(operand) else {
+            // A call's null result proves its contract's `returns(null) implies …`.
+            self.contract_result_narrowings(
+                scope,
+                operand,
+                crate::contracts::ReturnsValue::Null,
+                out,
+                declined,
+            );
             return;
         };
         let site = self.span(operand);
+        self.implied_null_narrowings(scope, &path, out, declined, site);
         if matches!(self.stable_path_ty(scope, &path, site), Some(ty) if ty.is_nullable()) {
             out.push((path, Ty::nullable(Ty::Nothing)));
             return;

@@ -121,26 +121,15 @@ companionBlocksAndExtensions/interfaceCompanionBlockAndObject.kt
 companionBlocksAndExtensions/multiModule.kt
 companionBlocksAndExtensions/throwingInitializersCompanionExtensions.kt
 companionBlocksAndExtensions/throwingInitializersMixedCompanions.kt
-compileKotlinAgainstKotlin/defaultConstructor.kt
 compileKotlinAgainstKotlin/delegatedDefault.kt
 compileKotlinAgainstKotlin/inlineClasses/funInterface.kt
 compileKotlinAgainstKotlin/inlineClasses/suspendFunWithDefaultMangling.kt
 compileKotlinAgainstKotlin/interfaceDelegationAndBridgesProcessing.kt
-compileKotlinAgainstKotlin/jvm8/defaults/enable/superCall.kt
-compileKotlinAgainstKotlin/jvm8/defaults/enable/superCallFromInterface.kt
-compileKotlinAgainstKotlin/jvm8/defaults/enable/superCallFromInterface2.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superPropAccess.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superPropAccessFromInterface.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superPropAccessFromInterface2.kt
-compileKotlinAgainstKotlin/jvm8/defaults/superCall.kt
-compileKotlinAgainstKotlin/jvm8/defaults/superCallFromInterface.kt
 compileKotlinAgainstKotlin/jvm8/defaults/superPropAccess.kt
 compileKotlinAgainstKotlin/jvm8/defaults/superPropAccessFromInterface.kt
-compileKotlinAgainstKotlin/jvm8/jvm8against6/delegation/diamond.kt
-compileKotlinAgainstKotlin/jvm8/jvm8against6/delegation/diamond2.kt
-compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleCall.kt
-compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleCallWithBigHierarchy.kt
-compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleCallWithHierarchy.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleProp.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simplePropWithHierarchy.kt
 compileKotlinAgainstKotlin/privateSuperType.kt
@@ -169,7 +158,6 @@ contextParameters/kt65953.kt
 contracts/kt39374.kt
 contracts/referenceToGenericInDeserializedContract.kt
 controlStructures/breakContinueInExpressions/breakInLoopConditions.kt
-controlStructures/forInSequenceWithIndex/forInSequenceWithIndexNameBasedDestructuringShortForm.kt
 controlStructures/kt513.kt
 controlflow/for_loops_array_nested.kt
 controlflow/for_loops_coroutines.kt
@@ -443,7 +431,6 @@ inline/sharedVar.kt
 inline/typeParameterSymbolIsUnbound.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
 inlineArgsInPlace/kt49370.kt
-inlineClasses/anonymousObjectAsDefaultParamFull.kt
 inlineClasses/boxReturnValueOnOverride/covariantOverrideListVsMutableList.kt
 inlineClasses/boxReturnValueOnOverride/covariantOverrideListVsMutableListGeneric.kt
 inlineClasses/boxReturnValueOnOverride/kt31585.kt
@@ -519,7 +506,6 @@ multiplatform/k2/basic/substitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/widerVisibilityInActualClassifier.kt
 multiplatform/k2/complexInheritanceWithDelegation.kt
 multiplatform/k2/defaultArguments/kt67488.kt
-multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
 multiplatform/k2/expectStatic.kt
@@ -767,7 +753,6 @@ regressions/kt2246.kt
 regressions/kt344.kt
 regressions/kt5056.kt
 regressions/kt6434.kt
-regressions/kt68727.kt
 regressions/multimodule/inlineAssertFailsWithBlock.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 reified/callableReferenceInlinedFun.kt
@@ -793,7 +778,6 @@ specialBuiltins/notEmptyMap.kt
 specialBuiltins/throwableComplex.kt
 specialBuiltins/throwableImpl.kt
 strictEquals/crossModuleInheritance.kt
-strictEquals/delegated.kt
 strings/kt2592.kt
 strings/kt3571.kt
 strings/surrogatePair.kt

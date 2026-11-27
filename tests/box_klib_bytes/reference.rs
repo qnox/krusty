@@ -211,7 +211,6 @@ fn live(
 ) -> Result<BTreeMap<String, Vec<u8>>, String> {
     let units = reference_units(source, units, target)?;
     let scratch = Scratch::new()?;
-    let graph = FragmentGraph::new(source, target, &units)?;
     let directive_libraries =
         krusty::toolchain::klib_libraries_for(source, target.compilation_target())?;
     let mut built = BTreeMap::new();
@@ -283,15 +282,7 @@ fn live(
                 ));
             }
         }
-        fragment_arguments(
-            &mut command,
-            unit,
-            &paths,
-            &built,
-            &toolchain.stdlib,
-            &directive_libraries,
-            &graph,
-        )?;
+        fragment_arguments(&mut command, unit, &paths)?;
         let configuration = krusty::conformance::platform_compiler_configuration(source, target)?;
         command.args(&configuration.arguments);
         command.args(krusty::conformance::reference_jvm_properties(
@@ -490,23 +481,16 @@ fn fragment_arguments(
     command: &mut Command,
     unit: &ModuleUnit,
     paths: &[PathBuf],
-    built: &BTreeMap<String, BuiltModule>,
-    stdlib: &Path,
-    directive_libraries: &[PathBuf],
-    graph: &FragmentGraph,
 ) -> Result<(), String> {
     if unit.fragments.len() <= 1 {
         return Ok(());
     }
+    // kotlinc's own KLIB box runners compile a unit's fragments together: each fragment names its
+    // sources and what it refines, and every fragment sees the unit's libraries. Neither the Wasm
+    // nor the Native runner passes `-Xseparate-kmp-compilation`, so neither does the reference.
     command.arg("-Xmulti-platform");
-    // Wasm consumes folded platform representatives, as the JVM oracle does. Its separate KMP
-    // scheme instead requires independently built common-metadata KLIB dependencies.
-    let separate = graph.target == TestTarget::Native;
-    if separate {
-        command.arg("-Xseparate-kmp-compilation");
-    }
     let mut offset = 0;
-    for (index, fragment) in unit.fragments.iter().enumerate() {
+    for fragment in &unit.fragments {
         command.arg(format!("-Xfragments={}", fragment.name));
         for path in &paths[offset..offset + fragment.kotlin_file_count] {
             command.arg(format!(
@@ -519,47 +503,6 @@ fn fragment_arguments(
         for refined in &fragment.refines {
             command.arg(format!("-Xfragment-refines={}:{refined}", fragment.name));
         }
-        if separate && index + 1 != unit.fragments.len() {
-            // The selected stdlib is the fragment's platform declaration evidence too.
-            command.arg(format!(
-                "-Xfragment-dependency={}:{}",
-                fragment.name,
-                stdlib.display()
-            ));
-            for library in directive_libraries {
-                command.arg(format!(
-                    "-Xfragment-dependency={}:{}",
-                    fragment.name,
-                    library.display()
-                ));
-            }
-            let block = graph
-                .blocks
-                .get(&fragment.name)
-                .ok_or_else(|| format!("missing fragment {}", fragment.name))?;
-            for (dependencies, flag) in [
-                (&block.deps, "-Xfragment-dependency"),
-                (&block.friends, "-Xfragment-friend-dependency"),
-            ] {
-                for dependency in dependencies {
-                    let representative = graph
-                        .representatives
-                        .get(dependency)
-                        .ok_or_else(|| format!("missing built representative for {dependency}"))?;
-                    if representative == &unit.name {
-                        continue;
-                    }
-                    let library = built
-                        .get(representative)
-                        .ok_or_else(|| format!("missing fragment dependency {representative}"))?;
-                    command.arg(format!(
-                        "{flag}={}:{}",
-                        fragment.name,
-                        library.path.display()
-                    ));
-                }
-            }
-        }
     }
     if offset != paths.len() {
         return Err(format!(
@@ -568,44 +511,6 @@ fn fragment_arguments(
         ));
     }
     Ok(())
-}
-
-struct FragmentGraph {
-    target: TestTarget,
-    blocks: BTreeMap<String, krusty::conformance::ModuleBlock>,
-    representatives: BTreeMap<String, String>,
-}
-impl FragmentGraph {
-    fn new(source: &str, target: TestTarget, units: &[ModuleUnit]) -> Result<Self, String> {
-        let mut blocks = if krusty::conformance::contains_directive(source, "MODULE") {
-            module_blocks(source, target)?
-        } else {
-            Vec::new()
-        };
-        if !blocks.is_empty() && krusty::conformance::directive(source, "WITH_COROUTINES") {
-            krusty::conformance::inject_coroutine_support(
-                &mut blocks,
-                source,
-                krusty::conformance::COROUTINE_HELPERS,
-            )?;
-        }
-        let mut representatives = BTreeMap::new();
-        for unit in units {
-            for fragment in &unit.fragments {
-                representatives
-                    .entry(fragment.name.clone())
-                    .or_insert_with(|| unit.name.clone());
-            }
-        }
-        Ok(Self {
-            target,
-            blocks: blocks
-                .into_iter()
-                .map(|block| (block.name.clone(), block))
-                .collect(),
-            representatives,
-        })
-    }
 }
 
 #[cfg(test)]
@@ -704,10 +609,37 @@ mod tests {
             include_str!("../box_regressions/multimodule/multimoduleDependsOnFriendDependency.kt")
         );
         let units = super::super::units(&source, "Case", TestTarget::Native).unwrap();
-        let graph = FragmentGraph::new(&source, TestTarget::Native, &units).unwrap();
-        assert_eq!(graph.blocks["common"].deps, ["friend", "support"]);
-        assert_eq!(graph.blocks["common"].friends, ["friend"]);
-        assert_eq!(graph.representatives["support"], "support");
-        assert_eq!(graph.representatives["common"], "main");
+        let units = reference_units(&source, &units, TestTarget::Native).unwrap();
+        let main = units.iter().find(|unit| unit.name == "main").unwrap();
+        assert_eq!(main.deps, ["support", "friend"]);
+        assert_eq!(main.friends, ["friend"]);
+    }
+
+    #[test]
+    fn a_unit_compiles_its_fragments_together_like_kotlincs_runners() {
+        let source = "// LANGUAGE: +MultiPlatformProjects\n// MODULE: common\nexpect fun answer(): String\n// MODULE: main()()(common)\nactual fun answer() = \"OK\"\nfun box() = answer()\n";
+        let units = super::super::units(source, "Case", TestTarget::Native).unwrap();
+        let unit = &reference_units(source, &units, TestTarget::Native).unwrap()[0];
+        let paths = [
+            PathBuf::from("/work/common.kt"),
+            PathBuf::from("/work/main.kt"),
+        ];
+        let mut command = Command::new("kotlinc-native");
+        fragment_arguments(&mut command, unit, &paths).unwrap();
+        let arguments: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            arguments,
+            [
+                "-Xmulti-platform",
+                "-Xfragments=common",
+                "-Xfragment-sources=common:/work/common.kt",
+                "-Xfragments=main",
+                "-Xfragment-sources=main:/work/main.kt",
+                "-Xfragment-refines=main:common",
+            ]
+        );
     }
 }

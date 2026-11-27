@@ -67,6 +67,11 @@ impl<'a> CallTypes<'a> {
             .obj_internal()
     }
 
+    /// Whether the lowering recorded the call at `id` as a value-class construction.
+    pub(super) fn is_value_construction(&self, id: ExprId) -> bool {
+        self.constructions.erased_value_construction(id).is_some()
+    }
+
     pub(super) fn get(&self, id: &u32) -> Option<Ty> {
         self.logical.logical(*id)
     }
