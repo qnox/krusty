@@ -114,7 +114,6 @@ bridges/delegationComplexWithList.kt
 bridges/diamond.kt
 bridges/fakeCovariantOverride.kt
 bridges/fakeGenericCovariantOverride.kt
-bridges/fakeGenericCovariantOverrideWithDelegation.kt
 bridges/fakeOverride/abstractFakeOverride.kt
 bridges/fakeOverride/fakeOverrideAbstractAndConcreteDeclarations.kt
 bridges/fakeOverride/fakeOverrideInheritsBridgeFromFakeOverride.kt
@@ -276,16 +275,13 @@ casts/mutableCollections/weirdMutableCasts.kt
 casts/unitAsSafeAny.kt
 classDelegation/generic.kt
 classDelegation/method.kt
-classDelegation/withBridge.kt
 classLiteral/bound/primitives.kt
 classLiteral/bound/sideEffect.kt
 classes/comanionObjectFieldVsClassField.kt
 classes/defaultObjectSameNamesAsInOuter.kt
-classes/delegation4.kt
 classes/delegationGenericArg.kt
 classes/delegationGenericArgUpperBound.kt
 classes/delegationGenericLongArg.kt
-classes/delegationMethodsWithArgs.kt
 classes/inheritSetAndHashSet.kt
 classes/kt1120.kt
 classes/kt1157.kt
@@ -295,9 +291,7 @@ classes/kt2390.kt
 classes/kt2417.kt
 classes/kt2477.kt
 classes/kt2566_2.kt
-classes/kt285.kt
 classes/kt343.kt
-classes/kt3546.kt
 classes/kt471.kt
 classes/kt496.kt
 classes/kt500.kt
@@ -943,7 +937,6 @@ delegation/ifWithCallableReferenceInLazy.kt
 delegation/kt30102_comparable.kt
 delegation/kt44199.kt
 delegation/smartCastedDelegation.kt
-delegation/withDefaultsMultipleFilesOrder.kt
 destructuringDeclInLambdaParam/extensionComponents.kt
 destructuringDeclInLambdaParam/stdlibUsages.kt
 destructuringDeclInLambdaParam/withIndexed.kt
@@ -2210,8 +2203,6 @@ regressions/memberExtensionLambdaResultsJoin.kt
 regressions/memberExtensionNullableReceiverOverload.kt
 regressions/memberExtensionRecursiveOpenBound.kt
 regressions/memberLocalFunctions.kt
-regressions/moduleDelegationForwarderSlots.kt
-regressions/moduleDelegationSuspendForwarderSlots.kt
 regressions/multimodule/boundExtensionReferences.kt
 regressions/multimodule/delegatedPropertiesExpandInlineLibraryConventions.kt
 regressions/multimodule/dependencyArrayView.kt
