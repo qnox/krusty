@@ -2,41 +2,42 @@
 // line is the answer (or the exception it stopped at) and the exact calls it made into the program.
 // `V` is the program class; `throws` names its members that throw: 'c' compareTo, 'e' equals,
 // 'h' hashCode, 's' toString.
-val log = StringBuilder()
+var log = ""
 
 class Boom(tag: String) : RuntimeException(tag)
 
 class V(val n: Int, val tag: String, val throws: String = "") : Comparable<V> {
     override fun compareTo(other: V): Int {
-        log.append("cmp($tag,${other.tag}) ")
+        log += "cmp($tag,${other.tag}) "
         if ('c' in throws) throw Boom("cmp:$tag")
         return n.compareTo(other.n)
     }
 
     override fun equals(other: Any?): Boolean {
-        log.append("eq($tag) ")
+        log += "eq($tag) "
         if ('e' in throws) throw Boom("eq:$tag")
         return other is V && other.n == n
     }
 
     override fun hashCode(): Int {
-        log.append("hash($tag) ")
+        log += "hash($tag) "
         if ('h' in throws) throw Boom("hash:$tag")
         return n
     }
 
     override fun toString(): String {
-        log.append("str($tag) ")
+        log += "str($tag) "
         if ('s' in throws) throw Boom("str:$tag")
         return "V$n"
     }
 }
 
-fun report(): String = buildString {
+fun report(): String {
+    var text = ""
     fun show(label: String, block: () -> Any?) {
         val answer = try { block().toString() } catch (b: Boom) { "threw ${b.message}" }
-        appendLine("$label = $answer | $log")
-        log.setLength(0)
+        text += "$label = $answer | $log\n"
+        log = ""
     }
     val a = V(1, "a")..V(3, "b")
     val same = V(1, "c")..V(3, "d")
@@ -60,34 +61,29 @@ fun report(): String = buildString {
     show("startHashThrows.hash") { (V(1, "m", "h")..V(3, "n", "h")).hashCode() }
     show("startStrThrows.str") { (V(1, "o", "s")..V(3, "y", "s")).toString() }
     show("endStrThrows.str") { (V(1, "z")..V(3, "zz", "s")).toString() }
+    return text
 }
 
 // kotlinc's answers, one line per member call.
-val expected = listOf(
-    "a==same = true | cmp(a,b) eq(a) eq(b) ",
-    "a==empty1 = false | cmp(a,b) eq(a) ",
-    "empty1==empty2 = true | cmp(e,f) cmp(g,h) ",
-    "empty1==a = false | cmp(e,f) cmp(a,b) eq(e) ",
-    "a==other = false | cmp(a,b) eq(a) eq(b) ",
-    "a.hash = 34 | cmp(a,b) hash(a) hash(b) ",
-    "empty1.hash = -1 | cmp(e,f) ",
-    "a.str = V1..V3 | str(a) str(b) ",
-    "empty1.str = V5..V2 | str(e) str(f) ",
-    "cmpThrows==a = threw cmp:p | cmp(p,q) ",
-    "empty1==emptyOtherThrows = threw cmp:r | cmp(e,f) cmp(r,s) ",
-    "eqThrows==same = threw eq:t | cmp(t,u) eq(t) ",
-    "endEqThrows==same = threw eq:w | cmp(v,w) eq(v) eq(w) ",
-    "endHashThrows.hash = threw hash:l | cmp(k,l) hash(k) hash(l) ",
-    "startHashThrows.hash = threw hash:m | cmp(m,n) hash(m) ",
-    "startStrThrows.str = threw str:o | str(o) ",
-    "endStrThrows.str = threw str:zz | str(z) str(zz) ",
-)
+val expected = "a==same = true | cmp(a,b) eq(a) eq(b) \n" +
+    "a==empty1 = false | cmp(a,b) eq(a) \n" +
+    "empty1==empty2 = true | cmp(e,f) cmp(g,h) \n" +
+    "empty1==a = false | cmp(e,f) cmp(a,b) eq(e) \n" +
+    "a==other = false | cmp(a,b) eq(a) eq(b) \n" +
+    "a.hash = 34 | cmp(a,b) hash(a) hash(b) \n" +
+    "empty1.hash = -1 | cmp(e,f) \n" +
+    "a.str = V1..V3 | str(a) str(b) \n" +
+    "empty1.str = V5..V2 | str(e) str(f) \n" +
+    "cmpThrows==a = threw cmp:p | cmp(p,q) \n" +
+    "empty1==emptyOtherThrows = threw cmp:r | cmp(e,f) cmp(r,s) \n" +
+    "eqThrows==same = threw eq:t | cmp(t,u) eq(t) \n" +
+    "endEqThrows==same = threw eq:w | cmp(v,w) eq(v) eq(w) \n" +
+    "endHashThrows.hash = threw hash:l | cmp(k,l) hash(k) hash(l) \n" +
+    "startHashThrows.hash = threw hash:m | cmp(m,n) hash(m) \n" +
+    "startStrThrows.str = threw str:o | str(o) \n" +
+    "endStrThrows.str = threw str:zz | str(z) str(zz) \n"
 
 fun box(): String {
-    val actual = report().trimEnd('\n').split('\n')
-    for (i in expected.indices) {
-        if (actual.getOrNull(i) != expected[i]) return "fail line $i: ${actual.getOrNull(i)}"
-    }
-    if (actual.size != expected.size) return "fail size ${actual.size}"
-    return "OK"
+    val actual = report()
+    return if (actual == expected) "OK" else "fail:\n" + actual
 }
