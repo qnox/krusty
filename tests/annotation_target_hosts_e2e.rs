@@ -42,6 +42,17 @@ fun top(@OnlyClass y: @OnlyClass Int): Int {
     val inner = local(y)
     return inner
 }
+
+@Target(AnnotationTarget.EXPRESSION)
+@Retention(AnnotationRetention.SOURCE)
+annotation class OnlyExpression
+
+fun statements(): Int {
+    var v = 0
+    @OnlyExpression v += 1
+    @OnlyExpression v = 4
+    return v
+}
 ";
 
 #[test]
