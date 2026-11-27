@@ -768,7 +768,9 @@ pub(super) fn authenticate(
     // continuation's result type.
     match (platform?, declaration.formals.is_empty()) {
         (TargetIntrinsicPlatform::Native, true) => native(placement, declaration),
-        (TargetIntrinsicPlatform::Wasm, true) => wasm(placement, declaration),
+        (TargetIntrinsicPlatform::Wasm, true) => {
+            wasm(placement, declaration).or_else(|| wasm_js_code(placement, declaration))
+        }
         (TargetIntrinsicPlatform::Wasm, false) => wasm_array_copy(placement, declaration)
             .or_else(|| wasm_intercepted_continuation(placement, declaration)),
         (TargetIntrinsicPlatform::Native, false) => None,
@@ -991,6 +993,36 @@ fn wasm_intercepted_continuation(
             params: vec![continuation],
             ret: continuation,
         }
+    })
+}
+
+/// `js(code: String): Nothing` in `kotlin.js`, the wasm-js stdlib's `@ExcludedFromCodegen`
+/// external. kotlinc binds the declaration by this name: a function whose whole body calls it with
+/// a constant becomes the JavaScript function that constant spells (`JsCodeCallsLowering`).
+fn wasm_js_code(
+    placement: crate::libraries::CallablePlacement,
+    declaration: &KotlinFunction,
+) -> Option<KlibIntrinsicShape> {
+    let excluded = declaration
+        .annotation_applications
+        .iter()
+        .filter(|annotation| {
+            annotation.identity == type_name("kotlin/wasm/internal/ExcludedFromCodegen")
+        })
+        .count();
+    (placement == crate::libraries::CallablePlacement::Package(type_name("kotlin/js"))
+        && declaration.name == "js"
+        && declaration.is_external
+        && excluded == 1
+        && declaration.receiver.is_none()
+        && matches!(declaration.params.as_slice(), [code] if exact_type(code, "kotlin/String"))
+        && exact_type(&declaration.ret, "kotlin/Nothing"))
+    .then(|| KlibIntrinsicShape {
+        operation: CompilerIntrinsic::JsCode,
+        kind: ExternalCallableKind::TopLevel,
+        receiver: None,
+        params: vec![Ty::String],
+        ret: Ty::Nothing,
     })
 }
 

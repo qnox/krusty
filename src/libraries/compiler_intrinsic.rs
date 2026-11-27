@@ -254,6 +254,10 @@ pub enum CompilerIntrinsic {
     /// `BuiltInsLowering` expands it to `if (cont is CoroutineImpl) cont.intercepted() else cont`
     /// over the stdlib's state-machine `kotlin.coroutines.CoroutineImpl`.
     InterceptedContinuation,
+    /// Kotlin/Wasm's `kotlin.js.js(code: String): Nothing`, an `@ExcludedFromCodegen` declaration
+    /// of the wasm-js stdlib. kotlinc's `JsCodeCallsLowering` turns a function whose whole body is
+    /// `js("…")` into a JavaScript function the host supplies; the call itself never runs.
+    JsCode,
     EnumValues,
     EnumValueOf,
     /// The zero-argument `kotlin.enums.enumEntries<T>()`. Its stdlib body only throws; the selected

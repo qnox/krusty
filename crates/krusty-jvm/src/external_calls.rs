@@ -1097,6 +1097,9 @@ fn realize_expressions(
             Some(krusty::libraries::CompilerIntrinsic::InterceptedContinuation) => {
                 unreachable!("a Wasm continuation intrinsic cannot reach JVM call realization")
             }
+            Some(krusty::libraries::CompilerIntrinsic::JsCode) => {
+                unreachable!("the wasm-js stdlib's `js` cannot reach JVM call realization")
+            }
             Some(
                 krusty::libraries::CompilerIntrinsic::UnsignedDivide { .. }
                 | krusty::libraries::CompilerIntrinsic::UnsignedRemainder { .. }

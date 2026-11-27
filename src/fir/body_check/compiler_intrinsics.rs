@@ -94,7 +94,8 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::PrimitiveIteratorNext
         | CompilerIntrinsic::CurrentContinuation
         | CompilerIntrinsic::ReturnIfSuspended
-        | CompilerIntrinsic::InterceptedContinuation => return None,
+        | CompilerIntrinsic::InterceptedContinuation
+        | CompilerIntrinsic::JsCode => return None,
     })
 }
 

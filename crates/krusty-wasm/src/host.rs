@@ -10,6 +10,7 @@
 //! target.
 
 use super::encode::{Code, Function, FunctionImport, Module, ValType};
+use super::js_code::JsFunctions;
 use super::runtime::BUFFER;
 use super::target::WasmTarget;
 
@@ -36,8 +37,8 @@ impl Host {
             WasmTarget::Js => {
                 let ty = module.func_type(vec![ValType::I32, ValType::I32], Vec::new());
                 let write = module.import(FunctionImport {
-                    module: "krusty",
-                    name: "write",
+                    module: "krusty".to_string(),
+                    name: "write".to_string(),
                     ty,
                 });
                 Self {
@@ -50,8 +51,8 @@ impl Host {
             WasmTarget::Wasi => {
                 let ty = module.func_type(vec![ValType::I32; 4], vec![ValType::I32]);
                 let fd_write = module.import(FunctionImport {
-                    module: "wasi_snapshot_preview1",
-                    name: "fd_write",
+                    module: "wasi_snapshot_preview1".to_string(),
+                    name: "fd_write".to_string(),
                     ty,
                 });
                 Self {
@@ -97,7 +98,7 @@ impl Host {
     }
 
     /// The JavaScript loader that runs `<module_name>.wasm` under this target with Node.js.
-    pub(super) fn loader(&self, module_name: &str) -> String {
+    pub(super) fn loader(&self, module_name: &str, js: &JsFunctions) -> String {
         let read = format!(
             "import fs from 'node:fs';\n\
              const bytes = fs.readFileSync(new URL('./{module_name}.wasm', import.meta.url));\n\
@@ -105,12 +106,15 @@ impl Host {
         );
         match self.target {
             WasmTarget::Js => format!(
-                "{read}let memory;\n\
+                "{read}let memory;\nlet exports;\n{}\
                  const imports = {{\n  krusty: {{\n    write: (pointer, length) => {{\n      \
-                 fs.writeSync(1, new Uint8Array(memory.buffer, pointer, length));\n    }},\n  }},\n}};\n\
+                 fs.writeSync(1, new Uint8Array(memory.buffer, pointer, length));\n    }},\n  }},\n{}}};\n\
                  const instance = new WebAssembly.Instance(module, imports);\n\
-                 memory = instance.exports.memory;\n\
-                 instance.exports._start();\n"
+                 exports = instance.exports;\n\
+                 memory = exports.memory;\n\
+                 exports._start();\n",
+                js.loader_imports("exports"),
+                if js.is_empty() { "" } else { "  js_code,\n" },
             ),
             WasmTarget::Wasi => format!(
                 "import {{ WASI }} from 'node:wasi';\n{read}\

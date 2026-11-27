@@ -36,6 +36,19 @@ pub(super) fn sleb(out: &mut Vec<u8>, mut value: i64) {
     }
 }
 
+/// `value` as an unsigned LEB128 of exactly [`FUNCTION_INDEX_WIDTH`] bytes.
+fn padded_uleb(out: &mut Vec<u8>, mut value: u32) {
+    for position in 0..FUNCTION_INDEX_WIDTH {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        out.push(if position + 1 < FUNCTION_INDEX_WIDTH {
+            byte | 0x80
+        } else {
+            byte
+        });
+    }
+}
+
 fn name(out: &mut Vec<u8>, text: &str) {
     uleb(out, text.len() as u64);
     out.extend_from_slice(text.as_bytes());
@@ -203,9 +216,17 @@ struct Global {
 
 /// An import of a function; the only kind of import the hosts krusty targets need.
 pub(super) struct FunctionImport {
-    pub(super) module: &'static str,
-    pub(super) name: &'static str,
+    pub(super) module: String,
+    pub(super) name: String,
     pub(super) ty: u32,
+}
+
+/// One entry of the module's function index space, in the order it was reserved.
+enum FunctionSlot {
+    /// Reserved by [`Module::declare`]; [`Module::define`] or [`Module::define_import`] fills it.
+    Declared,
+    Defined(Function),
+    Imported(FunctionImport),
 }
 
 /// A function body under construction: its declared locals and its instruction bytes.
@@ -215,13 +236,15 @@ pub(super) struct Function {
     pub(super) code: Code,
 }
 
-/// A module, assembled in index order: the function index space is the imports followed by the
-/// defined functions, in the order they were added.
+/// A module, assembled in index order. A function index handed out while the module is built is
+/// the order it was reserved in, whether it is defined here or imported. The format numbers
+/// imports first, so [`Module::encode`] renumbers: imports, then defined functions, each in
+/// reservation order. A function's body can therefore turn out to be the host's after other
+/// functions were declared, as a declaration whose body is JavaScript does.
 #[derive(Default)]
 pub(super) struct Module {
     types: Vec<SubType>,
-    imports: Vec<FunctionImport>,
-    functions: Vec<Option<Function>>,
+    functions: Vec<FunctionSlot>,
     /// One page-granular linear memory, exported as `memory`, when the host ABI needs one.
     memory_pages: Option<u32>,
     exports: Vec<(String, u32)>,
@@ -279,46 +302,76 @@ impl Module {
         index
     }
 
-    /// Declare an imported function. Imports precede every defined function in the index space,
-    /// so all of them are declared before the first [`Module::declare`].
+    /// Declare an imported function.
     pub(super) fn import(&mut self, import: FunctionImport) -> u32 {
-        assert!(
-            self.functions.is_empty(),
-            "a function import after a defined function would renumber it"
-        );
-        self.imports.push(import);
-        (self.imports.len() - 1) as u32
+        self.functions.push(FunctionSlot::Imported(import));
+        (self.functions.len() - 1) as u32
     }
 
-    /// Reserve the index of a function whose body is supplied later by [`Module::define`].
+    /// Reserve the index of a function whose body is supplied later by [`Module::define`], or
+    /// which [`Module::define_import`] imports.
     pub(super) fn declare(&mut self) -> u32 {
-        self.functions.push(None);
-        (self.imports.len() + self.functions.len() - 1) as u32
+        self.functions.push(FunctionSlot::Declared);
+        (self.functions.len() - 1) as u32
     }
 
     pub(super) fn define(&mut self, index: u32, function: Function) {
-        let slot = &mut self.functions[index as usize - self.imports.len()];
-        assert!(slot.is_none(), "function {index} defined twice");
-        *slot = Some(function);
+        let slot = &mut self.functions[index as usize];
+        assert!(
+            matches!(slot, FunctionSlot::Declared),
+            "function {index} defined twice"
+        );
+        *slot = FunctionSlot::Defined(function);
+    }
+
+    /// Supply a reserved function from the host: its calls call `import`.
+    pub(super) fn define_import(&mut self, index: u32, import: FunctionImport) {
+        let slot = &mut self.functions[index as usize];
+        assert!(
+            matches!(slot, FunctionSlot::Declared),
+            "function {index} defined twice"
+        );
+        *slot = FunctionSlot::Imported(import);
     }
 
     /// Whether a reserved function index already has its physical body. Imported functions are
     /// complete by definition; a local declaration remains incomplete until [`Module::define`].
     pub(super) fn function_is_defined(&self, index: u32) -> bool {
-        let Some(local) = (index as usize).checked_sub(self.imports.len()) else {
-            return true;
-        };
-        self.functions.get(local).is_some_and(Option::is_some)
+        self.functions
+            .get(index as usize)
+            .is_some_and(|slot| !matches!(slot, FunctionSlot::Declared))
     }
 
     /// The actual type of a defined local function. A reserved declaration is not evidence of
     /// a physical frame; imported entries are owned by their separate import contract.
     pub(super) fn defined_function_type(&self, index: u32) -> Option<u32> {
-        let local = (index as usize).checked_sub(self.imports.len())?;
+        match self.functions.get(index as usize)? {
+            FunctionSlot::Defined(function) => Some(function.ty),
+            FunctionSlot::Declared | FunctionSlot::Imported(_) => None,
+        }
+    }
+
+    /// The format's index of every reserved function: the imports, then the defined functions,
+    /// each in the order they were reserved.
+    fn function_numbering(&self) -> Vec<u32> {
+        let imports = self
+            .functions
+            .iter()
+            .filter(|slot| matches!(slot, FunctionSlot::Imported(_)))
+            .count() as u32;
+        let (mut import, mut defined) = (0, imports);
         self.functions
-            .get(local)?
-            .as_ref()
-            .map(|function| function.ty)
+            .iter()
+            .map(|slot| {
+                let next = if matches!(slot, FunctionSlot::Imported(_)) {
+                    &mut import
+                } else {
+                    &mut defined
+                };
+                *next += 1;
+                *next - 1
+            })
+            .collect()
     }
 
     pub(super) fn memory(&mut self, pages: u32) {
@@ -372,6 +425,24 @@ impl Module {
     }
 
     pub(super) fn encode(&self) -> Vec<u8> {
+        let numbering = self.function_numbering();
+        let imports = self
+            .functions
+            .iter()
+            .filter_map(|slot| match slot {
+                FunctionSlot::Imported(import) => Some(import),
+                FunctionSlot::Declared | FunctionSlot::Defined(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let defined = self
+            .functions
+            .iter()
+            .filter_map(|slot| match slot {
+                FunctionSlot::Defined(function) => Some(function),
+                FunctionSlot::Imported(_) => None,
+                FunctionSlot::Declared => panic!("every declared function is defined"),
+            })
+            .collect::<Vec<_>>();
         let mut out = b"\0asm".to_vec();
         out.extend_from_slice(&1u32.to_le_bytes());
         section(&mut out, 1, |body| {
@@ -383,20 +454,17 @@ impl Module {
             }
         });
         section(&mut out, 2, |body| {
-            uleb(body, self.imports.len() as u64);
-            for import in &self.imports {
-                name(body, import.module);
-                name(body, import.name);
+            uleb(body, imports.len() as u64);
+            for import in &imports {
+                name(body, &import.module);
+                name(body, &import.name);
                 body.push(0x00);
                 uleb(body, u64::from(import.ty));
             }
         });
         section(&mut out, 3, |body| {
-            uleb(body, self.functions.len() as u64);
-            for function in &self.functions {
-                let function = function
-                    .as_ref()
-                    .expect("every declared function is defined");
+            uleb(body, defined.len() as u64);
+            for function in &defined {
                 uleb(body, u64::from(function.ty));
             }
         });
@@ -424,7 +492,7 @@ impl Module {
                     global.ty.encode(body);
                     body.push(u8::from(global.mutable));
                     match &global.init {
-                        Some(init) => body.extend_from_slice(&init.bytes),
+                        Some(init) => body.extend_from_slice(&init.numbered(&numbering)),
                         None => {
                             let mut init = Code::default();
                             match global.ty {
@@ -447,7 +515,7 @@ impl Module {
             for (export, index) in &self.exports {
                 name(body, export);
                 body.push(0x00);
-                uleb(body, u64::from(*index));
+                uleb(body, u64::from(numbering[*index as usize]));
             }
             if memory == 1 {
                 name(body, "memory");
@@ -464,7 +532,7 @@ impl Module {
                 body.push(0x00);
                 uleb(body, self.referenced.len() as u64);
                 for function in &self.referenced {
-                    uleb(body, u64::from(*function));
+                    uleb(body, u64::from(numbering[*function as usize]));
                 }
             });
         }
@@ -472,8 +540,8 @@ impl Module {
         // permits once the data count section has announced how many there are.
         section(&mut out, 12, |body| uleb(body, 1));
         section(&mut out, 10, |body| {
-            uleb(body, self.functions.len() as u64);
-            for function in self.functions.iter().flatten() {
+            uleb(body, defined.len() as u64);
+            for function in &defined {
                 let mut entry = Vec::new();
                 let mut runs: Vec<(u32, ValType)> = Vec::new();
                 for local in &function.locals {
@@ -487,7 +555,7 @@ impl Module {
                     uleb(&mut entry, u64::from(count));
                     ty.encode(&mut entry);
                 }
-                entry.extend_from_slice(&function.code.bytes);
+                entry.extend_from_slice(&function.code.numbered(&numbering));
                 entry.push(0x0b);
                 uleb(body, entry.len() as u64);
                 body.extend_from_slice(&entry);
@@ -523,9 +591,40 @@ pub(super) enum BlockType {
 #[derive(Default)]
 pub(super) struct Code {
     bytes: Vec<u8>,
+    /// Where `bytes` names a function: each offset starts a [`FUNCTION_INDEX_WIDTH`]-byte index
+    /// in the module's reservation order, which [`Code::numbered`] rewrites to the format's.
+    functions: Vec<usize>,
 }
 
+/// A function index is written in a fixed width, so the format's index replaces the reserved one
+/// in place once the module knows which functions are imported.
+const FUNCTION_INDEX_WIDTH: usize = 5;
+
 impl Code {
+    fn function_index(&mut self, function: u32) -> &mut Self {
+        self.functions.push(self.bytes.len());
+        padded_uleb(&mut self.bytes, function);
+        self
+    }
+
+    /// The instruction bytes with every function index in the format's numbering.
+    fn numbered(&self, numbering: &[u32]) -> Vec<u8> {
+        let mut bytes = self.bytes.clone();
+        for &offset in &self.functions {
+            let slot = &mut bytes[offset..offset + FUNCTION_INDEX_WIDTH];
+            let reserved = slot
+                .iter()
+                .enumerate()
+                .fold(0u32, |value, (position, byte)| {
+                    value | (u32::from(byte & 0x7f) << (7 * position))
+                });
+            let mut renumbered = Vec::with_capacity(FUNCTION_INDEX_WIDTH);
+            padded_uleb(&mut renumbered, numbering[reserved as usize]);
+            slot.copy_from_slice(&renumbered);
+        }
+        bytes
+    }
+
     pub(super) fn op(&mut self, opcode: u8) -> &mut Self {
         self.bytes.push(opcode);
         self
@@ -609,7 +708,7 @@ impl Code {
     }
 
     pub(super) fn call(&mut self, function: u32) -> &mut Self {
-        self.op(0x10).index(function)
+        self.op(0x10).function_index(function)
     }
 
     /// `select`: the first of two values when the condition is non-zero, else the second.
@@ -694,7 +793,7 @@ impl Code {
     }
 
     pub(super) fn ref_func(&mut self, function: u32) -> &mut Self {
-        self.op(0xd2).index(function)
+        self.op(0xd2).function_index(function)
     }
 
     pub(super) fn call_ref(&mut self, ty: u32) -> &mut Self {
