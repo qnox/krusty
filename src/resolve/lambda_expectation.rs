@@ -237,7 +237,11 @@ pub(super) fn functional_argument_expectation(
             &call_sig.inline_modifiers,
             index,
         );
-    let has_receiver = call_sig.receiver_function_parameter(index, param);
+    let has_receiver = call_sig
+        .lambda_receiver_params
+        .get(index)
+        .copied()
+        .unwrap_or(false);
     let metadata_receiver = call_sig.lambda_receivers.get(index).copied().flatten();
     {
         let param = param.non_null();

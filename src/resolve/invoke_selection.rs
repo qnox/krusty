@@ -511,7 +511,10 @@ impl Checker<'_> {
             context_counts[source] = signature.context_count;
             if instantiated
                 .call_sig
-                .receiver_function_parameter(parameter, expected)
+                .lambda_receiver_params
+                .get(parameter)
+                .copied()
+                .unwrap_or(false)
             {
                 receivers[source] = signature.params.get(signature.context_count).copied();
             }

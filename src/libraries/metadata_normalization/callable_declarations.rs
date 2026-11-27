@@ -170,10 +170,25 @@ pub(crate) fn declared_function(
         normalized.associated_classifier,
         normalized.associated_access_owner,
     ) = placement.associated();
-    normalized.call_sig = CallSig::metadata_member(
+    // A receiver function type (`Recv.() -> R`) is a receiver parameter of the call: publish the
+    // mark every lambda-shape site reads, with the receiver its type declares.
+    let (lambda_receivers, lambda_receiver_params) = generic_sig
+        .params
+        .iter()
+        .map(|parameter| match parameter.non_null().kind() {
+            crate::types::TyKind::Fun(signature) if signature.has_receiver => {
+                (signature.params.get(signature.context_count).copied(), true)
+            }
+            _ => (None, false),
+        })
+        .unzip();
+    normalized.call_sig = CallSig::metadata_function(
         generic_sig.params.len(),
         function.param_names.clone(),
         function.param_defaults.clone(),
+        lambda_receivers,
+        lambda_receiver_params,
+        Vec::new(),
         function.vararg,
     );
     normalized.call_sig.parameter_identities = parameters.arguments.clone();

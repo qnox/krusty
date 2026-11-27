@@ -663,7 +663,10 @@ pub(super) fn member_extension_lambda_shape_with(
             context_counts[source_index] = signature.context_count;
             if instantiated
                 .call_sig
-                .receiver_function_parameter(parameter_index, parameter)
+                .lambda_receiver_params
+                .get(parameter_index)
+                .copied()
+                .unwrap_or(false)
             {
                 lambda_receivers[source_index] =
                     signature.params.get(signature.context_count).copied();

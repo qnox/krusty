@@ -37504,7 +37504,11 @@ impl<'a> Checker<'a> {
             return self.check_unshaped_argument(scope, argument, implicit_lambda_label);
         }
         if self.lambda_needs_selected_shape(scope, argument, probed_actual, expected) {
-            let has_receiver = call_sig.receiver_function_parameter(parameter, expected);
+            let has_receiver = call_sig
+                .lambda_receiver_params
+                .get(parameter)
+                .copied()
+                .unwrap_or(false);
             return self.check_argument_expected(
                 scope,
                 argument,

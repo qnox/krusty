@@ -1516,8 +1516,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// Evaluate one call operand and adapt it to its descriptor type, as
-    /// [`Self::emit_call_descriptor_operands`] does for every operand in turn.
     /// Cast a dispatch receiver of a subclass to the inlined member's declaring class, which the
     /// splice descriptor names for it.
     fn cast_dispatch_receiver(&mut self, receiver: u32, declaring: Ty, code: &mut CodeBuilder) {
@@ -1533,6 +1531,8 @@ impl Emitter<'_> {
         }
     }
 
+    /// Evaluate one call operand and adapt it to its descriptor type, as
+    /// [`Self::emit_call_descriptor_operands`] does for every operand in turn.
     fn emit_call_operand(
         &mut self,
         call_expression: u32,

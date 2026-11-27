@@ -457,7 +457,10 @@ impl Checker<'_> {
                             constructor.params[slot],
                             constructor
                                 .call_sig
-                                .receiver_function_parameter(slot, constructor.params[slot]),
+                                .lambda_receiver_params
+                                .get(slot)
+                                .copied()
+                                .unwrap_or(false),
                         );
                         let symbolic = symbolic.map(|generic| generic.params[slot]);
                         (parameter, symbolic)
