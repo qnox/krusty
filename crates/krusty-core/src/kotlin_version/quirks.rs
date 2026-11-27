@@ -178,14 +178,6 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: false,
     }
-    /// The JVM optimizer's constant-condition elimination leaves a `goto` that carries a known
-    /// `int` to an `if<cond>` jumping there, instead of sending it straight to the branch that
-    /// constant takes: a materialized Boolean is tested again (`iconst_1; goto L; …; L: ifne`).
-    ConstantGotoNotThreadedToComparison {
-        since: None,
-        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
-        defect: false,
-    }
     /// A class's static state initializes with its `companion object` first: the companion is
     /// constructed, then every `companion { }` block property of the class is stored, then the
     /// companion's initializer body runs. From 2.5 kotlinc initializes in program order: the block
