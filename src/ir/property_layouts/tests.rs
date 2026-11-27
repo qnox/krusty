@@ -443,6 +443,7 @@ fn copied_override(explicit: bool) -> (IrFile, u32) {
                 implementation_receiver: None,
                 declared_contexts: Vec::new(),
                 implementation_contexts: Vec::new(),
+                declared_context_identities: Vec::new(),
                 overridden_setter_value: None,
                 implementation_mutable: true,
                 has_kotlin_superclass_override: false,

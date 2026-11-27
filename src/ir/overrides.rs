@@ -26,6 +26,8 @@ pub struct IrPropertyOverride {
     /// Context parameters on each side, as on `ResolvedPropertyOverride`.
     pub declared_contexts: Vec<Ty>,
     pub implementation_contexts: Vec<Ty>,
+    /// How the overridden property spells its context parameters, as on `ResolvedPropertyOverride`.
+    pub declared_context_identities: Vec<crate::fir::ResolvedParameterIdentity>,
     /// As on `ResolvedPropertyOverride`: `None` when the overridden property is a `val`.
     pub overridden_setter_value: Option<crate::fir::ResolvedParameterIdentity>,
     pub implementation_mutable: bool,

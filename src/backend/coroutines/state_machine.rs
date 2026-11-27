@@ -365,6 +365,7 @@ fn publish_context_override(
             implementation_receiver: None,
             declared_contexts: Vec::new(),
             implementation_contexts: Vec::new(),
+            declared_context_identities: Vec::new(),
             overridden_setter_value: None,
             implementation_mutable: false,
             has_kotlin_superclass_override: false,
