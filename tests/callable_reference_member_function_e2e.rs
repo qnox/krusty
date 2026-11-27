@@ -16,6 +16,20 @@ fn a_member_function_beats_a_same_named_accessor_property_in_a_reference() {
     );
 }
 
+/// A `KFunction1` expectation is a supertype of the member function's reference type, so the
+/// member function still wins over the synthetic property.
+#[test]
+fn an_expected_function_reflection_type_keeps_the_member_function() {
+    const SOURCE: &str = "import kotlin.reflect.KFunction1\n\
+                          \n\
+                          fun threadDaemon(): KFunction1<Thread, Boolean> = Thread::isDaemon\n";
+    common::assert_classes_identical_to_kotlinc(
+        "MemberFunctionReflectionReference",
+        SOURCE,
+        &["MemberFunctionReflectionReferenceKt$threadDaemon$1"],
+    );
+}
+
 /// The portable program lives once in `tests/box_regressions/`, which every backend runs; here
 /// its reference classes are compared with kotlinc's.
 #[test]
