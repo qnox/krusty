@@ -845,6 +845,46 @@ fn type_mismatches_omit_the_constructor_that_never_mapped() {
 }
 
 #[test]
+fn a_more_specific_constructor_beats_fewer_omitted_defaults() {
+    let source =
+        include_str!("box_regressions/constructorDelegationPrefersSpecificOverFewerDefaults.kt");
+    common::expect_box_same_as_kotlinc(
+        source,
+        "ConstructorDelegationPrefersSpecificOverFewerDefaults",
+    );
+}
+
+#[test]
+fn shape_tie_break_and_numeric_preference_match_kotlinc() {
+    let source = include_str!("box_regressions/equallySpecificShapeAndNumericPreference.kt");
+    common::expect_box_same_as_kotlinc(source, "EquallySpecificShapeAndNumericPreference");
+}
+
+#[test]
+fn nothing_leaves_incomparable_numeric_parameters_ambiguous() {
+    let cases = [
+        (
+            "short-long",
+            "fun f(x: Short) = \"s\"\nfun f(x: Long) = \"l\"\nfun use() = f(TODO())\n",
+        ),
+        (
+            "int-double",
+            "fun f(x: Int) = \"i\"\nfun f(x: Double) = \"d\"\nfun use() = f(TODO())\n",
+        ),
+        (
+            "int-string",
+            "fun f(x: Int) = \"i\"\nfun f(x: String) = \"s\"\nfun use() = f(TODO())\n",
+        ),
+    ];
+    let stdlib = common::stdlib_jar();
+    for (name, source) in cases {
+        let result =
+            common::compiler_diagnostics(&[("Main.kt", source)], std::slice::from_ref(&stdlib));
+        common::expect_identical_rejection(&result, name);
+    }
+}
+
+#[test]
 fn an_excess_delegation_also_reports_the_mapped_type_mismatch() {
     let stdlib = common::stdlib_jar();
     let result = common::compiler_diagnostics(

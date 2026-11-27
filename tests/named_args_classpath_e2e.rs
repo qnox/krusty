@@ -72,19 +72,8 @@ fn unknown_named_args_on_classpath_callables_are_rejected_canonically() {
         "import lib.Outer\nfun bad(): Outer.Inner = Outer.Inner(z = 1)",
     ];
     for source in cases {
-        let diagnostics = common::front_end_diagnostics(
-            source,
-            &classpath,
-            Some(common::jdk_modules().as_path()),
-        );
-        assert_eq!(
-            diagnostics,
-            [
-                "no value passed for parameter 'a'.",
-                "no parameter with name 'z' found.",
-            ],
-            "unexpected diagnostics for {source:?}"
-        );
+        let result = common::compiler_diagnostics(&[("Main.kt", source)], &classpath);
+        common::expect_identical_rejection(&result, source);
     }
 }
 

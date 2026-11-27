@@ -180,6 +180,25 @@ pub(crate) fn declarations_equally_specific(
             .all(|(&l, &r)| at_least_as_specific(l, r) && at_least_as_specific(r, l))
 }
 
+/// Whether `left` strictly beats `right` in the shape tie-break that follows parameter specificity.
+///
+/// A fixed arity beats a vararg even when the fixed declaration omits more defaults. Fewer omitted
+/// defaults then choose between declarations with the same vararg status. Callers apply this only
+/// when the two declarations are equally specific, so a more specific parameter type is never
+/// discarded for omitting a default or for being a vararg.
+pub(crate) fn fixed_arity_then_fewer_omitted_defaults(
+    left_fixed: bool,
+    left_omitted: usize,
+    right_fixed: bool,
+    right_omitted: usize,
+) -> bool {
+    match (left_fixed, right_fixed) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => left_omitted < right_omitted,
+    }
+}
+
 /// Retain declarations after semantic specificity, then apply non-genericity only as a tiebreaker.
 /// Value shapes arrive aligned to source arguments; an extension's resolved declared receiver is a
 /// separate leading position. Named/default/vararg mapping is never reconstructed here.

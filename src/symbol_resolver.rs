@@ -85,7 +85,8 @@ pub(crate) use callable_shapes::{
 };
 pub(crate) use declaration_specificity::{
     declaration_dominance_maxima, declarations_equally_specific, declarations_incomparable,
-    declared_call_shape, retain_most_specific_declarations,
+    declared_call_shape, fixed_arity_then_fewer_omitted_defaults,
+    retain_most_specific_declarations,
 };
 use extension_specialization::{
     bind_defaulted_ext_ret, bind_defaulted_ext_ret_slots, bind_ext_ret, bind_ext_ret_tracking,

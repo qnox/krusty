@@ -1460,10 +1460,14 @@ pub(super) fn indexed_call_shape(
 
 /// Whether `left` is at least as specific as `right` for `arg`.
 ///
-/// A `Nothing` argument makes every numeric parameter applicable, and ordinary assignability leaves
-/// those parameters tied. kotlinc then prefers `Int` over `Byte`, `Short`, `Long`, and `UInt`;
-/// `Short` over `Byte`; `Double` over `Float`; and `UInt` over `ULong`. The comparison is per
-/// argument, so a mixed call and a family of more than two candidates use the same relation.
+/// Numeric parameters that are not subtypes of one another still have a specificity order: every
+/// signed integer is at least as specific as every unsigned integer, `Int` as `Long`/`Short`/`Byte`,
+/// `Short` as `Byte`, `UInt` as `ULong`/`UShort`/`UByte`, `UShort` as `UByte`, and `Double` as
+/// `Float`. The relation compares the parameter types. It is not limited to a `Nothing` argument;
+/// `Nothing` (and an integer literal) is what makes several of those parameters applicable at once.
+/// Pairs kotlinc leaves unordered, such as `Short` and `Long` or `Int` and `Double`, stay tied.
+/// The comparison is per argument, so a mixed call and a family of more than two candidates use
+/// the same relation.
 pub(crate) fn parameter_at_least_as_specific(
     src: &dyn SymbolSource,
     left: Ty,
@@ -1473,14 +1477,32 @@ pub(crate) fn parameter_at_least_as_specific(
     left == right
         || (left == arg.ty() && arg.adapts_integer_literal_to(right))
         || semantic_arg_assignable(src, &right, &left)
-        || (arg.ty().canonical_semantic().non_null() == Ty::Nothing
-            && matches!(
-                (left.non_null(), right.non_null()),
-                (Ty::Int, Ty::Byte | Ty::Short | Ty::Long | Ty::UInt)
-                    | (Ty::Short, Ty::Byte)
-                    | (Ty::Double, Ty::Float)
-                    | (Ty::UInt, Ty::ULong)
-            ))
+        || numeric_parameter_at_least_as_specific(left, right)
+}
+
+/// kotlinc's non-subtype numeric specificity. `specific` and `general` are parameter types.
+fn numeric_parameter_at_least_as_specific(specific: Ty, general: Ty) -> bool {
+    let specific = specific.non_null();
+    let general = general.non_null();
+    if signed_integer(specific) && unsigned_integer(general) {
+        return true;
+    }
+    matches!(
+        (specific, general),
+        (Ty::Int, Ty::Long | Ty::Short | Ty::Byte)
+            | (Ty::Short, Ty::Byte)
+            | (Ty::UInt, Ty::ULong | Ty::UShort | Ty::UByte)
+            | (Ty::UShort, Ty::UByte)
+            | (Ty::Double, Ty::Float)
+    )
+}
+
+fn signed_integer(ty: Ty) -> bool {
+    matches!(ty, Ty::Byte | Ty::Short | Ty::Int | Ty::Long)
+}
+
+fn unsigned_integer(ty: Ty) -> bool {
+    matches!(ty, Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong)
 }
 
 /// Assignability through the SOURCE symbol federation (module classes first): a module-declared

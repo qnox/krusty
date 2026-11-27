@@ -660,9 +660,8 @@ impl Checker<'_> {
         }
     }
 
-    /// Fewer omitted defaults, then a fixed arity over a vararg, wins only between equally
-    /// specific constructors, as at a function call. Neither may discard a more specific
-    /// constructor: `this(1)` beside `(x: Int, y: Int = 2)` and `(z: Long)` selects the `Int` one.
+    /// Apply the shared shape tie-break. A more specific constructor is kept: `this(1)` beside
+    /// `(x: Int, y: Int = 2)` and `(z: Long)` selects the `Int` one.
     fn retain_without_equally_specific_tie_break_loss(
         &self,
         scored: &mut Vec<super::source_constructors::ScoredSourceConstructor>,
@@ -671,19 +670,20 @@ impl Checker<'_> {
             return;
         }
         let source = self.fed_source();
-        let tie_break = |candidate: &super::source_constructors::ScoredSourceConstructor| {
-            (candidate.rank.1, candidate.rank.2)
-        };
         let dominated = scored
             .iter()
             .map(|candidate| {
                 scored.iter().any(|other| {
-                    tie_break(other) > tie_break(candidate)
-                        && crate::symbol_resolver::declarations_equally_specific(
-                            &source,
-                            (None, &candidate.resolved.argument_types),
-                            (None, &other.resolved.argument_types),
-                        )
+                    crate::symbol_resolver::fixed_arity_then_fewer_omitted_defaults(
+                        other.rank.2,
+                        other.rank.1 .0,
+                        candidate.rank.2,
+                        candidate.rank.1 .0,
+                    ) && crate::symbol_resolver::declarations_equally_specific(
+                        &source,
+                        (None, &candidate.resolved.argument_types),
+                        (None, &other.resolved.argument_types),
+                    )
                 })
             })
             .collect::<Vec<_>>();
