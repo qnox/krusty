@@ -138,6 +138,7 @@ impl BodyLowering<'_> {
             FirExprKind::ArrayLiteral {
                 array_type,
                 elements,
+                ..
             } => self.array_literal(*array_type, elements)?,
             FirExprKind::ArrayConstruction {
                 array_type,
@@ -1513,13 +1514,14 @@ impl BodyLowering<'_> {
         let debug = self.expression_position(expression_id, &expression.kind);
         // The array instructions take the first element's line. The factory call's own line stays
         // on the vararg: the JVM lambda-offset pass still moves a lambda argument onto that call,
-        // which ran while the factory was a call. An empty factory keeps its own position.
+        // which ran while the factory was a call. An empty factory (`arrayOf()`) keeps its own
+        // position too, and the line says its array is a factory's vararg, which `emptyArray()`'s
+        // is not.
         let factory_line = match &expression.kind {
-            FirExprKind::ArrayLiteral { elements, .. }
-                if !elements.is_empty() && call_line != 0 =>
-            {
-                Some(call_line)
-            }
+            FirExprKind::ArrayLiteral {
+                vararg_factory: true,
+                ..
+            } if call_line != 0 => Some(call_line),
             _ => None,
         };
         // The builtin call this node realizes, when lowering made a node of its own for it.

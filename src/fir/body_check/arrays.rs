@@ -76,6 +76,7 @@ impl BodyFirChecker<'_> {
                 Ok(FirExprKind::ArrayLiteral {
                     array_type,
                     elements,
+                    vararg_factory: kind != ArrayFactoryKind::EmptyReference,
                 })
             }
             (ArrayFactoryKind::PrimitiveSize(_), [size])

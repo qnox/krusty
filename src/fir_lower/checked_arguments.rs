@@ -26,7 +26,9 @@ pub(super) enum CheckedArgumentSlot {
 }
 
 /// The array value of a grouped vararg argument. It carries the line the argument begins on, as
-/// kotlinc's `IrVararg` does, so the backend can attribute the array it builds to that line.
+/// kotlinc's `IrVararg` does, so the backend can attribute the array it builds to that line. An
+/// omitted vararg has no `IrVararg` at all: kotlinc's `VarargLowering` builds its empty array
+/// without offsets, so the array has no position for the call's to fill in.
 pub(super) fn vararg_value(
     ir: &mut crate::ir::IrFile,
     array_type: Ty,
@@ -34,6 +36,7 @@ pub(super) fn vararg_value(
     spreads: Vec<bool>,
     source_line: u32,
 ) -> ExprId {
+    let elements_empty = elements.is_empty();
     let value = ir.add_expr(crate::ir::IrExpr::Vararg {
         array_type,
         spreads,
@@ -41,6 +44,8 @@ pub(super) fn vararg_value(
     });
     if source_line != 0 {
         ir.set_source_line(value, source_line);
+    } else if elements_empty {
+        ir.clear_position(value);
     }
     value
 }
