@@ -13806,6 +13806,10 @@ impl<'a> Checker<'a> {
             },
         );
         self.local_properties.record(flow_identity, is_var);
+        if stable_reference_val {
+            self.local_properties
+                .record_initializer_narrowing(flow_identity, bind);
+        }
         if deferred {
             self.local_initialization.declare_deferred(s, flow_identity);
         }

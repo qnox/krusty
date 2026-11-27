@@ -14,7 +14,9 @@
 use super::scope::PathRoot;
 use super::stable_path::StablePathRead;
 use super::{Checker, CheckerScope, ExprId, MemberCallTowerRung, Ty};
+use crate::fir::ResolvedDelegatedMember;
 use crate::symbol_source::SymbolSource;
+use crate::types::TypeName;
 
 impl Checker<'_> {
     /// The receiver's declared type when it exposes exactly the member `selected` was selected
@@ -60,7 +62,13 @@ impl Checker<'_> {
             declared,
             selected.callable.external_identity,
         );
-        (exposes_selected && accessible).then_some(declared)
+        let delegated = self.delegated_below(
+            declared,
+            narrowed,
+            &selected.callable.name,
+            selected.callable.owner,
+        );
+        (exposes_selected && accessible && !delegated).then_some(declared)
     }
 
     /// The type an explicit receiver read had before the smart cast that narrowed it.
@@ -76,6 +84,10 @@ impl Checker<'_> {
                 .into_iter()
                 .find(|candidate| candidate.identity == *identity)
                 .map(|candidate| candidate.declared_ty),
+            (PathRoot::Value(identity), true) => self
+                .local_properties
+                .declared_before_initializer(*identity)
+                .or_else(|| StablePathRead::new(self).declared_ty(scope, &path)),
             _ => StablePathRead::new(self).declared_ty(scope, &path),
         }
     }
@@ -152,8 +164,15 @@ impl Checker<'_> {
             declared,
             left.getter.external_identity,
         );
+        let accessor = if write {
+            left.setter.as_deref()?
+        } else {
+            &left.getter
+        };
         (same_declaration
             && accessible
+            && !self.java_accessor_override(declared, narrowed, accessor)
+            && !self.delegated_below(declared, narrowed, name, left.owner)
             && through_declared.ty == through_narrowed.ty
             && !self.declared_by_generic_classifier(
                 left.getter
@@ -163,9 +182,80 @@ impl Checker<'_> {
         .then_some(declared)
     }
 
+    /// Whether a Java class between `declared` and `narrowed` overrides the property `accessor`
+    /// with its own method (`NullPointerException.getMessage` for `Throwable.message`): a Java
+    /// method of the accessor's JVM name and arity that `narrowed` exposes and `declared` does not.
+    /// kotlinc reads it as an override of the property, so the access needs the narrowed class.
+    fn java_accessor_override(
+        &self,
+        declared: Ty,
+        narrowed: Ty,
+        accessor: &crate::libraries::LibraryCallable,
+    ) -> bool {
+        let name = accessor.physical_name.as_deref().unwrap_or(&accessor.name);
+        let methods = |receiver| {
+            self.stable_receiver_callables(receiver, name)
+                .functions()
+                .iter()
+                .filter(|method| {
+                    method.kind == crate::libraries::FnKind::Member
+                        && method.callable.params.len() == accessor.params.len()
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let through_declared = methods(declared);
+        methods(narrowed).iter().any(|method| {
+            !through_declared
+                .iter()
+                .any(|exposed| crate::symbol_resolver::same_callable_declaration(exposed, method))
+        })
+    }
+
+    /// Whether a source class in `narrowed`'s hierarchy, below `declared`'s classifier, delegates
+    /// an interface whose member `name` of `owner` it so overrides (`class IC(i: I) : I by i`
+    /// overrides `I.ok`): the generated forwarder is the narrowed class's own declaration.
+    fn delegated_below(&self, declared: Ty, narrowed: Ty, name: &str, owner: TypeName) -> bool {
+        let (Some(index), Some(root)) = (self.resolved_index, narrowed.obj_internal()) else {
+            return false;
+        };
+        let top = declared.nominal_classifier();
+        let mut pending = vec![root];
+        let mut seen = crate::fx_hash::HashSet::default();
+        while let Some(classifier) = pending.pop() {
+            if Some(classifier) == top || !seen.insert(classifier) {
+                continue;
+            }
+            let header = index
+                .classifier_declaration(classifier)
+                .and_then(|declaration| index.classifier_header(declaration));
+            let delegates = header.is_some_and(|header| {
+                header.interface_delegations.iter().any(|delegation| {
+                    delegation.members.iter().any(|member| match member {
+                        ResolvedDelegatedMember::Function(function) => {
+                            &*function.name == name
+                                && function.overridden.iter().any(|over| over.owner == owner)
+                        }
+                        ResolvedDelegatedMember::Property(property) => {
+                            &*property.name == name
+                                && property.overridden.iter().any(|over| over.owner == owner)
+                        }
+                    })
+                })
+            });
+            if delegates {
+                return true;
+            }
+            if let Some(info) = self.fed_source().classifier(classifier) {
+                pending.extend(info.supertypes.iter());
+            }
+        }
+        false
+    }
+
     /// Whether `owner`, the classifier declaring a selected member, has type parameters. An
     /// unknown owner counts as generic, so the narrowed receiver is kept.
-    fn declared_by_generic_classifier(&self, owner: crate::types::TypeName) -> bool {
+    fn declared_by_generic_classifier(&self, owner: TypeName) -> bool {
         self.fed_source()
             .classifier(owner)
             .is_none_or(|classifier| !classifier.type_params.is_empty())

@@ -1,8 +1,9 @@
 // A member reached through a smart-cast receiver dispatches on the receiver's declared type when the
 // narrowed class only inherits that declaration: no cast is needed to call it. A real override in the
 // narrowed class, a member of a generic class (inherited through a substitution of its type
-// parameters), a nullable declared receiver, or a protected member only the narrowed receiver may
-// access from the calling class still dispatches on the narrowed class.
+// parameters), a member the narrowed class overrides by interface delegation, a nullable declared
+// receiver (including a `val` its non-null initializer narrows), or a protected member only the
+// narrowed receiver may access from the calling class still dispatches on the narrowed class.
 open class Root {
     open fun root() = 10
 }
@@ -50,6 +51,16 @@ interface Refined : Defaulted
 class Plain : Refined
 
 class Holder(val base: Base<String>)
+
+class Delegating(defaulted: Defaulted) : Defaulted by defaulted
+
+fun delegated(value: Defaulted) = if (value is Delegating) value.defaulted() else 0
+
+fun initializedNullable(): Int {
+    val value: Any? = Square()
+    if (value !is Square) return 0
+    return value.hashCode() - value.hashCode() + value.area()
+}
 
 open class Guarded {
     protected open fun guarded() = 1
@@ -128,6 +139,8 @@ fun box(): String {
     if (compound(square) != 6) return "fail compound"
     if (square.implicitWrite() != 7) return "fail implicit write"
     if (local(Overriding()) != 0) return "fail miss"
+    if (delegated(Delegating(Plain())) != 5) return "fail delegated"
+    if (initializedNullable() != 6) return "fail initialized nullable"
     val guard = Guard()
     if (guard.call(guard) != 1 || guard.read(guard) != 2) return "fail protected"
     if (guard.fromOwner(guard) != 3) return "fail protected owner"

@@ -170,6 +170,13 @@ quirks! {
         fixed_in: Some(KotlinVersion::V2_5_0),
         defect: true,
     }
+    /// An interface's `$DefaultImpls` forwarder for a default it only inherits maps its body to
+    /// the interface's declaration line; later releases give it no line.
+    InheritedHolderForwarderMapsInterfaceLine {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
+    }
     /// A library compiled below language 2.3 stamps KLIB `metadata_version` `1.4.1` instead of the
     /// language level's own (read off `kotlinc-native -p library -Xmetadata-klib`).
     KlibLegacyMetadataVersionBelowLanguage23 {
