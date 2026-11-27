@@ -47,7 +47,40 @@ fn an_expected_property_type_selects_the_unsupported_synthetic_property() {
         message: "the feature \"references to synthetic java properties\" is unsupported."
             .to_string(),
     }];
-    assert_eq!(errors(&result.reference_stderr), expected, "kotlinc's diagnostics");
+    assert_eq!(
+        errors(&result.reference_stderr),
+        expected,
+        "kotlinc's diagnostics"
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    assert_eq!(krusty_errors, expected, "krusty's diagnostics");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the reference");
+}
+
+/// A bound reference follows the same rung order: an expected `KProperty0` admits no member
+/// function, so `thread::isDaemon` selects the unsupported synthetic property.
+#[test]
+fn an_expected_bound_property_type_selects_the_unsupported_synthetic_property() {
+    const SOURCE: &str = "import kotlin.reflect.KProperty0\n\
+                          \n\
+                          fun daemon(thread: Thread) {\n\
+                          \x20   val p: KProperty0<Boolean> = thread::isDaemon\n\
+                          }\n";
+    let result =
+        common::compiler_diagnostics(&[("BoundSyntheticPropertyReference.kt", SOURCE)], &[]);
+    let expected = vec![ObservedError {
+        file: "BoundSyntheticPropertyReference.kt".to_string(),
+        line: 4,
+        column: 42,
+        message: "the feature \"references to synthetic java properties\" is unsupported."
+            .to_string(),
+    }];
+    assert_eq!(
+        errors(&result.reference_stderr),
+        expected,
+        "kotlinc's diagnostics"
+    );
     let mut krusty_errors = errors(&result.krusty_stderr);
     krusty_errors.extend(errors(&result.krusty_stdout));
     assert_eq!(krusty_errors, expected, "krusty's diagnostics");

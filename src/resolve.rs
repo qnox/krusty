@@ -23585,6 +23585,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         expected: None,
         callable_reference_literal_constraints: HashMap::default(),
         active_callable_reference: None,
+        active_reference_expects_property: false,
         reference_type_variable_inputs: HashMap::default(),
         active_postponed_callable_reference_recheck: None,
         completed_failed_postponed_callable_rechecks: crate::fx_hash::HashSet::default(),
@@ -25587,6 +25588,8 @@ struct Checker<'a> {
     /// during that one reference's selection and is discarded with the bounded checker.
     callable_reference_literal_constraints: HashMap<ExprId, HashMap<String, Vec<CallArgKind>>>,
     active_callable_reference: Option<ExprId>,
+    /// The active reference's expected type admits only a property reference.
+    active_reference_expects_property: bool,
     /// Per callable-reference argument, the inputs its selected parameter declares as call type
     /// variables, as `reference_type_variable_inputs` records them.
     reference_type_variable_inputs:
@@ -28478,6 +28481,7 @@ impl<'a> Checker<'a> {
             return Some(BoundCallableRefSelection::Property(Box::new(property)));
         }
         let member = match expected_function {
+            _ if self.active_reference_expects_property => None,
             Some(expected) => self
                 .select_adapted_instance_ref(&candidates.overloads, expected)
                 .map(|(member, argument_mapping, type_arguments)| {
@@ -44723,7 +44727,13 @@ impl<'a> Checker<'a> {
             }
         });
         let previous_callable_reference = self.active_callable_reference.replace(e);
+        let expects_property = self.expects_property_reference(expected);
+        let previous_expects_property = std::mem::replace(
+            &mut self.active_reference_expects_property,
+            expects_property,
+        );
         let nominal = self.callable_ref_function_type(scope, e, selection_expected, receiver, name);
+        self.active_reference_expects_property = previous_expects_property;
         self.active_callable_reference = previous_callable_reference;
         let misfit = self.misfit_callable_references.remove(&e);
         self.publish_callable_reference_constraints(e);
@@ -45251,7 +45261,10 @@ impl<'a> Checker<'a> {
                     expected,
                 );
             }
-            if let Some(TyKind::Fun(expected)) = expected.map(|ty| ty.kind()) {
+            let expected_member_function = expected
+                .filter(|_| !self.active_reference_expects_property)
+                .map(|ty| ty.kind());
+            if let Some(TyKind::Fun(expected)) = expected_member_function {
                 let source = self.fed_source();
                 if let Some((selected, argument_mapping, type_arguments)) =
                     callable_reference_selection::select_adapted_instance_candidate(

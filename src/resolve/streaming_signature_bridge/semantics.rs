@@ -3773,9 +3773,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 }
                 if ordinary_argument_types.is_empty() {
                     if matches!(spelling, "inc" | "dec") {
-                        if let Some(result) =
-                            super::super::operator_calls::builtin_inc_dec_result(receiver.get())
-                        {
+                        if let Some(result) = super::super::builtin_inc_dec_result(receiver.get()) {
                             return crate::fir::ResolvedTy::new(result)
                                 .map(|ty| crate::fir::ResolvedMemberCall {
                                     ty: Some(ty),
@@ -3791,7 +3789,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         _ => None,
                     };
                     if let Some(result) = operator.and_then(|operator| {
-                        super::super::operator_calls::builtin_unary_result(
+                        super::super::builtin_unary_result(
                             self.table.libraries.as_ref(),
                             receiver.get().range_operand_bound(),
                             operator,
