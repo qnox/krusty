@@ -1196,6 +1196,11 @@ impl<'a> Body<'a> {
                         // The nullable reference local's Wasm default is sufficient: every read
                         // is erased at an authenticated dependency call, and the exact singleton
                         // access was proved to have no initialization effect.
+                    } else if self.ir.deferred_local_types.contains_key(&id) {
+                        // A local declared without an initializer holds a target-neutral zero
+                        // that stands for its type's own: a Wasm local starts at it, whatever the
+                        // carrier, where the placeholder constant has no value of an unsigned
+                        // type's carrier.
                     } else if let Some(init) = init {
                         self.value(init, ty)?;
                         self.code.local_set(local);
