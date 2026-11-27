@@ -1481,6 +1481,9 @@ pub(crate) fn parameter_at_least_as_specific(
 }
 
 /// kotlinc's non-subtype numeric specificity. `specific` and `general` are parameter types.
+/// Nullability is outside the order: `Int?` is at least as specific as `Long`, and `Int` as
+/// `Long?`, when both parameters are applicable. `nullable_int_is_more_specific_than_long` pins
+/// `Int?` against `Long`.
 fn numeric_parameter_at_least_as_specific(specific: Ty, general: Ty) -> bool {
     let specific = specific.non_null();
     let general = general.non_null();

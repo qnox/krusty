@@ -2128,39 +2128,21 @@ impl Body<'_> {
     }
 
     /// The constructor a delegation to `class`'s constructor `ordinal` (0 for the primary) reaches,
-    /// and the parameters it takes.
-    ///
-    /// `primaryless` is the parameter list of a superclass delegation recorded as the primary
-    /// because that superclass was not materialized yet. A class with no primary constructor is
-    /// reached through the secondary constructor that declares exactly those parameters.
-    fn constructor_of(
-        &self,
-        class: ClassId,
-        ordinal: u32,
-        primaryless: Option<&[Ty]>,
-    ) -> Result<(u32, Vec<Ty>), Unsupported> {
+    /// and the parameters it takes. Lowering records that ordinal, including when the selected
+    /// constructor is a secondary of a class that has no primary.
+    fn constructor_of(&self, class: ClassId, ordinal: u32) -> Result<(u32, Vec<Ty>), Unsupported> {
         let declaration = &self.ir.classes[class as usize];
         let form = &self.file_classes()?.forms[class as usize];
         if ordinal == 0 {
-            if let Some(constructor) = form.constructor {
-                return Ok((
-                    constructor,
-                    declaration.ctor_args.iter().map(|arg| arg.ty).collect(),
+            let Some(constructor) = form.constructor else {
+                return Err(format!(
+                    "a delegation to a primary constructor `{}` lacks",
+                    declaration.fq_name()
                 ));
-            }
-            if let Some(parameters) = primaryless {
-                if let Some(index) = declaration
-                    .secondary_ctors
-                    .iter()
-                    .position(|secondary| secondary.params == parameters)
-                {
-                    let ordinal = u32::try_from(index + 1).expect("a constructor ordinal fits u32");
-                    return self.constructor_of(class, ordinal, None);
-                }
-            }
-            return Err(format!(
-                "a delegation to a primary constructor `{}` lacks",
-                declaration.fq_name()
+            };
+            return Ok((
+                constructor,
+                declaration.ctor_args.iter().map(|arg| arg.ty).collect(),
             ));
         }
         let index = ordinal as usize - 1;
@@ -2316,11 +2298,8 @@ impl Body<'_> {
         }
         match self.file_classes()?.tables.table(class).superclass {
             Some(parent) => {
-                let (constructor, params) = self.constructor_of(
-                    parent,
-                    declaration.super_ctor.ordinal,
-                    Some(&declaration.super_ctor_params),
-                )?;
+                let (constructor, params) =
+                    self.constructor_of(parent, declaration.super_ctor.ordinal)?;
                 self.delegate(constructor, &params, 0, &declaration.super_args)?;
             }
             None if self.file_classes()?.laid_out_superclass(class).is_some() => {
@@ -2443,7 +2422,7 @@ impl Body<'_> {
         match &secondary.delegate {
             // A `this(…)` passes on the prefix every constructor of the class takes.
             CtorDelegateTarget::This { target, .. } => {
-                let (constructor, params) = self.constructor_of(class, target.ordinal, None)?;
+                let (constructor, params) = self.constructor_of(class, target.ordinal)?;
                 let forwarded = secondary.prefix_params.len();
                 self.delegate(constructor, &params, forwarded, &secondary.delegate_args)?;
             }
@@ -2453,8 +2432,7 @@ impl Body<'_> {
                 ..
             } => match self.file_classes()?.tables.table(class).superclass {
                 Some(parent) => {
-                    let (constructor, params) =
-                        self.constructor_of(parent, target.ordinal, Some(target_params))?;
+                    let (constructor, params) = self.constructor_of(parent, target.ordinal)?;
                     self.delegate(constructor, &params, 0, &secondary.delegate_args)?;
                 }
                 None if self.file_classes()?.laid_out_superclass(class).is_some() => {

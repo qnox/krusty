@@ -855,6 +855,19 @@ fn a_more_specific_constructor_beats_fewer_omitted_defaults() {
 }
 
 #[test]
+fn nullable_int_is_more_specific_than_long() {
+    // Both parameters are applicable to `Nothing`. The `String` result is the `Int?` overload;
+    // selecting `Long` would make `pick` ill-typed.
+    let source = "\
+fun nullableInt(x: Int?): String = \"int?\"
+fun nullableInt(x: Long): Int = 0
+fun pick(value: Nothing): String = nullableInt(value)
+fun box(): String = \"OK\"
+";
+    common::expect_box_same_as_kotlinc(source, "NullableIntMoreSpecificThanLong");
+}
+
+#[test]
 fn shape_tie_break_and_numeric_preference_match_kotlinc() {
     let source = include_str!("box_regressions/equallySpecificShapeAndNumericPreference.kt");
     common::expect_box_same_as_kotlinc(source, "EquallySpecificShapeAndNumericPreference");
