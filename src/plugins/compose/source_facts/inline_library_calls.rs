@@ -3,13 +3,35 @@
 
 use super::*;
 
+/// How a call passes one of its lambda arguments ([`BodyScope::lambda_placement`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LambdaPlacement {
+    /// The call inlines the lambda's body into its caller.
+    Placed,
+    /// The lambda of a `crossinline` parameter, which the callee may move into code of its own.
+    Crossinline,
+    /// The lambda is a function value the callee receives.
+    Value,
+}
+
 impl BodyScope<'_> {
-    /// Whether `lambda`, an argument of `call`, is placed in its caller: `call` is of an inline
-    /// library composable, and the declaration does not mark the parameter that takes `lambda`
-    /// `noinline`. A `noinline` parameter's lambda is a value the callee receives.
+    /// Whether `lambda`, an argument of `call`, is placed in its caller.
     pub(super) fn places_lambda(&self, ir: &IrFile, call: ExprId, lambda: ExprId) -> bool {
+        self.lambda_placement(ir, call, lambda) == Some(LambdaPlacement::Placed)
+    }
+
+    /// How `call` passes `lambda`, one of its arguments: a call of an inline library composable
+    /// places the lambda of an inline parameter ([`crate::types::is_inline_parameter`]) in its
+    /// caller, and passes any other lambda as a function value. `None` when the declaration
+    /// published neither the parameter's modifier nor its declared type, so the call is refused.
+    pub(super) fn lambda_placement(
+        &self,
+        ir: &IrFile,
+        call: ExprId,
+        lambda: ExprId,
+    ) -> Option<LambdaPlacement> {
         let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
-            return false;
+            return Some(LambdaPlacement::Value);
         };
         let Callee::External {
             target,
@@ -17,29 +39,32 @@ impl BodyScope<'_> {
             ..
         } = &**callee
         else {
-            return false;
+            return Some(LambdaPlacement::Value);
         };
-        let Some(shape) = self.source.checked.dependency_shape(*target) else {
-            return false;
-        };
-        let Some((parameter, _)) =
-            supplied_arguments(callee, args).find(|&(_, argument)| argument == lambda)
-        else {
-            return false;
-        };
-        // The declaration's modifiers skip the extension receiver; the call's parameters do not.
+        let shape = self.source.checked.dependency_shape(*target)?;
+        if !shape.inline || !matches!(ir.exprs[lambda as usize], IrExpr::Lambda { .. }) {
+            return Some(LambdaPlacement::Value);
+        }
+        let (parameter, _) =
+            supplied_arguments(callee, args).find(|&(_, argument)| argument == lambda)?;
+        // The declaration's modifiers skip the extension receiver; its declared types do not.
         let value_parameter = match *extension_receiver_parameter {
-            Some(receiver) if receiver == parameter => return false,
+            Some(receiver) if receiver == parameter => return Some(LambdaPlacement::Value),
             Some(receiver) if receiver < parameter => parameter - 1,
             _ => parameter,
         };
-        shape.inline
-            && matches!(ir.exprs[lambda as usize], IrExpr::Lambda { .. })
-            && shape
-                .inline_modifiers
-                .get(value_parameter as usize)
-                .copied()
-                != Some(crate::types::InlineParameterModifier::Noinline)
+        let modifier = *shape.inline_modifiers.get(value_parameter as usize)?;
+        let declared = *shape
+            .declared_parameters
+            .as_ref()?
+            .get(parameter as usize)?;
+        Some(if !crate::types::is_inline_parameter(modifier, declared) {
+            LambdaPlacement::Value
+        } else if modifier == crate::types::InlineParameterModifier::Crossinline {
+            LambdaPlacement::Crossinline
+        } else {
+            LambdaPlacement::Placed
+        })
     }
 
     /// The facts of the composable lambda `argument` an inline library composable places in its
@@ -79,7 +104,8 @@ impl BodyScope<'_> {
             .source
             .expression_span(ir, argument.lambda)
             .unwrap_or(crate::diag::Span::new(0, 0));
-        // The standalone function the lambda was also lowered to holds the same calls; nothing emits it.
+        // The standalone function the lambda was also lowered to holds the same calls; nothing
+        // emits it.
         let mut pending = vec![*template];
         pending.extend(ir.functions[argument.implementation as usize].body);
         while let Some(expression) = pending.pop() {

@@ -19,6 +19,7 @@ use super::runtime::ComposeRuntime;
 use super::{ComposeOptions, COMPOSABLE};
 
 mod inline_library_calls;
+use inline_library_calls::LambdaPlacement;
 
 /// The Compose facts of one file.
 pub struct ComposeFileFacts {
@@ -2018,16 +2019,32 @@ impl BodyScope<'_> {
                 "a call to an inline library composable function with a composable lambda that \
                  takes parameters or has a receiver",
             )
-        } else if shape.inline
-            && supplied_arguments(callee, args).any(|(_, argument)| {
-                matches!(ir.exprs[argument as usize], IrExpr::Lambda { .. })
-                    && !self.places_lambda(ir, call, argument)
+        } else if let Some(placement) = shape
+            .inline
+            .then(|| {
+                supplied_arguments(callee, args)
+                    .filter(|&(_, argument)| {
+                        matches!(ir.exprs[argument as usize], IrExpr::Lambda { .. })
+                    })
+                    .map(|(_, argument)| self.lambda_placement(ir, call, argument))
+                    .find(|placement| *placement != Some(LambdaPlacement::Placed))
             })
+            .flatten()
         {
-            Some(
-                "a call to an inline library composable function with a lambda passed to a \
-                 `noinline` parameter",
-            )
+            Some(match placement {
+                None => {
+                    "a call to an inline library composable function that publishes no inline \
+                     facts for a lambda's parameter"
+                }
+                Some(LambdaPlacement::Crossinline) => {
+                    "a call to an inline library composable function with a lambda passed to a \
+                     `crossinline` parameter"
+                }
+                _ => {
+                    "a call to an inline library composable function with a lambda passed to a \
+                     parameter it does not inline"
+                }
+            })
         } else if !matches!(ret.kind(), TyKind::Unit) {
             Some("a call to a library composable function with a result")
         } else if !takes_composer_frame(&shape.synthetic_parameters, params.len(), shape.defaults) {

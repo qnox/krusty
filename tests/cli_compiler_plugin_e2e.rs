@@ -1281,6 +1281,17 @@ fn an_inline_library_composable_places_its_lambda_in_the_caller() {
 /// Compiles `library` with kotlinc and its Compose plugin, then `declarations` against it with
 /// krusty, which must decline them with `error` and emit no class.
 fn assert_inline_library_call_rejects(name: &str, library: &str, declarations: &str, error: &str) {
+    assert_inline_library_call_rejects_all(name, library, declarations, &[error]);
+}
+
+/// [`assert_inline_library_call_rejects`] for a call krusty declines with every one of `errors`,
+/// in order.
+fn assert_inline_library_call_rejects_all(
+    name: &str,
+    library: &str,
+    declarations: &str,
+    errors: &[&str],
+) {
     let compose = reference_plugin_jar("compose-compiler-plugin.jar");
     let switches = vec![format!("-Xplugin={}", compose.display())];
     let mut classpath =
@@ -1301,11 +1312,20 @@ fn assert_inline_library_call_rejects(name: &str, library: &str, declarations: &
         plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
     }
     .message();
+    let reported: String = errors
+        .iter()
+        .map(|error| {
+            format!(
+                "{}:{error}; compile this module with kotlinc\n",
+                probe.source.display()
+            )
+        })
+        .collect();
     assert_eq!(
         compiled.stderr,
         format!(
-            "info: {partial}\n{}:{error}; compile this module with kotlinc\nkrusty: 1 error(s)\n",
-            probe.source.display()
+            "info: {partial}\n{reported}krusty: {} error(s)\n",
+            errors.len()
         )
     );
     assert_eq!(compiled.code, Some(3));
@@ -1344,7 +1364,40 @@ fn an_inline_library_composable_declines_a_lambda_for_a_noinline_parameter() {
         "@Composable inline fun Keep(noinline content: @Composable () -> Unit) {\ncontent()\n}\n",
         "import lib.Keep\n@Composable fun Leaf() {}\n@Composable fun Screen() {\nKeep { Leaf() }\n}\n",
         "6:1: error: krusty's Compose compiler plugin does not support a call to an inline \
-         library composable function with a lambda passed to a `noinline` parameter yet",
+         library composable function with a lambda passed to a parameter it does not inline yet",
+    );
+}
+
+/// kotlinc inlines only a parameter whose declared type is a non-null function type, and rejects a
+/// nullable one unless it is `noinline` (NULLABLE_INLINE_PARAMETER), so a library publishes a
+/// nullable composable function type only as `noinline`. The pass does not treat a lambda passed
+/// to a nullable composable function type as a composable argument yet, so it declines the lambda
+/// and the composable call inside it before it reaches the inline call.
+#[test]
+fn an_inline_library_composable_declines_a_lambda_for_a_nullable_function_parameter() {
+    assert_inline_library_call_rejects_all(
+        "compose-inline-library-nullable-lambda",
+        "@Composable inline fun Maybe(noinline content: (@Composable () -> Unit)?) {\ncontent?.invoke()\n}\n",
+        "import lib.Maybe\n@Composable fun Leaf() {}\n@Composable fun Screen() {\nMaybe { Leaf() }\n}\n",
+        &[
+            "5:13: error: krusty's Compose compiler plugin does not support a lambda in a \
+             composable function yet",
+            "6:9: error: krusty's Compose compiler plugin does not support a composable call \
+             outside the statements of a composable body yet",
+        ],
+    );
+}
+
+/// The callee may move a `crossinline` lambda into code of its own rather than run it in its
+/// caller, so the pass declines a lambda passed to a `crossinline` parameter.
+#[test]
+fn an_inline_library_composable_declines_a_lambda_for_a_crossinline_parameter() {
+    assert_inline_library_call_rejects(
+        "compose-inline-library-crossinline-lambda",
+        "@Composable inline fun Later(crossinline content: @Composable () -> Unit) {\ncontent()\n}\n",
+        "import lib.Later\n@Composable fun Leaf() {}\n@Composable fun Screen() {\nLater { Leaf() }\n}\n",
+        "6:1: error: krusty's Compose compiler plugin does not support a call to an inline \
+         library composable function with a lambda passed to a `crossinline` parameter yet",
     );
 }
 

@@ -72,6 +72,7 @@ impl CheckedSourceFacts for HandoffSourceFacts<'_> {
             synthetic_parameters: synthetic_parameters(&fact.descriptor, &fact.physical_params),
             composable_parameters: fact.composable_parameters,
             inline_modifiers: fact.inline_modifiers.clone(),
+            declared_parameters: fact.declared_params.clone(),
         })
     }
 }

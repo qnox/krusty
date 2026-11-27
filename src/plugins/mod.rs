@@ -1026,6 +1026,9 @@ pub struct DependencyCallableShape {
     /// `noinline`/`crossinline` modifier the declaration wrote. An inline function's call splices
     /// the lambda of a parameter that is not `noinline`.
     pub inline_modifiers: Box<[crate::types::InlineParameterModifier]>,
+    /// The declared types of the source parameters, before the call's substitution: contexts,
+    /// extension receiver, then values. `None` when the provider published none.
+    pub declared_parameters: Option<Box<[Ty]>>,
 }
 
 /// A construct a native plugin does not implement, reported as an error at `span`.
