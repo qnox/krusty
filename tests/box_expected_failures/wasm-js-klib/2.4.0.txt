@@ -207,8 +207,6 @@ coroutines/asyncIteratorNullMerge_1_3.kt
 coroutines/asyncIteratorToList_1_3.kt
 coroutines/asyncIterator_1_3.kt
 coroutines/await.kt
-coroutines/bridges/mapSuspendAbstractClear.kt
-coroutines/bridges/mapSuspendClear.kt
 coroutines/captureMutableLocalVariableInsideCoroutineBlock.kt
 coroutines/castWithSuspend.kt
 coroutines/controlFlow/breakFinally.kt
@@ -501,7 +499,6 @@ inference/overrideDefaultProperty.kt
 inference/pcla/callableReferencesProperCompletion.kt
 inference/pcla/issues/kt42139.kt
 inference/pcla/issues/kt54400b.kt
-inference/pcla/issues/kt76171.kt
 inference/pcla/memberScope.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/Int.kt
 inference/pcla/substituteStubTypeIntoCR.kt
@@ -649,7 +646,6 @@ objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlock.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlockOfNestedClass.kt
 objects/kt32749.kt
 objects/objectInLocalAnonymousObject.kt
-objects/useAnonymousObjectFunction.kt
 operatorConventions/BoundedGenericValueInRangeCheck.kt
 operatorConventions/kt20387.kt
 operatorConventions/kt44647.kt
@@ -705,7 +701,6 @@ ranges/contains/uintInUShortRangeWithPossibleOverflow.kt
 ranges/contains/userDefinedContainsExtension.kt
 ranges/forInCharSequenceLengthDecreasedInLoopBody.kt
 ranges/forInCharSequenceWithCustomIterator.kt
-ranges/forInCharSequenceWithMultipleGetFunctions.kt
 ranges/forInDownTo/forNullableIntInDownTo.kt
 ranges/forInIndices/forNullableIntInArrayIndices.kt
 ranges/forInIndices/forNullableIntInCollectionIndices.kt
