@@ -39,6 +39,33 @@ pub(crate) fn function_input_types(
     }
 }
 
+/// The inputs a lambda argument takes for `sig`: a function type's parameters, or else the
+/// parameters of a functional interface's method, partially substituted the same way. The SAM
+/// shape comes from the interface's declaration, whichever provider declared the callable.
+pub(crate) fn lambda_input_types(source: &dyn SymbolSource, sig: Ty, binds: &GSigBinds) -> Vec<Ty> {
+    let inputs = function_input_types(source, sig, binds);
+    if !inputs.is_empty() {
+        return inputs;
+    }
+    semantic_sam_signature(source, sig)
+        .map(|sam| {
+            sam.params
+                .iter()
+                .map(|parameter| {
+                    instantiate_slot(
+                        source,
+                        None,
+                        *parameter,
+                        binds,
+                        TypePosition::Out,
+                        UnboundSpecialization::Preserve,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Whether an argument fits a parameter in erased Kotlin terms.
 pub(crate) fn arg_fits(parameter: &Ty, argument: &Ty) -> bool {
     parameter == argument

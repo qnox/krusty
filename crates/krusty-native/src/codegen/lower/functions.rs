@@ -671,10 +671,7 @@ impl<'a> FileLowering<'a> {
             return Err("a suspend functional interface".into());
         }
         let Some(interface) = self.ir.class_id_by_name(target.classifier) else {
-            return Err(declined!(
-                "a functional interface declared outside this file (`{}`)",
-                target.classifier.render()
-            ));
+            return self.dependency_sam_table(target);
         };
         let (method, entry) = match target.method_target {
             krusty::ir::IrSamMethod::Module(callable) => {
@@ -809,6 +806,62 @@ impl<'a> FileLowering<'a> {
             itable,
             interfaces,
             kotlin_name,
+        })
+    }
+
+    /// The tables, interface list and name of the object a lambda becomes when it is converted to
+    /// a `fun interface` a dependency declares.
+    ///
+    /// No table of this module numbers the dependency's members: every call through one, this
+    /// module's and the dependency's alike, reaches the object through the link's record of the
+    /// member's KLIB identity (`sam_dependency_implementations`). So the object's own tables are
+    /// those of `kotlin.Any`, and its interfaces are the dependency interface and the interfaces
+    /// it extends.
+    fn dependency_sam_table(
+        &mut self,
+        target: &krusty::ir::IrSamTarget,
+    ) -> Result<SamTables, Unsupported> {
+        if target.requires_object_dispatch {
+            return Err(
+                "a dependency's functional interface whose method is a `kotlin.Any` member".into(),
+            );
+        }
+        if !target.default_methods.is_empty() {
+            return Err("a dependency's functional interface with default members".into());
+        }
+        if !matches!(target.method_target, krusty::ir::IrSamMethod::External(_))
+            || !target
+                .dispatch_methods
+                .iter()
+                .any(|frame| frame.method == Some(target.method_target))
+        {
+            return Err(
+                "a dependency's functional interface without its checked selected dispatch frame"
+                    .into(),
+            );
+        }
+        for frame in &target.dispatch_methods {
+            let identity = match frame.method {
+                Some(krusty::ir::IrSamMethod::External(method)) => self
+                    .callables
+                    .callable(method)
+                    .and_then(|fact| fact.member_slot_identity()),
+                _ => None,
+            };
+            if identity.is_none() {
+                return Err(declined!(
+                    "a dependency's functional interface member without its KLIB identity (`{}`)",
+                    target.classifier.render()
+                ));
+            }
+        }
+        let vtable = self.any_vtable()?;
+        let interfaces = self.dependency_interface_closure(vec![target.classifier])?;
+        Ok(SamTables {
+            vtable,
+            itable: Vec::new(),
+            interfaces,
+            kotlin_name: target.classifier.render().replace(['/', '$'], "."),
         })
     }
 

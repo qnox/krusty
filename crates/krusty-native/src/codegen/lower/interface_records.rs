@@ -259,10 +259,31 @@ impl FileLowering<'_> {
         &self,
         target: &krusty::ir::IrSamTarget,
     ) -> Vec<(Vec<u8>, Vec<Ty>, Ty)> {
-        let krusty::ir::IrSamMethod::Module(method) = target.method_target else {
-            return Vec::new();
-        };
         let mut members: Vec<(Vec<u8>, Vec<Ty>, Ty)> = Vec::new();
+        let method = match target.method_target {
+            krusty::ir::IrSamMethod::Module(method) => method,
+            // A dependency's own `fun interface`: every declaration of the method's override
+            // family the checker froze is a dependency member.
+            krusty::ir::IrSamMethod::External(_) => {
+                for frame in &target.dispatch_methods {
+                    let Some(krusty::ir::IrSamMethod::External(method)) = frame.method else {
+                        continue;
+                    };
+                    let Some(identity) = self
+                        .callables
+                        .callable(method)
+                        .and_then(|fact| fact.member_slot_identity())
+                    else {
+                        continue;
+                    };
+                    if !members.iter().any(|(known, _, _)| *known == identity) {
+                        members.push((identity, frame.parameters.clone(), frame.result));
+                    }
+                }
+                return members;
+            }
+            krusty::ir::IrSamMethod::FunctionTypeInvoke => return members,
+        };
         for edge in self
             .ir
             .function_overrides

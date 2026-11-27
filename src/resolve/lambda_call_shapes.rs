@@ -878,7 +878,7 @@ impl Checker<'_> {
             .map(|(&argument_parameter, &parameter)| {
                 Some(argument_parameter)
                     .map(|parameter| {
-                        crate::symbol_resolver::function_input_types(
+                        crate::symbol_resolver::lambda_input_types(
                             &self.fed_source(),
                             parameter,
                             &binds,
