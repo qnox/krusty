@@ -21,6 +21,36 @@ impl Checker<'_> {
         self.intersection_member_receiver(&bounds, name)
     }
 
+    /// The result of `selected` called through a flow intersection. kotlinc's intersection
+    /// override returns the most specific result among the constituents' members of the same
+    /// shape, whichever constituent dispatches the call: on `Option<Pair<A, B>> & Some<*>`,
+    /// `get()` dispatches through `Some<*>` but returns `Pair<A, B>`, not `Some<*>`'s `Any?`.
+    /// `None` without such an override, or when its result is the selected one.
+    pub(super) fn flow_intersection_member_result(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: ExprId,
+        selected: &crate::libraries::FunctionInfo,
+    ) -> Option<Ty> {
+        // A member's own type arguments are inferred at the call and already applied to the
+        // selected result; the constituents' members carry only their receiver's substitution.
+        if selected
+            .generic_sig
+            .as_ref()
+            .is_some_and(|signature| !signature.formals.is_empty())
+        {
+            return None;
+        }
+        let path = self.flow_read_path(receiver)?;
+        let bounds = self.lookup_intersection_narrowing(scope, &path);
+        if bounds.len() < 2 {
+            return None;
+        }
+        let families = self.intersection_member_families(&bounds, &selected.callable.name);
+        let (_, result) = self.intersection_override(&families)?;
+        (result != selected.callable.ret).then_some(result)
+    }
+
     /// Project a flow intersection onto the constituent that supplies the selected property facet.
     /// A write requires a setter on that constituent; a read accepts the ordinary getter facet.
     pub(super) fn flow_intersection_property_receiver(
@@ -185,7 +215,30 @@ impl Checker<'_> {
         if bounds.len() < 2 {
             return None;
         }
-        let member_families = bounds
+        let member_families = self.intersection_member_families(bounds, name);
+        if let [(bound, _)] = member_families.as_slice() {
+            return Some(*bound);
+        }
+        if let Some(overriding) =
+            self.overriding_constituent(member_families.iter().map(|(bound, _)| *bound))
+        {
+            return Some(overriding);
+        }
+        if let Some((bound, _)) = self.intersection_override(&member_families) {
+            return Some(bound);
+        }
+
+        self.intersection_property_receiver(bounds, name, false)
+    }
+
+    /// The member functions `name` each constituent of `bounds` declares, for the constituents
+    /// that declare any.
+    fn intersection_member_families(
+        &self,
+        bounds: &[Ty],
+        name: &str,
+    ) -> Vec<(Ty, Vec<crate::libraries::FunctionInfo>)> {
+        bounds
             .iter()
             .copied()
             .map(|bound| {
@@ -199,49 +252,52 @@ impl Checker<'_> {
                 (bound, members)
             })
             .filter(|(_, members)| !members.is_empty())
-            .collect::<Vec<_>>();
-        if let [(bound, _)] = member_families.as_slice() {
-            return Some(*bound);
-        }
-        if let Some(overriding) =
-            self.overriding_constituent(member_families.iter().map(|(bound, _)| *bound))
-        {
-            return Some(overriding);
-        }
-        let single = member_families
+            .collect()
+    }
+
+    /// Kotlin's synthetic intersection override over member families: when at least two
+    /// constituents each declare exactly one member of the same parameter shape, the override has
+    /// the uniquely most specific result. Returns the constituent declaring that result, and the
+    /// result itself.
+    fn intersection_override(
+        &self,
+        families: &[(Ty, Vec<crate::libraries::FunctionInfo>)],
+    ) -> Option<(Ty, Ty)> {
+        let single = families
             .iter()
             .filter_map(|(bound, members)| match members.as_slice() {
                 [member] => Some((*bound, member)),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        if single.len() == member_families.len() && single.len() > 1 {
-            let same_parameters = single.windows(2).all(|pair| {
-                pair[0].1.semantic_params() == pair[1].1.semantic_params()
-                    && pair[0].1.context_count == pair[1].1.context_count
-            });
-            if same_parameters {
-                let context = crate::assignable::TyCtx::new();
-                let winners = single
-                    .iter()
-                    .filter(|(_, candidate)| {
-                        single.iter().all(|(_, other)| {
-                            crate::assignable::is_subtype(
-                                &context,
-                                self,
-                                candidate.callable.ret,
-                                other.callable.ret,
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                if let [winner] = winners.as_slice() {
-                    return Some(winner.0);
-                }
-            }
+        if single.len() != families.len() || single.len() < 2 {
+            return None;
         }
-
-        self.intersection_property_receiver(bounds, name, false)
+        let same_parameters = single.windows(2).all(|pair| {
+            pair[0].1.semantic_params() == pair[1].1.semantic_params()
+                && pair[0].1.context_count == pair[1].1.context_count
+        });
+        if !same_parameters {
+            return None;
+        }
+        let context = crate::assignable::TyCtx::new();
+        let winners = single
+            .iter()
+            .filter(|(_, candidate)| {
+                single.iter().all(|(_, other)| {
+                    crate::assignable::is_subtype(
+                        &context,
+                        self,
+                        candidate.callable.ret,
+                        other.callable.ret,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        match winners.as_slice() {
+            [(bound, member)] => Some((*bound, member.callable.ret)),
+            _ => None,
+        }
     }
 
     /// Select the concrete receiver view for a synthetic intersection property. Equivalent fake
