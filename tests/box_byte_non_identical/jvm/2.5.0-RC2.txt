@@ -127,7 +127,6 @@ boxingOptimization/unsignedArrayForEach.kt
 branching/when_with_try1.kt
 bridges/delegationComplex.kt
 bridges/delegationComplexWithList.kt
-bridges/diamond.kt
 bridges/fakeCovariantOverride.kt
 bridges/fakeGenericCovariantOverride.kt
 bridges/fakeGenericCovariantOverrideWithDelegation.kt
@@ -150,7 +149,6 @@ bridges/special.kt
 bridges/strListContains.kt
 bridges/substitutionInSuperClass/boundedTypeArguments.kt
 bridges/substitutionInSuperClass/delegation.kt
-bridges/substitutionInSuperClass/enum.kt
 bridges/test6.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/adaptedSecondArgArray.kt
@@ -1352,7 +1350,6 @@ directInvokeOptimization/unboundInnerContructorRef.kt
 directInvokeOptimization/unboundMemberRef.kt
 elvis/genericElvisWithMoreSpecificLHS.kt
 elvis/genericElvisWithNullLHS.kt
-elvis/kt6694ExactAnnotationForElvis.kt
 elvis/kt87816.kt
 elvis/ofNonNullableResultType.kt
 elvis/withNothingConstraintAndExpectedType.kt
@@ -1457,7 +1454,6 @@ extensionProperties/kt9897.kt
 extensionProperties/kt9897_topLevel.kt
 fakeOverride/kt40180_2.kt
 fakeOverride/kt40180_3.kt
-fakeOverride/kt49371.kt
 fakeOverride/privateFakeOverrides0.kt
 fakeOverride/privateFakeOverrides1.kt
 fieldRename/constructorAndClassObject.kt
@@ -1540,7 +1536,6 @@ funInterface/inlinedSamWrapper.kt
 funInterface/irrelevantPrivateDeclarations.kt
 funInterface/kt46908_functionSupertype.kt
 funInterface/kt49384.kt
-funInterface/kt64587.kt
 funInterface/kt77685-sam.kt
 funInterface/kt77685.kt
 funInterface/kt79092-sam.kt
@@ -1946,10 +1941,7 @@ inlineClasses/interfaceDelegation/memberFunDelegationToInlineClassWithInlineClas
 inlineClasses/interfaceDelegation/memberFunDelegationToInlineClassWithInlineClassParameterTypesGeneric.kt
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypes.kt
 inlineClasses/interfaceDelegation/memberFunDelegationWithInlineClassParameterTypesGeneric.kt
-inlineClasses/interfaceMethodCalls/genericDefaultInterfaceExtensionFunCall.kt
 inlineClasses/interfaceMethodCalls/genericDefaultInterfaceExtensionFunCallGeneric.kt
-inlineClasses/interfaceMethodCalls/genericDefaultInterfaceMethodCall.kt
-inlineClasses/interfaceMethodCalls/genericDefaultInterfaceMethodCallGeneric.kt
 inlineClasses/interfaceMethodCalls/interfaceSuperCallGeneric.kt
 inlineClasses/iterateOverArrayOfInlineClassValues.kt
 inlineClasses/iterateOverArrayOfInlineClassValuesGeneric.kt
@@ -2075,7 +2067,6 @@ innerNested/superConstructorCall/objectExtendsInnerOfLocalVarargAndDefault.kt
 innerNested/superConstructorCall/objectExtendsInnerOfLocalWithCapture.kt
 innerNested/superConstructorCall/objectExtendsLocalWithClosure.kt
 innerNested/superConstructorCall/objectOuterDiffersFromInnerOuter.kt
-interfaceCallsNCasts/diamond.kt
 interfaceCallsNCasts/finalMethod.kt
 intrinsics/kt10131.kt
 intrinsics/kt10131a.kt
@@ -2232,8 +2223,6 @@ multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflict.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt
 multiplatform/k2/hmpp/expectActualChainExtra3-3.kt
 multiplatform/k2/hmpp/expectRefinement.kt
-multiplatform/k2/hmpp/incorrectIntersectionOverride.kt
-multiplatform/k2/hmpp/incorrectIntersectionOverride2.kt
 multiplatform/k2/hmpp/moveToDiagnostic/deprecationActualTypealias2-2.kt
 multiplatform/k2/hmpp/stdlibRegressions.kt
 multiplatform/k2/kt59613.kt
@@ -2708,9 +2697,6 @@ regressions/builderInferenceThroughCallableReference.kt
 regressions/callableReferenceToImplicitReceiverUnitCoercion.kt
 regressions/captureStorageDefaultMetadata.kt
 regressions/castReceiverUsesTarget.kt
-regressions/closedRangeBoundsThroughInterface.kt
-regressions/closedRangeBoundsThroughSubclass.kt
-regressions/closedRangeIntAccessors.kt
 regressions/closureWriteConformingSmartCast.kt
 regressions/closureWriteConformingSmartCastStringBuilder.kt
 regressions/collectionLiteralForTypeVariableBuiltFromOtherBound.kt
@@ -2839,6 +2825,8 @@ regressions/kt47279.kt
 regressions/kt6153.kt
 regressions/kt6434.kt
 regressions/kt789.kt
+regressions/lambdaTailGuardIntersectionPublishesAny.kt
+regressions/lambdaTailSmartCastPublishedType.kt
 regressions/libraryArrayLoops.kt
 regressions/libraryClassInheritedDefaults.kt
 regressions/libraryClassSubclass.kt
@@ -2962,6 +2950,7 @@ regressions/sourceExceptionSubclasses.kt
 regressions/sourceKCallableNameAcrossFiles.kt
 regressions/sourceKPropertyName.kt
 regressions/starImportOfCompanionBlock.kt
+regressions/suspendCallsInConditions.kt
 regressions/suspendCoroutineResultInTypedLocal.kt
 regressions/suspendLambdaCompletions.kt
 regressions/suspendLambdaInlinedObjectCrossinline.kt
@@ -3070,7 +3059,6 @@ serialization/deserializedMembers.kt
 serialization/serializedDefaultArgs.kt
 smartCasts/avoidSmartCastToDerivedForPrivate.kt
 smartCasts/falseSmartCast.kt
-smartCasts/genericInheritanceWithNonGenericNoAmbiguity.kt
 smartCasts/genericSet.kt
 smartCasts/implicitMemberReceiver.kt
 smartCasts/invokeRecieverSmartcastK2.kt
@@ -3126,7 +3114,6 @@ super/kt3492ClassFun.kt
 super/kt3492ClassProperty.kt
 super/kt3492TraitFun.kt
 super/kt3492TraitProperty.kt
-super/superCallToNonGenericImplThroughGenericDefaultImpls.kt
 super/superConstructor/kt13846.kt
 super/superConstructor/kt18356_2.kt
 super/superConstructor/objectExtendsInner.kt
@@ -3185,7 +3172,6 @@ traits/kt2399.kt
 traits/multiple.kt
 traits/receiverOfIntersectionType.kt
 traits/traitImplDelegationWithCovariantOverride.kt
-traits/traitImplGenericDelegation.kt
 traits/traitWithPrivateExtension.kt
 traits/traitWithPrivateMember.kt
 traits/traitWithPrivateMemberAccessFromLambda.kt
