@@ -20,6 +20,18 @@ fn dependency_file_private_classes_implement_inherited_interface_defaults() {
     );
 }
 
+/// A library-private object and class carry the interface default only the consumer's call,
+/// dispatched through the interface, reaches.
+#[test]
+fn dependency_private_classes_implement_defaults_only_the_consumer_dispatches_to() {
+    assert_file_private_inheritance(
+        include_str!(
+            "../box_regressions/multimodule/dependencySourceDispatchedInterfaceDefaults.kt"
+        ),
+        "DependencySourceDispatchedInterfaceDefaults",
+    );
+}
+
 fn assert_file_private_inheritance(source: &str, fixture_name: &str) {
     if std::env::var_os("KRUSTY_KOTLIN_NATIVE").is_none() {
         assert!(
