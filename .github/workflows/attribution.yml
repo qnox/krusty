@@ -92,10 +92,9 @@ jobs:
     # A few API calls: GitHub-hosted, so it never waits behind the self-hosted runner cap.
     runs-on: ubuntu-latest
     steps:
-      # A review event checks out the pull request; the script is always master's.
+      # A review event runs the pull request's own copy of the script, as the title-and-body job
+      # does; the others run master's.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.repository.default_branch || 'master' }}
       - name: remove comment footers
         env:
           GH_TOKEN: ${{ github.token }}
