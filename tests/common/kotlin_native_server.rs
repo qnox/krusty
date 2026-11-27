@@ -107,15 +107,20 @@ pub(crate) struct NativeCompile {
 }
 
 /// Run `kotlinc-native` from the distribution at `root` with `args`, in a persistent server.
+///
+/// A `-D*` argument is a JVM system property of the compiler, which `bin/kotlinc-native` passes to
+/// its JVM rather than to `K2Native` (which rejects it as an invalid argument). It is therefore set
+/// on the server's JVM, and each distribution and property set has its own servers.
 pub(crate) fn kotlinc_native(root: &Path, args: &[OsString]) -> NativeCompile {
-    type Pools = Mutex<HashMap<PathBuf, Arc<server_pool::Pool<KotlinNativeServer>>>>;
+    type Pools = Mutex<HashMap<(PathBuf, Vec<String>), Arc<server_pool::Pool<KotlinNativeServer>>>>;
     static POOLS: OnceLock<Pools> = OnceLock::new();
+    let (properties, args) = native_jvm_properties(args);
     let pool = Arc::clone(
         POOLS
             .get_or_init(Default::default)
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .entry(root.to_path_buf())
+            .entry((root.to_path_buf(), properties.clone()))
             .or_insert_with(|| {
                 Arc::new(server_pool::Pool::resident(
                     server_pool::Budget::process(),
@@ -123,21 +128,41 @@ pub(crate) fn kotlinc_native(root: &Path, args: &[OsString]) -> NativeCompile {
                 ))
             }),
     );
-    let start = || KotlinNativeServer::start(root);
+    let start = || KotlinNativeServer::start(root, &properties);
     pool.with_server(
         server_pool_cap(),
         || Some(start()),
-        |server| match server.compile(args) {
+        |server| match server.compile(&args) {
             Ok(compile) => compile,
             Err(first) => {
                 *server = start();
-                server.compile(args).unwrap_or_else(|second| {
+                server.compile(&args).unwrap_or_else(|second| {
                     panic!("kotlinc-native server failed twice: {first}; then {second}")
                 })
             }
         },
     )
     .expect("a kotlinc-native server is admitted")
+}
+
+/// Split the compiler's JVM system properties out of a `kotlinc-native` argument list, by the
+/// launcher's own rule for `bin/kotlinc`.
+fn native_jvm_properties(args: &[OsString]) -> (Vec<String>, Vec<OsString>) {
+    let mut properties = Vec::new();
+    let mut compiler_args = Vec::new();
+    for arg in args {
+        match arg.to_str() {
+            Some(text)
+                if !super::kotlinc_server::kotlinc_jvm_properties(&[text.to_string()])
+                    .0
+                    .is_empty() =>
+            {
+                properties.push(text.to_string());
+            }
+            _ => compiler_args.push(arg.clone()),
+        }
+    }
+    (properties, compiler_args)
 }
 
 struct KotlinNativeServer {
@@ -147,7 +172,7 @@ struct KotlinNativeServer {
 }
 
 impl KotlinNativeServer {
-    fn start(root: &Path) -> Self {
+    fn start(root: &Path, properties: &[String]) -> Self {
         let jar = root.join("konan/lib/kotlin-native-compiler-embeddable.jar");
         assert!(
             jar.is_file(),
@@ -169,6 +194,7 @@ impl KotlinNativeServer {
                 home.push(root);
                 home
             })
+            .args(properties)
             .arg("-cp")
             .arg(classpath)
             .arg("KotlinNativeServer")
@@ -289,4 +315,31 @@ fn the_compile_deadline_defaults_to_five_minutes_and_follows_its_variable() {
     assert_eq!(compile_timeout_ms_from(Some(" ")), 300_000);
     assert_eq!(compile_timeout_ms_from(Some("900000")), 900_000);
     assert!(std::panic::catch_unwind(|| compile_timeout_ms_from(Some("0"))).is_err());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_jvm_property_reaches_the_compilers_jvm_not_its_command_line() {
+        let args = [
+            "-Dkotlinc.test.allow.testonly.language.features=true",
+            "-language-version",
+            "2.5",
+            "-destination",
+        ]
+        .map(OsString::from);
+
+        let (properties, compiler_args) = native_jvm_properties(&args);
+
+        assert_eq!(
+            properties,
+            ["-Dkotlinc.test.allow.testonly.language.features=true"]
+        );
+        assert_eq!(
+            compiler_args,
+            ["-language-version", "2.5", "-destination"].map(OsString::from)
+        );
+    }
 }
