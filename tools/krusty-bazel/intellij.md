@@ -236,15 +236,30 @@ KRUSTY_BINARY=/path/to/krusty/target/gate/krusty \
 Rewriting every `BUILD.bazel` to load `krusty_jvm_library` does not scale. `tools/krusty-bazel/intellij/*.patch`
 is applied to an intellij-community checkout and leaves `jvm_library` in place. With
 `KRUSTY_BINARY` unset the patch is a stub and the JPS builder is unchanged. With it set to a built
-`krusty` executable, a target is compiled by krusty when it has no Java sources, no source jars,
-and no build-supplied compiler plugin in either the stubs or compile phase. Anything else stays on
-the JPS builder, so a mixed module still builds.
+`krusty` executable, a target is compiled by krusty when it has Kotlin sources (its Java sources,
+if any, are compiled by javac inside the same action), no source jars, and no build-supplied
+compiler plugin in either the stubs or compile phase. Anything else stays on the JPS builder.
 
-The action sets `JAVA_HOME` from the build's tool Java runtime and passes `-no-stdlib`. The
-module classpath already contains `kotlin-stdlib`; the copied binary cannot walk up to a Kotlin
-distribution of its own. It also passes `-Xkotlin-reference-version` with the build's own Kotlin
-release (`_KOTLIN_VERSION` in `build/jvm-rules/MODULE.bazel`), so krusty reproduces the kotlinc the
-JPS builder embeds; a release krusty does not support fails the action. CI checks that the
+The action sets `JAVA_HOME` from the build's tool Java runtime and starts the worker with
+`--kotlinc-arg -no-stdlib`. The module classpath already contains `kotlin-stdlib`; the copied
+binary cannot walk up to a Kotlin distribution of its own. It also passes
+`-Xkotlin-reference-version` with the build's own Kotlin release (`_KOTLIN_VERSION` in
+`build/jvm-rules/MODULE.bazel`), so krusty reproduces the kotlinc the JPS builder embeds. Both are
+startup arguments, so each work request is exactly the JPS builder's.
+
+A target krusty does not compile, for any reason, is handed to the JPS builder rather than failing
+the build: the worker is started with the builder's command line (`--jps-builder`, one argument at
+a time), runs it as a one-request persistent worker, and forwards the original request. The action
+still succeeds when the source is valid, and its output records why:
+
+```text
+krusty: target '//platform/eel:eel' is left to the JPS builder: krusty reported errors
+<krusty's report>
+```
+
+The reason keeps the failure's kind, so a krusty bug stays visible: `krusty failed with an internal
+error` (a panic), `krusty does not implement everything the target uses` (a native plugin's
+refusal), `krusty rejects the command line`, or `krusty reported errors`. CI checks that the
 patch applies at `1608e029bb2c`, the last revision built with Kotlin 2.4.20 exactly
 (`scripts/check-intellij-patch.sh`). Further checkout fixes (a module dependency the compiler cannot see, a
 repository that fails to fetch) are additional patches in the same directory, applied in name
