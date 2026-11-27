@@ -99,9 +99,9 @@ struct SolvedOperatorTypeArguments {
 }
 
 /// The type arguments an operator selection solved, published only by the caller whose expression
-/// IS that one call (`a + b`, `a..b`, `a < b`). A convention selected for another expression's
-/// key (a loop range, a compound assignment receiver, an `in` range that also selects `contains`)
-/// does not own that key's single generic-call record.
+/// IS that one call (`a + b`, `a..b`, `a < b`, and `contains` for `x in a..b`). A convention
+/// selected for another expression's key (a loop range, a compound assignment receiver, the range
+/// builder of an `in` range) does not own that key's single generic-call record.
 enum OperatorTypeArguments {
     Solved(Box<SolvedOperatorTypeArguments>),
     NotGeneric,
@@ -227,8 +227,18 @@ impl<'a> Checker<'a> {
             },
             None,
         )?;
-        match selected.type_arguments {
-            OperatorTypeArguments::Solved(solved) => {
+        self.publish_operator_type_arguments(expression, Some(selected.type_arguments));
+        Some((selected.ret, selected.call))
+    }
+
+    /// Publish what an operator selection solved under the expression that IS that call.
+    fn publish_operator_type_arguments(
+        &mut self,
+        expression: ExprId,
+        type_arguments: Option<OperatorTypeArguments>,
+    ) {
+        match type_arguments {
+            Some(OperatorTypeArguments::Solved(solved)) => {
                 let SolvedOperatorTypeArguments {
                     signature,
                     call_sig,
@@ -236,10 +246,9 @@ impl<'a> Checker<'a> {
                 } = *solved;
                 self.replace_selected_generic_call(expression, &signature, &call_sig, arguments)
             }
-            OperatorTypeArguments::NotGeneric => self.clear_selected_generic_call(expression),
-            OperatorTypeArguments::CommittedBySelection => {}
+            Some(OperatorTypeArguments::NotGeneric) => self.clear_selected_generic_call(expression),
+            Some(OperatorTypeArguments::CommittedBySelection) | None => {}
         }
-        Some((selected.ret, selected.call))
     }
 
     /// Shared operator selection with an optional checked semantic view of the arguments. Range
@@ -825,8 +834,16 @@ impl<'a> Checker<'a> {
                         self.range_contains_call_for_bound(scope, e, range_ty, range_vt, value)
                     };
                     let selects_range_contains = match &selected {
-                        Some((Ty::Boolean, ResolvedCall::Member(_))) => true,
-                        Some((Ty::Boolean, ResolvedCall::Extension(extension))) => {
+                        Some(SelectedOperator {
+                            ret: Ty::Boolean,
+                            call: ResolvedCall::Member(_),
+                            ..
+                        }) => true,
+                        Some(SelectedOperator {
+                            ret: Ty::Boolean,
+                            call: ResolvedCall::Extension(extension),
+                            ..
+                        }) => {
                             extension.callable.compiler_intrinsic
                                 == Some(crate::libraries::CompilerIntrinsic::ClosedRangeContains)
                         }
@@ -910,8 +927,27 @@ impl<'a> Checker<'a> {
                     == Some(crate::libraries::MemberRealization::Intrinsic(
                         crate::libraries::CompilerIntrinsic::ComparableRangeTo,
                     ))
-                    && matches!(contains, Some((Ty::Boolean, ResolvedCall::Member(_))));
+                    && matches!(
+                        contains,
+                        Some(SelectedOperator {
+                            ret: Ty::Boolean,
+                            call: ResolvedCall::Member(_),
+                            ..
+                        })
+                    );
+                let (contains, type_arguments) = match contains {
+                    Some(selected) => (
+                        Some((selected.ret, selected.call)),
+                        Some(selected.type_arguments),
+                    ),
+                    None => (None, None),
+                };
                 let ty = self.finish_range_contains(&operands, range_ty, range_call, contains);
+                // The expression IS the `contains` call, so it owns the expression's generic-call
+                // record: a generic `Iterable<T>.contains` reaches a target with the `T` it solved.
+                if ty == Ty::Boolean {
+                    self.publish_operator_type_arguments(e, type_arguments);
+                }
                 if comparable_range
                     && ty == Ty::Boolean
                     && !self.select_comparable_range_ordering(e, range_ty)
@@ -981,17 +1017,20 @@ impl<'a> Checker<'a> {
         range_ty: Ty,
         value_ty: Ty,
         value: ExprId,
-    ) -> Option<(Ty, ResolvedCall)> {
-        self.operator_call_ret(OperatorCall {
-            scope,
-            site: expression,
-            receiver: range_ty,
-            name: "contains",
-            arg_tys: &[value_ty],
-            arg_exprs: &[value],
-            span: self.span(expression),
-            expected_result: None,
-        })
+    ) -> Option<SelectedOperator> {
+        self.select_operator(
+            OperatorCall {
+                scope,
+                site: expression,
+                receiver: range_ty,
+                name: "contains",
+                arg_tys: &[value_ty],
+                arg_exprs: &[value],
+                span: self.span(expression),
+                expected_result: None,
+            },
+            None,
+        )
     }
 
     /// Select `contains` through a type parameter's checked primitive bound solely to authorize
@@ -1005,7 +1044,7 @@ impl<'a> Checker<'a> {
         range_ty: Ty,
         bound: Ty,
         value: ExprId,
-    ) -> Option<(Ty, ResolvedCall)> {
+    ) -> Option<SelectedOperator> {
         self.select_operator(
             OperatorCall {
                 scope,
@@ -1019,7 +1058,6 @@ impl<'a> Checker<'a> {
             },
             Some(vec![crate::symbol_resolver::CallArgKind::Typed(bound)]),
         )
-        .map(|selected| (selected.ret, selected.call))
     }
 
     fn finish_range_contains(
@@ -1174,8 +1212,13 @@ struct InRangeOperands {
 /// Whether the resolved `contains` is the declaration whose element parameter is the callable's own
 /// type parameter (`fun <T> Iterable<T>.contains(element: T)`), as opposed to a precise overload of
 /// the range. Decided from the declared generic signature, never from the erased representation.
-fn selects_generic_element_contains(selected: &Option<(Ty, ResolvedCall)>) -> bool {
-    let Some((Ty::Boolean, ResolvedCall::Extension(extension))) = selected else {
+fn selects_generic_element_contains(selected: &Option<SelectedOperator>) -> bool {
+    let Some(SelectedOperator {
+        ret: Ty::Boolean,
+        call: ResolvedCall::Extension(extension),
+        ..
+    }) = selected
+    else {
         return false;
     };
     extension.callable.generic_sig.as_ref().is_some_and(|sig| {

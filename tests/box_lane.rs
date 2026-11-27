@@ -1108,9 +1108,22 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path, source: &str) -> Outcom
         && lane.platform() == box_ratchet::Platform::Native
         && source.contains("// MODULE:")
     {
-        let answer = timed(Stage::TargetOracle, || {
-            super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source)
+        let oracle = timed(Stage::TargetOracle, || {
+            super::kotlin_native_multimodule_support::kotlin_native_multimodule_outcome(&source)
         });
+        let answer = match oracle {
+            Some(super::kotlin_native_multimodule_support::NativeModulesOutcome::Answer(
+                answer,
+            )) => Some(answer),
+            Some(super::kotlin_native_multimodule_support::NativeModulesOutcome::Rejected(
+                reason,
+            )) => {
+                return Outcome::Harness(format!(
+                    "the pinned kotlinc-native oracle rejected the final module: {reason}"
+                ));
+            }
+            None => None,
+        };
         if answer.as_deref() != Some("OK") {
             return Outcome::Harness(format!(
                 "required Native oracle must return OK, got {answer:?}"

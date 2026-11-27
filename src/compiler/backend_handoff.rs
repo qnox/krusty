@@ -90,6 +90,7 @@ pub(super) fn checked_ir_file<'a>(
         &mut callables,
         symbols.semantic_platform(),
         module.dispatched_classes,
+        &source_read_objects(&ir),
     ) {
         diags.error(Span::new(0, 0), format!("internal error: {error}"));
         return None;
@@ -181,6 +182,24 @@ pub(super) fn checked_ir_file<'a>(
     })
 }
 
+/// The classifiers of the objects the emitted source reads as values and does not declare: the
+/// library objects a unit may materialize, whose inherited members dispatch reaches.
+fn source_read_objects(ir: &crate::ir::IrFile) -> Vec<crate::types::TypeName> {
+    let mut objects: Vec<crate::types::TypeName> = Vec::new();
+    for expression in crate::ir::emitted_body_roots(ir)
+        .into_iter()
+        .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
+    {
+        let crate::ir::IrExpr::SingletonValue { classifier } = ir.expr(expression) else {
+            continue;
+        };
+        if ir.class_id_by_name(*classifier).is_none() && !objects.contains(classifier) {
+            objects.push(*classifier);
+        }
+    }
+    objects
+}
+
 /// Check the KLIB body graph reachable from the frozen callables and store its facts, before the
 /// checked callable facts are completed. A refreeze after common preparation checks the graph of
 /// the calls the preparation introduced the same way, and a dependency support unit checks the
@@ -189,15 +208,17 @@ pub(super) fn record_checked_klib_dependency_facts(
     callables: &mut CheckedBackendCallables,
     platform: &dyn crate::libraries::SemanticPlatform,
     represented: &[crate::types::TypeName],
+    read_objects: &[crate::types::TypeName],
 ) -> Result<(), String> {
     let Some(dependency_bodies) = platform.klib_dependency_body_facts() else {
         return Ok(());
     };
-    let checked = crate::resolve::for_checked_klib_bodies(
+    let checked = crate::resolve::for_checked_klib_bodies_reading(
         platform,
         dependency_bodies.bodies(),
         callables.klib_body_callables(),
         represented,
+        read_objects,
     )
     .map_err(|identity| {
         format!("checked KLIB body graph has no exact member facts for {identity:?}")
@@ -291,8 +312,13 @@ pub(super) fn prepare_common_ir(
                 ))
             })?;
     }
-    record_checked_klib_dependency_facts(&mut callables, provider, represented)
-        .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
+    record_checked_klib_dependency_facts(
+        &mut callables,
+        provider,
+        represented,
+        &source_read_objects(&file.ir),
+    )
+    .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
     super::builtin_implementations::record_checked(
         &mut callables,
         &file.ir,

@@ -270,8 +270,9 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
 
     // Request 1 is the options intellij-community actually builds with, including `--progressive`,
     // whose features are all modeled. Request 2 supplies codegen decisions through the rule's
-    // `kotlinc_opts` passthrough ONLY: worker defaults must not overwrite them. Request 3 carries
-    // Java and must be refused. Requests 4 and 5 prove the refusal leaves the worker alive;
+    // `kotlinc_opts` passthrough ONLY: worker defaults must not overwrite them. Request 3 counts
+    // Java sources its `--srcs` does not list and must be refused. Requests 4 and 5 prove the
+    // refusal leaves the worker alive;
     // request 5 is request 1 without `--progressive` and writes every declared output.
     let requests = format!(
         concat!(
@@ -323,7 +324,7 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
         [
             r#"{"exitCode":0,"output":"","requestId":1}"#,
             r#"{"exitCode":0,"output":"","requestId":2}"#,
-            r#"{"exitCode":1,"output":"krusty: krusty has no Java front end, so this target cannot be built by it: --java-count 4","requestId":3}"#,
+            r#"{"exitCode":1,"output":"krusty: malformed work request: --java-count 4, but --srcs lists 0 Java source(s)","requestId":3}"#,
             r#"{"exitCode":0,"output":"","requestId":4}"#,
             r#"{"exitCode":0,"output":"","requestId":5}"#,
         ],
@@ -378,5 +379,142 @@ fn the_persistent_worker_serves_intellijs_argument_surface() {
     assert!(
         !forwarded_code.contains("checkNotNullParameter"),
         "forwarded -Xno-param-assertions must not be overwritten:\n{forwarded_code}"
+    );
+}
+
+/// A mixed target, as intellij-community's builder compiles it: the Kotlin reads the Java as
+/// declarations, javac compiles the Java against the Kotlin classes, and both land in one jar.
+/// Each half calls the other, so neither compiles alone.
+#[test]
+fn the_persistent_worker_compiles_a_mixed_kotlin_and_java_target() {
+    let dir = workspace("worker-mixed");
+    let kotlin = dir.join("Mixed.kt");
+    std::fs::write(
+        &kotlin,
+        concat!(
+            "package demo\n",
+            "class Greeter { fun greet(): String = Names.who() }\n",
+            "fun box(): String = if (Names.twice() == \"java!\") \"OK\" else Names.twice()\n",
+        ),
+    )
+    .expect("write Kotlin source");
+    let java = dir.join("Names.java");
+    std::fs::write(
+        &java,
+        concat!(
+            "package demo;\n",
+            "public class Names {\n",
+            "  public static String who() { return \"java\"; }\n",
+            "  public static String twice() { return new Greeter().greet() + \"!\"; }\n",
+            "}\n",
+        ),
+    )
+    .expect("write Java source");
+    let broken = dir.join("Broken.java");
+    std::fs::write(
+        &broken,
+        "package demo;\npublic class Broken { int f() { return missing(); } }\n",
+    )
+    .expect("write broken Java source");
+    let jar = dir.join("mixed.jar");
+    let broken_jar = dir.join("broken.jar");
+    let stdlib = common::stdlib_jar();
+
+    let requests = format!(
+        concat!(
+            r#"{{"arguments":["--kotlin_module_name","intellij.mixed","--jvm_target","17","#,
+            r#""--srcs","{kotlin}","{java}","--cp","{stdlib}","--out","{jar}","--java-count","1"],"#,
+            r#""requestId":1}}"#,
+            "\n",
+            r#"{{"arguments":["--srcs","{kotlin}","{java}","{broken}","--cp","{stdlib}","#,
+            r#""--out","{broken_jar}","--java-count","2"],"requestId":2}}"#,
+            "\n",
+        ),
+        kotlin = kotlin.display(),
+        java = java.display(),
+        broken = broken.display(),
+        stdlib = stdlib.display(),
+        jar = jar.display(),
+        broken_jar = broken_jar.display(),
+    );
+    let mut child = std::process::Command::new(common::krusty_binary())
+        .arg("--persistent_worker")
+        .env("JAVA_HOME", common::java_home())
+        // The JDK prints a "Picked up" line for each of these, which is the machine's, not javac's.
+        .env_remove("JAVA_TOOL_OPTIONS")
+        .env_remove("_JAVA_OPTIONS")
+        .env_remove("JDK_JAVA_OPTIONS")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("start worker");
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .expect("worker stdin")
+        .write_all(requests.as_bytes())
+        .expect("send requests");
+    let output = child.wait_with_output().expect("worker exit");
+    let text = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+    // javac's own report of the broken source, whole, after the Kotlin half compiled.
+    let javac_report = format!(
+        concat!(
+            "krusty: javac failed (exit status: 1):\n",
+            "{broken}:2: error: cannot find symbol\n",
+            "public class Broken {{ int f() {{ return missing(); }} }}\n",
+            "                                       ^\n",
+            "  symbol:   method missing()\n",
+            "  location: class Broken\n",
+            "1 error\n",
+            "\n",
+        ),
+        broken = broken.display()
+    );
+    let escaped = javac_report
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    assert_eq!(
+        lines,
+        [
+            r#"{"exitCode":0,"output":"","requestId":1}"#.to_string(),
+            format!(r#"{{"exitCode":1,"output":"{escaped}","requestId":2}}"#),
+        ],
+        "one exact response per request: {text}"
+    );
+
+    let mut entries = jar_entries(&jar);
+    entries.sort();
+    assert_eq!(
+        entries,
+        [
+            "META-INF/MANIFEST.MF",
+            "META-INF/intellij.mixed.kotlin_module",
+            "demo/Greeter.class",
+            "demo/MixedKt.class",
+            "demo/Names.class",
+        ]
+    );
+    let file = std::fs::File::open(&jar).expect("open jar");
+    let mut archive = zip::ZipArchive::new(file).expect("read jar");
+    let classes: Vec<(String, Vec<u8>)> = ["demo/Greeter", "demo/MixedKt", "demo/Names"]
+        .iter()
+        .map(|name| {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(
+                &mut archive
+                    .by_name(&format!("{name}.class"))
+                    .expect("class entry"),
+                &mut bytes,
+            )
+            .expect("read class");
+            (name.to_string(), bytes)
+        })
+        .collect();
+    assert_eq!(
+        common::run_box(&classes, "demo.MixedKt", &[stdlib]).as_deref(),
+        Some("OK")
     );
 }
