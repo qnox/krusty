@@ -28,11 +28,8 @@ fun both(name: String): Both =\n\
 
 #[test]
 fn a_library_value_class_default_construction_marks_its_line_at_its_synthesized_operands() {
-    let Some(classes) = common::classes_against_kotlinc_lib("Use", &[("Lib.kt", LIBRARY)], USE)
-    else {
-        eprintln!("skip (reference toolchain unavailable)");
-        return;
-    };
+    let classes = common::classes_against_kotlinc_lib("Use", &[("Lib.kt", LIBRARY)], USE)
+        .expect("the reference kotlinc compiles the library and its use");
     let differences = classes
         .differences()
         .into_iter()
