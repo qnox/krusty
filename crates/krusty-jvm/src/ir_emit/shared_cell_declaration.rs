@@ -10,7 +10,19 @@
 //! the box, the local's range opens on the real initializer and a default store precedes it.
 
 use super::*;
-use krusty::ir::ExprId;
+use krusty::ir::{ExprId, IrExpr};
+
+/// The local-variable descriptor of a source `Nothing` or `Nothing?` declaration.
+///
+/// `ir_ty_to_jvm` erases nullable `Nothing` to `Any` in a value slot. kotlinc's
+/// `LocalVariableTable` still names the declaration `java.lang.Void`.
+fn nothing_declaration_debug_type(ir: &IrFile, declaration: ExprId) -> Option<Ty> {
+    let IrExpr::Variable { ty, .. } = *ir.expr(declaration) else {
+        return None;
+    };
+    let declared = super::declaration_types::jvm_value_ty(&ty);
+    (declared.obj_internal() == Some(krusty::types::wk::java_void())).then_some(declared)
+}
 
 /// A holder's element type and the initial value its declaration sets, if any.
 pub(super) type SharedCell = (Ty, Option<ExprId>);
@@ -202,6 +214,9 @@ impl Emitter<'_> {
             .inline_declared_type(declaration)
             .map(|declared| ir_ty_to_jvm(&stored_value_ty(declared)))
             .unwrap_or(ty);
+        // A value position erases `Nothing?` to `Any`. The local-variable table names the
+        // declaration: kotlinc records an explicit `Nothing?` local as `java.lang.Void`.
+        let debug_ty = nothing_declaration_debug_type(self.ir, declaration).unwrap_or(debug_ty);
         let descriptor = local_variable_desc(debug_ty);
         self.cw.declare_local_type(&descriptor);
         let local = super::block_scope::OpenLocal {

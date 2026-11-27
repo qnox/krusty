@@ -2112,7 +2112,6 @@ regressions/NullableFunctionValueSuspendConversion.kt
 regressions/ReceiverLifetimeContrast.kt
 regressions/ShadowedContextCapture.kt
 regressions/SpacedTypeAnnotationParenthesizedFunctionType.kt
-regressions/WidenedLiteralCallArgumentKeepsItsCandidate.kt
 regressions/anonymousInterfaceDelegateOperands.kt
 regressions/anyMembersOfLibraryDeclarations.kt
 regressions/arrayElementWriteOrder.kt

@@ -19,25 +19,25 @@ fun nothingSigned(x: Long): String = "long"
 
 fun nothingSigned(x: ULong): Int = 0
 
-fun nothingSelectsLong(): String = nothingSigned(TODO())
+fun nothingSelectsLong(): String = nothingSigned(null!!)
 
 fun nothingUnsigned(x: UInt): String = "uint"
 
 fun nothingUnsigned(x: UByte): Int = 0
 
-fun nothingSelectsUInt(): String = nothingUnsigned(TODO())
+fun nothingSelectsUInt(): String = nothingUnsigned(null!!)
 
 fun nothingSmallUnsigned(x: UShort): String = "ushort"
 
 fun nothingSmallUnsigned(x: UByte): Int = 0
 
-fun nothingSelectsUShort(): String = nothingSmallUnsigned(TODO())
+fun nothingSelectsUShort(): String = nothingSmallUnsigned(null!!)
 
 fun nothingFloat(x: Double): String = "double"
 
 fun nothingFloat(x: Float): Int = 0
 
-fun nothingSelectsDouble(): String = nothingFloat(TODO())
+fun nothingSelectsDouble(): String = nothingFloat(null!!)
 
 fun nothingNullable(x: Int?): String = "int"
 

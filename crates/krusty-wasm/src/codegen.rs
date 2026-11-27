@@ -637,6 +637,66 @@ mod tests {
         }
     }
 
+    /// Shape tie-break and numeric preference, including `Nothing` witnesses. A `Nothing` argument
+    /// is `null!!`, so the file does not construct `NotImplementedError`.
+    #[test]
+    fn equally_specific_shape_and_numeric_preference_runs() {
+        use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
+        let source = include_str!(
+            "../../../tests/box_regressions/equallySpecificShapeAndNumericPreference.kt"
+        );
+        for target in WasmTarget::ALL {
+            let path = krusty::toolchain::kotlin_stdlib_klib_or_reason(
+                krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
+            )
+            .unwrap_or_else(|reason| {
+                panic!("the exact target stdlib must be provisioned: {reason}")
+            });
+            let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+                path,
+                KlibStdlibSemantics::Wasm,
+            )])
+            .unwrap();
+            let (artifacts, diagnostics) =
+                compile_program_with_provider(target, Entry::Box, &[source], Box::new(libraries));
+            assert_eq!(diagnostics, Vec::<String>::new(), "{target:?}");
+            let directory = std::env::temp_dir().join(format!(
+                "shape-preference-{}-{}",
+                target.name(),
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&directory).unwrap();
+            for (name, bytes) in &artifacts {
+                std::fs::write(directory.join(name), bytes).unwrap();
+            }
+            let loader = artifacts
+                .iter()
+                .find(|(name, _)| name.ends_with(".mjs"))
+                .expect("wasm loader")
+                .0
+                .as_str();
+            let output = std::process::Command::new("node")
+                .arg("--no-warnings")
+                .arg(directory.join(loader))
+                .output()
+                .expect("node runs the wasm box");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "{target:?} exit {:?}\n{stdout}{stderr}",
+                output.status.code()
+            );
+            assert_eq!(
+                stdout,
+                format!("{}OK", krusty::backend::BOX_RESULT_FRAME),
+                "{target:?} complete framed box result"
+            );
+            assert!(stderr.is_empty(), "{target:?} box stderr: {stderr:?}");
+            let _ = std::fs::remove_dir_all(&directory);
+        }
+    }
+
     /// A file dispatching `toString` on an erased receiver, and another file creating a value
     /// whose `toString` this target has no body for, decline together, whichever file comes first.
     /// A lambda converted to a `fun interface` inside a local class is such a value: kotlinc-wasm
