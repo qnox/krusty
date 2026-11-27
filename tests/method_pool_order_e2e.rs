@@ -593,3 +593,32 @@ abstract class Dispatcher : AbstractCoroutineContextElement(ContinuationIntercep
         &["Dispatcher"],
     );
 }
+
+/// A function's header descriptor interns with its header, even when an earlier method's inlined
+/// body interned the same descriptor first: `()V` follows `test`, ahead of the suspend lambda's
+/// class that the body names.
+#[test]
+fn a_header_descriptor_an_earlier_inlined_body_interned_stays_at_its_header() {
+    assert_identical_with_stdlib(
+        "HeaderDescriptor",
+        r#"import kotlin.coroutines.*
+
+fun builder(c: suspend () -> Unit) { }
+
+var c: Continuation<Any>? = null
+
+suspend fun <T> suspendMe(): T = suspendCoroutine {
+    c = it as Continuation<Any>
+}
+
+fun test() {
+    var invoked = false
+    builder {
+        suspendMe<Int>()
+    }
+    c?.resumeWithException(IllegalStateException("OK"))
+}
+"#,
+        &["HeaderDescriptorKt"],
+    );
+}
