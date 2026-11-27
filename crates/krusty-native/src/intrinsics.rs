@@ -2061,6 +2061,14 @@ pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'stati
             _ => {}
         }
     }
+    // `k.isInstance(value)`: the class literal's descriptor tested against the value, which is the
+    // test an `is` makes. The class object is the receiver and the value its one operand.
+    if signature.owner.classifier_matches("kotlin/reflect/KClass") {
+        return match (signature.name, signature.params) {
+            ("isInstance", [_]) => Some("kt_class_is_instance"),
+            _ => None,
+        };
+    }
     if signature
         .owner
         .classifier_matches("kotlin/text/StringBuilder")
