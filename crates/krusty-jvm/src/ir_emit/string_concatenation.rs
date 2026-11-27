@@ -173,8 +173,36 @@ impl Emitter<'_> {
         if self.erased_reference_result(part).is_some() {
             return self.emit_consumed_operand(part, code);
         }
+        if let Some(producer) = self.erased_value_class_box(part) {
+            self.emit_value(producer, code);
+            return Ty::obj("java/lang/Object");
+        }
         self.emit_value(part, code);
         self.value_ty(part)
+    }
+
+    /// A generic result read as a nullable value class that stays boxed (`KProperty0<I?>.get()`,
+    /// `List<I?>[0]` for `I(val v: Int)`) is already the object a template renders: the box's
+    /// `toString` or `null`. kotlinc appends the erased result as it is, so the coercion's
+    /// `checkcast` to the box class is dropped. A class whose nullable form is its carrier
+    /// (`Z(val v: String)` as `Z?`) is unboxed by the coercion and keeps it.
+    fn erased_value_class_box(&self, part: u32) -> Option<u32> {
+        let IrExpr::TypeOp {
+            op: krusty::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = self.ir.expr(part)
+        else {
+            return None;
+        };
+        let boxed = type_operand.non_null();
+        let slot = self.ir.physical_type(*arg)?;
+        (type_operand.is_nullable()
+            && self.is_value_class_ty(&boxed)
+            && self.value_ty(part) == boxed
+            && jvm_is_erased_top(slot)
+            && slot.array_elem().is_none())
+        .then_some(*arg)
     }
 
     /// Emit one `invokedynamic` argument, answering the type the recipe takes it at. The bootstrap
