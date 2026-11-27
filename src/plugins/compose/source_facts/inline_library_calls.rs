@@ -142,6 +142,20 @@ impl BodyScope<'_> {
             reject("an empty composable lambda");
             return None;
         }
+        // The values the lambda takes of its own, its receiver first, follow its captures.
+        let parameters = match lambda_parameters(
+            ir,
+            self.runtime,
+            argument.implementation,
+            *template,
+            captures.len() as u32,
+        ) {
+            Ok(parameters) => parameters,
+            Err(what) => {
+                reject(what);
+                return None;
+            }
+        };
         // A captured parameter of the caller is that parameter in the lambda's calls.
         let parameter_of_capture = |capture: u32| match captures
             .get(capture as usize)
@@ -156,7 +170,9 @@ impl BodyScope<'_> {
             if let Some((mut site, location)) = self.direct_call_site(
                 ir,
                 call,
-                CallValues::Parameters(captures.len() as u32),
+                CallValues::Parameters(
+                    ir.functions[argument.implementation as usize].params.len() as u32
+                ),
                 span,
                 rejections,
             ) {
@@ -175,7 +191,7 @@ impl BodyScope<'_> {
             call: argument.call,
             memoization,
             captures: captures.len() as u32,
-            parameters: Vec::new(),
+            parameters,
             implementation: argument.implementation,
             key,
             offsets: (0, 0),
