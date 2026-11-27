@@ -50,6 +50,7 @@ use crate::jvm::method_node::{Insn, MethodNode, Node, ShapeError};
 use crate::jvm::{
     bytecode_passes::fix_stack::{fix_stack, FixStackError},
     bytecode_passes::insn_list::EditableMethod,
+    bytecode_passes::temporaries,
 };
 
 pub use anonymous_object::{
@@ -161,7 +162,7 @@ pub fn inline(
     let mut node = preparation::prepare(&node, inline_only, parameters, scopes.is_some());
     default_lambda::store_captured_values(&mut node, parameters, lambdas)?;
     try_blocks::move_try_starts_to_their_first_instruction(&mut node)?;
-    let mut node = preprocess_node_before_inline(node)?;
+    let mut node = preprocess_node_before_inline(node, parameters)?;
     preparation::remove_fake_variable_initializations(&mut node);
     returns::normalize_local_returns(&mut node)?;
     let constructors =
@@ -194,16 +195,31 @@ pub fn inline(
     Ok(node)
 }
 
-/// Normalize inline-call stack brackets that were already in a body before that body is inlined.
+/// kotlinc's `preprocessNodeBeforeInline` over a body about to be inlined.
 ///
-/// This is kotlinc's `FixStackWithLabelNormalizationMethodTransformer` in
-/// `preprocessNodeBeforeInline`: its synthetic spill accesses must reach the enclosing
+/// `FixStackWithLabelNormalizationMethodTransformer` normalizes the inline-call stack brackets
+/// already in the body: its synthetic spill accesses must reach the enclosing
 /// `LocalVariablesSorter` before the body's own locals do. Brackets introduced while expanding
 /// this body remain for the finished caller's FixStack pass.
-fn preprocess_node_before_inline(node: MethodNode) -> Result<MethodNode, InlineError> {
+///
+/// `TemporaryVariablesEliminationTransformer` then folds the body's temporaries on their own, after
+/// an `@InlineOnly` body lost its variable table. An unused store becomes a `pop` there, so a marker
+/// `iconst_0; istore` of an inline the body called stays between a receiver's store and its load,
+/// and the caller's own pass keeps that store, as it keeps `find`'s copy of `firstOrNull`'s receiver.
+///
+/// The body's captured values are the caller's variables, read in place: a default lambda's
+/// captures stored before this pass, or a tail call's parameter writes inside a lambda, are read
+/// by the caller after the body, so the pass never treats a store to one as a temporary. kotlinc's
+/// bodies never write one (a lambda writes a captured `var` through its `Ref`).
+fn preprocess_node_before_inline(
+    node: MethodNode,
+    parameters: &Parameters,
+) -> Result<MethodNode, InlineError> {
     let mut editable = EditableMethod::new(node);
     fix_stack(&mut editable, "fake").map_err(InlineError::FixStack)?;
-    Ok(editable.finish())
+    let mut node = editable.finish();
+    temporaries::eliminate_before_inlining(&mut node, &parameters.captured_slots());
+    Ok(node)
 }
 
 const NOP: u8 = 0x00;

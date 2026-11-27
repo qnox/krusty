@@ -64,7 +64,8 @@ pub(super) fn inline_into(
     let fields: Vec<&str> = lambdas.iter().map(|lambda| lambda.field.as_str()).collect();
     replace_lambda_reads(&mut node, owner, &fields, parameters.real_size())?;
     try_blocks::move_try_starts_to_their_first_instruction(&mut node).map_err(inlining)?;
-    let mut node = super::super::preprocess_node_before_inline(node).map_err(inlining)?;
+    let mut node =
+        super::super::preprocess_node_before_inline(node, &parameters).map_err(inlining)?;
     preparation::remove_fake_variable_initializations(&mut node);
     returns::normalize_local_returns(&mut node).map_err(inlining)?;
     let classes = WithOwnCopy {

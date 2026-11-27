@@ -7,6 +7,7 @@
 
 use crate::fx_hash::HashSet;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 
 use super::super::instruction_graph::InstructionGraph;
 use super::null_check_folds::analysis_within_limit;
@@ -107,14 +108,19 @@ fn join_into(
 }
 
 /// Every temporary store of `method` with the loads that read it, by instruction number, in store
-/// order; `None` when the body is outside what the analysis models.
-pub(super) fn temporaries(method: &MethodNode) -> Option<BTreeMap<usize, Vec<usize>>> {
-    analyze(method, &mut || {})
+/// order; `None` when the body is outside what the analysis models. A store to a slot in `owned`
+/// writes a variable that lives on after the body, so it is never a temporary.
+pub(super) fn temporaries(
+    method: &MethodNode,
+    owned: &Range<u16>,
+) -> Option<BTreeMap<usize, Vec<usize>>> {
+    analyze(method, owned, &mut || {})
 }
 
 /// [`temporaries`], calling `on_step` for every instruction step of the fixpoint.
 pub(super) fn analyze(
     method: &MethodNode,
+    owned: &Range<u16>,
     on_step: &mut dyn FnMut(),
 ) -> Option<BTreeMap<usize, Vec<usize>>> {
     let graph = InstructionGraph::build(method)?;
@@ -147,7 +153,9 @@ pub(super) fn analyze(
         slot_count = slot_count.max(end);
     }
     let mut candidate: Vec<bool> = (0..n)
-        .map(|index| matches!(var_op(graph.insn(index)), Some(VarOp::Store(..))))
+        .map(|index| {
+            matches!(var_op(graph.insn(index)), Some(VarOp::Store(_, slot)) if !owned.contains(&slot))
+        })
         .collect();
     // Named locals: `(start, end, slot)`, end exclusive; one starting after the last instruction
     // covers none.

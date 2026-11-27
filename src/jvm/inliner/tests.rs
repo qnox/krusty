@@ -210,7 +210,7 @@ fn a_body_moves_above_its_temporaries_and_renames_its_locals() {
 }
 
 #[test]
-fn an_inline_only_body_loses_its_debug_information_and_its_marker() {
+fn an_inline_only_body_loses_its_debug_information_and_unloads_its_marker() {
     let inlined = inline_plain(
         &plus_one(),
         &temporaries(&[Category::Int]),
@@ -224,16 +224,19 @@ fn an_inline_only_body_loses_its_debug_information_and_its_marker() {
         .nodes
         .iter()
         .any(|node| matches!(node, Node::Line { .. })));
-    let instructions: Vec<&Insn> = inlined.instructions().take(5).collect();
-    // The marker store went with the variable table, and `y` took the first free slot.
+    let instructions: Vec<&Insn> = inlined.instructions().take(6).collect();
+    // With the variable table gone, kotlinc's temporaries pass over the body runs before its
+    // fake-variable cleanup: the marker store is a temporary nobody loads and becomes a `pop`
+    // (the caller's stack peephole drops the pair later), and `y`'s store and load fold.
     assert_eq!(
         instructions,
         vec![
             &Insn::Op(0x00),
+            &Insn::Op(0x03),
+            &Insn::Op(0x57),
             &Insn::Var { op: 0x15, slot: 5 },
             &Insn::Op(0x04),
             &Insn::Op(0x60),
-            &Insn::Var { op: 0x36, slot: 6 },
         ]
     );
 }

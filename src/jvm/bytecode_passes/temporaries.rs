@@ -3,7 +3,8 @@
 //!
 //! kotlinc's JVM backend writes a temporary (an unnamed local with no `LocalVariableTable` entry) as
 //! an ordinary `store`/`load` pair, then this pass rewrites the pairs whose value can stay on the
-//! operand stack. In order:
+//! operand stack. A body that still carries suspend inline markers is left as it is, as kotlinc
+//! leaves it, until its state machine is built. In order:
 //!
 //! - `xload; pop` (`pop2` for a two-word value) becomes a `nop`, then every `nop` that need not
 //!   preserve a debug/protected boundary is removed ([`trivial_cleanup`]);
@@ -32,7 +33,9 @@ mod tests;
 mod trivial_cleanup;
 
 use std::collections::BTreeSet;
+use std::ops::Range;
 
+use crate::jvm::bytecode_passes::coroutines::markers::is_suspend_inline_marker;
 use crate::jvm::method_node::{LabelId, MethodNode};
 use adjacency::Body;
 
@@ -51,6 +54,31 @@ pub(crate) fn eliminate(
     preserved_unreachable_labels: &BTreeSet<LabelId>,
     post_coroutine: bool,
 ) -> Option<Elimination> {
+    run(
+        method,
+        preserved_unreachable_labels,
+        post_coroutine,
+        &(0..0),
+    )
+}
+
+/// The pass over a body about to be inlined (`preprocessNodeBeforeInline`). The slots in `owned`
+/// hold the caller's variables the body reaches in place, which the caller reads after the body,
+/// so a store to one is never a temporary.
+pub(crate) fn eliminate_before_inlining(method: &mut MethodNode, owned: &Range<u16>) {
+    run(method, &BTreeSet::new(), false, owned);
+}
+
+fn run(
+    method: &mut MethodNode,
+    preserved_unreachable_labels: &BTreeSet<LabelId>,
+    post_coroutine: bool,
+    owned: &Range<u16>,
+) -> Option<Elimination> {
+    // A body with suspend inline markers waits for its state machine: kotlinc leaves it untouched.
+    if method.nodes.iter().any(is_suspend_inline_marker) {
+        return None;
+    }
     let original = method.nodes.clone();
     let mut body = Body::take(method);
     let rewritten = rewrite(
@@ -58,6 +86,7 @@ pub(crate) fn eliminate(
         method,
         preserved_unreachable_labels,
         post_coroutine,
+        owned,
     );
     method.nodes = match rewritten {
         Some(_) => body.list.to_nodes(),
@@ -71,6 +100,7 @@ fn rewrite(
     method: &mut MethodNode,
     preserved_unreachable_labels: &BTreeSet<LabelId>,
     post_coroutine: bool,
+    owned: &Range<u16>,
 ) -> Option<Elimination> {
     let mut changed = trivial_cleanup::remove_discarded_loads(body);
     changed |= trivial_cleanup::remove_nops(body);
@@ -78,7 +108,7 @@ fn rewrite(
     changed |= folds.folded;
     let mut analyzed = method.clone();
     analyzed.nodes = body.list.to_nodes();
-    let found = temporary_values::temporaries(&analyzed)?;
+    let found = temporary_values::temporaries(&analyzed, owned)?;
     let instructions = body.instructions();
     let temporaries = found
         .into_iter()

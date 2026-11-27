@@ -124,6 +124,11 @@ impl Parameters {
         self.args_size() - self.real_size()
     }
 
+    /// The slots of the captured values, after the real parameters.
+    pub(crate) fn captured_slots(&self) -> std::ops::Range<u16> {
+        self.real_size()..self.args_size()
+    }
+
     /// The inline lambda a parameter's declaration slot holds (`getFunctionalArgumentIfExists`).
     pub(super) fn lambda_at(&self, slot: usize) -> Option<usize> {
         let mut declaration = 0usize;
