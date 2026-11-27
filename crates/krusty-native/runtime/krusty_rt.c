@@ -1428,6 +1428,64 @@ static kt_boolean kt_is_encoded_surrogate(const char *bytes, unsigned char secon
     return (unsigned char)bytes[0] == 0xEDu && ((unsigned char)bytes[1] & 0xF0u) == second_high_bits;
 }
 
+/* The four-byte encoding of the character whose HIGH half is encoded at `high` and whose LOW half is
+   encoded at `low`, each in its three bytes. Each half's low ten bits are its share of the code
+   point above U+FFFF. */
+static void kt_encode_surrogate_pair(const char *high, const char *low, char *out) {
+    uint32_t high_bits = ((uint32_t)(unsigned char)high[1] & 0x0Fu) << 6 |
+                         ((uint32_t)(unsigned char)high[2] & 0x3Fu);
+    uint32_t low_bits = ((uint32_t)(unsigned char)low[1] & 0x0Fu) << 6 |
+                        ((uint32_t)(unsigned char)low[2] & 0x3Fu);
+    uint32_t code_point = 0x10000u + (high_bits << 10 | low_bits);
+    out[0] = (char)(0xF0u | (code_point >> 18));
+    out[1] = (char)(0x80u | ((code_point >> 12) & 0x3Fu));
+    out[2] = (char)(0x80u | ((code_point >> 6) & 0x3Fu));
+    out[3] = (char)(0x80u | (code_point & 0x3Fu));
+}
+
+/* `sb.reverse()`, by CHARACTER like Java's: the whole byte run is reversed and each multi-byte
+   encoding is then turned back, so a surrogate pair stays together. Answers the builder itself. */
+KRef kt_string_builder_reverse(KRef self) {
+    KStringBuilder *builder = (KStringBuilder *)self;
+    char *bytes = kt_bytes_of((KByteArray *)builder->storage);
+    kt_int length = builder->byte_length;
+    for (kt_int low = 0, high = length - 1; low < high; low++, high--) {
+        char swap = bytes[low];
+        bytes[low] = bytes[high];
+        bytes[high] = swap;
+    }
+    for (kt_int at = 0; at < length;) {
+        /* After the reversal an encoding's continuation bytes (10xxxxxx) precede its lead byte. */
+        kt_int end = at;
+        while (end < length && ((unsigned char)bytes[end] & 0xC0u) == 0x80u) {
+            end++;
+        }
+        kt_int stop = end < length ? end + 1 : end;
+        for (kt_int low = at, high = stop - 1; low < high; low++, high--) {
+            char swap = bytes[low];
+            bytes[low] = bytes[high];
+            bytes[high] = swap;
+        }
+        at = stop;
+    }
+    /* Reversing can bring a lone low half and a lone high half together as a high half then a low
+       one, which is one character: join them as an append does, so equality and a later reversal
+       see the pair. */
+    kt_int written = 0;
+    for (kt_int read = 0; read < length;) {
+        if (read + 6 <= length && kt_is_encoded_surrogate(bytes + read, 0xA0u) &&
+            kt_is_encoded_surrogate(bytes + read + 3, 0xB0u)) {
+            kt_encode_surrogate_pair(bytes + read, bytes + read + 3, bytes + written);
+            written += 4;
+            read += 6;
+        } else {
+            bytes[written++] = bytes[read++];
+        }
+    }
+    builder->byte_length = written;
+    return self;
+}
+
 /* Append UTF-8 bytes, JOINING a surrogate pair that meets at the tail. A character a program
    assembles unit by unit (`for (c in s) sb.append(c)`) arrives as a high half, then a low one, each
    in its own three bytes; stored side by side they would be CESU-8, which no literal of the
@@ -1440,17 +1498,9 @@ static void kt_string_builder_append_bytes(KRef self, const char *bytes, kt_int 
     kt_int at = builder->byte_length;
     if (length >= 3 && at >= 3 && kt_is_encoded_surrogate(bytes, 0xB0u) &&
         kt_is_encoded_surrogate(storage + at - 3, 0xA0u)) {
-        uint32_t high = ((uint32_t)(unsigned char)storage[at - 2] & 0x0Fu) << 6 |
-                        ((uint32_t)(unsigned char)storage[at - 1] & 0x3Fu);
-        uint32_t low = ((uint32_t)(unsigned char)bytes[1] & 0x0Fu) << 6 |
-                       ((uint32_t)(unsigned char)bytes[2] & 0x3Fu);
-        /* Each half's low ten bits are its share of the code point above U+FFFF. */
-        uint32_t code_point = 0x10000u + (high << 10 | low);
         at -= 3;
-        storage[at++] = (char)(0xF0u | (code_point >> 18));
-        storage[at++] = (char)(0x80u | ((code_point >> 12) & 0x3Fu));
-        storage[at++] = (char)(0x80u | ((code_point >> 6) & 0x3Fu));
-        storage[at++] = (char)(0x80u | (code_point & 0x3Fu));
+        kt_encode_surrogate_pair(storage + at, bytes, storage + at);
+        at += 4;
         bytes += 3;
         length -= 3;
     }

@@ -547,6 +547,11 @@ KRef kt_mutable_list_new(void) {
     return (KRef)list;
 }
 
+/* The `ArrayList.build()` a `buildList` block ends in: the list the block filled, answered as the
+   read-only list the caller sees. Read-only is a static claim here, not a runtime one: the runtime
+   holds no flag for it, and nothing the program can ask tells the two apart. */
+KRef kt_mutable_list_build(KRef self) { return self; }
+
 /* `ArrayList(initialCapacity)`. The capacity is a hint and nothing observable depends on a valid
    one, but a NEGATIVE one is an error Kotlin raises, with the JVM's wording, and a program may catch
    it. */

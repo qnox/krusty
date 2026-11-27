@@ -78,6 +78,27 @@ void kt_program_entry(void) {
     CHECK(TEXT_IS(em2, "a\xF0\x9F\x98\x80") && kt_string_length(em2) == 3,
           "setLength after the pair keeps it whole\n");
 
+    KRef rv = kt_string_builder_with_text(kt_string_utf8(emoji, sizeof(emoji) - 1));
+    CHECK(kt_string_builder_reverse(rv) == rv && TEXT_IS(rv, "b\xF0\x9F\x98\x80" "a") &&
+              kt_string_length(rv) == 4,
+          "reverse keeps a surrogate pair whole and answers the builder\n");
+    KRef rw = kt_string_builder_with_text(kt_string_utf8("abc", 3));
+    (void)kt_string_builder_reverse(rw);
+    CHECK(TEXT_IS(rw, "cba"), "reverse\n");
+    /* A lone low half then a lone high half is a pair once reversed, and stays whole after that. */
+    KRef halves = kt_string_builder_new();
+    (void)kt_string_builder_append(halves, kt_string_utf8("\xED\xB8\x80", 3));
+    (void)kt_string_builder_append(halves, kt_string_utf8("\xED\xA0\xBD", 3));
+    (void)kt_string_builder_reverse(halves);
+    CHECK(TEXT_IS(halves, "\xF0\x9F\x98\x80") && kt_string_length(halves) == 2,
+          "reverse joins halves it brings together into a pair\n");
+    (void)kt_string_builder_reverse(halves);
+    CHECK(TEXT_IS(halves, "\xF0\x9F\x98\x80") && kt_string_length(halves) == 2,
+          "reversing a pair again keeps it whole\n");
+    KRef re = kt_string_builder_new();
+    (void)kt_string_builder_reverse(re);
+    CHECK(TEXT_IS(re, ""), "reverse of an empty builder\n");
+
     CHECK(TEXT_IS(kt_string_builder_with_capacity(0), ""), "StringBuilder(0)\n");
     KRef grown = kt_string_builder_with_capacity(5);
     (void)kt_string_builder_append(grown, kt_string_utf8("past the capacity", 17));
