@@ -1273,6 +1273,14 @@ mod tests {
     }
 
     #[test]
+    fn the_analysis_round_reads_only_the_parsed_declarations() {
+        // It lists a module's declarations as positions: the outline of each parsed file and the
+        // offsets kotlinc measures. It resolves nothing and reaches no backend.
+        let allowed = ["diag", "features", "frontend", "libraries"];
+        assert_allowed_crate_modules("src/analysis_round.rs", &allowed);
+    }
+
+    #[test]
     fn the_ksp_round_reads_only_the_declaration_only_analysis() {
         // It describes a module's declaration headers to a KSP host: the parsed declarations and
         // what their annotations resolved to. It never checks a body, lowers or reaches a backend.

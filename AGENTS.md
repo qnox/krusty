@@ -38,6 +38,16 @@ account opened the pull request. Dependabot's commits and pull request text are 
 upstream release notes, which can name an assistant that contributed upstream. The lefthook
 `commit-msg` hook runs it on each local commit, including the identity the commit is about to get.
 
+## Review guidelines
+
+- **Attribution is checked by CI on the pull request's own commits, not by a reviewer.** A review
+  sandbox that applies the diff and commits it locally creates a commit under the sandbox's own
+  identity and message, which is not part of the pull request. Never run
+  `scripts/check-attribution.sh` on such a commit and never report its identity or message as an
+  attribution finding. Report attribution only for a commit that is on the pull request's head
+  branch (`git cat-file -t <sha>` succeeds and the SHA is listed among the pull request's commits),
+  or for the pull request's title and body as published.
+
 ## Engineering conventions
 
 - **TDD is required.** Every feature lands with a test; every phase ends on a green harness run.

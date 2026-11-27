@@ -19,7 +19,6 @@ fn an_unsupported_kotlinc_argument_exits_nonzero_and_writes_nothing() {
         // JVM output shape.
         "-Xemit-jvm-type-annotations",
         "-Xno-unified-null-checks",
-        "-Xjvm-enable-preview",
         "-Xno-source-debug-extension",
     ] {
         let work = common::scratch_dir().expect("allocate a scratch directory");

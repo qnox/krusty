@@ -133,7 +133,6 @@ boxingOptimization/simpleUninitializedMerge.kt
 boxingOptimization/unsafeRemoving.kt
 boxingOptimization/unsignedArrayForEach.kt
 boxingOptimization/variables.kt
-bridges/covariantGenericDiamond.kt
 bridges/delegationComplexWithList.kt
 bridges/genericProperty.kt
 bridges/internalMethodFakeOverrideInFriendModule.kt
@@ -161,8 +160,6 @@ bridges/test5.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/boundReferences.kt
 callableReference/adaptedReferences/extensionPropertyToFun.kt
-callableReference/adaptedReferences/inlineDefault.kt
-callableReference/adaptedReferences/inlineVararg.kt
 callableReference/adaptedReferences/innerConstructorWithVararg.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
 callableReference/adaptedReferences/suspendConversion/inlineWithContextParameterAsAPropertyType.kt
@@ -231,13 +228,10 @@ constants/kt9532.kt
 contextParameters/contextPropertyInInterface.kt
 contextParameters/explicitPassing.kt
 contextParameters/kt51863.kt
-contextParameters/propertyCompoundAssignment.kt
-contextParameters/substitutedContextReceivers.kt
 contextParameters/suspendContextParemetersWithExtension.kt
 contracts/contractForCast.kt
 contracts/isNullString.kt
 contracts/kt39374.kt
-contracts/kt47300.kt
 contracts/nonNullSmartCast.kt
 contracts/referenceToGenericInDeserializedContract.kt
 contracts/require.kt
@@ -498,9 +492,6 @@ dataflow/scope1.kt
 dataflow/uninitialized_val.kt
 deadCodeElimination/emptyVariableRange.kt
 defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
-defaultArguments/implementedByFake.kt
-defaultArguments/implementedByFake2.kt
-defaultArguments/implementedByFake3.kt
 defaultArguments/useThisInLambda.kt
 delegatedProperty/callableReferenceAsSecondArgumentOfDelegate.kt
 delegatedProperty/correctFieldsOrder.kt
@@ -774,7 +765,6 @@ inline/inlineMethod.kt
 inline/inlineNoReturn.kt
 inline/inlineOrder.kt
 inline/inlineSimpleAssignment.kt
-inline/inlinedLambdaWithErasedParamType.kt
 inline/iteratorOnInlineFunctionResult.kt
 inline/lambdaInLambda.kt
 inline/lambdaReassignment.kt
@@ -794,7 +784,6 @@ inline/propertyAccessorInline.kt
 inline/redundantCoercionsCleaner.kt
 inline/redundantCoercionsCleanerKT48876.kt
 inline/redundantCoercionsCleanerKT49356.kt
-inline/rootConstructor.kt
 inline/safeCall.kt
 inline/sharedVar.kt
 inline/simpleReturnFunctionWithResultUnused.kt
@@ -871,11 +860,9 @@ inlineClasses/kt33119Generic.kt
 inlineClasses/kt47762Generic.kt
 inlineClasses/kt47823.kt
 inlineClasses/kt51157.kt
-inlineClasses/overridingFunCallingPrivateFunGeneric.kt
 inlineClasses/resultRunCatchingOrElse.kt
 inlineClasses/secondaryConstructorWithVarargGeneric.kt
 inlineClasses/secondaryConstructorsInsideInlineClassWithPrimitiveCarrierTypeGeneric.kt
-inlineClasses/smartCastOnThisOfInlineClassTypeGeneric.kt
 inlineClasses/toStringCallingPrivateFunGeneric.kt
 inlineClasses/unboxGenericParameter/funInterface/primitive.kt
 inlineClasses/unboxGenericParameter/lambda/primitive.kt
@@ -1156,9 +1143,6 @@ ranges/contains/evaluationOrderForRangeLiteral.kt
 ranges/contains/evaluationOrderForRangeLiteralReversed.kt
 ranges/contains/evaluationOrderForUntil.kt
 ranges/contains/evaluationOrderForUntilReversed.kt
-ranges/contains/generated/charDownTo.kt
-ranges/contains/generated/intDownTo.kt
-ranges/contains/generated/longDownTo.kt
 ranges/contains/generated/uintDownTo.kt
 ranges/contains/generated/uintRangeTo.kt
 ranges/contains/generated/uintRangeUntil.kt
@@ -2021,7 +2005,6 @@ unsignedTypes/unsignedIntCompare.kt
 unsignedTypes/unsignedLiteralsForMaxLongValue.kt
 unsignedTypes/unsignedLongCompare.kt
 unsignedTypes/unsignedRangeIterator.kt
-unsignedTypes/varargsOfUnsignedTypes.kt
 vararg/spreadCopiesArray.kt
 vararg/varargInTailrec.kt
 wasm-new-exception-handling/catch1.kt

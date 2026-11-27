@@ -457,7 +457,7 @@ impl BodyLowering<'_, '_, '_> {
                 supplied.len()
             ));
         }
-        let mut arguments = Vec::with_capacity(supplied.len() + 1);
+        let mut arguments = Vec::with_capacity(supplied.len());
         // The owner's instance is the accessor's first operand, exactly as it is for any other
         // instance method; the declared parameters follow in the order the layout recorded.
         let dispatch = match owner {
@@ -468,7 +468,6 @@ impl BodyLowering<'_, '_, '_> {
                 let Some(object) = self.receiver(receiver)? else {
                     return Ok(None);
                 };
-                arguments.push(object);
                 Some((owner, object))
             }
         };
@@ -481,11 +480,24 @@ impl BodyLowering<'_, '_, '_> {
             }
             arguments.push(argument);
         }
+        self.call_receiver_accessor(function, dispatch, &arguments)
+    }
+
+    /// Call `function`, the accessor of a property with a receiver or context parameters, with its
+    /// operands already converted to the types it declares: through its owner's dispatch slot when
+    /// it is a member's, directly when it is a top-level property's.
+    pub(super) fn call_receiver_accessor(
+        &mut self,
+        function: FunId,
+        dispatch: Option<(TypeName, Value)>,
+        arguments: &[Value],
+    ) -> Result<Option<Value>, Unsupported> {
+        let parameters = self.file.ir.functions[function as usize].params.clone();
         let Some((owner, object)) = dispatch else {
             let id = self.file.functions[function as usize]
                 .ok_or_else(|| "a property accessor with no body".to_string())?;
             let func_ref = self.func_ref(id);
-            let call = self.emit_call(func_ref, &arguments)?;
+            let call = self.emit_call(func_ref, arguments)?;
             return Ok(self.builder.inst_results(call).first().copied());
         };
         let class = self.file.class_of(owner, "a property accessor of")?;
@@ -494,7 +506,7 @@ impl BodyLowering<'_, '_, '_> {
             return Err("a member accessor with no dispatch slot".into());
         };
         let ret = self.file.ir.functions[function as usize].ret;
-        self.dispatch_through(object, slot, &parameters, ret, &arguments[1..])
+        self.dispatch_through(object, slot, &parameters, ret, arguments)
     }
 }
 

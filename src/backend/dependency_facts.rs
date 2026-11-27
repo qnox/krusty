@@ -1490,6 +1490,17 @@ impl CheckedBackendCallables {
             .or_else(|| self.sam_declarations.get(&identity))
     }
 
+    /// The dependency properties that store their value class's underlying value, by their
+    /// getters' identity, as their providers normalized them.
+    pub fn value_class_storage_properties(
+        &self,
+    ) -> impl Iterator<Item = crate::fir::ResolvedPropertyOverrideTarget> + '_ {
+        self.properties
+            .values()
+            .filter(|property| property.declares_value_class_storage)
+            .map(|property| crate::fir::ResolvedPropertyOverrideTarget::External(property.getter))
+    }
+
     /// The fact for a dependency property identity this file's IR holds. `None` means the identity
     /// is not one of this file's.
     pub fn property(&self, identity: ExternalPropertyId) -> Option<&BackendPropertyFact> {

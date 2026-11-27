@@ -420,6 +420,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             read_classes,
             dispatched,
             private_member_classes,
+            object_defaults,
         } = closure;
         let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
@@ -434,6 +435,7 @@ pub(super) fn emit_dependencies<B: Backend>(
         .with_indices_bounds(indices_bounds)
         .with_read_classes(read_classes)
         .with_private_member_classes(private_member_classes)
+        .with_object_defaults(object_defaults)
         .with_enum_entries_factory(entries_factory.clone())
         .with_target_classifiers(&target_represents_classifier)
         .with_expansion_copies(facts.inline_bodies());
@@ -805,6 +807,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             &mut callables,
             platform,
             &dispatched_classes,
+            &[],
         ) {
             diags.error(Span::new(0, 0), format!("internal error: {error}"));
             return Vec::new();

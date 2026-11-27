@@ -16,6 +16,10 @@ enum Access {
     /// A member of an ordinary or file-local class: it reads its receiver's fields and writes the
     /// mutable ones.
     Member,
+    /// A lambda inside such a member. It neither reads nor writes a field itself; a property
+    /// reference in it may designate one of the member's class fields, on the receiver the
+    /// reference binds, for an atomic access the lambda's inline expansion performs.
+    Designation,
 }
 
 #[derive(Clone, Copy)]
@@ -39,10 +43,17 @@ pub(super) struct InstanceStorageFrame<'a> {
 }
 
 impl<'a> InstanceStorageFrame<'a> {
-    /// Only constructor initialization storage was inherited by nested bodies. A value member's
-    /// read authority remains local to that member, as before the shared frame.
-    pub(super) fn nested_initializer(&self) -> Option<Self> {
-        matches!(self.access, Access::Initializer).then(|| self.clone())
+    /// The frame of a lambda inside this body: an initializer's storage, or a member's fields
+    /// for designation only ([`Access::Designation`]).
+    pub(super) fn nested(&self) -> Option<Self> {
+        match self.access {
+            Access::Initializer => Some(self.clone()),
+            Access::Member => Some(Self {
+                access: Access::Designation,
+                ..self.clone()
+            }),
+            Access::ValueReadOnly | Access::Designation => None,
+        }
     }
 
     pub(super) fn initializer(
@@ -176,7 +187,9 @@ impl<'a> InstanceStorageFrame<'a> {
                 Access::ValueReadOnly => {
                     "a value class member reads a field outside its declaring class"
                 }
-                Access::Member => "a class member accesses a field outside its declaring class",
+                Access::Member | Access::Designation => {
+                    "a class member accesses a field outside its declaring class"
+                }
             }));
         };
         if matches.next().is_some() {
@@ -252,6 +265,13 @@ impl<'a> BodyLowering<'a> {
         if value.is_some() && matches!(frame.access, Access::ValueReadOnly) {
             return unsupported("a field write");
         }
+        if matches!(frame.access, Access::Designation) {
+            return unsupported(if value.is_some() {
+                "a field write"
+            } else {
+                "a field read"
+            });
+        }
         let field = frame.field(symbol)?;
         if value.is_some() && matches!(frame.access, Access::Member) && field.final_ {
             return Err(mismatch("a class member writes a final field"));
@@ -266,7 +286,9 @@ impl<'a> BodyLowering<'a> {
         let declared_receiver = declared_receiver.ok_or_else(|| {
             mismatch(match access {
                 Access::ValueReadOnly => "a value class member has no receiver",
-                Access::Initializer | Access::Member => "a class member has no receiver",
+                Access::Initializer | Access::Member | Access::Designation => {
+                    "a class member has no receiver"
+                }
             })
         })?;
         let receiver =
@@ -358,7 +380,9 @@ impl<'a> BodyLowering<'a> {
     /// The target stdlib's atomic access `operation` through a reference to a property of this
     /// member's class: the same access to the property's backing field, on the reference's one
     /// bound receiver. The reference is not a value and its accessor lambdas are not called; the
-    /// operands follow, in order, after that receiver.
+    /// operands follow, in order, after that receiver. A reference this body does not hold itself
+    /// (a lambda's result, in an inline helper) is resolved once inline expansion has replaced it
+    /// with the lambda's own reference ([`IrCheckedOperation::AtomicFieldThrough`]).
     pub(super) fn atomic_field(
         &mut self,
         operation: AtomicOperation,
@@ -377,16 +401,64 @@ impl<'a> BodyLowering<'a> {
                 "an atomic field access has another shape than its declaration's",
             ));
         };
+        let reference_ty = self.ty(self.arena.expr(reference), "atomic field reference")?;
+        let held = matches!(
+            self.arena.expr(reference).kind,
+            KlibIrExprKind::RichPropertyReference { .. }
+        );
+        let reference = if held {
+            self.field_designation(self.arena.expr(reference), reference_ty)?
+        } else {
+            self.operand(reference, reference_ty)?
+        };
+        // The field's storage type types every operand; until the reference is resolved, the
+        // intrinsic's type argument, the referenced property's type, does.
+        let field_ty = match self.ir.expr(reference) {
+            IrExpr::Checked(operation) => match &**operation {
+                IrCheckedOperation::FieldDesignation { ty, .. } => Some(*ty),
+                _ => None,
+            },
+            _ => None,
+        };
+        let operand_ty = match (field_ty, access.type_arguments.as_slice()) {
+            (Some(field_ty), _) => field_ty,
+            (None, &[Some(property)]) => self.semantic(property)?,
+            (None, _) => {
+                return Err(mismatch(
+                    "an atomic field access does not apply its property's type",
+                ))
+            }
+        };
+        let operands = operands
+            .into_iter()
+            .map(|operand| self.operand(operand, operand_ty))
+            .collect::<Lowered<Vec<_>>>()?;
+        let through = self.ir.add_expr(IrExpr::Checked(Box::new(
+            IrCheckedOperation::AtomicFieldThrough {
+                operation,
+                reference,
+                operands,
+            },
+        )));
+        let through = self.typed(through, ty);
+        if field_ty.is_some() {
+            return super::super::atomic_references::resolve(self.ir, through).map(|()| through);
+        }
+        Ok(through)
+    }
+
+    /// The field a property reference to a property of this body's class designates, on the
+    /// one receiver the reference binds: the only use a library body makes of such a reference
+    /// is as the receiver of an atomic access, directly or as a lambda's result.
+    pub(super) fn field_designation(&mut self, reference: &KlibIrExpr, ty: Ty) -> Lowered<ExprId> {
         let KlibIrExprKind::RichPropertyReference {
             bound_values,
             reflection_target: Some(property),
             setter: Some(_),
             ..
-        } = &self.arena.expr(reference).kind
+        } = &reference.kind
         else {
-            return unsupported(
-                "an atomic field access through another receiver than a property reference",
-            );
+            return unsupported("a property reference");
         };
         let &[bound] = bound_values.as_slice() else {
             return unsupported(
@@ -396,9 +468,9 @@ impl<'a> BodyLowering<'a> {
         let Some(frame) = self
             .instance_storage
             .as_ref()
-            .filter(|frame| matches!(frame.access, Access::Member))
+            .filter(|frame| matches!(frame.access, Access::Member | Access::Designation))
         else {
-            return unsupported("an atomic field access outside a member of its class");
+            return unsupported("a property reference outside a member of its class");
         };
         let mut backing = frame
             .properties
@@ -406,43 +478,23 @@ impl<'a> BodyLowering<'a> {
             .filter(|(declared, _)| *declared == property);
         let (Some(&(_, field)), None) = (backing.next(), backing.next()) else {
             return Err(mismatch(
-                "an atomic field access names a property outside its member's class",
+                "a property reference names a property outside its member's class",
             ));
         };
         let field = frame.field(field)?;
         let (class, receiver_ty) = (frame.class, frame.receiver);
-        if field.final_ && operation != AtomicOperation::Load {
-            return Err(mismatch("an atomic field access writes a final field"));
-        }
-        let result = match operation {
-            AtomicOperation::Store => Ty::Unit,
-            AtomicOperation::CompareAndSet => Ty::Boolean,
-            AtomicOperation::Load
-            | AtomicOperation::Exchange
-            | AtomicOperation::CompareAndExchange
-            | AtomicOperation::FetchAndAdd => field.ty,
-        };
-        if ty != result {
-            return Err(mismatch(
-                "an atomic field access disagrees with its field's storage type",
-            ));
-        }
         let receiver_ty = receiver_ty.ok_or_else(|| mismatch("a class member has no receiver"))?;
         let receiver = self.operand(bound, receiver_ty)?;
-        let operands = operands
-            .into_iter()
-            .map(|operand| self.operand(operand, field.ty))
-            .collect::<Lowered<Vec<_>>>()?;
-        let lowered =
-            self.ir
-                .add_expr(IrExpr::Checked(Box::new(IrCheckedOperation::AtomicField {
-                    operation,
-                    receiver,
-                    class,
-                    index: field.index,
-                    operands,
-                })));
-        Ok(self.typed(lowered, ty))
+        let designation = self.ir.add_expr(IrExpr::Checked(Box::new(
+            IrCheckedOperation::FieldDesignation {
+                receiver,
+                class,
+                index: field.index,
+                ty: field.ty,
+                final_: field.final_,
+            },
+        )));
+        Ok(self.typed(designation, ty))
     }
 
     /// The expression `reference` stands for: itself, or, for a returnable block whose only
