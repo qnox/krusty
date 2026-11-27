@@ -1114,6 +1114,7 @@ fn fn_info(
             is_final: sig.is_final(),
             deprecated_hidden: false,
             inherited_by_delegation: false,
+            signature_polymorphic: false,
             return_value_status: None,
         },
         visibility: sig.visibility,

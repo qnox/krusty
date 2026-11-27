@@ -624,6 +624,26 @@ impl Ty {
         }
     }
 
+    /// The type of a not-null operator (`!!`, the left of `?:`, the receiver of `?.`) applied to a
+    /// value of this type, in the release `quirks` describes. It differs from smart-casting the
+    /// value to non-null only for a nullable intersection fixed below an upper type, whose operator
+    /// result keeps that upper type from 2.5.
+    pub fn not_null_operator_result(self, quirks: crate::kotlin_version::Quirks) -> Ty {
+        if quirks.has(crate::kotlin_version::Quirk::NotNullOperatorDropsIntersectionApproximation) {
+            self.definitely_non_null()
+        } else {
+            self.non_null_keeping_intersection_bound()
+        }
+    }
+
+    /// This type made non-null, keeping the upper type a nullable intersection was fixed below.
+    pub fn non_null_keeping_intersection_bound(self) -> Ty {
+        match self.kind() {
+            TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Intersection(_)) => inner,
+            _ => self.definitely_non_null(),
+        }
+    }
+
     /// The intersection `T & Any` of a type parameter whose bound admits null, as a KLIB
     /// serializes a definitely-non-null type. Any other type is already as non-null as it can be.
     pub fn marked_definitely_not_null(self) -> Ty {

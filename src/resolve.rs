@@ -112,6 +112,7 @@ mod checked_annotation_publication;
 mod checked_constant_publication;
 mod data_class_copy_visibility;
 pub(crate) mod operator_override_relations;
+mod selected_member_use;
 pub(crate) use actualization_names::actualization_type_bindings;
 #[cfg(test)]
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
@@ -308,6 +309,7 @@ mod name_read_demand;
 mod named_class_constructors;
 pub(crate) mod operator_calls;
 mod operator_declarations;
+mod operator_of_declarations;
 mod opt_in_usage;
 mod primitive_reference;
 use operator_calls::{
@@ -476,7 +478,9 @@ use context_sensitive_resolution::{expected_nested_classifier, parameterized_cla
 use delegated_properties::{
     select_delegate_operator, select_delegate_operator_return, DelegateConventionSite,
 };
-pub(crate) use dependency_body_call_edges::for_checked_klib_bodies;
+pub(crate) use dependency_body_call_edges::{
+    for_checked_klib_bodies, for_checked_klib_bodies_reading,
+};
 pub(crate) use dependency_platform::DependencyPlatform;
 use extension_reference_selection::ExtensionReferenceChoice;
 pub(crate) use finalized_projection::{
@@ -1253,19 +1257,6 @@ fn builtin_inc_dec_result(operand: Ty) -> Option<Ty> {
 /// which is weaker but never wrong. Box
 /// `callableReference/property/extensionPropertyWithExtensionType.kt` covers it.
 const CALLABLE_INVOKE_OPERATOR: &str = "invoke";
-
-/// The augmented-assignment operator name for a binary op (`+=` → `plusAssign`, etc.). Only the five
-/// arithmetic compound operators have an `…Assign` form.
-fn assign_op_name(op: BinOp) -> Option<&'static str> {
-    Some(match op {
-        BinOp::Add => "plusAssign",
-        BinOp::Sub => "minusAssign",
-        BinOp::Mul => "timesAssign",
-        BinOp::Div => "divAssign",
-        BinOp::Rem => "remAssign",
-        _ => return None,
-    })
-}
 
 fn delegated_getvalue_ret_for_signature(
     file: &File,
@@ -15017,7 +15008,7 @@ impl<'a> Checker<'a> {
                         self.this_labels.pop();
                     }
                     self.this_extension_receiver = previous_extension_receiver;
-                    self.inferred_declaration_value_ty(*e, inferred_declaration_ty(inferred))
+                    self.inferred_declaration_value_ty(*e, inferred)
                 }
                 _ => Ty::Unit,
             };
@@ -23696,6 +23687,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_fun_rets: HashMap::default(),
         inferred_ext_fun_rets: HashMap::default(),
         inferred_method_rets: HashMap::default(),
+        operator_of_overloads: Vec::new(),
         inferred_source_member_rets: HashMap::default(),
         inferred_stable_declaration_rets: HashMap::default(),
         inferred_declaration_publications: Default::default(),
@@ -24697,6 +24689,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     c.narrow_value_class_receivers();
     c.narrow_script_template_receivers();
     c.publish_member_declaring_receivers();
+    c.report_operator_of_overloads();
     let enhanced_values = c.enhanced_value_heads();
     let builtin_implementations = match builtin_implementation::for_checked_unit(&c) {
         Ok(implementations) => implementations,
@@ -24730,6 +24723,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         inferred_fun_rets,
         inferred_ext_fun_rets,
         inferred_method_rets,
+        operator_of_overloads: _,
         inferred_source_member_rets,
         inferred_stable_declaration_rets,
         inferred_declaration_publications,
@@ -25737,6 +25731,7 @@ struct Checker<'a> {
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
     inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
     inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
+    operator_of_overloads: Vec<operator_of_declarations::OperatorOfOverload>,
     inferred_source_member_rets: HashMap<crate::libraries::SourceMember, Ty>,
     inferred_stable_declaration_rets: HashMap<crate::fir::DeclarationId, Ty>,
     inferred_declaration_publications: declaration_publication::InferredDeclarationPublications,
@@ -33300,8 +33295,7 @@ impl<'a> Checker<'a> {
                     continue;
                 };
                 let inferred = self.expr(&property_scope, expression);
-                let inferred = self
-                    .inferred_declaration_value_ty(expression, inferred_declaration_ty(inferred));
+                let inferred = self.inferred_declaration_value_ty(expression, inferred);
                 if inferred == Ty::Error || inferred.mentions_pending() {
                     continue;
                 }
@@ -36663,8 +36657,7 @@ impl<'a> Checker<'a> {
                             }
                         });
                         if declared.is_none() && it != Ty::Error {
-                            let inferred = self
-                                .inferred_declaration_value_ty(init, inferred_declaration_ty(it));
+                            let inferred = self.inferred_declaration_value_ty(init, it);
                             if let Some(declaration) = stable_property {
                                 self.record_inferred_property_publication(
                                     declaration,
@@ -40728,7 +40721,7 @@ impl<'a> Checker<'a> {
                 if t == Ty::Null {
                     return self.set(e, Ty::Nothing);
                 }
-                let narrowed = definitely_non_null_ty(t);
+                let narrowed = t.not_null_operator_result(self.file.reference.quirks());
                 // A successful assertion proves the same stable access path non-null for the rest
                 // of this lexical flow (`x!!.let { use(x) }`, and later statements). Reassignments
                 // invalidate the fact through the ordinary scope machinery; temporaries and
@@ -47462,18 +47455,9 @@ impl<'a> Checker<'a> {
         mut selected: crate::symbol_resolver::ResolvedMember,
     ) -> Option<Ty> {
         selected.member.owner?;
-        if self.reject_inaccessible_selected_member(self.call_callee_name_span(call), &selected) {
+        if !self.check_selected_member_use(call, args, &selected) {
             return Some(Ty::Error);
         }
-        self.check_data_class_copy_usage(self.call_callee_name_span(call), &selected.member);
-        self.reject_non_public_api_from_public_inline(
-            call,
-            Self::is_public_api_for_inline_access(
-                selected.member.visibility,
-                &selected.member.annotations,
-            ),
-            selected.member.inline,
-        );
         // A direct function parameter contextually CHECKS a postponed lambda body. Apply the
         // receiver builder's current lower approximation to that function shape so the selected
         // commit rechecks the body with the same concrete `it` type used by the provisional member

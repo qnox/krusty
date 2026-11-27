@@ -1886,6 +1886,27 @@ fn wasm_runtime_list_iterator_is_a_list_iterator() {
     );
 }
 
+// PLATFORM-SPECIFIC: kotlinc's Wasm analyzer services import `kotlin.js.*` on both Wasm targets,
+// but only the wasm-js stdlib declares `JsAny` there, so this program runs on wasm-js alone.
+#[test]
+fn wasm_js_kotlin_js_declarations_resolve_without_an_import() {
+    let stem = "wasmUnqualifiedJsAny";
+    let src = include_str!("wasm_regressions/unqualifiedJsAny.kt");
+    let lane = WasmLane {
+        target: WasmTarget::Js,
+    };
+    if !focused_wasm_lane_available(&lane, stem) {
+        return;
+    }
+    let outcome = lane.compile_and_run(
+        &std::env::temp_dir(),
+        stem,
+        &[(format!("{stem}.kt"), src.to_string())],
+        src,
+    );
+    assert_eq!(outcome, Outcome::Pass, "{stem} on {}", lane.target.name());
+}
+
 #[path = "wasm_unsigned_decimal.rs"]
 mod unsigned_decimal;
 

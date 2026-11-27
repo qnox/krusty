@@ -482,6 +482,11 @@ impl BodyLowering<'_, '_, '_> {
                         return realized;
                     }
                 }
+                if let Some(realized) =
+                    self.floating_range_construction(signature, dispatch_receiver, args, *ret)
+                {
+                    return realized;
+                }
                 let symbols = self.file.dependency_symbols;
                 let export_of = |realization: &krusty::backend::BackendCallableFact| {
                     realization

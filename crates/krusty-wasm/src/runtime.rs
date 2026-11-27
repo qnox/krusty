@@ -16,6 +16,7 @@
 //! `String` is on every target. A string constant is copied out of the module's passive data
 //! segment with `array.new_data`.
 
+mod char_array_text;
 mod exception_classes;
 mod floating_strings;
 mod object_equality;
@@ -68,6 +69,9 @@ pub(super) struct Runtime {
     string_sub_sequence: Option<u32>,
     /// The range-checked copy of the units in use of a string or a builder, once a slice needs it.
     units_sub_sequence: Option<u32>,
+    /// `CharArray.concatToString` for a whole array and for a start-end range, once a call needs
+    /// each.
+    char_array_text: [Option<u32>; 2],
     /// `Double.toString()` and `Float.toString()`, once a conversion needs them.
     floating_strings: floating_strings::FloatingStrings,
     pub(super) object_equals: u32,
@@ -182,6 +186,7 @@ impl Runtime {
             string_compare: None,
             string_sub_sequence: None,
             units_sub_sequence: None,
+            char_array_text: [None; 2],
             floating_strings: Default::default(),
             object_equals,
             string_concat,

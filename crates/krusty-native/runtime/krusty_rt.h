@@ -904,6 +904,10 @@ kt_char kt_string_get(KRef self, kt_int index);
    on its side of the bound, stored as the three bytes its code unit encodes to, as on the JVM. */
 KRef kt_string_substring(KRef self, kt_int start, kt_int end);
 
+/* Kotlin/Native's `unsafeStringFromCharArray(chars, start, size)`: the string of `size` UTF-16
+   units of the `CharArray` from `start`, whose bounds the caller has proven. */
+KRef kt_string_from_char_array(KRef chars, kt_int start, kt_int size);
+
 /* `s.substring(start)`: from there to the end. */
 KRef kt_string_substring_from(KRef self, kt_int start);
 
