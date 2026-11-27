@@ -201,6 +201,8 @@ void *kt_gc_allocate(const KType *type, uint32_t size);
 void kt_gc_collect(void);
 /* The standard library's `GC.collect`, by the symbol its `@GCUnsafeCall` names. */
 void Kotlin_native_internal_GC_collect(void *receiver);
+/* The Native standard library's `getTimeNanos`, by the symbol its `@GCUnsafeCall` names. */
+kt_long Kotlin_system_getSteadyTimeNanos(void);
 
 /* Register a global slot that may hold a reference, so it is treated as a root. Static storage
    is not scanned — a freestanding program has no portable way to find its own data section. The
