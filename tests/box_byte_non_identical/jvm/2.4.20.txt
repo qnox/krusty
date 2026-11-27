@@ -111,7 +111,6 @@ boxingOptimization/unsignedArrayForEach.kt
 branching/when_with_try1.kt
 bridges/delegationComplex.kt
 bridges/delegationComplexWithList.kt
-bridges/diamond.kt
 bridges/fakeCovariantOverride.kt
 bridges/fakeGenericCovariantOverride.kt
 bridges/fakeGenericCovariantOverrideWithDelegation.kt
@@ -133,7 +132,6 @@ bridges/returnTypeSignature.kt
 bridges/special.kt
 bridges/substitutionInSuperClass/boundedTypeArguments.kt
 bridges/substitutionInSuperClass/delegation.kt
-bridges/substitutionInSuperClass/enum.kt
 bridges/test6.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/adaptedSecondArgArray.kt
@@ -1581,7 +1579,6 @@ innerNested/superConstructorCall/objectExtendsInnerOfLocalVarargAndDefault.kt
 innerNested/superConstructorCall/objectExtendsInnerOfLocalWithCapture.kt
 innerNested/superConstructorCall/objectExtendsLocalWithClosure.kt
 innerNested/superConstructorCall/objectOuterDiffersFromInnerOuter.kt
-interfaceCallsNCasts/diamond.kt
 interfaceCallsNCasts/finalMethod.kt
 intrinsics/kt10131.kt
 intrinsics/kt10131a.kt
@@ -2124,9 +2121,6 @@ regressions/arrayLiteralSpreadsInSourceOrder.kt
 regressions/atomicCompareExchange.kt
 regressions/callableReferenceToImplicitReceiverUnitCoercion.kt
 regressions/captureStorageDefaultMetadata.kt
-regressions/closedRangeBoundsThroughInterface.kt
-regressions/closedRangeBoundsThroughSubclass.kt
-regressions/closedRangeIntAccessors.kt
 regressions/closureWriteConformingSmartCast.kt
 regressions/closureWriteConformingSmartCastStringBuilder.kt
 regressions/collectionLiteralForTypeVariableBuiltFromOtherBound.kt
@@ -2420,7 +2414,6 @@ super/kt3492ClassFun.kt
 super/kt3492ClassProperty.kt
 super/kt3492TraitFun.kt
 super/kt3492TraitProperty.kt
-super/superCallToNonGenericImplThroughGenericDefaultImpls.kt
 super/superConstructor/kt18356_2.kt
 super/superConstructor/objectExtendsInner.kt
 super/superConstructor/objectExtendsLocalInner.kt
