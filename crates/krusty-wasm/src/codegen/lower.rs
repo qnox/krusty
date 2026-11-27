@@ -639,6 +639,14 @@ fn expression_type(
         {
             Ty::Unit
         }
+        IrExpr::Checked(checked_op)
+            if matches!(
+                &**checked_op,
+                krusty::ir::IrCheckedOperation::IllegalProgressionStep { .. }
+            ) =>
+        {
+            return Ok(None)
+        }
         IrExpr::Variable { .. }
         | IrExpr::SetValue { .. }
         | IrExpr::SetStatic { .. }
@@ -1764,6 +1772,12 @@ impl<'a> Body<'a> {
                 self.no_such_enum_constant(classifier, name)?
             }
             IrExpr::Throw { operand } => self.throw_value(operand)?,
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::IllegalProgressionStep { step } =
+                    &**checked_op =>
+            {
+                self.illegal_progression_step(*step)?
+            }
             IrExpr::Vararg {
                 array_type,
                 spreads,
