@@ -24,13 +24,6 @@ use super::super::super::captures::carried_parameters;
 use super::super::ReferenceDeclaration;
 use super::*;
 
-/// The table number a call through a function type of `operands` physical operands reads: the one
-/// every function value of that operand count holds its `invoke` in.
-pub(super) fn function_slot_for(operands: usize) -> Result<u32, Unsupported> {
-    krusty::backend::class_tables::function_slot(crate::classes::FUNCTION_SLOTS, operands)
-        .ok_or_else(|| declined!("a function value called with {operands} operands"))
-}
-
 /// A declaration marker is shared only within the scope that authenticates its identity.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) enum ReferenceIdentity {
@@ -560,7 +553,7 @@ impl<'a> FileLowering<'a> {
                     };
                     // Called at the slot of its operand count, which the callers of its function
                     // type read, so every one holds the body.
-                    vtable.extend((0..crate::classes::FUNCTION_SLOTS).map(|_| thunk));
+                    vtable.extend((0..self.model.function_slots()).map(|_| thunk));
                     // A REFERENCE answers `KCallable.name` too, and a program reaches it through
                     // a variable rather than through the written reference — so the answer is a
                     // member of the object rather than a constant folded at the site. It takes
@@ -700,12 +693,10 @@ impl<'a> FileLowering<'a> {
             }
             krusty::ir::IrSamMethod::FunctionTypeInvoke => {
                 let operands = target.declared_parameters.len();
-                let slot = krusty::backend::class_tables::function_slot(
-                    crate::classes::FUNCTION_SLOTS,
-                    operands,
+                (
+                    None,
+                    model::Dispatch::Class(self.model.function_slot(operands)),
                 )
-                .ok_or_else(|| declined!("a function type of {operands} operands"))?;
-                (None, model::Dispatch::Class(slot))
             }
         };
 
@@ -794,10 +785,7 @@ impl<'a> FileLowering<'a> {
                 &vec![any(); arity],
                 any(),
             )?;
-            let slot =
-                krusty::backend::class_tables::function_slot(crate::classes::FUNCTION_SLOTS, arity)
-                    .ok_or_else(|| declined!("a functional interface of {arity} operands"))?;
-            vtable[slot as usize] = boxed;
+            vtable[self.model.function_slot(arity) as usize] = boxed;
         }
 
         let mut interfaces: Vec<DataId> = Vec::new();
@@ -1107,7 +1095,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         let result = self.dispatch(
             function,
-            function_slot_for(arguments.len())?,
+            self.file.model.function_slot(arguments.len()),
             &vec![any(); arguments.len()],
             any(),
             &arguments,
@@ -1162,7 +1150,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     ) -> Result<Option<Value>, Unsupported> {
         let result = self.dispatch(
             function,
-            function_slot_for(arguments.len())?,
+            self.file.model.function_slot(arguments.len()),
             &vec![any(); arguments.len()],
             any(),
             arguments,

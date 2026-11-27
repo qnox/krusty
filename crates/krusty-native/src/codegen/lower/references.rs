@@ -23,10 +23,25 @@ use krusty::fir::FirPropertyReferenceTarget;
 
 /// Where the three members live: after `kotlin.Any`'s three and the function slots every function
 /// value's `invoke` takes by its operand count, which a reference fills alike with its getter.
-pub(super) const GET: u32 =
-    krusty::backend::class_tables::FUNCTION_SLOT + crate::classes::FUNCTION_SLOTS;
-pub(super) const SET: u32 = GET + 1;
-pub(super) const NAME: u32 = GET + 2;
+#[derive(Clone, Copy)]
+pub(super) struct ReferenceSlots {
+    pub(super) get: u32,
+    pub(super) set: u32,
+    pub(super) name: u32,
+}
+
+impl ReferenceSlots {
+    /// The numbers after `function_slots` function slots, which a reference's own members never
+    /// share with an `invoke`.
+    pub(super) fn new(function_slots: u32) -> Self {
+        let get = krusty::backend::class_tables::FUNCTION_SLOT + function_slots;
+        Self {
+            get,
+            set: get + 1,
+            name: get + 2,
+        }
+    }
+}
 
 /// The emitted pieces of one property-reference site.
 #[derive(Clone, Copy)]
@@ -371,7 +386,7 @@ impl<'a> FileLowering<'a> {
         let mut vtable = self.any_vtable()?;
         vtable[0] = equals;
         // The function slots, `get` and `set`: nothing can call any of them on a local property.
-        vtable.extend((0..crate::classes::FUNCTION_SLOTS + 2).map(|_| unreachable));
+        vtable.extend((0..self.model.function_slots() + 2).map(|_| unreachable));
         vtable.push(name);
         let any_type = self.import_data("kt_type_any")?;
         // A local delegated property's metadata is a KProperty, but not a KProperty0: Kotlin does
@@ -541,7 +556,7 @@ impl<'a> FileLowering<'a> {
         vtable[2] = to_string;
         // A property reference is also the function `(R) -> V` it reads through, called at the slot
         // of its operand count, so every function slot holds the getter.
-        vtable.extend((0..crate::classes::FUNCTION_SLOTS).map(|_| getter));
+        vtable.extend((0..self.model.function_slots()).map(|_| getter));
         vtable.push(getter);
         vtable.push(match setter {
             Some(setter) => setter,
@@ -550,7 +565,10 @@ impl<'a> FileLowering<'a> {
             None => getter,
         });
         vtable.push(name);
-        debug_assert_eq!(vtable.len() as u32, NAME + 1);
+        debug_assert_eq!(
+            vtable.len() as u32,
+            ReferenceSlots::new(self.model.function_slots()).name + 1
+        );
 
         let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
         let any_type = self.import_data("kt_type_any")?;
@@ -938,7 +956,11 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        let slot = reference_slot(role, args.len())?;
+        let slot = reference_slot(
+            ReferenceSlots::new(self.file.model.function_slots()),
+            role,
+            args.len(),
+        )?;
         Some(self.reference_call(slot, receiver, args, ret))
     }
 
@@ -982,7 +1004,14 @@ impl BodyLowering<'_, '_, '_> {
             .callables
             .property(target)
             .and_then(|property| self.file.callables.callable(property.getter))
-            .is_some_and(|getter| reference_slot(getter.semantic_role, 0).is_some())
+            .is_some_and(|getter| {
+                reference_slot(
+                    ReferenceSlots::new(self.file.model.function_slots()),
+                    getter.semantic_role,
+                    0,
+                )
+                .is_some()
+            })
     }
 
     /// A checked read of a dependency property whose selected getter carries a reference role.
@@ -996,7 +1025,11 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let property = self.file.callables.property(target)?;
         let getter = self.file.callables.callable(property.getter)?;
-        let slot = reference_slot(getter.semantic_role, 0)?;
+        let slot = reference_slot(
+            ReferenceSlots::new(self.file.model.function_slots()),
+            getter.semantic_role,
+            0,
+        )?;
         let owner = getter.physical_owner;
         Some(self.reference_property_read(slot, owner, property.getter, receiver, property.result))
     }
@@ -1083,17 +1116,18 @@ impl BodyLowering<'_, '_, '_> {
         use krusty::types::SemanticCallRole;
         // Which operands reach the slot: a `KProperty1` is handed `thisRef`, a `KProperty0` is not,
         // and the written value is always the last one.
+        let slots = ReferenceSlots::new(self.file.model.function_slots());
         let (slot, kept): (u32, Vec<usize>) = match role {
             Some(SemanticCallRole::KotlinPropertyReferenceDelegateGet(arity))
                 if args.len() == 2 && arity <= 1 =>
             {
-                (GET, (arity == 1).then_some(0).into_iter().collect())
+                (slots.get, (arity == 1).then_some(0).into_iter().collect())
             }
             Some(SemanticCallRole::KotlinPropertyReferenceDelegateSet(arity))
                 if args.len() == 3 && arity <= 1 =>
             {
                 (
-                    SET,
+                    slots.set,
                     (arity == 1).then_some(0).into_iter().chain([2]).collect(),
                 )
             }
@@ -1122,7 +1156,8 @@ impl BodyLowering<'_, '_, '_> {
         let mut arguments: Vec<Value> = kept.iter().map(|index| evaluated[*index]).collect();
         // A bound reference's slot ignores the receiver operand; a null keeps one signature for
         // both shapes, exactly as `reference_call` does.
-        let expected = usize::from(slot == SET) + 1;
+        let slots = ReferenceSlots::new(self.file.model.function_slots());
+        let expected = usize::from(slot == slots.set) + 1;
         while arguments.len() < expected {
             arguments.insert(0, self.builder.ins().iconst(types::I64, 0));
         }
@@ -1131,7 +1166,7 @@ impl BodyLowering<'_, '_, '_> {
             object,
             slot,
             &params,
-            if slot == SET { Ty::Unit } else { any() },
+            if slot == slots.set { Ty::Unit } else { any() },
             &arguments,
         )?;
         let Some(answer) = answer else {
@@ -1170,7 +1205,8 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Result<Option<Value>, Unsupported> {
         // `get()` on a BOUND reference passes no receiver and the body ignores the slot anyway; a
         // null keeps one signature for both shapes.
-        let expected = usize::from(slot == SET) + 1;
+        let slots = ReferenceSlots::new(self.file.model.function_slots());
+        let expected = usize::from(slot == slots.set) + 1;
         while arguments.len() < expected {
             arguments.insert(0, self.builder.ins().iconst(types::I64, 0));
         }
@@ -1179,7 +1215,7 @@ impl BodyLowering<'_, '_, '_> {
             object,
             slot,
             &params,
-            if slot == SET { Ty::Unit } else { any() },
+            if slot == slots.set { Ty::Unit } else { any() },
             &arguments,
         )?;
         let Some(answer) = answer else {
@@ -1193,17 +1229,21 @@ impl BodyLowering<'_, '_, '_> {
 
 /// The reference-object slot a member with `role` reaches when it is handed `operands` operands
 /// after the reference itself, or `None` when the role is not a reference member's.
-fn reference_slot(role: Option<krusty::types::SemanticCallRole>, operands: usize) -> Option<u32> {
+fn reference_slot(
+    slots: ReferenceSlots,
+    role: Option<krusty::types::SemanticCallRole>,
+    operands: usize,
+) -> Option<u32> {
     use krusty::types::SemanticCallRole;
     match role? {
-        SemanticCallRole::KotlinCallableReferenceName if operands == 0 => Some(NAME),
+        SemanticCallRole::KotlinCallableReferenceName if operands == 0 => Some(slots.name),
         SemanticCallRole::KotlinPropertyReferenceGet(arity) if operands == usize::from(arity) => {
-            Some(GET)
+            Some(slots.get)
         }
         SemanticCallRole::KotlinPropertyReferenceSet(arity)
             if operands == usize::from(arity) + 1 =>
         {
-            Some(SET)
+            Some(slots.set)
         }
         _ => None,
     }

@@ -28,6 +28,7 @@ pub(super) fn class_table(
     ir: &IrFile,
     tabled: TabledClass<'_>,
     numbered: &ModuleInterfaces,
+    reserved: u32,
 ) -> Result<ClassTable, Unsupported> {
     let TabledClass {
         id,
@@ -57,19 +58,18 @@ pub(super) fn class_table(
     // inherits its superclass's table, and a member of `A` already standing at that number would be
     // overwritten by `invoke` while every call through `A` still expected it there. Reserved at the
     // root, the number is never anyone else's.
-    let reserved = representation.function_slots();
     let prefix = (FUNCTION_SLOT + reserved) as usize;
     if vtable.len() < prefix {
         vtable.resize(prefix, Slot::Abstract);
     }
 
     // A class implementing MORE THAN ONE function type has more `invoke`s than one number. Each
-    // physical operand count has a number of its own where the target reserves them
-    // ([`Representation::function_slots`]), so `object Test : () -> Unit, (Boolean) -> Unit` holds
-    // each body where the callers of its own function type read it. Where the target reserves one
-    // number, or two of the types carry the same number of physical operands (`suspend (Int) ->
-    // Unit` beside `(Int, Continuation) -> Unit`), whichever took it would be reached by a call
-    // through the other type (`intersectionTypeToFun` answered `KK` for `OK`). Decline rather pick.
+    // physical operand count has a number of its own, so `object Test : () -> Unit, (Boolean) ->
+    // Unit` holds each body where the callers of its own function type read it. Two of the types
+    // carrying the same number of physical operands (`suspend (Int) -> Unit` beside `(Int,
+    // Continuation) -> Unit`) share a number, and whichever took it would be reached by a call
+    // through the other type (`intersectionTypeToFun` answered `KK` for `OK`). Decline rather
+    // than pick.
     {
         let invokes = ir
             .function_overrides
@@ -98,7 +98,7 @@ pub(super) fn class_table(
             .collect::<Vec<_>>();
         let distinct_slots = invokes
             .iter()
-            .map(|&(_, operands)| operands.and_then(|operands| function_slot(reserved, operands)))
+            .map(|&(_, operands)| operands.map(|operands| function_slot(reserved, operands)))
             .collect::<crate::fx_hash::HashSet<_>>();
         if invokes.len() > 1 && distinct_slots.len() != invokes.len() {
             return Err(format!(
@@ -217,9 +217,8 @@ pub(super) fn class_table(
             // `invoke` on a class implementing a FUNCTION TYPE takes the one other fixed slot this
             // target has: the runtime names it (`KT_SLOT_INVOKE`) and every caller through a
             // function type reads it, a lambda's body included.
-            None => {
-                invoke_edge.and_then(|edge| external_invoke_slot(representation, edge, function))
-            }
+            None => invoke_edge
+                .and_then(|edge| external_invoke_slot(representation, reserved, edge, function)),
         };
         // Whether the FUNCTION SLOT needs a stand-in for this method: it is an `invoke` over a
         // function type that could not take the slot outright, because it does not carry
@@ -345,12 +344,7 @@ pub(super) fn class_table(
         // The FUNCTION SLOT, once this method's own is known — reserved when the table began, so
         // the two are never the same number.
         if let Some(arity) = function_bridge {
-            let function_number = function_slot(reserved, arity).ok_or_else(|| {
-                format!(
-                    "a function type of {arity} operands (`{}`)",
-                    class.fq_name()
-                )
-            })?;
+            let function_number = function_slot(reserved, arity);
             debug_assert_ne!(
                 slot, function_number,
                 "the stand-in forwards through its own number"
@@ -746,6 +740,7 @@ pub(super) fn register_interface_keys(
 
 fn external_invoke_slot(
     representation: &dyn Representation,
+    reserved: u32,
     edge: &crate::ir::IrFunctionOverride,
     function: &IrFunction,
 ) -> Option<u32> {
@@ -757,8 +752,7 @@ fn external_invoke_slot(
         .iter()
         .all(|param| representation.is_reference(*param))
         && representation.is_reference(function.ret))
-    .then(|| function_slot(representation.function_slots(), function.params.len()))
-    .flatten()
+    .then(|| function_slot(reserved, function.params.len()))
 }
 
 /// Whether an override is callable through the overridden slot's signature as it stands.

@@ -75,11 +75,9 @@ pub trait Representation {
     /// Whether a class may extend `superclass` although no class of the file declares it: a base
     /// whose storage and `kotlin.Any` members the target's runtime owns.
     fn owns_base(&self, superclass: TypeName) -> bool;
-    /// How many consecutive tables slots, from [`FUNCTION_SLOT`], a function value's `invoke`
-    /// can stand in: one per physical operand count, so a class implementing several function
-    /// types holds each one's body at the number its callers read. One means every function type
-    /// shares [`FUNCTION_SLOT`], and a class implementing two of them is declined.
-    fn function_slots(&self) -> u32 {
+    /// The fewest function slots every table reserves, because the target's own runtime calls
+    /// function values with that many operand counts and reads the number of each.
+    fn min_function_slots(&self) -> u32 {
         1
     }
 }
@@ -87,13 +85,13 @@ pub trait Representation {
 /// The table number a function value's `invoke` takes when it has `operands` physical operands
 /// (a `suspend` one's continuation included), in a target whose tables reserve `reserved` function
 /// slots.
-pub fn function_slot(reserved: u32, operands: usize) -> Option<u32> {
+pub fn function_slot(reserved: u32, operands: usize) -> u32 {
     // A function type wider than the numbers reserved shares the first: it is the one a class
     // naming it can implement, because every other function type of the class is declined beside
     // it.
     match u32::try_from(operands) {
-        Ok(operands) if operands < reserved => Some(FUNCTION_SLOT + operands),
-        _ => Some(FUNCTION_SLOT),
+        Ok(operands) if operands < reserved => FUNCTION_SLOT + operands,
+        _ => FUNCTION_SLOT,
     }
 }
 
@@ -305,7 +303,13 @@ pub fn build_numbered(
     laid_out: &dyn Fn(TypeName) -> Option<LaidOutSuperclass>,
 ) -> Result<NumberedClassTables, Unsupported> {
     let superclasses = laid_out_superclasses(ir, laid_out);
-    let (mut tables, order, interfaces) = class_tables(representation, ir, plan, &superclasses)?;
+    // How many function slots every table reserves: the module's plan decides, from the function
+    // types its classes implement, and a file no plan covers decides from its own.
+    let reserved = plan
+        .function_slots()
+        .unwrap_or_else(|| module_slots::local_function_slots(ir, representation));
+    let (mut tables, order, interfaces) =
+        class_tables(representation, ir, plan, reserved, &superclasses)?;
     let numbers = plan.interfaces().with_installed(ir, extended)?;
     let interface_tables = planned_itable::interface_tables(
         representation,
@@ -320,12 +324,10 @@ pub fn build_numbered(
             continue;
         }
         let table = &mut tables[id];
-        table
-            .vtable
-            .truncate((FUNCTION_SLOT + representation.function_slots()) as usize);
+        table.vtable.truncate((FUNCTION_SLOT + reserved) as usize);
         table
             .slots
-            .retain(|_, slot| *slot < FUNCTION_SLOT + representation.function_slots());
+            .retain(|_, slot| *slot < FUNCTION_SLOT + reserved);
         table.interface_bridges.clear();
     }
     let members = tables
@@ -339,6 +341,7 @@ pub fn build_numbered(
         interface_tables,
         members,
         numbers,
+        function_slots: reserved,
     })
 }
 
@@ -396,6 +399,9 @@ pub struct NumberedClassTables {
     pub members: Vec<HashMap<module_slots::PlanKey, u32>>,
     /// The module's interface numbers, extended with the interfaces this file's IR installed.
     pub numbers: module_interfaces::ModuleInterfaces,
+    /// How many function slots follow `kotlin.Any`'s in every table: one per physical operand
+    /// count up to the widest function type a class implements ([`function_slot`]).
+    pub function_slots: u32,
 }
 
 impl NumberedClassTables {
@@ -450,6 +456,7 @@ fn class_tables(
     representation: &dyn Representation,
     ir: &IrFile,
     plan: &module_slots::ModuleSlotPlan,
+    reserved: u32,
     superclasses: &HashMap<TypeName, LaidOutSuperclass>,
 ) -> Result<FileTables, Unsupported> {
     let order = hierarchy::hierarchy_order(representation, ir, superclasses)?;
@@ -507,6 +514,7 @@ fn class_tables(
                         laid_out,
                     },
                     plan.interfaces(),
+                    reserved,
                 )?,
             }
         };
