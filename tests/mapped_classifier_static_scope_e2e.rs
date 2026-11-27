@@ -61,3 +61,33 @@ fn the_java_classifier_keeps_its_statics_by_explicit_import_or_qualified_name() 
     ];
     common::assert_sources_accepted_like_kotlinc(&sources, &[]);
 }
+
+/// A callable reference whose LHS names the JDK class keeps that class's statics, through a
+/// package-qualified path or an explicit import, while the reference's types are the mapped
+/// Kotlin ones (`copyValueOf` returns `kotlin.String`).
+#[test]
+fn a_callable_reference_through_the_java_classifier_selects_its_statics() {
+    common::expect_box_same_as_kotlinc(
+        "import java.lang.Integer\n\
+         \n\
+         fun box(): String {\n\
+             val copy: (CharArray) -> String = java.lang.String::copyValueOf\n\
+             val hex: (Int) -> String = Integer::toHexString\n\
+             val digit: (Char) -> Boolean = java.lang.Character::isDigit\n\
+             if (hex(255) != \"ff\") return \"Fail: hex\"\n\
+             if (!digit('7')) return \"Fail: digit\"\n\
+             return copy(charArrayOf('O', 'K'))\n\
+         }\n",
+        "mapped_classifier_static_callable_references",
+    );
+}
+
+/// The mapped Kotlin classifier has no static scope for a callable reference either.
+#[test]
+fn a_callable_reference_through_the_mapped_kotlin_classifier_has_no_statics() {
+    let sources = [(
+        "test.kt",
+        "val copy: (CharArray) -> String = String::copyValueOf\n",
+    )];
+    common::assert_error_blocks_match_kotlinc(&sources, &[]);
+}

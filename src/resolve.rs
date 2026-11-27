@@ -44972,13 +44972,7 @@ impl<'a> Checker<'a> {
         }
         let mut inner_alias_receiver_mismatch = None;
         let selected = (|| {
-            let receiver_ty = receiver_ty.unboxed_primitive().unwrap_or_else(|| {
-                if internal.matches("kotlin/String") {
-                    Ty::String
-                } else {
-                    receiver_ty
-                }
-            });
+            let receiver_ty = callable_reference_lhs::unbound_ref_receiver_ty(receiver_ty);
             if receiver_ty == Ty::Error {
                 return None;
             }
