@@ -288,8 +288,14 @@ impl ProgramDeclarations {
     /// reaches it.
     fn absorb(&mut self, ir: &IrFile, laid_out: impl Fn(krusty::types::TypeName) -> bool) {
         self.declares_its_own_comparable |= declares_its_own_comparable(ir);
-        self.implemented_dependencies
-            .extend(implemented_dependencies(ir, laid_out));
+        // Only `Comparable` is program-wide, as in `absorb_comparable`: another interface a
+        // source unit implements stays a fact of that unit, so a file that implements none of its
+        // own keeps reading its receivers through the runtime's tables.
+        self.implemented_dependencies.extend(
+            implemented_dependencies(ir, laid_out)
+                .into_iter()
+                .filter(|&owner| super::super::intrinsics::is_comparable_supertype(owner)),
+        );
     }
 }
 

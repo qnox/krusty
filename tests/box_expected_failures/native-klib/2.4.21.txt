@@ -480,7 +480,6 @@ multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/delegation/delegationToExpectInterface_noNewMembers.kt
 multiplatform/k2/expectStatic.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
-multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflictDefaults.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt

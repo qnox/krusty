@@ -598,7 +598,6 @@ ranges/stepped/unsigned/literal/downTo/illegalStepNonConst.kt
 ranges/stepped/unsigned/literal/downTo/illegalStepThenLegalStep.kt
 ranges/stepped/unsigned/literal/downTo/illegalStepZero.kt
 ranges/stepped/unsigned/literal/downTo/legalStepThenIllegalStep.kt
-ranges/stepped/unsigned/literal/rangeTo/illegalStepNegative.kt
 ranges/stepped/unsigned/literal/rangeTo/illegalStepNonConst.kt
 ranges/stepped/unsigned/literal/rangeTo/illegalStepThenLegalStep.kt
 ranges/stepped/unsigned/literal/rangeTo/illegalStepZero.kt
