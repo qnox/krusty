@@ -1017,7 +1017,7 @@ fn append_property_override_edges(
                     .getter
                     .params
                     .get(..declared.context_count)
-                    .unwrap_or_default()
+                    .expect("a provider getter declares its context parameters first")
                     .iter()
                     .map(|ty| {
                         resolved_ty(
