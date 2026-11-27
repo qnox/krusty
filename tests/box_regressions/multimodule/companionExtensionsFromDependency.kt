@@ -39,7 +39,7 @@ import b.*
 
 fun box(): String {
     if (C.answer != 42) return "Fail answer: ${C.answer}"
-    C.counter = C.counter + 2
+    C.counter += 2
     if (C.counter != 3) return "Fail counter: ${C.counter}"
     if (C.fromStar() != "star") return "Fail star: ${C.fromStar()}"
     return C.greet("K")
