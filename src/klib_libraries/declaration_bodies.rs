@@ -908,6 +908,19 @@ impl KlibDeclarationBodies {
             .is_some()
     }
 
+    /// Whether `identity` is a top-level function its library declares `internal` in its IR.
+    /// Only bodies of that library can call one, so a declaration of it that the library's
+    /// metadata does not publish, one a compiler plugin generated into the IR, has no provider.
+    pub(crate) fn is_internal_top_level_function(&self, identity: &KlibDependencyCallable) -> bool {
+        matches!(identity.declaration, KlibDeclarationSignature::Public(_))
+            && self.top_level_file(identity).is_some()
+            && self.function(identity).is_some_and(|(_, function)| {
+                function.dispatch_receiver.is_none()
+                    && crate::metadata::semantic::declaration_visibility(function.base.flags)
+                        == crate::types::Visibility::Internal
+            })
+    }
+
     /// The class in `module` that declares the file-local function `signature` directly.
     pub(crate) fn module_class_declaring<'a>(
         &'a self,

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The platform/version outcome manifests only shrink: a change may remove entries, never add one, so a
 # regression cannot be recorded as expected and a fix cannot pay for one. That covers the box
-# expected failures and not-applicable lists, the CLI corpus expected failures, the diagnostics
+# expected failures and not-applicable lists, the byte-identity non-identical lists, the CLI corpus failures, the diagnostics
 # false accepts, and uncovered KLIB implementations. A release records a manifest only where it differs from its predecessor's, and a
 # release with none reads the newest one below it, so what is compared is the manifest each release
 # READS: deleting a release's own file is an addition when the inherited one lists more. A release
@@ -10,7 +10,10 @@
 # base which has since dropped entries is not charged with them. The CLI not-applicable lists and the
 # diagnostics not-scored lists are not checked here: they record what the reference kotlinc cannot
 # run in this environment, and the required reference run proves every entry instead.
-# The one exception to "only shrink" is a plugin corpus's `included` inventory
+# A byte-identity list also accepts a row for a case the change itself adds: a new owned regression
+# program, or a case the base's JVM lane did not apply (see new_byte_identity_keys_removed). Every
+# key the base scored, upstream or owned, only shrinks, and a renamed owned program is not new.
+# The other exception to "only shrink" is a plugin corpus's `included` inventory
 # (src/plugins/<name>/boxes/included): it lists the cases that must pass, so it only GROWS. A change
 # may add entries, never remove one, including by deleting a release's own file when the inherited
 # one lists fewer; otherwise a case that starts failing could be dropped from the list instead of
@@ -112,6 +115,43 @@ approved_migration() {
   fi
 }
 
+# The owned regression programs the head renamed or moved from the base: a moved file is a case the
+# base already scored under another name, so it is not new.
+renamed_owned_regressions() {
+  git diff -M --diff-filter=R --name-only "$base" "$head" -- tests/box_regressions
+}
+
+# A byte-identity row may arrive with the case it describes: an owned regression program that the
+# head adds (a `regressions/<path>` key whose tests/box_regressions/<path> file is absent at the
+# base, present at the head, and not a rename of a base file), or a case the base's JVM lane did
+# not apply (listed in the base's not-applicable manifest). A key the base already scored only leaves
+# the list. That includes an upstream case under the `regressions/` prefix, which has no owned
+# file at all, and an owned program that was only renamed. Prints the added keys that remain
+# charged.
+new_byte_identity_keys_removed() {
+  local release=$1 added=$2 not_applicable_from key owned renamed
+  not_applicable_from=$(reads "$base" tests/box_expected_not_applicable/jvm "$release")
+  renamed=$(renamed_owned_regressions)
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    case "$key" in
+      regressions/*)
+        owned="tests/box_regressions/${key#regressions/}"
+        if ! git cat-file -e "$base:$owned" 2>/dev/null &&
+          git cat-file -e "$head:$owned" 2>/dev/null &&
+          ! grep -Fx -- "$owned" <<<"$renamed" >/dev/null; then
+          continue
+        fi
+        ;;
+    esac
+    if [ -n "$not_applicable_from" ] &&
+      entries "$base:tests/box_expected_not_applicable/jvm/$not_applicable_from.txt" | grep -Fx -- "$key" >/dev/null; then
+      continue
+    fi
+    printf '%s\n' "$key"
+  done <<<"$added"
+}
+
 added_total=0
 removed_total=0
 while read -r lane; do
@@ -137,6 +177,9 @@ while read -r lane; do
     else
       added=""
     fi
+    if [ "$lane" = tests/box_byte_non_identical/jvm ] && [ -n "$added" ]; then
+      added=$(new_byte_identity_keys_removed "$release" "$added")
+    fi
     [ -n "$added" ] || continue
     count=$(wc -l <<<"$added" | tr -d '[:space:]')
     manifest="$lane/$release.txt"
@@ -157,7 +200,7 @@ while read -r lane; do
   done
 done < <(
   { git ls-tree -r --name-only "$base"; git ls-tree -r --name-only "$head"; } |
-    grep -E '^(tests/(box_expected_failures|box_expected_not_applicable|cli_expected_failures|diagnostics_false_accepts|klib_uncovered_implementations)|src/plugins/[^/]+/boxes/(expected_not_applicable|included))/[^/]+/[^/]+\.txt$' |
+    grep -E '^(tests/(box_byte_non_identical|box_expected_failures|box_expected_not_applicable|cli_expected_failures|diagnostics_false_accepts|klib_uncovered_implementations)|src/plugins/[^/]+/boxes/(expected_not_applicable|included))/[^/]+/[^/]+\.txt$' |
     sed 's|/[^/]*$||' | sort -u
 )
 

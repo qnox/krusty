@@ -15,6 +15,8 @@ mod common;
 #[path = "common/asm_text.rs"]
 mod asm_text;
 
+#[path = "box_byte_ratchet.rs"]
+mod box_byte_ratchet;
 #[path = "box_byte_score.rs"]
 mod box_byte_score;
 mod box_inventory;

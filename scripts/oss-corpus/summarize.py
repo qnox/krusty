@@ -170,6 +170,23 @@ def misses(project):
     return reasons.most_common()
 
 
+def outcomes(project):
+    """(built, fallback, failed, blocked) compilation counts; they add up to `compilations`.
+    A compilation krusty did not build is blocked when a failed task kept it from running, left to
+    kotlinc (fallback) when krusty declined it, and failed otherwise."""
+    built = fallback = failed = blocked = 0
+    for r in project['rows']:
+        if r['built']:
+            built += 1
+        elif r.get('blocked_by'):
+            blocked += 1
+        elif r.get('fallback'):
+            fallback += 1
+        else:
+            failed += 1
+    return built, fallback, failed, blocked
+
+
 QUOTED = {quote: re.compile(f'{quote}[^{quote}]*{quote}') for quote in ("'", '`', '"')}
 
 
@@ -508,16 +525,17 @@ def report(projects, stars, surveys, title, previous=None, not_measured=()):
         out += [f'# {title}', '']
     # A published result carries the run that measured it: projects can come from different runs.
     dated = any('measured' in p for p in projects)
-    out += ['| Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Identical classes |'
-            + (' Measured |' if dated else ''),
-            '| --- | ---: | ---: | ---: | --- | ---: | ---: |' + (' --- |' if dated else '')]
+    out += ['| Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Left to kotlinc | Failed | Not run |'
+            ' Identical classes |' + (' Measured |' if dated else ''),
+            '| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |' + (' --- |' if dated else '')]
     built = compilations = identical = classes = 0
     for p in projects:
         measured = p['reference_exit'] == 0
         reference = 'ok' if measured else f"failed (exit {p['reference_exit']})"
+        _, fallback, failed, blocked = outcomes(p)
         star = f"{stars[p['name']]:,}" if p['name'] in stars else 'not fetched'
         out.append(f"| {p['name']} | {star} | {p['loc']['kotlin']:,} | {p['loc']['java']:,} | {reference} | "
-                   f"{p['built']} / {p['compilations']} | {p['identical']:,} / {p['classes']:,}"
+                   f"{p['built']} / {p['compilations']} | {fallback} | {failed} | {blocked} | {p['identical']:,} / {p['classes']:,}"
                    f"{share(p['identical'], p['classes'])} |" + (f" {measured_cell(p)} |" if dated else ''))
         if measured:
             built += p['built']

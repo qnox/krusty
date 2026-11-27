@@ -41,6 +41,7 @@ pub(crate) use class_construction::superclass_constructor_ordinal;
 mod constructor_linking;
 mod enum_materialization;
 mod fake_overrides;
+mod file_private_functions;
 pub(crate) use fake_overrides::emitted_body;
 #[cfg(test)]
 mod initializer_capability_tests;
@@ -1115,6 +1116,7 @@ impl DependencyBodyUnit {
         let decline = |reason| KlibBodyDecline::new(identity.declaration.clone(), reason);
         super::class_hierarchies::publish(&mut self.ir, first_class, classes).map_err(decline)?;
         inline_functions::expand_calls(&mut self.ir).map_err(decline)?;
+        super::atomic_references::resolve_all(&mut self.ir).map_err(decline)?;
         Ok(root)
     }
 }
@@ -1471,11 +1473,12 @@ impl<'s> CallLinker for Linker<'_, 's> {
         matches!(
             callee,
             KlibIrSignature::Public(_) | KlibIrSignature::Accessor(_)
-        ) && self
+        ) && (self
             .sources
             .bodies
             .module_local_function(&self.active_module, callee)
             .is_some()
+            || self.unpublished_internal_function(callee).is_some())
     }
 
     fn link_local_object(
@@ -1539,6 +1542,9 @@ impl<'s> CallLinker for Linker<'_, 's> {
         ir: &mut IrFile,
         callee: &KlibIrSignature,
     ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
+        if let Some(identity) = self.unpublished_internal_function(callee) {
+            return self.link_file_private(ir, identity.declaration.clone(), identity);
+        }
         let &KlibIrSignature::FileLocal { file, slot } = callee else {
             // A member of a class private to its enclosing class keeps its public signature.
             if !self.links_privately(callee) {
@@ -2967,63 +2973,6 @@ impl Linker<'_, '_> {
                 primitive
             },
         )
-    }
-
-    /// The top-level function private to the active body's file that `identity` names. No
-    /// provider records one: the unit emits it from its serialized header alone, as a function of
-    /// the unit that it publishes to no one.
-    fn link_file_private(
-        &mut self,
-        ir: &mut IrFile,
-        signature: KlibDeclarationSignature,
-        identity: KlibDependencyCallable,
-    ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
-        let callee_declined = |reason| {
-            KlibBodyDeclineReason::CalleeDeclined(Box::new(KlibBodyDecline::new(
-                signature.clone(),
-                reason,
-            )))
-        };
-        let (arena, declaration) = self
-            .sources
-            .bodies
-            .function(&identity)
-            .ok_or_else(|| callee_declined(KlibBodyDeclineReason::Unjoined))?;
-        // A generic one binds the formals its own identity mints, as a provider's record binds a
-        // published declaration's.
-        let (mut types, type_parameters, type_parameter_bounds) =
-            super::function_lowering::file_private_formals(&identity, arena, declaration)
-                .map_err(callee_declined)?;
-        super::private_signature_classes::bind(
-            &mut types,
-            self.sources.bodies,
-            &identity.module,
-            arena,
-            declaration,
-        )
-        .map_err(callee_declined)?;
-        self.private_members.entry(identity.clone()).or_default();
-        let function = match self.functions.get(&identity) {
-            Some(function) => *function,
-            None => self
-                .declare_with_types(ir, &identity, None, arena, declaration, types)
-                .map_err(callee_declined)?,
-        };
-        let parameter_defaults = parameter_defaults(declaration);
-        let declared = &ir.functions[function as usize];
-        Ok(LinkedCallee {
-            callee: Callee::Local(function),
-            receiver: None,
-            params: declared.params.clone(),
-            ret: declared.ret,
-            context_count: ir.declared_parameters(function).context_count,
-            singleton_dispatch: None,
-            type_parameters,
-            type_parameter_bounds: Some(type_parameter_bounds),
-            class_type_parameters: Vec::new(),
-            parameter_defaults,
-            edge: super::CallEdge::default(),
-        })
     }
 }
 

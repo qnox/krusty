@@ -476,7 +476,9 @@ use context_sensitive_resolution::{expected_nested_classifier, parameterized_cla
 use delegated_properties::{
     select_delegate_operator, select_delegate_operator_return, DelegateConventionSite,
 };
-pub(crate) use dependency_body_call_edges::for_checked_klib_bodies;
+pub(crate) use dependency_body_call_edges::{
+    for_checked_klib_bodies, for_checked_klib_bodies_reading,
+};
 pub(crate) use dependency_platform::DependencyPlatform;
 use extension_reference_selection::ExtensionReferenceChoice;
 pub(crate) use finalized_projection::{

@@ -303,6 +303,8 @@ run_lane() {
   esac
   local require=()
   [ -z "$infix" ] || require=("KRUSTY_REQUIRE_${infix}CONFORMANCE=1")
+  # The JVM lane also scores byte identity, so a case that newly diverges from kotlinc fails here.
+  [ "$lane" != jvm ] || require+=("KRUSTY_JVM_BYTE_REPORT=$logdir/jvm-byte-report")
   if [ "$limit" -gt 0 ]; then
     echo "$lane: $limit sampled corpus cases"
     run_with_deadline "$deadline" env "${require[@]}" "KRUSTY_${infix}BOX_LIMIT=$limit" \
