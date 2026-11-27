@@ -1138,3 +1138,19 @@ fn distinct_type_parameters_are_not_assignable_to_each_other() {
     assert_eq!(krusty, expected);
     assert_eq!(errors(&result.reference_stderr), expected);
 }
+
+#[test]
+fn lambda_result_after_a_null_guard_keeps_the_narrowed_type() {
+    let source = "interface Base { fun base() {} }\n\
+                  fun guarded(v: Base?) = run {\n\
+                  \x20   if (v == null) throw Exception()\n\
+                  \x20   v\n\
+                  }\n\
+                  fun use(b: Base?) { guarded(b).base() }\n";
+    let (code, stderr) = common::kotlinc_source_result("GuardedLambdaResult", source);
+    assert_eq!(
+        code, 0,
+        "kotlinc rejected the guarded lambda result: {stderr}"
+    );
+    common::expect_front_end_ok_files_with_stdlib(&[source], "guarded lambda result parity");
+}

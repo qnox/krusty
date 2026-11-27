@@ -36,7 +36,10 @@ mod class_capture_discovery;
 mod class_names;
 mod common_supertype;
 use class_capture_discovery::*;
+mod constructor_rung_failure;
 mod declaration_type_inference;
+mod source_constructor_failure;
+use source_constructor_failure::ConstructorValueParameters;
 mod symbol_table;
 use common_supertype::*;
 use declaration_type_inference::*;
@@ -94,7 +97,6 @@ use annotation_bindings::{BoundAnnotation, BoundAnnotations};
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
 mod backing_field_binding;
-mod boolean_implications;
 mod dependency_annotation_defaults;
 mod dependency_body_call_edges;
 pub(crate) use anonymous_object_capture::discover_inline_anonymous_object_captures;
@@ -175,6 +177,7 @@ mod collection_literals;
 mod common_classifier_views;
 mod compound_assignments;
 mod condition_exclusions;
+mod condition_narrowings;
 mod conditional_branch;
 mod constant_evaluation;
 mod constructor_arguments;
@@ -453,6 +456,7 @@ mod type_argument_arity;
 mod uninferred_call_results;
 mod upper_bound_violations;
 mod value_class_declaration;
+mod value_implications;
 mod variance_conflicts;
 mod when_comparison;
 mod when_exhaustiveness;
@@ -3472,8 +3476,6 @@ struct Local {
     /// Identity smart-cast facts about this value are keyed by. Every declaration allocates one,
     /// whatever its origin; a narrowing shadow keeps the identity of the value it narrows.
     flow_identity: u32,
-    /// Immutable origin identity implied by this safe-call result; follows lexical shadowing.
-    safe_call_origin: Option<lexical_bindings::BindingIdentity>,
 }
 
 /// The receiver stack a lambda body is checked under: any context receivers, the extension
@@ -3578,14 +3580,6 @@ struct NamedCallArguments<'a> {
 struct DispatchPropertyProvenance {
     enum_entry: Option<EnumEntryProperty>,
     selected_receiver: Option<(usize, usize)>,
-}
-
-/// The value-parameter list a constructor-arity diagnostic is written against.
-struct ConstructorValueParameters<'a> {
-    types: &'a [Ty],
-    names: &'a [String],
-    defaults: &'a [bool],
-    vararg: Option<usize>,
 }
 
 /// The selected formal a committed argument is checked against.
@@ -5285,6 +5279,14 @@ impl<'a> Checker<'a> {
                 &[],
             )
             .is_some_and(|symbol| !symbol.overloads().is_empty());
+        let applicability = if has_candidates {
+            self.callable_rung_applicability(scope, call, args, &type_args, &candidates)
+        } else {
+            constructor_rung_failure::RungApplicability::NoCandidate
+        };
+        if self.settle_deferred_constructor_failure(scope, call, args, applicability) {
+            return ClassifierValueCall::Checked(Ty::Error);
+        }
         self.diags.error(
             self.call_callee_name_span(call),
             if has_candidates {
@@ -7946,18 +7948,25 @@ impl<'a> Checker<'a> {
                             InvokeResolution::Inapplicable(_) | InvokeResolution::Absent => {}
                         }
                     }
-                    if !self.report_source_constructor_mapping_error(
-                        call,
-                        args,
-                        &arguments,
-                        &candidates,
-                        &qname,
-                    ) && !self.call_already_has_argument_diagnostic(call, args)
-                    {
-                        self.diags
-                            .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                    // The later rungs of a classifier qualifier (`C`'s associated, companion and
+                    // static callables) still name `Name`; they settle this failure.
+                    let trailing_lambda = arguments.trailing_lambda;
+                    let failure = constructor_rung_failure::DeferredConstructorFailure::source(
+                        arguments,
+                        candidates,
+                        qname,
+                        trailing_lambda,
+                    );
+                    self.defer_constructor_failure(call, failure);
+                    if !matches!(receiver_qualifier, Ok(ResolvedQualifier::Classifier(_))) {
+                        self.settle_deferred_constructor_failure(
+                            scope,
+                            call,
+                            args,
+                            constructor_rung_failure::RungApplicability::NoCandidate,
+                        );
+                        return Ty::Error;
                     }
-                    return Ty::Error;
                 }
                 // CLASSPATH nested-class constructor `Outer.Nested(args)` (a sealed subclass
                 // `Subject.User("x")`, or any nested class), OR a FULLY-QUALIFIED constructor via a package
@@ -7966,6 +7975,7 @@ impl<'a> Checker<'a> {
                 {
                     if let Ok(ResolvedQualifier::Classifier(internal)) = member_qualifier {
                         let mut constructor_mapping_error = None;
+                        let mut rejected_constructors = None;
                         match self.record_resolved_library_constructor(
                             scope,
                             call,
@@ -7999,7 +8009,9 @@ impl<'a> Checker<'a> {
                                 self.report_invisible_constructor(call, &invisible);
                                 return Ty::Error;
                             }
-                            Ok(LibraryConstructorSelection::NoMatch(_)) => {}
+                            Ok(LibraryConstructorSelection::NoMatch(rejected)) => {
+                                rejected_constructors = rejected;
+                            }
                             Err(error) => {
                                 constructor_mapping_error = Some(error);
                             }
@@ -8022,13 +8034,20 @@ impl<'a> Checker<'a> {
                                 InvokeResolution::Inapplicable(_) | InvokeResolution::Absent => {}
                             }
                         }
-                        if let Some(error) = constructor_mapping_error {
-                            self.report_library_constructor_failure(scope, call, args, error);
-                        } else if !self.call_already_has_argument_diagnostic(call, args) {
-                            self.diags
-                                .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                        let failure = constructor_rung_failure::DeferredConstructorFailure::library(
+                            constructor_mapping_error,
+                            rejected_constructors.as_deref(),
+                        );
+                        self.defer_constructor_failure(call, failure);
+                        if !matches!(receiver_qualifier, Ok(ResolvedQualifier::Classifier(_))) {
+                            self.settle_deferred_constructor_failure(
+                                scope,
+                                call,
+                                args,
+                                constructor_rung_failure::RungApplicability::NoCandidate,
+                            );
+                            return Ty::Error;
                         }
-                        return Ty::Error;
                     }
                 }
                 if let Ok(ResolvedQualifier::Package(package)) = receiver_qualifier {
@@ -8477,6 +8496,17 @@ impl<'a> Checker<'a> {
                     // The one candidate whose parameters the arguments map onto owns the failure,
                     // as for a member call: `J.a(null)` against `a(@NotNull String)` is that
                     // candidate's argument mismatch, not an unresolved static.
+                    let applicability = self.callable_rung_applicability(
+                        scope,
+                        call,
+                        args,
+                        &explicit_type_args,
+                        &rejected_candidates,
+                    );
+                    if self.settle_deferred_constructor_failure(scope, call, args, applicability) {
+                        self.set(receiver, classifier_receiver);
+                        return Ty::Error;
+                    }
                     let call_diagnostics = self.diags.diags.len();
                     if let Some(rejected) = self.report_single_mapped_candidate_type_errors(
                         scope,
@@ -8530,6 +8560,15 @@ impl<'a> Checker<'a> {
                         }
                         return Ty::Error;
                     }
+                }
+                // A deferred constructor rung with no later classifier rung owns the failure.
+                if self.settle_deferred_constructor_failure(
+                    scope,
+                    call,
+                    args,
+                    constructor_rung_failure::RungApplicability::NoCandidate,
+                ) {
+                    return Ty::Error;
                 }
                 let receiver_diag_mark = self.diags.diags.len();
                 let mut rt = self.expr(scope, receiver);
@@ -13643,11 +13682,6 @@ impl<'a> Checker<'a> {
                 format!("krusty: conflicting local declaration '{name}'"),
             );
         }
-        // Keep the implication on the result's eventual binding, but resolve its origin before the
-        // result is declared: `val x = x?.p` refers to the OUTER `x` on the right-hand side.
-        // The bounded path accepts immutable lexical roots only. A mutable root needs edge
-        // invalidation and branch joins; declining it is conservative and cannot invent a cast.
-        let safe_call_origin = self.safe_call_origin_for_initializer(scope, init, is_var);
         let declared = ty.as_ref().map(|r| self.type_ref_ty(scope, r));
         // An UNRESOLVED annotation must fail the file, not silently bind `Error`: the local
         // would otherwise take its initializer's shape while every use site's checks are
@@ -13748,8 +13782,8 @@ impl<'a> Checker<'a> {
         // An explicitly typed callable-reference local has already adapted to its target shape.
         // Keep that shape instead of reopening the raw reference and undoing the adaptation.
         // Computed before the val is declared: `val x = x != null` talks about the OUTER `x`.
-        let boolean_implications = (!is_var)
-            .then(|| self.boolean_val_implications(scope, init, bound_ty))
+        let value_implications = (!is_var)
+            .then(|| self.value_implications(scope, init, bound_ty))
             .flatten();
         let flow_identity = if let Some(function_type) = declared
             .filter(|ty| ty.is_fun())
@@ -13776,11 +13810,11 @@ impl<'a> Checker<'a> {
             self.record_enhanced_local(flow_identity, init, bound_ty);
             self.record_flexible_local(flow_identity, init, bound_ty);
         }
-        if let Some(origin) = safe_call_origin {
-            self.attach_safe_call_origin(scope, &name, origin);
-        }
-        if let Some(implications) = boolean_implications {
-            scope.record_boolean_implications(flow_identity, implications);
+        if let Some(implications) = value_implications {
+            scope.record_value_implications(
+                NarrowPath::root_only(scope::PathRoot::Value(flow_identity)),
+                implications,
+            );
         }
         if declared.is_none() && !is_var {
             if let Some(path) = self.visible_value_path(scope, &name) {
@@ -14096,6 +14130,9 @@ impl<'a> Checker<'a> {
                             ty,
                             stable: true,
                         });
+                    if let Some(implications) = self.value_implications(scope, value, ty) {
+                        scope.record_value_implications(path.clone(), implications);
+                    }
                     if let Some(narrowed) =
                         self.assignment_narrowing(&name, ty, vt, self.span(value))
                     {
@@ -23671,6 +23708,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_expression_intersections: HashMap::default(),
         selected_value_smartcasts: HashMap::default(),
         selected_numeric_conversions: HashMap::default(),
+        deferred_constructor_failures: HashMap::default(),
         selected_function_value_conversions: HashMap::default(),
         narrowed_this_member: HashMap::default(),
         script_receiver_members: HashSet::default(),
@@ -25777,6 +25815,9 @@ struct Checker<'a> {
         HashMap<ExprId, intersection_inference::InferredIntersection>,
     selected_value_smartcasts: HashMap<ExprId, Ty>,
     selected_numeric_conversions: HashMap<ExprId, Ty>,
+    /// A qualified call's inapplicable nested-constructor rung, kept while its later rungs select.
+    deferred_constructor_failures:
+        HashMap<ExprId, constructor_rung_failure::DeferredConstructorFailure>,
     selected_function_value_conversions: HashMap<ExprId, (Ty, Ty)>,
     narrowed_this_member: HashMap<ExprId, TypeName>,
     /// Bare member reads and calls whose implicit receiver is a script's own instance. Once their
@@ -28148,6 +28189,30 @@ impl<'a> Checker<'a> {
         type_args: &[Ty],
         overloads: &[crate::libraries::FunctionInfo],
     ) -> Option<(CallArgMappingFailure, crate::libraries::FunctionInfo)> {
+        let mut failures =
+            self.callable_mapping_failures(scope, call, args, type_args, overloads)?;
+        let same_mapping_shape = failures.first().is_some_and(|(_, first)| {
+            failures
+                .iter()
+                .skip(1)
+                .all(|(_, candidate)| Self::same_argument_mapping_shape(first, candidate))
+        });
+        if !same_mapping_shape {
+            return None;
+        }
+        take_unanimous_mapping_error(&mut failures)
+    }
+
+    /// Each visible candidate's argument-mapping failure, or `None` when a candidate maps the
+    /// source argument list.
+    fn callable_mapping_failures(
+        &self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        args: &[ExprId],
+        type_args: &[Ty],
+        overloads: &[crate::libraries::FunctionInfo],
+    ) -> Option<Vec<(CallArgMappingFailure, crate::libraries::FunctionInfo)>> {
         let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let mut failures = Vec::new();
@@ -28177,16 +28242,7 @@ impl<'a> Checker<'a> {
                 Err(failure) => failures.push((failure, candidate.clone())),
             }
         }
-        let same_mapping_shape = failures.first().is_some_and(|(_, first)| {
-            failures
-                .iter()
-                .skip(1)
-                .all(|(_, candidate)| Self::same_argument_mapping_shape(first, candidate))
-        });
-        if !same_mapping_shape {
-            return None;
-        }
-        take_unanimous_mapping_error(&mut failures)
+        Some(failures)
     }
 
     // Call-site sugar over the ONE resolution entry point [`SymbolResolver::resolve_symbol`]: each
@@ -30923,115 +30979,6 @@ impl<'a> Checker<'a> {
         candidates
     }
 
-    /// Preserve the concrete part of a declared generic constructor parameter instead of reducing
-    /// "mentions a type variable" to a boolean. `<T>` itself is inference-only, a function containing
-    /// `T` still constrains its outer shape, and a constructed type such as `List<T>` still constrains
-    /// its argument by the `List` head.
-    /// Report WHY no source constructor accepted the call, when every candidate agrees on the reason.
-    ///
-    /// `select_source_constructor` answers only yes/no, so the reason was dropped and the caller fell back
-    /// to the generic "none of the following candidates is applicable:" list — `Point()` on
-    /// `class Point(val x: Int)` said that instead of "no value passed for parameter 'x'.", which is what
-    /// every other callable origin reports for the same mistake. Re-run the argument mapping over the
-    /// candidates to recover it. Returns whether a canonical error was reported.
-    fn report_source_constructor_mapping_error(
-        &mut self,
-        call: ExprId,
-        args: &[ExprId],
-        arguments: &CtorDelegationCall,
-        candidates: &[CtorDelegationCandidate],
-        class_name: &str,
-    ) -> bool {
-        let names: Option<&[Option<String>]> = arguments
-            .names
-            .iter()
-            .any(Option::is_some)
-            .then_some(&arguments.names);
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-        let mut failures = Vec::new();
-        for (index, candidate) in candidates.iter().enumerate() {
-            let params = crate::libraries::ParamList {
-                visibility: Visibility::Public,
-                names: candidate.param_names.clone(),
-                defaults: candidate.defaults.as_slice().into(),
-                types: candidate.target.params().to_vec(),
-                recv_fun: candidate.lambda_receivers.as_slice().into(),
-                vararg: candidate.vararg,
-                annotation: None,
-            };
-            if let Err(failure) = map_param_list_args(args, names, &params, trailing_lambda) {
-                failures.push((failure, index));
-            }
-        }
-        match take_unanimous_mapping_error(&mut failures) {
-            Some((failure, index)) => {
-                if let Some(candidate) = candidates.get(index) {
-                    if self.report_constructor_too_many_arguments(
-                        call,
-                        args,
-                        &failure,
-                        class_name,
-                        ConstructorValueParameters {
-                            types: candidate.target.params(),
-                            names: &candidate.param_names,
-                            defaults: &candidate.defaults,
-                            vararg: candidate.vararg,
-                        },
-                    ) {
-                        return true;
-                    }
-                }
-                self.report_call_arg_mapping_error(call, args, failure);
-                true
-            }
-            None => false,
-        }
-    }
-
-    fn report_constructor_too_many_arguments(
-        &mut self,
-        call: ExprId,
-        args: &[ExprId],
-        failure: &CallArgMappingFailure,
-        class_name: &str,
-        parameters: ConstructorValueParameters<'_>,
-    ) -> bool {
-        let ConstructorValueParameters {
-            types: params,
-            names,
-            defaults,
-            vararg,
-        } = parameters;
-        if !matches!(
-            failure.errors.as_slice(),
-            [CallArgMappingError::TooManyArguments { .. }]
-        ) || names.len() != params.len()
-        {
-            return false;
-        }
-        let rendered = names
-            .iter()
-            .zip(params)
-            .enumerate()
-            .map(|(index, (name, ty))| {
-                let default = if defaults.get(index).copied().unwrap_or(false) {
-                    " = ..."
-                } else {
-                    ""
-                };
-                let vararg = if vararg == Some(index) { "vararg " } else { "" };
-                format!("{vararg}{name}: {}{default}", ty.source_name())
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let span = self.arity_diagnostic_span(call, args, names.len());
-        self.diags.error(
-            span,
-            format!("too many arguments for 'constructor({rendered}): {class_name}'."),
-        );
-        true
-    }
-
     fn select_source_constructor(
         &self,
         scope: &CheckerScope<'_>,
@@ -32102,17 +32049,15 @@ impl<'a> Checker<'a> {
                 .active_declaration_spelling_facts
                 .take()
                 .expect("declaration spelling capture must remain active for one type traversal");
-            let mut annotations = crate::spelling::RecordedTypeAnnotations::default();
-            for (&occurrence, name) in &self.file.function_type_parameter_names {
-                annotations.record_parameter_name(occurrence, name);
-            }
-            if checked_source_facts.is_some_and(|facts| {
-                !annotations.record_checked_source_facts(binding_reference, facts)
-            }) {
+            let Some(annotations) = crate::spelling::declaration_type_annotations(
+                &self.file.function_type_parameter_names,
+                binding_reference,
+                checked_source_facts,
+            ) else {
                 self.resolved_declaration_types
                     .insert((reference.span.lo, reference.span.hi), Ty::Error);
                 return Ty::Error;
-            }
+            };
             let already_written_aliases = HashMap::default();
             let source_spellings = crate::spelling::SourceSpellings {
                 aliases: if checked_source_facts.is_some() {
@@ -32845,7 +32790,7 @@ impl<'a> Checker<'a> {
                     if narrows_then != for_else {
                         self.null_check_narrowings(scope, operand, &mut out, declined);
                     } else {
-                        self.null_branch_narrowings(scope, operand, &mut out);
+                        self.null_branch_narrowings(scope, operand, &mut out, declined);
                     }
                 } else if matches!(op, BinOp::Eq | BinOp::RefEq) != for_else {
                     // `x?.p == v` holds only when every `?.` held, as long as `v` cannot be null:
@@ -32919,124 +32864,6 @@ impl<'a> Checker<'a> {
             declined,
         );
         out
-    }
-
-    fn condition_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        cond: ExprId,
-        truth: bool,
-    ) -> (Vec<FlowNarrowing>, Vec<DeclinedFlowNarrowing>) {
-        let mut candidates = Vec::new();
-        let mut declined = Vec::new();
-        self.collect_condition_narrowings(scope, cond, truth, &mut candidates, &mut declined);
-        let nonnull: crate::fx_hash::HashSet<NarrowPath> = candidates
-            .iter()
-            .filter_map(|(path, ty)| (!ty.is_nullable()).then_some(path.clone()))
-            .collect();
-        let mut result: Vec<(NarrowPath, Ty)> = Vec::new();
-        for (path, ty) in candidates {
-            let ty = match ty.kind() {
-                TyKind::Nullable(inner) if nonnull.contains(&path) && !inner.is_unsigned() => inner,
-                _ => ty,
-            };
-            let matching = result
-                .iter()
-                .enumerate()
-                .filter_map(|(index, (existing, current))| {
-                    (*existing == path).then_some((index, *current))
-                })
-                .collect::<Vec<_>>();
-            if matching.is_empty() {
-                result.push((path, ty));
-                continue;
-            }
-            let context = crate::assignable::TyCtx::new();
-            // Keep the minimal set of proven types. Comparable facts collapse to the narrower one;
-            // unrelated facts form a real flow intersection and must both survive. Treating that
-            // case as a conflict discarded `A & B` entirely and made every member unresolved.
-            if matching
-                .iter()
-                .any(|(_, current)| crate::assignable::is_subtype(&context, self, *current, ty))
-            {
-                continue;
-            }
-            let dominated = matching
-                .into_iter()
-                .filter_map(|(index, current)| {
-                    crate::assignable::is_subtype(&context, self, ty, current).then_some(index)
-                })
-                .collect::<crate::fx_hash::HashSet<_>>();
-            if !dominated.is_empty() {
-                result = result
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(index, entry)| (!dominated.contains(&index)).then_some(entry))
-                    .collect();
-            }
-            result.push((path, ty));
-        }
-        (result, declined)
-    }
-
-    fn collect_condition_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        cond: ExprId,
-        truth: bool,
-        out: &mut Vec<(NarrowPath, Ty)>,
-        declined: &mut Vec<(String, Ty)>,
-    ) {
-        // `!cond` flips the branch facts: the narrowings of `cond`-false hold when `!cond` is true
-        // (and vice versa). Recursing with a flipped `truth` also yields De Morgan for `!(a && b)` /
-        // `!(a || b)` through the combine rule below.
-        if let Expr::Unary {
-            op: UnOp::Not,
-            operand,
-        } = self.file.expr(cond).clone()
-        {
-            self.collect_condition_narrowings(scope, operand, !truth, out, declined);
-            return;
-        }
-        if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
-            if matches!(op, BinOp::Eq | BinOp::Ne) {
-                for (condition, literal) in [(lhs, rhs), (rhs, lhs)] {
-                    let Expr::BoolLit(literal) = self.file.expr(literal) else {
-                        continue;
-                    };
-                    if self.expr_types[condition.0 as usize].non_null() != Ty::Boolean {
-                        continue;
-                    }
-                    let condition_truth = if (op == BinOp::Eq) == truth {
-                        *literal
-                    } else {
-                        !*literal
-                    };
-                    self.collect_condition_narrowings(
-                        scope,
-                        condition,
-                        condition_truth,
-                        out,
-                        declined,
-                    );
-                    // Projecting the Boolean value must not discard facts established by the
-                    // equality expression itself. In particular, a true `x?.p == true` also
-                    // proves that the safe-call receiver `x` was non-null.
-                    out.extend(self.smartcast_narrowings(scope, cond, !truth, declined));
-                    return;
-                }
-            }
-            let combines = (truth && op == BinOp::And) || (!truth && op == BinOp::Or);
-            if combines {
-                self.collect_condition_narrowings(scope, lhs, truth, out, declined);
-                self.collect_condition_narrowings(scope, rhs, truth, out, declined);
-                return;
-            }
-        }
-        self.contract_condition_narrowings(scope, cond, truth, out, declined);
-        self.implied_condition_narrowings(scope, cond, truth, out, declined);
-        out.extend(self.smartcast_narrowings(scope, cond, !truth, declined));
-        self.as_cast_narrowings(scope, cond, out);
     }
 
     /// Bring the narrowings a condition proves into scope for a guarded region. The single
@@ -40690,7 +40517,14 @@ impl<'a> Checker<'a> {
                 // of this lexical flow (`x!!.let { use(x) }`, and later statements). Reassignments
                 // invalidate the fact through the ordinary scope machinery; temporaries and
                 // unstable properties never produce a reusable path.
+                // The assertion proves what `operand != null` would: a safe-call chain's links, a
+                // call's `returnsNotNull()` effect, and a stable value's initializer implications.
                 if narrowed != Ty::Error {
+                    let mut proven = Vec::new();
+                    self.null_check_narrowings(scope, operand, &mut proven, &mut Vec::new());
+                    for (path, ty) in proven {
+                        self.apply_narrowing_unchecked(scope, &path, ty);
+                    }
                     if let Some(path) = self.expr_access_path(operand).filter(|path| {
                         self.stable_path_ty(scope, path, self.span(operand))
                             .is_some()
@@ -42318,7 +42152,7 @@ impl<'a> Checker<'a> {
                 // stored in a local (`val parent = explicit?.let { … }`) is null whenever its base
                 // is, so reaching the selector proves the base non-null too. Without it,
                 // `parent?.let { explicit.name }` reads `explicit` as still nullable.
-                self.apply_safe_call_origin_narrowing(&selector_scope, &path, self.span(receiver));
+                self.apply_implied_non_null_narrowing(&selector_scope, &path, self.span(receiver));
             }
             let scope = &selector_scope;
             // Diagnostic checkpoint for the "nothing resolved, nothing reported" report below. Taken
@@ -46608,6 +46442,13 @@ impl<'a> Checker<'a> {
         } = call_args;
         let selected = match selection {
             None => {
+                if !overloads.is_empty() {
+                    let applicability =
+                        self.callable_rung_applicability(scope, e, args, type_args, &overloads);
+                    if self.settle_deferred_constructor_failure(scope, e, args, applicability) {
+                        return Some(Ty::Error);
+                    }
+                }
                 if let Some((failure, candidate)) =
                     self.unanimous_callable_mapping_failure(scope, e, args, type_args, &overloads)
                 {

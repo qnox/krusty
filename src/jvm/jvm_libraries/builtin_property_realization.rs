@@ -5,9 +5,10 @@
 //! such method as the builtin property it overrides, read through the property's getter
 //! (`<get-keys>`), so the provider normalizes it into a [`PropertyInfo`] on the declaring class.
 //! The Java result is enhanced from the builtin property's declared type, which also marks the
-//! positions it fixes not-null ([`crate::libraries::enhance_from_overridden`]).
+//! positions it fixes not-null ([`enhance_from_overridden`]).
 
 use super::*;
+use krusty_core::enhanced_nullability::enhance_from_overridden;
 
 impl JvmLibraries {
     /// The builtin property `name` as `recv`'s class declares it through a realizing member.
@@ -56,7 +57,7 @@ impl JvmLibraries {
             .unwrap_or_else(|| function.ret.apply(getter.ret));
         let (ty, marks) =
             match mapped_property.and_then(|mapping| self.overridden_property_type(mapping)) {
-                Some(overridden) => crate::libraries::enhance_from_overridden(ty, overridden),
+                Some(overridden) => enhance_from_overridden(ty, overridden),
                 None => (ty, crate::libraries::TypeEnhancement::NONE),
             };
         getter.ret = ty;

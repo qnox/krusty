@@ -92,10 +92,15 @@ pub(crate) const ORDER: &[Pass] = &[
     Pass::UnusedLocalSlots,
 ];
 
+/// The class every pass analyzes the method as a member of. kotlinc's `OptimizationMethodVisitor`
+/// runs its transformers with the internal class name `"fake"`, so an instance method's `this`
+/// enters each analysis as a reference of a class no other value has, never as exactly its owner:
+/// a cast of a value read from `this` (`(this as Any) as C`, or `this` entering a generic inline
+/// call such as `apply { }`) is not redundant, while a parameter's or a constructed value's is.
+const ANALYZED_OWNER: &str = "fake";
+
 /// What the passes need to know of the method beyond its body.
 pub(crate) struct PassContext<'a> {
-    /// The internal name of the class the method belongs to.
-    pub owner: &'a str,
     /// The value classes whose boxes the boxing pass recognizes.
     pub value_classes: &'a dyn ValueClasses,
     /// The quirks of the kotlinc release whose optimizer the passes reproduce.
@@ -147,22 +152,22 @@ impl Run {
         context: &PassContext<'_>,
     ) -> Option<()> {
         let changed = match pass {
-            Pass::CapturedVars => captured_vars::eliminate(method, context.owner).ok()?,
+            Pass::CapturedVars => captured_vars::eliminate(method, ANALYZED_OWNER).ok()?,
             Pass::RedundantNullCheck => {
-                redundant_null_checks::eliminate(method, context.owner, context.value_classes)
+                redundant_null_checks::eliminate(method, ANALYZED_OWNER, context.value_classes)
                     .ok()?
             }
             Pass::RedundantCheckCast => {
-                redundant_checkcasts::eliminate(method, context.owner).ok()?
+                redundant_checkcasts::eliminate(method, ANALYZED_OWNER).ok()?
             }
             Pass::ConstantCondition => {
                 let done =
-                    constant_conditions::eliminate(method, context.owner, context.quirks).ok()?;
+                    constant_conditions::eliminate(method, ANALYZED_OWNER, context.quirks).ok()?;
                 self.constant_condition_labels = done.preserved_unreachable_labels;
                 done.changed
             }
             Pass::RedundantBoxing => {
-                redundant_boxing::eliminate(method, context.owner, context.value_classes).ok()?
+                redundant_boxing::eliminate(method, ANALYZED_OWNER, context.value_classes).ok()?
             }
             Pass::TemporaryVariables => {
                 match temporaries::eliminate(
@@ -178,7 +183,7 @@ impl Run {
                 }
             }
             Pass::StackPeephole => stack_peephole::optimize(method),
-            Pass::PopBackwardPropagation => pop_backward::propagate(method, context.owner).ok()?,
+            Pass::PopBackwardPropagation => pop_backward::propagate(method, ANALYZED_OWNER).ok()?,
             Pass::DeadCode => dead_code::eliminate(method),
             Pass::RedundantGoto => redundant_gotos::remove(method, &self.pinned),
             Pass::RedundantNops => redundant_nops::remove(method),
@@ -212,8 +217,7 @@ pub(crate) fn optimize(method: &mut MethodNode, context: &PassContext<'_>) -> Ou
     if !optimizable && !context.kept_for_inlining {
         crate::trace_compiler!(
             "bytecode",
-            "{}.{}{} is too large to optimize; only the final dead-code step runs",
-            context.owner,
+            "{}{} is too large to optimize; only the final dead-code step runs",
             method.name,
             method.desc
         );
@@ -267,7 +271,6 @@ mod tests {
 
     fn context(value_classes: &ValueClassDescriptors) -> PassContext<'_> {
         PassContext {
-            owner: "T",
             value_classes,
             quirks: crate::kotlin_version::Quirks::NONE,
             parameter_slots: 0,

@@ -4,14 +4,14 @@
 mod annotation_values;
 pub use annotation_values::AnnotationValue;
 mod builtin_classes;
-pub(crate) use annotation_values::ExactFloat;
+pub use annotation_values::ExactFloat;
 pub use builtin_classes::REPRESENTED_BUILTINS;
 mod classifier_declarations;
 mod deprecation;
 mod diagnostic_rendering;
 mod intersection;
 pub use intersection::declaration_approximation;
-pub(crate) use intersection::{same_component_set, same_structure};
+pub use intersection::{same_component_set, same_structure};
 mod overridden_declaration;
 mod semantic_call_role;
 mod semantic_callable_owner;
@@ -31,10 +31,10 @@ pub use overridden_declaration::OverriddenDeclaration;
 pub use semantic_call_role::{ConstNumericOperation, SemanticCallRole};
 pub use semantic_callable_owner::SemanticCallableOwner;
 pub use suspension::continuation_passing;
-pub(crate) use value_conversion::{value_conversion, ValueConversion};
+pub use value_conversion::{value_conversion, ValueConversion};
 mod annotation_targets;
 mod interning;
-pub(crate) use annotation_targets::PropertyAnnotationHost;
+pub use annotation_targets::PropertyAnnotationHost;
 pub use annotation_targets::{
     AnnotationTargets, DeclaredTargetPolicies, KotlinTarget, PropertyAnnotationDefaultTargetMode,
     PropertyAnnotationSite, PropertyAnnotationSites,
@@ -44,7 +44,7 @@ mod substitute;
 mod type_parameter_identity;
 pub use equality_mode::EqualityMode;
 
-pub(crate) use substitute::{
+pub use substitute::{
     declares_formal, ty_canonicalize_params, ty_map_symbols, ty_rename_params,
     ty_replace_formals_along, ty_subst_alias_expansion, ty_subst_formals, ty_subst_keep_unbound,
     ty_subst_keep_unbound_closed, ty_subst_supertype_template, ty_with_param_bounds,
@@ -60,11 +60,11 @@ use interning::ShardedInterner;
 mod array_types;
 mod primitive_arrays;
 mod raw_erasure;
-pub(crate) use raw_erasure::{formal_erasures, raw_member_type, DeclaredFormals};
+pub use raw_erasure::{formal_erasures, raw_member_type, DeclaredFormals};
 mod thin_handles;
 mod ty_kind;
 mod ty_table;
-pub use krusty_core::{
+pub use crate::{
     existing_type_name, existing_type_name_child, existing_type_name_in,
     existing_type_name_nested_child, insert_type_name_in, same, type_name, type_name_child,
     type_name_from, type_name_from_multifile_facade, type_name_nested_child, InternalName,
@@ -79,21 +79,16 @@ pub use thin_handles::{IntersectionParts, TyList, TyParamName};
 pub use ty_kind::TyKind;
 mod type_name_list;
 pub use type_name_list::TypeNameList;
+pub use type_parameter_identity::declaration_type_parameter;
 pub use type_parameter_identity::type_parameter_source_name;
-pub(crate) use type_parameter_identity::{
+pub use type_parameter_identity::{
     call_site_type_variable, constructor_type_parameter, generated_function_type_parameter,
     hidden_captured_type_parameter, is_nested_result_type_variable, metadata_type_parameter,
     nested_result_type_variable, postponed_call_type_variable, postponed_variable_origin,
     ty_declared_at_call, ty_mentions_call_variable, CallSiteIdentity,
 };
-// Backend unit tests build declaration type parameters directly; production code outside the
-// frontend never allocates one.
-#[cfg(not(any(test, feature = "test-support")))]
-pub(crate) use type_parameter_identity::declaration_type_parameter;
-#[cfg(any(test, feature = "test-support"))]
-pub use type_parameter_identity::declaration_type_parameter;
 
-pub use krusty_core::assertions::{AssertionCompilation, AssertionMode};
+pub use crate::assertions::{AssertionCompilation, AssertionMode};
 
 /// Semantic shape of one compiler-provided Kotlin array factory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -819,13 +814,13 @@ impl Ty {
 
     /// The inference variable `name` of one call, standing for the called declaration's formal
     /// and carrying that formal's instantiated upper bound.
-    pub(crate) fn type_variable(name: TyParamName, bound: Ty) -> Ty {
+    pub fn type_variable(name: TyParamName, bound: Ty) -> Ty {
         Ty::intern(TyKind::Var(name, bound))
     }
 
     /// This type parameter or inference variable with its upper bound replaced, keeping its kind
     /// and identity. Any other type is returned unchanged.
-    pub(crate) fn with_symbol_bound(self, bound: Ty) -> Ty {
+    pub fn with_symbol_bound(self, bound: Ty) -> Ty {
         match self.kind() {
             TyKind::TyParam(name, _) => Ty::intern(TyKind::TyParam(name, bound)),
             TyKind::Var(name, _) => Ty::type_variable(name, bound),
@@ -1232,7 +1227,7 @@ impl Ty {
 
     /// Render a Kotlin source type while letting a diagnostic qualify type-parameter names with
     /// their declaration owner. Semantic type identities remain unchanged.
-    pub(crate) fn source_name_with_type_parameter(
+    pub fn source_name_with_type_parameter(
         self,
         type_parameter: &dyn Fn(&str) -> String,
     ) -> String {
@@ -1253,7 +1248,7 @@ impl Ty {
     /// Render one type for a diagnostic while allowing the frontend to replace an opaque semantic
     /// classifier identity with its recorded source declaration name. The callback is consulted
     /// only while rendering; lookup and equality continue to use the interned identity.
-    pub(crate) fn source_name_with_classifier_in(
+    pub fn source_name_with_classifier_in(
         self,
         context: &[Ty],
         type_parameter: &dyn Fn(&str) -> String,
@@ -1750,7 +1745,7 @@ impl Ty {
 
 /// Semantic type of one declared value-parameter slot. A `vararg element: T` is callable as an
 /// `Array<T>` slot even though the source annotation itself denotes the element type.
-pub(crate) fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
+pub fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
     if is_vararg {
         Ty::array(declared)
     } else {
@@ -1817,7 +1812,7 @@ pub fn ty_mentions_any_param(ty: Ty) -> bool {
 
 /// Whether an occurrence names a parameter outside the supplied declaration scope.
 /// Declaration-owned bounds are checked separately from the occurrences they contain.
-pub(crate) fn ty_mentions_undeclared_param<F: TyParamKey>(ty: Ty, names: &[F]) -> bool {
+pub fn ty_mentions_undeclared_param<F: TyParamKey>(ty: Ty, names: &[F]) -> bool {
     ty.mentions_marker(
         &|occurrence| matches!(occurrence.kind(), TyKind::TyParam(name, _) | TyKind::Var(name, _) if !declares_formal(names, &name)),
     )
@@ -2065,9 +2060,9 @@ pub enum TypeVariance {
 
 #[derive(Clone, Debug, Default)]
 pub struct TypeParameterView<B> {
-    pub(crate) type_params: Vec<String>,
-    pub(crate) type_param_bounds: B,
-    pub(crate) type_param_variances: Vec<TypeVariance>,
+    pub type_params: Vec<String>,
+    pub type_param_bounds: B,
+    pub type_param_variances: Vec<TypeVariance>,
 }
 
 #[derive(Clone, Debug, Default)]

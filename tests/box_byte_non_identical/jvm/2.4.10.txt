@@ -2129,9 +2129,6 @@ regressions/arrayLiteralSpreadsInSourceOrder.kt
 regressions/atomicCompareExchange.kt
 regressions/callableReferenceToImplicitReceiverUnitCoercion.kt
 regressions/captureStorageDefaultMetadata.kt
-regressions/closedRangeBoundsThroughInterface.kt
-regressions/closedRangeBoundsThroughSubclass.kt
-regressions/closedRangeIntAccessors.kt
 regressions/closureWriteConformingSmartCast.kt
 regressions/closureWriteConformingSmartCastStringBuilder.kt
 regressions/collectionLiteralForTypeVariableBuiltFromOtherBound.kt
@@ -2215,6 +2212,8 @@ regressions/kt47279.kt
 regressions/kt6153.kt
 regressions/kt6434.kt
 regressions/kt789.kt
+regressions/lambdaTailGuardIntersectionPublishesAny.kt
+regressions/lambdaTailSmartCastPublishedType.kt
 regressions/libraryArrayLoops.kt
 regressions/libraryClassInheritedDefaults.kt
 regressions/libraryInterfaceTypeTests.kt
@@ -2295,7 +2294,6 @@ regressions/propertyReferenceGetAndName.kt
 regressions/propertyReferenceIdentityAcrossModules.kt
 regressions/propertySmartCastKeepsDeclaredType.kt
 regressions/rangeEqualityThroughProgression.kt
-regressions/receiverParameterMemberKeepsDefinitelyNonNull.kt
 regressions/referenceArrayStoreEvaluatesValueBeforeBoundsCheck.kt
 regressions/rigid.kt
 regressions/runtimeArrayListInterfaceTests.kt
@@ -2393,7 +2391,6 @@ serialization/deserializedMembers.kt
 serialization/serializedDefaultArgs.kt
 smartCasts/avoidSmartCastToDerivedForPrivate.kt
 smartCasts/falseSmartCast.kt
-smartCasts/genericInheritanceWithNonGenericNoAmbiguity.kt
 smartCasts/genericSet.kt
 smartCasts/implicitMemberReceiver.kt
 smartCasts/invokeRecieverSmartcastK2.kt

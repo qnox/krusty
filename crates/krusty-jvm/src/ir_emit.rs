@@ -122,6 +122,7 @@ mod inline_scope_frames;
 mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;
 mod inherited_default_forwarders;
+mod inherited_member_target;
 mod interface_compatibility;
 mod intrinsic_probes;
 mod lambda_class;
@@ -3032,10 +3033,9 @@ fn emit_interface_class(
                 parameter_names: &parameter_names,
                 ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
                 varargs: method_access::varargs_access(ir, fid),
-                // A split interface member's source declaration is the trampoline, while
-                // `suspend_funs` stays with the `$suspendImpl` body carrier that the coroutine
-                // transformer owns. The copied declared signature is the exact semantic fact
-                // this declaration-side bridge needs; do not recover it from the CPS descriptor.
+                // A split interface member's declaration is the trampoline; `suspend_funs` stays
+                // with the coroutine transformer's `$suspendImpl` carrier. The copied declared
+                // signature is the exact fact this bridge needs, never the CPS descriptor.
                 suspend: ir.suspend_declared_sigs.contains_key(&fid),
             },
         );
@@ -3046,7 +3046,7 @@ fn emit_interface_class(
             c,
             &mut cw,
             &mut default_impls,
-            env.dependency_callables,
+            env,
             opts,
         );
     }

@@ -214,14 +214,14 @@ impl PropertyAnnotationSites {
 
 /// Storage and parameter facts of the property declaration owning an application.
 #[derive(Clone, Copy)]
-pub(crate) struct PropertyAnnotationHost {
+pub struct PropertyAnnotationHost {
     pub constructor_parameter: bool,
     pub has_backing_field: bool,
 }
 
 impl PropertyAnnotationSite {
     /// The source keyword kotlinc names when diagnosing an explicit use-site target.
-    pub(crate) fn keyword(self) -> &'static str {
+    pub fn keyword(self) -> &'static str {
         match self {
             Self::ValueParameter => "param",
             Self::Property => "property",
@@ -233,7 +233,7 @@ impl PropertyAnnotationSite {
     }
 
     /// The declaration target selected by this property use-site.
-    pub(crate) fn kotlin_target(self) -> KotlinTarget {
+    pub fn kotlin_target(self) -> KotlinTarget {
         match self {
             Self::ValueParameter | Self::SetterParameter => KotlinTarget::ValueParameter,
             Self::Property => KotlinTarget::Property,
@@ -354,7 +354,7 @@ impl AnnotationTargets {
     /// Select once from the owning declaration's facts. Modern defaulting adds a parameter and,
     /// independently, a property (or an available backing field). Accessors are never implicit.
     /// Explicit sites remain singleton selections; the checker validates their host contracts.
-    pub(crate) fn property_declaration_sites(
+    pub fn property_declaration_sites(
         self,
         host: PropertyAnnotationHost,
         mode: PropertyAnnotationDefaultTargetMode,

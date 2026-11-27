@@ -1032,6 +1032,13 @@ impl<'u, 's> Linker<'u, 's> {
         implemented: &[KlibDependencyCallable],
     ) -> Result<(), KlibBodyDeclineReason> {
         if self.declared_member(body).is_none() {
+            // An interface default no walked body reaches through a declaration it implements is
+            // one nothing dispatches to: the closure released no body for it.
+            if self.sources.bodies.is_interface_default(body)
+                && !self.sources.callees.is_object_default(body)
+            {
+                return Ok(());
+            }
             // The class carries the body however dispatch reaches it, so a body the closure did
             // not select uniquely declines rather than leaving the slot without an implementation.
             let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) else {
