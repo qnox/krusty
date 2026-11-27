@@ -13,9 +13,10 @@
 //! flexible result ([`ResultEnhancement::Flexible`]).
 
 use super::{override_parameter_types_match, resolution_subtype};
-use crate::libraries::{enhance_from_overridden, FunctionInfo, FunctionSet, ResultEnhancement};
+use crate::libraries::{FunctionInfo, FunctionSet, ResultEnhancement};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind};
+use krusty_core::enhanced_nullability::enhance_from_overridden;
 
 /// The head nullability qualifier one overridden declaration contributes to an override's result
 /// (`AbstractSignatureParts.nullabilityQualifier`): a nullable result is `NULLABLE`, a flexible one
