@@ -406,9 +406,12 @@ fn run_backend_passes_after_plugins(
             storage_properties: &storage_properties,
         },
         &inherited_default_statics,
-        &mut facts.bridge_adaptations,
-        &mut facts.override_results,
-        &mut facts.property_reference_realizations,
+        crate::value_classes::RealizationFacts {
+            bridge_adaptations: &mut facts.bridge_adaptations,
+            override_results: &mut facts.override_results,
+            property_reference_realizations: &mut facts.property_reference_realizations,
+            default_call_operands: &mut facts.default_call_operands,
+        },
     ) {
         return Err(SkipReason::ValueClasses);
     }

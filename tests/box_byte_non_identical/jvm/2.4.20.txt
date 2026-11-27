@@ -24,7 +24,6 @@ annotations/instances/multimoduleTypeParams.kt
 annotations/instances/nested.kt
 annotations/instances/repeatableInstantiation.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
-annotations/instances/unsignedAndBooleanArrays.kt
 annotations/instances/varargInAnnotationParameterInstantiation.kt
 annotations/intrinsicConstEvaluationInSources.kt
 annotations/parameters.kt
