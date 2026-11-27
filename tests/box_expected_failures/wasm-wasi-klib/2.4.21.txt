@@ -289,7 +289,6 @@ coroutines/featureIntersection/tailrec/realStringRepeat.kt
 coroutines/featureIntersection/tailrec/whenWithIs.kt
 coroutines/functionReference_Function_SuspendFunction_casts.kt
 coroutines/handleException.kt
-coroutines/indirectInlineUsedAsNonInline.kt
 coroutines/inlineClasses/direct/boxTypeParameterOfSuperType.kt
 coroutines/inlineClasses/direct/boxTypeParameterOfSuperTypeResult.kt
 coroutines/inlineClasses/direct/defaultStub.kt

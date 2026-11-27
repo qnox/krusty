@@ -274,7 +274,6 @@ coroutines/featureIntersection/tailrec/realStringEscape.kt
 coroutines/featureIntersection/tailrec/realStringRepeat.kt
 coroutines/featureIntersection/tailrec/whenWithIs.kt
 coroutines/handleException.kt
-coroutines/indirectInlineUsedAsNonInline.kt
 coroutines/inlineClasses/direct/boxTypeParameterOfSuperType.kt
 coroutines/inlineClasses/direct/boxTypeParameterOfSuperTypeResult.kt
 coroutines/inlineClasses/direct/defaultStub.kt
