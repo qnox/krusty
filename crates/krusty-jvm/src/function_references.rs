@@ -19,15 +19,7 @@ pub(super) enum FunctionReferenceRealizationTarget {
 }
 
 fn adapted_flags(adaptation: &krusty::fir::FirReferenceAdaptation, declaration_result: Ty) -> i32 {
-    let vararg_conversion = adaptation.arguments.iter().any(|argument| {
-        matches!(
-            argument,
-            krusty::fir::FirAdaptedReferenceArgument::Vararg {
-                whole_array: false,
-                ..
-            }
-        )
-    });
+    let vararg_conversion = adaptation.vararg_conversion();
     let unit_conversion =
         adaptation.result_type.get() == Ty::Unit && declaration_result != Ty::Unit;
     i32::from(vararg_conversion)

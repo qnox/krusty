@@ -21225,7 +21225,7 @@ fun use() {
             } if member.name == "exists"
                 && matches!(
                     argument_mapping.as_slice(),
-                    [AdaptedRefArgument::Value(0), AdaptedRefArgument::Vararg { values, whole_array: false }]
+                    [AdaptedRefArgument::Value(0), AdaptedRefArgument::Vararg { values, whole_array: false, .. }]
                         if values.is_empty()
                 )
         )));
@@ -27982,10 +27982,9 @@ impl<'a> Checker<'a> {
                 }
                 let direct_prefix = plan.iter().enumerate().all(|(target, argument)| match argument {
                     AdaptedRefArgument::Value(value) => *value == target,
-                    AdaptedRefArgument::Vararg {
-                        values,
-                        whole_array: true,
-                    } => values.as_slice() == [target],
+                    AdaptedRefArgument::Vararg { values, whole_array: true, .. } => {
+                        values.as_slice() == [target]
+                    }
                     AdaptedRefArgument::Context
                     | AdaptedRefArgument::Default
                     | AdaptedRefArgument::Vararg {
@@ -27996,7 +27995,7 @@ impl<'a> Checker<'a> {
                 let vararg_collect = vararg.and_then(|index| {
                     (index + 1 == declared
                         && plan.get(index).is_some_and(|argument| {
-                            matches!(argument, AdaptedRefArgument::Vararg { values, whole_array: false }
+                            matches!(argument, AdaptedRefArgument::Vararg { values, whole_array: false, .. }
                                 if !values.is_empty())
                         })
                         && plan[..index].iter().enumerate().all(|(target, argument)| {
@@ -28010,10 +28009,9 @@ impl<'a> Checker<'a> {
                     } else {
                         match argument {
                             AdaptedRefArgument::Default => true,
-                            AdaptedRefArgument::Vararg {
-                                values,
-                                whole_array: false,
-                            } => values.is_empty(),
+                            AdaptedRefArgument::Vararg { values, whole_array: false, .. } => {
+                                values.is_empty()
+                            }
                             _ => false,
                         }
                     }
