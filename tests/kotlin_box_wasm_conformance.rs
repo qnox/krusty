@@ -46,6 +46,55 @@ impl WasmLane {
         Ok(backend)
     }
 
+    /// The KLIB backend that writes this target's module libraries.
+    fn library_backend(&self, directive_source: &str) -> krusty::klib::backend::KlibBackend {
+        let features = krusty::features::LangFeatures::from_source_in_environment(directive_source);
+        let platform = match self.target {
+            WasmTarget::Js => krusty::klib::write::KlibPlatform::WasmJs,
+            WasmTarget::Wasi => krusty::klib::write::KlibPlatform::WasmWasi,
+        };
+        krusty::klib::backend::KlibBackend::new(
+            platform,
+            krusty::klib::write::KlibStamp::new(
+                krusty::kotlin_version::environment_release(),
+                features.language_version(),
+            ),
+        )
+        .with_annotations_in_metadata(features.has("AnnotationsInMetadata"))
+    }
+
+    /// Compile every module but the last into a KLIB only, link the last module's program against
+    /// those KLIBs, and run it.
+    fn compile_klib_modules_and_run(
+        &self,
+        scratch: &Path,
+        stem: &str,
+        modules: &[krusty::conformance::ModuleUnit],
+        directive_source: &str,
+    ) -> Outcome {
+        let backend = match self.backend(directive_source) {
+            Ok(backend) => backend,
+            Err(outcome) => return outcome,
+        };
+        let library = self.library_backend(directive_source);
+        let program = match box_lane::compile_modules_from_klibs(
+            ModuleCase {
+                scratch,
+                stem,
+                modules,
+            },
+            directive_source,
+            self.test_target(),
+            &backend,
+            &library,
+            DECLINE_PREFIX,
+        ) {
+            Ok(program) => program,
+            Err(outcome) => return outcome,
+        };
+        self.run_artifacts(scratch, stem, "klib-modules", directive_source, program)
+    }
+
     fn run_artifacts(
         &self,
         scratch: &Path,
@@ -203,19 +252,7 @@ impl Lane for WasmLane {
             Ok(backend) => backend.with_entry_module(entry_module.name.clone()),
             Err(outcome) => return outcome,
         };
-        let features = krusty::features::LangFeatures::from_source_in_environment(directive_source);
-        let platform = match self.target {
-            WasmTarget::Js => krusty::klib::write::KlibPlatform::WasmJs,
-            WasmTarget::Wasi => krusty::klib::write::KlibPlatform::WasmWasi,
-        };
-        let metadata = krusty::klib::backend::KlibBackend::new(
-            platform,
-            krusty::klib::write::KlibStamp::new(
-                krusty::kotlin_version::environment_release(),
-                features.language_version(),
-            ),
-        )
-        .with_annotations_in_metadata(features.has("AnnotationsInMetadata"));
+        let metadata = self.library_backend(directive_source);
         let program = match box_lane::compile_modules(
             ModuleCase {
                 scratch,
@@ -1995,4 +2032,24 @@ fn wasm_library_abstract_members_dispatch_to_their_overrides() {
     let src = include_str!("box_regressions/libraryAbstractMemberCalls.kt");
     expect_reference_box(src, "libraryAbstractMemberCalls");
     expect_wasm_box(src, "libraryAbstractMemberCalls");
+}
+
+#[test]
+fn wasm_links_a_library_s_top_level_function_bodies_from_its_klib() {
+    let source = include_str!("box_regressions/multimodule/libraryTopLevelFunctionBodies.kt");
+    let stem = "wasmLibraryTopLevelFunctionBodies";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the whole library-bodies program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name(),
+        );
+    }
 }

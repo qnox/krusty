@@ -1,0 +1,301 @@
+//! Top-level function bodies as krusty's KLIB writer records them, read and linked by kotlinc.
+//!
+//! The library is the shared regression `libraryTopLevelFunctionBodies.kt`. krusty compiles its
+//! library module into a Native KLIB; the pinned Kotlin/Native distribution's `klib dump-ir`
+//! deserializes that KLIB's IR, and `kotlinc-native` links the shared program's main module
+//! against it and runs it. Both directions use the official consumer, so a nonstandard table, a
+//! symbol of the wrong kind or a call by an unknown signature fails here rather than only in
+//! krusty's own reader.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use krusty::diag::DiagSink;
+use krusty::klib::backend::KlibBackend;
+use krusty::klib::write::{KlibPlatform, KlibStamp};
+
+use crate::common;
+
+const PROGRAM: &str = include_str!("box_regressions/multimodule/libraryTopLevelFunctionBodies.kt");
+
+fn kotlin_native_root() -> Option<PathBuf> {
+    let root = std::env::var_os("KRUSTY_KOTLIN_NATIVE").map(PathBuf::from);
+    match root {
+        Some(root) if root.join("bin/kotlinc-native").is_file() => Some(root),
+        Some(root) => panic!(
+            "KRUSTY_KOTLIN_NATIVE={} has no bin/kotlinc-native",
+            root.display()
+        ),
+        None if std::env::var_os("KRUSTY_REQUIRE_KLIB").is_some() => {
+            panic!("KRUSTY_REQUIRE_KLIB needs KRUSTY_KOTLIN_NATIVE")
+        }
+        None => {
+            eprintln!("skipping the KLIB body oracle: KRUSTY_KOTLIN_NATIVE is not set");
+            None
+        }
+    }
+}
+
+/// The shared program's library and main sources.
+fn program_sources() -> (String, String) {
+    let modules = krusty::conformance::split_modules(PROGRAM).expect("a two-module program");
+    let [library, main] = modules.as_slice() else {
+        panic!("the shared program has a library and a main module");
+    };
+    assert_eq!(main.deps, std::slice::from_ref(&library.name));
+    let [(_, library_source)] = library.files.as_slice() else {
+        panic!("the library module is one Kotlin file");
+    };
+    let [(_, main_source)] = main.files.as_slice() else {
+        panic!("the main module is one Kotlin file");
+    };
+    (library_source.clone(), main_source.clone())
+}
+
+/// Compile `source` with krusty into an unpacked linux_x64 KLIB under `work`.
+fn write_library(work: &Path, source: &str) -> PathBuf {
+    let stdlib = krusty::toolchain::kotlin_stdlib_klib(
+        krusty::compilation_target::CompilationTarget::Native,
+    )
+    .expect("the Native KLIB producer test has a stdlib");
+    let libraries = krusty::klib_libraries::KlibLibraries::open(&[
+        krusty::klib_libraries::KlibLibraryInput::platform_stdlib(
+            stdlib,
+            krusty::klib_libraries::KlibStdlibSemantics::Native,
+        ),
+    ])
+    .expect("open the Native stdlib KLIB");
+    let inputs = [krusty::source::SourceInput::kotlin(source).with_file_stem("Library")];
+    let mut diags = DiagSink::new();
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+        &inputs,
+        krusty::frontend::PlatformProvider::new(
+            krusty::compilation_target::CompilationTarget::Native,
+            Box::new(libraries.for_compilation()),
+        ),
+        &krusty::features::LangFeatures::from_source_in_environment(source),
+        &mut diags,
+    );
+    let backend = KlibBackend::new(
+        KlibPlatform::Native,
+        KlibStamp::new(
+            krusty::kotlin_version::KotlinVersion::V2_4_20,
+            krusty::language_version::LanguageVersion::V2_4,
+        ),
+    )
+    .with_native_target(krusty_native::NativeTarget::new(
+        krusty_native::Arch::X86_64,
+        krusty_native::Os::Linux,
+    ))
+    .expect("the official consumer fixture targets Kotlin/Native linux_x64");
+    let entries = krusty::compiler::emit_analyzed(
+        analysis,
+        &["Library".to_owned()],
+        &backend,
+        "lib",
+        &mut diags,
+    );
+    assert_eq!(
+        diags
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>(),
+        Vec::<&str>::new()
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|(path, _)| path == "default/ir/bodies.knb"),
+        "every function of the library has a body the writer records"
+    );
+    let library = work.join("lib");
+    for (entry, bytes) in entries {
+        let path = library.join(entry);
+        std::fs::create_dir_all(path.parent().expect("KLIB entry has a parent"))
+            .expect("create KLIB entry directory");
+        std::fs::write(path, bytes).expect("write KLIB entry");
+    }
+    library
+}
+
+fn scratch(name: &str) -> PathBuf {
+    let work = common::scratch_dir()
+        .expect("allocate the official KLIB consumer directory")
+        .join(name);
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).expect("create the consumer directory");
+    work
+}
+
+#[test]
+fn kotlinc_native_runs_a_program_against_krusty_written_function_bodies() {
+    let Some(native_root) = kotlin_native_root() else {
+        return;
+    };
+    let (library_source, main_source) = program_sources();
+    let work = scratch("krusty-function-bodies-official-consumer");
+    let library = write_library(&work, &library_source);
+    let main = work.join("Main.kt");
+    std::fs::write(
+        &main,
+        format!("{main_source}\nfun main() {{ print(box()) }}\n"),
+    )
+    .expect("write the consumer source");
+    let output = Command::new(native_root.join("bin/kotlinc-native"))
+        .arg(&main)
+        .arg("-library")
+        .arg(&library)
+        .args(["-produce", "program", "-output"])
+        .arg(work.join("consumer"))
+        .output()
+        .expect("launch the pinned kotlinc-native consumer");
+    assert!(
+        output.status.success(),
+        "kotlinc-native rejected krusty's function bodies (status {}):\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run = Command::new(work.join("consumer.kexe"))
+        .output()
+        .expect("run the official consumer");
+    assert_eq!(
+        (
+            run.status.success(),
+            String::from_utf8_lossy(&run.stdout).into_owned()
+        ),
+        (true, "OK".to_owned()),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    std::fs::remove_dir_all(work).expect("remove the consumer directory");
+}
+
+/// kotlinc's own dump of a library's IR, with the source path it records left out. A signature is
+/// printed by its mangled description when the library's debug table carries one and by its hash
+/// otherwise; the dump keeps only the declaration name before it, as the kotlinc consumer test
+/// proves each signature links.
+fn dump_ir(native_root: &Path, library: &Path) -> String {
+    let output = Command::new(native_root.join("bin/klib"))
+        .arg("dump-ir")
+        .arg(library)
+        .output()
+        .expect("launch the pinned klib tool");
+    assert!(
+        output.status.success(),
+        "klib dump-ir rejected the library (status {}):\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("klib dump-ir prints UTF-8")
+        .lines()
+        .filter(|line| !line.starts_with("Picked up "))
+        .map(
+            |line| match line.trim_start().strip_prefix("FILE fqName:") {
+                Some(file) => format!(
+                    "  FILE fqName:{}",
+                    file.split(' ')
+                        .next()
+                        .expect("a FILE line names its package")
+                ),
+                None => without_signature_descriptions(line),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `line` with each `|<description or hash>[` of a signature written `|[`.
+fn without_signature_descriptions(line: &str) -> String {
+    let mut rendered = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(bar) = rest.find('|') {
+        rendered.push_str(&rest[..=bar]);
+        rest = &rest[bar + 1..];
+        // A description nests braces and brackets; the signature's own `[mask]` follows `}` or a
+        // hash's last digit.
+        let mut depth = 0usize;
+        let end = rest.char_indices().find_map(|(index, char)| match char {
+            '(' | '{' => {
+                depth += 1;
+                None
+            }
+            ')' | '}' => {
+                depth = depth.saturating_sub(1);
+                None
+            }
+            '[' if depth == 0 => Some(index),
+            _ => None,
+        });
+        match end {
+            Some(end) => rest = &rest[end..],
+            None => break,
+        }
+    }
+    rendered.push_str(rest);
+    rendered
+}
+
+/// The dump of every function `names` lists, in dump order.
+fn functions(dump: &str, names: &[&str]) -> String {
+    let mut selected = String::new();
+    let mut keep = false;
+    for line in dump.lines() {
+        if let Some(rest) = line.strip_prefix("    FUN name:") {
+            keep = names
+                .iter()
+                .any(|name| rest.split(' ').next() == Some(*name));
+        } else if !line.starts_with("     ") {
+            keep = false;
+        }
+        if keep {
+            selected.push_str(line);
+            selected.push('\n');
+        }
+    }
+    selected
+}
+
+/// The functions whose bodies common IR records in the very form kotlinc's serializer writes:
+/// their whole dump is kotlinc's. (An `if` is a `when` whose `IF` origin common IR does not keep.)
+const KOTLINC_SHAPED: [&str; 6] = ["answer", "sum", "greet", "isNegative", "differs", "twice"];
+
+#[test]
+fn kotlinc_reads_krusty_written_function_bodies_as_it_writes_them() {
+    let Some(native_root) = kotlin_native_root() else {
+        return;
+    };
+    let (library_source, _) = program_sources();
+    let work = scratch("krusty-function-bodies-dump");
+    let krusty_library = write_library(&work, &library_source);
+    let kotlinc_source = work.join("Library.kt");
+    std::fs::write(&kotlinc_source, &library_source).expect("write the library source");
+    let output = Command::new(native_root.join("bin/kotlinc-native"))
+        .arg(&kotlinc_source)
+        .args([
+            "-produce",
+            "library",
+            "-nopack",
+            "-module-name",
+            "lib",
+            "-output",
+        ])
+        .arg(work.join("kotlinc-lib"))
+        .output()
+        .expect("launch the pinned kotlinc-native");
+    assert!(
+        output.status.success(),
+        "kotlinc-native failed (status {}):\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let krusty = dump_ir(&native_root, &krusty_library);
+    let kotlinc = dump_ir(&native_root, &work.join("kotlinc-lib"));
+    assert_eq!(
+        functions(&krusty, &KOTLINC_SHAPED),
+        functions(&kotlinc, &KOTLINC_SHAPED),
+        "the whole krusty dump:\n{krusty}"
+    );
+    std::fs::remove_dir_all(work).expect("remove the dump directory");
+}
