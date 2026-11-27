@@ -172,7 +172,15 @@ impl Emitter<'_> {
             && !inline.must_inline()
             && !self.default_call_operands.contains(call_expression);
         if let Some(recv) = dispatch_receiver {
-            let recv_desc = type_descriptor(self.value_ty(recv));
+            // kotlinc generates an inlined member's dispatch receiver as its declaring class: a
+            // receiver of a subclass is cast to it where it is stored (`this_$iv`).
+            let receiver = self.value_ty(recv);
+            let receiver = if receiver.obj_internal().is_some() {
+                Ty::obj(owner)
+            } else {
+                receiver
+            };
+            let recv_desc = type_descriptor(receiver);
             let splice_desc = format!("({}{}", recv_desc, &descriptor[1..]);
             let mut all = Vec::with_capacity(args.len() + 1);
             all.push(recv);
@@ -1038,6 +1046,9 @@ impl Emitter<'_> {
                 index,
                 code,
             );
+            if index < leading_non_argument_operands {
+                self.cast_dispatch_receiver(args[index], physical[index], code);
+            }
             self.frame.rewind_to(operand_frame);
             let entered = self
                 .frame
@@ -1507,6 +1518,21 @@ impl Emitter<'_> {
 
     /// Evaluate one call operand and adapt it to its descriptor type, as
     /// [`Self::emit_call_descriptor_operands`] does for every operand in turn.
+    /// Cast a dispatch receiver of a subclass to the inlined member's declaring class, which the
+    /// splice descriptor names for it.
+    fn cast_dispatch_receiver(&mut self, receiver: u32, declaring: Ty, code: &mut CodeBuilder) {
+        let (Some(source), Some(target)) = (
+            self.value_ty(receiver).obj_internal(),
+            declaring.obj_internal(),
+        ) else {
+            return;
+        };
+        if source != target {
+            let class = self.cw.class_ref(&target.render());
+            code.checkcast(class);
+        }
+    }
+
     fn emit_call_operand(
         &mut self,
         call_expression: u32,

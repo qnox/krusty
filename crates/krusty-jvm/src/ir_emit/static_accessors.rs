@@ -71,6 +71,9 @@ pub(super) enum StaticAccessor {
         companion: TypeName,
         holder: TypeName,
     },
+    /// `access$getThis$0$p(<inner>)`, reading inner class `inner`'s outer instance of class
+    /// `outer` for a body a caller may splice into another class.
+    OuterInstance { inner: TypeName, outer: TypeName },
 }
 
 /// Every static owner's accessors, in first-use order.
@@ -1013,6 +1016,8 @@ impl Walk<'_> {
                 }
                 // Placed by `companion_field_accessor`, which already decided it is needed.
                 StaticAccessor::CompanionInstance { .. } => true,
+                // Every class of the file may read the package-private field; a copied body may not.
+                StaticAccessor::OuterInstance { .. } => export_private,
                 StaticAccessor::Protected(_)
                 | StaticAccessor::PrivateMember(_)
                 | StaticAccessor::Constructor { .. } => true,
@@ -1067,6 +1072,13 @@ impl Walk<'_> {
             IrExpr::SetField { class, index, .. } => {
                 self.backing_field_accessor(*class, *index, true)
             }
+            IrExpr::EnclosingInstance { inner, outer, .. } => Some((
+                StaticOwner::Class(*inner),
+                StaticAccessor::OuterInstance {
+                    inner: *inner,
+                    outer: *outer,
+                },
+            )),
             IrExpr::PropertyRead { .. } => self
                 .hoisted_companion_property(expression, false)
                 .or_else(|| self.cross_class_member_property(expression, true)),
@@ -1392,6 +1404,14 @@ fn emit_selected(
                 companion,
                 holder,
                 &plan.companion_fields[&(holder, companion)],
+                cw,
+            ),
+            StaticAccessor::OuterInstance { inner, outer } => super::outer_instance_accessor::emit(
+                ir,
+                inner,
+                outer,
+                accessor.flags,
+                declaration_line,
                 cw,
             ),
             StaticAccessor::Protected(index) => {

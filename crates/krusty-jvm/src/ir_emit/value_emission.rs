@@ -1,6 +1,5 @@
 //! Physical JVM emission of one common-IR value node.
 
-use crate::value_classes::instance_representation;
 use krusty::ir::{Callee, IrExpr};
 use krusty::jvm::classfile::CodeBuilder;
 use krusty::jvm::names::{method_descriptor, type_descriptor};
@@ -192,11 +191,7 @@ impl super::Emitter<'_> {
                 outer,
             } => {
                 self.emit_value(*receiver, code);
-                let outer = instance_representation(self.ir, *outer);
-                let fref = self
-                    .cw
-                    .fieldref(&inner.render(), "this$0", &type_descriptor(outer));
-                code.getfield(fref, slot_words(outer) as i32);
+                self.emit_outer_instance_read(*inner, *outer, code);
             }
             IrExpr::GetField {
                 receiver,

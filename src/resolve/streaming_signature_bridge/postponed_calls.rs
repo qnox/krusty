@@ -655,10 +655,7 @@ impl ProductionSignatureSemantics<'_> {
                 };
                 let has_receiver = selected
                     .call_sig
-                    .lambda_receiver_params
-                    .get(parameter_index)
-                    .copied()
-                    .unwrap_or(false);
+                    .receiver_function_parameter(parameter_index, expectation);
                 let context_count = selected
                     .call_sig
                     .lambda_context_counts

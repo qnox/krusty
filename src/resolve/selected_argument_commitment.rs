@@ -437,11 +437,7 @@ impl Checker<'_> {
                 ParameterTypeExpectation { expected, declared },
                 argument,
                 actual,
-                call_sig
-                    .lambda_receiver_params
-                    .get(parameter)
-                    .copied()
-                    .unwrap_or(false),
+                call_sig.receiver_function_parameter(parameter, declared_parameter),
                 implicit_lambda_label.as_deref(),
             );
             argument_bindings.push(self.finalized_selected_argument_binding(

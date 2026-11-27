@@ -1,3 +1,11 @@
+//! A public inline member of a library class built by kotlinc, called from krusty-compiled code.
+//! The portable program is `tests/box_regressions/publicInlineMemberAcrossModules.kt`; its
+//! non-local returns join it once KLIB inline bodies are serialized.
+//!
+//! PLATFORM-SPECIFIC: these cases pin JVM facts the shared program cannot: a library compiled by
+//! kotlinc to class files (with `java.io.Closeable`), and the synthetic accessor through which a
+//! body copied into another package reads an inner class's package-private `this$0`.
+
 use super::common;
 
 const LIBRARY: &str = r#"
@@ -74,7 +82,7 @@ fun box(): String {
 }
 
 #[test]
-fn a_public_inline_member_reading_its_outer_instance_stays_a_call_from_another_package() {
+fn a_public_inline_member_reading_its_outer_instance_is_inlined_into_another_package() {
     common::expect_box_ok_against(
         "public_inline_member_outer_instance",
         r#"
@@ -141,10 +149,10 @@ fn call_owners(class: &[u8], callee: &str) -> Vec<String> {
 }
 
 #[test]
-fn a_declined_public_inline_member_splice_dispatches_on_the_subclass_receiver() {
-    // The inherited body reads the package-private `this$0`, so the splice is declined from this
-    // package and the member is called for real: on the receiver's class, as kotlinc names an
-    // ordinary member call on a `Sub` receiver.
+fn an_inherited_public_inline_member_reads_its_outer_instance_through_the_accessor() {
+    // The inherited body reads the package-private `this$0` through `access$getThis$0$p`, as
+    // kotlinc's does, so it is inlined into this package too: no call of `foo` remains, and the
+    // copied body calls the accessor of the declaring class.
     common::expect_box_ok_against(
         "public_inline_member_subclass_receiver",
         SUBCLASS_RECEIVER_LIBRARY,
@@ -169,5 +177,6 @@ fn a_declined_public_inline_member_splice_dispatches_on_the_subclass_receiver() 
         .find(|(name, _)| name == "MainKt")
         .map(|(_, bytes)| bytes)
         .expect("the consumer has a facade");
-    assert_eq!(call_owners(main, "foo"), ["a/E$Sub"]);
+    assert_eq!(call_owners(main, "foo"), Vec::<String>::new());
+    assert_eq!(call_owners(main, "access$getThis$0$p"), ["a/E$Base"]);
 }

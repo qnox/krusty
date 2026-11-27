@@ -106,6 +106,18 @@ impl CallSig {
 }
 
 impl CallSig {
+    /// Whether parameter `index`, of declared type `parameter`, is a receiver function type
+    /// (`Recv.() -> R`). A function type whose `has_receiver` is set is the structured form of the
+    /// receiver mark, so a provider that publishes the declared type need not repeat the mark; the
+    /// mark alone still covers a parameter whose function type was erased.
+    pub fn receiver_function_parameter(&self, index: usize, parameter: Ty) -> bool {
+        self.lambda_receiver_params
+            .get(index)
+            .copied()
+            .unwrap_or(false)
+            || matches!(parameter.non_null().kind(), crate::types::TyKind::Fun(signature) if signature.has_receiver)
+    }
+
     pub fn parameter_contributes_to_inference(&self, index: usize) -> bool {
         !self.no_infer_params.get(index).copied().unwrap_or(false)
     }

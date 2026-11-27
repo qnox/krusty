@@ -1272,7 +1272,6 @@ inline/inlineCallInsideStringTemplate.kt
 inline/inlineFunctionInLambda.kt
 inline/inlineInInlineWithLambdaPrivate.kt
 inline/inlineLambdaWithCapture.kt
-inline/innerInlineFunCapturesOuter.kt
 inline/iteratorOnInlineFunctionResult.kt
 inline/kt26117.kt
 inline/kt26466.kt
@@ -2274,7 +2273,6 @@ regressions/multimodule/multimoduleExpectConstructorDefaultProvider.kt
 regressions/multimodule/multimoduleExpectDefaultProvider.kt
 regressions/multimodule/multimoduleExpectMemberDefaultProvider.kt
 regressions/multimodule/multimoduleFloatingBitReferences.kt
-regressions/multimodule/multimoduleInheritedGenericInlineMembers.kt
 regressions/multimodule/multimoduleLocalMemberExtensionExpectReceiver.kt
 regressions/multimodule/multimoduleOverriddenAnyMemberOnAliasActualizedBase.kt
 regressions/multimodule/multimoduleReceiverReturningScopeFunctions.kt
