@@ -107,6 +107,12 @@ pub(super) struct SignatureTable<'a> {
     decoded: Vec<Option<KlibIrSignature>>,
     prepared_inline: bool,
     origins: std::collections::HashMap<KlibIrSignature, KlibFileLocalOrigin>,
+    /// The public identity inside each file-local `Composite(File, Public)` signature decoded so
+    /// far, by the file-local signature it decodes to.
+    file_private: std::collections::HashMap<KlibIrSignature, KlibPublicIdSignature>,
+    /// The slot the next decoder-synthesized local declaration takes, counting down from the top
+    /// of the slot space so it never meets a serialized slot.
+    synthetic: u32,
 }
 
 impl<'a> SignatureTable<'a> {
@@ -136,6 +142,25 @@ impl<'a> SignatureTable<'a> {
             decoded: vec![None; entries.len()],
             prepared_inline,
             origins: std::collections::HashMap::new(),
+            file_private: std::collections::HashMap::new(),
+            synthetic: u32::MAX,
+        }
+    }
+
+    /// A fresh identity, private to this file, for a declaration the decoder itself synthesizes
+    /// (the invocation function of an upgraded function reference). Its slot lies above every
+    /// serialized slot, so it never names a table entry, and no two synthesized declarations of
+    /// one file share it.
+    pub(super) fn synthetic_local(&mut self) -> KlibIrSignature {
+        let slot = self.synthetic;
+        assert!(
+            slot as usize >= self.entries.len(),
+            "synthesized local declarations exhausted the slots above the signature table"
+        );
+        self.synthetic -= 1;
+        KlibIrSignature::FileLocal {
+            file: self.file,
+            slot,
         }
     }
 
@@ -144,6 +169,14 @@ impl<'a> SignatureTable<'a> {
         &mut self,
     ) -> std::collections::HashMap<KlibIrSignature, KlibFileLocalOrigin> {
         std::mem::take(&mut self.origins)
+    }
+
+    /// The public identities of the file-private signatures decoded so far
+    /// ([`KlibIrModuleTrees::file_private_identity`](super::KlibIrModuleTrees)).
+    pub(super) fn take_file_private_identities(
+        &mut self,
+    ) -> std::collections::HashMap<KlibIrSignature, KlibPublicIdSignature> {
+        std::mem::take(&mut self.file_private)
     }
 
     pub(super) fn symbol(&mut self, code: u64) -> Result<KlibIrSymbol, KlibIrDecodeError> {
@@ -225,32 +258,19 @@ impl<'a> SignatureTable<'a> {
                 )));
             }
         }
-        // Kotlin 2.4's prepared-inline component gives its private copied function a
-        // `Composite(File(<dummy>), Public(copy))` signature. Project the exact inner identity only
-        // for references inside this component; `irDeclarations.knd` independently carries the
-        // original public declaration key used across components. General composites in ordinary
-        // IR stay file-local, and neither path reconstructs an identity from a spelling.
+        // kotlinc gives a declaration private to its file, and a member of a class private to its
+        // file, a `Composite(File, Public)` signature: the public identity it would have, scoped
+        // to its file. Kotlin 2.4's prepared-inline component gives its private copied function
+        // the same shape. Project the exact inner identity only for references inside that
+        // component; `irDeclarations.knd` independently carries the original public declaration
+        // key used across components. In ordinary IR the declaration stays file-local, and its
+        // inner identity is kept beside it: a fake override of a file-private class, which no
+        // declaration defines, is linked by it to the member it inherits. Neither path
+        // reconstructs an identity from a spelling.
+        let inner = self.file_composite_identity(&fields, slot)?;
         if self.prepared_inline {
-            if let Some(composite) = unique_bytes(&fields, 5, "composite signature", ENTRY)? {
-                let composite_offset = composite.value_offset;
-                let composite = message(composite.value, ENTRY, composite_offset)?;
-                let container =
-                    unique_varint(&composite, 1, "composite signature container", ENTRY)?;
-                let inner = unique_varint(&composite, 2, "composite inner signature", ENTRY)?;
-                let (Some(container), Some(inner)) = (container, inner) else {
-                    return Err(KlibIrDecodeError::malformed(
-                        ENTRY,
-                        composite_offset,
-                        format!("composite signature {slot} misses a required field"),
-                    ));
-                };
-                let container = self.slot(container, "composite signature container")?;
-                let inner = self.slot(inner, "composite inner signature")?;
-                if self.is_file_signature(container)? {
-                    if let Some(public) = self.direct_public_signature(inner)? {
-                        return Ok(KlibIrSignature::Public(public));
-                    }
-                }
+            if let Some(public) = inner {
+                return Ok(KlibIrSignature::Public(public));
             }
         }
         if let Some((owner, index)) = self.public_type_parameter(&fields)? {
@@ -279,7 +299,38 @@ impl<'a> SignatureTable<'a> {
                 }
             }
         }
+        if let Some(public) = inner {
+            self.file_private.insert(local.clone(), public);
+        }
         Ok(local)
+    }
+
+    /// The public identity a `Composite(File, Public)` signature scopes to its file.
+    fn file_composite_identity(
+        &self,
+        fields: &[super::wire::WireField<'_>],
+        slot: usize,
+    ) -> Result<Option<KlibPublicIdSignature>, KlibIrDecodeError> {
+        let Some(composite) = unique_bytes(fields, 5, "composite signature", ENTRY)? else {
+            return Ok(None);
+        };
+        let composite_offset = composite.value_offset;
+        let composite = message(composite.value, ENTRY, composite_offset)?;
+        let container = unique_varint(&composite, 1, "composite signature container", ENTRY)?;
+        let inner = unique_varint(&composite, 2, "composite inner signature", ENTRY)?;
+        let (Some(container), Some(inner)) = (container, inner) else {
+            return Err(KlibIrDecodeError::malformed(
+                ENTRY,
+                composite_offset,
+                format!("composite signature {slot} misses a required field"),
+            ));
+        };
+        let container = self.slot(container, "composite signature container")?;
+        let inner = self.slot(inner, "composite inner signature")?;
+        if !self.is_file_signature(container)? {
+            return Ok(None);
+        }
+        self.direct_public_signature(inner)
     }
 
     /// `Composite(Public(owner), Local(<TP>, index))`, the identity Kotlin gives the type
@@ -556,13 +607,25 @@ mod tests {
         ];
         let strings = ["fixture".to_owned(), "probe".to_owned()];
 
-        let ordinary = SignatureTable::new(7, &entries, &strings)
+        let mut table = SignatureTable::new(7, &entries, &strings);
+        let ordinary = table
             .symbol(3 << 8)
             .expect("the ordinary composite is valid");
         assert_eq!(
             ordinary.signature,
             KlibIrSignature::FileLocal { file: 7, slot: 3 }
         );
+        table
+            .symbol(4 << 8)
+            .expect("the ordinary non-file composite is valid");
+        // The file composite keeps its exact inner public identity beside its file-local one;
+        // the composite in another container scopes no public identity to a file.
+        let identities = table.take_file_private_identities();
+        assert_eq!(identities.len(), 1);
+        let identity = &identities[&KlibIrSignature::FileLocal { file: 7, slot: 3 }];
+        assert_eq!(identity.package().segments(), ["fixture"]);
+        assert_eq!(identity.declaration().segments(), ["probe"]);
+        assert_eq!(identity.member_id(), Some(0x14ab_8f30_859f_59a9));
 
         let prepared_local = SignatureTable::prepared_inline(7, &entries, &strings)
             .symbol(4 << 8)

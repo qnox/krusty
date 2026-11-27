@@ -11,26 +11,53 @@ mod companion_private_members;
 #[path = "klib_closure_frames_e2e/constructor_defaults.rs"]
 mod constructor_defaults;
 
+#[path = "klib_closure_frames_e2e/dispatched_member_defaults.rs"]
+mod dispatched_member_defaults;
+
 #[path = "klib_closure_frames_e2e/elvis_blocks.rs"]
 mod elvis_blocks;
 
 #[path = "klib_closure_frames_e2e/private_member_signatures.rs"]
 mod private_member_signatures;
 
+#[path = "klib_closure_frames_e2e/inner_classes.rs"]
+mod inner_classes;
+
 #[path = "klib_closure_frames_e2e/library_enums.rs"]
 mod library_enums;
+
+#[path = "klib_closure_frames_e2e/member_function_references.rs"]
+mod member_function_references;
+
+#[path = "klib_closure_frames_e2e/private_member_function_references.rs"]
+mod private_member_function_references;
 
 #[path = "klib_closure_frames_e2e/file_private_function_receivers.rs"]
 mod file_private_function_receivers;
 
+#[path = "klib_closure_frames_e2e/non_local_returns.rs"]
+mod non_local_returns;
+
 #[path = "klib_closure_frames_e2e/local_superclass_arguments.rs"]
 mod local_superclass_arguments;
+
+#[path = "klib_closure_frames_e2e/private_inline_members.rs"]
+mod private_inline_members;
+
+#[path = "klib_closure_frames_e2e/file_private_inherited_members.rs"]
+mod file_private_inherited_members;
+
+#[path = "klib_closure_frames_e2e/suspend_function_bodies.rs"]
+mod suspend_function_bodies;
 
 #[path = "klib_closure_frames_e2e/thread_local_objects.rs"]
 mod thread_local_objects;
 
 #[path = "klib_closure_frames_e2e/top_level_properties.rs"]
 mod top_level_properties;
+
+#[path = "klib_closure_frames_e2e/reference_array_literals.rs"]
+mod reference_array_literals;
 
 const LIBRARY: &str = include_str!("fixtures/klib_closure_frames/Library.kt");
 
@@ -577,6 +604,24 @@ fn assert_official_dependency_sources(
     fixture_name: &str,
     purpose: &DependencyConsumer,
 ) {
+    assert_official_dependency_sources_produced_with(
+        library_source,
+        &[],
+        consumers,
+        fixture_name,
+        purpose,
+    );
+}
+
+/// [`assert_official_dependency_sources`] with a library the official producer compiles under
+/// `producer_options`, such as one whose first stage keeps its own inline calls as calls.
+fn assert_official_dependency_sources_produced_with(
+    library_source: &str,
+    producer_options: &[&str],
+    consumers: &[(&str, &str)],
+    fixture_name: &str,
+    purpose: &DependencyConsumer,
+) {
     let root = std::env::var_os("KRUSTY_KOTLIN_NATIVE")
         .map(std::path::PathBuf::from)
         .expect("the caller requires an official Native distribution");
@@ -585,6 +630,7 @@ fn assert_official_dependency_sources(
     std::fs::write(&source, library_source).unwrap();
     let library = work.join("frames");
     let output = std::process::Command::new(root.join("bin/kotlinc-native"))
+        .args(producer_options)
         .args(["-p", "library", "-nopack", "-o"])
         .arg(&library)
         .arg(&source)
@@ -618,7 +664,7 @@ fn assert_official_dependency_sources(
             krusty::compilation_target::CompilationTarget::Native,
             Box::new(libraries.for_compilation()),
         ),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         &mut diags,
     );
     let target = krusty_native::NativeTarget::host().expect("host Native target");

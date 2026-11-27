@@ -1,16 +1,16 @@
 //! Runtime behavior of `CallableReferencesToContextual` references: a reference to a declaration with context parameters selects
 //! a scope value for each of them where the reference is written and binds it, so the reference's
 //! own type shows only the remaining parameters. The language feature exists from Kotlin
-//! 2.5.0-RC, whose runtime library also carries the `boundContextArguments` the compiled
+//! 2.5.0-RC2, whose runtime library also carries the `boundContextArguments` the compiled
 //! references hand over; both programs run against that release.
 
 use crate::common;
 
 // PLATFORM-SPECIFIC: these pin the JVM `boundContextArguments` carrier of compiled references, which
 // exists only in the 2.5 JVM runtime library; a portable program cannot observe it.
-const RELEASE: &str = "2.5.0-RC";
+const RELEASE: &str = "2.5.0-RC2";
 
-/// Compile `source` with kotlinc 2.5.0-RC and run its `box()` against that release's stdlib. This is
+/// Compile `source` with kotlinc 2.5.0-RC2 and run its `box()` against that release's stdlib. This is
 /// the oracle: krusty's result must equal it, and it must be `OK`.
 fn kotlinc_release_box_result(source: &str) -> String {
     let work = common::scratch_dir().expect("cannot allocate reference-runtime fixture");
@@ -23,7 +23,7 @@ fn kotlinc_release_box_result(source: &str) -> String {
     args.extend(common::language_directives::kotlinc_args(source));
     args.extend(["-cp".to_string(), stdlib.to_string_lossy().into_owned()]);
     let (code, diagnostics) = common::kotlinc_server::kotlinc_compile_for_release(RELEASE, &args)
-        .expect("kotlinc 2.5.0-RC compiler unavailable");
+        .expect("kotlinc 2.5.0-RC2 compiler unavailable");
     assert_eq!(
         code, 0,
         "kotlinc {RELEASE} rejected the fixture: {diagnostics}"
@@ -36,11 +36,11 @@ fn kotlinc_release_box_result(source: &str) -> String {
 
 fn release_stdlib() -> std::path::PathBuf {
     common::kotlinc_server::kotlinc_lib_for_release(RELEASE)
-        .expect("kotlinc 2.5.0-RC")
+        .expect("kotlinc 2.5.0-RC2")
         .join("kotlin-stdlib.jar")
 }
 
-/// krusty's result for `source` against the 2.5.0-RC stdlib, required to equal kotlinc 2.5.0-RC's.
+/// krusty's result for `source` against the 2.5.0-RC2 stdlib, required to equal kotlinc 2.5.0-RC2's.
 fn expect_same_as_kotlinc_release(source: &str, stem: &str) {
     let reference = kotlinc_release_box_result(source);
     assert_eq!(

@@ -1117,7 +1117,7 @@ pub(super) fn class_initializer_steps<'ir>(
     };
     let companion_order = c
         .companion_class
-        .filter(|_| krusty::kotlin_version::class_statics_in_program_order())
+        .filter(|_| krusty::kotlin_version::class_statics_in_program_order(ir.reference.quirks()))
         .and_then(|companion| ir.class_id_by_name(companion))
         .and_then(|companion| ir.class_source_order(companion));
     let mut steps = Vec::with_capacity(statics.len() + 2);

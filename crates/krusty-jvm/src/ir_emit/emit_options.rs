@@ -10,6 +10,8 @@ use super::{InnerClassResolver, JvmDefaultMode, LambdaModes};
 pub struct EmitOptions {
     /// Class-file major version to emit (default v52; `-jvm-target 25` ⇒ v69).
     pub class_major: Option<u16>,
+    /// `-Xjvm-enable-preview`: mark every class as compiled with preview features.
+    pub enable_preview: bool,
     /// Source-file simple name for the `SourceFile` attribute (e.g. `Foo.kt`); `None` ⇒ no attribute.
     pub source_file: Option<String>,
     /// `-module-name` recorded in each class's `@Metadata`; `None` matches kotlinc's default `main`.
@@ -112,10 +114,19 @@ impl EmitOptions {
     }
 }
 
+impl EmitOptions {
+    /// Mark every class as compiled with preview features (`-Xjvm-enable-preview`).
+    pub fn with_enable_preview(mut self, enabled: bool) -> Self {
+        self.enable_preview = enabled;
+        self
+    }
+}
+
 impl Default for EmitOptions {
     fn default() -> Self {
         Self {
             class_major: None,
+            enable_preview: false,
             source_file: None,
             module_name: None,
             emit_class_metadata: true,

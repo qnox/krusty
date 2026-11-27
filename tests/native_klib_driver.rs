@@ -53,7 +53,7 @@ pub fn compile(
         .iter()
         .map(|(stem, _)| stem.to_string())
         .collect::<Vec<_>>();
-    let mut features = krusty::features::LangFeatures::new();
+    let mut features = krusty::features::LangFeatures::from_environment();
     for (_, source) in sources {
         features.apply_source_directives(source);
     }

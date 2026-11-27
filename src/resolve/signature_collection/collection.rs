@@ -1701,12 +1701,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         classifier_header
                             .type_parameters
                             .iter()
-                            .map(|source| {
-                                symbolic_ctp
-                                    .bound(source)
-                                    .ty_param_bound()
-                                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
-                            })
+                            .map(|source| symbolic_ctp.declared_upper_bound(source))
                             .collect(),
                         classifier_header.type_parameter_variances.clone(),
                     );
@@ -1882,11 +1877,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                         .iter()
                                         .map(|parameter| {
                                             symbolic_companion_tparams
-                                                .bound(parameter)
-                                                .ty_param_bound()
-                                                .unwrap_or_else(|| {
-                                                    Ty::nullable(Ty::obj("kotlin/Any"))
-                                                })
+                                                .declared_upper_bound(parameter)
                                         })
                                         .collect(),
                                     companion_header.type_parameter_variances.clone(),
@@ -2378,29 +2369,23 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                         .type_parameters
                                         .iter()
                                         .map(|parameter| {
-                                            symbolic_btp
-                                                .bound(parameter)
-                                                .ty_param_bound()
-                                                .unwrap_or_else(|| {
-                                                    Ty::nullable(Ty::obj("kotlin/Any"))
-                                                })
+                                            symbolic_btp.declared_upper_bound(parameter)
                                         })
                                         .collect::<Vec<_>>(),
                                     formal_bounds: property_header
                                         .type_parameters
                                         .iter()
                                         .map(|parameter| {
-                                            let mut bounds = vec![symbolic_btp
-                                                .bound(parameter)
-                                                .ty_param_bound()
-                                                .unwrap_or_else(|| {
-                                                    Ty::nullable(Ty::obj("kotlin/Any"))
-                                                })];
+                                            let mut bounds =
+                                                vec![symbolic_btp.declared_upper_bound(parameter)];
                                             bounds.extend(symbolic_btp.extra_bounds_of(parameter));
                                             bounds
                                         })
                                         .collect::<Vec<_>>(),
                                     is_var: property_header.mutable,
+                                    is_abstract: property_header
+                                        .flags
+                                        .has(crate::fir::DeclarationFlags::ABSTRACT),
                                     visibility: property_header.visibility,
                                     setter_visibility: property_header
                                         .mutable
@@ -2939,12 +2924,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     let tparam_bounds = classifier_header
                         .type_parameters
                         .iter()
-                        .map(|source| {
-                            symbolic_ctp
-                                .bound(source)
-                                .ty_param_bound()
-                                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
-                        })
+                        .map(|source| symbolic_ctp.declared_upper_bound(source))
                         .collect::<Vec<_>>();
                     let class_type_parameters = crate::types::TypeParameters::new(
                         semantic_tparam_names.clone(),
@@ -3764,10 +3744,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     .type_parameters
                                     .iter()
                                     .map(|parameter| {
-                                        semantic_tparams
-                                            .bound(parameter)
-                                            .ty_param_bound()
-                                            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
+                                        semantic_tparams.declared_upper_bound(parameter)
                                     })
                                     .collect(),
                                 receiver: declared_receiver,
@@ -3998,12 +3975,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             formal_bounds: property_header
                                 .type_parameters
                                 .iter()
-                                .map(|source| {
-                                    property_tparams
-                                        .bound(source)
-                                        .ty_param_bound()
-                                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
-                                })
+                                .map(|source| property_tparams.declared_upper_bound(source))
                                 .collect(),
                             ty,
                             storage_ty,

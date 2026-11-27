@@ -75,6 +75,10 @@ impl SemanticPlatform for KlibLibraries {
     }
 
     fn platform_default_import_packages(&self) -> &'static [&'static str] {
+        let selected = self.inventory.default_import_packages();
+        if !selected.is_empty() {
+            return selected;
+        }
         // The provider remains target-neutral: the opened libraries themselves identify Native by
         // publishing the documented `kotlin.native` package. A Wasm stdlib has no such package and
         // therefore receives no Native-only wildcard import.

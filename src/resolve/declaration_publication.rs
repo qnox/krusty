@@ -910,9 +910,12 @@ impl Checker<'_> {
     /// The declaration type owned by a checked value. Ordinary flow may view the current value
     /// through a provider upper face, but that does not replace the lower classifier selected for
     /// an inferred declaration's flexible interval.
-    pub(super) fn inferred_declaration_value_ty(&self, expression: ExprId, fallback: Ty) -> Ty {
+    /// The type a declaration publishes for its initializer or expression body: the value's
+    /// flexible publication when it has one, otherwise the checked type with the `null` literal's
+    /// marker approximated to Kotlin's denotable `Nothing?`.
+    pub(super) fn inferred_declaration_value_ty(&self, expression: ExprId, checked: Ty) -> Ty {
         self.flexible_value(expression)
-            .inferred_declaration_ty(fallback)
+            .inferred_declaration_ty(inferred_declaration_ty(checked))
     }
 
     pub(super) fn record_flexible_call_inputs(

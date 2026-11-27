@@ -773,11 +773,15 @@ impl Emitter<'_> {
         operand: ExprId,
         code: &mut CodeBuilder,
     ) -> (Ty, Ty) {
-        // A suspension point's reference result is checked and cast from the erased `Object` slot
-        // the point leaves.
+        // A suspension point's, or a generic call's, reference result is checked and cast from the
+        // erased `Object` slot it leaves: kotlinc narrows it only for a consumer that needs the
+        // narrower type, and a type operation's own check and cast are applied to the `Object`.
         if matches!(
             self.erased_reference_result(operand),
-            Some(super::operand_representation::ErasedResult::Suspension)
+            Some(
+                super::operand_representation::ErasedResult::Suspension
+                    | super::operand_representation::ErasedResult::Coerced { .. }
+            )
         ) {
             let physical = self.emit_consumed_operand(operand, code);
             let semantic = self

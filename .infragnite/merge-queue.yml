@@ -21,6 +21,16 @@ autoheal:
       file: '{list}'
       line: '{entry}'
       paths: ['tests/box_expected_not_applicable/*/*.txt']
+    # A case the byte-identity ratchet lists as non-identical that now matches kotlinc byte for byte.
+    # Only rows of that report may follow its header, and the list path is the one the header names.
+    # The report invites the removal only for a release's own list; a list a release inherits is
+    # shared with the releases that read it, so its rows carry another wording and are not matched.
+    - name: stale-byte-non-identical
+      uses: remove-lines
+      match: '(?<=^jvm byte identity disagrees with \S*?/(?<list>tests/box_byte_non_identical/jvm/[0-9][^/\s]*\.txt) \(Kotlin [^)\n]*\):\n(?:  [^\n]*\n)*)^  (?<entry>\S+): expected different bytes, got byte-identical; remove it from the list$'
+      file: '{list}'
+      line: '{entry}'
+      paths: ['tests/box_byte_non_identical/*/*.txt']
     # A diagnostics case krusty no longer falsely accepts: drop it from the list the lane printed.
     - name: stale-diagnostics-false-accepts
       uses: remove-lines

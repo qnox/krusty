@@ -65,10 +65,13 @@ if usable "$dest"; then
   exit 0
 fi
 
+# Under the lock no other provisioner is staging, so a `.staging-*` directory is one a killed run
+# left behind (the trap below never ran).
+rm -rf "$dest"/.staging-*
+
 echo "downloading kotlin-compiler ${ver}…" >&2
 staging="$dest/.staging-$$"
 trap 'rm -rf "$staging"' EXIT
-rm -rf "$staging"
 mkdir -p "$staging"
 # GitHub's release CDN answers 504 for minutes at a time. curl doubles its wait from one second,
 # so eight retries span about four minutes; a connection that never opens fails within 30s.

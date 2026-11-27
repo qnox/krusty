@@ -1474,7 +1474,7 @@ fn hoisted_companion_delegate_initializes_with_its_companion_on_2_5() {
     let build = ReleaseBuild::new(
         "HoistedDelegate",
         SRC,
-        "2.5.0-RC",
+        "2.5.0-RC2",
         &["+CompanionBlocks", "+CompanionExtensions"],
     );
     let (expected, actual) = build.box_results();
@@ -1520,7 +1520,7 @@ fn interface_block_storage_follows_kotlinc_2_5() {
     let build = ReleaseBuild::new(
         "InterfaceStorage",
         SRC,
-        "2.5.0-RC",
+        "2.5.0-RC2",
         &["+CompanionBlocks", "+CompanionExtensions"],
     );
     for class in [
@@ -1590,7 +1590,7 @@ fn interface_block_storage_keeps_its_field_facts() {
     let build = ReleaseBuild::new(
         "InterfaceFieldFacts",
         SRC,
-        "2.5.0-RC",
+        "2.5.0-RC2",
         &["+CompanionBlocks", "+CompanionExtensions"],
     );
     assert_eq!(

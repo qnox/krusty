@@ -25,6 +25,8 @@ enum ForwarderDispatch {
 /// One inherited interface member the class realizes with a forwarder, with the parameter
 /// identities its declaration publishes.
 struct InheritedForwarder {
+    /// The kotlinc profile the compilation reproduces.
+    quirks: krusty::kotlin_version::Quirks,
     /// The interface the forwarder's target belongs to: the holder's interface, or the direct
     /// superinterface an `invokespecial` names.
     target_interface: TypeName,
@@ -138,6 +140,7 @@ impl InheritedForwarder {
     /// checks name a parameter this way too.
     fn local_variable_names(&self, site: ForwarderSite) -> Vec<Option<String>> {
         crate::parameter_names::resolved_local_variables(
+            self.quirks,
             &self.parameter_identities,
             &self.semantic_params,
             &self.receiver_label(site),
@@ -146,6 +149,7 @@ impl InheritedForwarder {
 
     fn method_parameter_names(&self, site: ForwarderSite) -> Vec<Option<String>> {
         crate::parameter_names::resolved_method_parameters(
+            self.quirks,
             &self.parameter_identities,
             &self.semantic_params,
             &self.receiver_label(site),
@@ -333,6 +337,7 @@ fn forwarder(
         ),
     };
     Some(InheritedForwarder {
+        quirks: ir.reference.quirks(),
         target_interface,
         property_name: match &default.name {
             krusty::fir::InheritedMemberName::Function(_) => None,

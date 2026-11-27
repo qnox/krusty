@@ -1544,3 +1544,22 @@ mod properties;
 mod serialized_references;
 mod shared_inline_trees;
 mod top_level_storage;
+
+/// Kotlin/Wasm imports `kotlin.js.*` into every file on both targets, so `JsAny` resolves
+/// without an import.
+#[test]
+fn a_wasm_stdlib_default_imports_kotlin_js_on_each_target() {
+    use crate::compilation_target::CompilationTarget;
+    use crate::libraries::SemanticPlatform;
+
+    for target in [CompilationTarget::WasmJs, CompilationTarget::WasmWasi] {
+        let path = crate::toolchain::kotlin_stdlib_klib(target)
+            .expect("the exact target stdlib must be provisioned");
+        let wasm = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+            path.clone(),
+            KlibStdlibSemantics::Wasm,
+        )])
+        .expect("the Wasm stdlib opens");
+        assert_eq!(wasm.platform_default_import_packages(), &["kotlin.js"]);
+    }
+}

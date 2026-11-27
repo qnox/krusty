@@ -137,8 +137,9 @@ JSON on stdin/stdout, so the probe drives it directly. That isolates krusty's si
 integration; it does NOT exercise the Starlark rule, and the caveats below say where the two differ.
 
 Only modules whose full transitive closure is Kotlin-only are attempted — 91 of 2570 (the probe also
-skips closures above `--max-files`, inert at the default 400 on this checkout). krusty compiles no
-Java, so a closure containing Java sources cannot be built from source at all. Modules are built in
+skips closures above `--max-files`, inert at the default 400 on this checkout). The probe predates
+the worker's javac step and sends no Java, so a closure containing Java sources was not attempted.
+Modules are built in
 dependency order and each produced jar is fed to its dependents' `--cp`, which is what an upstream
 `krusty_jvm_library` target supplies.
 

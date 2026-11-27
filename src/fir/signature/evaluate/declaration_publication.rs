@@ -1,8 +1,8 @@
 //! Declaration-owned result recovery from an evaluated compact signature graph.
 
 use super::{
-    result_abbreviation, DiagnosticId, HashMap, ResolvedTy, ResolvedTypeAbbreviation, SigExpr,
-    SigExprId, SignatureGraph, SignatureSemantics,
+    not_null_operator_result, result_abbreviation, DiagnosticId, HashMap, ResolvedTy,
+    ResolvedTypeAbbreviation, SigExpr, SigExprId, SignatureGraph, SignatureSemantics,
 };
 
 /// Recover the declaration-owned type of a mutable local without changing ordinary flow
@@ -252,6 +252,18 @@ fn recover<S: SignatureSemantics>(
             if changed {
                 semantics
                     .make_non_nullable(published)
+                    .map(|ty| Some((ty, true, abbreviation)))
+            } else {
+                Ok(Some((current, false, abbreviation)))
+            }
+        }
+        Some(SigExpr::NotNullOperator(base)) => {
+            let Some((published, changed, abbreviation)) = recover(semantics, base, graph, memo)?
+            else {
+                return Ok(None);
+            };
+            if changed {
+                not_null_operator_result(semantics, published)
                     .map(|ty| Some((ty, true, abbreviation)))
             } else {
                 Ok(Some((current, false, abbreviation)))

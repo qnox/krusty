@@ -121,10 +121,7 @@ impl BodyLowering<'_, '_, '_> {
         } else {
             any()
         };
-        let mut params = Vec::with_capacity(record.parameters.len() + 1);
-        params.push(receiver_ty);
-        params.extend(record.parameters.iter().copied());
-        let ret = record.result;
+        let (params, ret) = Self::module_member_abi(record, Some(receiver_ty));
         let symbol =
             super::super::super::symbols::module_function_symbol(self.file.module_name, target);
         let id = self.file.import(&symbol, &params, ret)?;
@@ -138,6 +135,23 @@ impl BodyLowering<'_, '_, '_> {
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &arguments)?;
         Ok(self.builder.inst_results(call).first().copied())
+    }
+
+    /// The parameters and result a module member's symbol crosses with. The record keeps the
+    /// declared signature; a `suspend` member's symbol also takes its caller's continuation and
+    /// answers `Any?`, as every file realizes it.
+    fn module_member_abi(
+        record: &krusty::ir::IrModuleCallable,
+        receiver: Option<Ty>,
+    ) -> (Vec<Ty>, Ty) {
+        let mut params = Vec::with_capacity(record.parameters.len() + 2);
+        params.extend(receiver);
+        params.extend(record.parameters.iter().copied());
+        if record.is_suspend() {
+            params.push(any());
+            return (params, any());
+        }
+        (params, record.result)
     }
 
     /// A call dispatched through the table of `owner`, a class another file of the module
@@ -180,8 +194,7 @@ impl BodyLowering<'_, '_, '_> {
             model::Dispatch::Class(self.planned_class_slot(owner, target)?)
         };
         let record = &self.file.ir.referenced_module_callables[&target];
-        let params = record.parameters.to_vec();
-        let ret = record.result;
+        let (params, ret) = Self::module_member_abi(record, None);
         let Some(object) = self.receiver(receiver)? else {
             return Ok(None);
         };
@@ -469,6 +482,11 @@ impl BodyLowering<'_, '_, '_> {
                         return realized;
                     }
                 }
+                if let Some(realized) =
+                    self.floating_range_construction(signature, dispatch_receiver, args, *ret)
+                {
+                    return realized;
+                }
                 let symbols = self.file.dependency_symbols;
                 let export_of = |realization: &krusty::backend::BackendCallableFact| {
                     realization
@@ -524,9 +542,16 @@ impl BodyLowering<'_, '_, '_> {
                         args,
                     );
                 }
-                if let Some(function) = &realization.direct_c_function {
+                // A runtime entry the linked runtime defines is called as it is bound. One it does
+                // not define falls through to the realizations below that name the declaration by
+                // its owner. That second realization is transitional: it shrinks as the runtime
+                // defines more entries, and goes once it defines every one the library binds.
+                if let Some(function) = realization.direct_c_function.as_ref().filter(|function| {
+                    function.abi() == krusty::libraries::CFunctionAbi::Interop
+                        || self.file.runtime_symbols.contains(function.symbol())
+                }) {
                     return self.direct_c_call(
-                        function.symbol(),
+                        function,
                         params,
                         *ret,
                         defaults,

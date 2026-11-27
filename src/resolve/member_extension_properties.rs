@@ -25,6 +25,8 @@ pub struct MemberExtPropSig {
     pub(super) type_param_bounds: Vec<Ty>,
     pub(super) formal_bounds: Vec<Vec<Ty>>,
     pub(super) is_var: bool,
+    /// Declared `abstract`: neither accessor has a body.
+    pub(super) is_abstract: bool,
     pub(super) visibility: Visibility,
     /// Accessor visibility is independent from the property's visibility (`public var ... private
     /// set`). Keep it on the semantic signature, as ordinary declared properties do, so every
@@ -102,6 +104,10 @@ impl MemberExtPropSig {
 
     pub(crate) fn is_var(&self) -> bool {
         self.is_var
+    }
+
+    pub(crate) fn is_abstract(&self) -> bool {
+        self.is_abstract
     }
 
     pub(crate) fn stable_declaration(&self) -> Option<crate::fir::DeclarationId> {
@@ -318,6 +324,7 @@ pub(super) fn select(
                                 type_param_bounds,
                                 formal_bounds,
                                 is_var: property.setter.is_some(),
+                                is_abstract: property.getter.is_abstract,
                                 visibility: property.visibility,
                                 setter_visibility: property
                                     .setter

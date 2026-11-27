@@ -32,11 +32,11 @@ impl ClassInitializers {
         module: &mut Module,
         properties: &mut PropertyRegistry,
     ) -> Result<Self, Unsupported> {
-        let plan =
-            ClassStaticPlan::new(ir, krusty::kotlin_version::class_statics_in_program_order())
-                .map_err(|unordered| {
-                    format!("a static property of `{}`", unordered.owner.render())
-                })?;
+        let plan = ClassStaticPlan::new(
+            ir,
+            krusty::kotlin_version::class_statics_in_program_order(ir.reference.quirks()),
+        )
+        .map_err(|unordered| format!("a static property of `{}`", unordered.owner.render()))?;
         let classes = plan
             .classes()
             .iter()

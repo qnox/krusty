@@ -448,6 +448,22 @@ releases (`IrFileImpl` takes its module as a constructor argument from 2.4.20), 
 source lives under `adapter/compat/<first release>/`, and `adapter.rs` lists the exact releases each
 set builds for; a Kotlin version no set lists has no adapter.
 
+### The session's declarations
+
+An Analysis API host reads the session as an `AnalysisSession` (`krusty_plugin_api::analysis`, plain
+data like the module's IR): every source file of the session in compilation order, each with its
+path and its named declarations in source order. A declaration carries its kind (classifier kinds,
+enum entry, function, property, type alias), its simple name, the range of its name, the range of
+the whole declaration, and the index of the declaration it is declared in, which always precedes it.
+Local and anonymous declarations are not part of a file's structure.
+
+Offsets are kotlinc's, as in the module's IR: UTF-16 code units into the text kotlinc reads, where
+`\r\n` and a lone `\r` are each one `\n`. A host maps a `PsiElement` offset to a declaration with
+`AnalysisFile::declaration_at`, the innermost declaration whose range contains it, and converts
+nothing. krusty builds the session from its parsed files' declaration outline
+(`analysis_round::analysis_round`), the same outline that serves the language server and the KSP
+round, so positions are never recovered by re-reading the source.
+
 ## Drop-in extension management — two layers, like kotlinc
 
 Extensions have **two registration layers**, mirroring kotlinc exactly:

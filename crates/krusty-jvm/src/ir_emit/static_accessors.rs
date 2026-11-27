@@ -495,6 +495,8 @@ pub(super) fn plan(
                 accessor: StaticAccessor::Function(function),
             }),
     );
+    // Uses that lead the other uses of their line: a continuation's, placed at its function's start.
+    let mut leading = HashSet::default();
     for context in contexts {
         let owner = context.class.map(|index| ir.classes[index].fq_name);
         match owner.and_then(|owner| carriers.get(&owner).map(|uses| (owner, uses))) {
@@ -525,6 +527,25 @@ pub(super) fn plan(
                             found.line = line;
                         }
                     }
+                    // A continuation class has no source position of its own. kotlinc adds a
+                    // declared function's continuation at the start of that function's body, so its
+                    // re-entry accessor leads the uses the body writes. A local function is lifted to
+                    // the end of its container first, so its continuation follows every use the
+                    // source wrote.
+                    if let Some(function) = context.class.and_then(|class| {
+                        ir.jvm_continuation_functions.get(&(class as u32)).copied()
+                    }) {
+                        let line = if ir.lifted_functions.contains_key(&function) {
+                            u32::MAX
+                        } else {
+                            let position = ir.function_position(function);
+                            position.signature_line.or(position.decl_line).unwrap_or(0)
+                        };
+                        leading.extend(first_use..uses.len());
+                        for found in &mut uses[first_use..] {
+                            found.line = line;
+                        }
+                    }
                 }
             }
         }
@@ -532,7 +553,9 @@ pub(super) fn plan(
     // The sort is stable, so uses on one source line retain the lowering walk's order. In
     // particular, `collect` places an assignment target before its value without moving that
     // setter ahead of unrelated reads elsewhere on the line.
-    uses.sort_by_key(|found| found.line);
+    let mut uses = uses.into_iter().enumerate().collect::<Vec<_>>();
+    uses.sort_by_key(|(index, found)| (found.line, !leading.contains(index)));
+    let uses = uses.into_iter().map(|(_, found)| found);
     let mut plan = StaticAccessorPlan {
         protected: walk.protected.into_inner(),
         companion_fields: walk.companion_fields.into_inner(),

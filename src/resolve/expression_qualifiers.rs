@@ -457,7 +457,11 @@ impl Checker<'_> {
                 );
             }
         }
-        let message = crate::diagnostic_wording::unresolved_reference_on(name, None);
+        let message = crate::diagnostic_wording::unresolved_reference_on(
+            self.file.language.reference,
+            name,
+            None,
+        );
         self.diags
             .error(self.member_name_span(callee, name), message);
         Some(Ty::Error)

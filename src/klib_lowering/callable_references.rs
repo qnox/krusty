@@ -15,6 +15,10 @@ pub(super) struct DeclarationReference<'a> {
     pub(super) returned: KlibIrExprId,
     pub(super) arity: usize,
     pub(super) receiver: Option<BoundReceiver<'a>>,
+    /// Whether the forwarding call passes the wrapper's first parameter as the dispatch receiver
+    /// of a member, when its layout says so. A 2.4 call lists every argument in the callee's
+    /// parameter order, so only the linked declaration tells whether its first one is a receiver.
+    pub(super) dispatch: Option<bool>,
 }
 
 pub(super) struct BoundReceiver<'a> {
@@ -45,9 +49,6 @@ pub(super) fn declaration_reference<'a>(
     let KlibIrSignature::Public(target_signature) = &target.signature else {
         return None;
     };
-    if target_signature.declaration().segments().len() != 1 {
-        return None;
-    }
     let KlibIrType::Simple {
         classifier,
         nullability,
@@ -124,13 +125,14 @@ pub(super) fn declaration_reference<'a>(
         operand: *operand,
         parameter: &function.regular_parameters[0],
     });
-    let (values, parameters) = match &access.arguments {
-        KlibIrArguments::Flat(values) => (values, function.regular_parameters.as_slice()),
+    let all = function.regular_parameters.as_slice();
+    let (values, parameters, dispatch) = match &access.arguments {
+        KlibIrArguments::Flat(values) => (values, all, None),
         KlibIrArguments::Split {
             dispatch_receiver: None,
             extension_receiver: None,
             values,
-        } if receiver.is_none() => (values, function.regular_parameters.as_slice()),
+        } if receiver.is_none() => (values, all, None),
         KlibIrArguments::Split {
             dispatch_receiver: None,
             extension_receiver: Some(value),
@@ -139,7 +141,19 @@ pub(super) fn declaration_reference<'a>(
             .as_ref()
             .is_some_and(|bound| reads_parameter(arena, *value, bound.parameter)) =>
         {
-            (values, &function.regular_parameters[1..])
+            (values, &all[1..], Some(false))
+        }
+        // A member reference dispatches on its bound receiver or, unbound, on the wrapper's first
+        // parameter, which the reference's function type takes as the receiver.
+        KlibIrArguments::Split {
+            dispatch_receiver: Some(value),
+            extension_receiver: None,
+            values,
+        } if all
+            .first()
+            .is_some_and(|first| reads_parameter(arena, *value, first)) =>
+        {
+            (values, &all[1..], Some(true))
         }
         _ => return None,
     };
@@ -157,6 +171,7 @@ pub(super) fn declaration_reference<'a>(
         returned: *returned,
         arity: family.arity(),
         receiver,
+        dispatch,
     })
 }
 

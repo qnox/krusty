@@ -51,6 +51,7 @@ git -C "$scratch" apply --check "$patch"
 git -C "$scratch" apply "$patch"
 
 compile="$scratch/build/jvm-rules/rules/impl/compile.bzl"
+grep -Fxq '        (javaCount == 0 or len(srcs.kt) > 0) and' "$compile"
 grep -Fxq '        not plugins.stubs_phase and' "$compile"
 grep -Fxq '        not plugins.compile_phase.classpath' "$compile"
 grep -Fxq '            mnemonic = "KrustyCompile",' "$compile"

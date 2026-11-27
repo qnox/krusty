@@ -1508,6 +1508,9 @@ pub struct IrFile {
     /// Finalized source-language decision for recursive non-reified `typeOf` bounds. The JVM
     /// realizes this checked per-file fact; it does not select the policy itself.
     pub recursive_type_of: bool,
+    /// What this file's compilation reproduces of kotlinc. Backends read their quirks from here,
+    /// never from a process setting.
+    pub reference: crate::kotlin_version::ReferenceProfile,
     /// Checked file-level annotation applications. These are declaration metadata, not syntax;
     /// backend plugins consume their folded values without retaining or reopening the source AST.
     pub file_annotations: DeclarationAnnotations,
@@ -2967,6 +2970,7 @@ pub use checked_operation::{IrCheckedOperation, IrModulePropertyReference};
 mod construction_entries;
 mod exported_entries;
 mod function_parameters;
+mod value_class_constructions;
 pub use function_parameters::*;
 mod traversal;
 pub use traversal::*;

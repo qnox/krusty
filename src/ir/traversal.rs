@@ -102,6 +102,15 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
                 f(*receiver);
                 operands.iter().for_each(|&operand| f(operand));
             }
+            IrCheckedOperation::FieldDesignation { receiver, .. } => f(*receiver),
+            IrCheckedOperation::AtomicFieldThrough {
+                reference,
+                operands,
+                ..
+            } => {
+                f(*reference);
+                operands.iter().for_each(|&operand| f(operand));
+            }
             IrCheckedOperation::AtomicArrayElement {
                 array,
                 index,
@@ -140,10 +149,12 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
             IrCheckedOperation::PropertyReference {
                 dispatch_receiver,
                 extension_receiver,
+                context_arguments,
                 ..
             } => {
                 dispatch_receiver.iter().for_each(|&receiver| f(receiver));
                 extension_receiver.iter().for_each(|&receiver| f(receiver));
+                context_arguments.iter().for_each(|&argument| f(argument));
             }
         },
         IrExpr::CallableReference(reference) => {
