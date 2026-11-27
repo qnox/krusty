@@ -230,13 +230,11 @@ fn compare_with_kotlinc_plugin_request(
     std::fs::write(&reference_path, &reference_bytes).ok()?;
 
     let class_major = match jvm_target {
-        "1.6" | "6" => 50,
-        "1.7" | "7" => 51,
-        "1.8" | "8" => 52,
+        "1.8" => 52,
         other => other
             .parse::<u16>()
             .ok()
-            .filter(|target| (9..=99).contains(target))
+            .filter(|target| (9..=26).contains(target))
             .map(|target| target + 44)
             .unwrap_or_else(|| panic!("unknown -jvm-target {other}")),
     };

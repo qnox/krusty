@@ -19,6 +19,8 @@ use krusty::ir::{
 };
 use krusty::types::{Ty, TyKind, TypeName, Visibility};
 
+use crate::property_reference_delegates::{DelegateMethodValue, PropertyReferenceDelegates};
+
 /// What evaluating a delegate in place keeps at its initialization site.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InPlaceDelegate {
@@ -30,6 +32,14 @@ enum InPlaceDelegate {
 
 fn in_place_delegate(ir: &IrFile, delegate: ExprId) -> Option<InPlaceDelegate> {
     match ir.expr(delegate) {
+        // A callable reference is no singleton for kotlinc, though the JVM realizes an unbound
+        // one as its class's instance.
+        IrExpr::StaticInstance { ty, .. }
+            if ir.classes[*ty as usize].prop_ref.is_some()
+                || ir.classes[*ty as usize].func_ref.is_some() =>
+        {
+            None
+        }
         IrExpr::SingletonValue { .. }
         | IrExpr::UnitInstance
         | IrExpr::EnumEntry { .. }
@@ -44,10 +54,11 @@ fn in_place_delegate(ir: &IrFile, delegate: ExprId) -> Option<InPlaceDelegate> {
     }
 }
 
-/// Realize every package and member delegated property whose delegate is a singleton or constant.
-pub fn realize(ir: &mut IrFile) {
-    realize_package_delegates(ir);
-    realize_member_delegates(ir);
+/// Realize every package and member delegated property whose delegate is a singleton or constant,
+/// and add the `get<X>$delegate` method of each property-reference delegate `references` lowered.
+pub(crate) fn realize(ir: &mut IrFile, references: &PropertyReferenceDelegates) {
+    realize_package_delegates(ir, references);
+    realize_member_delegates(ir, references);
 }
 
 /// Extend each generated delegate method from its getter's final internal JVM name.
@@ -76,7 +87,7 @@ pub(crate) fn follow_internal_getter_names(ir: &mut IrFile, old_names: &HashMap<
     }
 }
 
-fn realize_package_delegates(ir: &mut IrFile) {
+fn realize_package_delegates(ir: &mut IrFile, references: &PropertyReferenceDelegates) {
     let candidates = ir
         .package_properties
         .iter()
@@ -85,13 +96,13 @@ fn realize_package_delegates(ir: &mut IrFile) {
             |declaration| match ir.local_property_layouts.get(&declaration.property) {
                 Some(IrLocalPropertyLayout::TopLevelAccessor {
                     getter,
-                    delegate: Some(storage),
+                    delegate,
                     receiver,
                     ..
                 }) => Some((
                     declaration.property,
                     *getter,
-                    *storage,
+                    *delegate,
                     receiver.map(|receiver| {
                         approximate_delegate_receiver(
                             receiver,
@@ -108,6 +119,24 @@ fn realize_package_delegates(ir: &mut IrFile) {
         )
         .collect::<Vec<_>>();
     for (property, getter, storage, receiver) in candidates {
+        if let Some(DelegateMethodValue { value, line }) = references.package_method(property) {
+            let method = add_delegate_method(
+                ir,
+                DelegateMethod {
+                    name: format!("{}$delegate", ir.functions[getter as usize].name),
+                    dispatch_receiver: None,
+                    receivers: receiver.into_iter().collect(),
+                    value: MethodValue::Reflected(value),
+                    line,
+                    source_order_of: getter,
+                },
+            );
+            ir.record_jvm_package_delegate_method(property, method, getter);
+            continue;
+        }
+        let Some(storage) = storage else {
+            continue;
+        };
         let Some(delegate) = ir.statics[storage as usize].init else {
             continue;
         };
@@ -130,14 +159,17 @@ fn realize_package_delegates(ir: &mut IrFile) {
             *delegate = None;
         }
         let line = accessor_line(ir, getter);
+        let value = MethodValue::InPlace {
+            delegate,
+            storage_ty,
+        };
         let method = add_delegate_method(
             ir,
             DelegateMethod {
                 name: format!("{}$delegate", ir.functions[getter as usize].name),
                 dispatch_receiver: None,
                 receivers: receiver.into_iter().collect(),
-                delegate,
-                storage_ty,
+                value,
                 line,
                 source_order_of: getter,
             },
@@ -146,7 +178,7 @@ fn realize_package_delegates(ir: &mut IrFile) {
     }
 }
 
-fn realize_member_delegates(ir: &mut IrFile) {
+fn realize_member_delegates(ir: &mut IrFile, references: &PropertyReferenceDelegates) {
     let mut removed = HashMap::<ClassId, HashSet<u32>>::default();
     for class in 0..ir.classes.len() {
         let class = class as ClassId;
@@ -170,7 +202,7 @@ fn realize_member_delegates(ir: &mut IrFile) {
             .filter_map(|(property, declaration)| {
                 Some(MemberDelegateCandidate {
                     declaration: MemberDelegateDeclaration::Property(property as u32),
-                    field: declaration.delegate_field?,
+                    field: declaration.delegate_field,
                     getter: declaration.getter?,
                     last_accessor: declaration.setter.unwrap_or(declaration.getter?),
                     annotation_marker: ir
@@ -188,7 +220,7 @@ fn realize_member_delegates(ir: &mut IrFile) {
                 .into_iter()
                 .flatten()
                 .enumerate()
-                .filter_map(|(property, declaration)| {
+                .map(|(property, declaration)| {
                     let receiver = approximate_delegate_receiver(
                         declaration.receiver,
                         declaration
@@ -205,9 +237,9 @@ fn realize_member_delegates(ir: &mut IrFile) {
                             .then_some(owner);
                     let receivers = dispatch_receiver
                         .map_or_else(|| vec![owner_receiver, receiver], |_| vec![receiver]);
-                    Some(MemberDelegateCandidate {
+                    MemberDelegateCandidate {
                         declaration: MemberDelegateDeclaration::Extension(property as u32),
-                        field: declaration.delegate_field?,
+                        field: declaration.delegate_field,
                         getter: declaration.getter,
                         last_accessor: declaration.setter.unwrap_or(declaration.getter),
                         annotation_marker: ir
@@ -216,7 +248,7 @@ fn realize_member_delegates(ir: &mut IrFile) {
                             .copied(),
                         dispatch_receiver,
                         receivers,
-                    })
+                    }
                 }),
         );
         for candidate in candidates {
@@ -229,44 +261,67 @@ fn realize_member_delegates(ir: &mut IrFile) {
                 dispatch_receiver,
                 receivers,
             } = candidate;
-            let Some((store, delegate)) = delegate_store(ir, class, field) else {
-                continue;
-            };
-            let Some(kind) = in_place_delegate(ir, delegate) else {
-                continue;
-            };
-            let stored = &ir.classes[class as usize].fields[field as usize];
-            let (storage_ty, line) = (stored.ty, stored.constructor_store_line);
-            replace_operations(
-                ir,
-                |expression| {
-                    matches!(expression, IrExpr::GetField { class: owner_class, index, .. }
-                    if *owner_class == class && *index == field)
-                },
-                delegate,
-            );
-            retire_store(ir, store, delegate, kind, line);
-            match declaration {
+            let lowered = match declaration {
                 MemberDelegateDeclaration::Property(property) => {
-                    ir.classes[class as usize].properties[property as usize].delegate_field = None;
+                    references.member_method(class, property)
                 }
                 MemberDelegateDeclaration::Extension(property) => {
-                    ir.member_ext_props
-                        .get_mut(&owner)
-                        .expect("a collected member extension keeps its owner")
-                        [property as usize]
-                        .delegate_field = None;
+                    references.member_extension_method(class, property)
                 }
-            }
-            removed.entry(class).or_default().insert(field);
+            };
+            let (value, line) = match lowered {
+                Some(DelegateMethodValue { value, line }) => (MethodValue::Reflected(value), line),
+                None => {
+                    let Some(field) = field else {
+                        continue;
+                    };
+                    let Some((store, delegate)) = delegate_store(ir, class, field) else {
+                        continue;
+                    };
+                    let Some(kind) = in_place_delegate(ir, delegate) else {
+                        continue;
+                    };
+                    let stored = &ir.classes[class as usize].fields[field as usize];
+                    let (storage_ty, line) = (stored.ty, stored.constructor_store_line);
+                    replace_operations(
+                        ir,
+                        |expression| {
+                            matches!(expression, IrExpr::GetField { class: owner_class, index, .. }
+                            if *owner_class == class && *index == field)
+                        },
+                        delegate,
+                    );
+                    retire_store(ir, store, delegate, kind, line);
+                    match declaration {
+                        MemberDelegateDeclaration::Property(property) => {
+                            ir.classes[class as usize].properties[property as usize]
+                                .delegate_field = None;
+                        }
+                        MemberDelegateDeclaration::Extension(property) => {
+                            ir.member_ext_props
+                                .get_mut(&owner)
+                                .expect("a collected member extension keeps its owner")
+                                [property as usize]
+                                .delegate_field = None;
+                        }
+                    }
+                    removed.entry(class).or_default().insert(field);
+                    (
+                        MethodValue::InPlace {
+                            delegate,
+                            storage_ty,
+                        },
+                        line,
+                    )
+                }
+            };
             let method = add_delegate_method(
                 ir,
                 DelegateMethod {
                     name: format!("{}$delegate", ir.functions[getter as usize].name),
                     dispatch_receiver,
                     receivers,
-                    delegate,
-                    storage_ty,
+                    value,
                     line,
                     source_order_of: getter,
                 },
@@ -481,7 +536,8 @@ enum MemberDelegateDeclaration {
 
 struct MemberDelegateCandidate {
     declaration: MemberDelegateDeclaration,
-    field: u32,
+    /// The `x$delegate` field; `None` once a property-reference delegate needs no storage.
+    field: Option<u32>,
     getter: FunId,
     last_accessor: FunId,
     annotation_marker: Option<FunId>,
@@ -566,30 +622,46 @@ struct DelegateMethod {
     dispatch_receiver: Option<TypeName>,
     /// The owner (a member property) or extension receiver the method takes as `<this>`.
     receivers: Vec<Ty>,
-    delegate: ExprId,
-    storage_ty: Ty,
+    value: MethodValue,
     line: u32,
     /// The accessor whose source position the method shares; it follows that property's accessors.
     source_order_of: u32,
+}
+
+/// What a delegate method returns.
+enum MethodValue {
+    /// A copy of the in-place delegate, a leaf, built with the method at its offsets.
+    InPlace { delegate: ExprId, storage_ty: Ty },
+    /// The reflective reference a property-reference delegate lowered to, at the reference's own
+    /// offsets.
+    Reflected(ExprId),
 }
 
 /// `private [static] Object get<X>$delegate([<this>])`, returning the delegate.
 fn add_delegate_method(ir: &mut IrFile, method: DelegateMethod) -> u32 {
     let result = Ty::nullable(Ty::obj("kotlin/Any"));
     let first_built = ir.exprs.len();
-    let value = ir.add_expr(ir.expr(method.delegate).clone());
-    if ir.source_line(method.delegate).is_some() {
-        ir.copy_position(method.delegate, value);
-    }
-    ir.set_logical_type(value, method.storage_ty);
-    let value = if method.storage_ty.is_jvm_scalar() {
-        ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: value,
-            type_operand: result,
-        })
-    } else {
-        value
+    let value = match method.value {
+        MethodValue::InPlace {
+            delegate,
+            storage_ty,
+        } => {
+            let value = ir.add_expr(ir.expr(delegate).clone());
+            if ir.source_line(delegate).is_some() {
+                ir.copy_position(delegate, value);
+            }
+            ir.set_logical_type(value, storage_ty);
+            if storage_ty.is_jvm_scalar() {
+                ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg: value,
+                    type_operand: result,
+                })
+            } else {
+                value
+            }
+        }
+        MethodValue::Reflected(value) => value,
     };
     let returned = ir.add_expr(IrExpr::Return(Some(value)));
     if method.line != 0 {

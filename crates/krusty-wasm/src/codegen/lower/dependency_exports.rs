@@ -423,28 +423,63 @@ impl Body<'_> {
         target: krusty::fir::ExternalCallableId,
         internal: krusty::types::TypeName,
         args: &[u32],
+        omitted: OmittedArguments<'_>,
     ) -> Option<Result<(), Unsupported>> {
         if self.ir.class_id_by_name(internal).is_some() {
             return None;
         }
         let function = self.calls.external(target)?;
+        // A construction leaving arguments out is the call of the default entry the constructor's
+        // module exports, with a zero at each omitted operand and the omission masks after them.
+        let default_entry = match omitted.ordinals.is_empty() {
+            true => None,
+            false => Some(self.calls.external_default(target)?),
+        };
         Some((|| {
-            let signature = self
-                .calls
-                .signature(target)
-                .ok_or("a dependency constructor without its declared signature")?
-                .clone();
-            if signature.parameters().len() != args.len() {
+            let signature = match default_entry {
+                Some(_) => self.calls.external_default_signature(target),
+                None => self.calls.signature(target),
+            }
+            .ok_or("a dependency constructor without its declared signature")?
+            .clone();
+            // The ordinals number the source parameters, which follow the compiler's leading
+            // operands; the masks number the source parameters alone.
+            let prefix = omitted.prefix as usize;
+            let omitted = omitted
+                .ordinals
+                .iter()
+                .map(|&ordinal| ordinal as usize + prefix)
+                .collect::<Vec<_>>();
+            if signature.parameters().len() != args.len() + omitted.len() {
                 return Err(
                     "a dependency construction whose operands disagree with its constructor"
                         .to_string(),
                 );
             }
-            for (argument, parameter) in args.iter().zip(signature.parameters()) {
-                self.argument(*argument, *parameter)?;
+            self.dependency_arguments_omitting(args, signature.parameters(), &omitted)?;
+            match default_entry {
+                Some(entry) => {
+                    for mask in krusty::backend::default_arguments::omission_masks(
+                        signature.parameters().len() - prefix,
+                        omitted.iter().map(|&position| position - prefix),
+                    ) {
+                        self.code.i32_const(mask as i32);
+                    }
+                    self.code.call(entry);
+                }
+                None => {
+                    self.code.call(function);
+                }
             }
-            self.code.call(function);
             self.coerce_emitted_value(signature.result(), Ty::obj_name(internal))
         })())
     }
+}
+
+/// The arguments a construction leaves to their defaults: their source ordinals, which begin after
+/// the `prefix` operands the compiler leads the constructor's frame with.
+#[derive(Clone, Copy)]
+pub(super) struct OmittedArguments<'a> {
+    pub ordinals: &'a [u32],
+    pub prefix: u32,
 }

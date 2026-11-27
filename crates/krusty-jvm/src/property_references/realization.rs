@@ -194,11 +194,33 @@ pub(crate) struct PropertyReferenceRealizations {
     /// The string operand that reflects each declared delegated property's getter, paired with
     /// the exact accessor declaration whose final JVM name and descriptor it must publish.
     delegated_getter_signatures: Vec<(ExprId, FunId)>,
+    /// Reflected getter signatures of internal members with no accessor in this file, whose JVM
+    /// names take the module suffix when internal members are renamed.
+    module_suffixed_signatures: Vec<ExprId>,
 }
 
 impl PropertyReferenceRealizations {
     pub(super) fn record_delegated_getter_signature(&mut self, signature: ExprId, getter: FunId) {
         self.delegated_getter_signatures.push((signature, getter));
+    }
+
+    pub(super) fn record_module_suffixed_signature(&mut self, signature: ExprId) {
+        self.module_suffixed_signatures.push(signature);
+    }
+
+    /// Give each recorded reflected signature's getter name the module suffix the internal getter
+    /// itself takes (`getX$<module>()…`).
+    pub(crate) fn suffix_reflected_signatures(&self, ir: &mut krusty::ir::IrFile, suffix: &str) {
+        for &signature in &self.module_suffixed_signatures {
+            let IrExpr::Const(IrConst::String(value)) = &mut ir.exprs[signature as usize] else {
+                panic!("a reflected getter signature remains a string constant");
+            };
+            let (name, descriptor) = value
+                .as_str()
+                .and_then(|value| value.split_once('('))
+                .expect("a reflected getter signature carries a descriptor");
+            *value = format!("{name}{suffix}({descriptor}").into();
+        }
     }
 
     /// Publish the physical getter signature after every declaration-naming pass has run. The

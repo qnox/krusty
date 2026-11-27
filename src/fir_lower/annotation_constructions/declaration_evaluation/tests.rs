@@ -248,6 +248,7 @@ fn shared_delegate_template(is_getter: bool) {
             member_order: 0,
         },
         storage_name: "p$delegate".into(),
+        storage: None,
         getter: accessor(if is_getter { fixture.allocation } else { other }),
         setter: Some(accessor(if is_getter { other } else { fixture.allocation })),
     });

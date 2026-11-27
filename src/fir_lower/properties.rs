@@ -688,6 +688,7 @@ fn materialize_member_extension_property(
             setter,
             visibility: property.visibility,
             type_params,
+            return_value_status: Default::default(),
             accessor_annotations: ir
                 .accessor_annotations
                 .get(&property_id)

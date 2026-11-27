@@ -993,12 +993,12 @@ mod tests {
     fn an_unsupported_construct_declines_the_whole_compilation_by_name() {
         let (outputs, diagnostics) = compile(
             WasmTarget::Js,
-            "lateinit var pending: String\nfun box(): String = \"OK\"",
+            "fun box(): String { var s = 0.0f; s %= 2f; return \"OK\" }",
         );
         assert_eq!(outputs, Vec::<Artifact>::new());
         assert_eq!(
             diagnostics,
-            ["krusty: the wasm backend does not support a `lateinit` top-level property yet"]
+            ["krusty: the wasm backend does not support the operator Rem on `kotlin.Float` yet"]
         );
     }
 

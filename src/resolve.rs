@@ -94,7 +94,6 @@ use annotation_bindings::{BoundAnnotation, BoundAnnotations};
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
 mod backing_field_binding;
-mod boolean_implications;
 mod dependency_annotation_defaults;
 mod dependency_body_call_edges;
 pub(crate) use anonymous_object_capture::discover_inline_anonymous_object_captures;
@@ -175,6 +174,7 @@ mod collection_literals;
 mod common_classifier_views;
 mod compound_assignments;
 mod condition_exclusions;
+mod condition_narrowings;
 mod conditional_branch;
 mod constant_evaluation;
 mod constructor_arguments;
@@ -248,6 +248,7 @@ mod generic_call_bindings;
 mod if_expression;
 mod implicit_receiver_calls;
 mod implicit_rungs;
+mod imported_singleton_members;
 mod inline_access;
 mod inline_parameter_usage;
 mod inner_constructor_calls;
@@ -451,6 +452,7 @@ mod type_argument_arity;
 mod uninferred_call_results;
 mod upper_bound_violations;
 mod value_class_declaration;
+mod value_implications;
 mod variance_conflicts;
 mod when_comparison;
 mod when_exhaustiveness;
@@ -3470,8 +3472,6 @@ struct Local {
     /// Identity smart-cast facts about this value are keyed by. Every declaration allocates one,
     /// whatever its origin; a narrowing shadow keeps the identity of the value it narrows.
     flow_identity: u32,
-    /// Immutable origin identity implied by this safe-call result; follows lexical shadowing.
-    safe_call_origin: Option<lexical_bindings::BindingIdentity>,
 }
 
 /// The receiver stack a lambda body is checked under: any context receivers, the extension
@@ -5472,56 +5472,6 @@ impl<'a> Checker<'a> {
         };
         self.expr_lowers.insert(expression, lowering);
         Some(ty)
-    }
-
-    /// Explicit import of a member declared on a singleton classifier. The import scope has already
-    /// resolved the owner path and alias to stable identities; this only supplies the ordinary value
-    /// receiver used by member/property selection.
-    fn imported_singleton_member(
-        &self,
-        name: &str,
-    ) -> Option<(ImplicitReceiver, String, SingletonValue)> {
-        let mut candidates = self
-            .function_import_scope
-            .explicit_targets(name)
-            .into_iter()
-            .filter_map(|(namespace, declared_name)| {
-                crate::trace_compiler!(
-                    "resolve",
-                    "imported singleton candidate name={name} target={namespace:?}.{declared_name}"
-                );
-                let crate::symbol_source::SymbolNamespace::Classifier(classifier) = namespace
-                else {
-                    return None;
-                };
-                let singleton = self.classifier_singleton_value(classifier)?;
-                (singleton.classifier == classifier).then_some((
-                    ImplicitReceiver {
-                        receiver_role: None,
-                        ty: Ty::obj_name(classifier),
-                        declared_ty: Ty::obj_name(classifier),
-                        identity: (0, 0),
-                        extension_receiver: None,
-                        class_receiver: false,
-                        current: false,
-                        receiver_depth: 0,
-                        dsl_shadowed: false,
-                    },
-                    declared_name,
-                    singleton,
-                ))
-            })
-            .collect::<Vec<_>>();
-        if candidates.len() != 1 {
-            return None;
-        }
-        let (receiver, declared_name, singleton) = candidates.pop()?;
-        crate::trace_compiler!(
-            "resolve",
-            "imported singleton classifier={:?} storage={singleton:?}",
-            singleton.classifier
-        );
-        Some((receiver, declared_name, singleton))
     }
 
     /// A classifier contributed by a star-import level can denote a value when it is an object or
@@ -13691,11 +13641,6 @@ impl<'a> Checker<'a> {
                 format!("krusty: conflicting local declaration '{name}'"),
             );
         }
-        // Keep the implication on the result's eventual binding, but resolve its origin before the
-        // result is declared: `val x = x?.p` refers to the OUTER `x` on the right-hand side.
-        // The bounded path accepts immutable lexical roots only. A mutable root needs edge
-        // invalidation and branch joins; declining it is conservative and cannot invent a cast.
-        let safe_call_origin = self.safe_call_origin_for_initializer(scope, init, is_var);
         let declared = ty.as_ref().map(|r| self.type_ref_ty(scope, r));
         // An UNRESOLVED annotation must fail the file, not silently bind `Error`: the local
         // would otherwise take its initializer's shape while every use site's checks are
@@ -13796,8 +13741,8 @@ impl<'a> Checker<'a> {
         // An explicitly typed callable-reference local has already adapted to its target shape.
         // Keep that shape instead of reopening the raw reference and undoing the adaptation.
         // Computed before the val is declared: `val x = x != null` talks about the OUTER `x`.
-        let boolean_implications = (!is_var)
-            .then(|| self.boolean_val_implications(scope, init, bound_ty))
+        let value_implications = (!is_var)
+            .then(|| self.value_implications(scope, init, bound_ty))
             .flatten();
         let flow_identity = if let Some(function_type) = declared
             .filter(|ty| ty.is_fun())
@@ -13824,11 +13769,11 @@ impl<'a> Checker<'a> {
             self.record_enhanced_local(flow_identity, init, bound_ty);
             self.record_flexible_local(flow_identity, init, bound_ty);
         }
-        if let Some(origin) = safe_call_origin {
-            self.attach_safe_call_origin(scope, &name, origin);
-        }
-        if let Some(implications) = boolean_implications {
-            scope.record_boolean_implications(flow_identity, implications);
+        if let Some(implications) = value_implications {
+            scope.record_value_implications(
+                NarrowPath::root_only(scope::PathRoot::Value(flow_identity)),
+                implications,
+            );
         }
         if declared.is_none() && !is_var {
             if let Some(path) = self.visible_value_path(scope, &name) {
@@ -14144,6 +14089,9 @@ impl<'a> Checker<'a> {
                             ty,
                             stable: true,
                         });
+                    if let Some(implications) = self.value_implications(scope, value, ty) {
+                        scope.record_value_implications(path.clone(), implications);
+                    }
                     if let Some(narrowed) =
                         self.assignment_narrowing(&name, ty, vt, self.span(value))
                     {
@@ -28803,15 +28751,7 @@ impl<'a> Checker<'a> {
 
     fn implicit_receivers(&self, scope: &CheckerScope<'_>) -> Vec<ImplicitReceiver> {
         let mut receivers = self.declared_implicit_receivers(scope);
-        // Flow facts for the unqualified `this` value change the semantic type of the nearest
-        // receiver rung, not its runtime identity. Bare member lookup must see that narrowed type
-        // (`fun A?.bar() = if (this != null) foo() else ...`) while FIR continues to materialize the
-        // exact receiver depth selected above.
-        if let Some(narrowed) = self.actual_this_narrow(scope) {
-            if let Some(current) = receivers.iter_mut().find(|receiver| receiver.current) {
-                current.ty = narrowed;
-            }
-        }
+        self.narrow_current_implicit_receiver(scope, &mut receivers);
         receivers
     }
 
@@ -28963,8 +28903,16 @@ impl<'a> Checker<'a> {
     }
 
     fn implicit_receiver_selection(&self, receiver: ImplicitReceiver) -> ImplicitReceiverSelection {
+        // A flow intersection is a semantic view of the receiver value, not a type it can be
+        // loaded as: the value keeps its declared type, and a member owned by one constituent
+        // reaches it through the smart cast recorded in `narrowed_this_member`.
+        let ty = if matches!(receiver.ty.non_null().kind(), TyKind::Intersection(_)) {
+            receiver.declared_ty
+        } else {
+            receiver.ty
+        };
         ImplicitReceiverSelection {
-            ty: receiver.ty,
+            ty,
             current: receiver.current,
             receiver_depth: receiver.receiver_depth,
             classifier: receiver
@@ -32885,7 +32833,7 @@ impl<'a> Checker<'a> {
                     if narrows_then != for_else {
                         self.null_check_narrowings(scope, operand, &mut out, declined);
                     } else {
-                        self.null_branch_narrowings(scope, operand, &mut out);
+                        self.null_branch_narrowings(scope, operand, &mut out, declined);
                     }
                 } else if matches!(op, BinOp::Eq | BinOp::RefEq) != for_else {
                     // `x?.p == v` holds only when every `?.` held, as long as `v` cannot be null:
@@ -32965,124 +32913,6 @@ impl<'a> Checker<'a> {
         out
     }
 
-    fn condition_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        cond: ExprId,
-        truth: bool,
-    ) -> (Vec<FlowNarrowing>, Vec<DeclinedFlowNarrowing>) {
-        let mut candidates = Vec::new();
-        let mut declined = Vec::new();
-        self.collect_condition_narrowings(scope, cond, truth, &mut candidates, &mut declined);
-        let nonnull: crate::fx_hash::HashSet<NarrowPath> = candidates
-            .iter()
-            .filter_map(|(path, ty)| (!ty.is_nullable()).then_some(path.clone()))
-            .collect();
-        let mut result: Vec<(NarrowPath, Ty)> = Vec::new();
-        for (path, ty) in candidates {
-            let ty = match ty.kind() {
-                TyKind::Nullable(inner) if nonnull.contains(&path) && !inner.is_unsigned() => inner,
-                _ => ty,
-            };
-            let matching = result
-                .iter()
-                .enumerate()
-                .filter_map(|(index, (existing, current))| {
-                    (*existing == path).then_some((index, *current))
-                })
-                .collect::<Vec<_>>();
-            if matching.is_empty() {
-                result.push((path, ty));
-                continue;
-            }
-            let context = crate::assignable::TyCtx::new();
-            // Keep the minimal set of proven types. Comparable facts collapse to the narrower one;
-            // unrelated facts form a real flow intersection and must both survive. Treating that
-            // case as a conflict discarded `A & B` entirely and made every member unresolved.
-            if matching
-                .iter()
-                .any(|(_, current)| crate::assignable::is_subtype(&context, self, *current, ty))
-            {
-                continue;
-            }
-            let dominated = matching
-                .into_iter()
-                .filter_map(|(index, current)| {
-                    crate::assignable::is_subtype(&context, self, ty, current).then_some(index)
-                })
-                .collect::<crate::fx_hash::HashSet<_>>();
-            if !dominated.is_empty() {
-                result = result
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(index, entry)| (!dominated.contains(&index)).then_some(entry))
-                    .collect();
-            }
-            result.push((path, ty));
-        }
-        (result, declined)
-    }
-
-    fn collect_condition_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        cond: ExprId,
-        truth: bool,
-        out: &mut Vec<(NarrowPath, Ty)>,
-        declined: &mut Vec<(String, Ty)>,
-    ) {
-        // `!cond` flips the branch facts: the narrowings of `cond`-false hold when `!cond` is true
-        // (and vice versa). Recursing with a flipped `truth` also yields De Morgan for `!(a && b)` /
-        // `!(a || b)` through the combine rule below.
-        if let Expr::Unary {
-            op: UnOp::Not,
-            operand,
-        } = self.file.expr(cond).clone()
-        {
-            self.collect_condition_narrowings(scope, operand, !truth, out, declined);
-            return;
-        }
-        if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
-            if matches!(op, BinOp::Eq | BinOp::Ne) {
-                for (condition, literal) in [(lhs, rhs), (rhs, lhs)] {
-                    let Expr::BoolLit(literal) = self.file.expr(literal) else {
-                        continue;
-                    };
-                    if self.expr_types[condition.0 as usize].non_null() != Ty::Boolean {
-                        continue;
-                    }
-                    let condition_truth = if (op == BinOp::Eq) == truth {
-                        *literal
-                    } else {
-                        !*literal
-                    };
-                    self.collect_condition_narrowings(
-                        scope,
-                        condition,
-                        condition_truth,
-                        out,
-                        declined,
-                    );
-                    // Projecting the Boolean value must not discard facts established by the
-                    // equality expression itself. In particular, a true `x?.p == true` also
-                    // proves that the safe-call receiver `x` was non-null.
-                    out.extend(self.smartcast_narrowings(scope, cond, !truth, declined));
-                    return;
-                }
-            }
-            let combines = (truth && op == BinOp::And) || (!truth && op == BinOp::Or);
-            if combines {
-                self.collect_condition_narrowings(scope, lhs, truth, out, declined);
-                self.collect_condition_narrowings(scope, rhs, truth, out, declined);
-                return;
-            }
-        }
-        self.contract_condition_narrowings(scope, cond, truth, out, declined);
-        self.implied_condition_narrowings(scope, cond, truth, out, declined);
-        out.extend(self.smartcast_narrowings(scope, cond, !truth, declined));
-        self.as_cast_narrowings(scope, cond, out);
-    }
-
     /// Bring the narrowings a condition proves into scope for a guarded region. The single
     /// application point for every site (`if`/`while` branches, `&&`/`||` right operands,
     /// early-return guards, contract statements). `declined` casts (a capturing closure mutates
@@ -33099,27 +32929,13 @@ impl<'a> Checker<'a> {
                 "smartcast",
                 "apply path={path:?} target={ty:?} compound={compound}",
             );
-            // A single `is B` proof on a value declared as `A` produces `A & B` when neither
-            // classifier contains the other. Root narrowing shadows expose only the newest read
-            // projection, so retain the incomparable declaration constituent before replacing it.
-            // Comparable declarations (`Any` then `String`) remain a single minimal fact.
-            // `Nothing?` is the exact null branch, not an unrelated classifier constituent. It is
-            // already the nullable bottom type and must not be widened by re-attaching the local's
-            // declared non-null classifier (`String?` + a null proof is still `Nothing?`, never
-            // `String & Nothing?`). Classifier type-test proofs continue through the intersection
-            // path below.
+            // Root narrowing shadows expose only the newest read projection, so retain the
+            // declaration constituent an incomparable proof keeps before replacing it.
             let declared = StablePathRead::new(self).declared_ty(scope, path);
-            if ty.non_null() != Ty::Nothing {
-                // A nullable test (`is B?`) still admits null, so the declaration keeps its `?`.
-                let keep_null = ty.is_nullable();
-                if let Some(declared) = declared.map(|d| if keep_null { d } else { d.non_null() }) {
-                    let context = crate::assignable::TyCtx::new();
-                    let comparable = crate::assignable::is_subtype(&context, self, declared, *ty)
-                        || crate::assignable::is_subtype(&context, self, *ty, declared);
-                    if !comparable {
-                        scope.narrow_intersection(path.clone(), declared);
-                    }
-                }
+            if let Some(kept) =
+                declared.and_then(|declared| self.declared_constituent_beside_proof(declared, *ty))
+            {
+                scope.narrow_intersection(path.clone(), kept);
             }
             scope.narrow_intersection(path.clone(), *ty);
             self.apply_narrowing_unchecked(scope, path, *ty);
@@ -40746,7 +40562,14 @@ impl<'a> Checker<'a> {
                 // of this lexical flow (`x!!.let { use(x) }`, and later statements). Reassignments
                 // invalidate the fact through the ordinary scope machinery; temporaries and
                 // unstable properties never produce a reusable path.
+                // The assertion proves what `operand != null` would: a safe-call chain's links, a
+                // call's `returnsNotNull()` effect, and a stable value's initializer implications.
                 if narrowed != Ty::Error {
+                    let mut proven = Vec::new();
+                    self.null_check_narrowings(scope, operand, &mut proven, &mut Vec::new());
+                    for (path, ty) in proven {
+                        self.apply_narrowing_unchecked(scope, &path, ty);
+                    }
                     if let Some(path) = self.expr_access_path(operand).filter(|path| {
                         self.stable_path_ty(scope, path, self.span(operand))
                             .is_some()
@@ -42371,7 +42194,7 @@ impl<'a> Checker<'a> {
                 // stored in a local (`val parent = explicit?.let { … }`) is null whenever its base
                 // is, so reaching the selector proves the base non-null too. Without it,
                 // `parent?.let { explicit.name }` reads `explicit` as still nullable.
-                self.apply_safe_call_origin_narrowing(&selector_scope, &path, self.span(receiver));
+                self.apply_implied_non_null_narrowing(&selector_scope, &path, self.span(receiver));
             }
             let scope = &selector_scope;
             // Diagnostic checkpoint for the "nothing resolved, nothing reported" report below. Taken
@@ -43050,6 +42873,7 @@ impl<'a> Checker<'a> {
             )
         }) {
             for receiver in self.implicit_receivers_before_value_binding(scope, &n) {
+                let receiver = self.implicit_intersection_property_view(receiver, &n);
                 if let Some(ty) =
                     self.try_member_read(scope, receiver.ty, &n, self.span(e), Some(e))
                 {
@@ -43153,7 +42977,9 @@ impl<'a> Checker<'a> {
                                 }
                                 continue;
                             }
-                            implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
+                            implicit_rungs::ImplicitRung::Receiver(receiver) => {
+                                self.implicit_intersection_property_view(receiver, &n)
+                            }
                         };
                         if let Some(selected_ty) =
                             self.try_member_read(scope, receiver.ty, &n, self.span(e), Some(e))
@@ -43338,7 +43164,9 @@ impl<'a> Checker<'a> {
                             }
                             continue;
                         }
-                        implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
+                        implicit_rungs::ImplicitRung::Receiver(receiver) => {
+                            self.implicit_intersection_property_view(receiver, &n)
+                        }
                     };
                     if context_receiver_priority::is_context_parameter_receiver(
                         scope,

@@ -528,6 +528,19 @@ pub(super) fn declarations(
             }
             let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
             read_values(platform, bodies, &facts, &emitted.objects, &mut state)?;
+            // A `super` call runs the interface body it names without dispatch, so the unit
+            // emits that body as a callable entry even where no class inherits it.
+            for target in emitted
+                .super_callables
+                .iter()
+                .filter(|target| is_interface_default(bodies, target))
+            {
+                if state.object_defaults.insert(target.clone()) {
+                    state.emitted_defaults.insert(target.clone());
+                    visited.remove(target);
+                    state.pending.push_back((target.clone(), None));
+                }
+            }
             let member_class = selected
                 .class_contract()
                 .filter(|class| class.emits_members())
@@ -1371,6 +1384,17 @@ fn walk_value_class_overrides(
         }
     }
     Ok(())
+}
+
+/// Whether `target` is a member with a body of an interface: a default a `super` call names.
+fn is_interface_default(bodies: &KlibDeclarationBodies, target: &KlibDependencyCallable) -> bool {
+    bodies.function_has_body(target) == Some(true)
+        && matches!(
+            bodies.member_owner(target),
+            crate::klib_libraries::LocatedMember::One { class, .. }
+                if crate::metadata::semantic::class_kind(class.base.flags)
+                    == crate::libraries::TypeKind::Interface
+        )
 }
 
 #[cfg(test)]

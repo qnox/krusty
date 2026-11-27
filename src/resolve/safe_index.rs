@@ -43,7 +43,7 @@ impl Checker<'_> {
                 .is_some()
         }) {
             self.apply_narrowing_unchecked(&selector_scope, &path, safe_receiver);
-            self.apply_safe_call_origin_narrowing(&selector_scope, &path, self.span(receiver));
+            self.apply_implied_non_null_narrowing(&selector_scope, &path, self.span(receiver));
         }
         selector_scope
     }
