@@ -166,7 +166,6 @@ collections/addCollectionStubWithCovariantOverride.kt
 collections/clashWithInternalMapMethod.kt
 collections/internalRemove.kt
 collections/removeClash.kt
-companionBlocksAndExtensions/lateinit.kt
 constants/comparisonFalse.kt
 constants/divisionByZero.kt
 constants/float.kt
@@ -417,7 +416,6 @@ delegatedProperty/valByMapDelegatedProperty.kt
 delegation/delegationDifferentModule.kt
 delegation/kt30102_comparable.kt
 delegation/kt44199.kt
-devirtualization/lateinitInterface.kt
 diagnostics/functions/tailRecursion/whenWithIs.kt
 elvis/ofNonNullableResultType.kt
 elvis/primitive.kt

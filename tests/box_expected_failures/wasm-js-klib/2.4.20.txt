@@ -177,7 +177,6 @@ companionBlocksAndExtensions/initializersInheritanceMixedWithObject.kt
 companionBlocksAndExtensions/initializersInheritanceMultipleSupertypesMixedOrder.kt
 companionBlocksAndExtensions/initializersTriggeredByObject.kt
 companionBlocksAndExtensions/innerClasses.kt
-companionBlocksAndExtensions/lateinit.kt
 companionBlocksAndExtensions/multiModule.kt
 companionBlocksAndExtensions/nestedClasses.kt
 constants/comparisonFalse.kt
@@ -434,7 +433,6 @@ delegatedProperty/valByMapDelegatedProperty.kt
 delegation/delegationDifferentModule.kt
 delegation/kt30102_comparable.kt
 delegation/kt44199.kt
-devirtualization/lateinitInterface.kt
 diagnostics/functions/tailRecursion/whenWithIs.kt
 elvis/ofNonNullableResultType.kt
 elvis/primitive.kt
