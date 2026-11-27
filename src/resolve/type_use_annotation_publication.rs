@@ -7,6 +7,7 @@
 //! seals each published spelling: a bound occurrence becomes its checked application, and a
 //! `SOURCE`-retained one leaves the record.
 
+use super::annotation_host_kind::AnnotationHostKind;
 use super::*;
 use crate::spelling::{AnnotationOccurrence, CheckedTypeUseAnnotation, CheckedTypeUseAnnotations};
 
@@ -226,7 +227,7 @@ impl Checker<'_> {
                 scope,
                 &annotation,
                 arguments,
-                "type usage",
+                AnnotationHostKind::TypeUsage,
             );
         }
     }

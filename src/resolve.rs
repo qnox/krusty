@@ -93,6 +93,7 @@ mod annotation_applications;
 mod annotation_argument_constness;
 mod annotation_arguments;
 mod annotation_bindings;
+mod annotation_host_kind;
 use annotation_bindings::{BoundAnnotation, BoundAnnotations};
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
@@ -33359,7 +33360,7 @@ impl<'a> Checker<'a> {
                     scope,
                     &entry.annotations,
                     &entry.annotation_args,
-                    "enum entry",
+                    annotation_host_kind::AnnotationHostKind::EnumEntry,
                 );
             }
             self.check_secondary_constructor_annotations(scope, cl);
@@ -33382,7 +33383,7 @@ impl<'a> Checker<'a> {
                     scope,
                     annotations,
                     &cl.primary_ctor_annotation_args,
-                    "constructor",
+                    annotation_host_kind::AnnotationHostKind::Constructor,
                 );
             }
             self.exit_annotation_class_rung(member_rung);
@@ -36825,23 +36826,13 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                for &argument in &entry.args {
-                    self.finish_executable_root(argument);
-                }
-                // The entry's own annotations (`@OptIn(M::class) ENTRY`) accept what its call needs.
-                let entry_policy_depth = self.push_declaration_policies(
-                    scope,
-                    &entry.annotations,
-                    &entry.annotation_args,
-                );
                 self.record_enum_entry_constructor(
-                    entry.span,
-                    entry.explicit_call,
+                    scope,
+                    entry,
                     streamed_enum_owner,
                     enum_signature.as_ref(),
                     selected,
                 );
-                self.active_lexical_policies.truncate(entry_policy_depth);
             }
             self.static_companion_this = previous_static_this;
         }
@@ -49554,7 +49545,7 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         function: &FunDecl,
-        declaration_target: &'static str,
+        declaration_target: annotation_host_kind::AnnotationHostKind,
     ) -> usize {
         self.fold_function_annotation_applications(scope, function, declaration_target)
     }

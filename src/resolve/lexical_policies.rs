@@ -6,6 +6,7 @@
 //! policies are resolved once, from the application checked in its owning scope, and every later
 //! push of that application consumes the published fact.
 
+use super::annotation_host_kind::AnnotationHostKind;
 use super::*;
 pub(crate) use crate::lexical_policy::LexicalPolicy;
 use crate::types::PropertyAnnotationSite;
@@ -305,11 +306,11 @@ impl Checker<'_> {
                 Stmt::Local { .. }
                 | Stmt::LocalLateinit { .. }
                 | Stmt::LocalDelegate { .. }
-                | Stmt::Destructure { .. } => "local variable",
+                | Stmt::Destructure { .. } => AnnotationHostKind::LocalVariable,
                 Stmt::LocalFun(_) | Stmt::LocalClass(_) | Stmt::LocalTypeAlias(_) => {
-                    "local declaration"
+                    AnnotationHostKind::LocalDeclaration
                 }
-                _ => "expression",
+                _ => AnnotationHostKind::Expression,
             };
             self.open_use_site_policies(scope, &annotations, target);
         }
@@ -325,7 +326,7 @@ impl Checker<'_> {
     ) -> usize {
         let depth = self.active_lexical_policies.len();
         if let Some(annotations) = self.file.expression_annotations.get(&expression).cloned() {
-            self.open_use_site_policies(scope, &annotations, "expression");
+            self.open_use_site_policies(scope, &annotations, AnnotationHostKind::Expression);
         }
         depth
     }
@@ -357,7 +358,7 @@ impl Checker<'_> {
         &mut self,
         scope: &CheckerScope<'_>,
         annotations: &[UseSiteAnnotation],
-        declaration_target: &'static str,
+        declaration_target: AnnotationHostKind,
     ) {
         for annotation in annotations {
             let policies =
@@ -380,7 +381,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         annotations: &[AnnotationRef],
         arguments: &[Vec<ExprId>],
-        declaration_target: &'static str,
+        declaration_target: AnnotationHostKind,
     ) {
         let policy_depth = self.push_declaration_policies(scope, annotations, arguments);
         for (annotation, arguments) in annotations.iter().zip(arguments) {

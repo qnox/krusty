@@ -7,6 +7,7 @@
 //! are is an explicit declaration, not something inferred from the data a pass happens to carry —
 //! see [`super::source_fragment`].
 
+use super::annotation_host_kind::AnnotationHostKind;
 use super::*;
 
 #[derive(Default)]
@@ -129,7 +130,7 @@ enum AnnotationApplicationHost {
         constructor_parameter: bool,
     },
     NonProperty {
-        declaration_target: &'static str,
+        declaration_target: AnnotationHostKind,
         constructor_parameter: bool,
         /// A declaration no annotation target denotes (an initializer): an annotation that allows
         /// an explicit use-site target is still wrong on it.
@@ -144,7 +145,7 @@ impl Checker<'_> {
         &mut self,
         annotation: &AnnotationRef,
         targets: crate::types::AnnotationTargets,
-        description: &'static str,
+        kind: AnnotationHostKind,
         hosts: &[crate::types::KotlinTarget],
     ) -> bool {
         if hosts.iter().any(|&host| targets.allows(host))
@@ -154,7 +155,7 @@ impl Checker<'_> {
         }
         self.diags.error(
             Span::new(annotation.at, annotation.span.hi),
-            wrong_annotation_target_message(description, targets),
+            wrong_annotation_target_message(kind.description(), targets),
         );
         self.discard_annotation_application(annotation);
         false
@@ -183,7 +184,7 @@ impl Checker<'_> {
                 scope,
                 annotation,
                 arguments,
-                "local function",
+                AnnotationHostKind::LocalFunction,
             );
         }
         for parameter in &function.params {
@@ -194,7 +195,7 @@ impl Checker<'_> {
                     scope,
                     annotation,
                     arguments,
-                    "value parameter",
+                    AnnotationHostKind::ValueParameter,
                 );
             }
         }
@@ -211,7 +212,7 @@ impl Checker<'_> {
             scope,
             annotation,
             arguments,
-            "type parameter",
+            AnnotationHostKind::TypeParameter,
         );
     }
 
@@ -365,7 +366,7 @@ impl Checker<'_> {
                 }
             } else {
                 AnnotationApplicationHost::NonProperty {
-                    declaration_target: "value parameter",
+                    declaration_target: AnnotationHostKind::ValueParameter,
                     constructor_parameter: true,
                     targetless: false,
                 }
@@ -382,7 +383,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         annotation: &AnnotationRef,
         arguments: &[ExprId],
-        declaration_target: &'static str,
+        declaration_target: AnnotationHostKind,
     ) -> Option<TypeName> {
         self.check_annotation_application_for_host(
             scope,
@@ -672,7 +673,7 @@ impl Checker<'_> {
                 constructor_parameter,
                 ..
             } => (
-                Some(declaration_target),
+                Some(declaration_target.description()),
                 None,
                 false,
                 false,
@@ -694,7 +695,7 @@ impl Checker<'_> {
                 declaration_target, ..
             } = host
             {
-                if let Some(hosts) = non_property_host_targets(declaration_target) {
+                if let Some(hosts) = declaration_target.targets() {
                     return self.check_non_property_target(
                         annotation,
                         targets,
@@ -851,7 +852,7 @@ impl Checker<'_> {
                 scope,
                 annotation,
                 arguments,
-                class_target_description(class),
+                class_host_kind(class),
             );
         }
         self.annotated_classifier = annotated;
@@ -883,37 +884,15 @@ impl Checker<'_> {
     }
 }
 
-/// How kotlinc's diagnostics name the declaration kind of `class`.
-fn class_target_description(class: &ClassDecl) -> &'static str {
+/// The declaration kind of `class`.
+fn class_host_kind(class: &ClassDecl) -> AnnotationHostKind {
     match class.kind {
-        crate::ast::ClassKind::Annotation => "annotation class",
-        crate::ast::ClassKind::Enum => "enum class",
-        crate::ast::ClassKind::Interface => "interface",
-        crate::ast::ClassKind::Class if class.singleton => "standalone object",
-        crate::ast::ClassKind::Class => "class",
+        crate::ast::ClassKind::Annotation => AnnotationHostKind::AnnotationClass,
+        crate::ast::ClassKind::Enum => AnnotationHostKind::EnumClass,
+        crate::ast::ClassKind::Interface => AnnotationHostKind::Interface,
+        crate::ast::ClassKind::Class if class.singleton => AnnotationHostKind::StandaloneObject,
+        crate::ast::ClassKind::Class => AnnotationHostKind::Class,
     }
-}
-
-/// The annotation targets a declaration kind denotes, named as kotlinc's diagnostics name it. An
-/// annotation class accepts `class` too, and an enum entry is a field or property.
-fn non_property_host_targets(description: &str) -> Option<&'static [crate::types::KotlinTarget]> {
-    use crate::types::KotlinTarget as Target;
-    Some(match description {
-        "class" | "interface" | "standalone object" | "enum class" | "companion object" => {
-            &[Target::Class]
-        }
-        "annotation class" => &[Target::AnnotationClass, Target::Class],
-        "constructor" => &[Target::Constructor],
-        "enum entry" => &[Target::Property, Target::Field],
-        "function" | "top level function" | "member function" | "local function" => {
-            &[Target::Function]
-        }
-        "value parameter" => &[Target::ValueParameter],
-        "local variable" => &[Target::LocalVariable],
-        "type parameter" => &[Target::TypeParameter],
-        "type usage" => &[Target::Type],
-        _ => return None,
-    })
 }
 
 /// The retention of an annotation classifier: the module's own normalized fact for a source
@@ -964,7 +943,7 @@ impl Checker<'_> {
                 scope,
                 &constructor.annotations,
                 &constructor.annotation_args,
-                "constructor",
+                AnnotationHostKind::Constructor,
             );
         }
     }
@@ -990,7 +969,7 @@ impl Checker<'_> {
                 annotation,
                 arguments,
                 AnnotationApplicationHost::NonProperty {
-                    declaration_target: "initializer",
+                    declaration_target: AnnotationHostKind::Initializer,
                     constructor_parameter: false,
                     targetless: true,
                 },
