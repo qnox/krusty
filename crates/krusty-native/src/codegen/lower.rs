@@ -270,16 +270,26 @@ pub struct ProgramDeclarations {
     implemented_dependencies: krusty::fx_hash::HashSet<krusty::types::TypeName>,
 }
 
+/// Whether the runtime answers for its own objects of `owner`, which is the one table type checks
+/// and class markers read, or `owner` is the enum base whose order the runtime owns. A program
+/// object standing behind such a type has no answer in the runtime, so a call through it
+/// dispatches to the object whichever unit declares its class.
+fn is_runtime_provided_interface(owner: krusty::types::TypeName) -> bool {
+    classifier_shapes::runtime_interface_descriptor(owner).is_some()
+        || super::super::intrinsics::is_comparable_supertype(owner)
+}
+
 impl ProgramDeclarations {
-    /// Take in, before any file is lowered, the `Comparable` objects a source file of the program
-    /// declares: a dependency body ordering its operands through `Comparable` must reach them by
-    /// dispatch, where the runtime's own order answers only the builtin ones.
+    /// Take in, before any file is lowered, the runtime-provided interfaces (the one table of
+    /// `classifier_shapes::runtime_interface_descriptor`) a source file of the program implements:
+    /// a dependency body calling through one must reach the program's objects by dispatch, where
+    /// the runtime's own answer covers only the objects it makes.
     pub(super) fn absorb_comparable(&mut self, ir: &IrFile) {
         self.declares_its_own_comparable |= declares_its_own_comparable(ir);
         self.implemented_dependencies.extend(
             implemented_dependencies(ir, |_| false)
                 .into_iter()
-                .filter(|&owner| super::super::intrinsics::is_comparable_supertype(owner)),
+                .filter(|&owner| is_runtime_provided_interface(owner)),
         );
     }
 
@@ -288,13 +298,13 @@ impl ProgramDeclarations {
     /// reaches it.
     fn absorb(&mut self, ir: &IrFile, laid_out: impl Fn(krusty::types::TypeName) -> bool) {
         self.declares_its_own_comparable |= declares_its_own_comparable(ir);
-        // Only `Comparable` is program-wide, as in `absorb_comparable`: another interface a
-        // source unit implements stays a fact of that unit, so a file that implements none of its
-        // own keeps reading its receivers through the runtime's tables.
+        // Only the runtime-provided interfaces are program-wide, as in `absorb_comparable`: any
+        // other interface a source unit implements stays a fact of that unit, and a file that
+        // implements none of its own reaches that unit's classes through the runtime's tables.
         self.implemented_dependencies.extend(
             implemented_dependencies(ir, laid_out)
                 .into_iter()
-                .filter(|&owner| super::super::intrinsics::is_comparable_supertype(owner)),
+                .filter(|&owner| is_runtime_provided_interface(owner)),
         );
     }
 }
