@@ -8,7 +8,7 @@
 //! function with a reified own type parameter.
 
 use super::body_encoding::BodyEncoder;
-use super::body_tree::{BodyScope, BodyStatement};
+use super::body_tree::{BodyScope, FunctionBody};
 use super::ir_tables::{
     declaration_table, entry_table, lattice, per_file, symbol, IrTables, CONSTRUCTOR_SYMBOL,
     FUNCTION_SYMBOL, RECEIVER_PARAMETER_SYMBOL, TYPE_PARAMETER_SYMBOL, VALUE_PARAMETER_SYMBOL,
@@ -66,7 +66,7 @@ pub(super) struct PreparedFunction {
     extension_parameter: Option<usize>,
     result: Ty,
     type_parameters: Vec<PreparedTypeParameter>,
-    body: Vec<BodyStatement>,
+    body: FunctionBody,
 }
 
 #[derive(Clone)]
@@ -741,7 +741,7 @@ mod tests {
     use std::borrow::Cow;
 
     use super::*;
-    use crate::klib::body_tree::{BodyExpr, BodyKind, TypeOperator, ValueRef};
+    use crate::klib::body_tree::{BodyExprId, BodyKind, FunctionBody, TypeOperator, ValueRef};
     use crate::metadata::id_signature::{
         callable_signature, CallableShape, DeclarationContainer, Placement, SignatureType,
         TypeParameterShape, TypeView,
@@ -972,16 +972,19 @@ mod tests {
                     variance: TypeVariance::Invariant,
                     reified: true,
                 }],
-                body: returning(BodyExpr {
-                    ty: Ty::Boolean,
-                    kind: BodyKind::TypeOperator {
-                        operator: TypeOperator::InstanceOf,
-                        operand: parameter,
-                        argument: Box::new(BodyExpr {
-                            ty: Ty::nullable(Ty::obj("kotlin/Any")),
-                            kind: BodyKind::GetValue(ValueRef::Parameter(0)),
-                        }),
-                    },
+                body: returning(|body| {
+                    let argument = body.push(
+                        Ty::nullable(Ty::obj("kotlin/Any")),
+                        BodyKind::GetValue(ValueRef::Parameter(0)),
+                    );
+                    body.push(
+                        Ty::Boolean,
+                        BodyKind::TypeOperator {
+                            operator: TypeOperator::InstanceOf,
+                            operand: parameter,
+                            argument,
+                        },
+                    )
                 }),
             },
             signature,
@@ -989,11 +992,13 @@ mod tests {
     }
 
     /// A block body that returns `value`.
-    fn returning(value: BodyExpr) -> Vec<BodyStatement> {
-        vec![BodyStatement::Expression(BodyExpr {
-            ty: Ty::Nothing,
-            kind: BodyKind::Return(Box::new(value)),
-        })]
+    fn returning(value: impl FnOnce(&mut FunctionBody) -> BodyExprId) -> FunctionBody {
+        let mut body = FunctionBody::default();
+        let value = value(&mut body);
+        let returned = body.push(Ty::Nothing, BodyKind::Return(value));
+        body.statements
+            .push(crate::klib::body_tree::BodyStatement::Expression(returned));
+        body
     }
 
     fn fixture() -> (PreparedFunction, KlibPublicIdSignature) {
@@ -1305,39 +1310,41 @@ mod tests {
 
         let bodies = [
             (
-                returning(BodyExpr {
-                    ty: Ty::Int,
-                    kind: BodyKind::Const(crate::ir::IrConst::Int(-7)),
-                }),
+                returning(|body| body.push(Ty::Int, BodyKind::Const(crate::ir::IrConst::Int(-7)))),
                 Some(KlibIrConstant::Int(-7)),
             ),
             (
-                returning(BodyExpr {
-                    ty: Ty::Long,
-                    kind: BodyKind::Const(crate::ir::IrConst::Long(1 << 40)),
+                returning(|body| {
+                    body.push(Ty::Long, BodyKind::Const(crate::ir::IrConst::Long(1 << 40)))
                 }),
                 Some(KlibIrConstant::Long(1 << 40)),
             ),
             (
-                returning(BodyExpr {
-                    ty: Ty::Boolean,
-                    kind: BodyKind::Const(crate::ir::IrConst::Boolean(true)),
+                returning(|body| {
+                    body.push(
+                        Ty::Boolean,
+                        BodyKind::Const(crate::ir::IrConst::Boolean(true)),
+                    )
                 }),
                 Some(KlibIrConstant::Boolean(true)),
             ),
             (
-                returning(BodyExpr {
-                    ty: Ty::String,
-                    kind: BodyKind::Const(crate::ir::IrConst::String(
-                        crate::kt_string::KtString::from("ok"),
-                    )),
+                returning(|body| {
+                    body.push(
+                        Ty::String,
+                        BodyKind::Const(crate::ir::IrConst::String(
+                            crate::kt_string::KtString::from("ok"),
+                        )),
+                    )
                 }),
                 Some(KlibIrConstant::String("ok".to_owned())),
             ),
             (
-                returning(BodyExpr {
-                    ty: Ty::obj("kotlin/Any"),
-                    kind: BodyKind::GetValue(ValueRef::Parameter(0)),
+                returning(|body| {
+                    body.push(
+                        Ty::obj("kotlin/Any"),
+                        BodyKind::GetValue(ValueRef::Parameter(0)),
+                    )
                 }),
                 None,
             ),

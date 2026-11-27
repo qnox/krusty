@@ -34,11 +34,40 @@ pub(super) struct BodyScope<'a> {
     pub(super) type_parameters: &'a [IrTypeParameter],
 }
 
+/// An expression of a [`FunctionBody`], by its index in the body's expression arena.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct BodyExprId(u32);
+
 /// One expression with its Kotlin type.
 #[derive(Clone, Debug)]
 pub(super) struct BodyExpr {
     pub(super) ty: Ty,
     pub(super) kind: BodyKind,
+}
+
+/// A function's block body: its statements, over the arena that holds every expression they
+/// reach. A node names its operands by [`BodyExprId`].
+#[derive(Clone, Debug, Default)]
+pub(super) struct FunctionBody {
+    exprs: Vec<BodyExpr>,
+    pub(super) statements: Vec<BodyStatement>,
+}
+
+impl FunctionBody {
+    /// Adds an expression whose operands are already in the arena.
+    pub(super) fn push(&mut self, ty: Ty, kind: BodyKind) -> BodyExprId {
+        let id = BodyExprId(u32::try_from(self.exprs.len()).expect("a body has under 2^32 nodes"));
+        self.exprs.push(BodyExpr { ty, kind });
+        id
+    }
+
+    pub(super) fn expr(&self, id: BodyExprId) -> &BodyExpr {
+        &self.exprs[id.0 as usize]
+    }
+
+    fn ty(&self, id: BodyExprId) -> Ty {
+        self.expr(id).ty
+    }
 }
 
 /// The value a `GET_VAR` reads: a physical parameter slot, or a local variable.
@@ -71,7 +100,7 @@ pub(super) enum BodyKind {
     GetValue(ValueRef),
     SetValue {
         local: u32,
-        value: Box<BodyExpr>,
+        value: BodyExprId,
     },
     /// The value of the singleton class (`kotlin.Unit`).
     GetObject(crate::types::TypeName),
@@ -79,28 +108,28 @@ pub(super) enum BodyKind {
         statements: Vec<BodyStatement>,
         origin: Option<&'static str>,
     },
-    Return(Box<BodyExpr>),
+    Return(BodyExprId),
     When {
-        branches: Vec<(BodyExpr, BodyExpr)>,
+        branches: Vec<(BodyExprId, BodyExprId)>,
         origin: Option<&'static str>,
     },
     TypeOperator {
         operator: TypeOperator,
         operand: Ty,
-        argument: Box<BodyExpr>,
+        argument: BodyExprId,
     },
     Call {
         target: CallTarget,
         type_arguments: Vec<Ty>,
-        arguments: Vec<BodyExpr>,
+        arguments: Vec<BodyExprId>,
         origin: Option<&'static str>,
     },
-    StringConcat(Vec<BodyExpr>),
+    StringConcat(Vec<BodyExprId>),
 }
 
 #[derive(Clone, Debug)]
 pub(super) enum BodyStatement {
-    Expression(BodyExpr),
+    Expression(BodyExprId),
     Variable(BodyVariable),
 }
 
@@ -112,11 +141,11 @@ pub(super) struct BodyVariable {
     pub(super) name: Option<String>,
     pub(super) ty: Ty,
     pub(super) mutable: bool,
-    pub(super) initializer: Option<BodyExpr>,
+    pub(super) initializer: Option<BodyExprId>,
 }
 
-/// The statements of a function's block body, or `None` when a node is not translated yet.
-pub(super) fn function_body(scope: &BodyScope<'_>, body: ExprId) -> Option<Vec<BodyStatement>> {
+/// The block body of a function, or `None` when a node is not translated yet.
+pub(super) fn function_body(scope: &BodyScope<'_>, body: ExprId) -> Option<FunctionBody> {
     // A source body is a block holding the written block; the outer one only groups it.
     let mut block = body;
     loop {
@@ -135,13 +164,17 @@ pub(super) fn function_body(scope: &BodyScope<'_>, body: ExprId) -> Option<Vec<B
     };
     let mut translation = Translation {
         scope,
+        body: FunctionBody::default(),
         locals: HashMap::default(),
         assigned: assigned_locals(scope.ir, block),
     };
-    stmts
+    let statements = stmts
         .iter()
         .map(|statement| translation.statement(*statement))
-        .collect()
+        .collect::<Option<Vec<_>>>()?;
+    let mut body = translation.body;
+    body.statements = statements;
+    Some(body)
 }
 
 /// Every local a `SET_VAR` in the body writes, which Kotlin declares `var`.
@@ -159,6 +192,7 @@ fn assigned_locals(ir: &IrFile, root: ExprId) -> HashSet<u32> {
 
 struct Translation<'s, 'a> {
     scope: &'s BodyScope<'a>,
+    body: FunctionBody,
     /// The declared type of each local variable the body declared so far.
     locals: HashMap<u32, Ty>,
     assigned: HashSet<u32>,
@@ -200,37 +234,38 @@ impl Translation<'_, '_> {
         self.expr(statement).map(BodyStatement::Expression)
     }
 
-    fn expr(&mut self, expression: ExprId) -> Option<BodyExpr> {
+    fn push(&mut self, ty: Ty, kind: BodyKind) -> Option<BodyExprId> {
+        Some(self.body.push(ty, kind))
+    }
+
+    fn ty(&self, expression: BodyExprId) -> Ty {
+        self.body.ty(expression)
+    }
+
+    fn expr(&mut self, expression: ExprId) -> Option<BodyExprId> {
         let ir = self.scope.ir;
-        let typed = |ty: Ty, kind: BodyKind| Some(BodyExpr { ty, kind });
         match ir.expr(expression) {
             IrExpr::Const(constant) => {
-                typed(constant_type(constant)?, BodyKind::Const(constant.clone()))
+                self.push(constant_type(constant)?, BodyKind::Const(constant.clone()))
             }
             IrExpr::GetValue(slot) => {
                 let (value, ty) = self.value(*slot)?;
-                typed(ty, BodyKind::GetValue(value))
+                self.push(ty, BodyKind::GetValue(value))
             }
             IrExpr::SetValue { var, value } => {
                 let declared = *self.locals.get(var)?;
                 let value = self.expr(*value)?;
-                if value.ty != declared && value.ty != Ty::Nothing {
+                if self.ty(value) != declared && self.ty(value) != Ty::Nothing {
                     return None;
                 }
-                typed(
-                    Ty::Unit,
-                    BodyKind::SetValue {
-                        local: *var,
-                        value: Box::new(value),
-                    },
-                )
+                self.push(Ty::Unit, BodyKind::SetValue { local: *var, value })
             }
             IrExpr::Return(value) => {
                 let value = match value {
                     Some(value) => self.expr(*value)?,
-                    None => unit_value(),
+                    None => self.unit_value(),
                 };
-                typed(Ty::Nothing, BodyKind::Return(Box::new(value)))
+                self.push(Ty::Nothing, BodyKind::Return(value))
             }
             IrExpr::Block { stmts, value } => {
                 let mut statements = stmts
@@ -242,18 +277,17 @@ impl Translation<'_, '_> {
                     Some(value) if matches!(ir.expr(*value), IrExpr::UnitInstance) => Ty::Unit,
                     Some(value) => {
                         let value = self.expr(*value)?;
-                        let ty = value.ty;
                         statements.push(BodyStatement::Expression(value));
-                        ty
+                        self.ty(value)
                     }
                     None => match statements.last() {
-                        Some(BodyStatement::Expression(last)) if last.ty == Ty::Nothing => {
+                        Some(BodyStatement::Expression(last)) if self.ty(*last) == Ty::Nothing => {
                             Ty::Nothing
                         }
                         _ => Ty::Unit,
                     },
                 };
-                typed(
+                self.push(
                     ty,
                     BodyKind::Block {
                         statements,
@@ -271,17 +305,17 @@ impl Translation<'_, '_> {
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(expression, *op, *lhs, *rhs),
             IrExpr::PrimitiveNeg { operand, ty } => {
                 let operand = self.expr(*operand)?;
-                if operand.ty != *ty {
+                if self.ty(operand) != *ty {
                     return None;
                 }
                 let target = member_signature(*ty, "unaryMinus", None)?;
-                typed(*ty, call(target, vec![operand], Some("UMINUS")))
+                self.push(*ty, call(target, vec![operand], Some("UMINUS")))
             }
             IrExpr::NotNullAssert { operand, .. } => {
                 let operand = self.expr(*operand)?;
-                let ty = operand.ty.non_null();
+                let ty = self.ty(operand).non_null();
                 let target = self.builtin(BuiltinOperator::CheckNotNull)?;
-                typed(
+                self.push(
                     ty,
                     BodyKind::Call {
                         target,
@@ -296,7 +330,7 @@ impl Translation<'_, '_> {
                     .iter()
                     .map(|part| self.expr(*part))
                     .collect::<Option<Vec<_>>>()?;
-                typed(Ty::String, BodyKind::StringConcat(parts))
+                self.push(Ty::String, BodyKind::StringConcat(parts))
             }
             IrExpr::Call {
                 callee,
@@ -304,7 +338,7 @@ impl Translation<'_, '_> {
                 args,
             } => self.call(expression, callee, *dispatch_receiver, args),
             IrExpr::Checked(operation) => self.checked(operation),
-            IrExpr::UnitInstance => Some(unit_value()),
+            IrExpr::UnitInstance => Some(self.unit_value()),
             _ => None,
         }
     }
@@ -320,42 +354,46 @@ impl Translation<'_, '_> {
         &mut self,
         expression: ExprId,
         branches: &[(Option<ExprId>, ExprId)],
-    ) -> Option<BodyExpr> {
+    ) -> Option<BodyExprId> {
         let mut translated = Vec::with_capacity(branches.len());
         for (condition, result) in branches {
             let condition = match condition {
                 Some(condition) => self.expr(*condition)?,
-                None => boolean(true),
+                None => self
+                    .body
+                    .push(Ty::Boolean, BodyKind::Const(IrConst::Boolean(true))),
             };
-            if condition.ty != Ty::Boolean {
+            if self.ty(condition) != Ty::Boolean {
                 return None;
             }
-            translated.push((condition, self.expr(*result)?));
+            let result = self.expr(*result)?;
+            translated.push((condition, result));
         }
         let ty = match self.scope.ir.logical_type(expression) {
             Some(ty) => ty,
             None => {
                 let (_, first) = translated.first()?;
-                first.ty
+                self.ty(*first)
             }
         };
         if !self.supported(ty) {
             return None;
         }
-        Some(BodyExpr {
+        self.push(
             ty,
-            kind: BodyKind::When {
+            BodyKind::When {
                 branches: translated,
                 origin: None,
             },
-        })
+        )
     }
 
-    fn type_operator(&mut self, op: IrTypeOp, argument: ExprId, operand: Ty) -> Option<BodyExpr> {
+    fn type_operator(&mut self, op: IrTypeOp, argument: ExprId, operand: Ty) -> Option<BodyExprId> {
         if !self.supported(operand) {
             return None;
         }
         let argument = self.expr(argument)?;
+        let argument_ty = self.ty(argument);
         let (operator, ty) = match op {
             IrTypeOp::InstanceOf => (TypeOperator::InstanceOf, Ty::Boolean),
             IrTypeOp::NotInstanceOf => (TypeOperator::NotInstanceOf, Ty::Boolean),
@@ -371,25 +409,25 @@ impl Translation<'_, '_> {
             // A coercion between two representations of one value; a conversion between two
             // primitive types is not one, and is not translated.
             IrTypeOp::ImplicitCoercion
-                if argument.ty.non_null() == operand.non_null()
-                    || !(argument.ty.non_null().is_numeric_or_char()
+                if argument_ty.non_null() == operand.non_null()
+                    || !(argument_ty.non_null().is_numeric_or_char()
                         && operand.non_null().is_numeric_or_char()) =>
             {
-                if argument.ty == operand {
+                if argument_ty == operand {
                     return Some(argument);
                 }
                 (TypeOperator::ImplicitCast, operand)
             }
             _ => return None,
         };
-        Some(BodyExpr {
+        self.push(
             ty,
-            kind: BodyKind::TypeOperator {
+            BodyKind::TypeOperator {
                 operator,
                 operand,
-                argument: Box::new(argument),
+                argument,
             },
-        })
+        )
     }
 
     /// `==`, `!=`, `===` or `!==`: kotlinc's `EQEQ`, `ieee754equals` or `EQEQEQ`, negated by
@@ -400,17 +438,19 @@ impl Translation<'_, '_> {
         mode: Option<EqualityMode>,
         lhs: ExprId,
         rhs: ExprId,
-    ) -> Option<BodyExpr> {
+    ) -> Option<BodyExprId> {
         let lhs = self.expr(lhs)?;
         let rhs = self.expr(rhs)?;
         let (operator, negated) = match op {
             IrBinOp::Eq | IrBinOp::Ne => {
                 let operator = match mode {
                     Some(EqualityMode::Ieee754) => {
-                        if lhs.ty != rhs.ty {
+                        if self.ty(lhs) != self.ty(rhs) {
                             return None;
                         }
-                        BuiltinOperator::Ieee754Equals { operand: lhs.ty }
+                        BuiltinOperator::Ieee754Equals {
+                            operand: self.ty(lhs),
+                        }
                     }
                     _ => BuiltinOperator::Equals,
                 };
@@ -425,21 +465,13 @@ impl Translation<'_, '_> {
             (_, false) => "EQEQ",
             (_, true) => "EXCLEQ",
         };
-        let equal = BodyExpr {
-            ty: Ty::Boolean,
-            kind: call(self.builtin(operator)?, vec![lhs, rhs], Some(origin)),
-        };
+        let target = self.builtin(operator)?;
+        let equal = self.push(Ty::Boolean, call(target, vec![lhs, rhs], Some(origin)))?;
         if !negated {
             return Some(equal);
         }
-        Some(BodyExpr {
-            ty: Ty::Boolean,
-            kind: call(
-                self.builtin(BuiltinOperator::Not)?,
-                vec![equal],
-                Some(origin),
-            ),
-        })
+        let not = self.builtin(BuiltinOperator::Not)?;
+        self.push(Ty::Boolean, call(not, vec![equal], Some(origin)))
     }
 
     fn binary(
@@ -448,7 +480,7 @@ impl Translation<'_, '_> {
         op: IrBinOp,
         lhs: ExprId,
         rhs: ExprId,
-    ) -> Option<BodyExpr> {
+    ) -> Option<BodyExprId> {
         let ir = self.scope.ir;
         match op {
             IrBinOp::Eq | IrBinOp::Ne | IrBinOp::RefEq | IrBinOp::RefNe => {
@@ -476,12 +508,18 @@ impl Translation<'_, '_> {
                             let [right] = args.as_slice() else {
                                 return None;
                             };
-                            return self.relation(op, *operand, *left, *right);
+                            let left = self.expr(*left)?;
+                            let right = self.expr(*right)?;
+                            if self.ty(left) != *operand {
+                                return None;
+                            }
+                            return self.relation(op, left, right);
                         }
                     }
                 }
                 let left = self.expr(lhs)?;
-                return self.relation_of(op, left, rhs);
+                let right = self.expr(rhs)?;
+                return self.relation(op, left, right);
             }
             IrBinOp::And | IrBinOp::Or => return None,
             _ => {}
@@ -510,53 +548,28 @@ impl Translation<'_, '_> {
             IrBinOp::Rem => Some("PERC"),
             _ => None,
         };
-        let ty = ir.logical_type(expression).unwrap_or(left.ty);
+        let ty = ir.logical_type(expression).unwrap_or(self.ty(left));
         if !ty.is_numeric_or_char() {
             return None;
         }
-        let target = member_signature(left.ty, name, Some(right.ty))?;
-        Some(BodyExpr {
-            ty,
-            kind: call(target, vec![left, right], origin),
-        })
+        let target = member_signature(self.ty(left), name, Some(self.ty(right)))?;
+        self.push(ty, call(target, vec![left, right], origin))
     }
 
-    fn relation(
-        &mut self,
-        op: IrBinOp,
-        operand: Ty,
-        left: ExprId,
-        right: ExprId,
-    ) -> Option<BodyExpr> {
-        let left = self.expr(left)?;
-        let right = self.expr(right)?;
-        if left.ty != operand || right.ty != operand {
+    /// The builtin relation `op` over two operands of one type.
+    fn relation(&mut self, op: IrBinOp, left: BodyExprId, right: BodyExprId) -> Option<BodyExprId> {
+        let operand = self.ty(left);
+        if self.ty(right) != operand {
             return None;
         }
         let target = self.builtin(BuiltinOperator::Relation(BuiltinRelation {
             operator: op,
             operand,
         }))?;
-        Some(BodyExpr {
-            ty: Ty::Boolean,
-            kind: call(target, vec![left, right], Some(relation_origin(op))),
-        })
-    }
-
-    /// A relation over an already translated left operand and `right`.
-    fn relation_of(&mut self, op: IrBinOp, left: BodyExpr, right: ExprId) -> Option<BodyExpr> {
-        let right = self.expr(right)?;
-        if left.ty != right.ty {
-            return None;
-        }
-        let target = self.builtin(BuiltinOperator::Relation(BuiltinRelation {
-            operator: op,
-            operand: left.ty,
-        }))?;
-        Some(BodyExpr {
-            ty: Ty::Boolean,
-            kind: call(target, vec![left, right], Some(relation_origin(op))),
-        })
+        self.push(
+            Ty::Boolean,
+            call(target, vec![left, right], Some(relation_origin(op))),
+        )
     }
 
     fn call(
@@ -565,11 +578,18 @@ impl Translation<'_, '_> {
         callee: &Callee,
         dispatch_receiver: Option<ExprId>,
         args: &[ExprId],
-    ) -> Option<BodyExpr> {
+    ) -> Option<BodyExprId> {
         let ir = self.scope.ir;
         let (target, ty) = match callee {
             Callee::Local(function) => {
-                if dispatch_receiver.is_some() {
+                // A call of a generic function passes its type arguments, which common IR does not
+                // record on a local call yet.
+                if dispatch_receiver.is_some()
+                    || ir
+                        .signatures
+                        .get(function)
+                        .is_some_and(|generic| !generic.type_params.is_empty())
+                {
                     return None;
                 }
                 let (signature, None) = self.scope.declarations.get(*function)? else {
@@ -590,7 +610,7 @@ impl Translation<'_, '_> {
                 extension_receiver_parameter: _,
             } if substitutions.is_empty() && defaults.is_empty() => {
                 let fact = self.scope.callables.callable(*target)?;
-                if params.len() != args.len() {
+                if params.len() != args.len() || generic(fact) {
                     return None;
                 }
                 (call_target(fact)?, *ret)
@@ -620,18 +640,10 @@ impl Translation<'_, '_> {
             .chain(args.iter().copied())
             .map(|argument| self.expr(argument))
             .collect::<Option<Vec<_>>>()?;
-        Some(BodyExpr {
-            ty,
-            kind: BodyKind::Call {
-                target,
-                type_arguments: Vec::new(),
-                arguments,
-                origin: None,
-            },
-        })
+        self.push(ty, call(target, arguments, None))
     }
 
-    fn checked(&mut self, operation: &IrCheckedOperation) -> Option<BodyExpr> {
+    fn checked(&mut self, operation: &IrCheckedOperation) -> Option<BodyExprId> {
         match operation {
             IrCheckedOperation::ExternalPropertyRead {
                 target,
@@ -645,6 +657,9 @@ impl Translation<'_, '_> {
             } if arguments.is_empty() && substitutions.is_empty() => {
                 let property = self.scope.callables.property(*target)?;
                 let getter = self.scope.callables.callable(property.getter)?;
+                if generic(getter) {
+                    return None;
+                }
                 let target = call_target(getter)?;
                 if !self.supported(*result) {
                     return None;
@@ -653,18 +668,18 @@ impl Translation<'_, '_> {
                     .iter()
                     .map(|receiver| self.expr(*receiver))
                     .collect::<Option<Vec<_>>>()?;
-                Some(BodyExpr {
-                    ty: *result,
-                    kind: BodyKind::Call {
-                        target,
-                        type_arguments: Vec::new(),
-                        arguments,
-                        origin: Some("GET_PROPERTY"),
-                    },
-                })
+                self.push(*result, call(target, arguments, Some("GET_PROPERTY")))
             }
             _ => None,
         }
+    }
+
+    /// `return` without a value returns `kotlin.Unit`'s object.
+    fn unit_value(&mut self) -> BodyExprId {
+        self.body.push(
+            Ty::Unit,
+            BodyKind::GetObject(crate::types::TypeName::from("kotlin/Unit")),
+        )
     }
 
     fn builtin(&self, operator: BuiltinOperator) -> Option<CallTarget> {
@@ -680,27 +695,12 @@ impl Translation<'_, '_> {
     }
 }
 
-fn call(target: CallTarget, arguments: Vec<BodyExpr>, origin: Option<&'static str>) -> BodyKind {
+fn call(target: CallTarget, arguments: Vec<BodyExprId>, origin: Option<&'static str>) -> BodyKind {
     BodyKind::Call {
         target,
         type_arguments: Vec::new(),
         arguments,
         origin,
-    }
-}
-
-fn boolean(value: bool) -> BodyExpr {
-    BodyExpr {
-        ty: Ty::Boolean,
-        kind: BodyKind::Const(IrConst::Boolean(value)),
-    }
-}
-
-/// `return` without a value returns `kotlin.Unit`'s object.
-fn unit_value() -> BodyExpr {
-    BodyExpr {
-        ty: Ty::Unit,
-        kind: BodyKind::GetObject(crate::types::TypeName::from("kotlin/Unit")),
     }
 }
 
@@ -711,6 +711,13 @@ fn relation_origin(op: IrBinOp) -> &'static str {
         IrBinOp::Gt => "GT",
         _ => "GTEQ",
     }
+}
+
+/// Whether a dependency callable declares type parameters, whose arguments a call of it passes.
+fn generic(fact: &crate::backend::BackendCallableFact) -> bool {
+    fact.generic_sig
+        .as_ref()
+        .is_some_and(|signature| !signature.formals.is_empty())
 }
 
 /// The KLIB identity a dependency callable's provider published for it.

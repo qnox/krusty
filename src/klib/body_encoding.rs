@@ -4,7 +4,9 @@
 //! decodes: an `IrExpression` carries its type in field 2 and its operation in the field the
 //! operation's kind owns.
 
-use super::body_tree::{BodyExpr, BodyKind, BodyStatement, BodyVariable, CallTarget, ValueRef};
+use super::body_tree::{
+    BodyExprId, BodyKind, BodyStatement, BodyVariable, CallTarget, FunctionBody, ValueRef,
+};
 use super::ir_tables::{lattice, symbol, IrTables, FUNCTION_SYMBOL};
 use crate::fx_hash::HashMap;
 use crate::ir::IrConst;
@@ -43,11 +45,11 @@ impl<'t> BodyEncoder<'t> {
         }
     }
 
-    /// A block body holding `statements`, as an entry of the body table.
-    pub(super) fn block_body(&mut self, statements: &[BodyStatement]) -> u32 {
+    /// The block body `body`, as an entry of the body table.
+    pub(super) fn block_body(&mut self, body: &FunctionBody) -> u32 {
         let mut block = Pb::new();
-        for statement in statements {
-            let statement = self.statement(statement);
+        for statement in &body.statements {
+            let statement = self.statement(body, statement);
             block.repeated_message(1, &statement);
         }
         let mut body = Pb::new();
@@ -55,15 +57,15 @@ impl<'t> BodyEncoder<'t> {
         self.tables.body(body.canonical().into_bytes())
     }
 
-    fn statement(&mut self, statement: &BodyStatement) -> Pb {
+    fn statement(&mut self, body: &FunctionBody, statement: &BodyStatement) -> Pb {
         let mut encoded = Pb::new();
         match statement {
             BodyStatement::Expression(expression) => {
-                let expression = self.expression(expression);
+                let expression = self.expression(body, *expression);
                 encoded.field_message(3, &expression);
             }
             BodyStatement::Variable(variable) => {
-                let variable = self.variable(variable);
+                let variable = self.variable(body, variable);
                 let mut declaration = Pb::new();
                 declaration.field_message(9, &variable);
                 encoded.field_message(2, &declaration);
@@ -72,13 +74,13 @@ impl<'t> BodyEncoder<'t> {
         encoded
     }
 
-    fn variable(&mut self, variable: &BodyVariable) -> Pb {
+    fn variable(&mut self, body: &FunctionBody, variable: &BodyVariable) -> Pb {
         let signature = self.tables.local_signature();
         let declared = symbol(signature, VARIABLE_SYMBOL);
         let initializer = variable
             .initializer
             .as_ref()
-            .map(|initializer| self.expression(initializer));
+            .map(|initializer| self.expression(body, *initializer));
         // The initializer runs before the variable is in scope, so it is encoded first.
         self.locals.insert(variable.local, declared);
         let (name, origin) = match &variable.name {
@@ -106,16 +108,17 @@ impl<'t> BodyEncoder<'t> {
         encoded
     }
 
-    fn expression(&mut self, expression: &BodyExpr) -> Pb {
+    fn expression(&mut self, body: &FunctionBody, expression: BodyExprId) -> Pb {
+        let expression = body.expr(expression);
         let ty = self.ty(expression.ty);
         let mut encoded = Pb::new();
         encoded.field_varint(2, u64::from(ty));
-        let (field, operation) = self.operation(&expression.kind);
+        let (field, operation) = self.operation(body, &expression.kind);
         encoded.field_message(field, &operation);
         encoded
     }
 
-    fn operation(&mut self, kind: &BodyKind) -> (u32, Pb) {
+    fn operation(&mut self, body: &FunctionBody, kind: &BodyKind) -> (u32, Pb) {
         let mut operation = Pb::new();
         let field = match kind {
             BodyKind::Const(constant) => {
@@ -128,7 +131,7 @@ impl<'t> BodyEncoder<'t> {
             }
             BodyKind::SetValue { local, value } => {
                 operation.field_varint(1, self.value(ValueRef::Local(*local)));
-                let value = self.expression(value);
+                let value = self.expression(body, *value);
                 operation.field_message(2, &value);
                 operation.field_varint(3, u64::from(self.tables.string("EQ")));
                 7
@@ -148,7 +151,7 @@ impl<'t> BodyEncoder<'t> {
                     operation.field_varint(4, u64::from(self.tables.string(origin)));
                 }
                 for argument in arguments {
-                    let argument = self.expression(argument);
+                    let argument = self.expression(body, *argument);
                     operation.repeated_message(5, &argument);
                 }
                 let type_arguments = type_arguments
@@ -160,7 +163,7 @@ impl<'t> BodyEncoder<'t> {
             }
             BodyKind::Block { statements, origin } => {
                 for statement in statements {
-                    let statement = self.statement(statement);
+                    let statement = self.statement(body, statement);
                     operation.repeated_message(1, &statement);
                 }
                 if let Some(origin) = origin {
@@ -170,16 +173,16 @@ impl<'t> BodyEncoder<'t> {
             }
             BodyKind::Return(value) => {
                 operation.field_varint(1, self.function);
-                let value = self.expression(value);
+                let value = self.expression(body, *value);
                 operation.field_message(2, &value);
                 12
             }
             BodyKind::When { branches, origin } => {
                 for (condition, result) in branches {
                     let mut branch = Pb::new();
-                    let condition = self.expression(condition);
+                    let condition = self.expression(body, *condition);
                     branch.field_message(1, &condition);
-                    let result = self.expression(result);
+                    let result = self.expression(body, *result);
                     branch.field_message(2, &result);
                     let mut statement = Pb::new();
                     statement.field_message(5, &branch);
@@ -198,7 +201,7 @@ impl<'t> BodyEncoder<'t> {
                 operation.field_varint(1, *operator as u64);
                 let operand = self.ty(*operand);
                 operation.field_varint(2, u64::from(operand));
-                let argument = self.expression(argument);
+                let argument = self.expression(body, *argument);
                 operation.field_message(3, &argument);
                 14
             }
@@ -208,7 +211,7 @@ impl<'t> BodyEncoder<'t> {
             }
             BodyKind::StringConcat(parts) => {
                 for part in parts {
-                    let part = self.expression(part);
+                    let part = self.expression(body, *part);
                     operation.repeated_message(1, &part);
                 }
                 29
