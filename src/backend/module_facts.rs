@@ -52,12 +52,12 @@ pub trait BackendClassifierSource {
         }
     }
 
-    /// Whether the module declares `classifier` and a dependency declares it too: the module's
-    /// declaration redeclares one of its dependency chain, the way a platform module's class
-    /// replaces a common module's on its classpath. Only a view that federates the module with its
-    /// dependencies can tell.
-    fn redeclares_dependency_classifier(&self, _classifier: TypeName) -> bool {
-        false
+    /// The dependency module whose declaration of `classifier` the module's own declaration
+    /// redeclares, the way a platform module's class replaces a common module's on its classpath:
+    /// the KLIB module the dependency's classifier record names, when the module declares
+    /// `classifier` too. Only a view that federates the module with its dependencies can tell.
+    fn redeclared_dependency_module(&self, _classifier: TypeName) -> Option<String> {
+        None
     }
 
     /// Whether `ancestor` is `classifier` or one of the supertypes its facts publish, transitively.
@@ -930,11 +930,19 @@ impl<'a> CheckedBackendClassifiers<'a> {
 }
 
 impl BackendClassifierSource for CheckedBackendClassifiers<'_> {
-    fn redeclares_dependency_classifier(&self, classifier: TypeName) -> bool {
-        self.module
+    fn redeclared_dependency_module(&self, classifier: TypeName) -> Option<String> {
+        if !self
+            .module
             .classifier(classifier)
             .is_some_and(|fact| fact.source)
-            && self.dependencies.classifier(classifier).is_some()
+        {
+            return None;
+        }
+        self.dependencies
+            .classifier(classifier)?
+            .klib_identity
+            .as_ref()
+            .map(|identity| identity.module.clone())
     }
 
     fn classifier_declaration_name(

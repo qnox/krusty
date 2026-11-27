@@ -17,9 +17,10 @@
 //! module's class over a common module's, the way classpath substitution lets the later
 //! declaration replace the earlier one. The table remembers which module owns each link, so the
 //! redeclaring module's own declaration and its reads get a link of their own, which every module
-//! after it reads. The caller proves the redeclaration (the module's dependencies declare the
-//! identity too); without that proof a second module's definition is [`LinkConflict::DefinedTwice`]
-//! as within one module. An earlier module's files are already lowered against the link they
+//! after it reads. The caller proves the redeclaration by naming the dependency module whose
+//! declaration it replaces; a link owned by any other module, a sibling outside the chain
+//! included, is never replaced, and a second definition is [`LinkConflict::DefinedTwice`] as
+//! within one module. An earlier module's files are already lowered against the link they
 //! read, so a link any file has read is never replaced: that would leave the reader on the class
 //! the redeclaration replaces ([`LinkConflict::ReplacedAfterRead`]).
 
@@ -81,11 +82,11 @@ impl<K: Eq + Hash, V: Clone> ModuleLinks<K, V> {
         }
     }
 
-    /// Whether the current module's declaration replaces `link`, another module's: `redeclares`
-    /// proves that module is of the current module's dependency chain. Without it the other
-    /// module's link stands.
-    fn replaces(&self, link: &Link<V>, redeclares: bool) -> Result<bool, LinkConflict> {
-        if link.module == self.module || !redeclares {
+    /// Whether the current module's declaration replaces `link`, another module's: `replaced` is
+    /// the dependency module whose declaration it redeclares, and only that module's link is
+    /// replaced.
+    fn replaces(&self, link: &Link<V>, replaced: Option<&str>) -> Result<bool, LinkConflict> {
+        if link.module == self.module || replaced != Some(&*link.module) {
             return Ok(false);
         }
         // Only a read reserves a link, so an undefined one is read and never replaced either: it
@@ -98,17 +99,17 @@ impl<K: Eq + Hash, V: Clone> ModuleLinks<K, V> {
 
     /// The link of `key` for a read: the defined or reserved one, or `None` when no file has
     /// realized it and `declared` (the module fact certifying it exists) is false. A read of an
-    /// identity the current module redeclares (`declared` and `redeclares`, see [`Self::define`])
+    /// identity the current module redeclares (`declared` and `replaced`, see [`Self::define`])
     /// never finds the earlier module's link: it reserves one for the module's own declaration.
     pub fn read(
         &mut self,
         key: K,
         declared: bool,
-        redeclares: bool,
+        replaced: Option<&str>,
         allocate: impl FnOnce() -> V,
     ) -> Result<Option<V>, LinkConflict> {
         match self.links.get(&key) {
-            Some(link) if !declared || !self.replaces(link, redeclares)? => {
+            Some(link) if !declared || !self.replaces(link, replaced)? => {
                 let link = self.links.get_mut(&key).expect("found just above");
                 link.read = true;
                 return Ok(Some(link.target.clone()));
@@ -124,20 +125,20 @@ impl<K: Eq + Hash, V: Clone> ModuleLinks<K, V> {
     }
 
     /// The link the declaring file defines `key` under: the one an earlier read of the current
-    /// module reserved, or a fresh one. `redeclares` proves the identity is a redeclaration of a
-    /// declaration of the current module's dependency chain; that module's link, if no file read
-    /// it, is then replaced, so later modules read the redeclaration.
+    /// module reserved, or a fresh one. `replaced` names the dependency module whose declaration
+    /// of the identity the current module's redeclares; that module's link, if no file read it,
+    /// is then replaced, so later modules read the redeclaration. Another module's link is not.
     pub fn define(
         &mut self,
         key: K,
-        redeclares: bool,
+        replaced: Option<&str>,
         allocate: impl FnOnce() -> V,
     ) -> Result<V, LinkConflict> {
         if let Some(link) = self.links.get(&key) {
-            if link.module != self.module && !redeclares {
+            if link.module != self.module && replaced != Some(&*link.module) {
                 return Err(LinkConflict::DefinedTwice);
             }
-            if !self.replaces(link, redeclares)? {
+            if !self.replaces(link, replaced)? {
                 let link = self.links.get_mut(&key).expect("found just above");
                 if link.defined {
                     return Err(LinkConflict::DefinedTwice);
@@ -185,15 +186,15 @@ mod tests {
     fn a_read_before_the_declaring_file_reserves_the_link_it_defines() {
         let mut links = ModuleLinks::<&str, u32>::default();
         let mut fresh = counter();
-        assert_eq!(links.read("A", true, false, &mut fresh), Ok(Some(1)));
-        assert_eq!(links.read("A", true, false, &mut fresh), Ok(Some(1)));
+        assert_eq!(links.read("A", true, None, &mut fresh), Ok(Some(1)));
+        assert_eq!(links.read("A", true, None, &mut fresh), Ok(Some(1)));
         assert_eq!(links.undefined().collect::<Vec<_>>(), [&"A"]);
         assert_eq!(links.defined(&"A"), None);
-        assert_eq!(links.define("A", false, &mut fresh), Ok(1));
+        assert_eq!(links.define("A", None, &mut fresh), Ok(1));
         assert_eq!(links.defined(&"A"), Some(1));
         assert_eq!(links.undefined().count(), 0);
         assert_eq!(
-            links.define("A", false, &mut fresh),
+            links.define("A", None, &mut fresh),
             Err(LinkConflict::DefinedTwice)
         );
     }
@@ -203,14 +204,17 @@ mod tests {
         let mut links = ModuleLinks::<&str, u32>::default();
         let mut fresh = counter();
         links.enter_module("common");
-        assert_eq!(links.define("A", false, &mut fresh), Ok(1));
+        assert_eq!(links.define("A", None, &mut fresh), Ok(1));
         links.enter_module("platform");
         // The platform module's own read, before its declaring file, reserves its own link.
-        assert_eq!(links.read("A", true, true, &mut fresh), Ok(Some(2)));
-        assert_eq!(links.define("A", true, &mut fresh), Ok(2));
+        assert_eq!(
+            links.read("A", true, Some("common"), &mut fresh),
+            Ok(Some(2))
+        );
+        assert_eq!(links.define("A", Some("common"), &mut fresh), Ok(2));
         assert_eq!(links.defined(&"A"), Some(2));
         links.enter_module("app");
-        assert_eq!(links.read("A", false, false, &mut fresh), Ok(Some(2)));
+        assert_eq!(links.read("A", false, None, &mut fresh), Ok(Some(2)));
         assert_eq!(links.undefined().count(), 0);
     }
 
@@ -219,9 +223,9 @@ mod tests {
         let mut links = ModuleLinks::<&str, u32>::default();
         let mut fresh = counter();
         links.enter_module("common");
-        assert_eq!(links.define("A", false, &mut fresh), Ok(1));
+        assert_eq!(links.define("A", None, &mut fresh), Ok(1));
         links.enter_module("platform");
-        assert_eq!(links.define("A", true, &mut fresh), Ok(2));
+        assert_eq!(links.define("A", Some("common"), &mut fresh), Ok(2));
         assert_eq!(links.defined(&"A"), Some(2));
     }
 
@@ -230,16 +234,38 @@ mod tests {
         let mut links = ModuleLinks::<&str, u32>::default();
         let mut fresh = counter();
         links.enter_module("left");
-        assert_eq!(links.define("A", false, &mut fresh), Ok(1));
+        assert_eq!(links.define("A", None, &mut fresh), Ok(1));
         links.enter_module("right");
         // Without a proven redeclaration the sibling's read finds the first link, and its own
         // definition conflicts with it.
-        assert_eq!(links.read("A", true, false, &mut fresh), Ok(Some(1)));
+        assert_eq!(links.read("A", true, None, &mut fresh), Ok(Some(1)));
         assert_eq!(
-            links.define("A", false, &mut fresh),
+            links.define("A", None, &mut fresh),
             Err(LinkConflict::DefinedTwice)
         );
         assert_eq!(links.defined(&"A"), Some(1));
+    }
+
+    #[test]
+    fn a_redeclaration_replaces_only_the_link_of_the_module_it_redeclares() {
+        let mut links = ModuleLinks::<&str, u32>::default();
+        let mut fresh = counter();
+        // Siblings `left(common)` and `right(common)` both redeclare `common`'s `A`.
+        links.enter_module("common");
+        assert_eq!(links.define("A", None, &mut fresh), Ok(1));
+        links.enter_module("left");
+        assert_eq!(links.define("A", Some("common"), &mut fresh), Ok(2));
+        links.enter_module("right");
+        // `left` owns the link now, and `right` redeclares `common`'s declaration, not `left`'s.
+        assert_eq!(
+            links.read("A", true, Some("common"), &mut fresh),
+            Ok(Some(2))
+        );
+        assert_eq!(
+            links.define("A", Some("common"), &mut fresh),
+            Err(LinkConflict::DefinedTwice)
+        );
+        assert_eq!(links.defined(&"A"), Some(2));
     }
 
     #[test]
@@ -247,10 +273,10 @@ mod tests {
         let mut links = ModuleLinks::<&str, u32>::default();
         let mut fresh = counter();
         links.enter_module("left");
-        assert_eq!(links.read("A", true, false, &mut fresh), Ok(Some(1)));
+        assert_eq!(links.read("A", true, None, &mut fresh), Ok(Some(1)));
         links.enter_module("right");
         assert_eq!(
-            links.define("A", false, &mut fresh),
+            links.define("A", None, &mut fresh),
             Err(LinkConflict::DefinedTwice)
         );
         assert_eq!(links.undefined().collect::<Vec<_>>(), [&"A"]);
@@ -261,16 +287,16 @@ mod tests {
         let mut links = ModuleLinks::<&str, u32>::default();
         let mut fresh = counter();
         links.enter_module("common");
-        assert_eq!(links.define("A", false, &mut fresh), Ok(1));
+        assert_eq!(links.define("A", None, &mut fresh), Ok(1));
         links.enter_module("reader");
-        assert_eq!(links.read("A", false, false, &mut fresh), Ok(Some(1)));
+        assert_eq!(links.read("A", false, None, &mut fresh), Ok(Some(1)));
         links.enter_module("platform");
         assert_eq!(
-            links.read("A", true, true, &mut fresh),
+            links.read("A", true, Some("common"), &mut fresh),
             Err(LinkConflict::ReplacedAfterRead)
         );
         assert_eq!(
-            links.define("A", true, &mut fresh),
+            links.define("A", Some("common"), &mut fresh),
             Err(LinkConflict::ReplacedAfterRead)
         );
         assert_eq!(links.defined(&"A"), Some(1));
@@ -281,10 +307,10 @@ mod tests {
         let mut links = ModuleLinks::<&str, u32>::default();
         let mut fresh = counter();
         links.enter_module("common");
-        assert_eq!(links.read("A", true, false, &mut fresh), Ok(Some(1)));
+        assert_eq!(links.read("A", true, None, &mut fresh), Ok(Some(1)));
         links.enter_module("platform");
         assert_eq!(
-            links.define("A", true, &mut fresh),
+            links.define("A", Some("common"), &mut fresh),
             Err(LinkConflict::ReplacedAfterRead)
         );
         assert_eq!(links.undefined().collect::<Vec<_>>(), [&"A"]);
@@ -294,22 +320,22 @@ mod tests {
     fn a_module_that_does_not_redeclare_an_identity_reads_the_earlier_modules_link() {
         let mut links = ModuleLinks::<&str, u32>::default();
         links.enter_module("common");
-        assert_eq!(links.define("A", false, || 1), Ok(1));
+        assert_eq!(links.define("A", None, || 1), Ok(1));
         links.enter_module("app");
-        assert_eq!(links.read("A", false, false, || 2), Ok(Some(1)));
+        assert_eq!(links.read("A", false, None, || 2), Ok(Some(1)));
     }
 
     #[test]
     fn a_read_after_the_declaring_file_finds_its_link() {
         let mut links = ModuleLinks::<&str, u32>::default();
-        assert_eq!(links.define("A", false, || 7), Ok(7));
-        assert_eq!(links.read("A", false, false, || 8), Ok(Some(7)));
+        assert_eq!(links.define("A", None, || 7), Ok(7));
+        assert_eq!(links.read("A", false, None, || 8), Ok(Some(7)));
     }
 
     #[test]
     fn an_undeclared_read_reserves_nothing() {
         let mut links = ModuleLinks::<&str, u32>::default();
-        assert_eq!(links.read("A", false, false, || 1), Ok(None));
+        assert_eq!(links.read("A", false, None, || 1), Ok(None));
         assert_eq!(links.undefined().count(), 0);
     }
 }

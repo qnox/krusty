@@ -332,7 +332,7 @@ fn native_declines_a_redeclaration_of_a_class_the_common_module_code_already_use
     assert_eq!(
         run_native_abi_case(source, stem),
         Outcome::Declined(
-            "redeclaring the class `Single` that code of the module `lib-platform` already uses"
+            "redeclaring the class `Single` that code compiled into the module `lib-platform` already uses"
                 .to_owned()
         ),
         "{stem}"

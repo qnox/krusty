@@ -510,11 +510,8 @@ impl Backend for CraneliftBackend {
             },
         ) {
             Ok(instances) => instances,
-            Err(error) => {
-                diags.error(
-                    krusty::diag::Span::new(0, 0),
-                    format!("internal error: {error}"),
-                );
+            Err(conflict) => {
+                report_decline(&lower::Unsupported::from(conflict), &file, diags);
                 return Vec::new();
             }
         };
@@ -571,11 +568,8 @@ impl Backend for CraneliftBackend {
         });
         let instance_reads = match instance_reads {
             Ok(reads) => reads,
-            Err(error) => {
-                diags.error(
-                    krusty::diag::Span::new(0, 0),
-                    format!("internal error: {error}"),
-                );
+            Err(conflict) => {
+                report_decline(&lower::Unsupported::from(conflict), &file, diags);
                 return Vec::new();
             }
         };

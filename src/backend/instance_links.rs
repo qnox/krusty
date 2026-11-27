@@ -83,21 +83,25 @@ impl InstanceEntry {
         }
     }
 
-    /// Whether the current module's declaration of the instance redeclares one of its dependency
-    /// chain (see [`super::module_links`]).
-    fn redeclared(&self, classifiers: &dyn BackendClassifierSource) -> bool {
+    /// The dependency module whose declaration of the instance the current module's redeclares
+    /// (see [`super::module_links`]).
+    fn redeclared_owner(&self, classifiers: &dyn BackendClassifierSource) -> Option<String> {
         self.redeclarable_classifier()
-            .is_some_and(|classifier| classifiers.redeclares_dependency_classifier(classifier))
+            .and_then(|classifier| classifiers.redeclared_dependency_module(classifier))
     }
 }
 
-/// The diagnostic of a link `conflict`: a broken lowering invariant, which
-/// `super::classifier_redeclarations` declines before a link can conflict.
+/// The construct a target declines for a link `conflict`, phrased for its capability diagnostic.
 fn conflict_message(conflict: LinkConflict) -> &'static str {
     match conflict {
-        LinkConflict::DefinedTwice => "two files realize one instance entry",
+        LinkConflict::DefinedTwice => {
+            "one instance entry realized by two files, or by two modules neither of which \
+             redeclares the other's"
+        }
+        // `super::classifier_redeclarations` declines a redeclaration of a classifier earlier code
+        // uses before its links are defined, so this one only guards the table.
         LinkConflict::ReplacedAfterRead => {
-            "a redeclaration replaces an instance entry a file already read"
+            "a redeclaration replacing an instance entry a file already read"
         }
     }
 }
@@ -117,7 +121,7 @@ pub fn link_entries<V: Clone>(
             links
                 .define(
                     instance.clone(),
-                    instance.redeclared(classifiers),
+                    instance.redeclared_owner(classifiers).as_deref(),
                     &mut allocate,
                 )
                 .map(|link| (*entry, link))
@@ -173,7 +177,7 @@ pub fn link_reads<V: Clone>(
             .read(
                 instance.clone(),
                 declared,
-                instance.redeclared(classifiers),
+                instance.redeclared_owner(classifiers).as_deref(),
                 &mut allocate,
             )
             .map_err(conflict_message)?
@@ -233,7 +237,7 @@ pub fn link_constructor_reads<V: Clone>(
         let declared = module.declares_instance(&instance);
         // A constructor's identity is module-qualified, so no module redeclares another's.
         if let Some(link) = links
-            .read(instance.clone(), declared, false, &mut allocate)
+            .read(instance.clone(), declared, None, &mut allocate)
             .map_err(conflict_message)?
         {
             reads.insert(instance, link);
@@ -280,7 +284,7 @@ pub fn link_type_test_reads<V: Clone>(
             .read(
                 instance.clone(),
                 declared,
-                instance.redeclared(classifiers),
+                instance.redeclared_owner(classifiers).as_deref(),
                 &mut allocate,
             )
             .map_err(conflict_message)?

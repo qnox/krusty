@@ -35,7 +35,7 @@ impl UsedBeforeRedeclaration {
     pub fn construct(&self) -> String {
         // Boundary conversion for a diagnostic.
         format!(
-            "redeclaring the class `{}` that code of the module `{}` already uses",
+            "redeclaring the class `{}` that code compiled into the module `{}` already uses",
             self.classifier.render().replace('/', "."),
             self.user
         )
@@ -56,7 +56,10 @@ impl ClassifierUses {
             if class.is_anonymous_object || class.is_local_class {
                 continue;
             }
-            if !classifiers.redeclares_dependency_classifier(class.fq_name) {
+            if classifiers
+                .redeclared_dependency_module(class.fq_name)
+                .is_none()
+            {
                 continue;
             }
             match self.first_user.get(&class.fq_name) {
