@@ -7,6 +7,21 @@ use crate::ir::{IrClass, IrCtorArg, IrCtorParameterProvenance, IrExpr, IrField};
 /// The field an inner class keeps its outer instance in, after the fields it declares.
 const OUTER_INSTANCE_FIELD: &str = "this$0";
 
+impl<'a> super::MemberClass<'a> {
+    /// The outer instance of the class `header` declares, kept after its declared `fields`.
+    pub(super) fn outer_instance(
+        header: &super::super::class_headers::ClassMemberHeader<'_, 'a>,
+        fields: &[&'a KlibIrField],
+    ) -> Option<super::super::same_library_class::OuterInstance<'a>> {
+        header
+            .outer
+            .map(|outer| super::super::same_library_class::OuterInstance {
+                symbol: outer.this,
+                field: u32::try_from(fields.len()).expect("a field list fits u32"),
+            })
+    }
+}
+
 impl<'u, 's> Linker<'u, 's> {
     pub(super) fn materialize_class(
         &mut self,
