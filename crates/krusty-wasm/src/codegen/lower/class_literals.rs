@@ -9,8 +9,9 @@
 //! facts common IR recorded for it, any other from the declaration name its provider published.
 
 use krusty::backend::class_names::{declared_class, published_classifier};
+use krusty::backend::BackendCallableFact;
 use krusty::libraries::{ClassNameKind, CompilerIntrinsic};
-use krusty::types::{wk, TypeName};
+use krusty::types::{wk, SemanticCallableOwner, TypeName};
 
 use crate::class_tokens::{emit_runtime_info, QUALIFIED_NAME_FIELD, SIMPLE_NAME_FIELD};
 
@@ -97,6 +98,64 @@ impl Body<'_> {
         Ok(global)
     }
 
+    /// `X::class.isInstance(value)`: the test `value is X` makes. A class literal names its
+    /// classifier statically, so the call is that type test. A token that is not a literal wraps
+    /// one record of names and carries no supertype information to test against, so it is
+    /// declined rather than answered from a guess.
+    pub(super) fn class_is_instance_expression(
+        &mut self,
+        call: u32,
+        node: &IrExpr,
+    ) -> Option<Result<(), Unsupported>> {
+        let IrExpr::Call {
+            callee,
+            dispatch_receiver: Some(receiver),
+            args,
+        } = node
+        else {
+            return None;
+        };
+        let Callee::External {
+            target, defaults, ..
+        } = &**callee
+        else {
+            return None;
+        };
+        if !defaults.is_empty()
+            || !self
+                .callables
+                .callable(*target)
+                .is_some_and(is_class_is_instance)
+        {
+            return None;
+        }
+        Some(self.class_is_instance(call, *receiver, args))
+    }
+
+    fn class_is_instance(
+        &mut self,
+        call: u32,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<(), Unsupported> {
+        let [value] = args else {
+            return Err("`KClass.isInstance` without its one operand".to_string());
+        };
+        let IrExpr::KClassLiteral {
+            classifier: Some(ty),
+            value: None,
+            type_argument: false,
+        } = self.ir.expr(receiver).clone()
+        else {
+            return Err(
+                "`KClass.isInstance` of a class token that is not a class literal: the token \
+                 carries no supertype information"
+                    .to_string(),
+            );
+        };
+        self.type_test(call, IrTypeOp::InstanceOf, *value, ty.non_null())
+    }
+
     /// Which name the external property `target` reads, when its getter is the platform stdlib's
     /// own `KClass` name getter.
     pub(super) fn class_name_property(
@@ -146,4 +205,14 @@ pub(super) fn name_type_infos(
             runtime.objects.type_infos.name(module, classifier, &names);
         }
     }
+}
+
+/// Whether the selected declaration `fact` is `KClass.isInstance(value: Any?): Boolean`.
+pub(in crate::codegen) fn is_class_is_instance(fact: &BackendCallableFact) -> bool {
+    matches!(
+        fact.declaration_owner,
+        Some(SemanticCallableOwner::Classifier(owner)) if owner == wk::kclass()
+    ) && fact.name == "isInstance"
+        && fact.params.as_slice() == [Ty::nullable(objects::any())]
+        && fact.ret == Ty::Boolean
 }

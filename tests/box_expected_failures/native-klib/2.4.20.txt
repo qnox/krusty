@@ -79,7 +79,6 @@ callableReference/function/sortListOfStrings.kt
 callableReference/kt52270.kt
 callableReference/property/accessorForPropertyWithPrivateSetter.kt
 casts/functions/asFunKBig.kt
-casts/functions/reifiedAsFunKBig.kt
 casts/kt65197.kt
 casts/kt80795.kt
 casts/mutableCollections/asWithMutable.kt
