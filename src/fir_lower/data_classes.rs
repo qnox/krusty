@@ -328,12 +328,18 @@ fn synthesize_to_string(
     ir.record_data_class_member(owner, IrDataClassMemberRole::ToString, function);
     // kotlinc names the class by its own declared name: a nested `C.IC1` prints `IC1(…)`, and a
     // backticked `Cash$Tag` keeps its `$`, which no segment of a member's binary name preserves.
-    // A local class retains no lexical declaration name; its own identity segment is that name.
-    let declared = &ir.classes[class as usize];
-    let simple = match &declared.declaration_name {
-        Some(name) => name.name(),
-        None => declared.fq_name_id().nested_segment_ref(),
+    // A local class has no lexical declaration name; the last segment of its naming provenance is
+    // the name it was declared with, whatever identity its executable scope gives it.
+    let simple = match index.local_class_name_provenance(declaration) {
+        Some(provenance) => provenance.segments.last().map(String::as_str),
+        None => ir.classes[class as usize]
+            .declaration_name
+            .as_ref()
+            .map(|name| name.name()),
     }
+    .ok_or(FirFileLoweringFailure::MissingClassSourceQualifiedName(
+        declaration,
+    ))?
     .to_owned();
     let simple = simple.as_str();
     let singleton = ir.classes[class as usize].is_singleton();

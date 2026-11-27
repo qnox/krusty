@@ -1,5 +1,5 @@
 // A local class's member signatures and supertype arguments see the nested classifiers of the
-// class whose member function declares it.
+// class whose member function declares it. A local data class prints its own declared name.
 sealed interface Result<out T, out E> {
     interface Ok<out T> : Result<T, Nothing> { val value: T }
     interface Error<out E> : Result<Nothing, E> { val error: E }
@@ -21,9 +21,16 @@ class Api {
     }
 }
 
+fun describe(): String {
+    data class Failure(val error: String)
+    return Failure("x").toString()
+}
+
 fun box(): String {
+    if (describe() != "Failure(error=x)") return describe()
     val api = Api()
     val ok = api.run(false) as Result.Ok<String>
     val error = api.run(true) as Result.Error<Api.Problem>
+    if (error.toString() != "Failure(error=${error.error})") return error.toString()
     return ok.value + error.error.message
 }

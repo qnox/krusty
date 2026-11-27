@@ -1600,7 +1600,6 @@ localClasses/inLocalExtensionProperty.kt
 localClasses/kt10835.kt
 localClasses/kt10835a.kt
 localClasses/kt2700.kt
-localClasses/kt3389.kt
 localClasses/kt3584.kt
 localClasses/kt4174.kt
 localClasses/kt45383.kt
@@ -2102,7 +2101,6 @@ regressions/crossFileInlineWhenMapping.kt
 regressions/crossFileNominalBoxTests.kt
 regressions/crossinlineReferenceToPrivateFunctionAcrossModules.kt
 regressions/dataClassEqualsAndHashCode.kt
-regressions/dataClassInInlineFunctionWithTypeParameters.kt
 regressions/dataClassInRegularFunctionWithTypeParameters.kt
 regressions/deepInnerClassInEnumEntryClass2.kt
 regressions/delegatedBuiltinInterfaceMembers.kt
