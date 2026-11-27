@@ -391,12 +391,17 @@ fn run_backend_passes_after_plugins(
         &facts.property_realizations,
         facts.jvm_default,
     );
+    let storage_properties: krusty::fx_hash::HashSet<_> = callables
+        .value_class_storage_properties()
+        .chain(classifiers.module().source_value_storage().iter().copied())
+        .collect();
     if !crate::value_classes::lower_value_classes(
         ir,
         classifiers,
         crate::value_classes::ModuleValueClasses {
             underlying: module_value_classes,
             readable: module_readable_value_classes,
+            storage_properties: &storage_properties,
         },
         &inherited_default_statics,
         &mut facts.bridge_adaptations,
