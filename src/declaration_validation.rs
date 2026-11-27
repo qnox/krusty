@@ -1,6 +1,7 @@
 //! Target-neutral semantic validation of declaration headers.
 
-use crate::ast::{FunDecl, PropDecl, TypeAliasDecl};
+use crate::ast::{ClassDecl, ClassKind, FunDecl, PropDecl, TypeAliasDecl};
+use crate::types::Visibility;
 use crate::diag::Span;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -111,4 +112,31 @@ pub(crate) fn interface_block_property_diagnostics(
         span,
         message: "abstract property in interface cannot be private.",
     })
+}
+
+/// kotlinc's NON_PRIVATE_CONSTRUCTOR_IN_ENUM: an enum class's constructors are private, so one
+/// that writes another visibility is reported over its whole declaration, primary first.
+pub(crate) fn enum_constructor_diagnostics(class: &ClassDecl) -> Vec<DeclarationDiagnostic> {
+    if class.kind != ClassKind::Enum {
+        return Vec::new();
+    }
+    let primary = class
+        .primary_ctor_visibility_span
+        .filter(|_| class.primary_ctor_visibility != Visibility::Private)
+        .and_then(|_| class.primary_constructor_signature_span);
+    let secondary = class
+        .secondary_ctors
+        .iter()
+        .filter(|constructor| {
+            constructor.visibility_written && constructor.visibility != Visibility::Private
+        })
+        .map(|constructor| constructor.declaration_span);
+    primary
+        .into_iter()
+        .chain(secondary)
+        .map(|span| DeclarationDiagnostic {
+            span,
+            message: "constructor must be private in enum class.",
+        })
+        .collect()
 }
