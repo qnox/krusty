@@ -235,8 +235,8 @@ fn indy_rejects_a_pre_java_8_target_in_kotlincs_words() {
         .expect("run krusty CLI");
     assert_eq!(
         result.status.code(),
-        Some(2),
-        "invalid indy target compiled"
+        Some(reference_code),
+        "krusty's exit status differs from kotlinc's"
     );
     assert_eq!(String::from_utf8_lossy(&result.stdout), "");
     assert_eq!(

@@ -225,53 +225,77 @@ fn lambda_and_sam_strategies_are_independent() {
 
 /// A `-jvm-target` below 1.8 predates what kotlinc 2.x can emit, so the class strategy has no older
 /// target to serve. Both compilers must refuse every such value (and every other spelling kotlinc
-/// does not know) with the same error, and write nothing.
+/// does not know) with the same error and exit status, and write nothing.
 #[test]
 fn jvm_targets_kotlinc_refuses_are_refused_in_its_words() {
-    let work = common::scratch_dir().expect("allocate jvm-target fixture");
+    for target in ["1.6", "1.7", "6", "7", "8", "1.9", "27", "banana"] {
+        assert_refused_as_kotlinc_refuses(&["-jvm-target", target]);
+    }
+}
+
+/// `-Xjdk-release` names the target too: a release kotlinc does not know, one below 1.8 without an
+/// explicit `-jvm-target`, and one that conflicts with the target are refused as kotlinc refuses them.
+#[test]
+fn jdk_releases_kotlinc_refuses_are_refused_in_its_words() {
+    for arguments in [
+        &["-Xjdk-release=1.6"][..],
+        &["-Xjdk-release=7"],
+        &["-Xjdk-release=5"],
+        &["-Xjdk-release=1.9"],
+        &["-Xjdk-release=27"],
+        &["-Xjdk-release=banana"],
+        &["-Xjdk-release=11", "-jvm-target", "17"],
+        &["-Xjdk-release=1.6", "-jvm-target", "1.6"],
+    ] {
+        assert_refused_as_kotlinc_refuses(arguments);
+    }
+}
+
+/// Compile the class-strategy lambda fixture with `arguments` on both compilers: kotlinc must
+/// refuse it, and krusty must print kotlinc's errors, exit with kotlinc's status and write nothing.
+fn assert_refused_as_kotlinc_refuses(arguments: &[&str]) {
+    let work = common::scratch_dir().expect("allocate refused-target fixture");
     let source = work.join("L.kt");
     std::fs::write(&source, LAMBDA_SOURCE).expect("write fixture");
-    for target in ["1.6", "1.7", "6", "7", "8", "1.9", "27", "banana"] {
-        let reference_output = work.join("reference");
-        let (code, kotlinc_stderr) = common::kotlinc_compile(&[
-            "-d".to_string(),
-            reference_output.to_string_lossy().into_owned(),
-            "-Xlambdas=class".to_string(),
-            "-Xsam-conversions=class".to_string(),
-            "-jvm-target".to_string(),
-            target.to_string(),
-            source.to_string_lossy().into_owned(),
-        ])
-        .expect("reference compiler unavailable");
-        assert_eq!(code, 1, "kotlinc -jvm-target {target}: {kotlinc_stderr}");
+    let reference_output = work.join("reference");
+    let mut reference_args = vec![
+        "-d".to_string(),
+        reference_output.to_string_lossy().into_owned(),
+        "-Xlambdas=class".to_string(),
+        "-Xsam-conversions=class".to_string(),
+    ];
+    reference_args.extend(arguments.iter().map(|argument| argument.to_string()));
+    reference_args.push(source.to_string_lossy().into_owned());
+    let (code, kotlinc_stderr) =
+        common::kotlinc_compile(&reference_args).expect("reference compiler unavailable");
+    assert_ne!(code, 0, "kotlinc {arguments:?}: {kotlinc_stderr}");
 
-        let output = work.join("out");
-        let result = std::process::Command::new(common::krusty_binary())
-            .args(["-d", output.to_str().expect("UTF-8 output"), "-no-reflect"])
-            .args(["-Xlambdas=class", "-Xsam-conversions=class"])
-            .args(["-jvm-target", target])
-            .arg(&source)
-            .output()
-            .expect("run krusty CLI");
-        assert!(!result.status.success(), "krusty -jvm-target {target}");
-        assert_eq!(String::from_utf8_lossy(&result.stdout), "");
-        let expected = kotlinc_stderr
-            .lines()
-            .map(|line| {
-                if line.starts_with("error: ") {
-                    format!("krusty: {line}\n")
-                } else {
-                    format!("{line}\n")
-                }
-            })
-            .collect::<String>();
-        assert_eq!(
-            String::from_utf8_lossy(&result.stderr),
-            expected,
-            "-jvm-target {target}"
-        );
-        assert!(!output.exists(), "krusty wrote output for {target}");
-    }
+    let output = work.join("out");
+    let result = std::process::Command::new(common::krusty_binary())
+        .args(["-d", output.to_str().expect("UTF-8 output"), "-no-reflect"])
+        .args(["-Xlambdas=class", "-Xsam-conversions=class"])
+        .args(arguments)
+        .arg(&source)
+        .output()
+        .expect("run krusty CLI");
+    assert_eq!(result.status.code(), Some(code), "krusty {arguments:?}");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "");
+    let expected = kotlinc_stderr
+        .lines()
+        .map(|line| {
+            if line.starts_with("error: ") {
+                format!("krusty: {line}\n")
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect::<String>();
+    assert_eq!(
+        String::from_utf8_lossy(&result.stderr),
+        expected,
+        "{arguments:?}"
+    );
+    assert!(!output.exists(), "krusty wrote output for {arguments:?}");
     let _ = std::fs::remove_dir_all(work);
 }
 

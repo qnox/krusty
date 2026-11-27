@@ -455,7 +455,7 @@ pub(super) fn finish_jvm_target(opts: &mut Options, parsed: &ParsedSettings) {
                 }
                 _ => opts
                     .errors
-                    .push(format!("Unknown JDK release version: {release}")),
+                    .push(format!("unknown JDK release version: {release}")),
             }
             match release {
                 "6" | "1.6" | "7" | "1.7" => {
