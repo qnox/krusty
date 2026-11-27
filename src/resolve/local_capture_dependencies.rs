@@ -80,7 +80,8 @@ impl Checker<'_> {
     }
 
     /// The captures an anonymous object needs beyond the names its body spells: the context
-    /// bindings its members pass implicitly, and those its local superclass requires.
+    /// bindings its members pass implicitly, those of the local classifiers it constructs, and
+    /// those its local superclass requires.
     pub(super) fn extend_anonymous_selected_captures(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -89,7 +90,15 @@ impl Checker<'_> {
     ) {
         let mut bindings = Self::local_capture_binding_identities(captures);
         if let Decl::Class(class) = self.file.decl(declaration) {
+            let expressions = self.local_class_dependency_expressions(class);
             self.extend_selected_context_binding_captures(scope, class, captures, &mut bindings);
+            self.extend_selected_constructor_captures(
+                scope,
+                declaration,
+                &expressions,
+                captures,
+                &mut bindings,
+            );
         }
         self.extend_superclass_captures(scope, declaration, captures, &mut bindings);
     }
