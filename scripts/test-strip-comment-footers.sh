@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Contract of scripts/strip-comment-footers.sh against a stand-in `gh`: a comment, review comment or
 # review that ends with an integration's footer is written back without it, by the method its kind
-# takes; a clean comment and Dependabot's text are not written at all.
+# takes; a clean comment and Dependabot's text are not written at all. A sweep covers reviews too.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -95,13 +95,20 @@ item repos/o/r/issues/comments/5 'dependabot[bot]' "Release notes.$footer"
 run --comment repos/o/r/issues/comments/5
 writes "dependabot" ""
 
-# A sweep reads both repository-wide listings and writes only what carries a footer.
+# A sweep reads both repository-wide comment listings and the reviews of each pull request (not
+# issue) updated since then, and writes only what carries a footer. A listed review has no API URL
+# of its own.
 jq -s . "$work/api/repos/o/r/issues/comments/1.json" "$work/api/repos/o/r/issues/comments/4.json" \
   "$work/api/repos/o/r/issues/comments/5.json" > "$work/api/repos/o/r/issues/comments.list"
 jq -s . "$work/api/repos/o/r/pulls/comments/2.json" > "$work/api/repos/o/r/pulls/comments.list"
+echo '[{"number": 7, "pull_request": {}}, {"number": 8}]' > "$work/api/repos/o/r/issues.list"
+jq -n --arg body "Ship it.$footer" \
+  '[{id: 3, user: {login: "qnox"}, body: $body}, {id: 6, user: {login: "qnox"}, body: ""}]' \
+  > "$work/api/repos/o/r/pulls/7/reviews.list"
 run --since 2026-01-01T00:00:00Z
-writes "sweep" $'PATCH repos/o/r/issues/comments/1\nPATCH repos/o/r/pulls/comments/2'
-body "sweep" repos/o/r/pulls/comments/2 $'Done.\n'
+writes "sweep" $'PATCH repos/o/r/issues/comments/1\nPATCH repos/o/r/pulls/comments/2\nPUT repos/o/r/pulls/7/reviews/3'
+body "sweep comment" repos/o/r/pulls/comments/2 $'Done.\n'
+body "sweep review" repos/o/r/pulls/7/reviews/3 $'Ship it.\n'
 
 [ "$failed" -eq 0 ] || { echo "strip-comment-footers: $failed failed assertions" >&2; exit 1; }
 echo "strip-comment-footers: ok"

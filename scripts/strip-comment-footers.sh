@@ -6,8 +6,9 @@
 #
 #   scripts/strip-comment-footers.sh --comment <api-path>  one issue comment, review comment or
 #                                                          review, by its REST API path
-#   scripts/strip-comment-footers.sh --since <timestamp>   every issue and review comment in the
-#                                                          repository updated since then
+#   scripts/strip-comment-footers.sh --since <timestamp>   every issue and review comment updated
+#                                                          since then, and every review of a pull
+#                                                          request updated since then
 #
 # GH_REPO names the repository (owner/name). Dependabot's text quotes upstream release notes and
 # is left as it is.
@@ -38,18 +39,25 @@ case "${1:-}" in
     clean "$2" "$(jq -r '.user.login // ""' "$work/item.json")" "$work/body"
     ;;
   --since)
+    # One JSON object per line: the URL, the author and the body (newlines kept inside JSON).
+    item='{url, login: (.user.login // ""), body: (.body // "")} | @json'
     for kind in issues/comments pulls/comments; do
-      # One JSON object per line: the URL, the author and the body (newlines kept inside JSON).
-      gh api --paginate "repos/$GH_REPO/$kind?since=$2&per_page=100" \
-        --jq '.[] | {url, login: (.user.login // ""), body: (.body // "")} | @json' > "$work/list"
-      while IFS= read -r item; do
-        jq -r .body <<<"$item" > "$work/body"
-        clean "$(jq -r .url <<<"$item")" "$(jq -r .login <<<"$item")" "$work/body"
-      done < "$work/list"
+      gh api --paginate "repos/$GH_REPO/$kind?since=$2&per_page=100" --jq ".[] | $item" >> "$work/list"
     done
+    # Reviews have no repository-wide listing: read those of each pull request updated since then.
+    gh api --paginate "repos/$GH_REPO/issues?state=all&since=$2&per_page=100" \
+      --jq '.[] | select(.pull_request) | .number' > "$work/pulls"
+    while IFS= read -r pr; do
+      gh api --paginate "repos/$GH_REPO/pulls/$pr/reviews?per_page=100" \
+        --jq ".[] | .url = \"repos/$GH_REPO/pulls/$pr/reviews/\\(.id)\" | $item" >> "$work/list"
+    done < "$work/pulls"
+    while IFS= read -r line; do
+      jq -r .body <<<"$line" > "$work/body"
+      clean "$(jq -r .url <<<"$line")" "$(jq -r .login <<<"$line")" "$work/body"
+    done < "$work/list"
     ;;
   *)
-    sed -n '2,13p' "$0" >&2
+    sed -n '2,14p' "$0" >&2
     exit 2
     ;;
 esac
