@@ -2073,7 +2073,8 @@ fn consume_parameterized_lambdas(
             .ok_or_else(|| malformed(class_name))?
             .params
             .len();
-        if parameters <= lambda.capture_count
+        if lambda.capture_count == 0
+            || parameters <= lambda.capture_count
             || ir.suspend_funs.contains(&lambda.impl_fn)
             || constructor_reads_parameter(ir, copy_id, &roots, lambda.parameter)
         {
