@@ -190,7 +190,20 @@ pub(crate) fn function_shape_matches(src: &dyn SymbolSource, actual: Ty, declare
 impl ReceiverMro {
     pub(crate) fn new(src: &dyn SymbolSource, recv: Ty) -> ReceiverMro {
         let mut ranks = Vec::new();
-        if let Some(internal) = recv.erased_recv().kotlin_class_internal() {
+        if let Some(components) = super::hierarchy_projection::intersection_components(recv) {
+            // An intersection has no classifier of its own: it is each component, so an extension
+            // declared on any supertype of any component applies, at that component's rung.
+            for component in components {
+                for (applied, rung) in ReceiverMro::new(src, *component).ranks {
+                    match ranks.iter_mut().find(|(seen, _): &&mut (Ty, u32)| {
+                        seen.kotlin_class_internal() == applied.kotlin_class_internal()
+                    }) {
+                        Some((_, seen_rung)) => *seen_rung = (*seen_rung).min(rung),
+                        None => ranks.push((applied, rung)),
+                    }
+                }
+            }
+        } else if let Some(internal) = recv.erased_recv().kotlin_class_internal() {
             let root = if recv.non_null().obj_internal().is_some() {
                 recv.non_null()
             } else {

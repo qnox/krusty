@@ -203,8 +203,7 @@ pub(crate) fn semantic_common_supertype_inner(
     // Kotlin's universal reference upper bound is the result when no single more-specific common
     // classifier can represent the result. Preserve source/flexible nullability: `String?` and
     // `Marker` produce `Any?`, never the unsound non-null `Any`.
-    let has_value_classifier =
-        |ty: Ty| ty.non_null() == Ty::Unit || ty.kotlin_class_internal().is_some();
+    let has_value_classifier = common_supertype_intersection::has_value_classifier;
     if has_value_classifier(a) && has_value_classifier(b) {
         return Some(common_result_nullability(a, b, Ty::obj("kotlin/Any")));
     }
@@ -254,6 +253,11 @@ pub(crate) fn applied_common_supertype_unguarded(
     right: Ty,
     visiting: &mut crate::fx_hash::HashSet<(Ty, Ty)>,
 ) -> Option<Ty> {
+    if let Some(joined) = common_supertype_intersection::join_intersection_operand(
+        source, oracle, left, right, visiting,
+    ) {
+        return joined;
+    }
     // Nullability does not change a classifier's hierarchy. Restore the operands' result
     // nullability after finding their common classifier.
     let left_hierarchy = crate::symbol_resolver::applied_hierarchy(source, left.non_null());
@@ -285,15 +289,10 @@ pub(crate) fn applied_common_supertype_unguarded(
         .copied()
         .filter(|(candidate, _, _)| !dominated.contains(candidate))
         .collect::<Vec<_>>();
-    let [(owner, left_applied, right_applied)] = most_specific.as_slice() else {
-        return None;
-    };
-    let joined = join_applied_classifier(
+    let joined = common_supertype_intersection::join_most_specific(
         source,
         oracle,
-        *owner,
-        *left_applied,
-        *right_applied,
+        &most_specific,
         visiting,
     )?;
     Some(common_result_nullability(left, right, joined))

@@ -1154,3 +1154,31 @@ fn lambda_result_after_a_null_guard_keeps_the_narrowed_type() {
     );
     common::expect_front_end_ok_files_with_stdlib(&[source], "guarded lambda result parity");
 }
+
+#[test]
+fn narrowing_a_nullable_intersection_publishes_its_common_supertype() {
+    let source = "interface Base { fun base() {} }\n\
+                  interface Base2\n\
+                  interface One : Base, Base2\n\
+                  interface Two : Base, Base2\n\
+                  fun <S : Base> intersectNullable(vararg elements: S): S? = TODO()\n\
+                  fun narrowed(a: One, b: Two) = run {\n\
+                  \x20   val v = intersectNullable(a, b)\n\
+                  \x20   if (v == null) throw Exception()\n\
+                  \x20   v\n\
+                  }\n\
+                  fun use(one: One, two: Two) { narrowed(one, two).base() }\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", source)], &[common::stdlib_jar()]);
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+
+    let expected = vec![ObservedError {
+        file: "Main.kt".to_string(),
+        line: 11,
+        column: 50,
+        message: "unresolved reference 'base' on receiver of type 'Any'.".to_string(),
+    }];
+    let mut krusty = errors(&result.krusty_stderr);
+    krusty.extend(errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+    assert_eq!(errors(&result.reference_stderr), expected);
+}

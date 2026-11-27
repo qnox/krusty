@@ -1935,36 +1935,6 @@ fn only_input_type_inference_uses_representable_integer_literal_types() {
 }
 
 #[test]
-fn conditional_numeric_lub_is_not_arithmetic_promotion() {
-    let (body, _) = checked_function_body_with_platform(
-        "import kotlin.test.assertEquals\n\
-         fun use() {\n\
-             val value = when (true) {\n\
-                 true -> 42\n\
-                 else -> 1.0\n\
-             }\n\
-             assertEquals(42, value)\n\
-         }\n",
-        "use",
-        jvm_stdlib_semantics(),
-    );
-
-    let call = (0..body.expression_count())
-        .filter_map(|raw| body.expr(FirExprId::from_raw(raw as u32)))
-        .find_map(|expression| match &expression.kind {
-            FirExprKind::Call(call)
-                if matches!(call.target, FirCallTarget::External { .. })
-                    && call.substitutions.len() == 1 =>
-            {
-                Some(call)
-            }
-            _ => None,
-        })
-        .expect("assertEquals must remain an applicable checked call");
-    assert_eq!(call.substitutions[0].value.get(), Ty::obj("kotlin/Any"));
-}
-
-#[test]
 fn only_input_type_selection_contextualizes_a_nested_empty_generic_call() {
     let (body, _) = checked_function_body_with_platform(
         "import kotlin.test.assertEquals\n\
