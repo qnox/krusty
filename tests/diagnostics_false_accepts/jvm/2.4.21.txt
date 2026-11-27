@@ -29,6 +29,7 @@ compiler/testData/diagnostics/tests/annotationOnGetClassCall.kt
 compiler/testData/diagnostics/tests/annotations/AnnotatedBlock.kt
 compiler/testData/diagnostics/tests/annotations/AnnotatedCatchValueParameter.kt
 compiler/testData/diagnostics/tests/annotations/AnnotatedNullableTypes.kt
+compiler/testData/diagnostics/tests/annotations/AnnotatedStatement.kt
 compiler/testData/diagnostics/tests/annotations/AnnotatedTryCatch.kt
 compiler/testData/diagnostics/tests/annotations/DanglingMixed.kt
 compiler/testData/diagnostics/tests/annotations/DanglingNoBrackets.kt
@@ -55,7 +56,10 @@ compiler/testData/diagnostics/tests/annotations/illegalSinceKotlinValue.kt
 compiler/testData/diagnostics/tests/annotations/kt1886annotationBody.kt
 compiler/testData/diagnostics/tests/annotations/missingValOnParameter.kt
 compiler/testData/diagnostics/tests/annotations/onLoops.kt
+compiler/testData/diagnostics/tests/annotations/options/assignment.kt
+compiler/testData/diagnostics/tests/annotations/options/prefix.kt
 compiler/testData/diagnostics/tests/annotations/options/targets/returntype.kt
+compiler/testData/diagnostics/tests/annotations/options/unrepeatable.kt
 compiler/testData/diagnostics/tests/annotations/parameters/expressions/labeled.kt
 compiler/testData/diagnostics/tests/annotations/parameters/expressions/paranthesized.kt
 compiler/testData/diagnostics/tests/annotations/referenceOfAnnotatedFunctionInAnnotation.kt
@@ -78,6 +82,8 @@ compiler/testData/diagnostics/tests/annotations/withUseSiteTarget/diagnosticWith
 compiler/testData/diagnostics/tests/annotations/withUseSiteTarget/kt26638.kt
 compiler/testData/diagnostics/tests/annotations/withUseSiteTarget/prohibitUseSiteGetTargetAnnotationsOff.kt
 compiler/testData/diagnostics/tests/annotations/withUseSiteTarget/prohibitUseSiteGetTargetAnnotationsOn.kt
+compiler/testData/diagnostics/tests/annotationsSameLineSuggestion.kt
+compiler/testData/diagnostics/tests/annotationsSameLineSuggestion_Vanilla.kt
 compiler/testData/diagnostics/tests/arguments/dnnMismatch.kt
 compiler/testData/diagnostics/tests/arguments/fieldPlusAssign.kt
 compiler/testData/diagnostics/tests/backingField/FieldReassignment.kt
@@ -1221,6 +1227,7 @@ compiler/testData/diagnostics/tests/targetedBuiltIns/backwardCompatibility/deriv
 compiler/testData/diagnostics/tests/targetedBuiltIns/backwardCompatibility/finalize.kt
 compiler/testData/diagnostics/tests/testsWithExplicitApi/kt56505.kt
 compiler/testData/diagnostics/tests/testsWithExplicitReturnTypes/kt56505.kt
+compiler/testData/diagnostics/tests/testsWithJava17/jvmRecord/diagnostics.kt
 compiler/testData/diagnostics/tests/testsWithJava17/jvmRecord/irrelevantFields.kt
 compiler/testData/diagnostics/tests/testsWithJava17/sealedClasses/flexibleSealedInSubject.kt
 compiler/testData/diagnostics/tests/testsWithJava17/sealedClasses/kotlinInheritsJavaClass.kt
@@ -1332,7 +1339,9 @@ compiler/testData/diagnostics/testsWithStdLib/annotations/jvmStatic/constructorP
 compiler/testData/diagnostics/testsWithStdLib/annotations/jvmStatic/property.kt
 compiler/testData/diagnostics/testsWithStdLib/annotations/kClass/kClassOutArrayInAnnotationsOutVariance.kt
 compiler/testData/diagnostics/testsWithStdLib/annotations/multipleRepeatables.kt
+compiler/testData/diagnostics/testsWithStdLib/annotations/strictfpOnClass.kt
 compiler/testData/diagnostics/testsWithStdLib/annotations/subclassOptInRequired/Experimentality.kt
+compiler/testData/diagnostics/testsWithStdLib/annotations/subclassOptInRequired/IncorrectApplicability.kt
 compiler/testData/diagnostics/testsWithStdLib/annotations/subclassOptInRequired/InheritingByLocalClassifiers.kt
 compiler/testData/diagnostics/testsWithStdLib/annotations/subclassOptInRequired/InnerAndNestedClasses.kt
 compiler/testData/diagnostics/testsWithStdLib/annotations/subclassOptInRequired/JavaKotlinInterop.kt
