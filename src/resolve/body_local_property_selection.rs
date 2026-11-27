@@ -160,6 +160,7 @@ impl Checker<'_> {
                     type_param_bounds,
                     formal_bounds,
                     is_var: property.is_var,
+                    is_abstract: property.is_abstract,
                     visibility: property.visibility,
                     setter_visibility: property.is_var.then(|| {
                         property

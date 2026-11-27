@@ -22,7 +22,8 @@ use crate::fx_hash::HashMap;
 use std::hash::Hash;
 
 use crate::fir::{
-    DeclarationFlags, DeclarationId, DeclarationKind, InheritedCallableStatus,
+    CallableId, DeclarationFlags, DeclarationId, DeclarationKind, InheritedCallableStatus,
+    ResolvedDelegatedFunctionDeclaration, ResolvedDelegatedPropertyDeclaration,
     ResolvedFunctionOverride, ResolvedFunctionOverrideTarget, ResolvedModuleIndex,
     ResolvedPropertyOverride, ResolvedPropertyOverrideTarget,
 };
@@ -202,27 +203,11 @@ pub(super) fn publish_inherited_statuses(
         },
         |edge| edge.depth,
     );
-    let own_function = |callable| {
-        let flags = index
-            .callable(callable)
-            .and_then(|header| index.declaration_header(header.declaration))
-            .map(|header| header.flags);
-        InheritedCallableStatus {
-            return_value: ReturnValueStatus::Unspecified,
-            operator: flags.is_some_and(|flags| flags.has(DeclarationFlags::OPERATOR)),
-            infix: flags.is_some_and(|flags| flags.has(DeclarationFlags::INFIX)),
-            semantic_role: None,
-        }
-    };
-    let functions = derive(&functions, own_function, |callable| {
-        let own = own_function(callable);
-        let published = index.callable_inherited_status(callable);
-        InheritedCallableStatus {
-            operator: own.operator || published.operator,
-            infix: own.infix || published.infix,
-            ..published
-        }
-    });
+    let functions = derive(
+        &functions,
+        |callable| index.own_function_status(callable),
+        |callable| index.module_function_status(callable),
+    );
     let properties = derive(
         &properties,
         |_| ReturnValueStatus::Unspecified,
@@ -235,6 +220,78 @@ pub(super) fn publish_inherited_statuses(
         index.publish_property_return_value_status(property, status);
     }
     publish_inherited_visibilities(index, classifiers)
+}
+
+impl ResolvedModuleIndex {
+    /// A module function's own declared facts: its `operator` and `infix` modifiers, with no
+    /// return-value status or role of its own.
+    fn own_function_status(&self, callable: CallableId) -> InheritedCallableStatus {
+        let flags = self
+            .callable(callable)
+            .and_then(|header| self.declaration_header(header.declaration))
+            .map(|header| header.flags);
+        InheritedCallableStatus {
+            return_value: ReturnValueStatus::Unspecified,
+            operator: flags.is_some_and(|flags| flags.has(DeclarationFlags::OPERATOR)),
+            infix: flags.is_some_and(|flags| flags.has(DeclarationFlags::INFIX)),
+            semantic_role: None,
+        }
+    }
+
+    /// The status a module function contributes to a declaration overriding it: its published
+    /// inherited status together with its own modifiers. A declaration that overrides nothing has
+    /// no published status, so its own `operator`/`infix` are all it contributes.
+    fn module_function_status(&self, callable: CallableId) -> InheritedCallableStatus {
+        let own = self.own_function_status(callable);
+        let published = self.callable_inherited_status(callable);
+        InheritedCallableStatus {
+            operator: own.operator || published.operator,
+            infix: own.infix || published.infix,
+            ..published
+        }
+    }
+
+    /// The status an `interface by` forwarder has: the override rule above applied to the
+    /// declarations it overrides, nearest first. Call it once their statuses are published; a
+    /// module declaration contributes its published status and a provider declaration its record.
+    pub(crate) fn delegated_function_status(
+        &self,
+        overridden: &[ResolvedDelegatedFunctionDeclaration],
+    ) -> InheritedCallableStatus {
+        let edges = overridden
+            .iter()
+            .map(|declaration| match declaration.target {
+                ResolvedFunctionOverrideTarget::Module(callable) => {
+                    self.module_function_status(callable).as_edge()
+                }
+                ResolvedFunctionOverrideTarget::External(_) => OverriddenFunction {
+                    return_value: declaration.return_value_status,
+                    operator: declaration.operator,
+                    infix: declaration.infix,
+                    semantic_role: declaration.semantic_role,
+                },
+            })
+            .collect::<Vec<_>>();
+        InheritedCallableStatus::inherit(InheritedCallableStatus::default(), &edges)
+    }
+
+    /// The return-value status an `interface by` property forwarder has, as for
+    /// [`Self::delegated_function_status`].
+    pub(crate) fn delegated_property_return_value_status(
+        &self,
+        overridden: &[ResolvedDelegatedPropertyDeclaration],
+    ) -> ReturnValueStatus {
+        let edges = overridden
+            .iter()
+            .map(|declaration| match declaration.target {
+                ResolvedPropertyOverrideTarget::Module(property) => {
+                    self.property_return_value_status(property).as_edge()
+                }
+                ResolvedPropertyOverrideTarget::External(_) => declaration.return_value_status,
+            })
+            .collect::<Vec<_>>();
+        ReturnValueStatus::inherit(ReturnValueStatus::default(), &edges)
+    }
 }
 
 /// Resolve every override's effective visibility and restrict the headers of modifier-less
