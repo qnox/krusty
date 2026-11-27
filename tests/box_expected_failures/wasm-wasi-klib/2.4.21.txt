@@ -431,7 +431,6 @@ delegatedProperty/optimizedDelegatedProperties/definedInSourcesWithNonNullParame
 delegatedProperty/packageLevel.kt
 delegatedProperty/provideDelegate/delegatedPropertyWithIdProvideDelegate.kt
 delegatedProperty/provideDelegate/genericProvideDelegateOnNumberLiteral.kt
-delegatedProperty/provideDelegate/propertyMetadata.kt
 delegatedProperty/simpleVal.kt
 delegatedProperty/simpleVar.kt
 delegatedProperty/valByMapDelegatedProperty.kt
