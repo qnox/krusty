@@ -123,8 +123,8 @@ pub struct Regeneration<'a> {
     pub prior_classes: &'a [(String, String)],
     /// The call's reified arguments, which specialize `reifiedOperationMarker` in the copy.
     pub reified: &'a crate::jvm::reified_arguments::ReifiedArguments,
-    /// The caller's class-file major version.
-    pub major: u16,
+    /// The caller's class-file version.
+    pub version: crate::jvm::classfile::ClassFileVersion,
     /// The `@Metadata` stamp the caller writes.
     pub metadata_stamp: crate::jvm::classfile::MetadataStamp,
     /// The call's inline lambdas the constructor call passes, which the copy inlines.
@@ -270,7 +270,8 @@ pub fn regenerate(
     if original.deprecated {
         cw.set_deprecated();
     }
-    cw.set_major(original.major.max(regeneration.major));
+    cw.set_major(original.major.max(regeneration.version.major));
+    cw.set_preview(regeneration.version.preview);
     for interface in &original.interfaces {
         cw.add_interface(&remapper.map_type(interface)?);
     }

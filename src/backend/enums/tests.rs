@@ -1039,3 +1039,34 @@ fn an_entries_getter_a_body_reads_is_kept_and_published() {
     assert!(!ir.inline_only_fns.contains(&function(&ir, "Shade$entries")));
     assert!(publishes_entries(&exports));
 }
+
+#[test]
+fn an_entries_read_in_another_file_of_the_program_keeps_the_getter() {
+    let mut declaring = IrFile::default();
+    shade(&mut declaring);
+    declare(&mut declaring, "box", Vec::new(), Vec::new());
+    let mut reading = IrFile::default();
+    let entries = reading.add_expr(IrExpr::EnumEntries {
+        classifier: type_name("Shade"),
+    });
+    declare(&mut reading, "read", Vec::new(), vec![entries]);
+
+    let mut declaring_exports = super::super::DependencyExportSignatures::default();
+    super::realize(
+        &mut declaring,
+        super::Contract::KotlinWasm,
+        Some(super::EntriesFactory::Selected(factory())),
+        &mut declaring_exports,
+    )
+    .expect("the enums are realized");
+    let mut reading_exports = super::super::DependencyExportSignatures::default();
+    super::withdraw_unread_entries(&mut [
+        (&mut declaring, &mut declaring_exports),
+        (&mut reading, &mut reading_exports),
+    ]);
+
+    assert!(!declaring
+        .inline_only_fns
+        .contains(&function(&declaring, "Shade$entries")));
+    assert!(publishes_entries(&declaring_exports));
+}

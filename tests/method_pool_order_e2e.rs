@@ -48,6 +48,8 @@
 //!   before `<clinit>`.
 //! - A suspend local function's re-entry accessor follows the accessors the source's references
 //!   need: its continuation class carries no source position.
+//! - A suspend member's re-entry accessor stands at the start of the member: it leads the
+//!   accessors the member's body needs and follows those of earlier declarations.
 //!
 //! Each case asserts that the named classes are byte-identical to kotlinc's. The fixtures use
 //! neutral names only.
@@ -484,6 +486,48 @@ fn a_suspend_local_function_s_reentry_accessor_follows_the_source_ordered_access
     );
 }
 
+#[test]
+fn a_suspend_member_s_reentry_accessor_stands_at_the_member() {
+    assert_identical_with_stdlib(
+        "SuspendMemberReentry",
+        r#"class Early {
+    private companion object {
+        val first = Regex("a")
+    }
+
+    private fun helper() = 1
+
+    private suspend fun step(): Int {
+        pause()
+        val task = object : Runnable { override fun run() { helper() } }
+        task.run()
+        return first.pattern.length
+    }
+
+    suspend fun start(): Int = step()
+}
+
+class Late {
+    suspend fun start(): Int = step()
+
+    private suspend fun step(): Int {
+        pause()
+        return listOf("x").mapNotNull { last.find(it)?.value }.size
+    }
+
+    private companion object {
+        val last = Regex("x")
+    }
+}
+
+suspend fun pause() {}
+
+fun box(): String = "OK"
+"#,
+        &["Early", "Late"],
+    );
+}
+
 /// A function-local lambda inside an enum member is lifted to a method that kotlinc visits before
 /// the private `$values` helper.
 #[test]
@@ -591,5 +635,34 @@ abstract class Dispatcher : AbstractCoroutineContextElement(ContinuationIntercep
 }
 "#,
         &["Dispatcher"],
+    );
+}
+
+/// A function's header descriptor interns with its header, even when an earlier method's inlined
+/// body interned the same descriptor first: `()V` follows `test`, ahead of the suspend lambda's
+/// class that the body names.
+#[test]
+fn a_header_descriptor_an_earlier_inlined_body_interned_stays_at_its_header() {
+    assert_identical_with_stdlib(
+        "HeaderDescriptor",
+        r#"import kotlin.coroutines.*
+
+fun builder(c: suspend () -> Unit) { }
+
+var c: Continuation<Any>? = null
+
+suspend fun <T> suspendMe(): T = suspendCoroutine {
+    c = it as Continuation<Any>
+}
+
+fun test() {
+    var invoked = false
+    builder {
+        suspendMe<Int>()
+    }
+    c?.resumeWithException(IllegalStateException("OK"))
+}
+"#,
+        &["HeaderDescriptorKt"],
     );
 }

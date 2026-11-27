@@ -89,7 +89,8 @@ fn the_join_keeps_the_star_and_the_outer_out() {
 
 /// The control: two arms with ORDINARY arguments still join to an `out` projection of their common
 /// supertype, which is what both compilers do. The rule is "a star argument wins", not "every
-/// invariant argument join becomes a star".
+/// invariant argument join becomes a star". `Mono<T> extends Pub<T>` is a Java supertype, so its
+/// argument is flexible and kotlinc reports the joined argument as `Resp<out Any>!`.
 #[test]
 fn two_ordinary_arguments_still_join_to_an_out_projection() {
     const SRC: &str = "class JoinLeft\n\
@@ -102,7 +103,7 @@ fn two_ordinary_arguments_still_join_to_an_out_projection() {
     assert_eq!(
         diagnostics(SRC),
         vec![
-            "initializer type mismatch: expected 'JoinExpected', actual 'Pub<out Resp<out Any>>'."
+            "initializer type mismatch: expected 'JoinExpected', actual 'Pub<out Resp<out Any>!>'."
                 .to_string()
         ]
     );

@@ -70,6 +70,17 @@ impl DeclarationOwner {
         self.semantic == Some(SemanticCallableOwner::Package(package))
     }
 
+    /// Whether this declares its members on one of the unsigned arrays (`UIntArray`, …).
+    fn is_unsigned_array_class(self) -> bool {
+        match self.semantic {
+            Some(SemanticCallableOwner::Classifier(owner)) => {
+                krusty::types::prim_array_element(owner).is_some_and(Ty::is_unsigned)
+            }
+            Some(SemanticCallableOwner::Package(_)) => false,
+            None => false,
+        }
+    }
+
     fn classifier_matches(self, kotlin: &str) -> bool {
         match self.semantic {
             Some(SemanticCallableOwner::Classifier(owner)) => classifier_matches(owner, kotlin),
@@ -417,6 +428,23 @@ pub(super) fn runtime_function(signature: FunctionSignature<'_>) -> Option<Strin
             ("TODO", [], Ty::Nothing) => Some("kt_not_implemented".to_string()),
             ("TODO", [reason], Ty::Nothing) if classifier_is(*reason, "kotlin/String") => {
                 Some("kt_not_implemented_reason".to_string())
+            }
+            _ => None,
+        };
+    }
+    if signature.owner.package_matches("kotlin/text") {
+        return match (
+            signature.name,
+            signature.params,
+            signature.ret.canonical_semantic(),
+        ) {
+            // The stdlib's own bodyless seam from a `CharArray` slice to a `String`, as every
+            // `String(chars)` and case mapping reaches it. Its operands cross at their own widths.
+            ("unsafeStringFromCharArray", [chars, Ty::Int, Ty::Int], text)
+                if classifier_is(*chars, "kotlin/CharArray")
+                    && classifier_is(text, "kotlin/String") =>
+            {
+                Some("kt_string_from_char_array".to_string())
             }
             _ => None,
         };
@@ -1717,12 +1745,17 @@ pub(super) fn array_member(
     // The unsigned arrays get their own package: Kotlin declares `UIntArray.reversed()` in
     // `kotlin.collections.unsigned`, apart from the signed one it answers identically to. The
     // runtime reads the element's type from the array's descriptor, so both reach one entry.
+    let reference = Ty::nullable(Ty::obj("kotlin/Any"));
+    // An unsigned array is a value class over its carrier, whose own `Collection.isEmpty` asks the
+    // carrier's length, the same question the facade's extension answers.
+    if owner.is_unsigned_array_class() && name == "isEmpty" && params.is_empty() {
+        return Some(("kt_array_is_empty", vec![reference], Ty::Boolean));
+    }
     if !owner.package_is(krusty::types::wk::kotlin_collections_package())
         && !owner.package_is(krusty::types::wk::kotlin_collections_unsigned_package())
     {
         return None;
     }
-    let reference = Ty::nullable(Ty::obj("kotlin/Any"));
     Some(match (name, params) {
         ("toList", []) => ("kt_array_to_list", vec![reference], reference),
         ("reversed", []) => ("kt_array_reversed", vec![reference], reference),
@@ -2614,6 +2647,26 @@ mod tests {
             "a missing runtime function must produce a diagnostic, never a call to a symbol that \
              does not exist"
         );
+    }
+
+    #[test]
+    fn a_string_is_made_from_a_char_array_slice_by_the_whole_declaration() {
+        let chars = Ty::obj("kotlin/CharArray");
+        let make = |params: &[Ty], ret| {
+            runtime_function(function(
+                package("kotlin/text"),
+                "unsafeStringFromCharArray",
+                params,
+                ret,
+            ))
+        };
+        assert_eq!(
+            make(&[chars, Ty::Int, Ty::Int], Ty::String).as_deref(),
+            Some("kt_string_from_char_array")
+        );
+        assert_eq!(make(&[chars, Ty::Int], Ty::String), None);
+        assert_eq!(make(&[Ty::String, Ty::Int, Ty::Int], Ty::String), None);
+        assert_eq!(make(&[chars, Ty::Int, Ty::Int], Ty::Int), None);
     }
 
     #[test]

@@ -35,6 +35,9 @@ pub(super) enum CommonPrimitive {
     /// arguments are packed into is the array it returns, as checked FIR lowers a source call of
     /// it to an array literal.
     ArrayLiteral,
+    /// `arrayOf<T>(vararg elements: T)`: the reference array its one vararg argument packs, of the
+    /// array type the call has.
+    ReferenceArrayLiteral,
     /// `emptyArray<T>()`: a new reference array of no elements, of the array type the call has.
     EmptyArray,
 }
@@ -68,6 +71,11 @@ pub(super) fn authenticate(
         selected.compiler_intrinsic()
     {
         return empty_array(selected).map(Some);
+    }
+    if let Some(CompilerIntrinsic::ArrayFactory(ArrayFactoryKind::ReferenceVararg)) =
+        selected.compiler_intrinsic()
+    {
+        return reference_array_literal(selected).map(Some);
     }
     let operation = match selected.compiler_intrinsic() {
         Some(CompilerIntrinsic::PrimitiveUnary(operation)) => CommonPrimitive::Unary(operation),
@@ -116,6 +124,7 @@ pub(super) fn authenticate(
         | CommonPrimitive::StringGet
         | CommonPrimitive::ArrayLiteral => 1,
         CommonPrimitive::Unary(_)
+        | CommonPrimitive::ReferenceArrayLiteral
         | CommonPrimitive::EmptyArray
         | CommonPrimitive::PropertyRead(_)
         | CommonPrimitive::Conversion => 0,
@@ -136,6 +145,7 @@ pub(super) fn authenticate(
         | CommonPrimitive::Conversion
         | CommonPrimitive::StringGet
         | CommonPrimitive::ArrayLiteral
+        | CommonPrimitive::ReferenceArrayLiteral
         | CommonPrimitive::EmptyArray => {
             matches!(selected.signature(), KlibDeclarationSignature::Public(_))
         }
@@ -220,6 +230,7 @@ pub(super) fn authenticate(
         | CommonPrimitive::Conversion
         | CommonPrimitive::StringGet
         | CommonPrimitive::ArrayLiteral
+        | CommonPrimitive::ReferenceArrayLiteral
         | CommonPrimitive::EmptyArray => None,
     };
     Ok(Some(CommonPrimitiveCall {
@@ -255,6 +266,34 @@ fn array_literal(
         operation: CommonPrimitive::ArrayLiteral,
         receiver: None,
         params: vec![ret],
+        ret,
+        class_type_parameters: Vec::new(),
+        property: None,
+    })
+}
+
+/// The reference array literal `arrayOf<T>(vararg elements: T)` is: a top-level function of one
+/// type parameter and one vararg parameter, returning a reference array. The packed array's type is
+/// the call's, so the declaration states no parameter type of its own.
+fn reference_array_literal(
+    selected: KlibBodyCallable<'_>,
+) -> Result<CommonPrimitiveCall, KlibBodyDeclineReason> {
+    let ret = selected.ret();
+    if selected.is_member()
+        || selected.context_count() != 0
+        || selected.type_parameters().len() != 1
+        || selected.vararg_index() != Some(0)
+        || selected.params().len() != 1
+        || !ret.is_reference_array()
+    {
+        return Err(mismatch(
+            "a reference array factory has a different selected call shape",
+        ));
+    }
+    Ok(CommonPrimitiveCall {
+        operation: CommonPrimitive::ReferenceArrayLiteral,
+        receiver: None,
+        params: Vec::new(),
         ret,
         class_type_parameters: Vec::new(),
         property: None,

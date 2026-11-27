@@ -738,6 +738,7 @@ pub(super) fn materialize_member_extension_delegate(
             setter,
             visibility: property.visibility,
             type_params,
+            return_value_status: Default::default(),
             accessor_annotations: ir
                 .accessor_annotations
                 .get(&property_id)
@@ -790,6 +791,7 @@ fn delegated_property_reference(
             },
             dispatch_receiver: None,
             extension_receiver: None,
+            context_arguments: Vec::new(),
             mutable: flags.has(DeclarationFlags::MUTABLE),
             substitutions: Vec::new(),
             adaptation: None,

@@ -853,10 +853,11 @@ impl<'a> BodyLowering<'a> {
                 }
                 (self.closure(*invoke, ty, origin.as_deref())?, ty)
             }
-            KlibIrExprKind::PropertyReference { .. }
-            | KlibIrExprKind::RichPropertyReference { .. } => {
-                return unsupported("a property reference")
+            KlibIrExprKind::RichPropertyReference { .. } => {
+                let ty = self.ty(expression, "property reference")?;
+                return self.field_designation(expression, ty);
             }
+            KlibIrExprKind::PropertyReference { .. } => return unsupported("a property reference"),
             KlibIrExprKind::LocalDelegatedPropertyReference { .. } => {
                 return unsupported("a local delegated property reference")
             }
@@ -1160,6 +1161,14 @@ impl<'a> BodyLowering<'a> {
         if site.is_some_and(|site| captures_star_projection(actual, expected, site)) {
             return Ok(lowered);
         }
+        // A body a compiler plugin generates may use a value of a type parameter's declared bound
+        // as a value of the parameter, as an atomicfu helper initializes a `T` from the `Any?` its
+        // field intrinsic reads. kotlinc's backends represent both by the parameter's erasure; the
+        // value crosses with the coercion a generic declaration's boundary places.
+        if expected.is_ty_param() && expected.ty_param_bound() == Some(actual) {
+            let coerced = self.coercion(lowered, expected);
+            return Ok(self.typed(coerced, expected));
+        }
         self.upcast(lowered, actual, expected)
             .ok_or(KlibBodyDeclineReason::ImplicitConversion)
     }
@@ -1347,7 +1356,7 @@ impl<'a> BodyLowering<'a> {
         // A compiler temporary, such as the cast `other` of a data class's `equals`, is an unnamed
         // immutable local the source never names.
         if variable.base.origin == "IR_TEMPORARY_VARIABLE" {
-            return self.unnamed_local(id);
+            return self.unnamed_variable(id);
         }
         let ty = self.semantic(variable.ty)?;
         let Some(initializer) = variable.initializer else {

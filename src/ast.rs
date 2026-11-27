@@ -45,6 +45,7 @@ pub use declaration_prefixes::{
 pub use destructuring::{DestructureProperty, DestructuringSyntax};
 pub use external_modifier_targets::{ExternalModifierTarget, ExternalModifierUse};
 pub use import_path::ImportPath;
+use operators::{binop, unop};
 pub use operators::{BinOp, UnOp};
 pub(crate) use property_shape::setter_param_or_value;
 pub use property_shape::{
@@ -1900,10 +1901,10 @@ pub struct File {
     /// argument expressions. Resolution binds the reference span to a semantic classifier identity;
     /// plugins may still use the retained spelling for source-oriented configuration.
     pub file_annotations: Vec<(AnnotationRef, Vec<ExprId>)>,
-    /// `ExprId`s of call arguments written with the spread operator (`*arr`). The marked id is the
-    /// inner expression (the `arr` of `*arr`), which is what appears in the call's `args`. Lets the
-    /// vararg lowering pass the array through (`Arrays.copyOf`) instead of packing it as one element.
-    pub spread_arg_ids: crate::fx_hash::HashSet<u32>,
+    /// Call arguments written with the spread operator (`*arr`), keyed by the inner expression (the
+    /// `arr` that appears in the call's `args`) and mapped to the span of the `*`. Lets the vararg
+    /// lowering pass the array through (`Arrays.copyOf`) instead of packing it as one element.
+    pub spread_arg_stars: crate::fx_hash::HashMap<u32, Span>,
     /// Annotations written on a TYPE (`@Composable () -> Unit`, `@UnsafeVariance T`), keyed by the
     /// type's start offset (`TypeRef.span.lo`). The parser consumes leading `@Foo` before a type and
     /// records the simple names here; a plugin recovers them via the type's span (e.g. to detect a
@@ -2142,7 +2143,7 @@ impl File {
         self.base_arg_names = Default::default();
         self.anon_fun_ret = Default::default();
         self.file_annotations = Default::default();
-        self.spread_arg_ids = Default::default();
+        self.spread_arg_stars = Default::default();
     }
 
     pub fn expr_span(&self, id: ExprId) -> Option<Span> {
@@ -2173,7 +2174,12 @@ impl File {
 
     /// Whether call argument `id` (the inner expr of `*expr`) was written with the spread operator.
     pub fn is_spread_arg(&self, id: ExprId) -> bool {
-        self.spread_arg_ids.contains(&id.0)
+        self.spread_star_span(id).is_some()
+    }
+
+    /// The span of the `*` that makes call argument `id` a spread, when it is one.
+    pub fn spread_star_span(&self, id: ExprId) -> Option<Span> {
+        self.spread_arg_stars.get(&id.0).copied()
     }
 
     pub fn expr(&self, id: ExprId) -> &Expr {
@@ -2963,33 +2969,6 @@ impl File {
                 out.push_str(&format!("::{name}"));
             }
         }
-    }
-}
-
-fn binop(op: BinOp) -> &'static str {
-    match op {
-        BinOp::Add => "+",
-        BinOp::Sub => "-",
-        BinOp::Mul => "*",
-        BinOp::Div => "/",
-        BinOp::Rem => "%",
-        BinOp::Eq => "==",
-        BinOp::Ne => "!=",
-        BinOp::Lt => "<",
-        BinOp::Le => "<=",
-        BinOp::Gt => ">",
-        BinOp::Ge => ">=",
-        BinOp::And => "&&",
-        BinOp::Or => "||",
-        BinOp::RefEq => "===",
-        BinOp::RefNe => "!==",
-    }
-}
-fn unop(op: UnOp) -> &'static str {
-    match op {
-        UnOp::Neg => "neg",
-        UnOp::Not => "not",
-        UnOp::Plus => "plus",
     }
 }
 

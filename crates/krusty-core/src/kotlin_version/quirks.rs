@@ -179,6 +179,15 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: true,
     }
+    /// A not-null operator (`!!`, the left of `?:`, the receiver of `?.`) applied to a nullable
+    /// intersection fixed below an upper type (`pick(a, b)!!` with `S : Base`) narrows it to a new
+    /// intersection that publishes `Any`. From 2.5 kotlinc keeps the upper type, so the result still
+    /// approximates to the bound; a smart cast (`if (x != null) x`) still publishes `Any`.
+    NotNullOperatorDropsIntersectionApproximation {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
     /// The Kotlin/Native and Kotlin/Wasm standard library's `ArrayList.addAll` makes room for the
     /// new elements before it reads the argument, so a range of the list being appended to is
     /// invalidated first: `list.addAll(list.subList(0, 2))` raises

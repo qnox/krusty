@@ -100,7 +100,7 @@ impl AnonymousObjects for NestedObjects<'_, '_> {
         if outer.classes.regenerated_class(class) == Some(RegeneratedClass::SamWrapper) {
             let name = sam_wrapper_name(outer.calling_class, class)
                 .ok_or(unsupported("a SAM wrapper without its ABI name segment"))?;
-            let bytes = copy_sam_wrapper(&original, &name, outer.major)
+            let bytes = copy_sam_wrapper(&original, &name, outer.version)
                 .map_err(InlineError::Regeneration)?;
             self.renamed.push((class.to_string(), name.clone()));
             self.sam_wrappers.push(SamWrapperCopy {

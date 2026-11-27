@@ -72,6 +72,15 @@ pub(crate) fn produce_sole_tail_return(
         stmts: Vec::new(),
         value: Some(produced),
     };
+    // The `return` this block replaces was typed `Nothing`; the block now yields the expansion's
+    // result, and a later pass that lifts it reads that type back from the node. A block's type is
+    // its last statement's, so every enclosing block on the path ending in that `return` was typed
+    // `Nothing` as well and takes the result type too.
+    for node in std::iter::once(tail).chain(chain.iter().copied()) {
+        if ir.logical_type(node) == Some(Ty::Nothing) {
+            ir.set_logical_type(node, result_ty);
+        }
+    }
     for &block in &chain {
         let IrExpr::Block { stmts, value: None } = ir.expr(block).clone() else {
             unreachable!("the chain was proved to be statement blocks")
@@ -257,6 +266,33 @@ mod tail_promotion_tests {
         assert_block(&ir, outer, &[], Some(inner));
         assert_block(&ir, inner, &[first], Some(tail));
         assert_block(&ir, tail, &[], Some(returned));
+    }
+
+    /// A block is typed by its last statement, so the blocks enclosing a `return` are `Nothing`
+    /// beside it; every one of them takes the expansion's result type, not only the tail.
+    #[test]
+    fn every_nothing_block_on_the_path_takes_the_result_type() {
+        let mut ir = IrFile::default();
+        let first = statement(&mut ir, 1);
+        let returned = statement(&mut ir, 2);
+        let tail = statement_block(&mut ir, vec![]);
+        let inner = statement_block(&mut ir, vec![first, tail]);
+        let outer = statement_block(&mut ir, vec![inner]);
+        for block in [tail, inner, outer] {
+            ir.set_logical_type(block, Ty::Nothing);
+        }
+
+        assert!(produce_sole_tail_return(
+            &mut ir,
+            outer,
+            tail,
+            Some(returned),
+            Ty::Int,
+            None,
+        ));
+        for block in [tail, inner, outer] {
+            assert_eq!(ir.logical_type(block), Some(Ty::Int), "block {block}");
+        }
     }
 
     /// The return is not the tail, which is the case that must keep the caller's result local and

@@ -1,7 +1,75 @@
 //! Declaration-side most-specific selection and the genericity tiebreaker.
 
+use crate::libraries::{FunctionInfo, GenericSig};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
+
+/// A declaration as kotlinc's declaration comparison reads it at a call of `arguments` value
+/// arguments: its receiver and value parameters over its own type variables, without its context
+/// parameters, and a vararg parameter standing for the element its one argument supplies. kotlinc
+/// compares the parameters the arguments map to, so a declaration whose value parameters do not
+/// each take exactly one argument (an omitted default, an empty or several-element vararg) has no
+/// shape this comparison can express.
+pub(crate) fn declared_call_shape(
+    candidate: &FunctionInfo,
+    arguments: usize,
+) -> Option<GenericSig> {
+    let mut signature = candidate.semantic_signature().into_owned();
+    let contexts = candidate.context_count.min(signature.params.len());
+    signature.params.drain(..contexts);
+    if signature.params.len() != arguments {
+        return None;
+    }
+    if let Some(vararg) = candidate.call_sig.vararg_index {
+        let parameter = signature.params.get_mut(vararg.checked_sub(contexts)?)?;
+        *parameter = parameter.array_read_elem().unwrap_or(*parameter);
+    }
+    Some(signature)
+}
+
+/// Whether `general` is strictly less specific than `specific` by declaration: it accepts
+/// `specific`'s receiver and parameters over its own type variables, and `specific` does not accept
+/// its. `C.h(vararg e: T)` accepts `C.h(e: Collection<T>?)` with `T := Collection<T>?`, so the
+/// collection overload is the more specific one.
+fn declaration_strictly_less_specific(
+    src: &dyn SymbolSource,
+    general: &GenericSig,
+    specific: &GenericSig,
+) -> bool {
+    super::generic_declaration_accepts_parameters_of(src, general, specific)
+        && !super::generic_declaration_accepts_parameters_of(src, specific, general)
+}
+
+/// Whether neither declaration accepts the other's parameters, which kotlinc reports as ambiguous.
+pub(crate) fn declarations_incomparable(
+    src: &dyn SymbolSource,
+    left: &GenericSig,
+    right: &GenericSig,
+) -> bool {
+    !super::generic_declaration_accepts_parameters_of(src, left, right)
+        && !super::generic_declaration_accepts_parameters_of(src, right, left)
+}
+
+/// The positions of the shapes that no other shape is strictly more specific than. A `None` shape
+/// takes no part in the comparison: it is never dominated and dominates nothing.
+pub(crate) fn declaration_dominance_maxima(
+    src: &dyn SymbolSource,
+    shapes: &[Option<GenericSig>],
+) -> Vec<usize> {
+    (0..shapes.len())
+        .filter(|&index| {
+            let Some(general) = &shapes[index] else {
+                return true;
+            };
+            !shapes.iter().enumerate().any(|(other, specific)| {
+                other != index
+                    && specific.as_ref().is_some_and(|specific| {
+                        declaration_strictly_less_specific(src, general, specific)
+                    })
+            })
+        })
+        .collect()
+}
 
 pub(super) fn most_specific_indices(
     parameter_shapes: &[&[Ty]],

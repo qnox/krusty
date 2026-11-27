@@ -175,7 +175,7 @@ def cause(message: str) -> str:
     first = lines[0]
     # Order matters: the CLI's "not modeled by krusty" arrives WRAPPED in the worker's
     # `unsupported by krusty:` prefix, so the broader pattern must be tested last or it swallows it.
-    for pattern in ("internal compiler panic", "has no Java front end", "not modeled by krusty",
+    for pattern in ("internal compiler panic", "not modeled by krusty",
                     "malformed work request", "unsupported by krusty"):
         if pattern in first:
             return pattern

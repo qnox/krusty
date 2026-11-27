@@ -2881,6 +2881,7 @@ pub use checked_operation::{IrCheckedOperation, IrModulePropertyReference};
 mod construction_entries;
 mod exported_entries;
 mod function_parameters;
+mod value_class_constructions;
 pub use function_parameters::*;
 mod traversal;
 pub use traversal::*;

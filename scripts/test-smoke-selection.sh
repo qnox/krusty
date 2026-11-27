@@ -132,5 +132,18 @@ git commit -q -am "edit a plugin source and a covering module"
 expect_e2e "a module that is both changed and covering is selected once" "cli_plugins_e2e::
 grouped_e2e::"
 
+# The JVM lane's corpus scope for "<version> <newest>".
+expect_jvm_scope() {
+    local scenario=$1 versions=$2 expected=$3 actual
+    actual=$(KRUSTY_SMOKE_PRINT_JVM_SCOPE="$versions" bash scripts/smoke.sh master)
+    [ "$actual" = "$expected" ] || fail "$scenario: expected '$expected', got '$actual'"
+}
+
+reset_branch
+expect_jvm_scope "the newest version runs the whole corpus for byte identity" "2.4.21 2.4.21" full
+expect_jvm_scope "an older version runs the sample" "2.4.20 2.4.21" sampled
+KRUSTY_SMOKE_BYTE_IDENTITY=0 expect_jvm_scope "the byte-identity run can be turned off" \
+    "2.4.21 2.4.21" sampled
+
 [ "$failures" -eq 0 ] || exit 1
 echo "smoke selection tests passed"

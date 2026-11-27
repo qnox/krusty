@@ -8,7 +8,9 @@ mod builtins_customizer;
 mod callable_availability;
 mod catalog_presence;
 mod class_application_headers;
+mod classfile_member_facts;
 mod classifier_facts;
+pub(crate) use classfile_member_facts::inherited_by_delegation;
 mod classpath_annotation_classes;
 mod collection_canonicalization;
 mod declaration_headers;
@@ -72,7 +74,7 @@ use generic_signatures::{
 pub use generic_signatures::{parse_class_gsig, parse_method_gsig};
 use inline_capability::{metadata_inline, property_accessor_inline, property_getter_inline};
 use java_nullability::{
-    java_field_type, java_result_enhancement, java_type_argument_nullability, java_type_nullability,
+    java_field_type, java_result_enhancement, java_type_nullability, supertype_template_nullability,
 };
 use mapped_builtin_member_status::{
     mapped_builtin_member_status, retain_joined_mapped_members, MappedBuiltinMemberStatus,
@@ -128,19 +130,6 @@ pub struct JvmLibraries {
     /// not a lookup fallback: recursive metadata reads observe the same immutable raw signature.
     building_types:
         std::cell::RefCell<crate::fx_hash::HashMap<TypeName, std::sync::Arc<LibraryType>>>,
-}
-
-/// Kotlin's JVM delegation filter, applied at the provider boundary: an implemented Java method
-/// (no Kotlin `@Metadata`, such as a JDK default method or one admitted onto a mapped builtin) and
-/// an implemented builtin mapped to a Java default (`@PlatformDependent`, such as
-/// `Map.getOrDefault`) stay inherited instead of being forwarded to a delegate.
-pub(crate) fn inherited_by_delegation(
-    is_abstract: bool,
-    has_kotlin_metadata: bool,
-    annotations: &[TypeName],
-) -> bool {
-    !is_abstract
-        && (!has_kotlin_metadata || annotations.contains(&crate::types::wk::platform_dependent()))
 }
 
 /// JVM-only description of a classfile field used to realize an already-normalized Kotlin
@@ -535,6 +524,7 @@ impl JvmLibraries {
                     is_final: true,
                     deprecated_hidden: false,
                     inherited_by_delegation: false,
+                    signature_polymorphic: false,
                     return_value_status: None,
                 },
                 ..FunctionInfo::plain(kind, None, callable)
@@ -619,6 +609,7 @@ impl JvmLibraries {
                 is_final: true,
                 deprecated_hidden: false,
                 inherited_by_delegation: false,
+                signature_polymorphic: false,
                 return_value_status: None,
             };
             function.callable.annotations = builtin.annotations;
@@ -805,6 +796,7 @@ impl JvmLibraries {
                     is_final: function.is_final(),
                     deprecated_hidden: false,
                     inherited_by_delegation: false,
+                    signature_polymorphic: false,
                     return_value_status: Some(function.return_value_status),
                 },
                 ..FunctionInfo::plain(
@@ -1493,6 +1485,10 @@ impl JvmLibraries {
                     }) {
                         member.descriptor.clear();
                     }
+                } else {
+                    member.set_signature_polymorphic(
+                        classfile_member_facts::is_signature_polymorphic_method(internal_name, m),
+                    );
                 }
                 member.physical_ret = physical_ret;
                 // Kotlin metadata owns declaration modality. In legacy JVM-default mode a method
@@ -2198,29 +2194,27 @@ impl JvmLibraries {
                         .map(|(_, _, supertypes)| supertypes)
                 })
                 .unwrap_or_default();
-            // A JAVA class's supertype ARGUMENTS carry Java's flexible nullability, exactly as its
-            // member signatures do: `class Document implements Map<String, Object>` exposes
-            // `MutableMap<String!, Any!>`, so `doc["k"] = null` is legal. Read verbatim they hardened
-            // to non-null, and every member reached THROUGH the supertype then rejected a nullable
-            // argument — `set(String, Any)` refused `Long?` while the class's own `put` accepted it.
-            // A Kotlin class states its own nullability in `@Metadata` and must keep it.
-            let declared_supertype_templates: Vec<Ty> = if has_kotlin_metadata {
-                declared_supertype_templates
-            } else {
-                declared_supertype_templates
-                    .into_iter()
-                    .map(|template| match template.kind() {
-                        TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
-                            name,
-                            &arguments
-                                .iter()
-                                .map(|argument| java_type_argument_nullability(*argument))
-                                .collect::<Vec<_>>(),
-                        ),
-                        _ => template,
-                    })
-                    .collect()
-            };
+            let purely_implemented = super::pure_implementations::purely_implemented_supertype(
+                internal_name,
+                &ci.annotations,
+                &type_params,
+                &type_param_bounds,
+            );
+            // kotlinc gives a pure implementation the interface it purely implements as a supertype
+            // of its own, where no Java edge already names that interface.
+            if let Some(interface) = purely_implemented.and_then(Ty::obj_internal) {
+                if !supertypes.iter_ids().any(|supertype| {
+                    super::jvm_class_map::type_names_map_to_same_jvm_internal(supertype, interface)
+                }) {
+                    supertypes.push_name(interface);
+                }
+            }
+            let declared_supertype_templates = supertype_template_nullability(
+                declared_supertype_templates,
+                purely_implemented,
+                is_mapped_builtin,
+                has_kotlin_metadata,
+            );
             let mut callable_signatures = declared_supertype_templates
                 .iter()
                 .copied()

@@ -21,6 +21,19 @@ pub(crate) fn for_checked_klib_bodies<'a>(
     roots: impl IntoIterator<Item = crate::libraries::KlibBodyCallable<'a>>,
     represented: &[TypeName],
 ) -> Result<CheckedKlibDependencyFacts, ExternalCallableId> {
+    for_checked_klib_bodies_reading(source, bodies, roots, represented, &[])
+}
+
+/// [`for_checked_klib_bodies`] for a file that also reads the library objects `read_objects` as
+/// values: each admitted object is materialized with its initialization and the members it
+/// inherits, so the graph reaches their bodies as well.
+pub(crate) fn for_checked_klib_bodies_reading<'a>(
+    source: &dyn SymbolSource,
+    bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    roots: impl IntoIterator<Item = crate::libraries::KlibBodyCallable<'a>>,
+    represented: &[TypeName],
+    read_objects: &[TypeName],
+) -> Result<CheckedKlibDependencyFacts, ExternalCallableId> {
     let mut builtin_implementations = crate::fx_hash::HashMap::default();
     let mut sam_declarations = crate::fx_hash::HashMap::default();
     let mut member_edges = crate::fx_hash::HashMap::default();
@@ -43,8 +56,16 @@ pub(crate) fn for_checked_klib_bodies<'a>(
         .into_iter()
         .map(|callable| callable.identity().clone())
         .collect::<Vec<_>>();
+    let mut inherited_defaults = Vec::new();
+    pending.extend(read_object_callees(
+        source,
+        bodies,
+        entries_factory.as_ref(),
+        read_objects.iter().copied(),
+        &mut inherited_defaults,
+    ));
     let mut visited = crate::fx_hash::HashSet::default();
-    while let Some(identity) = pending.pop() {
+    while let Some(identity) = next_reached(&mut pending, &mut inherited_defaults, &visited) {
         if !visited.insert(identity.clone()) {
             continue;
         }
@@ -72,7 +93,11 @@ pub(crate) fn for_checked_klib_bodies<'a>(
             source,
             bodies,
             entries_factory.as_ref(),
-            &emitted.objects,
+            emitted
+                .objects
+                .iter()
+                .filter_map(crate::klib_lowering::object_classifier),
+            &mut inherited_defaults,
         ));
 
         // A reached constructor's initialization is serialized on its owning class. These are
@@ -258,17 +283,44 @@ fn emitted_initialization_callees(
 /// Declarations the emission closure reaches through the library objects `objects` names: each
 /// admitted object's initialization, with the members dispatch reaches, and those of the objects
 /// that initialization reads in turn. An object no unit admits contributes nothing.
+/// The next declaration to walk. When none is pending, the inherited interface defaults whose
+/// implemented declarations a walked body now calls are released, as emission releases them.
+fn next_reached(
+    pending: &mut Vec<crate::libraries::KlibDependencyCallable>,
+    defaults: &mut Vec<crate::klib_lowering::InheritedDefault>,
+    visited: &crate::fx_hash::HashSet<crate::libraries::KlibDependencyCallable>,
+) -> Option<crate::libraries::KlibDependencyCallable> {
+    loop {
+        if let Some(next) = pending.pop() {
+            return Some(next);
+        }
+        let (released, waiting): (Vec<_>, Vec<_>) =
+            std::mem::take(defaults).into_iter().partition(|default| {
+                default
+                    .implemented
+                    .iter()
+                    .any(|callee| visited.contains(callee))
+            });
+        *defaults = waiting;
+        if released.is_empty() {
+            return None;
+        }
+        pending.extend(released.into_iter().map(|default| default.body));
+    }
+}
+
 fn read_object_callees(
     source: &dyn SymbolSource,
     bodies: &crate::klib_libraries::KlibDeclarationBodies,
     entries_factory: Option<&crate::libraries::KlibDependencyCallable>,
-    objects: &[crate::metadata::id_signature::KlibPublicIdSignature],
+    objects: impl IntoIterator<Item = TypeName>,
+    defaults: &mut Vec<crate::klib_lowering::InheritedDefault>,
 ) -> Vec<crate::libraries::KlibDependencyCallable> {
     let mut callees = Vec::new();
-    let mut pending = objects.to_vec();
+    let mut pending = objects.into_iter().collect::<Vec<_>>();
     let mut seen = crate::fx_hash::HashSet::default();
     while let Some(object) = pending.pop() {
-        let Some(class) = crate::klib_lowering::object_classifier(&object)
+        let Some(class) = Some(object)
             .filter(|classifier| seen.insert(*classifier))
             .and_then(|classifier| source.klib_body_class_contract(classifier))
             .filter(|class| class.declares_instances() && class.emits_members())
@@ -292,10 +344,19 @@ fn read_object_callees(
         if let Ok(Some(initialization)) = facts.declared_instances_callees(&class, bodies) {
             callees.extend(initialization);
         }
+        // The interface defaults the object inherits wait for a walked body to call a declaration
+        // they implement, as emission releases them.
+        defaults.extend(
+            facts
+                .object_inherited_defaults(&class, bodies)
+                .unwrap_or_default(),
+        );
         pending.extend(
             facts
                 .declared_instances_objects(&class, bodies)
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .iter()
+                .filter_map(crate::klib_lowering::object_classifier),
         );
     }
     callees

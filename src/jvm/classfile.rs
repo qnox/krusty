@@ -39,6 +39,7 @@ mod pool_noting;
 mod source_map_annotation;
 mod stack_maps;
 mod utf8_pool;
+mod version;
 
 pub use annotation_values::split_declaration_annotations;
 use annotation_values::{NOT_NULL, NULLABLE};
@@ -68,9 +69,7 @@ pub const ACC_STRICT: u16 = 0x0800;
 pub const ACC_SYNTHETIC: u16 = 0x1000;
 pub const ACC_ANNOTATION: u16 = 0x2000;
 pub const ACC_ENUM: u16 = 0x4000;
-
-// Major 52 = Java 8, matching kotlinc's default JVM target.
-pub const MAJOR_JAVA8: u16 = 52;
+pub use version::{ClassFileVersion, ACC_IDENTITY, MAJOR_JAVA8, PREVIEW_MINOR_VERSION};
 
 /// JVM verification type for StackMapTable entries (JVMS §4.7.4).
 #[derive(Clone, PartialEq)]
@@ -529,8 +528,9 @@ pub struct ClassWriter {
     annotation_class_refs: crate::fx_hash::HashSet<String>,
     /// Entries for the `PermittedSubclasses` attribute.
     permitted_subclasses: Vec<String>,
-    /// Class-file major version to emit (default v52; set via [`ClassWriter::set_major`]).
-    major: u16,
+    /// Class-file version to emit (default v52, no preview marking; set via
+    /// [`ClassWriter::set_major`] and [`ClassWriter::set_preview`]).
+    version: ClassFileVersion,
     /// Source-file simple name for the `SourceFile` attribute (set via [`ClassWriter::set_source_file`]).
     source_file: Option<String>,
     /// The JSR-045 source map for a class that contains inlined code, accumulated as each inline
@@ -592,7 +592,7 @@ impl ClassWriter {
             value_classes: Rc::default(),
             annotation_class_refs: crate::fx_hash::HashSet::default(),
             permitted_subclasses: Vec::new(),
-            major: MAJOR_JAVA8,
+            version: ClassFileVersion::default(),
             source_file: None,
             source_map: crate::jvm::source_map::SourceMap::default(),
             method_source_map: crate::jvm::source_map::SourceMap::default(),
@@ -604,12 +604,25 @@ impl ClassWriter {
 
     /// Set the class-file major version to emit (kotlinc maps `-jvm-target 25` ⇒ v69). Default v52.
     pub fn set_major(&mut self, major: u16) {
-        self.major = major;
+        self.version.major = major;
+    }
+    /// Mark the class file as compiled with preview features, as `-Xjvm-enable-preview` does for
+    /// every class ([`ClassFileVersion`]).
+    pub fn set_preview(&mut self, preview: bool) {
+        self.version.preview = preview;
+    }
+    /// The class file is marked as compiled with preview features ([`ClassWriter::set_preview`]).
+    pub fn is_preview(&self) -> bool {
+        self.version.preview
+    }
+    /// The version this writer targets.
+    pub fn version(&self) -> ClassFileVersion {
+        self.version
     }
     /// The class-file major version (52 = Java 8, 53 = Java 9, …). Codegen that is gated on the target
     /// — e.g. `invokedynamic` string concatenation, which kotlinc emits only for Java 9+ — reads it.
     pub fn major(&self) -> u16 {
-        self.major
+        self.version.major
     }
 
     /// The class's own source file, for a synthesized class that belongs to it.
@@ -1518,7 +1531,7 @@ impl ClassWriter {
                     u2(&mut body, inner_idx);
                     u2(&mut body, outer_idx);
                     u2(&mut body, name_idx);
-                    u2(&mut body, s.access);
+                    u2(&mut body, self.version.inner_class_access(s.access));
                 }
                 (name, body)
             })
@@ -1622,8 +1635,8 @@ impl ClassWriter {
         });
         let mut out = Vec::new();
         u4(&mut out, 0xCAFEBABE);
-        u2(&mut out, 0); // minor
-        u2(&mut out, self.major);
+        u2(&mut out, self.version.minor());
+        u2(&mut out, self.version.major);
         self.cp.serialize(&mut out);
         u2(&mut out, self.access);
         u2(&mut out, self.this_class);

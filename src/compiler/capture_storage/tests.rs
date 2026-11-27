@@ -200,6 +200,7 @@ fn physical_compaction_preserves_other_fields_and_their_side_effects() {
             setter: None,
             visibility: crate::types::Visibility::Private,
             type_params: Vec::new(),
+            return_value_status: Default::default(),
             accessor_annotations: Default::default(),
         }],
     );
