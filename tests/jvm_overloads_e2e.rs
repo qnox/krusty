@@ -142,7 +142,41 @@ fn enum_constructor_overloads_keep_the_name_and_ordinal_prefix_like_kotlinc() {
     );
 }
 
-const VALUE_CLASS_CONSTRUCTORS: &str = "package p
+const VALUE_CLASS_CONSTRUCTORS: &str = "@JvmInline value class V(val v: Int)
+
+class HiddenSecondary(val x: String) {
+    @JvmOverloads constructor(a: V, b: Int = 1, c: Int = 2) : this(\"${a.v}$b$c\")
+}
+
+class HiddenPrimary @JvmOverloads constructor(val v: V, val a: Int = 1, val b: String = \"b\") {
+    override fun toString() = \"${v.v}$a$b\"
+}
+
+fun box(): String {
+    val int = Int::class.javaPrimitiveType
+    val marker = Class.forName(\"kotlin.jvm.internal.DefaultConstructorMarker\")
+    val secondary = HiddenSecondary::class.java
+    val one = secondary.getDeclaredConstructor(int)
+    one.isAccessible = true
+    if ((one.newInstance(7) as HiddenSecondary).x != \"712\") return \"secondary: ${(one.newInstance(7) as HiddenSecondary).x}\"
+    val accessor = secondary.getConstructor(int, marker)
+    if ((accessor.newInstance(8, null) as HiddenSecondary).x != \"812\") return \"secondary accessor\"
+    val primary = HiddenPrimary::class.java
+    val first = primary.getDeclaredConstructor(int)
+    first.isAccessible = true
+    if (first.newInstance(5).toString() != \"51b\") return \"primary: ${first.newInstance(5)}\"
+    val hidden = primary.getConstructor(int, marker)
+    if (hidden.newInstance(6, null).toString() != \"61b\") return \"primary accessor\"
+    return \"OK\"
+}
+";
+
+#[test]
+fn value_class_constructor_overloads_are_reachable_through_marker_accessors() {
+    common::expect_box_same_as_kotlinc(VALUE_CLASS_CONSTRUCTORS, "jvm_overloads_value_class");
+}
+
+const ANNOTATED_VALUE_CLASS_CONSTRUCTORS: &str = "package p
 
 @JvmInline value class V(val v: Int)
 
@@ -167,7 +201,7 @@ class PlainSecondary(val x: String) {
 fn value_class_constructor_overloads_and_annotations_sit_on_the_marker_accessors_like_kotlinc() {
     common::assert_classes_identical_to_kotlinc(
         "JvmOverloadsValueClassConstructors",
-        VALUE_CLASS_CONSTRUCTORS,
+        ANNOTATED_VALUE_CLASS_CONSTRUCTORS,
         &["p/HiddenSecondary", "p/HiddenPrimary", "p/PlainSecondary"],
     );
 }

@@ -20,7 +20,7 @@ use crate::method_parameters::{
 use krusty::ir::{
     ClassId, CtorDelegateTarget, IrClass, IrConstructorAccess, IrConstructorTarget, IrFile,
 };
-use krusty::types::TypeName;
+use krusty::types::{Ty, TypeName};
 
 /// Whether this construction goes through the value-class `DefaultConstructorMarker` accessor.
 pub(super) fn uses_value_class_marker_accessor(
@@ -162,6 +162,28 @@ pub(super) fn emit_accessor(
 /// marker accessor: it takes a value class, and the private constructor keeps none of them.
 pub(super) fn primary_annotations_ride_accessor(ir: &IrFile, class: &IrClass) -> bool {
     !class.is_sealed && !class.is_enum && ir.has_value_param_ctor(&class.fq_name())
+}
+
+/// Whether the primary constructor of `class` itself carries its parameters' user annotations.
+pub(super) fn primary_parameters_keep_annotations(ir: &IrFile, class: &IrClass) -> bool {
+    !class.ctor_param_annotations.is_empty() && !primary_annotations_ride_accessor(ir, class)
+}
+
+/// Write the declared annotations of the primary constructor of `class`, whose JVM parameters are
+/// `parameters`, on the constructor itself, unless they ride its marker accessor.
+pub(super) fn emit_primary_declared_annotations(
+    cw: &mut ClassWriter,
+    ir: &IrFile,
+    class: &IrClass,
+    parameters: &[Ty],
+) {
+    if !primary_annotations_ride_accessor(ir, class) {
+        super::function_annotations::emit_constructor_declared(
+            cw,
+            &class.primary_ctor_annotations,
+            &super::method_descriptor(parameters, Ty::Unit),
+        );
+    }
 }
 
 /// The same for the secondary `constructor` of `class`.
