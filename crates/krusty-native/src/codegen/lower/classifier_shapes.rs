@@ -142,6 +142,16 @@ pub(super) fn is_char_sequence(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/CharSequence"])
 }
 
+/// `kotlin.text.Appendable`, which the runtime's builder implements.
+pub(super) fn is_appendable(internal: TypeName) -> bool {
+    is_identity(internal, &["kotlin/text/Appendable"])
+}
+
+/// `kotlin.reflect.KClass`, whose instances the runtime builds over the descriptor named for it.
+pub(super) fn is_kclass(internal: TypeName) -> bool {
+    is_identity(internal, &["kotlin/reflect/KClass"])
+}
+
 pub(super) fn is_string_builder(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/text/StringBuilder"])
 }
@@ -192,13 +202,45 @@ pub(super) fn is_enum_entries(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/enums/EnumEntries"])
 }
 
-fn standard_interface_descriptor(internal: TypeName) -> Option<&'static str> {
-    Some(if internal == krusty::types::wk::function_root() {
-        "kt_type_function"
-    } else if is_comparable(internal) {
+/// `kotlin.collections.RandomAccess`, the marker every runtime list wears.
+pub(super) fn is_random_access(internal: TypeName) -> bool {
+    is_identity(internal, &["kotlin/collections/RandomAccess"])
+}
+
+/// The descriptor of an interface the runtime provides instances of, or marks its own objects
+/// with. This is the one table: a type check against the interface and the interface markers of a
+/// program class that implements it both read it, so a runtime object and a program object answer
+/// the same test.
+pub(super) fn runtime_interface_descriptor(internal: TypeName) -> Option<&'static str> {
+    Some(if is_comparable(internal) {
         "kt_type_comparable"
     } else if is_char_sequence(internal) {
         "kt_type_char_sequence"
+    } else if is_appendable(internal) {
+        "kt_type_appendable"
+    } else if is_closed_range(internal) {
+        "kt_type_closed_range"
+    } else if is_closed_floating_range(internal) {
+        "kt_type_closed_floating_point_range"
+    } else if is_lazy(internal) {
+        "kt_type_lazy"
+    } else if is_kclass(internal) {
+        "kt_type_kclass"
+    } else if is_enum_entries(internal) {
+        "kt_type_enum_entries_interface"
+    } else if is_random_access(internal) {
+        "kt_type_random_access_interface"
+    } else {
+        return None;
+    })
+}
+
+pub(super) fn standard_interface_descriptor(internal: TypeName) -> Option<&'static str> {
+    if let Some(symbol) = runtime_interface_descriptor(internal) {
+        return Some(symbol);
+    }
+    Some(if internal == krusty::types::wk::function_root() {
+        "kt_type_function"
     } else if is_identity(internal, &["kotlin/reflect/KCallable"]) {
         "kt_type_kcallable"
     } else if is_identity(internal, &["kotlin/reflect/KProperty"]) {
@@ -475,6 +517,9 @@ pub(super) fn class_runtime_interface_descriptors(
     class: ClassId,
     local_interfaces: &[ClassId],
 ) -> Vec<&'static str> {
+    // The interfaces a library superclass reaches (an enum's `kotlin.Enum` is a `Comparable`) are
+    // implemented by the class as its own are.
+    let inherited = classifiers.inherited_interfaces(ir.classes[class as usize].fq_name_id());
     let external_roots = ir.classes[class as usize]
         .interfaces
         .iter()
@@ -483,6 +528,7 @@ pub(super) fn class_runtime_interface_descriptors(
                 .iter()
                 .flat_map(|interface| ir.classes[*interface as usize].interfaces.iter()),
         )
+        .chain(inherited)
         .filter(|interface| ir.class_id_by_name(*interface).is_none());
     let mut descriptors = runtime_interface_descriptors(classifiers, external_roots);
     let function_roles = std::iter::once(class)
@@ -692,6 +738,11 @@ impl<'a> FileLowering<'a> {
                 !class.is_interface && !class.is_abstract && answered_by_arm(id)
             })
             .count()
+    }
+
+    /// Whether `class` is an enum class, whose base storage the runtime owns.
+    pub(super) fn is_enum_class(&self, class: ClassId) -> bool {
+        super::super::super::classes::is_enum(&self.ir.classes[class as usize])
     }
 
     /// Whether a concrete class of this file can be an instance of `internal`.

@@ -5839,6 +5839,14 @@ const LMF_METAFACTORY_DESC: &str = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljav
 Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;\
 Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
 
+/// The `LambdaMetafactory.altMetafactory` bootstrap-method descriptor: the call site carries flags
+/// and extra arguments (here the bridges) in a trailing array.
+const LMF_ALT_METAFACTORY_DESC: &str = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;\
+Ljava/lang/invoke/MethodType;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;";
+
+/// `LambdaMetafactory.FLAG_BRIDGES`: the call site lists additional method types to bridge.
+const LMF_FLAG_BRIDGES: i32 = 4;
+
 /// The boxed (wrapper) descriptor for a `Ty` — primitives map to their wrapper, references unchanged.
 pub(super) fn boxed_descriptor(t: Ty) -> String {
     if t.non_null().is_unsigned() {

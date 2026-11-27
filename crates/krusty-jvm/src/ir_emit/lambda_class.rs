@@ -660,6 +660,61 @@ pub(super) struct SamBootstrapDescriptors {
     pub(super) instantiated_method: String,
 }
 
+/// The erased descriptors, other than the interface method's own, under which the interface's
+/// override family declares the method: `Local.value(): String` overriding `Root<T>.value(): T`
+/// also answers `value()Ljava/lang/Object;`. `LambdaMetafactory.altMetafactory` implements each as
+/// a bridge, as kotlinc's call site asks for them.
+pub(super) fn sam_bridge_descriptors(
+    target: &krusty::ir::IrSamTarget,
+    erased: &str,
+) -> Vec<String> {
+    if target.suspend || target.has_receiver || target.context_count != 0 {
+        return Vec::new();
+    }
+    let mut bridges = Vec::new();
+    for frame in &target.dispatch_methods {
+        let parameters = krusty::jvm::method_descriptors::jvm_tys(&frame.parameters);
+        let result = krusty::jvm::method_descriptors::jvm_declared_ty(&frame.result);
+        let descriptor = krusty::jvm::names::method_descriptor(&parameters, result);
+        if descriptor != erased && !bridges.contains(&descriptor) {
+            bridges.push(descriptor);
+        }
+    }
+    // `LambdaMetafactory` adapts a bridge by casting references only: a bridge that would box or
+    // unbox against the interface method is one kotlinc realizes as a class instead.
+    if bridges
+        .iter()
+        .any(|bridge| !bridge_adapts_by_cast(erased, bridge))
+    {
+        return Vec::new();
+    }
+    bridges
+}
+
+/// Whether `bridge` differs from `erased` only where both sides are references.
+fn bridge_adapts_by_cast(erased: &str, bridge: &str) -> bool {
+    let (Some((erased_parameters, erased_result)), Some((bridge_parameters, bridge_result))) = (
+        krusty::jvm::names::parse_method_descriptor(erased),
+        krusty::jvm::names::parse_method_descriptor(bridge),
+    ) else {
+        return false;
+    };
+    erased_parameters.len() == bridge_parameters.len()
+        && erased_parameters
+            .iter()
+            .chain(std::iter::once(&erased_result))
+            .zip(
+                bridge_parameters
+                    .iter()
+                    .chain(std::iter::once(&bridge_result)),
+            )
+            .all(|(own, other)| {
+                own == other
+                    || (super::descriptor_is_reference(own)
+                        && super::descriptor_is_reference(other))
+            })
+}
+
 /// Build the erased SAM and instantiated method descriptors once for class-mode selection and
 /// indy emission. Keeping this at the lambda-class boundary prevents a representation decision
 /// from drifting away from the actual bootstrap arguments.

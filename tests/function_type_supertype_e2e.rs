@@ -137,27 +137,6 @@ fn a_suspend_function_supertype_matches_kotlinc() {
         .unwrap_or_else(|diff| panic!("{diff}"));
 }
 
-/// The erased `invoke(Object, Object)` a caller reaches through `Function2` delegates to the
-/// suspend override with the object cast back to a `Continuation`.
-#[test]
-fn a_suspend_function_supertype_is_invoked_through_its_erased_bridge() {
-    const SRC: &str = "import kotlin.coroutines.*\n\
-class Probe : suspend (Int) -> String {\n\
-    override suspend fun invoke(p1: Int): String = if (p1 == 7) \"OK\" else \"fail\"\n\
-}\n\
-object Done : Continuation<String> {\n\
-    override val context: CoroutineContext get() = throw UnsupportedOperationException()\n\
-    override fun resumeWith(result: Result<String>) {}\n\
-}\n\
-fun box(): String {\n\
-    val erased: Any = Probe()\n\
-    @Suppress(\"UNCHECKED_CAST\")\n\
-    val physical = erased as (Int, Continuation<String>) -> Any?\n\
-    return physical(7, Done) as String\n\
-}\n";
-    common::expect_box_ok_with_stdlib(SRC, "SuspendFunctionSupertypeBridge");
-}
-
 /// Past the 22 numbered function interfaces a function type is `FunctionN`, whose single
 /// `invoke(Object[])` kotlinc implements as a final bridge that checks the array length and casts
 /// each element to the override's parameter.

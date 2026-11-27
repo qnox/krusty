@@ -1379,13 +1379,8 @@ impl BodyLowering<'_> {
                 } else {
                     let lowered = self.expression(argument)?;
                     let applied = self.class_arguments(lowered, declared)?;
-                    bindings.extend(
-                        callee
-                            .class_type_parameters
-                            .iter()
-                            .cloned()
-                            .zip(applied.type_args().iter().copied()),
-                    );
+                    let captured = self.star_captures(applied, callee.class_type_parameters);
+                    bindings.extend(callee.class_type_parameters.iter().cloned().zip(captured));
                     (Some(lowered), Some(applied))
                 }
             }
@@ -1450,6 +1445,44 @@ impl BodyLowering<'_> {
 
     /// The generic class `declared` names, applied to the type arguments the dispatch receiver
     /// `lowered` applies to it through its hierarchy.
+    /// The type arguments `applied` binds `formals` to, each star argument read at the bound its
+    /// slot declares: a member of `ClosedRange<*>` of `ClosedRange<T : Comparable<T>>` reads `T`
+    /// as a `Comparable<*>`, as kotlinc captures the star and approximates the capture's bound.
+    fn star_captures(&self, applied: Ty, formals: &[String]) -> Vec<Ty> {
+        let Some((owner, arguments)) = applied.obj_parts() else {
+            return applied.type_args().to_vec();
+        };
+        let stars = formals
+            .iter()
+            .map(|formal| {
+                (
+                    formal.clone(),
+                    Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
+                )
+            })
+            .collect::<crate::fx_hash::HashMap<_, _>>();
+        arguments
+            .iter()
+            .enumerate()
+            .map(|(slot, &argument)| {
+                if !matches!(argument.kind(), TyKind::StarProjection(_)) {
+                    return argument;
+                }
+                let mut declared = self
+                    .linker
+                    .classifier_parameter_bounds(owner, slot)
+                    .into_iter()
+                    .filter(|bound| bound.mentions_ty_param());
+                match (declared.next(), declared.next()) {
+                    (Some(bound), None) => {
+                        Ty::star_projection(crate::types::ty_subst(bound, &stars))
+                    }
+                    _ => argument,
+                }
+            })
+            .collect()
+    }
+
     fn class_arguments(&self, lowered: ExprId, declared: Ty) -> Lowered<Ty> {
         let actual = self.lowered_type(lowered);
         let owner = declared

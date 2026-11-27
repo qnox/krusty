@@ -35,6 +35,14 @@ pub fn member_identity(member: &crate::libraries::KlibDependencyCallable) -> Vec
     bytes
 }
 
+/// Exact identity of a classifier, independent of any callable it declares or implements.
+pub fn classifier_identity(classifier: &crate::libraries::KlibClassIdentity) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    identity_string(&mut bytes, &classifier.module);
+    classifier.signature.write_identity(&mut bytes);
+    bytes
+}
+
 /// The bytes that identify the getter (or, with `setter`, the setter) of one interface property
 /// across modules, from the published identity of any of its accessors: the declaring module and
 /// the property's public KLIB signature. Either accessor names the same property, so a module
@@ -59,4 +67,60 @@ pub fn property_member_identity(
 fn identity_string(bytes: &mut Vec<u8>, text: &str) {
     bytes.extend_from_slice(&(text.len() as u32).to_le_bytes());
     bytes.extend_from_slice(text.as_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifier_identity_includes_exact_module_and_structural_signature() {
+        use crate::libraries::KlibClassIdentity;
+        use crate::metadata::id_signature::KlibPublicIdSignature;
+        use crate::types::{type_name, type_name_nested_child};
+        let first = KlibClassIdentity {
+            module: "first".into(),
+            signature: KlibPublicIdSignature::classifier(type_name("sample/Contract")),
+        };
+        let mut second = first.clone();
+        second.module = "second".into();
+        assert_ne!(classifier_identity(&first), classifier_identity(&second));
+        let nested = KlibClassIdentity {
+            module: first.module.clone(),
+            signature: KlibPublicIdSignature::classifier(type_name_nested_child(
+                type_name("sample/Owner"),
+                "Contract",
+            )),
+        };
+        let top_level = KlibClassIdentity {
+            module: first.module.clone(),
+            // A top-level Contract in package sample.Owner has the same dotted display as
+            // nested sample.Owner.Contract, but different package/declaration boundaries.
+            signature: KlibPublicIdSignature::classifier(type_name("sample/Owner/Contract")),
+        };
+        assert_eq!(
+            nested.signature.declaration().segments(),
+            &["Owner".to_owned(), "Contract".to_owned()]
+        );
+        assert_eq!(
+            top_level.signature.declaration().segments(),
+            &["Contract".to_owned()]
+        );
+        assert_eq!(
+            nested.signature.package().segments(),
+            &["sample".to_owned()]
+        );
+        assert_eq!(
+            top_level.signature.package().segments(),
+            &["sample".to_owned(), "Owner".to_owned()]
+        );
+        assert_ne!(
+            classifier_identity(&nested),
+            classifier_identity(&top_level)
+        );
+        assert_eq!(
+            classifier_identity(&first),
+            classifier_identity(&first.clone())
+        );
+    }
 }

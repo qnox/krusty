@@ -224,6 +224,7 @@ pub(super) fn declarations(
             })
         {
             let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
+            state.note_constructed_class_defaults(&emitted);
             state.pending.extend(
                 emitted
                     .callables
@@ -253,6 +254,7 @@ pub(super) fn declarations(
             && !externals.contains_key(&identity)
         {
             let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
+            state.note_constructed_class_defaults(&emitted);
             state
                 .pending
                 .extend(emitted.callables.into_iter().map(|callee| (callee, None)));
@@ -291,6 +293,7 @@ pub(super) fn declarations(
                 Some(declaration) => declaration,
                 None if raw_header_capability && known_target.is_none() => {
                     let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
+                    state.note_constructed_class_defaults(&emitted);
                     state
                         .pending
                         .extend(emitted.callables.into_iter().map(|callee| (callee, None)));
@@ -530,6 +533,7 @@ pub(super) fn declarations(
                 walk_declared_instances(platform, bodies, &facts, class, &mut state)?;
             }
             let emitted = crate::klib_lowering::emitted_body(bodies, &identity);
+            state.note_constructed_class_defaults(&emitted);
             read_values(platform, bodies, &facts, &emitted.objects, &mut state)?;
             // A `super` call runs the interface body it names without dispatch, so the unit
             // emits that body as a callable entry even where no class inherits it.
@@ -1411,6 +1415,18 @@ fn walk_value_class_overrides(
         }
     }
     Ok(())
+}
+
+impl ClosureState<'_, '_> {
+    /// The interface defaults the local classes an emitted body constructs inherit are emitted with
+    /// those classes, as the members a materialized class dispatches to are: no walked body calls
+    /// them, and the target does not realize them as leaves.
+    fn note_constructed_class_defaults(&mut self, emitted: &crate::klib_libraries::EmittedBody) {
+        for default in &emitted.constructed_class_defaults {
+            self.dispatched.insert(default.clone());
+            self.emitted_defaults.insert(default.clone());
+        }
+    }
 }
 
 #[cfg(test)]

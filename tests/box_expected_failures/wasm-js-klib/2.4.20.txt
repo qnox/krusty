@@ -331,7 +331,6 @@ coroutines/inlineGenericFunCalledFromSubclass.kt
 coroutines/inlineSuspendLambdaNonLocalReturn.kt
 coroutines/inlineSuspendTypealias.kt
 coroutines/inlinedTryCatchFinally.kt
-coroutines/instanceOfContinuation.kt
 coroutines/intLikeVarSpilling/listThrowablePairInOneSlot.kt
 coroutines/intLikeVarSpilling/unusedCatchVar.kt
 coroutines/intrinsicSemantics/coroutineContext.kt

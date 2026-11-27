@@ -12,7 +12,7 @@
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
+use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_box_as_kotlinc};
 
 /// Emptiness and blankness, over text that is neither, empty, and whitespace only.
 #[test]
@@ -144,15 +144,29 @@ fn a_string_builder_answers_the_same_questions_about_its_text() {
     expect_native_box(source, "BuilderText", "OK");
 }
 
-/// `ignoreCase = true` declines: it asks about Unicode case folding, which the runtime cannot
-/// answer, and answering it as though the flag were absent would be a wrong answer rather than a
-/// missing one.
+/// `ignoreCase = true` compares case-insensitively.
 #[test]
-fn ignoring_case_declines() {
-    expect_native_decline(
+fn ignoring_case_matches_across_case() {
+    expect_native_box_as_kotlinc(
         "fun box(): String = if (\"Hello\".startsWith(\"HELLO\", ignoreCase = true)) \"OK\"\n\
          \x20   else \"fail\"\n",
         "IgnoreCaseStartsWith",
-        "startsWith",
     );
+}
+
+/// A `CharIterator` the stdlib's own body builds (`CharSequence.iterator()`) is read through its
+/// narrow static type, which no runtime range or array walk backs.
+#[test]
+fn a_char_iterator_a_library_body_builds_answers_has_next_and_next() {
+    let source = "fun box(): String {\n\
+         \x20   val it: CharIterator = \"abc\".iterator()\n\
+         \x20   var seen = \"\"\n\
+         \x20   while (it.hasNext()) seen += it.next()\n\
+         \x20   if (seen != \"abc\") return \"fail \" + seen\n\
+         \x20   var total = 0\n\
+         \x20   \"xyz\".forEach { total += it.code }\n\
+         \x20   return if (total == 'x'.code + 'y'.code + 'z'.code) \"OK\" else \"fail total\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "CharIteratorFromLibraryBody");
+    expect_native_box(source, "CharIteratorFromLibraryBody", "OK");
 }

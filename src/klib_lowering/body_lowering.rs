@@ -1536,7 +1536,7 @@ struct CaptureSite<'a> {
     formals: &'a [crate::types::TyParamName],
 }
 
-/// A value typed `actual` is one of `expected` through the capture of a star projection: the
+/// A value typed `actual` is one of `expected` through the capture of a star or `in` projection: the
 /// call binds a type parameter of its callee to the star, which the serialized call states as
 /// the type parameter's bound (`Key<*>` passed to `get<E : Element>(key: Key<E>)` is read at
 /// `Key<Element>`).
@@ -1578,17 +1578,25 @@ fn captures_star_projection(actual: Ty, expected: Ty, site: CaptureSite<'_>) -> 
         let crate::types::TyKind::TyParam(name, bound) = declared.kind() else {
             return false;
         };
-        let sole = !declared_args
+        let alone_in_declaration = !declared_args
             .iter()
             .enumerate()
-            .any(|(other, argument)| other != slot && calls::names(*argument, name))
-            && site
-                .parameters
-                .iter()
-                .filter(|parameter| calls::names(**parameter, name))
-                .count()
-                == 1;
-        if !have.is_star_projection() || !site.formals.contains(&name) || !sole || *want != bound {
+            .any(|(other, argument)| other != slot && calls::names(*argument, name));
+        // A star captures apart from every other use of the parameter, so it must be the call's
+        // only one. An `in` projection is approximated by the bound alone, and the parameter's
+        // other uses are each checked against that bound on their own.
+        let capturable = if have.is_star_projection() {
+            alone_in_declaration
+                && site
+                    .parameters
+                    .iter()
+                    .filter(|parameter| calls::names(**parameter, name))
+                    .count()
+                    == 1
+        } else {
+            have.is_in_projection() && alone_in_declaration
+        };
+        if !capturable || !site.formals.contains(&name) || *want != bound {
             return false;
         }
         captured = true;
@@ -1642,6 +1650,23 @@ mod capture_conversion_tests {
         };
         assert!(captures_star_projection(
             key(star()),
+            key(Ty::obj("demo/Element")),
+            site
+        ));
+    }
+
+    #[test]
+    fn an_in_projection_is_captured_by_a_type_parameter_of_the_callee_at_its_bound() {
+        let (name, e) = formal();
+        let declared = key(e);
+        let site = CaptureSite {
+            declared,
+            parameters: &[declared],
+            formals: &[name],
+        };
+        let contravariant = Ty::in_projection(Ty::obj("demo/Element"));
+        assert!(captures_star_projection(
+            key(contravariant),
             key(Ty::obj("demo/Element")),
             site
         ));

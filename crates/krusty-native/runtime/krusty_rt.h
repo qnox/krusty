@@ -285,6 +285,12 @@ extern const KType kt_type_number;
 extern const KType kt_type_comparable;
 /* `kotlin.CharSequence`, which a `String` and a `StringBuilder` both point at. */
 extern const KType kt_type_char_sequence;
+/* `kotlin.text.Appendable`, which a `StringBuilder` points at. */
+extern const KType kt_type_appendable;
+/* `kotlin.ranges.ClosedRange`, which each of the runtime's ranges points at, and
+   `ClosedFloatingPointRange`, which the floating-point ones point at too. */
+extern const KType kt_type_closed_range;
+extern const KType kt_type_closed_floating_point_range;
 /* The four unsigned integers. Each is a value class over a signed primitive and is carried as the
    machine integer it wraps, so a descriptor of its own is the only thing keeping a BOXED one from
    being an `Int`: `1u as? Int` must fail, and printing one must not print the signed number sharing
@@ -324,12 +330,32 @@ kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source);
    overlap within one array. */
 void kt_array_copy_range(KRef source, kt_int from, KRef destination, kt_int to, kt_int count);
 
+/* Kotlin/Native's `arrayFill`: write `value` to `from until to` of `array`. A range outside the
+   array raises `IndexOutOfBoundsException`, and a start past the end `IllegalArgumentException`,
+   before anything is written.
+   One function per array kind; `kt_array_fill_range` is the reference array's. */
+void kt_array_fill_range(KRef array, kt_int from, kt_int to, KRef value);
+void kt_boolean_array_fill_range(KRef array, kt_int from, kt_int to, kt_boolean value);
+void kt_byte_array_fill_range(KRef array, kt_int from, kt_int to, kt_byte value);
+void kt_char_array_fill_range(KRef array, kt_int from, kt_int to, kt_char value);
+void kt_short_array_fill_range(KRef array, kt_int from, kt_int to, kt_short value);
+void kt_int_array_fill_range(KRef array, kt_int from, kt_int to, kt_int value);
+void kt_long_array_fill_range(KRef array, kt_int from, kt_int to, kt_long value);
+void kt_float_array_fill_range(KRef array, kt_int from, kt_int to, kt_float value);
+void kt_double_array_fill_range(KRef array, kt_int from, kt_int to, kt_double value);
+
 /* An index outside `0 until size`: raises Kotlin's `IndexOutOfBoundsException`, with the JVM's
    wording, and returns; the caller returns too. */
 void kt_index_out_of_bounds(kt_int index, kt_int size);
 
 /* `Enum.toString()`: the constant's name, read from the storage `kotlin.Enum` contributes. */
 KRef kt_enum_to_string(KRef self);
+
+/* The `kotlin.Enum` marker every enum class descriptor has as its `super`, whether an object is one
+   of an enum's constants (or an entry body of one), and `Enum.compareTo` over two of them. */
+extern const KType kt_type_enum;
+kt_boolean kt_is_enum_constant(KRef object);
+kt_int kt_enum_compare_to(KRef self, KRef other);
 
 /* An exhaustive `when` none of whose branches matched after all: Kotlin's
    `NoWhenBranchMatchedException`, raised and returned from. */
@@ -517,6 +543,8 @@ extern const KType kt_type_mutable_list;
 kt_boolean kt_is_mutable_list(KRef value);
 KRef kt_mutable_list_new(void);
 KRef kt_mutable_list_with_capacity(kt_int capacity);
+/* `ArrayList.build()`: the list a `buildList` block filled. */
+KRef kt_mutable_list_build(KRef self);
 /* A growable list holding a COPY of an array's elements. */
 KRef kt_mutable_list_of(KRef elements);
 /* `ArrayList(elements)`: a growable list holding a copy of any collection's elements. */
@@ -544,6 +572,7 @@ kt_boolean kt_list_iterator_has_previous(KRef iterator);
 KRef kt_list_iterator_previous(KRef iterator);
 kt_int kt_list_iterator_next_index(KRef iterator);
 kt_int kt_list_iterator_previous_index(KRef iterator);
+void kt_list_iterator_set(KRef iterator, KRef element);
 
 /* Iteration through a receiver the generator could only type by the INTERFACE, where either of the
    two iterable things this runtime has may turn up. The descriptor decides which, and `next`
@@ -758,26 +787,6 @@ kt_boolean kt_floating_range_contains(KRef range, kt_double value);
 kt_boolean kt_floating_range_is_empty(KRef range);
 kt_double kt_floating_range_start(KRef range);
 kt_double kt_floating_range_end(KRef range);
-
-/* ---- comparable ranges ------------------------------------------------------------------------
-
-   `"a".."c"`, and every other `a..b` ordered by `Comparable` rather than by a machine comparison.
-   The bounds are OBJECTS, and the range carries the `compareTo` it orders them by: the generator
-   chose that operation where it built the range, knowing the element type, so the runtime never
-   has to rediscover it from the bounds' descriptors. `kt_compare_any` is the one for the builtin
-   comparables; a program's own `Comparable` class passes its `compareTo`. Not a progression
-   either: `Comparable` names no successor, so there is no step and no walk. */
-extern const KType kt_type_comparable_range;
-
-/* `a.compareTo(b)`: negative, zero or positive. A program's `compareTo` may raise instead; it then
-   leaves the exception pending and its answer means nothing. */
-typedef kt_int (*kt_compare_fn)(KRef a, KRef b);
-
-KRef kt_comparable_range(KRef start, KRef end, kt_compare_fn compare);
-kt_boolean kt_comparable_range_contains(KRef range, KRef value);
-kt_boolean kt_comparable_range_is_empty(KRef range);
-KRef kt_comparable_range_start(KRef range);
-KRef kt_comparable_range_end(KRef range);
 
 /* `for (x in range)` over a range the program materialized. The iterator is its own object because
    the loop reads it twice per step; a range iterated straight from a literal never becomes one,
@@ -1007,6 +1016,7 @@ KRef kt_string_builder_append_range(KRef self, KRef value, KRef start_index, KRe
 
 /* `sb.setLength(n)`, by UTF-16 unit as Kotlin counts: shorter truncates, longer pads with NUL. */
 void kt_string_builder_set_length(KRef self, kt_int length);
+KRef kt_string_builder_reverse(KRef self);
 
 /* Whether a value is one, for the entry points that serve both shapes. */
 kt_boolean kt_is_string_builder(KRef value);
@@ -1230,6 +1240,7 @@ KRef kt_class_literal(const KType *type);
    fails loudly and names itself. */
 KRef kt_class_simple_name(KRef self);
 KRef kt_class_qualified_name(KRef self);
+kt_boolean kt_class_is_instance(KRef self, KRef value);
 
 /* `typeOf<T>()`: a `kotlin.reflect.KType`. Each is a static object the generator emits whole
    (see `krusty_rt.c` for its layout) wearing `kt_type_ktype_impl`, which names the `KType` marker

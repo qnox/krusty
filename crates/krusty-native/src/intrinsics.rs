@@ -2061,6 +2061,33 @@ pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'stati
             _ => {}
         }
     }
+    // `k.isInstance(value)`: the class literal's descriptor tested against the value, which is the
+    // test an `is` makes. The class object is the receiver and the value its one operand.
+    if signature.owner.classifier_matches("kotlin/reflect/KClass") {
+        return match (signature.name, signature.params) {
+            ("isInstance", [_]) => Some("kt_class_is_instance"),
+            _ => None,
+        };
+    }
+    if signature
+        .owner
+        .classifier_matches("kotlin/collections/MutableListIterator")
+    {
+        return match (signature.name, signature.params) {
+            ("set", [_]) => Some("kt_list_iterator_set"),
+            _ => None,
+        };
+    }
+    // The `build()` ending a `buildList` block, which the library declares on `ArrayList` itself.
+    if signature
+        .owner
+        .classifier_matches("kotlin/collections/ArrayList")
+    {
+        return match (signature.name, signature.params) {
+            ("build", []) => Some("kt_mutable_list_build"),
+            _ => None,
+        };
+    }
     if signature
         .owner
         .classifier_matches("kotlin/text/StringBuilder")
@@ -2086,6 +2113,7 @@ pub(super) fn runtime_member(signature: FunctionSignature<'_>) -> Option<&'stati
             }
             ("appendLine", [_]) => Some("kt_string_builder_append_line"),
             ("appendLine", []) => Some("kt_string_builder_append_new_line"),
+            ("reverse", []) => Some("kt_string_builder_reverse"),
             _ => None,
         };
     }

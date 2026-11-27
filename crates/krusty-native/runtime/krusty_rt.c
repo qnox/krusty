@@ -62,12 +62,24 @@ const KType kt_type_any = {KT_NAMED("kotlin.", "Any"),
    is `Comparable` and not `Number` either (it is a value class, not a `java.lang.Number`). */
 KT_MARKER_TYPE(kt_type_number, "kotlin.", "Number")
 KT_MARKER_TYPE(kt_type_comparable, "kotlin.", "Comparable")
+KT_MARKER_TYPE(kt_type_enum, "kotlin.", "Enum")
 
 /* `kotlin.CharSequence` is the same kind of thing: no instances of its own, and TWO types point at
    it — a `String` and a `StringBuilder`. Both are needed. Answering this question with
    `kt_type_string` would have been sound while a string was the only text this runtime made, and
    stopped being sound the moment there was a builder. */
 KT_MARKER_TYPE(kt_type_char_sequence, "kotlin.", "CharSequence")
+KT_MARKER_TYPE(kt_type_appendable, "kotlin.text.", "Appendable")
+
+/* `kotlin.ranges.ClosedRange` has no instances of its own either: each of the runtime's ranges
+   (`IntRange`, `LongRange`, ...) points at it, so a cast or `is` against the interface asks the
+   one marker, as it does of a class of the program that implements the interface. */
+KT_MARKER_TYPE(kt_type_closed_range, "kotlin.ranges.", "ClosedRange")
+KT_MARKER_TYPE(kt_type_closed_floating_point_range, "kotlin.ranges.", "ClosedFloatingPointRange")
+/* Flattened, as `KType.interfaces` requires: a `ClosedFloatingPointRange` is a `ClosedRange` too. */
+static const KType *const kt_range_interfaces[] = {&kt_type_closed_range};
+static const KType *const kt_floating_range_interfaces[] = {&kt_type_closed_range,
+                                                            &kt_type_closed_floating_point_range};
 
 /* `kotlin.Function` and each arity of it. A function value is an object of a type of its own —
    the generator emits one per lambda and per callable reference — so an `is` against a function
@@ -153,7 +165,8 @@ KT_REFLECT_TYPE(kt_type_kmutable_property2, "KMutableProperty2")
 static const KType *const kt_number_interfaces[] = {&kt_type_number, &kt_type_comparable};
 static const KType *const kt_comparable_interfaces[] = {&kt_type_comparable};
 static const KType *const kt_text_interfaces[] = {&kt_type_comparable, &kt_type_char_sequence};
-static const KType *const kt_char_sequence_interfaces[] = {&kt_type_char_sequence};
+static const KType *const kt_string_builder_interfaces[] = {&kt_type_char_sequence,
+                                                            &kt_type_appendable};
 
 #define KT_TYPE_WITH(identifier, package, simple, size, count, offsets, ifaces)                    \
     const KType identifier = {KT_NAMED(package, simple),                                           \
@@ -278,6 +291,22 @@ typedef struct KEnum {
 /* Kotlin's `Enum.toString()` is the constant's name, and `kotlin.Any`'s identity rendering is not.
    This sits in the `toString` slot of every enum class's table. */
 KRef kt_enum_to_string(KRef self) { return ((KEnum *)self)->name; }
+
+/* Every enum class's descriptor has `kt_type_enum` as its `super`, the storage owner, so this walks
+   the chain a constant's own class and its entry bodies share. */
+kt_boolean kt_is_enum_constant(KRef object) {
+    for (const KType *type = object->header.type; type != NULL; type = type->super) {
+        if (type == &kt_type_enum) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* `Enum.compareTo`: the difference of the ordinals, as Kotlin declares it. */
+kt_int kt_enum_compare_to(KRef self, KRef other) {
+    return ((KEnum *)self)->ordinal - ((KEnum *)other)->ordinal;
+}
 
 /* An exhaustive `when` used as a value has no `else` to fall into. Kotlin's own answer for the
    case its exhaustiveness check missed -- an enum constant or a sealed subclass added after the
@@ -1276,8 +1305,8 @@ const KType kt_type_string_builder = {KT_NAMED("kotlin.text.", "StringBuilder"),
                                       .super = &kt_type_any,
                                       .vtable = kt_string_builder_vtable,
                                       .vtable_length = 3,
-                                      .interfaces = kt_char_sequence_interfaces,
-                                      .interface_count = 1};
+                                      .interfaces = kt_string_builder_interfaces,
+                                      .interface_count = 2};
 
 static const char *kt_text_of(KRef self, kt_int *byte_length) {
     /* A `CharSequence` the PROGRAM implements holds no bytes to point at: its text exists only as
@@ -1433,6 +1462,64 @@ static kt_boolean kt_is_encoded_surrogate(const char *bytes, unsigned char secon
     return (unsigned char)bytes[0] == 0xEDu && ((unsigned char)bytes[1] & 0xF0u) == second_high_bits;
 }
 
+/* The four-byte encoding of the character whose HIGH half is encoded at `high` and whose LOW half is
+   encoded at `low`, each in its three bytes. Each half's low ten bits are its share of the code
+   point above U+FFFF. */
+static void kt_encode_surrogate_pair(const char *high, const char *low, char *out) {
+    uint32_t high_bits = ((uint32_t)(unsigned char)high[1] & 0x0Fu) << 6 |
+                         ((uint32_t)(unsigned char)high[2] & 0x3Fu);
+    uint32_t low_bits = ((uint32_t)(unsigned char)low[1] & 0x0Fu) << 6 |
+                        ((uint32_t)(unsigned char)low[2] & 0x3Fu);
+    uint32_t code_point = 0x10000u + (high_bits << 10 | low_bits);
+    out[0] = (char)(0xF0u | (code_point >> 18));
+    out[1] = (char)(0x80u | ((code_point >> 12) & 0x3Fu));
+    out[2] = (char)(0x80u | ((code_point >> 6) & 0x3Fu));
+    out[3] = (char)(0x80u | (code_point & 0x3Fu));
+}
+
+/* `sb.reverse()`, by CHARACTER like Java's: the whole byte run is reversed and each multi-byte
+   encoding is then turned back, so a surrogate pair stays together. Answers the builder itself. */
+KRef kt_string_builder_reverse(KRef self) {
+    KStringBuilder *builder = (KStringBuilder *)self;
+    char *bytes = kt_bytes_of((KByteArray *)builder->storage);
+    kt_int length = builder->byte_length;
+    for (kt_int low = 0, high = length - 1; low < high; low++, high--) {
+        char swap = bytes[low];
+        bytes[low] = bytes[high];
+        bytes[high] = swap;
+    }
+    for (kt_int at = 0; at < length;) {
+        /* After the reversal an encoding's continuation bytes (10xxxxxx) precede its lead byte. */
+        kt_int end = at;
+        while (end < length && ((unsigned char)bytes[end] & 0xC0u) == 0x80u) {
+            end++;
+        }
+        kt_int stop = end < length ? end + 1 : end;
+        for (kt_int low = at, high = stop - 1; low < high; low++, high--) {
+            char swap = bytes[low];
+            bytes[low] = bytes[high];
+            bytes[high] = swap;
+        }
+        at = stop;
+    }
+    /* Reversing can bring a lone low half and a lone high half together as a high half then a low
+       one, which is one character: join them as an append does, so equality and a later reversal
+       see the pair. */
+    kt_int written = 0;
+    for (kt_int read = 0; read < length;) {
+        if (read + 6 <= length && kt_is_encoded_surrogate(bytes + read, 0xA0u) &&
+            kt_is_encoded_surrogate(bytes + read + 3, 0xB0u)) {
+            kt_encode_surrogate_pair(bytes + read, bytes + read + 3, bytes + written);
+            written += 4;
+            read += 6;
+        } else {
+            bytes[written++] = bytes[read++];
+        }
+    }
+    builder->byte_length = written;
+    return self;
+}
+
 /* Append UTF-8 bytes, JOINING a surrogate pair that meets at the tail. A character a program
    assembles unit by unit (`for (c in s) sb.append(c)`) arrives as a high half, then a low one, each
    in its own three bytes; stored side by side they would be CESU-8, which no literal of the
@@ -1445,17 +1532,9 @@ static void kt_string_builder_append_bytes(KRef self, const char *bytes, kt_int 
     kt_int at = builder->byte_length;
     if (length >= 3 && at >= 3 && kt_is_encoded_surrogate(bytes, 0xB0u) &&
         kt_is_encoded_surrogate(storage + at - 3, 0xA0u)) {
-        uint32_t high = ((uint32_t)(unsigned char)storage[at - 2] & 0x0Fu) << 6 |
-                        ((uint32_t)(unsigned char)storage[at - 1] & 0x3Fu);
-        uint32_t low = ((uint32_t)(unsigned char)bytes[1] & 0x0Fu) << 6 |
-                       ((uint32_t)(unsigned char)bytes[2] & 0x3Fu);
-        /* Each half's low ten bits are its share of the code point above U+FFFF. */
-        uint32_t code_point = 0x10000u + (high << 10 | low);
         at -= 3;
-        storage[at++] = (char)(0xF0u | (code_point >> 18));
-        storage[at++] = (char)(0x80u | ((code_point >> 12) & 0x3Fu));
-        storage[at++] = (char)(0x80u | ((code_point >> 6) & 0x3Fu));
-        storage[at++] = (char)(0x80u | (code_point & 0x3Fu));
+        kt_encode_surrogate_pair(storage + at, bytes, storage + at);
+        at += 4;
         bytes += 3;
         length -= 3;
     }
@@ -1823,6 +1902,15 @@ static const KType *kt_class_described(KRef self) {
                               " publishes no reflection names consistent with its kind\n");
     }
     return described;
+}
+
+/* `isInstance`: whether `value` is an instance of the class `self` stands for, the test an `is`
+   makes against the class's descriptor. `null` is an instance of no class. */
+kt_boolean kt_class_is_instance(KRef self, KRef value) {
+    if (value == NULL) {
+        return 0;
+    }
+    return kt_is_instance(value, kt_class_described(self));
 }
 
 /* `qualifiedName`: the name the descriptor publishes, which for a nested class is joined with
@@ -2236,6 +2324,18 @@ static const kt_fn kt_range_vtable[] = {(kt_fn)kt_range_equals, (kt_fn)kt_range_
                               .vtable = table,                                                     \
                               .vtable_length = 3};
 
+/* A range proper, as against its progression: it is a `ClosedRange` of its element kind too, and
+   a floating-point one a `ClosedFloatingPointRange` as well. */
+#define KT_CLOSED_RANGE_TYPE(identifier, simple, shape, table, parent, ifaces)                     \
+    const KType identifier = {                                                                     \
+        KT_NAMED("kotlin.ranges.", simple),                                                        \
+        .instance_size = sizeof(shape),                                                            \
+        .super = parent,                                                                           \
+        .vtable = table,                                                                           \
+        .vtable_length = 3,                                                                        \
+        .interfaces = ifaces,                                                                      \
+        .interface_count = (uint32_t)(sizeof(ifaces) / sizeof((ifaces)[0]))};
+
 /* Each range subclasses its element's progression, as Kotlin's `IntRange : IntProgression` does, so
    an `is IntProgression` walk of the super chain finds it. Kotlin declares only two UNSIGNED pairs
    — `UByte.rangeTo` and `UShort.rangeTo` both answer a `UIntRange`. */
@@ -2248,16 +2348,16 @@ KT_RANGE_TYPE(kt_type_uint_progression, "kotlin.ranges.", "UIntProgression", KRa
               kt_range_vtable)
 KT_RANGE_TYPE(kt_type_ulong_progression, "kotlin.ranges.", "ULongProgression", KRange,
               kt_range_vtable)
-KT_RANGE_SUBTYPE(kt_type_int_range, "kotlin.ranges.", "IntRange", KRange, kt_range_vtable,
-                 &kt_type_int_progression)
-KT_RANGE_SUBTYPE(kt_type_long_range, "kotlin.ranges.", "LongRange", KRange, kt_range_vtable,
-                 &kt_type_long_progression)
-KT_RANGE_SUBTYPE(kt_type_char_range, "kotlin.ranges.", "CharRange", KRange, kt_range_vtable,
-                 &kt_type_char_progression)
-KT_RANGE_SUBTYPE(kt_type_uint_range, "kotlin.ranges.", "UIntRange", KRange, kt_range_vtable,
-                 &kt_type_uint_progression)
-KT_RANGE_SUBTYPE(kt_type_ulong_range, "kotlin.ranges.", "ULongRange", KRange, kt_range_vtable,
-                 &kt_type_ulong_progression)
+KT_CLOSED_RANGE_TYPE(kt_type_int_range, "IntRange", KRange, kt_range_vtable,
+                     &kt_type_int_progression, kt_range_interfaces)
+KT_CLOSED_RANGE_TYPE(kt_type_long_range, "LongRange", KRange, kt_range_vtable,
+                     &kt_type_long_progression, kt_range_interfaces)
+KT_CLOSED_RANGE_TYPE(kt_type_char_range, "CharRange", KRange, kt_range_vtable,
+                     &kt_type_char_progression, kt_range_interfaces)
+KT_CLOSED_RANGE_TYPE(kt_type_uint_range, "UIntRange", KRange, kt_range_vtable,
+                     &kt_type_uint_progression, kt_range_interfaces)
+KT_CLOSED_RANGE_TYPE(kt_type_ulong_range, "ULongRange", KRange, kt_range_vtable,
+                     &kt_type_ulong_progression, kt_range_interfaces)
 
 /* The five element kinds, which index the tables below: a kind's range, its progression, and the
    iterator either hands out (defined with the iterator). */
@@ -2774,6 +2874,11 @@ kt_boolean kt_range_iterator_has_next(KRef iterator) {
         return kt_walk_has_next(iterator);
     }
     if (!kt_is_range_iterator(iterator)) {
+        /* An iterator a LIBRARY body materialized, whose static type is the narrow `IntIterator`
+           or `CharIterator`: its descriptor carries the members the walk contract dispatches. */
+        if (iterator->header.type->walk_has_next != NULL) {
+            return iterator->header.type->walk_has_next(iterator);
+        }
         KT_FAIL("krusty: this value is no iterator\n");
     }
     return ((const KRangeIterator *)iterator)->has_next;
@@ -2788,6 +2893,22 @@ kt_long kt_range_iterator_next(KRef iterator) {
         return kt_walk_next_long(iterator);
     }
     if (!kt_is_range_iterator(iterator)) {
+        if (iterator->header.type->walk_next != NULL) {
+            KRef element = iterator->header.type->walk_next(iterator);
+            if (kt_pending_exception() != NULL || element == NULL) {
+                return 0;
+            }
+            const KType *boxed = element->header.type;
+            if (boxed == &kt_type_char) {
+                return kt_unbox_char(element);
+            }
+            if (boxed == &kt_type_long) {
+                return kt_unbox_long(element);
+            }
+            if (boxed == &kt_type_int) {
+                return kt_unbox_int(element);
+            }
+        }
         KT_FAIL("krusty: this value is no iterator\n");
     }
     KRangeIterator *self = (KRangeIterator *)iterator;
@@ -2846,10 +2967,10 @@ static const kt_fn kt_floating_range_vtable[] = {(kt_fn)kt_floating_range_equals
 /* Kotlin's own names for these: the class a `rangeTo` on a floating-point receiver answers with is
    private to the stdlib, and `ClosedFloatingPointRange` is the interface it is seen through. The
    name here is the CLASS's, because it is what `toString` on the object would report. */
-KT_RANGE_TYPE(kt_type_double_range, "kotlin.ranges.", "ClosedDoubleRange", KFloatingRange,
-              kt_floating_range_vtable)
-KT_RANGE_TYPE(kt_type_float_range, "kotlin.ranges.", "ClosedFloatRange", KFloatingRange,
-              kt_floating_range_vtable)
+KT_CLOSED_RANGE_TYPE(kt_type_double_range, "ClosedDoubleRange", KFloatingRange,
+                     kt_floating_range_vtable, &kt_type_any, kt_floating_range_interfaces)
+KT_CLOSED_RANGE_TYPE(kt_type_float_range, "ClosedFloatRange", KFloatingRange,
+                     kt_floating_range_vtable, &kt_type_any, kt_floating_range_interfaces)
 
 static KRef kt_floating_range_new(const KType *type, kt_double start, kt_double end) {
     KFloatingRange *range =
@@ -2929,142 +3050,7 @@ static KRef kt_floating_range_to_string(KRef self) {
 
 #undef KT_RANGE_TYPE
 #undef KT_RANGE_SUBTYPE
-
-/* ---- comparable ranges ----------------------------------------------------------------------
-
-   `"a".."c"`, and every other `a..b` whose bounds are ordered by `Comparable` rather than by a
-   machine comparison. Kotlin's `rangeTo` for those answers a `ComparableRange<T>`, seen through
-   `ClosedRange<T>`; it holds the two bounds as OBJECTS and orders them by `T`'s `compareTo`, which
-   the range carries: the generator picked it where the range was built (see the header).
-
-   A program's `compareTo`, `equals`, `hashCode` and `toString` are the program's code, and any of
-   them may raise. Each member stops at the first one that does and answers nothing further, as
-   Kotlin's own members do: the exception propagates out of them before anything else runs.
-
-   No walk, for the reason a floating-point range has none: `Comparable` names no successor, so
-   there is nothing to step by. A pair of bounds and the question `value in it`. */
-typedef struct KComparableRange {
-    KObjectHeader header;
-    KRef start;
-    KRef end;
-    kt_compare_fn compare;
-} KComparableRange;
-
-static const uint32_t kt_comparable_range_offsets[] = {offsetof(KComparableRange, start),
-                                                       offsetof(KComparableRange, end)};
-
-static kt_boolean kt_comparable_range_equals(KRef self, KRef other);
-static kt_int kt_comparable_range_hash_code(KRef self);
-static KRef kt_comparable_range_to_string(KRef self);
-
-static const kt_fn kt_comparable_range_vtable[] = {(kt_fn)kt_comparable_range_equals,
-                                                   (kt_fn)kt_comparable_range_hash_code,
-                                                   (kt_fn)kt_comparable_range_to_string};
-
-const KType kt_type_comparable_range = {
-    KT_NAMED("kotlin.ranges.", "ComparableRange"),
-    .instance_size = sizeof(KComparableRange),
-    .reference_count = 2,
-    .reference_offsets = kt_comparable_range_offsets,
-    .super = &kt_type_any,
-    .vtable = kt_comparable_range_vtable,
-    .vtable_length = 3,
-};
-
-KRef kt_comparable_range(KRef start, KRef end, kt_compare_fn compare) {
-    KComparableRange *range =
-        (KComparableRange *)kt_gc_allocate(&kt_type_comparable_range, sizeof(KComparableRange));
-    range->start = start;
-    range->end = end;
-    range->compare = compare;
-    return (KRef)range;
-}
-
-/* `start > end`, which is Kotlin's own `isEmpty` for this class. */
-kt_boolean kt_comparable_range_is_empty(KRef range) {
-    const KComparableRange *self = (const KComparableRange *)range;
-    kt_int order = self->compare(self->start, self->end);
-    return kt_pending_exception() == NULL && order > 0;
-}
-
-/* `value >= start && value <= end`, each comparison the VALUE's own. Kotlin's `ComparableRange`
-   asks the same way round, which matters for a `compareTo` that is not symmetric. A first
-   comparison that raises is the answer: the second never runs. */
-kt_boolean kt_comparable_range_contains(KRef range, KRef value) {
-    const KComparableRange *self = (const KComparableRange *)range;
-    kt_int from_start = self->compare(value, self->start);
-    if (kt_pending_exception() != NULL || from_start < 0) {
-        return false;
-    }
-    kt_int to_end = self->compare(value, self->end);
-    return kt_pending_exception() == NULL && to_end <= 0;
-}
-
-KRef kt_comparable_range_start(KRef range) { return ((const KComparableRange *)range)->start; }
-
-KRef kt_comparable_range_end(KRef range) { return ((const KComparableRange *)range)->end; }
-
-/* Kotlin's own three, which are `ClosedRange`'s documented contract: two empty ranges are equal
-   whatever their bounds, and `-1` hashes an empty one. `toString` is `"$start..$endInclusive"`
-   whether or not the range is empty, as `ComparableRange`'s own is. `equals` is `isEmpty() &&
-   other.isEmpty() || start == other.start && endInclusive == other.endInclusive`, in that order and
-   short-circuiting as Kotlin does: `other` is asked whether it is empty — a call into its
-   `compareTo` — only when this one is. */
-static kt_boolean kt_comparable_range_equals(KRef self, KRef other) {
-    if (other == NULL || other->header.type != &kt_type_comparable_range) {
-        return false;
-    }
-    kt_boolean empty = kt_comparable_range_is_empty(self);
-    if (kt_pending_exception() == NULL && empty) {
-        empty = kt_comparable_range_is_empty(other);
-    }
-    if (kt_pending_exception() != NULL || empty) {
-        return empty;
-    }
-    const KComparableRange *a = (const KComparableRange *)self;
-    const KComparableRange *b = (const KComparableRange *)other;
-    kt_boolean starts = kt_equals(a->start, b->start);
-    if (kt_pending_exception() != NULL || !starts) {
-        return false;
-    }
-    kt_boolean ends = kt_equals(a->end, b->end);
-    return kt_pending_exception() == NULL && ends;
-}
-
-static kt_int kt_comparable_range_hash_code(KRef self) {
-    kt_boolean empty = kt_comparable_range_is_empty(self);
-    if (kt_pending_exception() != NULL) {
-        return 0;
-    }
-    if (empty) {
-        return -1;
-    }
-    const KComparableRange *range = (const KComparableRange *)self;
-    kt_int start = kt_hash_code(range->start);
-    if (kt_pending_exception() != NULL) {
-        return 0;
-    }
-    /* Polled again: the second bound's `hashCode` may throw too, and its placeholder is no hash. */
-    kt_int end = kt_hash_code(range->end);
-    if (kt_pending_exception() != NULL) {
-        return 0;
-    }
-    return (kt_int)(31u * (uint32_t)start + (uint32_t)end);
-}
-
-static KRef kt_comparable_range_to_string(KRef self) {
-    const KComparableRange *range = (const KComparableRange *)self;
-    KRef start = kt_to_string(range->start);
-    if (kt_pending_exception() != NULL) {
-        return NULL;
-    }
-    KRef text = kt_string_plus(start, kt_string_utf8("..", 2));
-    KRef end = kt_to_string(range->end);
-    if (kt_pending_exception() != NULL) {
-        return NULL;
-    }
-    return kt_string_plus(text, end);
-}
+#undef KT_CLOSED_RANGE_TYPE
 
 /* Append `count` bytes of `text` at `out`, answering how many were written. */
 static kt_int kt_range_put(char *out, const char *text, kt_int count) {
@@ -3146,6 +3132,47 @@ void kt_array_copy_range(KRef source, kt_int from, KRef destination, kt_int to, 
         }
     }
 }
+
+/* `arrayFill`'s own range check, Kotlin/Native's `checkRangeIndexes`: a start before the array or an
+   end past it is an `IndexOutOfBoundsException`, a start past the end an
+   `IllegalArgumentException`, both raised before anything is written. Answers whether the range is
+   usable. The array is never null here: the callee is an internal stdlib function whose caller
+   owns it. */
+static kt_boolean kt_array_fill_range_is_valid(KRef array, kt_int from, kt_int to) {
+    kt_int size = ((const KArray *)array)->length;
+    if (from < 0 || to > size) {
+        kt_throw(kt_throwable_new(&kt_type_index_out_of_bounds_exception,
+                                  kt_bounds_text("fromIndex: ", from, ", toIndex: ", to,
+                                                 ", size: ", size)));
+        return 0;
+    }
+    if (from > to) {
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception,
+                                  kt_bounds_text("fromIndex: ", from, " > toIndex: ", to, NULL, 0)));
+        return 0;
+    }
+    return 1;
+}
+
+#define KT_ARRAY_FILL_RANGE(NAME, TYPE, STORE)                                                  \
+    void NAME(KRef array, kt_int from, kt_int to, TYPE value) {                                  \
+        if (!kt_array_fill_range_is_valid(array, from, to)) {                                    \
+            return;                                                                              \
+        }                                                                                        \
+        STORE *elements = (STORE *)((unsigned char *)(KArray *)array + sizeof(KArray));          \
+        for (kt_int at = from; at < to; at++) {                                                  \
+            elements[at] = value;                                                                \
+        }                                                                                        \
+    }
+KT_ARRAY_FILL_RANGE(kt_array_fill_range, KRef, KRef)
+KT_ARRAY_FILL_RANGE(kt_boolean_array_fill_range, kt_boolean, kt_boolean)
+KT_ARRAY_FILL_RANGE(kt_byte_array_fill_range, kt_byte, kt_byte)
+KT_ARRAY_FILL_RANGE(kt_char_array_fill_range, kt_char, kt_char)
+KT_ARRAY_FILL_RANGE(kt_short_array_fill_range, kt_short, kt_short)
+KT_ARRAY_FILL_RANGE(kt_int_array_fill_range, kt_int, kt_int)
+KT_ARRAY_FILL_RANGE(kt_long_array_fill_range, kt_long, kt_long)
+KT_ARRAY_FILL_RANGE(kt_float_array_fill_range, kt_float, kt_float)
+KT_ARRAY_FILL_RANGE(kt_double_array_fill_range, kt_double, kt_double)
 
 kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source) {
     if (destination == NULL || source == NULL) {

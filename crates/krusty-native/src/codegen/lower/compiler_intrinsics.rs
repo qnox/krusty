@@ -523,6 +523,25 @@ impl<'a> BodyLowering<'a, '_, '_> {
                     self.runtime_call("kt_array_copy_range", &params, ret, &arguments)
                 })());
             }
+            Some(krusty::backend::BackendCompilerIntrinsic::ArrayFill { array }) => {
+                let (None, [target, from, to, value]) = (receiver, args) else {
+                    return Some(Err("an array fill with malformed operands".into()));
+                };
+                if ret != Ty::Unit {
+                    return Some(Err("an array fill with a result".into()));
+                }
+                let Some((symbol, element)) = array_fill_entry(array) else {
+                    return Some(Err("an array fill of an unsupported array kind".into()));
+                };
+                let params = [array, Ty::Int, Ty::Int, element];
+                return Some((|| {
+                    let arguments = self.arguments(&[*target, *from, *to, *value], &params)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call(symbol, &params, ret, &arguments)
+                })());
+            }
             Some(krusty::backend::BackendCompilerIntrinsic::FloatingIsNaN { operand }) => {
                 let Some(value) = scalar_extension_operand(operand) else {
                     return Some(Err(
@@ -767,6 +786,26 @@ pub(super) fn console_intrinsic(
         Some(BackendCompilerIntrinsic::Println) => Some(ConsoleIntrinsic::Println),
         _ => None,
     }
+}
+
+/// The runtime function filling an array of kind `array`, and the type of the one value it writes.
+/// A reference array holds `Any?`; each specialized array holds its own scalar.
+fn array_fill_entry(array: Ty) -> Option<(&'static str, Ty)> {
+    let element = array.array_elem()?;
+    Some(match element {
+        Ty::Boolean => ("kt_boolean_array_fill_range", Ty::Boolean),
+        Ty::Byte => ("kt_byte_array_fill_range", Ty::Byte),
+        Ty::Char => ("kt_char_array_fill_range", Ty::Char),
+        Ty::Short => ("kt_short_array_fill_range", Ty::Short),
+        Ty::Int => ("kt_int_array_fill_range", Ty::Int),
+        Ty::Long => ("kt_long_array_fill_range", Ty::Long),
+        Ty::Float => ("kt_float_array_fill_range", Ty::Float),
+        Ty::Double => ("kt_double_array_fill_range", Ty::Double),
+        reference if reference == Ty::nullable(Ty::obj_name(krusty::types::wk::any())) => {
+            ("kt_array_fill_range", reference)
+        }
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

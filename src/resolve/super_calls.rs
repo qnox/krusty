@@ -89,8 +89,11 @@ impl ResolvedSuperCall {
             // only inherits.
             crate::libraries::MemberRealization::Dispatch => (physical_owner, false),
             crate::libraries::MemberRealization::Direct { .. } => (physical_owner, interface),
-            crate::libraries::MemberRealization::Intrinsic(_)
-            | crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
+            // The selected declaration is the platform's own: a nonvirtual call of it means the
+            // operation the target realizes for the declaration, applied to the current instance.
+            // The target that cannot realize it declines the call.
+            crate::libraries::MemberRealization::Intrinsic(_) => (physical_owner, interface),
+            crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
         };
         Some(Self {
             receiver,

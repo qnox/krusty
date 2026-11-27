@@ -36,6 +36,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::StringRangeEquals
         | CompilerIntrinsic::StringIndexOf { .. }
         | CompilerIntrinsic::ArrayCopy { .. }
+        | CompilerIntrinsic::ArrayFill { .. }
         | CompilerIntrinsic::ArrayGet
         | CompilerIntrinsic::ArraySet
         | CompilerIntrinsic::ArraySize

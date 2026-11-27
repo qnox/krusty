@@ -1131,6 +1131,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::StringRangeEquals
                 | krusty::libraries::CompilerIntrinsic::StringIndexOf { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayCopy { .. }
+                | krusty::libraries::CompilerIntrinsic::ArrayFill { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayGet
                 | krusty::libraries::CompilerIntrinsic::ArraySet
                 | krusty::libraries::CompilerIntrinsic::ArrayFactory(_)

@@ -1590,9 +1590,17 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn classifier_parameter_bounds(&self, owner: TypeName, index: usize) -> Vec<Ty> {
-        self.sources
-            .callees
-            .classifier_parameter_bounds(owner, index)
+        let model = super::same_library_class::MaterializedClassModel {
+            classes: self.local_classes,
+            public: self.sources.callees.class_type_oracle(),
+        };
+        model
+            .materialized_parameter_bounds(owner, index)
+            .unwrap_or_else(|| {
+                self.sources
+                    .callees
+                    .classifier_parameter_bounds(owner, index)
+            })
     }
 
     fn link_constructor(
