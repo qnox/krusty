@@ -46,15 +46,16 @@ fn a_java_methods_declared_parameter_name_is_not_a_named_argument() {
     let mut krusty = String::from_utf8_lossy(&out.stdout).into_owned();
     krusty.push_str(&String::from_utf8_lossy(&out.stderr));
     assert!(!out.status.success(), "krusty rejects it:\n{krusty}");
-    // Both reject the one argument at the same place. The reference compiler words it "named
-    // arguments are prohibited for non-Kotlin functions" where krusty reports that no parameter
-    // of that name exists; that wording is a separate gap, so only the position is pinned here.
-    let place = |report: &str| {
-        common::reported(report)
-            .into_iter()
-            .map(|error| (error.file, error.line, error.column))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(place(&krusty), place(&reference));
-    assert_eq!(place(&reference).len(), 1);
+    // Both reject the one argument at the same place. kotlinc reports
+    // NAMED_ARGUMENTS_NOT_ALLOWED for a non-Kotlin callee; krusty does not implement that diagnostic
+    // yet and reports the name as unmatched, so its complete text is pinned here: the wording gap
+    // is recorded, not hidden, and closing it changes this line.
+    assert_eq!(
+        common::ledger(&reference),
+        ["Use.kt:1:44: named arguments are prohibited for non-Kotlin functions."],
+    );
+    assert_eq!(
+        common::ledger(&krusty),
+        ["Use.kt:1:44: no parameter with name 'amount' found."],
+    );
 }

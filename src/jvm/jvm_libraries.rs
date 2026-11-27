@@ -1642,12 +1642,7 @@ impl JvmLibraries {
                     );
                 }
                 if !has_kotlin_metadata && declaration.is_none() {
-                    member.call_sig.declared_parameter_names =
-                        declared_parameter_names::declared_parameter_names(
-                            &m.parameter_names,
-                            constructor_enclosing_prefix,
-                            member.params.len(),
-                        );
+                    declared_parameter_names::publish(&mut member, m, constructor_enclosing_prefix);
                 }
                 if let Some(java_nullable) = platform_nullable_params {
                     member.call_sig.platform_nullable_params = java_nullable.into();
@@ -3046,15 +3041,7 @@ impl JvmLibraries {
                         field.nullability,
                     ))
                 };
-                let visibility = if field.access & 0x0001 != 0 {
-                    Visibility::Public
-                } else if field.access & 0x0004 != 0 {
-                    Visibility::Protected
-                } else if field.is_private() {
-                    Visibility::Private
-                } else {
-                    Visibility::PackagePrivate
-                };
+                let visibility = super::classreader::visibility_of_access(field.access);
                 let getter_source_name = name.to_string();
                 let getter_physical_name =
                     (field.name != getter_source_name).then(|| field.name.clone());
