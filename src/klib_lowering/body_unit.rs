@@ -2165,9 +2165,7 @@ impl<'s> Linker<'_, 's> {
         };
         // An abstract accessor is declared with its class, as an abstract member function is,
         // and a call of it dispatches to the instance's override.
-        let abstract_ = declaration.body.is_none()
-            && crate::metadata::semantic::declaration_modality(declaration.base.flags)
-                == crate::metadata::semantic::KotlinModality::Abstract;
+        let abstract_ = is_abstract_member(declaration);
         if !abstract_ && !matches!(declaration.body, Some(KlibIrBody::Block(_))) {
             return Ok(None);
         }
@@ -2402,9 +2400,7 @@ impl<'s> Linker<'_, 's> {
         let Some((_, declaration)) = self.sources.bodies.function(identity) else {
             return false;
         };
-        declaration.body.is_none()
-            && crate::metadata::semantic::declaration_modality(declaration.base.flags)
-                == crate::metadata::semantic::KotlinModality::Abstract
+        is_abstract_member(declaration)
             && !self.functions.contains_key(identity)
             && self.class_realized_earlier(callables[0])
             && self.sources.callees.reference_target(identity).is_some()
@@ -2427,7 +2423,7 @@ impl<'s> Linker<'_, 's> {
             }
             // An abstract member is a dispatch slot of its class, which declares it when the
             // unit materializes the class; a call can reach it before any construction does.
-            None if declaration.body.is_none() => {
+            None if is_abstract_member(declaration) => {
                 self.materialize_member_class(ir, selected)?;
                 *self
                     .functions
@@ -2973,3 +2969,10 @@ type PrimitiveSelection = for<'f> fn(
     Option<super::primitive_calls::CommonPrimitiveCall>,
     KlibBodyDeclineReason,
 >;
+
+/// Whether `declaration` is an abstract member: a dispatch slot its class declares, with no body.
+fn is_abstract_member(declaration: &KlibIrFunction) -> bool {
+    declaration.body.is_none()
+        && crate::metadata::semantic::declaration_modality(declaration.base.flags)
+            == crate::metadata::semantic::KotlinModality::Abstract
+}
