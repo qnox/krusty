@@ -591,7 +591,6 @@ ir/recursiveGeneric.kt
 ir/recursiveGeneric2.kt
 ir/serializationRegressions/anonFakeOverride.kt
 ir/serializationRegressions/useImportedMember.kt
-ir/serializationRegressions/varAsFunctionCall.kt
 jdk/noStringToCharArray.kt
 jsAstOptimizations/inlineEmptyFunction.kt
 jvm8/defaults/enable/kt55083_indyLambdaForFunInterface.kt
@@ -618,15 +617,11 @@ lower/forLoopsLowering/withIndexUInt.kt
 mangling/internalOverrideSuperCall.kt
 mangling/publicOverrideSuperCall.kt
 multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
-multiplatform/k2/basic/contextInFakeOverride.kt
 multiplatform/k2/basic/delegatedByExpectExtensionProperty.kt
 multiplatform/k2/basic/expectActualFakeOverrides2.kt
 multiplatform/k2/basic/expectActualFakeOverridesWithTypeParameters.kt
 multiplatform/k2/basic/expectActualIntersectionOverride2.kt
-multiplatform/k2/basic/expectActualOverloads.kt
-multiplatform/k2/basic/expectActualTypeParameters.kt
 multiplatform/k2/basic/expectInterfaceInSupertypes.kt
-multiplatform/k2/basic/extensionAndFakeOverride.kt
 multiplatform/k2/basic/interfaceMethodFromSuperTypeIsImplementedInOtherExpectSuperClass.kt
 multiplatform/k2/basic/localSubstitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/nameBasedDestructuringFullForm.kt
@@ -638,7 +633,6 @@ multiplatform/k2/defaultArguments/kt67488.kt
 multiplatform/k2/defaultArguments/suspend.kt
 multiplatform/k2/expectStatic.kt
 multiplatform/k2/expectValueClassWithNoPrimaryConstructor.kt
-multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
 multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt

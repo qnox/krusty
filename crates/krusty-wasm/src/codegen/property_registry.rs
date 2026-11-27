@@ -1,13 +1,17 @@
 //! Exact property identities in one stateful Wasm source module.
 //!
 //! Files reserve or publish the Wasm global chosen for each top-level property, private
-//! getter/setter entries for each ordinary member property, and private getter/setter entries for
-//! each receiver-less property realized by its accessors (a computed or delegated package property,
-//! or a property of a `companion { }` block). Other files reach any of these realizations by the
-//! frontend's stable [`PropertyId`]; neither spelling nor a file facade is reconstructed.
+//! getter/setter entries for each member property, and private getter/setter entries for each
+//! property without a dispatch receiver realized by its accessors (a computed or delegated package
+//! property, an extension or context package property, or a property of a `companion { }` block).
+//! An entry of an extension or context property takes its accessors' declared operands, in the
+//! order [`receiver_property_accessors`] gives both files. Other files reach any of these
+//! realizations by the frontend's stable [`PropertyId`]; neither spelling nor a file facade is
+//! reconstructed.
 
 use krusty::fx_hash::HashMap;
 
+use krusty::backend::receiver_property_accessors;
 use krusty::fir::{DeclarationFlags, PropertyId};
 use krusty::ir::{IrFile, IrLocalPropertyLayout};
 use krusty::types::{Ty, TypeName};
@@ -23,34 +27,40 @@ pub(super) struct TopLevelProperty {
     pub(super) direct_write: bool,
 }
 
-/// The private Wasm entry points through which another source file reads or writes an ordinary
-/// member property. A `PropertyId` is the only join between the using and defining files.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The private Wasm entry points through which another source file reads or writes a member
+/// property. A `PropertyId` is the only join between the using and defining files.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct MemberProperty {
     pub(super) getter: u32,
     pub(super) setter: Option<u32>,
     pub(super) owner: TypeName,
     pub(super) ty: Ty,
+    /// What the accessors take after the receiver and before a setter's value: an extension or
+    /// context property's context parameters, then its extension receiver.
+    pub(super) parameters: Box<[Ty]>,
 }
 
 /// One property this file defines, paired with the program-wide entries reserved for it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct MemberPropertyDefinition {
     pub(super) property: PropertyId,
     pub(super) entry: MemberProperty,
 }
 
-/// The private Wasm entry points through which another source file reads or writes a
-/// receiver-less property that its defining file realizes through accessors.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The private Wasm entry points through which another source file reads or writes a property
+/// with no dispatch receiver that its defining file realizes through accessors.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct AccessorProperty {
     pub(super) getter: u32,
     pub(super) setter: Option<u32>,
     pub(super) ty: Ty,
+    /// What the accessors take before a setter's value: an extension or context property's
+    /// context parameters, then its extension receiver.
+    pub(super) parameters: Box<[Ty]>,
 }
 
-/// One receiver-less accessor property this file defines, paired with its program-wide entries.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// One accessor property this file defines, paired with its program-wide entries.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct AccessorPropertyDefinition {
     pub(super) property: PropertyId,
     pub(super) entry: AccessorProperty,
@@ -95,10 +105,16 @@ impl PropertyRegistry {
                     owner,
                     ty,
                     mutable,
-                    context_parameters,
                     ..
-                } if context_parameters.is_empty() => {
-                    Some((property, *class, *owner, *ty, *mutable))
+                } => Some((property, Some(*class), *owner, *ty, *mutable, layout)),
+                // A member extension's layout names its owner, not the owner's class index: the
+                // checked declaration records that.
+                IrLocalPropertyLayout::MemberExtension { owner, ty, .. } => {
+                    let mutable = ir
+                        .checked_properties
+                        .get(&property)
+                        .is_some_and(|checked| checked.flags.has(DeclarationFlags::MUTABLE));
+                    Some((property, None, *owner, *ty, mutable, layout))
                 }
                 _ => None,
             })
@@ -106,11 +122,14 @@ impl PropertyRegistry {
         local.sort_by_key(|(property, ..)| property.raw());
 
         let mut definitions = Vec::new();
-        for (property, class, owner, ty, mutable) in local {
+        for (property, class, owner, ty, mutable, layout) in local {
             let declaration = ir
                 .checked_properties
                 .get(&property)
                 .ok_or_else(|| "a member property with no checked declaration".to_string())?;
+            let class = class
+                .or(declaration.class)
+                .ok_or_else(|| "a member property with no owning class".to_string())?;
             let classifier = ir
                 .classes
                 .get(class as usize)
@@ -127,7 +146,8 @@ impl PropertyRegistry {
             {
                 continue;
             }
-            let entry = self.reserve_member(module, property, owner, ty, mutable)?;
+            let parameters = receiver_property_accessors::layout_parameters(layout);
+            let entry = self.reserve_member(module, property, owner, ty, mutable, &parameters)?;
             definitions.push(MemberPropertyDefinition { property, entry });
         }
 
@@ -144,9 +164,7 @@ impl PropertyRegistry {
             let Some(owner) = declaration.owner else {
                 continue;
             };
-            if declaration.extension_receiver.is_some()
-                || !declaration.context_parameters.is_empty()
-                || declaration.visibility == krusty::types::Visibility::Private
+            if declaration.visibility == krusty::types::Visibility::Private
                 || declaration.flags.has(DeclarationFlags::EXPECT)
                 || declaration.flags.has(DeclarationFlags::CONST)
                 || !matches!(
@@ -164,7 +182,15 @@ impl PropertyRegistry {
             {
                 continue;
             }
-            self.reserve_member(module, property, owner, declaration.ty, declaration.mutable)?;
+            let parameters = receiver_property_accessors::record_parameters(declaration);
+            self.reserve_member(
+                module,
+                property,
+                owner,
+                declaration.ty,
+                declaration.mutable,
+                &parameters,
+            )?;
         }
         Ok(definitions)
     }
@@ -176,25 +202,31 @@ impl PropertyRegistry {
         owner: TypeName,
         ty: Ty,
         mutable: bool,
+        parameters: &[Ty],
     ) -> Result<MemberProperty, String> {
-        if let Some(entry) = self.members.get(&property).copied() {
-            if entry.owner != owner || entry.ty != ty || entry.setter.is_some() != mutable {
+        if let Some(entry) = self.members.get(&property) {
+            if entry.owner != owner
+                || entry.ty != ty
+                || entry.setter.is_some() != mutable
+                || *entry.parameters != *parameters
+            {
                 return Err("a member property reservation disagrees with its declaration".into());
             }
-            return Ok(entry);
+            return Ok(entry.clone());
         }
         let entry = MemberProperty {
             getter: module.declare(),
             setter: mutable.then(|| module.declare()),
             owner,
             ty,
+            parameters: parameters.into(),
         };
-        self.members.insert(property, entry);
+        self.members.insert(property, entry.clone());
         Ok(entry)
     }
 
     pub(super) fn member(&self, property: PropertyId) -> Option<MemberProperty> {
-        self.members.get(&property).copied()
+        self.members.get(&property).cloned()
     }
 
     /// Reserve the accessor-property entries this file defines or references. A file defines an
@@ -208,25 +240,18 @@ impl PropertyRegistry {
         let mut local = ir
             .local_property_layouts
             .iter()
-            .filter_map(|(&property, layout)| {
-                let receiverless = match layout {
-                    IrLocalPropertyLayout::TopLevelStorage {
-                        qualifier: None, ..
-                    } => true,
-                    IrLocalPropertyLayout::TopLevelAccessor {
-                        receiver,
-                        context_parameters,
-                        ..
-                    } => receiver.is_none() && context_parameters.is_empty(),
-                    _ => false,
-                };
-                receiverless.then_some(property)
+            .filter_map(|(&property, layout)| match layout {
+                IrLocalPropertyLayout::TopLevelStorage {
+                    qualifier: None, ..
+                }
+                | IrLocalPropertyLayout::TopLevelAccessor { .. } => Some((property, layout)),
+                _ => None,
             })
             .collect::<Vec<_>>();
-        local.sort_by_key(|property| property.raw());
+        local.sort_by_key(|(property, _)| property.raw());
 
         let mut definitions = Vec::new();
-        for property in local {
+        for (property, layout) in local {
             // A property common lowering synthesized, such as a local declaration copied out of an
             // inlined body, has no checked declaration and no module record another file could
             // name.
@@ -239,7 +264,9 @@ impl PropertyRegistry {
             {
                 continue;
             }
-            let entry = self.reserve_accessor(module, property, declaration.ty, mutable)?;
+            let parameters = receiver_property_accessors::layout_parameters(layout);
+            let entry =
+                self.reserve_accessor(module, property, declaration.ty, mutable, &parameters)?;
             definitions.push(AccessorPropertyDefinition { property, entry });
         }
 
@@ -249,22 +276,26 @@ impl PropertyRegistry {
             if ir.local_property_layouts.contains_key(&property) {
                 continue;
             }
-            // A block property's recorded receiver is its declaring classifier: the coordinate
-            // that associates it with the class, which its accessors do not take.
-            let receiverless = match declaration.placement {
-                krusty::ir::IrStaticPlacement::CompanionBlock { .. } => true,
-                krusty::ir::IrStaticPlacement::Package => {
-                    declaration.owner.is_none() && declaration.extension_receiver.is_none()
-                }
+            // A block property's recorded owner is its declaring classifier: the coordinate that
+            // associates it with the class, which its accessors do not take.
+            let dispatched = match declaration.placement {
+                krusty::ir::IrStaticPlacement::CompanionBlock { .. } => false,
+                krusty::ir::IrStaticPlacement::Package => declaration.owner.is_some(),
             };
-            if !receiverless
-                || !declaration.context_parameters.is_empty()
+            if dispatched
                 || declaration.visibility == krusty::types::Visibility::Private
                 || !accessor_realized(declaration.flags, declaration.mutable)
             {
                 continue;
             }
-            self.reserve_accessor(module, property, declaration.ty, declaration.mutable)?;
+            let parameters = receiver_property_accessors::record_parameters(declaration);
+            self.reserve_accessor(
+                module,
+                property,
+                declaration.ty,
+                declaration.mutable,
+                &parameters,
+            )?;
         }
         Ok(definitions)
     }
@@ -275,26 +306,31 @@ impl PropertyRegistry {
         property: PropertyId,
         ty: Ty,
         mutable: bool,
+        parameters: &[Ty],
     ) -> Result<AccessorProperty, String> {
-        if let Some(entry) = self.accessors.get(&property).copied() {
-            if entry.ty != ty || entry.setter.is_some() != mutable {
+        if let Some(entry) = self.accessors.get(&property) {
+            if entry.ty != ty
+                || entry.setter.is_some() != mutable
+                || *entry.parameters != *parameters
+            {
                 return Err(
                     "an accessor property reservation disagrees with its declaration".into(),
                 );
             }
-            return Ok(entry);
+            return Ok(entry.clone());
         }
         let entry = AccessorProperty {
             getter: module.declare(),
             setter: mutable.then(|| module.declare()),
             ty,
+            parameters: parameters.into(),
         };
-        self.accessors.insert(property, entry);
+        self.accessors.insert(property, entry.clone());
         Ok(entry)
     }
 
     pub(super) fn accessor(&self, property: PropertyId) -> Option<AccessorProperty> {
-        self.accessors.get(&property).copied()
+        self.accessors.get(&property).cloned()
     }
 
     /// Allocate this file's globals, reusing indices reserved by an earlier file, then reserve

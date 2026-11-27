@@ -410,39 +410,29 @@ impl BodyLowering<'_, '_, '_> {
         value: Option<u32>,
     ) -> Result<Option<Value>, Unsupported> {
         let Some(layout) = self.file.ir.local_property_layouts.get(target).cloned() else {
-            return Err("an extension or context property with no realization".into());
+            if !self.file.is_imported_property(target) {
+                return Err("an extension or context property with no realization".into());
+            }
+            // Another file of the module declares it and exports its accessors' entry points.
+            let declared = context_arguments
+                .iter()
+                .copied()
+                .chain(extension_receiver)
+                .collect::<Vec<_>>();
+            return match value {
+                None => self.module_property_read(target, dispatch_receiver, &declared),
+                Some(value) => self
+                    .module_property_write(target, dispatch_receiver, &declared, value)
+                    .map(|()| None),
+            };
         };
         // Which accessor, and whether it belongs to an owner — a member accessor is an instance
         // method and may be overridden, so it is reached through the owner's vtable slot rather
-        // than called directly. The layout says which of the three shapes this is; nothing here
-        // derives it from an accessor's name or arity.
-        let (function, owner) = match &layout {
-            IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } => {
-                (accessor(*getter, *setter, value.is_some())?, None)
-            }
-            IrLocalPropertyLayout::MemberExtension {
-                owner,
-                getter,
-                setter,
-                ..
-            } => (accessor(*getter, *setter, value.is_some())?, Some(*owner)),
-            // A MEMBER with a receiver reaching here has context parameters — an ordinary member
-            // read takes the storage path and never arrives.
-            IrLocalPropertyLayout::Member {
-                owner,
-                getter,
-                setter,
-                ..
-            } => {
-                let Some(getter) = *getter else {
-                    return Err("a context property with no getter".into());
-                };
-                (accessor(getter, *setter, value.is_some())?, Some(*owner))
-            }
-            IrLocalPropertyLayout::TopLevelStorage { .. } => {
-                return Err("a stored property reached through a receiver".into())
-            }
-        };
+        // than called directly. The layout says which shape this is; nothing here derives it from
+        // an accessor's name or arity.
+        let accessors =
+            krusty::backend::receiver_property_accessors::ReceiverAccessors::of_layout(&layout)?;
+        let (function, owner) = (accessors.accessor(value.is_some())?, accessors.owner);
         let parameters = self.file.ir.functions[function as usize].params.clone();
         let supplied = context_arguments
             .iter()
@@ -507,13 +497,5 @@ impl BodyLowering<'_, '_, '_> {
         };
         let ret = self.file.ir.functions[function as usize].ret;
         self.dispatch_through(object, slot, &parameters, ret, arguments)
-    }
-}
-
-/// The accessor a read or a write of a property with a receiver calls.
-fn accessor(getter: FunId, setter: Option<FunId>, writing: bool) -> Result<FunId, Unsupported> {
-    match writing {
-        false => Ok(getter),
-        true => setter.ok_or_else(|| "a write to a read-only property".into()),
     }
 }
