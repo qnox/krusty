@@ -107,6 +107,11 @@ pub(crate) fn accessor_operands(
     implementation_contexts: &[Ty],
     receiver: Option<(Ty, Ty)>,
 ) -> Vec<(Ty, Ty)> {
+    assert_eq!(
+        declared_contexts.len(),
+        implementation_contexts.len(),
+        "an override edge carries the same context parameters on both sides"
+    );
     declared_contexts
         .iter()
         .copied()

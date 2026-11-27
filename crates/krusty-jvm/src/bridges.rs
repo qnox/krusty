@@ -908,7 +908,7 @@ fn property_bridges(
                 overridden_internal: overridden_getter_internal,
                 contexts: context_parameter_types(ir, edge.implementation),
             },
-        );
+        )?;
         order.resize(
             order.len() + ir.classes[cid].bridges.len() - pushed_before,
             position,
@@ -1046,7 +1046,7 @@ fn push_property_bridge(
     edge: &krusty::ir::IrPropertyOverride,
     getter_results: PropertyGetterResults,
     names: PropertyBridgeNames,
-) {
+) -> Result<(), SkipReason> {
     let PropertyBridgeNames {
         getter_name,
         getter_target,
@@ -1056,20 +1056,17 @@ fn push_property_bridge(
         overridden_internal,
         contexts,
     } = names;
+    // The bridge names its context parameters after the overridden property's declaration, so the
+    // checked edge must carry one identity per context.
+    if edge.declared_context_identities.len() != contexts.len() {
+        return Err(SkipReason::Bridges);
+    }
     let context_parameters = || {
         contexts
             .iter()
-            .enumerate()
-            .map(|(ordinal, ty)| BridgeParameter {
-                identity: edge
-                    .declared_context_identities
-                    .get(ordinal)
-                    .cloned()
-                    .unwrap_or(
-                        krusty::fir::ResolvedParameterIdentity::AnonymousContextParameter {
-                            ordinal: ordinal as u32,
-                        },
-                    ),
+            .zip(&edge.declared_context_identities)
+            .map(|(ty, identity)| BridgeParameter {
+                identity: identity.clone(),
                 semantic: *ty,
             })
             .collect::<Vec<_>>()
@@ -1131,7 +1128,7 @@ fn push_property_bridge(
         .clone()
         .filter(|_| edge.implementation_mutable)
     else {
-        return;
+        return Ok(());
     };
     // The setter keeps the declared types: over a slot whose getter only differs by the boxed
     // result, the setter's descriptor is already the implementation's own.
@@ -1189,6 +1186,7 @@ fn push_property_bridge(
             property_implementation: property_implementation(edge, BridgeAccessorRole::Setter),
         });
     }
+    Ok(())
 }
 
 /// The JVM results of the two getters a property override edge joins: the declared types, or their

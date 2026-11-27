@@ -687,11 +687,11 @@ impl Planner<'_> {
                     slot,
                     edge.declared_type,
                     edge.implementation_type,
-                    edge.declared_contexts
-                        .iter()
-                        .copied()
-                        .zip(edge.implementation_contexts.iter().copied())
-                        .collect::<Vec<_>>(),
+                    super::accessor_operands(
+                        &edge.declared_contexts,
+                        &edge.implementation_contexts,
+                        None,
+                    ),
                 )),
                 // A `val` overridden by a `var` adds a setter the base never had.
                 None if setter => None,
