@@ -41,18 +41,12 @@ suspend fun throughWrapper(value: GreetingWrapper, name: String): String =
 suspend fun run(): String {
     val wrapper = GreetingWrapper(PlainGreeter())
     val special = SpecialGreeting(PlainGreeter())
-    val a = throughBase(wrapper, "a")
-    val b = throughBase(special, "b")
-    val c = throughInterface(wrapper, "c")
-    val d = throughInterface(special, "d")
-    val e = throughWrapper(wrapper, "e")
-    val f = throughWrapper(special, "f")
-    if (a != "hi a:base") return "base forwarder slot"
-    if (b != "hi b:special") return "subclass forwarder slot"
-    if (c != "hi c:4") return "interface forwarder"
-    if (d != "hi d:4") return "inherited interface forwarder"
-    if (e != "hi e:4:hi own:4") return "class forwarder calls"
-    if (f != "hi f:4:hi own:4") return "subclass forwarder calls"
+    if (throughBase(wrapper, "a") != "hi a:base") return "base forwarder slot"
+    if (throughBase(special, "b") != "hi b:special") return "subclass forwarder slot"
+    if (throughInterface(wrapper, "c") != "hi c:4") return "interface forwarder"
+    if (throughInterface(special, "d") != "hi d:4") return "inherited interface forwarder"
+    if (throughWrapper(wrapper, "e") != "hi e:4:hi own:4") return "class forwarder calls"
+    if (throughWrapper(special, "f") != "hi f:4:hi own:4") return "subclass forwarder calls"
     if (delegatedCalls != 8) return "delegate evaluation count: " + delegatedCalls
     return "OK"
 }
