@@ -7,7 +7,7 @@
 use super::ProductionSignatureSemantics;
 use crate::resolve::selected_result_aliases::{rebind_to_published, SelectionInputs};
 use crate::resolve::selected_result_publication::{
-    whole_array_arguments, CompactSelectedResultPublication,
+    whole_array_arguments, CompactSelectedResultPublication, SelectedMember,
 };
 use crate::types::{Ty, TyKind};
 
@@ -98,16 +98,19 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         origin: crate::fir::OriginId,
-        receiver: crate::fir::ResolvedTy,
         type_arguments: &[Ty],
         expected: Option<crate::fir::ResolvedTy>,
-        result: Ty,
-        member: Option<crate::libraries::LibraryMember>,
-        source_declaration: Option<crate::fir::DeclarationId>,
-        argument_types: Vec<Ty>,
-        publication: CompactSelectedResultPublication,
+        selected: SelectedMember,
         demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
+        let SelectedMember {
+            receiver,
+            result,
+            member,
+            source_declaration,
+            argument_types,
+            publication,
+        } = selected;
         let inputs = SelectionInputs::new(Some(receiver.get()), &argument_types);
         if let Some(member) = member.as_ref() {
             if let Some(signature) =

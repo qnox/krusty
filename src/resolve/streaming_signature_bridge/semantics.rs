@@ -10,7 +10,7 @@ use crate::resolve::implicit_rungs::ImplicitRung;
 use crate::resolve::selected_result_aliases::SelectionInputs;
 use crate::resolve::selected_result_publication::whole_array_arguments;
 use crate::resolve::selected_result_publication::{
-    CompactSelectedResultPublication, SelectedSignature,
+    CompactSelectedResultPublication, SelectedMember, SelectedSignature,
 };
 
 mod cast_narrowing;
@@ -3835,18 +3835,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     );
             }
         };
-        let (result, member, source_declaration, argument_types, publication) = selected;
+        let selected = SelectedMember::new(receiver, selected);
         self.finish_selected_member_publication(
             scope,
             origin,
-            receiver,
             &type_arguments,
             expected,
-            result,
-            member,
-            source_declaration,
-            argument_types,
-            publication,
+            selected,
             demand,
         )
     }

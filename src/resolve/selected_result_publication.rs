@@ -1080,6 +1080,40 @@ pub(super) fn constrain_parameters<F: Clone>(
     }
 }
 
+/// A selected member call's result and publication facts, which travel together from candidate
+/// selection to result publication.
+pub(super) struct SelectedMember {
+    pub(super) receiver: crate::fir::ResolvedTy,
+    pub(super) result: Ty,
+    pub(super) member: Option<crate::libraries::LibraryMember>,
+    pub(super) source_declaration: Option<crate::fir::DeclarationId>,
+    pub(super) argument_types: Vec<Ty>,
+    pub(super) publication: CompactSelectedResultPublication,
+}
+
+/// The selected candidate's result, member, source declaration, argument types and publication.
+pub(super) type SelectedCandidate = (
+    Ty,
+    Option<crate::libraries::LibraryMember>,
+    Option<crate::fir::DeclarationId>,
+    Vec<Ty>,
+    CompactSelectedResultPublication,
+);
+
+impl SelectedMember {
+    pub(super) fn new(receiver: crate::fir::ResolvedTy, selected: SelectedCandidate) -> Self {
+        let (result, member, source_declaration, argument_types, publication) = selected;
+        Self {
+            receiver,
+            result,
+            member,
+            source_declaration,
+            argument_types,
+            publication,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
