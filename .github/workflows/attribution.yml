@@ -5,24 +5,46 @@ name: attribution
 # and a pull request synchronize. This workflow is only the title and body: `edited` does not
 # start ci, and queueing a second runner for an 18-second check on every push was filling the
 # same runner cap as the conformance jobs.
+#
+# The comments job removes the footer an integration appends to the comments, review comments and
+# reviews it posts. Its own account cannot remove it: an edit through the integration appends it
+# again. A comment event runs master's copy of this workflow; a review event runs the pull request's
+# copy, which a stack on an older base lacks, and a fork's gets a read-only token. The hourly sweep
+# covers those, and a manual run with an earlier `since` cleans comments posted before this job.
 on:
   pull_request:
     types: [opened, edited, reopened]
+  issue_comment:
+    types: [created, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited]
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      since:
+        description: Clean every issue and review comment updated since this ISO 8601 time
+        required: true
 
-# Writing pull requests lets the check remove the footer an integration appends to the body. A fork's
-# pull request gets a read-only token whatever this asks for.
+# Writing pull requests and issues lets the check remove the footer an integration appends to the
+# body and to comments. A fork's pull request gets a read-only token whatever this asks for.
 permissions:
   contents: read
+  issues: write
   pull-requests: write
 
 # A new edit replaces the queued run. Repeated title or body updates were leaving several copies
 # of this check waiting on a runner.
+# Comment runs all share master's ref, so each gets its own group.
 concurrency:
-  group: attribution-${{ github.ref }}
+  group: attribution-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   attribution:
+    if: github.event_name == 'pull_request'
     # Fork PRs run on ubuntu-latest: self-hosted runners never take fork PR jobs.
     runs-on: ${{ (github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "utility"]') }}
     steps:
@@ -62,3 +84,36 @@ jobs:
           if printf '%s\n' "$PR_AUTHOR" | grep -qiE 'claude|codex|copilot|openai|anthropic'; then
             echo "::warning title=attribution::opened by $PR_AUTHOR; merge with Rebase and merge, not squash, so master keeps the maintainer as author"
           fi
+
+  comments:
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.event.pull_request == null || github.event.pull_request.head.repo.full_name == github.repository)
+    # A few API calls: GitHub-hosted, so it never waits behind the self-hosted runner cap.
+    runs-on: ubuntu-latest
+    steps:
+      # A review event checks out the pull request; the script is always master's.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch || 'master' }}
+      - name: remove comment footers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          COMMENT_URL: ${{ github.event.comment.url }}
+          PR: ${{ github.event.pull_request.number }}
+          REVIEW: ${{ github.event.review.id }}
+          SINCE: ${{ inputs.since }}
+        run: |
+          case "$EVENT" in
+            issue_comment | pull_request_review_comment)
+              scripts/strip-comment-footers.sh --comment "$COMMENT_URL" ;;
+            pull_request_review)
+              scripts/strip-comment-footers.sh --comment "repos/$GH_REPO/pulls/$PR/reviews/$REVIEW" ;;
+            workflow_dispatch)
+              scripts/strip-comment-footers.sh --since "$SINCE" ;;
+            schedule)
+              # Two hours back: an hourly run that starts late still overlaps the previous one.
+              scripts/strip-comment-footers.sh --since "$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)" ;;
+          esac
