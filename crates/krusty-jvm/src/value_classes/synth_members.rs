@@ -818,6 +818,9 @@ pub(super) fn synth_value_members(
             {
                 return false;
             }
+            // The delegated constructor's declared parameters, before erasure: the checked vector
+            // the delegation's arguments are adapted against.
+            let declared_target_params = target_params.clone().into_boxed_slice();
             let target_params = target_params
                 .iter()
                 .map(|parameter| erase(parameter, under))
@@ -856,6 +859,7 @@ pub(super) fn synth_value_members(
                 dispatch_receiver: None,
                 args: sc.delegate_args.clone(),
             });
+            ir.call_declared_params.insert(call, declared_target_params);
             // Typed as the value class, like the primary's temporary: `this` is the carrier.
             let delegation = ir.add_expr(IrExpr::Variable {
                 index: delegated_value,

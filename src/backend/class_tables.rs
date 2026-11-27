@@ -99,6 +99,27 @@ impl AnyMember {
     }
 }
 
+/// The operands an accessor takes between its dispatch receiver and its value, as the declaration
+/// and the implementation of a property override each have them: the context parameters, then a
+/// member extension's receiver.
+pub(crate) fn accessor_operands(
+    declared_contexts: &[Ty],
+    implementation_contexts: &[Ty],
+    receiver: Option<(Ty, Ty)>,
+) -> Vec<(Ty, Ty)> {
+    assert_eq!(
+        declared_contexts.len(),
+        implementation_contexts.len(),
+        "an override edge carries the same context parameters on both sides"
+    );
+    declared_contexts
+        .iter()
+        .copied()
+        .zip(implementation_contexts.iter().copied())
+        .chain(receiver)
+        .collect()
+}
+
 /// What a table slot holds.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Slot {
@@ -182,10 +203,11 @@ pub enum Slot {
         declared: Ty,
         /// The property type as the implementation has it: the carrier `target_slot` expects.
         implemented: Ty,
-        /// A member extension's receiver, as the interface declares it and as the implementation
-        /// takes it: `GFoo<T>.(T.extVal)` takes a box where `GFoo<S>`'s implementation takes the
-        /// value of `S`.
-        receiver: Option<(Ty, Ty)>,
+        /// The operands between the dispatch receiver and the value, each as the interface
+        /// declares it and as the implementation takes it: the context parameters, then a member
+        /// extension's receiver. `GFoo<T>.(T.extVal)` takes a box where `GFoo<S>`'s
+        /// implementation takes the value of `S`.
+        operands: Vec<(Ty, Ty)>,
         /// Whether this stands in for the setter — which takes the value and answers nothing —
         /// rather than the getter.
         setter: bool,

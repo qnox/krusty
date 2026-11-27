@@ -27,7 +27,7 @@ use super::super::super::interface_dispatch::MemberRef;
 use super::super::super::objects::{slot_field, REFERENCE};
 use super::super::super::runtime::{Runtime, EQZ32, OR32};
 use super::super::classes::{Accessor, FileClasses};
-use super::super::interface_members::{accessor_types, member_signature};
+use super::super::interface_members::{member_signature, operand_accessor_types};
 use super::super::property_registry::{
     AccessorProperty, MemberProperty, MemberPropertyDefinition, TopLevelProperty,
 };
@@ -455,6 +455,20 @@ impl Body<'_> {
                     Some(*getter)
                 }
             }
+            // A member property declaring context parameters takes them as leading accessor
+            // operands, which dispatches the way a member extension's receiver does.
+            Some(IrLocalPropertyLayout::Member {
+                getter,
+                setter: property_setter,
+                context_parameters,
+                ..
+            }) if !context_parameters.is_empty() => {
+                if setter {
+                    *property_setter
+                } else {
+                    *getter
+                }
+            }
             _ => None,
         }
         .ok_or_else(|| "a member-extension property call with no recorded accessor".to_string())?;
@@ -641,15 +655,15 @@ impl Body<'_> {
         let Some(number) = self.numbers.number(key) else {
             return Ok(None);
         };
-        let ty = match self.ir.local_property_layouts.get(&property) {
+        let (context, ty) = match self.ir.local_property_layouts.get(&property) {
             Some(IrLocalPropertyLayout::Member {
                 ty,
                 context_parameters,
                 ..
-            }) if context_parameters.is_empty() => *ty,
+            }) => (context_parameters.as_slice(), *ty),
             // A member extension of an interface is called through its accessor's dispatch.
             Some(IrLocalPropertyLayout::MemberExtension { .. }) => return Ok(None),
-            Some(_) => return Err("an interface property with context parameters".to_string()),
+            Some(_) => return Err("an interface property with an unrecognized layout".to_string()),
             None => {
                 let reference = self
                     .ir
@@ -659,13 +673,10 @@ impl Body<'_> {
                 if reference.extension_receiver.is_some() {
                     return Ok(None);
                 }
-                if !reference.context_parameters.is_empty() {
-                    return Err("an interface property with context parameters".to_string());
-                }
-                reference.ty
+                (reference.context_parameters.as_slice(), reference.ty)
             }
         };
-        let (params, result) = accessor_types(ty, setter);
+        let (params, result) = operand_accessor_types(context.iter().copied(), ty, setter);
         self.numbered_member(number, params, result).map(Some)
     }
 
@@ -940,6 +951,12 @@ impl Body<'_> {
                             .dispatch_member_extension_property(
                                 class, *property, false, receiver, args,
                             ),
+                        Some(IrLocalPropertyLayout::Member {
+                            context_parameters, ..
+                        }) if !context_parameters.is_empty() => self
+                            .dispatch_member_extension_property(
+                                class, *property, false, receiver, args,
+                            ),
                         _ if args.is_empty() => self.property_read(None, *property, Some(receiver)),
                         _ => self.context_member_accessor(*property, false, receiver, args),
                     },
@@ -947,6 +964,12 @@ impl Body<'_> {
                         property,
                     )) => match self.ir.local_property_layouts.get(property) {
                         Some(IrLocalPropertyLayout::MemberExtension { .. }) => self
+                            .dispatch_member_extension_property(
+                                class, *property, true, receiver, args,
+                            ),
+                        Some(IrLocalPropertyLayout::Member {
+                            context_parameters, ..
+                        }) if !context_parameters.is_empty() => self
                             .dispatch_member_extension_property(
                                 class, *property, true, receiver, args,
                             ),

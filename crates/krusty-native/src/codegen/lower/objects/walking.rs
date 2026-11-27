@@ -483,10 +483,10 @@ impl FileLowering<'_> {
             Slot::AccessorBridge {
                 declared,
                 implemented,
-                receiver,
+                operands,
                 setter,
                 ..
-            } => *declared == Ty::Int && *implemented == Ty::Int && receiver.is_none() && !setter,
+            } => *declared == Ty::Int && *implemented == Ty::Int && operands.is_empty() && !setter,
             _ => false,
         };
         if !exact {

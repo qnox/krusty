@@ -12,7 +12,7 @@ use super::super::super::super::encode::{Function, HeapType, Module};
 use super::super::super::super::objects::slot_field;
 use super::super::super::super::runtime::Runtime;
 use super::super::super::classes::{BridgedMember, FileClasses, OverrideBridge};
-use super::super::super::interface_members::accessor_types;
+use super::super::super::interface_members::operand_accessor_types;
 use super::{Body, FileContext, Unsupported};
 
 pub(super) fn define_override_bridges(
@@ -94,11 +94,20 @@ pub(super) fn define_override_bridges(
             BridgedMember::Accessor {
                 declared,
                 implemented,
+                operands,
                 setter,
                 target_slot,
             } => (
-                accessor_types(declared, setter),
-                accessor_types(implemented, setter),
+                operand_accessor_types(
+                    operands.iter().map(|&(declared, _)| declared),
+                    declared,
+                    setter,
+                ),
+                operand_accessor_types(
+                    operands.iter().map(|&(_, implemented)| implemented),
+                    implemented,
+                    setter,
+                ),
                 Some(target_slot),
                 None,
             ),

@@ -113,6 +113,11 @@ pub(crate) enum PlannedSlot {
     AccessorBridge {
         declared: Ty,
         implemented: Ty,
+        /// The context operands on each side, leading the value.
+        operands: Vec<(Ty, Ty)>,
+        /// What the declared accessor takes after its dispatch receiver: the operands, then the
+        /// value for a setter.
+        parameters: Box<[Ty]>,
         setter: bool,
         target_slot: u32,
     },
@@ -312,17 +317,13 @@ impl ModuleSlotPlan {
             PlannedSlot::Member(key) => member(key),
             PlannedSlot::Bridge { declared, .. } => member(&PlanKey::Callable(*declared)),
             PlannedSlot::AccessorBridge {
-                declared, setter, ..
-            } => Some(if *setter {
-                PlannedSignature::Member {
-                    parameters: std::slice::from_ref(declared),
-                    result: Ty::Unit,
-                }
-            } else {
-                PlannedSignature::Member {
-                    parameters: &[],
-                    result: *declared,
-                }
+                declared,
+                parameters,
+                setter,
+                ..
+            } => Some(PlannedSignature::Member {
+                parameters,
+                result: if *setter { Ty::Unit } else { *declared },
             }),
         }
     }
@@ -648,7 +649,16 @@ impl Planner<'_> {
         edges.sort_by_key(|edge| edge.depth != 1);
         let replaced = match edges.first() {
             Some(edge) => match slots.get(&key(edge.overridden)) {
-                Some(&slot) => Some((slot, edge.declared_type, edge.implementation_type)),
+                Some(&slot) => Some((
+                    slot,
+                    edge.declared_type,
+                    edge.implementation_type,
+                    super::accessor_operands(
+                        &edge.declared_contexts,
+                        &edge.implementation_contexts,
+                        None,
+                    ),
+                )),
                 // A `val` overridden by a `var` adds a setter the base never had.
                 None if setter => None,
                 None => return Err("a property override with no slot to replace".into()),
@@ -657,13 +667,23 @@ impl Planner<'_> {
         };
         let entry = PlannedSlot::Member(key(property));
         let slot = match replaced {
-            Some((slot, declared, implemented))
-                if !self.representation.same(declared, implemented) =>
+            Some((slot, declared, implemented, operands))
+                if !self.representation.same(declared, implemented)
+                    || operands.iter().any(|&(declared, implemented)| {
+                        !self.representation.same(declared, implemented)
+                    }) =>
             {
                 let own = place(entries, None, entry);
+                let parameters = operands
+                    .iter()
+                    .map(|&(declared, _)| declared)
+                    .chain(setter.then_some(declared))
+                    .collect();
                 entries[slot as usize] = PlannedSlot::AccessorBridge {
                     declared,
                     implemented,
+                    operands,
+                    parameters,
                     setter,
                     target_slot: own,
                 };

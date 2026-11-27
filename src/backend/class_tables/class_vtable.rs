@@ -356,7 +356,7 @@ pub(super) fn class_table(
             vtable[base_slot as usize] = Slot::AccessorBridge {
                 declared,
                 implemented,
-                receiver: None,
+                operands: Vec::new(),
                 setter,
                 target_slot: slot,
             };
@@ -434,7 +434,7 @@ pub(super) fn class_table(
                 vtable[base_slot as usize] = Slot::AccessorBridge {
                     declared,
                     implemented: property.ty,
-                    receiver: None,
+                    operands: Vec::new(),
                     setter,
                     target_slot: slot,
                 };
@@ -615,10 +615,15 @@ pub(super) fn register_inherited_interface_members(
         // the interface's carrier instead. A property is what `bridges/test7.kt` is about, which
         // is why the method check did not catch it.
         // A member extension's receiver is an operand like any other, and crosses the same way.
-        let receiver = edge.declared_receiver.zip(edge.implementation_receiver);
+        let operands = super::accessor_operands(
+            &edge.declared_contexts,
+            &edge.implementation_contexts,
+            edge.declared_receiver.zip(edge.implementation_receiver),
+        );
         let bridged = !representation.same(edge.implementation_type, edge.declared_type)
-            || receiver
-                .is_some_and(|(declared, implemented)| !representation.same(declared, implemented));
+            || operands
+                .iter()
+                .any(|&(declared, implemented)| !representation.same(declared, implemented));
         for setter in [false, true] {
             let (from, to) = if setter {
                 (
@@ -638,7 +643,7 @@ pub(super) fn register_inherited_interface_members(
                         .or_insert(Slot::AccessorBridge {
                             declared: edge.declared_type,
                             implemented: edge.implementation_type,
-                            receiver,
+                            operands: operands.clone(),
                             setter,
                             target_slot: slot,
                         });

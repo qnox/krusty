@@ -69,11 +69,16 @@ pub(super) fn accessor_types(ty: Ty, setter: bool) -> (Vec<Ty>, Ty) {
     }
 }
 
-/// The parameters and result of a property accessor of a value of type `ty` on a member extension
-/// whose receiver is `receiver`: the receiver comes first, then (for a setter) the value.
-fn extension_accessor_types(receiver: Option<Ty>, ty: Ty, setter: bool) -> (Vec<Ty>, Ty) {
+/// The parameters and result of a property accessor of a value of type `ty` that takes `operands`
+/// (its context parameters, then a member extension's receiver): they come first, then (for a
+/// setter) the value.
+pub(super) fn operand_accessor_types(
+    operands: impl IntoIterator<Item = Ty>,
+    ty: Ty,
+    setter: bool,
+) -> (Vec<Ty>, Ty) {
     let (value, result) = accessor_types(ty, setter);
-    (receiver.into_iter().chain(value).collect(), result)
+    (operands.into_iter().chain(value).collect(), result)
 }
 
 /// What every recording of one file reads.
@@ -283,8 +288,13 @@ fn publish_identities(
                 continue;
             };
             let signature = match layout {
-                IrLocalPropertyLayout::Member { ty, .. } => {
-                    let (params, result) = accessor_types(*ty, setter);
+                IrLocalPropertyLayout::Member {
+                    ty,
+                    context_parameters,
+                    ..
+                } => {
+                    let (params, result) =
+                        operand_accessor_types(context_parameters.iter().copied(), *ty, setter);
                     member_signature(&params, result)?
                 }
                 // A member extension's accessor takes its extension receiver as a parameter.
@@ -438,14 +448,21 @@ impl FileRecorder<'_, '_, '_> {
             InterfaceEntry::Slot(Slot::AccessorBridge {
                 declared,
                 implemented,
-                receiver: None,
+                operands,
                 setter,
                 target_slot,
             }) => {
                 let implementation = self.slot_function(*target_slot)?;
-                let (declared_params, declared_result) = accessor_types(*declared, *setter);
-                let (implemented_params, implemented_result) =
-                    accessor_types(*implemented, *setter);
+                let (declared_params, declared_result) = operand_accessor_types(
+                    operands.iter().map(|&(declared, _)| declared),
+                    *declared,
+                    *setter,
+                );
+                let (implemented_params, implemented_result) = operand_accessor_types(
+                    operands.iter().map(|&(_, implemented)| implemented),
+                    *implemented,
+                    *setter,
+                );
                 self.thunk(
                     (&declared_params, declared_result),
                     (&implemented_params, implemented_result),
@@ -1179,10 +1196,19 @@ impl FileRecorder<'_, '_, '_> {
                 }
             }
         };
-        let declared_types =
-            extension_accessor_types(edge.declared_receiver, edge.declared_type, setter);
-        let implemented_types = extension_accessor_types(
-            edge.implementation_receiver,
+        let declared_types = operand_accessor_types(
+            edge.declared_contexts
+                .iter()
+                .copied()
+                .chain(edge.declared_receiver),
+            edge.declared_type,
+            setter,
+        );
+        let implemented_types = operand_accessor_types(
+            edge.implementation_contexts
+                .iter()
+                .copied()
+                .chain(edge.implementation_receiver),
             edge.implementation_type,
             setter,
         );
