@@ -926,6 +926,7 @@ fn selected_delegate_call(
         DelegateGetValueTarget::Extension {
             callable,
             stable_declaration,
+            bindings,
             ..
         } => {
             let parameters = callable
@@ -996,6 +997,43 @@ fn selected_delegate_call(
             let declaration = callable
                 .external_identity
                 .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
+            // The bindings convention selection fixed for the operator's own type parameters. The
+            // selected value parameters are the declared ones at those bindings: a `setValue`'s
+            // `value: V` is the delegated property's type, not the declaration's `V`.
+            let (substitutions, parameters) = match callable.generic_sig.as_deref() {
+                Some(generic) => {
+                    let substitutions = external_delegate_substitutions(
+                        index,
+                        declaration,
+                        generic,
+                        &callable.reified_type_parameter_ordinals,
+                        span,
+                        bindings,
+                    )?;
+                    let applied = callable
+                        .params
+                        .iter()
+                        .skip(1)
+                        .map(|parameter| {
+                            resolved(crate::types::ty_subst_applied_arguments(
+                                *parameter, bindings,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_boxed_slice();
+                    (substitutions, applied)
+                }
+                None => (Box::new([]) as Box<[FirTypeSubstitution]>, parameters),
+            };
+            // The selected result is the declared one at the same bindings, so the recorded
+            // substitutions and the recorded result describe one instantiation.
+            let result = match callable.generic_sig.as_deref() {
+                Some(generic) => resolved(crate::types::ty_subst_applied_arguments(
+                    generic.ret,
+                    bindings,
+                ))?,
+                None => resolved(callable.ret)?,
+            };
             Ok(FirDelegateCall {
                 target: FirCallTarget::External {
                     declaration,
@@ -1008,7 +1046,7 @@ fn selected_delegate_call(
                     declared_receiver: callable.source_receiver.map(resolved).transpose()?,
                     declaring_receiver: None,
                     parameters: parameters.clone(),
-                    result: resolved(callable.ret)?,
+                    result,
                     declared_result: callable.declared_ret.map(resolved).transpose()?,
                     overridden_results: callable
                         .overridden_results
@@ -1035,10 +1073,10 @@ fn selected_delegate_call(
                     .map_err(|_| failure(BodyCheckFailureKind::UnsupportedCallShape))?,
                     extension_receiver_parameter: None,
                 },
-                substitutions: Box::new([]),
+                substitutions,
                 parameters,
                 declared_parameters,
-                result: resolved(callable.ret)?,
+                result,
                 extension: true,
                 dispatch_receiver: None,
                 receiver,
@@ -1186,30 +1224,12 @@ fn delegate_substitutions(
             let reified = header.flags.is_reified();
             let value = ResolvedTy::new(value)
                 .map_err(|error| failure(BodyCheckFailureKind::UnpublishableType(error)))?;
-            let runtime = if reified {
-                crate::symbol_resolver::reified_runtime_type(
-                    value.get(),
-                    &crate::symbol_resolver::ReifiedDeclarations {
-                        direct_supertypes: &|name| index.recorded_direct_supertypes(name),
-                        variance_at: &|name, position| {
-                            index.recorded_type_argument_variance(name, position)
-                        },
-                    },
-                )
-            } else {
-                value.get()
-            };
-            let reified_runtime = if runtime == value.get() {
-                value
-            } else {
-                ResolvedTy::new(runtime)
-                    .map_err(|error| failure(BodyCheckFailureKind::UnpublishableType(error)))?
-            };
             Ok(FirTypeSubstitution {
                 parameter: parameter.into(),
                 reified,
                 value,
-                reified_runtime,
+                reified_runtime: reified_runtime(index, reified, value)
+                    .map_err(|error| failure(BodyCheckFailureKind::UnpublishableType(error)))?,
                 additional_bounds: Box::new([]),
             })
         })
@@ -1219,6 +1239,74 @@ fn delegate_substitutions(
         FirTypeParameterRef::External { ordinal, .. } => ordinal,
     });
     Ok(substitutions.into_boxed_slice())
+}
+
+/// Serialize the generic bindings convention selection fixed for a dependency operator, by the
+/// ordinal of each of its declared type parameters, as an ordinary checked dependency call
+/// records them. Every pair is the declaration shape followed by its selected shape.
+fn external_delegate_substitutions(
+    index: &ResolvedModuleIndex,
+    declaration: ExternalCallableId,
+    generic: &crate::libraries::GenericSig,
+    reified_type_parameter_ordinals: &[u32],
+    span: Option<crate::diag::Span>,
+    bindings: &crate::symbol_resolver::GSigBinds,
+) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
+    let failure = |kind| BodyCheckFailure { span, kind };
+    let mut substitutions = bindings
+        .iter()
+        .map(|(name, value)| {
+            let (name, value) = (*name, *value);
+            let ordinal = generic
+                .formals
+                .iter()
+                .position(|formal| *formal == name)
+                .and_then(|ordinal| u32::try_from(ordinal).ok())
+                .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
+            let reified = reified_type_parameter_ordinals.contains(&ordinal);
+            let value = ResolvedTy::new(value)
+                .map_err(|error| failure(BodyCheckFailureKind::UnpublishableType(error)))?;
+            Ok(FirTypeSubstitution {
+                parameter: FirTypeParameterRef::External {
+                    callable: declaration,
+                    ordinal,
+                },
+                reified,
+                value,
+                reified_runtime: reified_runtime(index, reified, value)
+                    .map_err(|error| failure(BodyCheckFailureKind::UnpublishableType(error)))?,
+                additional_bounds: Box::new([]),
+            })
+        })
+        .collect::<Result<Vec<_>, BodyCheckFailure>>()?;
+    substitutions.sort_unstable_by_key(|substitution| match substitution.parameter {
+        FirTypeParameterRef::Module(parameter) => parameter.raw(),
+        FirTypeParameterRef::External { ordinal, .. } => ordinal,
+    });
+    Ok(substitutions.into_boxed_slice())
+}
+
+/// The run-time type a `reified` substitution supplies; an ordinary one supplies its value.
+fn reified_runtime(
+    index: &ResolvedModuleIndex,
+    reified: bool,
+    value: ResolvedTy,
+) -> Result<ResolvedTy, crate::fir::signature::UnpublishableType> {
+    if !reified {
+        return Ok(value);
+    }
+    let runtime = crate::symbol_resolver::reified_runtime_type(
+        value.get(),
+        &crate::symbol_resolver::ReifiedDeclarations {
+            direct_supertypes: &|name| index.recorded_direct_supertypes(name),
+            variance_at: &|name, position| index.recorded_type_argument_variance(name, position),
+        },
+    );
+    if runtime == value.get() {
+        Ok(value)
+    } else {
+        ResolvedTy::new(runtime)
+    }
 }
 
 fn delegate_dispatch_receiver(
@@ -1305,6 +1393,7 @@ mod tests {
             callable: Box::new(callable),
             stable_declaration: None,
             applied_receiver: Ty::Int,
+            bindings: Default::default(),
         };
 
         let failure = selected_delegate_call(
