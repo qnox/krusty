@@ -2127,14 +2127,17 @@ mod tests {
             ..WorkRequest::default()
         };
         let response = serve(&rejected, &setup, &|_unit| Ok(()));
-        assert_eq!(response.exit_code, 0, "{}", response.output);
-        assert!(
-            response.output.starts_with(
-                "krusty: target 'this target' is left to the JPS builder: krusty rejects the \
-                 command line\nkrusty: "
-            ),
-            "{}",
-            response.output
+        assert_eq!(
+            response,
+            WorkResponse {
+                exit_code: 0,
+                output:
+                    "krusty: target 'this target' is left to the JPS builder: krusty rejects the \
+                         command line\nkrusty: unsupported by krusty: --srcs B.kts: the worker \
+                         compiles only .kt and .java sources\nbuilt\n"
+                        .to_string(),
+                request_id: 0,
+            }
         );
     }
 
