@@ -32,7 +32,7 @@ pub mod source_set_compile;
 #[allow(unused_imports)]
 pub use native_backend::{
     expect_native_box, expect_native_decline, expect_native_exit, expect_native_sources,
-    expect_native_sources_decline, native_analysis, native_decline,
+    expect_native_sources_decline, native_decline,
 };
 pub use source_set_compile::compile_in_process_files;
 
@@ -1592,6 +1592,11 @@ pub fn expect_box_run(
     cp_jars: &[PathBuf],
     jdk_modules: Option<&Path>,
 ) -> String {
+    // The portable placeholders a program shared with Native carries (`OPTIONAL_JVM_INLINE_ANNOTATION`)
+    // are expanded for the JVM here and for Native by `native_backend`, one rule for both.
+    let prepared =
+        krusty::conformance::prepare_test_source(src, krusty::conformance::TestTarget::Jvm);
+    let src = prepared.as_str();
     compile_and_run_box(src, stem, cp_jars, jdk_modules).unwrap_or_else(|| {
         let diagnostics = front_end_diagnostics(src, cp_jars, jdk_modules);
         let backend = diagnostics
@@ -1753,6 +1758,20 @@ pub fn cross_check_backends(src: &str, stem: &str, expected: &str) {
 /// Multi-file form of [`expect_box_ok_with_stdlib`].
 #[allow(dead_code)]
 pub fn expect_box_ok_files_with_stdlib(sources: &[(&str, &str)], stem: &str) {
+    let prepared: Vec<(&str, String)> = sources
+        .iter()
+        .map(|(name, src)| {
+            (
+                *name,
+                krusty::conformance::prepare_test_source(src, krusty::conformance::TestTarget::Jvm),
+            )
+        })
+        .collect();
+    let sources: Vec<(&str, &str)> = prepared
+        .iter()
+        .map(|(name, src)| (*name, src.as_str()))
+        .collect();
+    let sources = sources.as_slice();
     let stdlib = stdlib_jar();
     let jdk = jdk_modules();
     let cp = [stdlib];

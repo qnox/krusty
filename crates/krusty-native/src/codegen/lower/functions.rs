@@ -527,6 +527,9 @@ impl<'a> FileLowering<'a> {
                             class_names: 0,
                         },
                     )?;
+                    let dependency =
+                        self.sam_dependency_implementations(target, &base, impl_fn, &storage)?;
+                    self.write_dependency_implementations(descriptor, &base, &dependency)?;
                 }
                 None => {
                     let thunk = self.declare_local_function(
@@ -794,6 +797,12 @@ impl<'a> FileLowering<'a> {
                 interfaces.push(descriptor);
             }
         }
+        let local_interfaces = self.model.interfaces[interface as usize].clone();
+        for descriptor in self.dependency_interface_memberships(interface, &local_interfaces)? {
+            if !interfaces.contains(&descriptor) {
+                interfaces.push(descriptor);
+            }
+        }
         let kotlin_name = target.classifier.render().replace(['/', '$'], ".");
         Ok(SamTables {
             vtable,
@@ -801,6 +810,28 @@ impl<'a> FileLowering<'a> {
             interfaces,
             kotlin_name,
         })
+    }
+
+    /// What the object a lambda becomes when converted to the `fun interface` `target` implements
+    /// each member of a dependency's interface with (`sam_dependency_members`): a thunk of the
+    /// member's own declared signature for each.
+    fn sam_dependency_implementations(
+        &mut self,
+        target: &krusty::ir::IrSamTarget,
+        base: &str,
+        impl_fn: u32,
+        captures: &CaptureStorage,
+    ) -> Result<Vec<(Vec<u8>, FuncId)>, Unsupported> {
+        let mut implemented = Vec::new();
+        for (identity, parameters, result) in self.sam_dependency_members(target) {
+            let mut signature = vec![any()];
+            signature.extend(parameters.iter().copied());
+            let name = format!("{base}_dependency_{}", implemented.len());
+            let thunk = self.declare_local_function(&name, &signature, result)?;
+            self.define_sam_thunk(thunk, &name, impl_fn, captures, &parameters, result)?;
+            implemented.push((identity, thunk));
+        }
+        Ok(implemented)
     }
 
     /// Why a lambda's body function was not emitted, for a thunk that needs to call it.

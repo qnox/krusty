@@ -12,7 +12,7 @@
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
+use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_box_as_kotlinc};
 
 /// Emptiness and blankness, over text that is neither, empty, and whitespace only.
 #[test]
@@ -144,15 +144,12 @@ fn a_string_builder_answers_the_same_questions_about_its_text() {
     expect_native_box(source, "BuilderText", "OK");
 }
 
-/// `ignoreCase = true` declines: it asks about Unicode case folding, which the runtime cannot
-/// answer, and answering it as though the flag were absent would be a wrong answer rather than a
-/// missing one.
+/// `ignoreCase = true` compares case-insensitively.
 #[test]
-fn ignoring_case_declines() {
-    expect_native_decline(
+fn ignoring_case_matches_across_case() {
+    expect_native_box_as_kotlinc(
         "fun box(): String = if (\"Hello\".startsWith(\"HELLO\", ignoreCase = true)) \"OK\"\n\
          \x20   else \"fail\"\n",
         "IgnoreCaseStartsWith",
-        "startsWith",
     );
 }

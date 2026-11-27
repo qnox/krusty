@@ -179,6 +179,9 @@ fn build_and_run(driver: &str) -> Option<Output> {
     if !host_can_run() {
         return None;
     }
+    if matches!(driver, "delegates" | "null_receiver_raises") {
+        return Some(build_compiled_delegate_driver(driver));
+    }
     let objects = runtime_objects().as_ref().unwrap_or_else(|errors| {
         panic!("{driver}: the driver and runtime did not build:\n{errors}")
     });
@@ -207,6 +210,56 @@ fn build_and_run(driver: &str) -> Option<Output> {
             .output()
             .expect("run the driver"),
     )
+}
+
+/// These drivers cross into actual KLIB-produced delegate implementations. Compile the complete
+/// fixture once, include its selected-entry header, and retain its exact import records at link.
+fn build_compiled_delegate_driver(driver: &str) -> Output {
+    static FIXTURE: OnceLock<crate::native_klib_driver::Compilation> = OnceLock::new();
+    let fixture = FIXTURE.get_or_init(|| {
+        crate::native_klib_driver::compile(
+            &[(
+                "NativeDelegateDriverContract",
+                include_str!("box_regressions/nativeDelegateDriverContract.kt"),
+            )],
+            krusty_native::NativeTarget::host().expect("host checked before driver compilation"),
+            "native_driver_fixture",
+            &[
+                (0, "driverRead", "native_fixture_read"),
+                (0, "driverWrite", "native_fixture_write"),
+                (0, "driverCalls", "native_fixture_calls"),
+                (0, "driverContract", "native_fixture_contract"),
+                (0, "driverNotNull", "native_fixture_not_null"),
+                (0, "driverNnProperty", "native_fixture_nn_property"),
+            ],
+            None,
+        )
+    });
+    let scratch = common::scratch_dir().expect("compiled delegate driver directory");
+    fs::write(scratch.join("native_driver_fixture.h"), &fixture.header)
+        .expect("write backend-produced fixture header");
+    let object = scratch.join(format!("{driver}.o"));
+    let built = Command::new("clang")
+        .args(compile_flags())
+        .arg("-I")
+        .arg(runtime_dir())
+        .arg("-I")
+        .arg(&scratch)
+        .arg("-c")
+        .arg(driver_dir().join(format!("{driver}.c")))
+        .arg("-o")
+        .arg(&object)
+        .output()
+        .expect("compile C driver against checked fixture header");
+    assert!(
+        built.status.success(),
+        "{driver}: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let object = fs::read(object).expect("read compiled C driver object");
+    let image = fixture.image(&[&object]);
+    common::native_backend::run_native_image(&image, driver, &[], &[])
+        .unwrap_or_else(|failure| panic!("{driver}: {}", failure.as_failure()))
 }
 
 /// Run `driver`, which must succeed EXACTLY: exit status 0, stdout exactly `OK\n`, and nothing on
@@ -1196,6 +1249,12 @@ fn a_pairs_members_answer_componentwise() {
 
 #[test]
 fn a_lazy_runs_its_initializer_once_on_the_first_read() {
+    assert_eq!(
+        common::kotlinc_box_result(include_str!(
+            "box_regressions/nativeDelegateDriverContract.kt"
+        )),
+        "OK"
+    );
     run_driver("delegates");
 }
 
@@ -1212,11 +1271,6 @@ fn a_ulong_progression_across_two_to_the_63_contains_its_members() {
 #[test]
 fn a_progression_renders_compares_and_hashes_with_its_step() {
     run_driver_against_kotlin("range_progression_members");
-}
-
-#[test]
-fn a_range_of_a_program_comparable_orders_by_its_compare_to() {
-    run_driver("comparable_range_program_type");
 }
 
 #[test]
@@ -1237,11 +1291,6 @@ fn a_spread_copy_that_does_not_fit_throws_and_writes_nothing() {
 #[test]
 fn a_range_a_progression_and_their_iterators_are_kotlins_classes() {
     run_driver_against_kotlin("range_class_identity");
-}
-
-#[test]
-fn a_comparable_ranges_members_call_the_program_in_kotlins_order_and_stop_at_a_throw() {
-    run_driver_against_kotlin("comparable_range_members");
 }
 
 #[test]

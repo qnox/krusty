@@ -13,6 +13,7 @@
    counterpart of. */
 #include "driver_exceptions.h"
 #include "transcript.h"
+#include "native_driver_fixture.h"
 
 static int invoked;
 
@@ -56,6 +57,11 @@ void kt_program_entry(void) {
     CHECK(kt_iterable_map(NULL, f_count) == NULL && raised_npe() && invoked == 0,
           "map over null went on after raising\n");
     CHECK(kt_class_of(NULL) == NULL && raised_npe(), "::class of null\n");
+    CHECK(native_fixture_read(NULL, NULL) == NULL && raised_npe(),
+          "a read through a null delegate\n");
+    native_fixture_write(NULL, NULL, kt_box_int(1));
+    CHECK(raised_npe(), "a write through a null delegate\n");
+    CHECK(text_is(native_fixture_calls(), "OK", 2), "a null delegate invoked an operator\n");
 
     CHECK(kt_iterable_iterator(NULL) == NULL && raised_npe(), "iterator() of null\n");
     CHECK(!kt_iterator_has_next(NULL) && raised_npe(), "hasNext() of a null iterator\n");

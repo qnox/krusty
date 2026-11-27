@@ -540,6 +540,23 @@ impl MaterializedClassModel<'_> {
         super::type_evidence::ordinary_subtype(known.then_some(model), parameters, sub, sup)
     }
 
+    /// The bounds `owner`'s type parameter at `index` declares when `owner` is a materialized
+    /// same-library class, whose bounds the calling compilation's model does not know.
+    pub(super) fn materialized_parameter_bounds(
+        &self,
+        owner: TypeName,
+        index: usize,
+    ) -> Option<Vec<Ty>> {
+        self.materialized(owner).map(|class| {
+            class
+                .formals
+                .get(index)
+                .and_then(|formal| formal.ty_param_bound())
+                .into_iter()
+                .collect()
+        })
+    }
+
     fn names_materialized(&self, ty: Ty) -> bool {
         match ty.kind() {
             TyKind::Nullable(inner) => self.names_materialized(inner),
