@@ -1122,7 +1122,7 @@ pub(super) fn compact(file: &mut File) {
         remap_u32_map(std::mem::take(&mut file.lambda_call_labels), &expressions);
     file.base_arg_names = remap_u32_map(std::mem::take(&mut file.base_arg_names), &expressions);
     file.anon_fun_ret = remap_u32_map(std::mem::take(&mut file.anon_fun_ret), &expressions);
-    file.spread_arg_ids = remap_u32_set(std::mem::take(&mut file.spread_arg_ids), &expressions);
+    file.spread_arg_stars = remap_u32_map(std::mem::take(&mut file.spread_arg_stars), &expressions);
 
     file.incdec_accesses = std::mem::take(&mut file.incdec_accesses)
         .into_iter()
