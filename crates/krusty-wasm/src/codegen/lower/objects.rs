@@ -1108,6 +1108,18 @@ impl Body<'_> {
                     return Err("a top-level property read that requires an accessor".to_string());
                 }
                 self.code.global_get(storage.global);
+                // A `lateinit` property's storage is read through its guard, as a read of the
+                // storage in its own file is, unless it is the raw read `isInitialized` makes.
+                if operation
+                    .is_none_or(|read| !self.ir.lateinit_initialization_probes.contains(&read))
+                {
+                    if let Some(name) = self.lateinit_top_level_name(target) {
+                        let Some(reference @ ValType::Ref { .. }) = carrier(storage.ty)? else {
+                            return Err("a `lateinit` read without a reference carrier".to_string());
+                        };
+                        self.guard_lateinit(reference, &name)?;
+                    }
+                }
                 return Ok(());
             }
         }
@@ -1272,6 +1284,22 @@ impl Body<'_> {
             return None;
         }
         self.properties.accessor(target)
+    }
+
+    /// The name of the top-level property `target` when it is `lateinit`, as this file declares it
+    /// or as another file of the module declared it.
+    fn lateinit_top_level_name(&self, target: PropertyId) -> Option<String> {
+        if let Some(IrLocalPropertyLayout::TopLevelStorage { storage, .. }) =
+            self.ir.local_property_layouts.get(&target)
+        {
+            let declaration = self.ir.statics.get(*storage as usize)?;
+            return declaration.is_lateinit.then(|| declaration.name.clone());
+        }
+        let reference = self.ir.referenced_module_properties.get(&target)?;
+        reference
+            .flags
+            .has(krusty::fir::DeclarationFlags::LATEINIT)
+            .then(|| reference.name.clone())
     }
 
     /// The storage selected for a receiver-less property in this or an earlier source file.
