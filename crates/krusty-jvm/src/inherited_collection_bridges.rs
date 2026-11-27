@@ -230,12 +230,14 @@ struct FoundMember {
     specification: BridgeMember,
     method: MethodSig,
     class_bindings: HashMap<String, Ty>,
-    /// The parameter names a Kotlin superclass's metadata gives the inherited method. A Java
-    /// method has none, and its fake override's parameters are kotlinc's generated `p0`, `p1`.
+    /// The parameter names the inherited method declares: a Kotlin superclass's metadata, or a
+    /// Java method's `MethodParameters` (a Java source, or javac `-parameters`). A Java method
+    /// without them gives its fake override kotlinc's generated `p0`, `p1`.
     declared_parameter_names: Option<Vec<String>>,
 }
 
-/// The value parameter names `info`'s Kotlin metadata declares for `method`.
+/// The value parameter names `info`'s Kotlin metadata, or else `method`'s own `MethodParameters`,
+/// declares for `method`: every parameter named, none synthesized.
 fn declared_parameter_names(
     classpath: &Classpath,
     info: &ClassInfo,
@@ -255,6 +257,11 @@ fn declared_parameter_names(
                 .iter()
                 .map(|parameter| parameter.name.clone())
                 .collect()
+        })
+        .or_else(|| {
+            (!method.parameter_names.is_empty())
+                .then(|| method.parameter_names.iter().cloned().collect())
+                .flatten()
         })
 }
 
