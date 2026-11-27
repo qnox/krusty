@@ -422,8 +422,8 @@ pub(super) fn emit_default_static_accessor(
             .borrow()
             .probed_from_another_class(static_index);
     if guarded {
-        // kotlinc's getter: return the value, or throw and then `aconst_null; areturn` so the
-        // null path has a reference for the verifier.
+        // kotlinc's getter: return the value, or throw and then return the coerced `Unit` result
+        // (`aconst_null`, or `Unit.INSTANCE` for an `Object` slot) so the path has a reference.
         g.dup();
         let missing = g.new_label();
         g.ifnull(missing);
@@ -440,7 +440,7 @@ pub(super) fn emit_default_static_accessor(
         if let Some(end) = lateinit_end {
             g.mark_line(end);
         }
-        g.aconst_null();
+        super::field_read::push_uninitialized_lateinit_result(&type_descriptor(jt), &mut g, cw);
     }
     emit_return(jt, &mut g);
     g.link();
@@ -1118,7 +1118,7 @@ fn emit_lateinit_getter_guard(
     if let Some(line) = null_tail_line {
         code.mark_line(line);
     }
-    code.aconst_null();
+    super::field_read::push_uninitialized_lateinit_result(&type_descriptor(ty), code, cw);
 }
 
 impl Emitter<'_> {
@@ -1175,7 +1175,7 @@ impl Emitter<'_> {
             code.invokestatic(m, 0, slot_words(jt) as i32);
             // `access$get<X>$p` is a raw `getstatic`. The use site throws; `isInitialized` does not.
             if is_lateinit && !probe {
-                self.emit_lateinit_use_guard(&name, code);
+                self.emit_lateinit_use_guard(&name, &type_descriptor(jt), code);
             }
             return;
         }
@@ -1246,7 +1246,7 @@ impl Emitter<'_> {
                         .map(|property| property.accessor_lines.declaration_end);
                     emit_lateinit_getter_guard(&name, jt, null_tail_line, code, self.cw);
                 } else {
-                    self.emit_lateinit_use_guard(&name, code);
+                    self.emit_lateinit_use_guard(&name, &type_descriptor(jt), code);
                 }
             }
         }
@@ -1266,7 +1266,7 @@ impl Emitter<'_> {
             );
             code.getstatic(fref, slot_words(jt) as i32);
             if is_lateinit && !probe {
-                self.emit_lateinit_use_guard(&name, code);
+                self.emit_lateinit_use_guard(&name, &type_descriptor(jt), code);
             }
         } else {
             let m = self.cw.methodref(
