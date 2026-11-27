@@ -150,6 +150,9 @@ typedef struct KMutableList {
        on the unsigned ring, as the JVM's `modCount` wraps: only equality is ever asked of it, and a
        signed count past `Int.MAX_VALUE` would be undefined. */
     uint32_t modifications;
+    /* Set by `ArrayList.build()`, which ends `buildList`: Kotlin/Native's `isReadOnly`. The list is
+       still an `ArrayList` and a `MutableList` to every type test, and each write refuses. */
+    kt_boolean read_only;
 } KMutableList;
 
 static const uint32_t kt_mutable_list_offsets[] = {offsetof(KMutableList, elements)};
@@ -545,10 +548,23 @@ KRef kt_mutable_list_new(void) {
     return (KRef)list;
 }
 
-/* The `ArrayList.build()` a `buildList` block ends in: the list the block filled, answered as the
-   read-only list the caller sees. Read-only is a static claim here, not a runtime one: the runtime
-   holds no flag for it, and nothing the program can ask tells the two apart. */
-KRef kt_mutable_list_build(KRef self) { return self; }
+/* The `ArrayList.build()` a `buildList` block ends in. Kotlin/Native keeps the list the block
+   filled and marks it read-only: it stays an `ArrayList`, so `is MutableList` holds, and every
+   later write raises `UnsupportedOperationException`, as the JVM's `ListBuilder` does. */
+KRef kt_mutable_list_build(KRef self) {
+    ((KMutableList *)self)->read_only = true;
+    return self;
+}
+
+/* Kotlin/Native's `checkIsMutable`: a write to a built list raises before it reads anything. A
+   range of a list asks its parent, through the parent's own writes. */
+static kt_boolean kt_mutable_list_refuses_write(KRef self) {
+    if (kt_is_sub_list(self) || !((const KMutableList *)self)->read_only) {
+        return false;
+    }
+    kt_throw(kt_throwable_new(&kt_type_unsupported_operation_exception, NULL));
+    return true;
+}
 
 /* `ArrayList(initialCapacity)`. The capacity is a hint and nothing observable depends on a valid
    one, but a NEGATIVE one is an error Kotlin raises, with the JVM's wording, and a program may catch
@@ -685,6 +701,9 @@ static void kt_sub_list_clear(KSubList *view) {
 }
 
 kt_boolean kt_mutable_list_add(KRef self, KRef value) {
+    if (kt_mutable_list_refuses_write(self)) {
+        return false;
+    }
     if (kt_is_sub_list(self)) {
         KSubList *view = (KSubList *)self;
         kt_sub_list_add_at(view, view->size, value);
@@ -716,6 +735,9 @@ void kt_mutable_list_plus_assign(KRef self, KRef value) { kt_mutable_list_add(se
    `-Xfix-kotlinc-defects`. Either way `xs.addAll(xs)` doubles the list: its walk starts after the
    room is made, and reads only the elements that were there. */
 static void kt_list_append_all(KRef self, KRef elements, kt_boolean read_first) {
+    if (kt_mutable_list_refuses_write(self)) {
+        return;
+    }
     if (elements != NULL
         && (kt_is_runtime_list(elements))) {
         kt_int count = kt_list_size(elements);
@@ -786,6 +808,9 @@ KRef kt_mutable_list_copy_of(KRef elements) {
 }
 
 KRef kt_mutable_list_set(KRef self, kt_int index, KRef value) {
+    if (kt_mutable_list_refuses_write(self)) {
+        return NULL;
+    }
     if (kt_is_sub_list(self)) {
         return kt_sub_list_set((KSubList *)self, index, value);
     }
@@ -805,6 +830,9 @@ KRef kt_mutable_list_set(KRef self, kt_int index, KRef value) {
 }
 
 void kt_mutable_list_add_at(KRef self, kt_int index, KRef value) {
+    if (kt_mutable_list_refuses_write(self)) {
+        return;
+    }
     if (kt_is_sub_list(self)) {
         kt_sub_list_add_at((KSubList *)self, index, value);
         return;
@@ -825,6 +853,9 @@ void kt_mutable_list_add_at(KRef self, kt_int index, KRef value) {
 }
 
 KRef kt_mutable_list_remove_at(KRef self, kt_int index) {
+    if (kt_mutable_list_refuses_write(self)) {
+        return NULL;
+    }
     if (kt_is_sub_list(self)) {
         return kt_sub_list_remove_at((KSubList *)self, index);
     }
@@ -845,6 +876,9 @@ KRef kt_mutable_list_remove_at(KRef self, kt_int index) {
 }
 
 kt_boolean kt_mutable_list_remove(KRef self, KRef value) {
+    if (kt_mutable_list_refuses_write(self)) {
+        return false;
+    }
     kt_int at = kt_list_index_of(self, value);
     if (at < 0) {
         return false;
@@ -857,6 +891,9 @@ kt_boolean kt_mutable_list_remove(KRef self, KRef value) {
    contain, answering whether the receiver changed. Kotlin asks `contains` of the live argument,
    including when the argument is the receiver itself, so this does not snapshot it. */
 static kt_boolean kt_mutable_list_drop_where(KRef self, KRef elements, kt_boolean drop_contained) {
+    if (kt_mutable_list_refuses_write(self)) {
+        return false;
+    }
     kt_boolean changed = false;
     kt_int at = 0;
     while (at < kt_list_size(self)) {
@@ -890,6 +927,9 @@ kt_boolean kt_mutable_list_retain_all(KRef self, KRef elements) {
 }
 
 void kt_mutable_list_clear(KRef self) {
+    if (kt_mutable_list_refuses_write(self)) {
+        return;
+    }
     if (kt_is_sub_list(self)) {
         kt_sub_list_clear((KSubList *)self);
         return;
