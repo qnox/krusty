@@ -2405,7 +2405,6 @@ super/superConstructor/kt18356_2.kt
 super/superConstructor/objectExtendsInner.kt
 super/superConstructor/objectExtendsLocalInner.kt
 suspendConversion/chainedFunSuspendConversionForSimpleExpression.kt
-suspendConversion/conversionOfInterfaceInheritingFunctionN.kt
 suspendConversion/suspendAndFunConversionInDisabledMode.kt
 suspendConversion/suspendConversionNullableCCE.kt
 suspendConversion/suspendConversionWithFunInterfaces.kt
