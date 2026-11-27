@@ -407,7 +407,6 @@ contextParameters/typealiasOnTypeWithContext.kt
 contextParameters/unaryOperators.kt
 contextParameters/useFromAnotherModuleSuspending.kt
 contracts/contractOnContextParameter.kt
-contracts/kt39374.kt
 contracts/kt45236.kt
 contracts/kt47300.kt
 contracts/listAppend.kt
@@ -2437,7 +2436,6 @@ super/superConstructor/objectExtendsInner.kt
 super/superConstructor/objectExtendsLocalInner.kt
 super/unqualifiedSuperWithDeeperHierarchies.kt
 suspendConversion/chainedFunSuspendConversionForSimpleExpression.kt
-suspendConversion/conversionOfInterfaceInheritingFunctionN.kt
 suspendConversion/suspendAndFunConversionInDisabledMode.kt
 suspendConversion/suspendConversionWithFunInterfaces.kt
 syntheticAccessors/functionsWithDefaultValues/extensionFunction.kt
