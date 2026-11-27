@@ -231,6 +231,17 @@ quirks! {
         fixed_in: None,
         defect: true,
     }
+    /// A Kotlin subclass of a Java class that realizes a builtin under another JVM name and also
+    /// declares a method under the builtin's Kotlin name (`charAt(int)` beside its own
+    /// `get(int)`) gets the builtin's entry under the Kotlin name, delegating to the renamed
+    /// method. The entry overrides the unrelated Java method, so a call to it reaches `charAt`, and
+    /// a class over a final one fails to load. The Java method is not the builtin's override, so a
+    /// subclass inherits it unchanged.
+    JavaRenamedBuiltinEntryOverridesJavaMember {
+        since: None,
+        fixed_in: None,
+        defect: true,
+    }
 }
 
 const _: () = assert!(Quirk::ALL.len() <= u64::BITS as usize);
