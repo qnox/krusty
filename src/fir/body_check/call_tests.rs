@@ -24,6 +24,7 @@ impl crate::symbol_source::SymbolSource for DependencyDefaultSource {
             == crate::symbol_source::SymbolNamespace::Package(crate::types::TypeName::ROOT)
             && name == self.name;
         std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+            companion_extensions: crate::libraries::Callables::None,
             builtin_classifier: false,
             classifier_name: None,
             classifier_declaration: None,
@@ -2207,7 +2208,8 @@ fn top_level_extension_call_keeps_its_stable_target_and_extension_receiver() {
 #[test]
 fn companion_extension_calls_keep_associated_targets_without_runtime_receivers() {
     let (body, index) = checked_function_body(
-        "class C\n\
+        "// LANGUAGE: +CompanionBlocksAndExtensions\n\
+         class C\n\
          companion fun C.func(value: String): String = value\n\
          companion fun C.getOk(): String = \"OK\"\n\
          fun box(): String = C.func(C.getOk())\n",

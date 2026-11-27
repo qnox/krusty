@@ -564,6 +564,7 @@ mod tests {
                 function_classifiers::classifier(identity).map(function_classifiers::synthetic)
             });
             std::rc::Rc::new(ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(identity),
                 classifier_declaration: classifier

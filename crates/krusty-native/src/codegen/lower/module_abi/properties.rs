@@ -194,11 +194,16 @@ impl FileLowering<'_> {
             record.placement,
             krusty::ir::IrStaticPlacement::CompanionBlock { .. }
         );
+        // A written `companion val C.p` records its classifier as the receiver, which selects the
+        // companion scope and is not an accessor parameter.
+        let companion_extension = record.flags.has(DeclarationFlags::COMPANION);
         let declaration = PropertyDeclaration {
             property: *target,
             ty: record.ty,
             owner,
-            receiver_parameters: (record.extension_receiver.is_some() && !companion_block)
+            receiver_parameters: (record.extension_receiver.is_some()
+                && !companion_block
+                && !companion_extension)
                 || !record.context_parameters.is_empty(),
             companion_block,
             flags: record.flags,

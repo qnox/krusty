@@ -60,6 +60,19 @@ impl<'a> SymbolResolver<'a> {
         self
     }
 
+    /// Both language features a header file's signature solving consults: eager lambda results and
+    /// nameable companion extensions.
+    pub(crate) fn with_file_features(self, eager_lambda: bool, companion_extensions: bool) -> Self {
+        self.with_eager_lambda_results(eager_lambda)
+            .with_companion_extensions(companion_extensions)
+    }
+
+    /// Let the calling file name written companion extensions, as `+CompanionExtensions` does.
+    pub(crate) fn with_companion_extensions(mut self, enabled: bool) -> Self {
+        self.companion_extensions = enabled;
+        self
+    }
+
     /// Tracking form used by synthesized language conventions. It preserves ambiguity and the exact
     /// specialized return beside the selected declaration so the checker can commit one target and
     /// lowering never has to repeat receiver or overload resolution.

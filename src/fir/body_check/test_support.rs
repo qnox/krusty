@@ -20,6 +20,7 @@ impl crate::symbol_source::SymbolSource for SingletonExtensionSource {
             == crate::symbol_source::SymbolNamespace::Package(crate::types::TypeName::ROOT)
             && name == "read";
         std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+            companion_extensions: crate::libraries::Callables::None,
             builtin_classifier: false,
             classifier_name: None,
             classifier_declaration: None,

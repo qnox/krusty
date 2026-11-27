@@ -806,6 +806,8 @@ pub struct SymbolResolver<'a> {
     type_variables: &'a [TyParamName],
     /// `+EagerLambdaAnalysis` in the calling file: a lambda's checked result decides applicability.
     eager_lambda_results: bool,
+    /// `+CompanionExtensions` in the calling file: written companion extensions are nameable.
+    companion_extensions: bool,
     /// The access site's member visibility ([`MemberAccessSite`]), when the caller has a site.
     member_access: Option<&'a dyn MemberAccessSite>,
 }
@@ -3838,6 +3840,7 @@ mod tests {
                     None
                 };
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(classifier_name),
                 classifier_declaration: classifier
@@ -3908,6 +3911,7 @@ mod tests {
                 classifier
             });
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(classifier_name),
                 classifier_declaration: classifier
@@ -4027,6 +4031,7 @@ mod tests {
                     crate::libraries::Callables::None
                 };
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_declaration: classifier
                     .as_ref()
@@ -5083,6 +5088,7 @@ mod tests {
                     _ => Vec::new(),
                 };
                 std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    companion_extensions: crate::libraries::Callables::None,
                     builtin_classifier: false,
                     classifier_name: None,
                     classifier_declaration: None,
@@ -5133,6 +5139,7 @@ mod tests {
                     _ => Vec::new(),
                 };
                 std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                    companion_extensions: crate::libraries::Callables::None,
                     builtin_classifier: false,
                     classifier_name: None,
                     classifier_declaration: None,

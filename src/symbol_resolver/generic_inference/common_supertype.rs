@@ -628,6 +628,7 @@ mod tests {
                 Some(Arc::new(classifier))
             });
             Rc::new(ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(identity),
                 classifier_declaration: classifier

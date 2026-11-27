@@ -45,6 +45,7 @@ impl SymbolSource for HeaderModuleClassifiers<'_> {
                         crate::libraries::LibraryType::declaration_header(),
                     )),
                     callables: crate::libraries::Callables::default(),
+                    companion_extensions: crate::libraries::Callables::None,
                     importable_declaration: true,
                 })
             },
@@ -573,6 +574,7 @@ mod tests {
                 || std::rc::Rc::new(crate::libraries::ResolvedSymbols::default()),
                 |classifier| {
                     std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+                        companion_extensions: crate::libraries::Callables::None,
                         builtin_classifier: false,
                         classifier_name: Some(classifier),
                         classifier_declaration: Some(

@@ -1407,6 +1407,8 @@ impl SymbolSource for ModuleSymbols<'_> {
             SymbolNamespace::Package(package) => Some(package),
             SymbolNamespace::Classifier(_) => None,
         };
+        let mut companion_functions = Vec::new();
+        let mut companion_properties = Vec::new();
         let mut overloads = if package.is_some() && self.syms.funs.contains_key(&name) {
             self.top_level_overloads(&name)
                 .into_iter()
@@ -1454,13 +1456,25 @@ impl SymbolSource for ModuleSymbols<'_> {
                 let origin = Origin::Module {
                     facade: type_name(""),
                 };
-                // A companion-associated declaration belongs to its classifier's namespace only: it
-                // is never an extension of a value of that classifier.
+                // A companion-associated declaration is never an extension of a value of its
+                // classifier. A `companion { }` block member belongs to its classifier's
+                // namespace; a written `companion fun C.f` is published in its package's
+                // companion-extension facet, as a dependency's is, and named only through its
+                // classifier once the package is in scope.
                 if sig.is_companion_extension() {
-                    if let Some(classifier) = associated_owner
-                        .filter(|owner| recv.non_null().obj_internal() == Some(*owner))
+                    let classifier = recv.non_null().obj_internal();
+                    if sig.is_companion_block_member() {
+                        if let Some(classifier) =
+                            associated_owner.filter(|owner| classifier == Some(*owner))
+                        {
+                            overloads
+                                .push(associated_fn_info(sig, classifier, owner, &name, origin));
+                        }
+                    } else if let Some(classifier) =
+                        classifier.filter(|_| package.is_some_and(|package| package == sig.package))
                     {
-                        overloads.push(associated_fn_info(sig, classifier, owner, &name, origin));
+                        companion_functions
+                            .push(associated_fn_info(sig, classifier, owner, &name, origin));
                     }
                     continue;
                 }
@@ -1608,18 +1622,28 @@ impl SymbolSource for ModuleSymbols<'_> {
                 continue;
             }
             for property in signatures {
-                // A companion-associated property belongs to its classifier's namespace only.
-                let associated_classifier = if property.is_companion_extension {
-                    let Some(classifier) = associated_owner.filter(|owner| {
-                        property.receiver.non_null().obj_internal() == Some(*owner)
-                    }) else {
+                // A `companion { }` block member belongs to its classifier's namespace; a written
+                // `companion val C.p` is published in its package's companion-extension facet,
+                // named only through its classifier.
+                let classifier = property.receiver.non_null().obj_internal();
+                let associated_classifier = if !property.is_companion_extension {
+                    None
+                } else if property.is_companion_block_member {
+                    let Some(classifier) =
+                        associated_owner.filter(|owner| classifier == Some(*owner))
+                    else {
                         continue;
                     };
                     Some(classifier)
                 } else {
-                    None
+                    let Some(classifier) = classifier else {
+                        continue;
+                    };
+                    Some(classifier)
                 };
-                if (associated_classifier.is_none()
+                let namespaced_block_member =
+                    associated_classifier.is_some() && property.is_companion_block_member;
+                if (!namespaced_block_member
                     && !package.is_some_and(|package| package == property.package))
                     || (property.visibility.is_private()
                         && self.source_file != Some(property.source.0))
@@ -1658,7 +1682,12 @@ impl SymbolSource for ModuleSymbols<'_> {
                         setter.generic_sig = Some(Box::new(setter_generic));
                     }
                 }
-                properties.push(PropertyInfo {
+                let published = if associated_classifier.is_some() && !namespaced_block_member {
+                    &mut companion_properties
+                } else {
+                    &mut properties
+                };
+                published.push(PropertyInfo {
                     return_value_status: None,
                     name: property_name.clone(),
                     kind: if associated_classifier.is_some() {
@@ -1752,6 +1781,14 @@ impl SymbolSource for ModuleSymbols<'_> {
             classifier_declaration,
             classifier,
             callables,
+            companion_extensions: Callables::from_parts(
+                crate::libraries::FunctionSet {
+                    overloads: companion_functions,
+                },
+                crate::libraries::PropertySet {
+                    overloads: companion_properties,
+                },
+            ),
             importable_declaration,
         });
         if self.syms.module_cache_enabled() {

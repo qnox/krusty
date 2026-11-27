@@ -79,6 +79,8 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
             .table()
             .get("StrictEqualsForStructuralClasses")
             .is_some();
+    file.language.companion_extensions =
+        features.has("CompanionExtensions") || features.has("CompanionBlocksAndExtensions");
     file.language.interface_companion_block_members_are_static =
         features.table().get("CompanionBlocks").is_some();
     file.language

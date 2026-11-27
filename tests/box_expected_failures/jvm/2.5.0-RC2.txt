@@ -3,7 +3,6 @@
 # Owned fixtures use regressions/<path relative to tests/box_regressions>.
 # Regenerate both exact inventories with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local
 # jvm run. The lists only shrink.
-companionBlocksAndExtensions/crossModuleExtensions.kt
 contextParameters/callableReferences/contextual/delegation/boundExtensionReceiver.kt
 contextParameters/callableReferences/contextual/delegation/boundReceiver.kt
 contextParameters/callableReferences/contextual/delegation/multipleBoundValues.kt

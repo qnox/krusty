@@ -77,6 +77,9 @@ pub struct HeaderFileScope {
     /// Whether this file binds a referenced declaration's context parameters at the reference.
     /// Signature solving types `::name` from the reference's own value parameters accordingly.
     pub callable_references_to_contextual: bool,
+    /// Whether this file enables companion extensions, so signature solving names a written
+    /// `companion fun/val C.name` through `C` only where it is on.
+    pub companion_extensions: bool,
 }
 
 #[derive(Default)]
@@ -143,6 +146,7 @@ impl HeaderScopeArena {
             explicit_context_arguments: file.language.explicit_context_arguments,
             eager_lambda_analysis: file.language.eager_lambda_analysis,
             callable_references_to_contextual: file.language.callable_references_to_contextual,
+            companion_extensions: file.language.companion_extensions,
         });
     }
 

@@ -9,7 +9,7 @@ use crate::language_version::LanguageVersion;
 use crate::libraries::{CallSig, GenericSig};
 use crate::types::{ContextParameterKind, ReturnValueStatus, Ty, TypeName, Visibility};
 
-use super::MetaValueParam;
+use super::{MetaValueParam, ParsedFunction};
 
 /// A function decoded from a `Class`/`Package` `@Metadata` message — the *metadata-truth* signature
 /// kotlinc resolves against (`JvmProtoBufUtil.getJvmMethodSignature`): the Kotlin name, the JVM method
@@ -76,6 +76,7 @@ impl MfnFlags {
     const IS_COMPANION_BLOCK_MEMBER: u16 = 1 << 10;
     const IS_SYNTHESIZED: u16 = 1 << 11;
     const ANNOTATIONS_ON_REALIZATION: u16 = 1 << 12;
+    const IS_COMPANION_EXTENSION: u16 = 1 << 13;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -134,6 +135,10 @@ impl MfnFlags {
     #[inline]
     pub const fn with_is_companion_block_member(self, on: bool) -> Self {
         self.with(Self::IS_COMPANION_BLOCK_MEMBER, on)
+    }
+    #[inline]
+    pub const fn with_is_companion_extension(self, on: bool) -> Self {
+        self.with(Self::IS_COMPANION_EXTENSION, on)
     }
     #[inline]
     pub const fn with_is_synthesized(self, on: bool) -> Self {
@@ -285,6 +290,12 @@ impl MetaFn {
     #[inline]
     pub fn is_companion_block_member(&self) -> bool {
         self.flags.has(MfnFlags::IS_COMPANION_BLOCK_MEMBER)
+    }
+    /// A written `companion fun C.name`: a static of its package facade with no receiver parameter,
+    /// named through `receiver_class` (`C`) with no value operand.
+    #[inline]
+    pub fn is_companion_extension(&self) -> bool {
+        self.flags.has(MfnFlags::IS_COMPANION_EXTENSION)
     }
     /// Kotlin metadata's exact `Function.flags.MEMBER_KIND == SYNTHESIZED` declaration fact.
     #[inline]
@@ -473,6 +484,38 @@ impl MetaFn {
 
     pub fn extension_call_sig(&self) -> CallSig {
         self.member_call_sig()
+    }
+}
+
+impl ParsedFunction {
+    /// A written `companion fun C.name` records `C` as its receiver and sets the static flag, but
+    /// it is realized as a facade static with no receiver parameter and named through `C`. Take it
+    /// out of the signature shape; `C` stays available as the classifier it is named through.
+    /// Returns whether this function is one.
+    pub(super) fn take_companion_extension(&mut self) -> bool {
+        let companion_extension = self.is_companion && self.has_receiver;
+        self.has_receiver &= !companion_extension;
+        companion_extension
+    }
+}
+
+impl MfnFlags {
+    /// The receiver shape and source markers `function` declares. `companion_extension` is
+    /// what [`ParsedFunction::take_companion_extension`] returned for it.
+    pub(super) fn with_declaration_markers(
+        self,
+        function: &ParsedFunction,
+        companion_extension: bool,
+    ) -> Self {
+        self.with_is_extension(function.has_receiver)
+            .with_is_operator(function.is_operator)
+            .with_is_infix(function.is_infix)
+            .with_is_companion_block_member(
+                function.is_companion && !function.has_receiver && !companion_extension,
+            )
+            .with_is_companion_extension(companion_extension)
+            .with_is_synthesized(function.is_synthesized)
+            .with_annotations_on_realization(function.annotations_on_realization)
     }
 }
 

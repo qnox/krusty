@@ -163,7 +163,11 @@ impl BodyLowering<'_, '_, '_> {
             extension_receiver_parameter: *semantic_extension_receiver_parameter,
             has_dispatch_receiver: dispatch_receiver.is_some(),
             unread_receiver,
-            companion_receiver_position: realization.klib_body_companion_receiver_position(),
+            companion_receiver_position: realization.exported_companion_receiver_position(
+                unread_receiver.is_some(),
+                export.signature.parameters().len(),
+                params.len(),
+            ),
             member_receiver: export
                 .member_receiver
                 .map(|receiver| receiver.semantic_type()),

@@ -99,6 +99,7 @@ mod tests {
                     .map(|(_, declaration)| declaration.clone())
             });
             std::rc::Rc::new(ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(identity),
                 classifier_declaration: classifier

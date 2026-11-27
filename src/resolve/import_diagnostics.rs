@@ -64,6 +64,7 @@ fn bind_import_path(
                         ResolvedQualifier::Package(crate::types::type_name_child(package, segment));
                 } else if terminal
                     && (!matches!(symbols.callables, Callables::None)
+                        || !matches!(symbols.companion_extensions, Callables::None)
                         || symbols.importable_declaration)
                 {
                     break;

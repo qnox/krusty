@@ -20,7 +20,8 @@ use crate::types::{existing_type_name_child, type_name, type_name_child, TypeNam
 
 /// A companion extension (`companion fun C.name()`, `companion val C.name`), joined with the
 /// package that declares it. It is named through the classifier `C` itself, not through a value of
-/// `C`, so it belongs to `C`'s namespace rather than to its package's.
+/// `C`, and only where its package's declaration is in scope, so it is published with that
+/// package's record rather than as one of the package's callables.
 pub(super) struct CompanionExtension<T> {
     pub(super) package: TypeName,
     pub(super) signed: T,
@@ -908,30 +909,59 @@ impl PackageInventory {
         self.type_aliases.get(&identity)
     }
 
-    /// The companion extension functions named `name` that are named through `classifier`.
+    /// The companion extension functions `package` declares under `name`, each with the classifier
+    /// it is named through.
     pub(super) fn companion_functions<'a>(
         &'a self,
-        classifier: TypeName,
+        package: TypeName,
         name: &'a str,
-    ) -> impl Iterator<Item = &'a CompanionExtension<SignedFunction>> {
-        self.companion_functions
-            .get(&classifier)
-            .into_iter()
-            .flatten()
-            .filter(move |extension| extension.signed.declaration.name == name)
+    ) -> impl Iterator<Item = (TypeName, &'a CompanionExtension<SignedFunction>)> {
+        declared_companion_extensions(&self.companion_functions, package, name)
     }
 
-    /// The companion extension properties named `name` that are named through `classifier`.
+    /// The companion extension properties `package` declares under `name`, each with the
+    /// classifier it is named through.
     pub(super) fn companion_properties<'a>(
         &'a self,
-        classifier: TypeName,
+        package: TypeName,
         name: &'a str,
-    ) -> impl Iterator<Item = &'a CompanionExtension<SignedProperty>> {
-        self.companion_properties
-            .get(&classifier)
-            .into_iter()
-            .flatten()
-            .filter(move |extension| extension.signed.declaration.name == name)
+    ) -> impl Iterator<Item = (TypeName, &'a CompanionExtension<SignedProperty>)> {
+        declared_companion_extensions(&self.companion_properties, package, name)
+    }
+}
+
+/// The extensions in `by_classifier` that `package` declares under `name`, with their classifier.
+fn declared_companion_extensions<'a, T: CompanionDeclaration>(
+    by_classifier: &'a HashMap<TypeName, Vec<CompanionExtension<T>>>,
+    package: TypeName,
+    name: &'a str,
+) -> impl Iterator<Item = (TypeName, &'a CompanionExtension<T>)> {
+    by_classifier
+        .iter()
+        .flat_map(move |(classifier, extensions)| {
+            extensions
+                .iter()
+                .filter(move |extension| {
+                    extension.package == package && extension.signed.declared_name() == name
+                })
+                .map(move |extension| (*classifier, extension))
+        })
+}
+
+/// The source name of a signed companion extension declaration.
+trait CompanionDeclaration {
+    fn declared_name(&self) -> &str;
+}
+
+impl CompanionDeclaration for SignedFunction {
+    fn declared_name(&self) -> &str {
+        &self.declaration.name
+    }
+}
+
+impl CompanionDeclaration for SignedProperty {
+    fn declared_name(&self) -> &str {
+        &self.declaration.name
     }
 }
 

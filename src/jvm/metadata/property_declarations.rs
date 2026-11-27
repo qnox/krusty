@@ -81,8 +81,12 @@ pub struct MetaProp {
     /// The EXTENSION receiver's class name (`val String.foo` → `kotlin/String`) — `None` for an
     /// ordinary member/top-level property.
     pub receiver_class: Option<TypeName>,
-    /// Receiver presence, including a type-parameter receiver that has no class name.
+    /// Receiver presence, including a type-parameter receiver that has no class name. A
+    /// companion extension is not an extension: its receiver only names its classifier.
     pub is_extension: bool,
+    /// A written `companion val C.name`: a facade static reached through the classifier
+    /// [`Self::receiver_class`], read and written through accessors with no receiver.
+    pub is_companion_extension: bool,
 }
 
 /// Decode every `Property` (`prop_field`: 10 in a `Class`, 4 in a `Package`) of this metadata message
@@ -305,7 +309,7 @@ pub(super) fn decode_properties(
             },
         );
         let is_var = setter_signature.is_some() || flags & is_var_bit != 0;
-        let (generic_sig, ret_alias) = build_property_generic_sig(
+        let (mut generic_sig, ret_alias) = build_property_generic_sig(
             ParsedPropertySignature {
                 inherited: class_tparams,
                 inherited_bounds: class_tparam_bounds,
@@ -330,6 +334,17 @@ pub(super) fn decode_properties(
                 receiver_class = signature
                     .receiver
                     .and_then(|ty| ty.non_null().obj_internal());
+            }
+        }
+        // A static property with a receiver is a written `companion val C.name`: its receiver
+        // names the classifier `C` it is reached through, and its accessors are facade statics
+        // that take no receiver parameter.
+        let is_static = modern_flags
+            .is_some_and(|flags| flags & crate::metadata::property_flags::IS_STATIC != 0);
+        let is_companion_extension = is_static && receiver_body.is_some();
+        if is_companion_extension {
+            if let Some(signature) = &mut generic_sig {
+                signature.receiver = None;
             }
         }
         let context_names = if context_params.is_empty() {
@@ -493,10 +508,9 @@ pub(super) fn decode_properties(
             getter_inline: accessor_is_inline(getter_flags),
             setter_inline: accessor_is_inline(setter_flags),
             receiver_class,
-            is_extension: receiver_body.is_some(),
-            is_companion_block_member: receiver_body.is_none()
-                && modern_flags
-                    .is_some_and(|flags| flags & crate::metadata::property_flags::IS_STATIC != 0),
+            is_extension: receiver_body.is_some() && !is_companion_extension,
+            is_companion_block_member: receiver_body.is_none() && is_static,
+            is_companion_extension,
         });
     }
     Ok(out)

@@ -2106,6 +2106,19 @@ impl Callables {
             Self::None | Self::Functions(_) => &[],
         }
     }
+
+    /// The candidates of several records' facets, concatenated in record order.
+    pub fn concat<'a>(parts: impl IntoIterator<Item = &'a Callables>) -> Self {
+        let mut functions = FunctionSet::default();
+        let mut properties = PropertySet::default();
+        for part in parts {
+            functions.overloads.extend(part.functions().iter().cloned());
+            properties
+                .overloads
+                .extend(part.properties().iter().cloned());
+        }
+        Self::from_parts(functions, properties)
+    }
 }
 
 /// What a fully-qualified name resolves to in a [`crate::symbol_source::SymbolSource`] — the
@@ -2134,6 +2147,11 @@ pub struct ResolvedSymbols {
     /// the classifier; a later child's builtins declaration does not mark an earlier one.
     pub builtin_classifier: bool,
     pub callables: Callables,
+    /// A package's written `companion fun/val C.name` declarations under this name. Kotlin names
+    /// them only through their associated classifier (`C.name`), once the package brings them into
+    /// scope, so they are kept out of `callables`: an unqualified or value-receiver call never
+    /// sees them. Each candidate is receiver-less and carries its `associated_classifier`.
+    pub companion_extensions: Callables,
     /// A declaration that is importable but has no classifier or callable candidate, such as a
     /// primitive typealias or enum entry.
     pub importable_declaration: bool,
@@ -2145,6 +2163,7 @@ impl ResolvedSymbols {
         self.classifier_name.is_none()
             && self.classifier.is_none()
             && matches!(self.callables, Callables::None)
+            && matches!(self.companion_extensions, Callables::None)
             && !self.importable_declaration
     }
 }

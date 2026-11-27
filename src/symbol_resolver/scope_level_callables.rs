@@ -641,6 +641,50 @@ impl SymbolResolver<'_> {
     }
 }
 
+impl SymbolResolver<'_> {
+    /// The written `companion fun/val C.name` declarations of `classifier` that this file's scope
+    /// brings in. Every function is stamped with the rung and level that brought it in, so the
+    /// shared overload selector decides by applicability whether a nearer level shadows a farther
+    /// one. A property is the nearest level's, as for a top-level property.
+    pub(super) fn scoped_companion_extensions(
+        &self,
+        classifier: TypeName,
+        name: &str,
+    ) -> (Vec<FunctionInfo>, Vec<PropertyInfo>) {
+        let Some(scope) = self.fn_scope.filter(|_| self.companion_extensions) else {
+            return Default::default();
+        };
+        let mut functions = Vec::new();
+        let mut properties = Vec::new();
+        for level in declaration_levels_in_function_scope(&self.src, name, scope) {
+            functions.extend(
+                level
+                    .symbols
+                    .iter()
+                    .flat_map(|record| record.companion_extensions.functions())
+                    .filter(|function| function.associated_classifier == Some(classifier))
+                    .cloned()
+                    .map(|mut function| {
+                        function.scope_rung = level.kind.callable_scope_rung();
+                        function.scope_rank = level.rank;
+                        function
+                    }),
+            );
+            if properties.is_empty() {
+                properties.extend(
+                    level
+                        .symbols
+                        .iter()
+                        .flat_map(|record| record.companion_extensions.properties())
+                        .filter(|property| property.associated_classifier == Some(classifier))
+                        .cloned(),
+                );
+            }
+        }
+        (functions, properties)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,6 +773,7 @@ mod tests {
         };
         let record = |owners: &[&str]| {
             Rc::new(ResolvedSymbols {
+                companion_extensions: crate::libraries::Callables::None,
                 builtin_classifier: false,
                 classifier_name: None,
                 classifier_declaration: None,

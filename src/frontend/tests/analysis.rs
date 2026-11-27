@@ -359,6 +359,7 @@ impl crate::symbol_source::SymbolSource for ExistingLibrary {
             return_policy: Default::default(),
         });
         std::rc::Rc::new(ResolvedSymbols {
+            companion_extensions: crate::libraries::Callables::None,
             builtin_classifier: false,
             classifier_declaration: classifier
                 .as_ref()

@@ -322,7 +322,17 @@ impl JvmLibraries {
                         public: method.public,
                     })
             };
-            props.extend(self.static_metadata_property(mp, facade, package, accessor));
+            props.extend(
+                self.static_metadata_property(mp, facade, package, accessor)
+                    .map(|mut property| {
+                        // A written `companion val C.name` is named through `C`, not as a value.
+                        if mp.is_companion_extension {
+                            property.associated_classifier = mp.receiver_class;
+                            property.companion_associated = true;
+                        }
+                        property
+                    }),
+            );
         }
     }
 }

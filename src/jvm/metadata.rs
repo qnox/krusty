@@ -821,8 +821,12 @@ fn build_generic_sig(
         tparams: &context.names,
         bounds: &context.erasure_bounds,
     };
-    let receiver_ref =
-        metadata_type_ref(pf.receiver_body.as_deref(), pf.receiver_type_id, type_table);
+    // A written `companion fun C.name` has no receiver operand: `take_companion_extension` took
+    // it out of the signature shape, so it is not the generic signature's receiver either.
+    let receiver_ref = pf
+        .has_receiver
+        .then(|| metadata_type_ref(pf.receiver_body.as_deref(), pf.receiver_type_id, type_table))
+        .flatten();
     let receiver = if let Some((body, table_nullable)) = receiver_ref {
         // An EXTENSION: its `receiver_type` is the receiver gsig node (`T`, `Ch`, `List<T>`, …).
         Some(decode_metadata_type(body, &source, table_nullable, 0)?)
@@ -1501,7 +1505,8 @@ fn decode_functions(
                     break;
                 };
                 {
-                    let pf = parse_function(fbody)?;
+                    let mut pf = parse_function(fbody)?;
+                    let companion_extension = pf.take_companion_extension();
                     let Some(kotlin_name) = d2.get(pf.name_id as usize).cloned() else {
                         continue;
                     };
@@ -1751,13 +1756,8 @@ fn decode_functions(
                             .with_is_suspend(pf.is_suspend)
                             .with_is_abstract(pf.is_abstract)
                             .with_is_final(pf.is_final)
-                            .with_is_extension(pf.has_receiver)
                             .with_ret_nullable(ret_ty.is_some_and(Ty::is_nullable))
-                            .with_is_operator(pf.is_operator)
-                            .with_is_infix(pf.is_infix)
-                            .with_is_companion_block_member(pf.is_companion && !pf.has_receiver)
-                            .with_is_synthesized(pf.is_synthesized)
-                            .with_annotations_on_realization(pf.annotations_on_realization)
+                            .with_declaration_markers(&pf, companion_extension)
                             .with_has_reified_type_params(
                                 pf.type_params.iter().any(|parameter| parameter.reified),
                             ),

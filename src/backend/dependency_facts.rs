@@ -206,6 +206,20 @@ impl BackendCallableFact {
             .map(|_| self.context_count)
     }
 
+    /// [`Self::klib_body_companion_receiver_position`] for a call that links to `export`. A
+    /// dependency module compiled from source exports the receiver-less declaration: its export
+    /// takes exactly the call's operands and carries no unread-receiver effect, so the serialized
+    /// receiver coordinate names no slot of it.
+    pub fn exported_companion_receiver_position(
+        &self,
+        export_has_unread_receiver: bool,
+        exported_operands: usize,
+        call_operands: usize,
+    ) -> Option<usize> {
+        self.klib_body_companion_receiver_position()
+            .filter(|_| export_has_unread_receiver || exported_operands != call_operands)
+    }
+
     /// Authenticate a serialized associated-extension call whose dependency body already carries
     /// the retained companion receiver in `call_params`. This is a provider-owned callable-shape
     /// check, so target registries do not need to import the compiler type model to repeat it.

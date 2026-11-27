@@ -191,7 +191,11 @@ impl Body<'_> {
             extension_receiver_parameter: *semantic_extension_receiver_parameter,
             has_dispatch_receiver: dispatch_receiver.is_some(),
             unread_receiver: unread.map(|effect| effect.semantic_type()),
-            companion_receiver_position: callable.klib_body_companion_receiver_position(),
+            companion_receiver_position: callable.exported_companion_receiver_position(
+                unread.is_some(),
+                signature.parameters().len(),
+                params.len(),
+            ),
             member_receiver: self
                 .calls
                 .member_receiver(*target)

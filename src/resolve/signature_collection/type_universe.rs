@@ -79,6 +79,7 @@ impl SymbolSource for BootstrapSymbolSource<'_> {
                     crate::libraries::LibraryType::declaration_header(),
                 )),
                 callables: library.callables.clone(),
+                companion_extensions: library.companion_extensions.clone(),
                 builtin_classifier: false,
                 importable_declaration: library.importable_declaration,
             })

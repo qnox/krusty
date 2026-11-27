@@ -71,6 +71,27 @@ struct PropertyProjectionShape {
     mutable: bool,
 }
 
+/// The classifier a companion-associated declaration is named through, when it is visible in
+/// `namespace`. A `companion { }` block member is a member of its classifier's namespace; a
+/// written `companion fun C.f` is a declaration of its own package, where it is published in the
+/// companion-extension facet.
+fn companion_associated_classifier(
+    flags: DeclarationFlags,
+    receiver: Option<Ty>,
+    namespace: SymbolNamespace,
+    declaration_package: TypeName,
+) -> Option<TypeName> {
+    let classifier = receiver.and_then(|receiver| receiver.non_null().obj_internal())?;
+    match namespace {
+        SymbolNamespace::Classifier(owner) => (flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER)
+            && owner == classifier)
+            .then_some(classifier),
+        SymbolNamespace::Package(package) => (!flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER)
+            && package == declaration_package)
+            .then_some(classifier),
+    }
+}
+
 impl<'a> StreamedModuleSymbols<'a> {
     pub(crate) fn for_file(index: &'a ResolvedModuleIndex, source_file: u32) -> Self {
         Self {
@@ -1540,10 +1561,6 @@ impl<'a> StreamedModuleSymbols<'a> {
             SymbolNamespace::Package(package) => Some(package),
             SymbolNamespace::Classifier(_) => None,
         };
-        let associated_owner = match namespace {
-            SymbolNamespace::Classifier(owner) => Some(owner),
-            SymbolNamespace::Package(_) => None,
-        };
         let mut functions = Vec::new();
         for &declaration in self.index.top_level_declarations_named(name) {
             let Some(header) = self.index.declaration_header(declaration) else {
@@ -1575,13 +1592,18 @@ impl<'a> StreamedModuleSymbols<'a> {
                 .shape
                 .extension_receiver
                 .map(|receiver| receiver.get());
-            // A companion-associated declaration belongs to its classifier's namespace only: it is
-            // never an extension of a value of that classifier. Its declared receiver names the
-            // classifier and is not a value parameter.
+            // A companion-associated declaration is never an extension of a value of its
+            // classifier: its declared receiver names the classifier and is not a value
+            // parameter. A `companion { }` block member belongs to its classifier's namespace; a
+            // written `companion fun C.f` is published in its package's companion-extension facet,
+            // named only through its classifier.
             let associated_classifier = if header.flags.has(DeclarationFlags::COMPANION) {
-                let Some(classifier) = associated_owner.filter(|owner| {
-                    receiver.and_then(|receiver| receiver.non_null().obj_internal()) == Some(*owner)
-                }) else {
+                let Some(classifier) = companion_associated_classifier(
+                    header.flags,
+                    receiver,
+                    namespace,
+                    declaration_package,
+                ) else {
                     continue;
                 };
                 Some(classifier)
@@ -1705,10 +1727,6 @@ impl<'a> StreamedModuleSymbols<'a> {
             SymbolNamespace::Package(package) => Some(package),
             SymbolNamespace::Classifier(_) => None,
         };
-        let associated_owner = match namespace {
-            SymbolNamespace::Classifier(owner) => Some(owner),
-            SymbolNamespace::Package(_) => None,
-        };
         let mut properties = Vec::new();
         for &declaration in self.index.top_level_declarations_named(name) {
             let Some(header) = self.index.declaration_header(declaration) else {
@@ -1740,12 +1758,15 @@ impl<'a> StreamedModuleSymbols<'a> {
             let receiver = property
                 .and_then(|property| property.extension_receiver)
                 .map(|receiver| receiver.get());
-            // A companion-associated property belongs to its classifier's namespace only; its
-            // accessors take no classifier parameter.
+            // A companion-associated property takes no classifier parameter; see
+            // `companion_associated_classifier` for where each kind is published.
             let associated_classifier = if header.flags.has(DeclarationFlags::COMPANION) {
-                let Some(classifier) = associated_owner.filter(|owner| {
-                    receiver.and_then(|receiver| receiver.non_null().obj_internal()) == Some(*owner)
-                }) else {
+                let Some(classifier) = companion_associated_classifier(
+                    header.flags,
+                    receiver,
+                    namespace,
+                    declaration_package,
+                ) else {
                     continue;
                 };
                 Some(classifier)
@@ -1962,12 +1983,17 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
             .map(|classifier| self.with_visible_constructors(classifier));
         let mut functions = FunctionSet::default();
         let mut properties = PropertySet::default();
-        functions
-            .overloads
-            .extend(self.top_level_functions(namespace, name));
-        properties
-            .overloads
-            .extend(self.top_level_properties(namespace, name));
+        let in_package = matches!(namespace, SymbolNamespace::Package(_));
+        let (companion_functions, top_level_functions): (Vec<_>, Vec<_>) = self
+            .top_level_functions(namespace, name)
+            .into_iter()
+            .partition(|function| in_package && function.associated_classifier.is_some());
+        let (companion_properties, top_level_properties): (Vec<_>, Vec<_>) = self
+            .top_level_properties(namespace, name)
+            .into_iter()
+            .partition(|property| in_package && property.associated_classifier.is_some());
+        functions.overloads.extend(top_level_functions);
+        properties.overloads.extend(top_level_properties);
         if let SymbolNamespace::Classifier(owner) = namespace {
             let (associated_functions, associated_properties) =
                 self.associated_companion_callables(owner, name);
@@ -2018,6 +2044,14 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
                 }),
             classifier,
             callables,
+            companion_extensions: Callables::from_parts(
+                FunctionSet {
+                    overloads: companion_functions,
+                },
+                PropertySet {
+                    overloads: companion_properties,
+                },
+            ),
             importable_declaration: stable_classifier_name.is_some(),
         })
     }

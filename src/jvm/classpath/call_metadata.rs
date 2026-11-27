@@ -85,6 +85,9 @@ pub struct MetadataCallFacts {
     /// a nullable value class stays boxed; a nullable value class erased to a reference carrier is
     /// recorded here as its nullable source type.
     pub value_class_ret: Option<Ty>,
+    /// For a written `companion fun C.name`, the classifier `C` it is reached through. The
+    /// declaration is a facade static with no receiver parameter.
+    pub associated_classifier: Option<TypeName>,
 }
 
 impl MetadataCallFacts {
@@ -113,6 +116,7 @@ impl MetadataCallFacts {
             deprecation: None,
             value_class_params: Vec::new(),
             value_class_ret: None,
+            associated_classifier: None,
         }
     }
 }
@@ -181,5 +185,9 @@ pub(super) fn for_callable(
             value_underlying,
         ),
         value_class_ret: value_class_return_type(callable, desc_ret, value_underlying),
+        associated_classifier: callable
+            .is_companion_extension()
+            .then_some(callable.receiver_class)
+            .flatten(),
     }
 }

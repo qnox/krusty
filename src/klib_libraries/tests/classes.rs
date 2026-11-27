@@ -9,7 +9,7 @@ use std::sync::Arc;
 use super::*;
 use crate::klib::KlibArchive;
 use crate::libraries::{
-    ClassifierAccess, ExternalCallableRealization, LibraryMember, LibraryType, PropKind,
+    Callables, ClassifierAccess, ExternalCallableRealization, LibraryMember, LibraryType, PropKind,
     PropertyInfo, TypeKind,
 };
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
@@ -516,9 +516,13 @@ fn companion_block_members_and_companion_extensions_are_named_through_their_clas
     );
     assert_eq!(accessor_path(&setter), "Registry.label.<set-label>");
 
-    // A companion extension is declared by its package and has no receiver parameter.
-    let named = libraries.symbols(namespace, "named");
-    let [named] = named.callables.functions() else {
+    // A companion extension is declared by its package and has no receiver parameter. The
+    // package publishes it apart from its callables, and the classifier does not publish it.
+    let package = SymbolNamespace::Package(type_name(PACKAGE));
+    assert!(libraries.symbols(namespace, "named").is_empty());
+    let named = libraries.symbols(package, "named");
+    assert!(matches!(named.callables, Callables::None));
+    let [named] = named.companion_extensions.functions() else {
         panic!("one named");
     };
     assert_eq!(named.kind, FnKind::TopLevel);
@@ -546,10 +550,13 @@ fn companion_block_members_and_companion_extensions_are_named_through_their_clas
         &ResolvedParameterIdentity::ExtensionReceiver
     );
 
-    let capacity = libraries.symbols(namespace, "capacity");
-    let [capacity] = capacity.callables.properties() else {
+    assert!(libraries.symbols(namespace, "capacity").is_empty());
+    let capacity = libraries.symbols(package, "capacity");
+    assert!(matches!(capacity.callables, Callables::None));
+    let [capacity] = capacity.companion_extensions.properties() else {
         panic!("one capacity");
     };
+    assert_eq!(capacity.associated_classifier, Some(registry));
     assert_eq!(capacity.receiver, None);
     let getter = realization(&libraries, capacity.getter.external_identity);
     assert!(getter.parameter_identities.is_empty());
@@ -782,20 +789,22 @@ fn fixture_classes_realize_the_signatures_their_ir_declares() {
         realized.extend(realized_identities(&libraries, local));
     }
     let mut namespace_identities = Vec::new();
-    for (owner, name) in [
-        ("Registry", "create"),
-        ("Registry", "size"),
-        ("Registry", "label"),
-        ("Registry", "named"),
-        ("Registry", "capacity"),
-        ("Color", "values"),
-        ("Color", "valueOf"),
+    let package = SymbolNamespace::Package(type_name(PACKAGE));
+    for (namespace, name) in [
+        (SymbolNamespace::Classifier(identity("Registry")), "create"),
+        (SymbolNamespace::Classifier(identity("Registry")), "size"),
+        (SymbolNamespace::Classifier(identity("Registry")), "label"),
+        (package, "named"),
+        (package, "capacity"),
+        (SymbolNamespace::Classifier(identity("Color")), "values"),
+        (SymbolNamespace::Classifier(identity("Color")), "valueOf"),
     ] {
-        let symbols = libraries.symbols(SymbolNamespace::Classifier(identity(owner)), name);
-        for function in symbols.callables.functions() {
+        let symbols = libraries.symbols(namespace, name);
+        let callables = Callables::concat([&symbols.callables, &symbols.companion_extensions]);
+        for function in callables.functions() {
             namespace_identities.extend(function.callable.external_identity);
         }
-        for property in symbols.callables.properties() {
+        for property in callables.properties() {
             namespace_identities.extend(property.getter.external_identity);
             namespace_identities.extend(
                 property
