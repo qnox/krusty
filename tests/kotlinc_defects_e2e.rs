@@ -179,7 +179,8 @@ fn defect(quirk: Quirk) -> Option<Defect> {
         | Quirk::AnnotationImplCarriesNullability
         | Quirk::KlibLegacyMetadataVersionBelowLanguage23
         | Quirk::ClassStaticsInitializeBeforeCompanionBody
-        | Quirk::NotNullOperatorDropsIntersectionApproximation => None,
+        | Quirk::NotNullOperatorDropsIntersectionApproximation
+        | Quirk::JvmTargetsEndAt26 => None,
     }
 }
 
