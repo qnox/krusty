@@ -314,6 +314,43 @@ fn native_library_object_values_preserve_identity() {
     expect_native_klib_box(source, "nativeLibraryObjectValues");
 }
 
+/// `kotlin.test`'s top-level assertions delegate to the library object `DefaultAsserter`, whose
+/// `assertEquals` and `assertTrue` are default bodies inherited from the `Asserter` interface: the
+/// object's dispatch table must carry them, or the first assertion dispatches through an empty slot.
+///
+/// Inline and Native only for now: Wasm's `DefaultWasmAsserter` reaches its inherited bodies through
+/// a `super` call the Wasm lowering does not model yet. The program moves into `box_regressions`
+/// with the Wasm capability.
+#[test]
+fn native_library_object_inherited_interface_defaults_dispatch() {
+    let source = "// WITH_STDLIB\n\
+        import kotlin.test.assertEquals\n\
+        import kotlin.test.assertTrue\n\
+        fun box(): String {\n\
+        \x20   assertEquals(1, 1)\n\
+        \x20   assertTrue(true)\n\
+        \x20   return \"OK\"\n\
+        }\n";
+    let stem = "nativeLibraryInterfaceDefaults";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the program");
+    let target = host().expect("Native KLIB/runtime is required for this test");
+    let lane = NativeLane {
+        target: Some(target),
+    };
+    let outcome = lane.compile_and_run(
+        &std::env::temp_dir(),
+        stem,
+        &[(format!("{stem}.kt"), source.to_string())],
+        source,
+    );
+    assert_eq!(
+        outcome,
+        Outcome::Pass,
+        "the library object's inherited interface defaults must dispatch"
+    );
+}
+
 #[test]
 fn native_library_generic_any_override_uses_the_canonical_vtable_slot() {
     let source = include_str!("box_regressions/multimodule/libraryGenericAnyOverride.kt");
@@ -474,13 +511,24 @@ fn run_native_abi_case(source: &str, stem: &str) -> Outcome {
     let Some(target) = host() else {
         return Outcome::Harness("required Native target/KLIB setup is unavailable".into());
     };
-    let Some(answer) =
-        super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(source)
-    else {
-        return Outcome::Harness(
-            "required pinned kotlinc-native module oracle is unavailable".into(),
-        );
-    };
+    let answer =
+        match super::kotlin_native_multimodule_support::kotlin_native_multimodule_outcome(source) {
+            Some(super::kotlin_native_multimodule_support::NativeModulesOutcome::Answer(
+                answer,
+            )) => answer,
+            Some(super::kotlin_native_multimodule_support::NativeModulesOutcome::Rejected(
+                reason,
+            )) => {
+                return Outcome::Harness(format!(
+                    "the pinned kotlinc-native module oracle rejected the final module: {reason}"
+                ));
+            }
+            None => {
+                return Outcome::Harness(
+                    "required pinned kotlinc-native module oracle is unavailable".into(),
+                );
+            }
+        };
     assert_eq!(
         answer, "OK",
         "{}: pinned kotlinc-native must run the exact KLIB module graph as OK",

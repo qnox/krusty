@@ -20,7 +20,7 @@ import summarize  # noqa: E402
 BIN = 'bazel-out/k8-fastbuild/bin'
 TOOL_BIN = 'bazel-out/k8-opt-exec/bin'
 OUT = 'k8-fastbuild/bin'
-SUMMARY_ROW = '| p | not fetched | 2 | 0 | ok | 2 / 5 | 3 / 10 (30.0%) |'
+SUMMARY_ROW = '| p | not fetched | 2 | 0 | ok | 2 / 5 | 1 | 2 | 0 | 3 / 10 (30.0%) |'
 
 
 def jar(path, entries):
@@ -65,16 +65,19 @@ class Snapshot(unittest.TestCase):
             self.assertEqual(Path(work, 'm.tsv').read_text().splitlines(), [
                 f'//a:a\t{BIN}/a/a.jar\tKrustyCompile\t1.25\t0\t',
                 f'//a:a [for tool]\t{TOOL_BIN}/a/a.jar\tKrustyCompile\t1.5\t0\t',
-                f'//b:b\t{BIN}/b/b.jar\tJvmCompile\t2.5\t0\tJava sources',
+                f'//b:b\t{BIN}/b/b.jar\tJvmCompile\t2.5\t0\tJava-only target',
                 f'//c:c\t{BIN}/c/c.jar\tKrustyCompile\t2.5\t1\t',
             ])
             copied = sorted(str(p.relative_to(f'{work}/out')) for p in Path(work, 'out').rglob('*') if p.is_file())
             self.assertEqual(copied, ['k8-fastbuild/bin/a/a.jar', 'k8-fastbuild/bin/b/b.jar', 'k8-opt-exec/bin/a/a.jar'])
 
     def test_a_held_back_action_names_the_integration_condition_it_meets(self):
-        self.assertEqual(bazel_compare.held_back(['x/A.kt', 'x/B.java']), 'Java sources')
-        self.assertEqual(bazel_compare.held_back(['x/A.kt', 'gen.srcjar']), 'source jars')
+        self.assertEqual(bazel_compare.held_back(['x/B.java', 'lib.jar']), 'Java-only target')
+        self.assertEqual(bazel_compare.held_back(['x/A.kt', 'x/B.java', 'gen.srcjar']), 'source jars')
         self.assertEqual(bazel_compare.held_back(['x/A.kt', 'compose-plugin.jar']), 'compiler plugins')
+        # A mixed target goes to krusty, so on the builder it was held back by its plugins.
+        self.assertEqual(bazel_compare.held_back(['x/A.kt', 'x/B.java', 'compose-plugin.jar']),
+                         'compiler plugins')
 
 
 def manifest(path, rows):
@@ -96,7 +99,7 @@ class Compare(unittest.TestCase):
             manifest(logs / f'{name}.krusty.compilations.tsv', [
                 ('//ok:ok', f'{BIN}/ok/ok.jar', 'KrustyCompile', 1.0, 0, ''),
                 ('//diff:diff', f'{BIN}/diff/diff.jar', 'KrustyCompile', 1.5, 0, ''),
-                ('//java:java', f'{BIN}/java/java.jar', 'JvmCompile', 3.0, 0, 'Java sources'),
+                ('//java:java', f'{BIN}/java/java.jar', 'JvmCompile', 3.0, 0, 'Java-only target'),
                 ('//fail:fail', f'{BIN}/fail/fail.jar', 'KrustyCompile', 0.5, 1, ''),
                 ('//empty:empty', f'{BIN}/empty/empty.jar', 'KrustyCompile', 0.1, 0, ''),
             ])
@@ -135,7 +138,7 @@ class Compare(unittest.TestCase):
         self.assertEqual(data['rows'], [
             row('//diff:diff', True, None, None, 1, 0, 1, 1.5),
             row('//fail:fail', False, None, "fail/F.kt:3:5: error: unresolved reference 'x'", 0, None, None, 0.5),
-            row('//java:java', False, 'Java sources', None, 0, None, None, 3.0),
+            row('//java:java', False, 'Java-only target', None, 0, None, None, 3.0),
             row('//ok:ok', True, None, None, 2, 0, 0, 1.0),
             row('//skip:skip', False, None, 'not run: a target it depends on failed', 0, None, None, None),
         ])

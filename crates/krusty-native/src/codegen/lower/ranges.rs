@@ -407,6 +407,29 @@ impl BodyLowering<'_, '_, '_> {
         })())
     }
 
+    /// `a..b` on `Float`/`Double`: the library declares `rangeTo` with a body that builds its own
+    /// range class, but the runtime owns the floating-point range object (the member calls on it
+    /// read the runtime's layout), so the object is built here and the library body never enters.
+    /// The operands are the receiver and `that` for a member, or both arguments for an extension.
+    pub(super) fn floating_range_construction(
+        &mut self,
+        signature: super::super::super::intrinsics::FunctionSignature<'_>,
+        receiver: Option<u32>,
+        args: &[u32],
+        ret: Ty,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        if signature.name != "rangeTo" || !range_to_owner(signature.owner) {
+            return None;
+        }
+        let (start, end) = match (receiver, args) {
+            (Some(start), [end]) => (start, *end),
+            (None, [start, end]) => (*start, *end),
+            _ => return None,
+        };
+        let (kind, element) = floating_range(ret)?;
+        Some(self.floating_range_of(kind, element, start, end, ret))
+    }
+
     /// A member of a range object, or an ordinary progression adapter on its declaring facade.
     ///
     /// Returns `None` when this is neither, so the caller falls through to the ordinary

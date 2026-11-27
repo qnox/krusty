@@ -150,7 +150,7 @@ impl BodyFirChecker<'_> {
         })?;
         let mut substitutions = HashMap::default();
         let mut approximations = HashMap::default();
-        for (ordinal, value) in self.info.materialized_call_type_arguments(expression) {
+        for (ordinal, value) in self.materialized_call_type_arguments(expression) {
             let approximation = self
                 .info
                 .published_call_type_argument_approximation(expression, ordinal);

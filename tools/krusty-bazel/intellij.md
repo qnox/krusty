@@ -106,14 +106,20 @@ krusty_jvm_library(
 
 ## Which targets are eligible today
 
-**Kotlin-only targets.** krusty has no Java front end, and `jvm-inc-builder` compiles both languages
-in one action (`--java-count`), so a target with any `.java` source is refused by the worker rather
-than emitting a jar missing those classes.
+**Kotlin and mixed Kotlin/Java targets.** `jvm-inc-builder` compiles both languages in one action
+(`--java-count` says how many of `--srcs` are Java), and the worker does the same in the same order:
+krusty compiles the Kotlin with the `.java` files read as declarations, as kotlinc does, then the
+action JDK's `javac` (`$JAVA_HOME/bin/javac`) compiles the Java against krusty's classes and the
+classpath, and its classes go into the same jar. javac gets the options the builder derives
+(`BuildContextImpl.buildJavaOptions`): `-g -deprecation -encoding UTF-8`, `--release <jvm_target>`
+when javac's own release differs from the target and `-source`/`-target` otherwise, `-nowarn` under
+`--warn off` unless a `--x_warning_level` entry raises a category back, `-proc:none` for
+`--no-proc`, and `--add-exports` for each `--add-export`. A `--java-count` that disagrees with the
+`.java` files in `--srcs` is a malformed request.
 
-That is a real restriction on this project: most `jvm_library` targets in intellij-community are
-mixed. Nothing in this repository reports which ones are Kotlin-only — the parity scan overlays Java
-stubs so mixed modules are analyzed rather than separated. `scripts/bazel-worker-probe.py` derives a
-Kotlin-only set from the project model when it selects what to build.
+A Java-only target stays on the JPS builder in the integration patch: it is not a Kotlin compile.
+A `module-info.java` is refused, because the builder then splits the classpath into a module path,
+which the worker does not model.
 
 **Targets using `associates`.** `--friends` grants a target visibility of another module's `internal`
 declarations. krusty has no `-Xfriend-paths` and hides classpath `internal` members by design, so
@@ -130,6 +136,7 @@ Three further gaps, each stated by the worker rather than discovered later:
   change instead of only on an ABI change. Correct, just less incremental.
 * **No build-supplied compiler plugins.** A target with `--plugin-id` (the Compose plugin, the
   serialization plugin) is refused; krusty loads its own plugins, not bazel-supplied jars.
+* **No source jars.** A target with `--src-jars` (generated sources) is refused.
 
 `--resources` groups (`strip_prefix:add_prefix:file`) are copied into the output jar after the
 classes. The entry name is the file path with `strip_prefix` removed and `add_prefix` prepended,
