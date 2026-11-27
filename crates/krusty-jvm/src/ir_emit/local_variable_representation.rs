@@ -156,7 +156,7 @@ impl Emitter<'_> {
     /// the omitted parameters among `statements` take theirs together, ahead of the temporaries
     /// their defaults use.
     pub(super) fn reserve_defaulted_parameter_slots(&mut self, statements: &[u32]) {
-        self.pending_default_slots.clear();
+        self.copied_frames.default_slots.clear();
         for (index, statement) in self.defaulted_parameters(statements) {
             self.reserve_defaulted_parameter_slot(index, statement);
         }
@@ -191,13 +191,13 @@ impl Emitter<'_> {
     /// The stub owns its parameters' slots in parameter order: a supplied operand stored before
     /// the frame opens takes its slot after those of the omitted parameters ahead of it.
     fn reserve_defaulted_slots_before(&mut self, operand: u32) {
-        let pending = std::mem::take(&mut self.pending_default_slots);
+        let pending = std::mem::take(&mut self.copied_frames.default_slots);
         let (before, after): (Vec<_>, Vec<_>) =
             pending.into_iter().partition(|&(index, _)| index < operand);
         for (index, statement) in before {
             self.reserve_defaulted_parameter_slot(index, statement);
         }
-        self.pending_default_slots = after;
+        self.copied_frames.default_slots = after;
     }
 
     pub(super) fn emit_local_variable(

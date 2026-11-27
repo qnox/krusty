@@ -1043,7 +1043,7 @@ impl Emitter<'_> {
         if !opens_frame {
             if !*frame_open {
                 self.copied_operand_binding = Some(statement);
-                self.pending_default_slots = self.defaulted_parameters(following);
+                self.copied_frames.default_slots = self.defaulted_parameters(following);
             }
             return;
         }
@@ -1074,7 +1074,7 @@ impl Emitter<'_> {
         if dead_branch {
             self.restate_dead_default_line(statement, code);
         }
-        self.pending_copied_frames.push(PendingCopiedFrame {
+        self.copied_frames.open.push(PendingCopiedFrame {
             block_depth: self.block_depth,
             start: u16::try_from(code.bytes.len()).ok(),
             default,
@@ -2347,4 +2347,14 @@ pub(super) struct PendingCopiedFrame {
     /// The frame's measurement of how far the callee's defaults reached, which the real body's
     /// marker lies above: the stub's locals keep their slots to its end.
     pub(super) enclosing_peak: u16,
+}
+
+/// What a same-module expansion's frame tracks between its first operand and its marker.
+#[derive(Default)]
+pub(super) struct CopiedFrames {
+    /// Expansions whose frame has opened and awaits its marker, innermost last.
+    pub(super) open: Vec<PendingCopiedFrame>,
+    /// The omitted parameters of the expansion whose operands are being stored, by local index,
+    /// that have not yet taken their slots.
+    pub(super) default_slots: Vec<(u32, u32)>,
 }
