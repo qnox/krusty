@@ -99,6 +99,34 @@ fn a_forwarder_reuses_the_exact_dependency_function_slot() {
 }
 
 #[test]
+fn a_suspend_forwarder_is_compared_by_its_continuation_carried_signature() {
+    let target = ResolvedFunctionOverrideTarget::External(ExternalCallableId::from_raw(42));
+    let plan = plan(
+        vec![ModuleMember::Function {
+            callable: target,
+            parameters: vec![Ty::obj("kotlin/Any")].into_boxed_slice(),
+            result: Ty::obj("kotlin/Any"),
+            suspend: true,
+        }],
+        vec![ModuleForwarder {
+            suspend: true,
+            ..forwarder(
+                vec![Ty::String],
+                Ty::String,
+                ForwardedMember::Function(target),
+            )
+        }],
+    );
+    let base = plan.table(TypeName::from("Base")).unwrap().unwrap();
+    let derived = plan.table(TypeName::from("Derived")).unwrap().unwrap();
+    let key = PlanKey::Forwarder {
+        class: TypeName::from("Derived"),
+        ordinal: 0,
+    };
+    assert_eq!(derived.slots[&key], base.slots[&PlanKey::function(target)]);
+}
+
+#[test]
 fn a_dependency_function_forwarder_cannot_change_parameter_or_result_carriers() {
     for (parameters, result) in [(vec![Ty::Int], Ty::String), (vec![Ty::String], Ty::Int)] {
         let plan = function_plan(parameters, result);

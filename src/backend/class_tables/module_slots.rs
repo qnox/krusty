@@ -500,10 +500,9 @@ impl Planner<'_> {
                     .carriers
                     .get(&member)
                     .ok_or("a delegated class member with no module-wide signature")?;
-                if !self.same(
-                    (&forwarder.parameters, forwarder.result),
-                    (parameters, *result),
-                ) {
+                let (forwarded, forwarded_result) =
+                    carried(&forwarder.parameters, forwarder.result, forwarder.suspend);
+                if !self.same((&forwarded, forwarded_result), (parameters, *result)) {
                     return Err(format!(
                         "a delegated member carried differently from the class member it \
                          overrides (`{}`)",
