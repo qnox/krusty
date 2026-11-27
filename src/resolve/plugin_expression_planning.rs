@@ -176,11 +176,7 @@ impl crate::plugins::FrontendCallResolver for Checker<'_> {
         let slots = crate::libraries::map_call_args(
             &source_arguments,
             None,
-            &call.member.call_sig.param_names,
-            call.member.params.len(),
-            call.member.call_sig.required,
-            &call.member.call_sig.param_defaults,
-            call.member.call_sig.vararg_index,
+            crate::libraries::ParameterSlots::of(&call.member.call_sig, call.member.params.len()),
             false,
         )
         .ok()?;

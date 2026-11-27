@@ -106,11 +106,10 @@ impl ProductionSignatureSemantics<'_> {
                 crate::libraries::map_call_args(
                     &source_indices,
                     Some(&names),
-                    &constructor.call_sig.param_names,
-                    constructor.params.len(),
-                    constructor.call_sig.required,
-                    &constructor.call_sig.param_defaults,
-                    constructor.call_sig.vararg_index,
+                    crate::libraries::ParameterSlots::of(
+                        &constructor.call_sig,
+                        constructor.params.len(),
+                    ),
                     trailing_lambda,
                 )
                 .ok()

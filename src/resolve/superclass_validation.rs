@@ -2,8 +2,12 @@
 
 use super::abstract_obligations::UnimplementedDeclaration;
 use super::{class_declaration_label, declaration_rendering, Checker};
-use crate::ast::{ClassDecl, Decl, DeclId};
+use crate::ast::{ClassDecl, Decl, DeclId, File};
+use crate::diag::Span;
 use crate::types::TypeName;
+
+const SUPERTYPE_WITHOUT_PRIMARY: &str =
+    "supertype initialization is impossible without a primary constructor.";
 
 impl Checker<'_> {
     /// The class's own identity, its selected superclass, and whether that superclass is emitted
@@ -199,4 +203,41 @@ impl Checker<'_> {
             .collect::<Vec<_>>()
             .join(".")
     }
+
+    /// A secondary `this` or `super` call on a class whose header already invoked a constructor
+    /// without declaring a primary. That diagnostic is emitted when the header is collected, before
+    /// the unresolved supertype. Kotlinc does not also diagnose the delegation.
+    pub(super) fn note_supertype_initialization_without_primary(&mut self, class: DeclId) -> bool {
+        let Decl::Class(classifier) = self.file.decl(class) else {
+            return false;
+        };
+        header_constructor_call_without_primary(self.file, classifier).is_some()
+    }
+}
+
+/// Report a header constructor call on a class that has a secondary constructor and no primary.
+/// Kotlinc reports this only once a secondary constructor exists, at the callee, and an unresolved
+/// callee name follows it. A header with no secondary constructor is only the unresolved name.
+pub(in crate::resolve) fn report_header_constructor_without_primary(
+    file: &File,
+    class: &ClassDecl,
+    diags: &mut crate::diag::DiagSink,
+) {
+    if class.secondary_ctors.is_empty() {
+        return;
+    }
+    let Some(span) = header_constructor_call_without_primary(file, class) else {
+        return;
+    };
+    diags.error(span, SUPERTYPE_WITHOUT_PRIMARY);
+}
+
+/// The callee of a written superclass constructor call (`: Missing()`) when the class has no
+/// primary constructor. A parenless supertype is not a constructor call.
+fn header_constructor_call_without_primary(file: &File, class: &ClassDecl) -> Option<Span> {
+    if class.primary_ctor_annotations.is_some() {
+        return None;
+    }
+    let header = class.base_class_span?;
+    file.base_class_callee_spans.get(&header.lo).copied()
 }

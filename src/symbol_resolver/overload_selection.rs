@@ -239,7 +239,7 @@ pub(super) fn non_vararg_among<'a>(
             .map(|(candidate, params)| (params.clone(), *candidate))
             .collect(),
         |_, left, right| {
-            super::parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
+            parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
         },
     )
 }
@@ -1458,6 +1458,31 @@ pub(super) fn indexed_call_shape(
     Some((params, ret, bindings))
 }
 
+/// Whether `left` is at least as specific as `right` for `arg`.
+///
+/// A `Nothing` argument makes every numeric parameter applicable, and ordinary assignability leaves
+/// those parameters tied. kotlinc then prefers `Int` over `Byte`, `Short`, `Long`, and `UInt`;
+/// `Short` over `Byte`; `Double` over `Float`; and `UInt` over `ULong`. The comparison is per
+/// argument, so a mixed call and a family of more than two candidates use the same relation.
+pub(crate) fn parameter_at_least_as_specific(
+    src: &dyn SymbolSource,
+    left: Ty,
+    right: Ty,
+    arg: CallArgKind,
+) -> bool {
+    left == right
+        || (left == arg.ty() && arg.adapts_integer_literal_to(right))
+        || semantic_arg_assignable(src, &right, &left)
+        || (arg.ty().canonical_semantic().non_null() == Ty::Nothing
+            && matches!(
+                (left.non_null(), right.non_null()),
+                (Ty::Int, Ty::Byte | Ty::Short | Ty::Long | Ty::UInt)
+                    | (Ty::Short, Ty::Byte)
+                    | (Ty::Double, Ty::Float)
+                    | (Ty::UInt, Ty::ULong)
+            ))
+}
+
 /// Assignability through the SOURCE symbol federation (module classes first): a module-declared
 /// class passed where a library member expects its (library) supertype — `class V : Thread()` into
 /// `take(Thread)` — is invisible to the platform oracle, which only walks classpath supertypes.
@@ -1774,8 +1799,14 @@ fn best_by_args_at_priority_with_ties<'a>(
         }
         CandidateSelectionWithTies::None => {}
     }
-    let specificity = |_: usize, left: Ty, right: Ty| {
-        parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
+    // The argument's runtime type, without integer-literal provenance. Literal adaptation stays in
+    // its own pass; a `Nothing` argument still reaches the shared specificity relation.
+    let specificity = |position: usize, left: Ty, right: Ty| {
+        let argument = args
+            .get(position)
+            .map(|argument| CallArgKind::Typed(argument.ty()))
+            .unwrap_or(CallArgKind::Typed(Ty::Error));
+        parameter_at_least_as_specific(src, left, right, argument)
     };
 
     // Contextual nested calls use this same comparison. Keeping them in a fixed-only pre-pass

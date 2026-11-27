@@ -37,11 +37,7 @@ pub(super) fn call_argument_parameter_indices_result(
     let slots = map_call_args(
         &arguments,
         names,
-        &sig.param_names,
-        parameter_count,
-        sig.required,
-        &sig.param_defaults,
-        sig.vararg_index,
+        crate::libraries::ParameterSlots::of(sig, parameter_count),
         trailing_lambda,
     )?;
     let indices = arguments

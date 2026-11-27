@@ -2919,6 +2919,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .or_default()
                             .push(copy.signature());
                     }
+                    super::super::superclass_validation::report_header_constructor_without_primary(
+                        file, c, diags,
+                    );
                     let mut resolve_super = |s: &str| -> String {
                         let resolved =
                             declared_supertype_name(c, s, &header_class_names, &lexical_inheritors)

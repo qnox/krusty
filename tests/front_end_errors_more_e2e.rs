@@ -281,7 +281,13 @@ fn non_final_vararg_is_not_reported_as_missing() {
          fun use(): Int = select(unknown = 1)",
     );
 
-    assert_eq!(diagnostics, ["no parameter with name 'unknown' found."]);
+    assert_eq!(
+        diagnostics,
+        [
+            "no value passed for parameter 'tail'.",
+            "no parameter with name 'unknown' found.",
+        ]
+    );
 }
 
 #[test]

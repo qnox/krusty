@@ -121,11 +121,7 @@ impl Checker<'_> {
                         .and_then(|argument| c.file.base_arg_names.get(&argument.0))
                         .cloned()
                         .unwrap_or_else(|| vec![None; cl.base_args.len()]);
-                    let arguments = CtorDelegationCall {
-                        args: cl.base_args.clone(),
-                        names,
-                        trailing_lambda: false,
-                    };
+                    let arguments = CtorDelegationCall::new(cl.base_args.clone(), names, false);
                     let candidates = c.super_ctor_delegation_candidates(current_owner);
                     crate::trace_compiler!(
                         "fir",
@@ -141,7 +137,7 @@ impl Checker<'_> {
                             .collect::<Vec<_>>(),
                     );
                     let selection =
-                        c.select_source_constructor(header_scope, &arguments, &candidates);
+                        c.select_source_constructor(header_scope, &arguments, &candidates, true);
                     if let SourceConstructorSelection::NoMatch { rejected, .. } = &selection {
                         c.report_single_constructor_argument_mismatches(
                             header_scope,

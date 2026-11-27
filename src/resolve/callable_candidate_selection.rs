@@ -1191,11 +1191,7 @@ impl Checker<'_> {
             let Ok(mapped_slots) = map_call_args(
                 args,
                 argument_names,
-                &shape.call_sig.param_names,
-                shape.params.len(),
-                shape.call_sig.required,
-                &shape.call_sig.param_defaults,
-                shape.call_sig.vararg_index,
+                crate::libraries::ParameterSlots::of(&shape.call_sig, shape.params.len()),
                 trailing_lambda,
             ) else {
                 continue;

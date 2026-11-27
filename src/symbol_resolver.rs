@@ -44,6 +44,7 @@ mod member_hierarchy;
 mod member_property_selection;
 mod member_specialization;
 mod overload_selection;
+pub(super) use overload_selection::parameter_at_least_as_specific;
 mod postponed_lambda_selection;
 mod property_candidates;
 mod qualified_classifiers;
@@ -552,17 +553,6 @@ fn vararg_parameter_shape_at(
         expanded.push(vararg_expected(argument));
     }
     Some(expanded)
-}
-
-pub(super) fn parameter_at_least_as_specific(
-    src: &dyn SymbolSource,
-    left: Ty,
-    right: Ty,
-    arg: CallArgKind,
-) -> bool {
-    left == right
-        || (left == arg.ty() && arg.adapts_integer_literal_to(right))
-        || semantic_arg_assignable(src, &right, &left)
 }
 
 /// Select the unique most-specific parameter shape from an already-applicable tied family. This is

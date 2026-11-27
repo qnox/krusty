@@ -1,4 +1,5 @@
 use super::common;
+use super::diagnostics_parity_support::complete_errors;
 
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
@@ -141,13 +142,20 @@ fn constructor_delegation_cycle_is_diagnosed() {
         \x20 constructor(value: Boolean): this(if (value) 1 else 0)\n\
         }\n";
     let stdlib = common::stdlib_jar();
-    let diagnostics =
-        common::front_end_diagnostics(SRC, &[stdlib], Some(common::jdk_modules().as_path()));
+    let result = common::compiler_diagnostics(&[("Cycle.kt", SRC)], std::slice::from_ref(&stdlib));
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("constructor delegation cycle")),
-        "expected constructor delegation cycle diagnostic, got {diagnostics:?}"
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
     );
 }
 
@@ -255,4 +263,606 @@ fn a_constructor_argument_reaches_the_companion_not_the_instance() {
             "reference compiler"
         );
     }
+}
+
+const UNRESOLVED_SECONDARY: &str = "\
+class Box(val item: Int) {
+    constructor(x: Missing) : this(0)
+}
+";
+
+#[test]
+fn an_unresolved_secondary_constructor_parameter_matches_kotlinc() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("Secondary.kt", UNRESOLVED_SECONDARY)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the constructor");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the constructor");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+const SUPERTYPE_WITHOUT_PRIMARY: &str = "\
+class Box : Missing() {
+    constructor(x: Int) : this()
+}
+";
+
+const HEADER_CONSTRUCTOR_WITHOUT_SECONDARY: &str = "\
+class Box : Missing()
+";
+
+#[test]
+fn a_supertype_initialization_without_a_primary_constructor_matches_kotlinc() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("Supertype.kt", SUPERTYPE_WITHOUT_PRIMARY)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the supertype");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the supertype");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+#[test]
+fn a_supertype_initialization_without_a_secondary_constructor_matches_kotlinc() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("HeaderOnly.kt", HEADER_CONSTRUCTOR_WITHOUT_SECONDARY)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the supertype");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the supertype");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+const MISSING_DELEGATION: &str = "\
+class Box {
+    constructor(x: Int) : this()
+}
+
+open class Base(val item: Int)
+class Child : Base {
+    constructor(item: Int) : super()
+}
+";
+
+#[test]
+fn a_missing_constructor_delegation_argument_matches_kotlinc() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("Delegation.kt", MISSING_DELEGATION)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+const EXCESS_DELEGATION: &str = "\
+class Box {
+    constructor(x: Int) : this(1, 2)
+}
+
+open class Base(val x: Int)
+class Child : Base {
+    constructor() : super(1, 2)
+}
+";
+
+#[test]
+fn an_excess_constructor_delegation_argument_matches_kotlinc() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("Excess.kt", EXCESS_DELEGATION)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+const SELF_DELEGATION: &str = "\
+class Box {
+    constructor() : this()
+}
+
+class Boxed(val item: Int) {
+    constructor() : this()
+}
+
+class Value {
+    constructor(x: Int) : this(1)
+}
+";
+
+const DELEGATION_TYPE: &str = "\
+class Box {
+    constructor(x: Int) : this(\"a\")
+}
+";
+
+const INAPPLICABLE_DELEGATION: &str = "\
+class Box {
+    constructor(x: Int) : this()
+    constructor(y: String) : this()
+}
+
+class Boxed(val item: Int) {
+    constructor(y: String) : this()
+}
+";
+
+#[test]
+fn inapplicable_constructor_delegations_match_kotlinc() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("Inapplicable.kt", INAPPLICABLE_DELEGATION)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+#[test]
+fn a_delegation_argument_type_mismatch_matches_kotlinc() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("Mismatch.kt", DELEGATION_TYPE)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+#[test]
+fn a_self_delegation_cycle_matches_kotlinc() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("Cycle.kt", SELF_DELEGATION)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+const EXCESS_TYPE: &str = "\
+class Box {
+    constructor(x: List<String>) : this(1, 2)
+}
+";
+
+const DEFAULT_SELF_CYCLE: &str = "\
+class Box(val item: Int = 0) {
+    constructor() : this()
+}
+";
+
+const NAMED_DELEGATION: &str = "\
+class Box {
+    constructor(x: Int, y: Int) : this(y = 1)
+    constructor(z: String) : this(y = 1)
+}
+";
+
+const SINGLE_NAMED_DELEGATION: &str = "\
+class Box {
+    constructor(x: Int) : this(y = 1)
+}
+";
+
+const TIED_DELEGATION: &str = "\
+class Box(val item: Int = 0) {
+    constructor(x: String = \"\") : this()
+}
+";
+
+const SPECIFIC_PARAMETER_DELEGATION: &str = "\
+class Box(val item: Number = 0) {
+    constructor(x: Int = 1) : this(1)
+}
+";
+
+const GENERIC_PRIMARY_DELEGATION: &str = "\
+class X<T>(val t: T) {
+    constructor(t: String): this(t)
+}
+";
+
+const FORWARDED_INT_TO_NUMBER: &str = "\
+class B(val x: Number) {
+    constructor(x: Int) : this(x)
+}
+";
+
+#[test]
+fn a_named_delegation_argument_lists_every_candidate() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("Named.kt", NAMED_DELEGATION)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+#[test]
+fn a_more_specific_self_delegation_is_a_cycle() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("DefaultCycle.kt", DEFAULT_SELF_CYCLE)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+#[test]
+fn a_single_constructor_named_delegation_matches_kotlinc() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("SingleNamed.kt", SINGLE_NAMED_DELEGATION)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+#[test]
+fn a_tied_constructor_delegation_is_ambiguous() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("Tied.kt", TIED_DELEGATION)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+#[test]
+fn a_forwarded_int_parameter_to_a_number_primary_matches_kotlinc() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("ForwardedInt.kt", FORWARDED_INT_TO_NUMBER)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+#[test]
+fn a_generic_primary_parameter_delegation_is_a_cycle() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("Generic.kt", GENERIC_PRIMARY_DELEGATION)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+#[test]
+fn a_more_specific_parameter_self_delegation_is_a_cycle() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("Specific.kt", SPECIFIC_PARAMETER_DELEGATION)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
+}
+
+fn constructor_delegation_matches_kotlinc(file: &str, source: &str) {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(&[(file, source)], std::slice::from_ref(&stdlib));
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert_eq!(
+        (result.krusty_code == 0, observed),
+        (result.reference_code == 0, expected),
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr,
+        result.reference_stderr
+    );
+}
+
+const FORWARDED_STRING_TO_ANY: &str = "\
+class A(x: Any) {
+    constructor(x: String) : this(x)
+}
+";
+
+const FORWARDED_STRING_CAST_TO_ANY: &str = "\
+class A(x: Any) {
+    constructor(x: String) : this(x as Any)
+}
+";
+
+const NOTHING_DELEGATED_TO_INT: &str = "\
+class F(val x: Int) {
+    constructor(x: Long) : this(TODO())
+}
+";
+
+const NOTHING_DELEGATED_TO_LONG: &str = "\
+class F(val x: Long) {
+    constructor(x: Int) : this(TODO())
+}
+";
+
+const THREE_CONSTRUCTOR_TIE: &str = "\
+class Box(val item: Int = 0) {
+    constructor(x: String = \"\") : this()
+    constructor(x: Long, y: Long) : this()
+}
+";
+
+const ARITY_BESIDE_TYPE_MISMATCH: &str = "\
+class Box(val x: String) {
+    constructor(a: Int, b: Int) : this(1)
+}
+";
+
+const TYPE_MISMATCHES_OMIT_ARITY: &str = "\
+class Box(val x: String) {
+    constructor(flag: Boolean) : this(flag.toString())
+    constructor(a: Int, b: Int) : this(1)
+}
+";
+
+#[test]
+fn a_string_forwarded_to_any_is_a_cycle() {
+    constructor_delegation_matches_kotlinc("Any.kt", FORWARDED_STRING_TO_ANY);
+}
+
+#[test]
+fn a_string_cast_to_any_delegates() {
+    constructor_delegation_matches_kotlinc("AnyCast.kt", FORWARDED_STRING_CAST_TO_ANY);
+}
+
+const NOTHING_AMONG_THREE_CONSTRUCTORS: &str = "\
+class F(val x: Int) {
+    constructor(x: Long) : this(TODO())
+    constructor(x: Byte) : this(TODO())
+}
+";
+
+const NOTHING_BESIDE_A_STRING: &str = "\
+class F(val x: Int, val y: String) {
+    constructor(x: Long, y: String) : this(TODO(), \"a\")
+}
+";
+
+#[test]
+fn a_nothing_argument_prefers_the_int_constructor() {
+    constructor_delegation_matches_kotlinc("NothingInt.kt", NOTHING_DELEGATED_TO_INT);
+}
+
+#[test]
+fn a_nothing_argument_prefers_int_among_three_constructors() {
+    constructor_delegation_matches_kotlinc("NothingThree.kt", NOTHING_AMONG_THREE_CONSTRUCTORS);
+}
+
+#[test]
+fn a_nothing_argument_beside_a_string_prefers_int() {
+    constructor_delegation_matches_kotlinc("NothingMixed.kt", NOTHING_BESIDE_A_STRING);
+}
+
+#[test]
+fn a_nothing_argument_that_selects_the_delegating_constructor_is_a_cycle() {
+    constructor_delegation_matches_kotlinc("NothingLong.kt", NOTHING_DELEGATED_TO_LONG);
+}
+
+#[test]
+fn an_ambiguous_delegation_names_only_the_tied_constructors() {
+    constructor_delegation_matches_kotlinc("Three.kt", THREE_CONSTRUCTOR_TIE);
+}
+
+#[test]
+fn an_arity_failure_beside_one_type_mismatch_reports_the_mismatch() {
+    constructor_delegation_matches_kotlinc("Arity.kt", ARITY_BESIDE_TYPE_MISMATCH);
+}
+
+#[test]
+fn type_mismatches_omit_the_constructor_that_never_mapped() {
+    constructor_delegation_matches_kotlinc("Mismatches.kt", TYPE_MISMATCHES_OMIT_ARITY);
+}
+
+#[test]
+fn an_excess_delegation_also_reports_the_mapped_type_mismatch() {
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("ExcessType.kt", EXCESS_TYPE)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the delegation");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the delegation");
+    let observed = complete_errors(&result.krusty_stderr, false);
+    let expected = complete_errors(&result.reference_stderr, true);
+    assert!(
+        !expected.is_empty(),
+        "kotlinc reported no error:\n{}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        observed, expected,
+        "inspection diagnostics differ from kotlinc.\nkrusty:\n{}\nkotlinc:\n{}",
+        result.krusty_stderr, result.reference_stderr
+    );
 }

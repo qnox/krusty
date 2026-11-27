@@ -79,7 +79,10 @@ fn unknown_named_args_on_classpath_callables_are_rejected_canonically() {
         );
         assert_eq!(
             diagnostics,
-            ["no parameter with name 'z' found."],
+            [
+                "no value passed for parameter 'a'.",
+                "no parameter with name 'z' found.",
+            ],
             "unexpected diagnostics for {source:?}"
         );
     }

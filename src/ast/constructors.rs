@@ -35,6 +35,9 @@ pub struct SecondaryCtor {
     /// parser stores that token's OFFSET and the post-pass rewrites it to its line, the way
     /// `ClassDecl::primary_ctor_lines` are rewritten; 0 = no written delegation.
     pub delegation_line: u32,
+    /// The written `this` or `super` keyword. Empty when the constructor delegates implicitly.
+    /// Delegation diagnostics point here; the line above is only the debug-info anchor.
+    pub delegation_keyword: Span,
     /// 1-based source line this constructor's declaration ENDS on — its delegation's closing `)`
     /// or its block's `}`. Filled by the same post-pass.
     pub decl_end_line: u32,
@@ -73,8 +76,27 @@ pub enum CtorDelegation {
 pub struct CtorDelegationCall {
     pub args: Vec<ExprId>,
     pub names: Vec<Option<String>>,
+    /// Source span of each named argument's label, parallel to [`Self::names`]. A positional
+    /// argument and a call that was not written in source have `None`.
+    pub name_spans: Vec<Option<Span>>,
     /// Whether the last argument was written as a SYNTACTIC trailing lambda (`f(1) {}`). A `this(…)` /
     /// `super(…)` delegation can never have one; a constructor CALL can, and the distinction decides
     /// whether that argument may fill a `vararg` slot.
     pub trailing_lambda: bool,
+}
+
+impl CtorDelegationCall {
+    /// A constructor call whose named arguments have no source label spans.
+    pub(crate) fn new(
+        args: Vec<ExprId>,
+        names: Vec<Option<String>>,
+        trailing_lambda: bool,
+    ) -> Self {
+        Self {
+            args,
+            names,
+            name_spans: Vec::new(),
+            trailing_lambda,
+        }
+    }
 }

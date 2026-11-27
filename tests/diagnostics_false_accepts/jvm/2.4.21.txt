@@ -430,7 +430,6 @@ compiler/testData/diagnostics/tests/diagnostics/outerClassArgumentsRequiredFromS
 compiler/testData/diagnostics/tests/diagnostics/projectionsOnNonClassTypeArguments.kt
 compiler/testData/diagnostics/tests/diagnostics/superclassNotAccessibleFromInterface.kt
 compiler/testData/diagnostics/tests/diagnostics/supertypeInitializedInInterface.kt
-compiler/testData/diagnostics/tests/diagnostics/supertypeInitializedWithoutPrimaryConstructor.kt
 compiler/testData/diagnostics/tests/diagnostics/typeOfAnnotationMember.kt
 compiler/testData/diagnostics/tests/diagnostics/valOnAnnotationParameter.kt
 compiler/testData/diagnostics/tests/enum.kt
@@ -1184,8 +1183,6 @@ compiler/testData/diagnostics/tests/secondaryConstructors/headerCallChecker/acce
 compiler/testData/diagnostics/tests/secondaryConstructors/headerCallChecker/accessBaseGenericFromInnerExtendingSameBase2After.kt
 compiler/testData/diagnostics/tests/secondaryConstructors/headerCallChecker/accessBaseWithSameExtension.kt
 compiler/testData/diagnostics/tests/secondaryConstructors/headerCallChecker/accessBaseWithSameExtensionAfter.kt
-compiler/testData/diagnostics/tests/secondaryConstructors/headerSupertypeInitialization.kt
-compiler/testData/diagnostics/tests/secondaryConstructors/kt6992.kt
 compiler/testData/diagnostics/tests/secondaryConstructors/kt6993.kt
 compiler/testData/diagnostics/tests/secondaryConstructors/propertyInitializationWithPrimary.kt
 compiler/testData/diagnostics/tests/secondaryConstructors/propertyInitializationWithoutPrimary.kt
