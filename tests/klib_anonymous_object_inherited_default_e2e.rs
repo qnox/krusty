@@ -1,16 +1,14 @@
 //! PLATFORM-SPECIFIC: the Native consumer imports an official KLIB. The producer's anonymous
 //! object inherits an interface default that no body calls, and the producer calls the member
 //! through the interface the default implements, so only dispatch reaches the default. The
-//! portable program is `tests/box_regressions/libraryAnonymousObjectInheritedDefault.kt`.
+//! portable program is `tests/box_regressions/libraryAnonymousObjectInheritedDefault.kt`, whose
+//! Wasm counterpart runs in `tests/wasm_dependency_constructor_exports.rs`.
 
 use crate::common;
 use krusty::diag::DiagSink;
 use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
 
-const LIBRARY: &str = include_str!("box_regressions/libraryAnonymousObjectInheritedDefault.kt");
-
-const CONSUMER: &str =
-    "fun box(): String = if (named() == \"OK\" && chained() == \"K\") \"OK\" else \"wrong\"\n";
+const PROGRAM: &str = include_str!("box_regressions/libraryAnonymousObjectInheritedDefault.kt");
 
 #[test]
 fn an_anonymous_object_carries_the_interface_default_only_dispatch_reaches() {
@@ -21,19 +19,22 @@ fn an_anonymous_object_carries_the_interface_default_only_dispatch_reaches() {
         );
         return;
     };
-    let consumer = format!("package fixture\n{CONSUMER}");
-    common::expect_box_ok_with_stdlib(LIBRARY, "LibraryAnonymousObjectInheritedDefaultOracle");
+    let modules = krusty::conformance::split_modules(PROGRAM).expect("the shared two modules");
+    let [library_module, consumer_module] = modules.as_slice() else {
+        panic!("the library and its consumer")
+    };
+    let [(_, producer)] = library_module.files.as_slice() else {
+        panic!("one library file")
+    };
+    let [(_, consumer)] = consumer_module.files.as_slice() else {
+        panic!("one consumer file")
+    };
+    common::expect_box_ok_against_ref("LibraryAnonymousObjectInheritedDefault", producer, consumer);
     let root = std::env::var_os("KRUSTY_KOTLIN_NATIVE")
         .map(std::path::PathBuf::from)
         .expect("the caller requires an official Native distribution");
     let work = common::scratch_dir().expect("allocate inherited-default producer directory");
     let source = work.join("AnonymousObject.kt");
-    // The shared program's `box` is the single-module oracle. The producer library exports
-    // `named`; this consumer supplies the entry.
-    let producer = LIBRARY
-        .split_once("\nfun box():")
-        .expect("the shared program declares box")
-        .0;
     std::fs::write(&source, producer).unwrap();
     let library = work.join("keyed");
     let output = std::process::Command::new(root.join("bin/kotlinc-native"))
@@ -55,7 +56,7 @@ fn an_anonymous_object_carries_the_interface_default_only_dispatch_reaches() {
         KlibLibraryInput::dependency(library),
     ])
     .expect("read the serialized library");
-    let inputs = [krusty::source::SourceInput::kotlin(&consumer).with_file_stem("Consumer")];
+    let inputs = [krusty::source::SourceInput::kotlin(consumer).with_file_stem("Consumer")];
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
