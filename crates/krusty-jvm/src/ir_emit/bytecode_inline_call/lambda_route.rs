@@ -87,7 +87,18 @@ impl Emitter<'_> {
             )? {
                 continue;
             }
-            if let Some(reason) = self.lambda_splice_reason(argument)? {
+            let into_object = inliner::constructs_regenerated_object(&callee, &self.bodies)
+                && index
+                    .checked_sub(leading_non_argument_operands)
+                    .and_then(|parameter| {
+                        crate::inline_parameters::crossinline_literal_moves(
+                            self.ir,
+                            call_expression,
+                            parameter,
+                        )
+                    })
+                    .unwrap_or(false);
+            if let Some(reason) = self.lambda_splice_reason(argument, into_object)? {
                 return splice(reason);
             }
             lambda_arguments.push(argument);

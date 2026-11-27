@@ -11,7 +11,6 @@ use crate::fir::{
 };
 use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, FunId, IrExpr, SameModuleInlining};
-use crate::types::{InlineParameterModifier, Ty, TyKind};
 
 #[cfg(test)]
 mod tests;
@@ -40,10 +39,6 @@ pub(in super::super) enum ExpansionReason {
     SuspendCallee,
     /// The call omits an argument that has a default.
     DefaultArguments,
-    /// A parameter (or the receiver) of the callee that is itself inlined has a suspend function
-    /// type, whose lambdas suspend inside the caller's state machine. A `noinline` one is only
-    /// passed on as a value, so its call keeps to the compiled body.
-    SuspendFunctionParameter,
     /// The callee has no body of its own in this file's IR.
     NoTemplate,
     /// The callee is another file's and its body holds a subject `when` that switches on an enum's
@@ -117,10 +112,6 @@ impl BodyLowering<'_> {
         if header.flags.has(DeclarationFlags::SUSPEND) {
             return Some(ExpansionReason::SuspendCallee);
         }
-        let Some(signature) = self.index.signature(declaration) else {
-            return Some(ExpansionReason::NoTemplate);
-        };
-        let _ = signature;
         let Some(function) = function else {
             return Some(ExpansionReason::NoTemplate);
         };

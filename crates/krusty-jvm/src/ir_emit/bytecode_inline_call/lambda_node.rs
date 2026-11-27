@@ -273,14 +273,25 @@ impl Emitter<'_> {
     /// Why the call passing the literal lambda `argument` takes the splice route, if it must: the
     /// lambda shapes the MethodInliner port does not own yet. Decided from the checked IR before
     /// anything of the call is emitted.
+    ///
+    /// `into_object` says the literal is a `crossinline` argument of a callee that builds an object
+    /// around it: the callee's suspend method inlines it, and the coroutine transformer builds that
+    /// method's machine over the result. A suspending literal anywhere else is a suspension point
+    /// of the caller's own machine, which only the splice places.
     pub(super) fn lambda_splice_reason(
         &mut self,
         argument: u32,
+        into_object: bool,
     ) -> Result<Option<SpliceReason>, &'static str> {
         let (lambda, arity) = self.literal_lambda(argument)?;
         // A suspension in the lambda needs the splice's state-machine markers until the coroutine
         // transformer runs on inlined bytecode; a suspend lambda's `Continuation` parameter is the
         // one its arity does not count.
+        if !into_object
+            && (self.suspends_within(lambda.inline_body) || lambda.parameter_types.len() != arity)
+        {
+            return Ok(Some(SpliceReason::SuspendingLambda));
+        }
         self.ir
             .lambda_exit(lambda.inline_body)
             .ok_or("an inline lambda reached emission without its recorded non-local exit")?;
