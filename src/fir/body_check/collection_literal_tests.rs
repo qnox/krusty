@@ -242,3 +242,22 @@ fn spread_collection_literal_uses_the_vararg_array_expectation() {
     assert_eq!(elements.len(), 1);
     assert!(elements[0].spread);
 }
+
+#[test]
+fn literal_passed_for_a_type_variable_is_built_from_the_other_arguments() {
+    // The literal's expectation-free `List<Int>` reading must not join `MutableSet<Int>` into
+    // `Collection<Int>`: the variable is fixed by the other argument and the literal is built as it.
+    let (body, _) = checked_function_body_with_platform(
+        "// LANGUAGE: +CollectionLiterals\n\
+         // WITH_STDLIB\n\
+         fun <T> select(vararg x: T): T = x[0]\n\
+         fun make(): MutableSet<Int> = select(mutableSetOf<Int>(), [1])\n",
+        "make",
+        jvm_stdlib_semantics(),
+    );
+    let root = body.expr(root_expression(&body)).expect("select call");
+    assert_eq!(
+        root.ty.get(),
+        Ty::obj_args("kotlin/collections/MutableSet", &[Ty::Int])
+    );
+}

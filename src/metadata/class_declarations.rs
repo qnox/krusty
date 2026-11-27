@@ -807,7 +807,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         .enumerate()
     {
         let record = PropMeta {
-            return_value_status: Default::default(),
+            return_value_status: ext.return_value_status,
             spellings: ir
                 .prop_declared_spellings
                 .get(&(c.fq_name_id(), ext.source_order))

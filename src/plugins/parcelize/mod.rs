@@ -89,6 +89,12 @@ impl IrPlugin for ParcelizePlugin {
         "parcelize"
     }
 
+    fn runtime_requirements(
+        &self,
+    ) -> Vec<crate::plugins::runtime_declarations::RuntimeRequirement> {
+        serializers::requirements()
+    }
+
     fn generate_frontend_declarations(
         &self,
         ctx: &FrontendClassContext<'_>,

@@ -450,6 +450,17 @@ fn delegated_function_declaration(
         applied_result: ResolvedTy::new(applied_result).ok()?,
         interface: function.callable.owner_is_interface,
         has_kotlin_superclass_override: false,
+        // A module declaration's status is published after this plan is resolved, so only a
+        // provider's own record is carried; the forwarder's status is derived from the published
+        // edges by `ResolvedModuleIndex::delegated_function_status`.
+        return_value_status: match target {
+            ResolvedFunctionOverrideTarget::Module(_) => None,
+            ResolvedFunctionOverrideTarget::External(_) => function.flags.return_value_status,
+        },
+        operator: matches!(target, ResolvedFunctionOverrideTarget::External(_))
+            && function.flags.operator,
+        infix: matches!(target, ResolvedFunctionOverrideTarget::External(_))
+            && function.flags.infix,
     })
 }
 
@@ -575,6 +586,19 @@ fn property_slot(property: &PropertyInfo) -> Option<PropertySlot> {
     }
 }
 
+/// The provider's recorded status of a delegated property's overridden declaration: `None` for a
+/// Java declaration, and for a module declaration, whose inherited status is published later and
+/// read through `ResolvedModuleIndex::delegated_property_return_value_status`.
+fn property_return_value_status(
+    target: crate::fir::ResolvedPropertyOverrideTarget,
+    declaration: &PropertyInfo,
+) -> Option<crate::types::ReturnValueStatus> {
+    match target {
+        crate::fir::ResolvedPropertyOverrideTarget::Module(_) => None,
+        crate::fir::ResolvedPropertyOverrideTarget::External(_) => declaration.return_value_status,
+    }
+}
+
 fn delegated_property(
     source: &dyn SymbolSource,
     index: &ResolvedModuleIndex,
@@ -610,6 +634,12 @@ fn delegated_property(
         setter_value: setter.and_then(super::override_plans::setter_value),
         interface: declaration.getter.owner_is_interface,
         depth: 0,
+        return_value_status: property_return_value_status(declared.target, declaration),
+        getter_has_body: !declaration.getter.is_abstract,
+        setter_has_body: declaration
+            .setter
+            .as_ref()
+            .is_some_and(|setter| !setter.is_abstract),
     }];
     let inherited_class = inherited_class_candidates
         .into_iter()
@@ -639,6 +669,12 @@ fn delegated_property(
                 setter_value: super::override_plans::setter_value(inherited),
                 interface: false,
                 depth: inherited.receiver_rank,
+                return_value_status: property_return_value_status(declared.target, inherited),
+                getter_has_body: !inherited.getter.is_abstract,
+                setter_has_body: inherited
+                    .setter
+                    .as_ref()
+                    .is_some_and(|setter| !setter.is_abstract),
             });
         }
     }

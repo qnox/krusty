@@ -395,6 +395,7 @@ impl JvmLibraries {
                                 is_final: m.is_final(),
                                 deprecated_hidden: m.deprecated_hidden(),
                                 inherited_by_delegation: m.inherited_by_delegation(),
+                                signature_polymorphic: m.is_signature_polymorphic(),
                                 return_value_status: m.return_value_status,
                             },
                             ..FunctionInfo::plain(FnKind::Member, Some(receiver), callable)

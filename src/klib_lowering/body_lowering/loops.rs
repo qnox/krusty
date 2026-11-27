@@ -11,9 +11,10 @@ use crate::ir::{
     Callee, ExprId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrIntrinsic, IrProgressionSource,
 };
 use crate::metadata::klib_ir::tree::{
-    KlibIrArguments, KlibIrExprKind, KlibIrLoop, KlibIrStatement, KlibIrVariableId,
+    KlibIrArguments, KlibIrExprId, KlibIrExprKind, KlibIrLoop, KlibIrMemberAccess, KlibIrStatement,
+    KlibIrVariableId,
 };
-use crate::metadata::klib_ir::KlibIrSignature;
+use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbol, KlibIrSymbolKind};
 use crate::types::Ty;
 
 impl BodyLowering<'_> {
@@ -33,7 +34,13 @@ impl BodyLowering<'_> {
         } else {
             "WHILE_LOOP"
         };
-        if serialized.origin.as_deref() != Some(expected) {
+        // A loop with no origin is one an inlined declaration's own body wrote (an array
+        // constructor's fill loop); it is an ordinary loop of its condition and body.
+        if serialized
+            .origin
+            .as_deref()
+            .is_some_and(|origin| origin != expected)
+        {
             return unsupported("a loop the compiler introduced");
         }
         let Some(body) = serialized.body else {
@@ -234,8 +241,8 @@ impl BodyLowering<'_> {
 
     /// A `for` loop over `array.indices`, counted as kotlinc's `IndicesHandler` counts it: the
     /// receiver is evaluated once, and the loop variable takes each value from zero until its
-    /// size. Only the array receiver is modelled; another receiver kind declines, because the
-    /// prewalk folded the loop's protocol calls.
+    /// size. A collection's or text's bound is the receiver's `size` or `length`, which the prewalk
+    /// reached through the `indices` getter's declaration.
     fn indices_loop(
         &mut self,
         indices_loop: super::super::for_loops::IndicesForLoop<'_>,
@@ -258,15 +265,14 @@ impl BodyLowering<'_> {
                 return unsupported("a `for` loop over indices through another progression call");
             }
         }
-        match self.linker.indices_receiver(getter)? {
-            Some(crate::libraries::IndicesReceiver::Array) => {}
-            Some(_) => return unsupported("a `for` loop over the indices of a non-array receiver"),
+        let kind = match self.linker.indices_receiver(getter)? {
+            Some(kind) => kind,
             None => {
                 return unsupported(
                     "a `for` loop over an extension property that is not an array's indices",
                 )
             }
-        }
+        };
         let variable = self.arena.variable(binding);
         if variable.base.origin != "FOR_LOOP_VARIABLE" {
             return unsupported("a destructured `for` loop over indices");
@@ -279,30 +285,50 @@ impl BodyLowering<'_> {
         if self.loops.iter().any(|(id, _)| *id == serialized.id) {
             return Err(mismatch("a loop repeats an enclosing loop's identity"));
         }
-        let array_value = self.expression(receiver)?;
-        let array_ty = self.lowered_type(array_value);
-        if !array_ty.non_null().is_array() {
-            return Err(mismatch(
-                "the receiver of an array indices loop is no array",
-            ));
-        }
-        let array_slot = self.locals.anonymous_slot();
-        let array_declaration = self.ir.add_expr(IrExpr::Variable {
-            index: array_slot,
-            ty: array_ty,
-            init: Some(array_value),
-            named: false,
-        });
-        let array_read = self.ir.add_expr(IrExpr::GetValue(array_slot));
-        let size = self.ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Intrinsic {
-                operation: IrIntrinsic::ArraySize,
-                ret: Ty::Int,
-            }),
-            dispatch_receiver: Some(array_read),
-            args: Vec::new(),
-        });
-        let size = self.typed(size, Ty::Int);
+        // The bound is read once, before the loop: an array's intrinsic size from the receiver
+        // kept in a local, or the member read of the receiver's size or length.
+        let (array_declaration, size) = match kind {
+            crate::libraries::IndicesReceiver::Array => {
+                let array_value = self.expression(receiver)?;
+                let array_ty = self.lowered_type(array_value);
+                if !array_ty.non_null().is_array() {
+                    return Err(mismatch(
+                        "the receiver of an array indices loop is no array",
+                    ));
+                }
+                let array_slot = self.locals.anonymous_slot();
+                let array_declaration = self.ir.add_expr(IrExpr::Variable {
+                    index: array_slot,
+                    ty: array_ty,
+                    init: Some(array_value),
+                    named: false,
+                });
+                let array_read = self.ir.add_expr(IrExpr::GetValue(array_slot));
+                let size = self.ir.add_expr(IrExpr::Call {
+                    callee: Box::new(Callee::Intrinsic {
+                        operation: IrIntrinsic::ArraySize,
+                        ret: Ty::Int,
+                    }),
+                    dispatch_receiver: Some(array_read),
+                    args: Vec::new(),
+                });
+                (Some(array_declaration), self.typed(size, Ty::Int))
+            }
+            crate::libraries::IndicesReceiver::Collection
+            | crate::libraries::IndicesReceiver::CharSequence => {
+                let Some(bound) = self.linker.indices_bound(getter)? else {
+                    return unsupported(
+                        "a `for` loop over the indices of a receiver whose bound this linker \
+                         does not read",
+                    );
+                };
+                // The range counts from zero in `Int`: the bound's declared type must be it.
+                if bound.ty != Ty::Int {
+                    return Err(mismatch("an indices bound is not declared `Int`"));
+                }
+                (None, self.indices_bound_read(&bound, receiver)?)
+            }
+        };
         // Counting down starts at the last index and ends at the first: `size - 1 downTo 0`.
         let (operation, start, end) = if reversed.is_some() {
             let one = self.ir.add_expr(IrExpr::Const(IrConst::Int(1)));
@@ -339,10 +365,36 @@ impl BodyLowering<'_> {
                 label,
                 with_index: None,
             })));
-        Ok(self.ir.add_expr(IrExpr::Block {
-            stmts: vec![array_declaration, counted],
-            value: None,
-        }))
+        Ok(match array_declaration {
+            Some(array_declaration) => self.ir.add_expr(IrExpr::Block {
+                stmts: vec![array_declaration, counted],
+                value: None,
+            }),
+            None => counted,
+        })
+    }
+
+    /// The read of the property that bounds a counted loop over the indices of `receiver`: its
+    /// getter called on the receiver, as a serialized call of it would be.
+    fn indices_bound_read(
+        &mut self,
+        bound: &super::IndicesBound,
+        receiver: KlibIrExprId,
+    ) -> Lowered<ExprId> {
+        let access = KlibIrMemberAccess {
+            symbol: KlibIrSymbol {
+                kind: KlibIrSymbolKind::Function,
+                signature: KlibIrSignature::Accessor(bound.accessor.clone()),
+            },
+            arguments: KlibIrArguments::Split {
+                dispatch_receiver: Some(receiver),
+                extension_receiver: None,
+                values: Vec::new(),
+            },
+            type_arguments: Vec::new(),
+            origin: None,
+        };
+        self.accessor_call(&bound.accessor, &access, bound.ty)
     }
 
     /// A `for` loop over a range literal, counted as kotlinc's `ForLoopsLowering` and checked FIR
@@ -450,7 +502,7 @@ impl BodyLowering<'_> {
         };
         let symbol = variable.base.symbol.clone();
         if destructured {
-            let local = self.locals.temporary(&symbol, ty)?;
+            let local = self.locals.temporary(&symbol, ty, false)?;
             return Ok(self.ir.add_expr(IrExpr::Variable {
                 index: local.index,
                 ty,

@@ -279,6 +279,8 @@ fn validate_checked_operation(operation: &IrCheckedOperation) -> Result<(), Unde
         | IrCheckedOperation::RangeLoop { counter, .. } => reject("range counter", *counter),
         IrCheckedOperation::IllegalProgressionStep { .. }
         | IrCheckedOperation::AtomicField { .. }
+        | IrCheckedOperation::FieldDesignation { .. }
+        | IrCheckedOperation::AtomicFieldThrough { .. }
         | IrCheckedOperation::AtomicArrayElement { .. }
         | IrCheckedOperation::ComparableRangeContains { .. } => Ok(()),
         IrCheckedOperation::PropertyReference { substitutions, .. } => {

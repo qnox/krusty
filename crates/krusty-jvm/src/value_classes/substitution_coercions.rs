@@ -91,7 +91,11 @@ fn drop_discarded_unboxes(ops: &mut Vec<(ExprId, BoxOp)>, ir: &mut IrFile) {
     let removable_operands: HashSet<ExprId> = discarded
         .iter()
         .filter_map(|(&operand, coercions)| {
-            (uses.get(&operand).copied().unwrap_or_default() == coercions.len()).then_some(operand)
+            // A suspend call of a value class hands its result over as the carrier or the box
+            // already, so the coercion over it keeps the cast kotlinc emits before the pop.
+            (!ir.value_class_suspend_calls.contains_key(&operand)
+                && uses.get(&operand).copied().unwrap_or_default() == coercions.len())
+            .then_some(operand)
         })
         .collect();
     ops.retain(|&(operand, op)| {
@@ -364,6 +368,40 @@ mod tests {
                 } if stmts.is_empty() && *value == argument
             ));
         }
+    }
+
+    #[test]
+    fn a_discarded_read_of_a_carrier_handover_keeps_its_coercion() {
+        let mut ir = IrFile::default();
+        let call = ir.add_expr(IrExpr::GetValue(0));
+        let coercion = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: call,
+            type_operand: Ty::obj("kotlin/String"),
+        });
+        ir.add_expr(IrExpr::Block {
+            stmts: vec![coercion],
+            value: None,
+        });
+        ir.value_class_suspend_calls.insert(
+            call,
+            krusty::ir::IrValueClassSuspendResult::Carrier {
+                classifier: type_name("fixture/Value"),
+                carrier: Ty::obj("kotlin/String"),
+            },
+        );
+        let mut operations = Vec::new();
+
+        drop_discarded_unboxes(&mut operations, &mut ir);
+
+        assert!(matches!(
+            ir.expr(coercion),
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } if *arg == call
+        ));
     }
 
     #[test]

@@ -21,7 +21,7 @@ expect "a release follows its release candidate" $'2.5.0-RC\n2.5.0' $'2.5.0\n2.5
 expect "pre-releases order before the release" $'2.5.0-Beta1\n2.5.0-RC\n2.5.0-RC2\n2.5.0' $'2.5.0\n2.5.0-RC2\n2.5.0-Beta1\n2.5.0-RC'
 expect "a pre-release of the next release follows the previous release" $'2.4.21\n2.5.0-RC' $'2.5.0-RC\n2.4.21'
 expect "numeric parts compare as numbers" $'2.4.0\n2.4.10\n2.4.20\n2.4.21' $'2.4.21\n2.4.10\n2.4.0\n2.4.20'
-expect "the manifest in use" $'2.4.0\n2.4.10\n2.4.20\n2.4.21\n2.5.0-RC' $'2.5.0-RC\n2.4.0\n2.4.21\n2.4.10\n2.4.20'
+expect "the manifest in use" $'2.4.0\n2.4.10\n2.4.20\n2.4.21\n2.5.0-RC2' $'2.5.0-RC2\n2.4.0\n2.4.21\n2.4.10\n2.4.20'
 
 [ "$failures" -eq 0 ] || exit 1
 echo "sort-kotlin-versions: ok"

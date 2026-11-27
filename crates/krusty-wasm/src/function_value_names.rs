@@ -93,11 +93,7 @@ pub(super) fn sam_class_name(ir: &IrFile, expression: ExprId) -> Option<String> 
 /// anonymous object has none of this shape.
 fn member_classifier_name(ir: &IrFile, owner: krusty::types::TypeName) -> Option<String> {
     let class = ir.class_id_by_name(owner)?;
-    let declaration = &ir.classes[class as usize];
-    if declaration.is_local_class
-        || declaration.is_anonymous_object
-        || ir.local_class_name_provenance.contains_key(&class)
-    {
+    if krusty::backend::is_declared_in_executable_code(ir, class) {
         return None;
     }
     Some(krusty::backend::class_names::source_class_names(ir, class)?.qualified)

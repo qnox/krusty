@@ -330,7 +330,7 @@ pub(super) fn parse_source_set_named(
     let files = sources
         .iter()
         .map(|(_, source)| {
-            let features = krusty::features::LangFeatures::from_source(source);
+            let features = krusty::features::LangFeatures::from_source_in_environment(source);
             let tokens = krusty::lexer::lex(source, diags);
             let mut file = krusty::parser::parse_with_features(source, &tokens, diags, &features);
             krusty::frontend::record_local_class_name_provenance(&mut file);
@@ -416,7 +416,7 @@ pub(crate) fn emit_in_process<B: krusty::compiler::Backend>(
     let mut diags = DiagSink::new();
     let inputs = [SourceInput::kotlin(src).with_file_stem(stem)];
     let stems = [stem.to_string()];
-    let features = krusty::features::LangFeatures::from_source(src);
+    let features = krusty::features::LangFeatures::from_source_in_environment(src);
     // The backend names the target; the analysis it consumes is checked under the same rules.
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
@@ -550,7 +550,7 @@ pub fn compile_in_process_metadata_cp_module_target(
     );
     let inputs = [SourceInput::kotlin(src).with_file_stem(stem)];
     let stems = [stem.to_string()];
-    let features = krusty::features::LangFeatures::from_source(src);
+    let features = krusty::features::LangFeatures::from_source_in_environment(src);
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         with_native_plugins(CompilationTarget::Jvm, platform),
@@ -767,7 +767,7 @@ where
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         with_native_plugins(CompilationTarget::Jvm, platform),
-        &krusty::features::LangFeatures::new(),
+        &krusty::features::LangFeatures::from_environment(),
         prepare,
         &mut diags,
     );
@@ -2008,7 +2008,7 @@ fn krusty_lib_out(sources: &[(&str, &str)]) -> Result<Option<PathBuf>, String> {
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         with_native_plugins(CompilationTarget::Jvm, platform),
-        &krusty::features::LangFeatures::default(),
+        &krusty::features::LangFeatures::from_environment(),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
     );
@@ -2461,7 +2461,7 @@ pub fn inspect_checker_with_classpath<T>(
     use krusty::diag::DiagSink;
     use krusty::frontend::{analyze_source_set_with_features, SourceInput};
     let mut diags = DiagSink::new();
-    let features = krusty::features::LangFeatures::from_source(main);
+    let features = krusty::features::LangFeatures::from_source_in_environment(main);
     let cp = std::rc::Rc::new(Classpath::new(classpath));
     let platform = Box::new(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),

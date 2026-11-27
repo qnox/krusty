@@ -1633,16 +1633,20 @@ fn stdlib_calls_reach_header_declared_callees() {
     // reaches past it and declines at a member call. A generic property's access links through
     // its exact accessor, so `toKString` reaches `toKStringFromUtf16` and declines at its type
     // parameters. A generic file-private function now links with the formals its identity
-    // mints, so three more bodies reach past one and decline at a member call.
-    let expected = if crate::kotlin_version::target()
+    // mints, so three more bodies reach past one and decline at a member call. One body that
+    // declined at an implicit conversion now passes it and declines at an enum value whose class
+    // its closure did not read. An internal top-level function no selection records now links
+    // as a file-private one does, with the formals its identity mints, so bodies reach past a
+    // generic one and decline further on, on the newest release three of them at a member call.
+    let expected = if crate::kotlin_version::environment_release()
         >= crate::kotlin_version::KotlinVersion::V2_4_20
     {
         vec![
                 ("it calls `kotlin.ArithmeticException.<init>`)", 2),
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
-                ("it converts a value implicitly)", 5),
-                ("it declares type parameters)", 209),
+                ("it converts a value implicitly)", 4),
+                ("it declares type parameters)", 168),
                 (
                     "it uses a `for` loop over a progression that is not a range literal)",
                     4,
@@ -1652,9 +1656,13 @@ fn stdlib_calls_reach_header_declared_callees() {
                      indices)",
                     6,
                 ),
-                ("it uses a call of a member function)", 92),
+                ("it uses a call of a member function)", 95),
                 ("it uses a call through a property accessor signature)", 41),
                 ("it uses a constant of another type than its value's)", 6),
+                (
+                    "it uses an enum value whose class the closure did not read)",
+                    1,
+                ),
                 ("its library serializes none)", 100),
                 (
                     "its serialized declaration disagrees with the selected one: an object literal's supertype TypeName(\"kotlinx/cinterop/CValues\") is not a selected classifier)",
@@ -1666,8 +1674,8 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.ArithmeticException.<init>`)", 2),
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
-                ("it converts a value implicitly)", 5),
-                ("it declares type parameters)", 191),
+                ("it converts a value implicitly)", 4),
+                ("it declares type parameters)", 165),
                 (
                     "it uses a `for` loop over a progression that is not a range literal)",
                     4,
@@ -1680,6 +1688,10 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it uses a call of a member function)", 84),
                 ("it uses a call through a property accessor signature)", 41),
                 ("it uses a constant of another type than its value's)", 6),
+                (
+                    "it uses an enum value whose class the closure did not read)",
+                    1,
+                ),
                 ("its library serializes none)", 100),
                 (
                     "its serialized declaration disagrees with the selected one: an object literal's supertype TypeName(\"kotlinx/cinterop/CValues\") is not a selected classifier)",

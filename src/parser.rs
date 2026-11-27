@@ -16,6 +16,7 @@ mod annotation_classes;
 mod annotation_values;
 mod anonymous_functions;
 mod class_recovery;
+mod comment_binding;
 mod companion_declarations;
 mod constructors;
 mod context_clause;
@@ -24,6 +25,7 @@ mod declaration_bodies;
 mod declaration_modifiers;
 mod declaration_stream;
 mod destructuring;
+mod enum_entries;
 mod expressions;
 mod file_features;
 mod for_loops;
@@ -2004,140 +2006,7 @@ impl<'a> Parser<'a> {
             let members_only = self.at(TokenKind::Semicolon);
             self.skip_semicolons();
             if !members_only {
-                loop {
-                    let (entry_ann_names, entry_ann_args) = self.parse_enum_entry_prefix();
-                    if !self.at(TokenKind::Ident) {
-                        break;
-                    }
-                    let entry_span = self.tok().span;
-                    let entry_name = self.text().to_string();
-                    self.bump();
-                    // Optional constructor arguments: `RED(0xFF0000)`, incl. named `RED(rgb = 0xFF0000)`.
-                    let (args, arg_names) = if self.eat(TokenKind::LParen) {
-                        let (args, names, _) = self.parse_call_argument_list();
-                        self.expect(TokenKind::RParen, "')'");
-                        (args, names)
-                    } else {
-                        (Vec::new(), Vec::new())
-                    };
-                    // A per-entry class body (`RED { override fun m() = … }`) is an anonymous subclass.
-                    // Capture its method overrides and `val`/`var` properties; anything else bails cleanly.
-                    let mut body = Vec::new();
-                    let mut bprops = Vec::new();
-                    let mut init_order = Vec::new();
-                    if self.eat(TokenKind::LBrace) {
-                        let entry_nested_start = self.file.decls.len();
-                        self.skip_semicolons();
-                        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-                            let bmods = self.parse_member_decl_prefix();
-                            let entry_owner = format!("{name}.{entry_name}");
-                            let nested_start = self.file.decls.len();
-                            if self.parse_and_register_nested_classifier(&entry_owner, &bmods, true)
-                            {
-                                if let Some(&declaration) = self.file.decls.get(nested_start) {
-                                    self.file
-                                        .enum_entry_nested_classifier_owners
-                                        .insert(declaration, entry_span);
-                                }
-                                // An `inner` classifier declared by an enum entry captures the entry value,
-                                // whose source type is the enum—not a separately nameable entry-subclass
-                                // type. Keep the JVM/source nesting path (`Enum.ENTRY.Inner`) while recording
-                                // the semantic dispatch receiver (`Enum`) independently.
-                                if bmods.iter().any(|modifier| modifier == "inner") {
-                                    if let Some(&declaration) = self.file.decls.get(nested_start) {
-                                        if let Decl::Class(nested) = self.file.decl_mut(declaration)
-                                        {
-                                            nested.inner_of = Some(name.clone());
-                                        }
-                                    }
-                                }
-                            } else if self.at(TokenKind::KwFun) {
-                                body.push(self.parse_fun(&bmods));
-                            } else if self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar) {
-                                let property = self.parse_member_property(
-                                    &bmods,
-                                    false,
-                                    bmods.iter().any(|m| m == "abstract"),
-                                );
-                                init_order.push(ClassInit::PropInit(bprops.len()));
-                                bprops.push(property);
-                            } else if self.at(TokenKind::Ident)
-                                && self.keyword_text("init")
-                                && self
-                                    .t
-                                    .get(self.i + 1)
-                                    .is_some_and(|token| token.kind == TokenKind::LBrace)
-                            {
-                                init_order.push(ClassInit::Block(self.parse_init_block()));
-                            } else {
-                                self.diags.error(
-                                    self.tok().span,
-                                    "expected an enum-entry member declaration",
-                                );
-                                while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-                                    self.bump();
-                                }
-                            }
-                            self.skip_semicolons();
-                        }
-                        self.expect(TokenKind::RBrace, "'}'");
-                        // Classifiers are parser-hoisted out of an enum-entry body. Retain the
-                        // structural entry boundary for every outermost classifier created while
-                        // parsing that body, including anonymous objects in properties, methods,
-                        // and init blocks. Descendants remain owned by their containing classifier
-                        // through source containment; attaching all newly created declarations
-                        // directly to the entry would flatten anonymous/named nesting.
-                        let nested = self.file.decls[entry_nested_start..]
-                            .iter()
-                            .copied()
-                            .filter(|declaration| {
-                                matches!(self.file.decl(*declaration), Decl::Class(_))
-                            })
-                            .collect::<Vec<_>>();
-                        for &declaration in &nested {
-                            let Decl::Class(class) = self.file.decl(declaration) else {
-                                continue;
-                            };
-                            let has_nested_owner = nested.iter().copied().any(|candidate| {
-                                if candidate == declaration {
-                                    return false;
-                                }
-                                matches!(self.file.decl(candidate), Decl::Class(owner)
-                                    if owner.span.lo <= class.span.lo
-                                        && class.span.hi <= owner.span.hi)
-                            });
-                            if !has_nested_owner {
-                                self.file
-                                    .enum_entry_nested_classifier_owners
-                                    .entry(declaration)
-                                    .or_insert(entry_span);
-                            }
-                        }
-                    }
-                    entries.push(AstEnumEntry {
-                        name: entry_name,
-                        span: entry_span,
-                        decl_line: 0,
-                        annotations: entry_ann_names,
-                        annotation_args: entry_ann_args,
-                        args,
-                        arg_names,
-                        methods: body,
-                        props: bprops,
-                        init_order,
-                    });
-                    self.skip_semicolons();
-                    if !self.eat(TokenKind::Comma) {
-                        break;
-                    }
-                    // After a trailing comma, a `;` still ends the entry list: `A, ; constructor(…)`
-                    // declares a member, not an entry `constructor`.
-                    let ends_entries = self.at(TokenKind::Semicolon);
-                    self.skip_semicolons();
-                    if ends_entries {
-                        break;
-                    }
-                }
+                entries = self.parse_enum_entries(&name);
             }
             // Members follow a `;` separator (lexed as a newline): `enum class C { A, B; fun f() … }`.
             loop {
@@ -2474,10 +2343,10 @@ impl<'a> Parser<'a> {
                 names.push(None);
                 name_spans.push(None);
             }
-            let spread = self.eat(TokenKind::Star);
+            let star = self.eat_span(TokenKind::Star);
             let arg = self.parse_expr();
-            if spread {
-                self.file.spread_arg_ids.insert(arg.0);
+            if let Some(star) = star {
+                self.file.spread_arg_stars.insert(arg.0, star);
             }
             args.push(arg);
             self.skip_semicolons();
@@ -4111,6 +3980,16 @@ fn unquote_char(raw: &str) -> u16 {
     decode_char_literal_content(inner).unwrap_or(0)
 }
 
+/// The value of verbatim raw-string text. kotlinc reads `\r\n` and a lone `\r` as `\n`, so a raw
+/// string written across such line breaks holds `\n`.
+fn raw_string_value(text: &str) -> KtString {
+    if text.contains('\r') {
+        KtString::from(crate::diag::kotlinc_offsets::kotlinc_text(text).as_str())
+    } else {
+        KtString::from(text)
+    }
+}
+
 /// Unescape a literal chunk of a string template (no surrounding quotes).
 fn unescape_chunk(inner: &str) -> KtString {
     let mut out = KtStringBuf::with_capacity(inner.len());
@@ -4195,7 +4074,7 @@ fn unquote(raw: &str) -> KtString {
             .strip_prefix("\"\"\"")
             .and_then(|s| s.strip_suffix("\"\"\""))
             .unwrap_or(raw);
-        return KtString::from(inner);
+        return raw_string_value(inner);
     }
     let inner = raw
         .strip_prefix('"')

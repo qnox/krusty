@@ -784,7 +784,7 @@ fn unmodelled_local_variables_decline_by_form() {
             "it uses a compiler-introduced variable",
         ),
         (
-            0b10,
+            0b1,
             "IR_TEMPORARY_VARIABLE",
             true,
             "it uses a mutable or annotated compiler temporary",
@@ -823,6 +823,28 @@ fn a_compiler_temporary_lowers_as_an_unnamed_local() {
     assert_eq!(
         lowered_body(&unit, function),
         "scope {scope {temp v1: Int = v0!: Int; return@Some(0) v1!: Int: Nothing}: Nothing}"
+    );
+}
+
+/// An inlined loop's induction counter is a compiler `var`: an unnamed reassignable local.
+#[test]
+fn a_mutable_compiler_temporary_lowers_as_an_unnamed_reassignable_local() {
+    let demo = demo(&[("f", &[T::Int], T::Int)], |_, body| {
+        let a = body.param(0);
+        let (declaration, x) = body.variable_with(T::Int, Some(a), 0b10, "IR_TEMPORARY_VARIABLE");
+        let value = body.param(0);
+        let assign = body.set(&x, value);
+        let read = body.get(&x, T::Int);
+        Some(vec![declaration, assign, body.ret(read)])
+    });
+    let mut unit = DependencyBodyUnit::default();
+    let function = demo
+        .lower(&mut unit, "f", &[])
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    assert_eq!(
+        lowered_body(&unit, function),
+        "scope {scope {temp v1: Int = v0!: Int; v1 = v0!: Int: Unit; return@Some(0) v1~: Int: Nothing}: Nothing}"
     );
 }
 
@@ -1035,6 +1057,46 @@ fn klib_primitive_upcast_retains_the_common_representation_coercion() {
     assert_eq!(
         lowered_body(&unit, function),
         source_body("fun f(a: Int): Any { return a }", "f", 1)
+    );
+}
+
+/// The cast the declaring compilation proved of a primitive to a supertype classifier that applies
+/// other type arguments than the primitive's hierarchy does (`Int` as `Comparable<Any?>`, which the
+/// stdlib's `CodePoint.compareTo` states) is the coercion that boxes it, as the upcast to the
+/// classifier is.
+#[test]
+fn an_implicit_cast_of_a_primitive_to_another_application_of_its_supertype_boxes_it() {
+    struct IntIsComparable;
+    impl crate::assignable::TypeOracle for IntIsComparable {
+        fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
+            if ty == Ty::Int {
+                vec![Ty::obj_args("kotlin/Comparable", &[Ty::Int])]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+    let demo = demo(&[("f", &[T::Int], T::ComparableNullableAny)], |_, body| {
+        let value = body.param(0);
+        let cast = body.type_operator(
+            KlibIrTypeOperator::ImplicitCast,
+            value,
+            T::ComparableNullableAny,
+        );
+        Some(vec![body.ret(cast)])
+    });
+    let classes = IntIsComparable;
+    let facts = KlibCalleeFacts::default().with_type_oracle(&classes);
+    let mut unit = DependencyBodyUnit::default();
+    let function = unit
+        .lower_function(demo.callable("f"), &demo.bodies, &facts)
+        .unwrap();
+    validated(unit.ir());
+    assert_eq!(
+        lowered_body(&unit, function),
+        "scope {scope {return@Some(0) ImplicitCoercion<Obj(TypeName(\"kotlin/Comparable\"), \
+         [Nullable(Obj(TypeName(\"kotlin/Any\"), []))])>(v0!: Int): Obj(TypeName(\"kotlin/Comparable\"), \
+         [Nullable(Obj(TypeName(\"kotlin/Any\"), []))]): Nothing}: Nothing}"
     );
 }
 

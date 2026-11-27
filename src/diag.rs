@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use crate::types::TypeName;
 
 pub(crate) mod kotlinc_offsets;
+pub(crate) mod line_breaks;
 pub mod names;
 
 pub use names::DiagnosticName;
@@ -533,23 +534,12 @@ fn severity_word(severity: Severity) -> &'static str {
     }
 }
 
-/// 1-based line and column for a byte offset.
+/// 1-based line and column for a byte offset. The column counts bytes from the line's start.
 pub fn line_col(src: &str, offset: u32) -> (usize, usize) {
-    let off = (offset as usize).min(src.len());
-    let mut line = 1usize;
-    let mut col = 1usize;
-    for (i, b) in src.bytes().enumerate() {
-        if i >= off {
-            break;
-        }
-        if b == b'\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-    (line, col)
+    let off = offset.min(src.len() as u32);
+    let starts = line_breaks::line_starts(src);
+    let line = starts.partition_point(|&start| start <= off);
+    (line, (off - starts[line - 1]) as usize + 1)
 }
 
 #[cfg(test)]
@@ -563,6 +553,14 @@ mod tests {
         assert_eq!(line_col(src, 1), (1, 2));
         assert_eq!(line_col(src, 3), (2, 1)); // 'c'
         assert_eq!(line_col(src, 7), (3, 1)); // 'f'
+    }
+
+    #[test]
+    fn line_col_counts_every_kotlinc_line_break() {
+        let src = "a\rbc\r\nd";
+        assert_eq!(line_col(src, 2), (2, 1)); // `b`, after a lone `\r`
+        assert_eq!(line_col(src, 3), (2, 2));
+        assert_eq!(line_col(src, 6), (3, 1)); // `d`, after `\r\n`
     }
 
     #[test]

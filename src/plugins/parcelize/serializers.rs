@@ -3,7 +3,8 @@
 
 use crate::ir::{ClassId, ExprId, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::plugins::runtime_declarations::{
-    BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
+    record_requirements, BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
+    RuntimeRequirement,
 };
 use crate::types::{type_name, Ty, TypeName};
 
@@ -180,6 +181,34 @@ fn array_names(element: Ty) -> (&'static str, &'static str) {
         Ty::Char => ("writeCharArray", "createCharArray"),
         other => unreachable!("{other:?} is not a Parcel-serialized primitive array element"),
     }
+}
+
+/// Every `Parcel`, `Parcelable.Creator` and `Class` member [`ParcelRuntime::bind`] may select.
+pub(super) fn requirements() -> Vec<RuntimeRequirement> {
+    let used = [
+        ParcelValue::Parcelable,
+        ParcelValue::String,
+        ParcelValue::Byte,
+        ParcelValue::Int,
+        ParcelValue::Long,
+        ParcelValue::Float,
+        ParcelValue::Double,
+    ]
+    .into_iter()
+    .chain(
+        [
+            Ty::Int,
+            Ty::Byte,
+            Ty::Long,
+            Ty::Float,
+            Ty::Double,
+            Ty::Boolean,
+            Ty::Char,
+        ]
+        .map(ParcelValue::PrimitiveArray),
+    )
+    .collect::<Vec<_>>();
+    record_requirements(|runtime| ParcelRuntime::bind(runtime, &used).map(drop))
 }
 
 impl ParcelMember {

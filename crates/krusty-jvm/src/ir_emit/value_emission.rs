@@ -1146,7 +1146,7 @@ impl super::Emitter<'_> {
                     params,
                     interface,
                     module_target,
-                    target: _,
+                    target,
                 } => {
                     let recv = dispatch_receiver.expect("virtual call needs a receiver");
                     let interface = *interface || declared_jvm_interface(self.ir, *owner);
@@ -1154,9 +1154,20 @@ impl super::Emitter<'_> {
                     // descriptor and emit a plain virtual/interface call. The classpath-operator
                     // special-casing below only applies to the `descriptor` form (a classpath receiver).
                     if let Some((param_tys, ret_ty)) = params {
-                        if let Some(owner) = module_target.and_then(|target| {
-                            jvm_static_members::module_singleton_static_owner(self.ir, target)
-                        }) {
+                        let static_owner = match (module_target, target) {
+                            (Some(target), _) => {
+                                jvm_static_members::module_singleton_static_owner(self.ir, *target)
+                            }
+                            (None, Some(target)) => {
+                                module_property_accessor(target).and_then(|(property, side)| {
+                                    jvm_static_members::module_singleton_static_accessor(
+                                        self.ir, property, side,
+                                    )
+                                })
+                            }
+                            (None, None) => None,
+                        };
+                        if let Some(owner) = static_owner {
                             let call = jvm_static_members::ModuleStaticCall {
                                 owner,
                                 name,
@@ -2063,5 +2074,18 @@ impl super::Emitter<'_> {
             }
             _ => {}
         }
+    }
+}
+
+/// The sibling-file property and accessor side a virtual accessor call selects.
+fn module_property_accessor(
+    target: &krusty::ir::IrVirtualTarget,
+) -> Option<(krusty::fir::PropertyId, super::PropertyAccessorSide)> {
+    use krusty::fir::ResolvedPropertyOverrideTarget::Module;
+    use krusty::ir::IrVirtualTarget::{PropertyGetter, PropertySetter};
+    match target {
+        PropertyGetter(Module(property)) => Some((*property, super::PropertyAccessorSide::Getter)),
+        PropertySetter(Module(property)) => Some((*property, super::PropertyAccessorSide::Setter)),
+        _ => None,
     }
 }

@@ -194,6 +194,7 @@ pub(crate) fn declared_function(
         is_final: function.modality == KotlinModality::Final,
         deprecated_hidden: false,
         inherited_by_delegation: false,
+        signature_polymorphic: false,
         return_value_status: Some(function.return_value_status),
     };
     normalized

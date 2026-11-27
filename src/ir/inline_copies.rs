@@ -81,7 +81,7 @@ impl IrFile {
     }
 
     /// Attach the source call line once the containing FIR expression has supplied it.
-    pub(crate) fn record_inline_copy_call_line(&mut self, copy: ExprId, line: u32) {
+    pub fn record_inline_copy_call_line(&mut self, copy: ExprId, line: u32) {
         if line == 0 {
             return;
         }

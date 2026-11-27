@@ -131,7 +131,7 @@ fun test(): Any {
 
 #[test]
 fn anonymous_owner_warning_matches_kotlinc() {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
         return;
     }
     let warning = format!(
@@ -148,7 +148,7 @@ fn anonymous_owner_warning_matches_kotlinc() {
 
 #[test]
 fn forbidden_anonymous_owner_failure_is_an_error() {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
         return;
     }
     assert_matches_kotlinc(
@@ -220,7 +220,7 @@ fn anonymous_owner_policy_is_owned_by_the_selected_release() {
 
 #[test]
 fn suppression_hides_only_the_warning_phase() {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
         return;
     }
     let source = "@Suppress(\"INAPPLICABLE_OPERATOR_MODIFIER_WARNING\")\n\
@@ -236,7 +236,7 @@ fn suppression_hides_only_the_warning_phase() {
 
 #[test]
 fn named_warning_policy_controls_the_exact_operator_diagnostic() {
-    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
         return;
     }
     let source = "fun make() = object {\n\
@@ -275,7 +275,7 @@ fn custom_typed_equals_uses_the_selected_value_class_representation() {
         &[],
     );
 
-    if krusty::kotlin_version::target() < KotlinVersion::V2_4_20 {
+    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
         return;
     }
     let full = "value class Full(val x: Int) {\n\

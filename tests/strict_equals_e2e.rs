@@ -151,7 +151,7 @@ fn kotlinc_admits_equality_bound() -> bool {
     use krusty::kotlin_version::KotlinVersion;
     common::for_reference(&[
         (KotlinVersion::V2_4_0, false),
-        (KotlinVersion::V2_5_0_RC, true),
+        (KotlinVersion::V2_5_0_RC2, true),
     ])
 }
 
@@ -161,7 +161,7 @@ fn generated_equals_is_bound() -> bool {
     use krusty::kotlin_version::KotlinVersion;
     common::for_reference(&[
         (KotlinVersion::V2_4_0, false),
-        (KotlinVersion::V2_5_0_RC, true),
+        (KotlinVersion::V2_5_0_RC2, true),
     ])
 }
 

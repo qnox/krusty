@@ -621,6 +621,39 @@ fn an_enum_class_realizes_its_implicit_members() {
     );
 }
 
+/// A dependency body links an enum's implicit members by their serialized identity, through the
+/// same provider records source resolution selects.
+#[test]
+fn an_enum_class_links_its_implicit_members_by_identity() {
+    let libraries =
+        KlibLibraries::from_named_packages("signatures", fixture_packages(&fixture_archive()))
+            .expect("the fixture is signable");
+    let shape = classifier(&libraries, "Color");
+    let entries = shape
+        .enum_entries_accessor
+        .as_ref()
+        .expect("the enum was compiled with `entries`");
+    let externals = shape
+        .companion
+        .iter()
+        .chain([entries])
+        .map(|member| member.external_identity.expect("a provider identity"))
+        .collect::<Vec<_>>();
+    assert_eq!(externals.len(), 3);
+    for external in externals {
+        let identity = libraries
+            .external_callable(external)
+            .expect("a provider realization")
+            .dependency_callable
+            .expect("an implicit member keeps its serialized identity");
+        let (linked, realization) = libraries
+            .external_callable_by_dependency(&identity)
+            .expect("the implicit member links by its serialized identity");
+        assert_eq!(linked, external);
+        assert_eq!(realization.dependency_callable, Some(identity));
+    }
+}
+
 /// The actual `Box` of the native fragment is the only `Box` metadata declares; the common
 /// fragment's `expect class Box` is not serialized.
 #[test]

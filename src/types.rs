@@ -510,6 +510,17 @@ impl Ty {
         }
     }
 
+    /// This intersection without the upper type it was fixed below, so it approximates by its own
+    /// components. Any other type is returned unchanged.
+    pub fn without_intersection_approximation(self) -> Ty {
+        match self.kind() {
+            TyKind::Intersection(parts) if parts.approximation().is_some() => Ty::from(
+                TyKind::Intersection(IntersectionParts::new(parts.parts(), None)),
+            ),
+            _ => self,
+        }
+    }
+
     pub fn projection_inner(self) -> Option<Ty> {
         match self.kind() {
             TyKind::InProjection(inner)
@@ -609,7 +620,32 @@ impl Ty {
             TyKind::TyParam(..) | TyKind::Var(..) => {
                 self.with_symbol_bound(self.ty_param_bound().unwrap().definitely_non_null())
             }
+            // Narrowing `(A & B)?` to non-null intersects it with `Any`, which builds a new
+            // intersection: the upper type the original was fixed below no longer applies.
+            TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Intersection(_)) => {
+                inner.without_intersection_approximation()
+            }
             _ => self.non_null_keeping_mutability(),
+        }
+    }
+
+    /// The type of a not-null operator (`!!`, the left of `?:`, the receiver of `?.`) applied to a
+    /// value of this type, in the release `quirks` describes. It differs from smart-casting the
+    /// value to non-null only for a nullable intersection fixed below an upper type, whose operator
+    /// result keeps that upper type from 2.5.
+    pub fn not_null_operator_result(self, quirks: crate::kotlin_version::Quirks) -> Ty {
+        if quirks.has(crate::kotlin_version::Quirk::NotNullOperatorDropsIntersectionApproximation) {
+            self.definitely_non_null()
+        } else {
+            self.non_null_keeping_intersection_bound()
+        }
+    }
+
+    /// This type made non-null, keeping the upper type a nullable intersection was fixed below.
+    pub fn non_null_keeping_intersection_bound(self) -> Ty {
+        match self.kind() {
+            TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Intersection(_)) => inner,
+            _ => self.definitely_non_null(),
         }
     }
 
