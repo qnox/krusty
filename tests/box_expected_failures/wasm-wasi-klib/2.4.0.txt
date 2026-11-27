@@ -600,7 +600,6 @@ lambda/lambda6.kt
 lambda/lambda_kt49360_withFlow.kt
 lateinit/globalIsInitialized.kt
 lateinit/isInitialized.kt
-lateinit/notInitialized.kt
 literals/strdedup1.kt
 localClasses/closureWithSelfInstantiation.kt
 localClasses/kt4174.kt
@@ -678,13 +677,7 @@ properties/generalAccess.kt
 properties/genericPropertyMultiModule.kt
 properties/kt4383.kt
 properties/kt78962.kt
-properties/lateinit/accessorException.kt
-properties/lateinit/accessorExceptionPublic.kt
-properties/lateinit/exceptionField.kt
-properties/lateinit/exceptionGetter.kt
-properties/lateinit/kt30548.kt
 properties/lateinit/local/kt23260.kt
-properties/lateinit/localClass.kt
 properties/lateinit/overrideException.kt
 properties/lazyInitialization.kt
 properties/lazyInitializationCyclicImports.kt
