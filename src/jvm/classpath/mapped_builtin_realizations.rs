@@ -242,6 +242,7 @@ impl Classpath {
                     physical_name: physical_name.to_string(),
                     descriptor,
                     kind,
+                    parameter_names: member.param_names.clone().into_boxed_slice(),
                 });
             }
             pending.extend(class.supertypes.iter_ids());

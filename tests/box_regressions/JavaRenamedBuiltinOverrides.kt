@@ -21,10 +21,16 @@ public class JvmNameOnly implements CharSequence {
 }
 
 // FILE: box.kt
+class OverridesJvmName : JvmNameOnly() {
+    override fun get(index: Int): Char = 'k'
+}
+
 fun box(): String {
     val both = Both()
     val bothSequence: CharSequence = both
     val jvmNameOnly = JvmNameOnly()
+    val overriding = OverridesJvmName()
+    val overridingSequence: CharSequence = overriding
     val buffer = java.nio.CharBuffer.wrap("xy")
     val bufferSequence: CharSequence = buffer
     val read = buildString {
@@ -34,9 +40,12 @@ fun box(): String {
         append(bothSequence[0])
         append(jvmNameOnly.get(0))
         append(jvmNameOnly[0])
+        append(overriding[0])
+        append(overridingSequence[0])
+        append(overriding.length)
         append(buffer.get(1))
         append(buffer[1])
         append(bufferSequence[1])
     }
-    return if (read == "ggccjjyyy") "OK" else read
+    return if (read == "ggccjjkk1yyy") "OK" else read
 }

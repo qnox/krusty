@@ -424,7 +424,11 @@ fn inherited_members(
     receiver: crate::types::Ty,
     name: &str,
 ) -> Vec<crate::fir::InheritedDependencyMember> {
-    let callables = crate::symbol_resolver::members_in_hierarchy(platform, receiver, name);
+    // Actualization matches declarations, not call candidates: a member hidden from calls (a
+    // Java method's renamed builtin copy beside a declared `get`, a HIDDEN-deprecated member)
+    // is still a member that can actualize, so two compatible ones are ambiguous.
+    let callables =
+        crate::symbol_resolver::member_declarations_in_hierarchy(platform, receiver, name);
     let functions = callables
         .functions()
         .iter()
