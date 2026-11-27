@@ -173,57 +173,18 @@ impl<'a> FileLowering<'a> {
             {
                 "kt_type_number"
             }
+            // A classifier the runtime provides instances of, or marks its own objects with: one
+            // table names the descriptor, and a class of the program that implements it names the
+            // same marker among its interfaces, so a check holds for both.
             _ if target
                 .obj_internal()
-                .is_some_and(super::classifier_shapes::is_comparable) =>
+                .and_then(super::classifier_shapes::runtime_interface_descriptor)
+                .is_some() =>
             {
-                "kt_type_comparable"
-            }
-            // `CharSequence` is a third of the same kind: no instances of its own, and both the
-            // string and the builder point at it.
-            _ if target
-                .obj_internal()
-                .is_some_and(super::classifier_shapes::is_char_sequence) =>
-            {
-                "kt_type_char_sequence"
-            }
-            // `Appendable` likewise: the runtime's builder points at it, so a check of a builder
-            // and of a program class that implements it asks about the one marker.
-            _ if target
-                .obj_internal()
-                .is_some_and(super::classifier_shapes::is_appendable) =>
-            {
-                "kt_type_appendable"
-            }
-            // `ClosedRange` is worn by the runtime's ranges, which name this marker among their
-            // interfaces.
-            _ if target
-                .obj_internal()
-                .is_some_and(super::classifier_shapes::is_closed_range) =>
-            {
-                "kt_type_closed_range"
-            }
-            _ if target
-                .obj_internal()
-                .is_some_and(super::classifier_shapes::is_closed_floating_range) =>
-            {
-                "kt_type_closed_floating_point_range"
-            }
-            // A `KClass` is the runtime's own object over `kt_type_kclass`, so a check of it asks
-            // about that descriptor rather than the dependency interface's KLIB one.
-            _ if target
-                .obj_internal()
-                .is_some_and(super::classifier_shapes::is_kclass) =>
-            {
-                "kt_type_kclass"
-            }
-            // `EnumEntries` is sealed, so the runtime's `EnumEntriesList` is every instance there
-            // is, and it names this descriptor among its interfaces.
-            _ if target
-                .obj_internal()
-                .is_some_and(super::classifier_shapes::is_enum_entries) =>
-            {
-                "kt_type_enum_entries_interface"
+                target
+                    .obj_internal()
+                    .and_then(super::classifier_shapes::runtime_interface_descriptor)
+                    .expect("just matched")
             }
             // `Unit` reaches a type check spelled as the object it is rather than as the carrier
             // `Ty::Unit` names, and it is one type either way.
