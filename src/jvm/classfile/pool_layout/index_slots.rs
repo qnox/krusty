@@ -41,6 +41,11 @@ pub(super) enum Part {
     Frame,
 }
 
+impl Part {
+    /// Every part, in the order ASM interns them.
+    pub(super) const ASM_ORDER: [Part; 4] = [Part::Catch, Part::Operand, Part::Local, Part::Frame];
+}
+
 /// What holds an index slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Holder {
@@ -91,7 +96,8 @@ pub(super) struct ClassSlots {
 impl ClassSlots {
     /// The slots in the order kotlinc's writer visits what holds them: the class header, the
     /// methods, the fields, then the class attributes. A method's header and attributes precede
-    /// its code: kotlinc interns them before it visits the body.
+    /// its code: kotlinc interns them before it visits the body. Its code is visited part by part
+    /// ([`Part::ASM_ORDER`]): ASM computes the frames after the local-variable tables are visited.
     pub(super) fn visit_order(&self) -> impl Iterator<Item = &Slot> {
         let slots = &self.slots;
         let method_ends = self.method_starts.iter().skip(1).copied();
@@ -102,10 +108,15 @@ impl ClassSlots {
             .flat_map(move |(&start, end)| {
                 let method = &slots[start..end];
                 let is_code = |slot: &&Slot| matches!(slot.holder, Holder::Code(..));
+                let code_part = move |part: Part| {
+                    method.iter().filter(
+                        move |slot| matches!(slot.holder, Holder::Code(_, at) if at == part),
+                    )
+                };
                 method
                     .iter()
                     .filter(move |slot| !is_code(slot))
-                    .chain(method.iter().filter(is_code))
+                    .chain(Part::ASM_ORDER.into_iter().flat_map(code_part))
             });
         slots[..self.fields.start]
             .iter()
