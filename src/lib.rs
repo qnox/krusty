@@ -10,6 +10,7 @@
 #[cfg(feature = "dhat-heap")]
 pub use dhat;
 
+pub mod analysis_round;
 pub mod archive;
 pub mod assignable;
 pub mod ast;
@@ -33,7 +34,6 @@ pub mod fir_lower;
 pub mod frontend;
 pub use krusty_core::fx_hash;
 mod inline_expansion;
-pub(crate) use krusty_core::inline_parameter_modifier;
 pub mod integer_constant;
 pub mod ir;
 pub mod ir_print;
@@ -74,7 +74,7 @@ pub mod token;
 pub mod toolchain;
 pub mod trace;
 pub mod type_engine;
-pub mod types;
+pub use krusty_core::types;
 pub mod value_classes;
 pub mod wide_stack;
 

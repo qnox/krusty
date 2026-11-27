@@ -78,6 +78,23 @@ impl Checker<'_> {
             .any(|candidate| candidate.flags.operator)
     }
 
+    /// The kind of a collection-literal argument before it is postponed against a call's
+    /// candidates: its provisional reading, with no factory classifier admitted yet.
+    /// [`Self::postponed_collection_literal_kinds`] fills them in from the candidates' parameters.
+    pub(super) fn unpostponed_collection_literal_kind(
+        &self,
+        argument: ExprId,
+        provisional: Ty,
+    ) -> Option<CallArgKind> {
+        self.file
+            .collection_literal_calls
+            .contains(&argument.0)
+            .then(|| CallArgKind::CollectionLiteral {
+                provisional,
+                factory_classifiers: std::sync::Arc::from([]),
+            })
+    }
+
     /// Argument kinds for selecting among `candidates` with each collection literal postponed.
     ///
     /// An expectation-free literal reads as `List<T>`, which is not evidence against a candidate

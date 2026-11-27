@@ -411,9 +411,17 @@ impl FileLowering<'_> {
                 if implemented.iter().any(|(known, _)| *known == identity) {
                     continue;
                 }
-                // A default the interface publishes and the class does not override implements the
-                // member with its own body, which is not a slot of the class.
-                if edge.implementation == edge.overridden
+                // A default an interface publishes and the class does not override implements the
+                // member with its own body, which is not a slot of the class: the member's own
+                // default, or one a subinterface overrides it with.
+                let interface_default = match edge.implementation {
+                    ResolvedFunctionOverrideTarget::External(implementation) => self
+                        .callables
+                        .callable(implementation)
+                        .is_some_and(|fact| fact.owner_is_interface),
+                    ResolvedFunctionOverrideTarget::Module(_) => false,
+                };
+                if interface_default
                     && edge.implementation_function.is_some_and(|function| {
                         self.ir.functions[function as usize].dispatch_receiver
                             != Some(self.ir.classes[owner as usize].fq_name_id())

@@ -31,6 +31,35 @@ pub(super) fn inherited_getter(linker: &Linker<'_, '_>, callee: &KlibIrSignature
     resolve_inherited_getter(linker.sources.bodies, &linker.active_module, callee)
 }
 
+/// The member the file-local `callee` of the active module is a fake override of, as the call of
+/// that member it links to, or `None` when `callee` is no fake override.
+pub(super) fn inherited_member(
+    linker: &Linker<'_, '_>,
+    callee: &KlibIrSignature,
+) -> Option<KlibIrSignature> {
+    let &KlibIrSignature::FileLocal { file, slot } = callee else {
+        return None;
+    };
+    let signature = KlibDeclarationSignature::FileLocal { file, slot };
+    match linker
+        .sources
+        .bodies
+        .linked_origin(&linker.active_module, &signature)
+    {
+        KlibCalleeOrigin::Exact(KlibDependencyCallable {
+            declaration: KlibDeclarationSignature::Public(member),
+            ..
+        }) => Some(KlibIrSignature::Public(member)),
+        KlibCalleeOrigin::Exact(KlibDependencyCallable {
+            declaration: KlibDeclarationSignature::Accessor(member),
+            ..
+        }) => Some(KlibIrSignature::Accessor(member)),
+        KlibCalleeOrigin::Exact(_) | KlibCalleeOrigin::Missing | KlibCalleeOrigin::Ambiguous => {
+            None
+        }
+    }
+}
+
 /// What the emitted body of `identity` reaches: its serialized edges, with a call of a fake
 /// override of a local class resolved to the inherited getter lowering links. A fake override no
 /// unit can resolve keeps its serialized edge, and lowering reports it.

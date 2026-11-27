@@ -270,12 +270,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.file.model.is_direct(function) {
             return self.direct_method_call(function, receiver, args);
         }
-        let class = self.file.ir.class_id_by_name(owner).ok_or_else(|| {
-            declined!(
+        let Some(class) = self.file.ir.class_id_by_name(owner) else {
+            // No class of this file realizes the owner, so no table numbers the member: it is an
+            // interface default the unit emitted for the `super` calls that name it, which run it
+            // without dispatch.
+            if self.file.functions[function as usize].is_some() {
+                return self.direct_method_call(function, receiver, args);
+            }
+            return Err(declined!(
                 "a member of `{}` this file does not declare",
                 owner.render().replace('/', ".")
-            )
-        })?;
+            ));
+        };
         // A member the class's table does not dispatch is a direct call, as in a call through the
         // class itself.
         if self.file.model.is_direct(function)
@@ -701,6 +707,65 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(self.builder.inst_results(call).first().copied())
     }
 
+    /// `super.f()` to the default body of an interface another module declares: a call of the
+    /// export that module publishes for the member, with the receiver first and the member's
+    /// declared operands after it.
+    fn interface_default_super_call(
+        &mut self,
+        super_target: SuperTarget<'_>,
+        target: krusty::fir::ExternalCallableId,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        let SuperTarget {
+            owner,
+            name,
+            parameters: selected_parameters,
+            result: selected_result,
+            ..
+        } = super_target;
+        let selected_parameters = selected_parameters.as_deref().ok_or_else(|| {
+            declined!("a `super` call to `{name}` without its checked parameters")
+        })?;
+        let selected_result = selected_result
+            .ok_or_else(|| declined!("a `super` call to `{name}` without its checked result"))?;
+        let outside = || {
+            declined!(
+                "a `super` call to the default `{name}` of `{}`, which its module does not export",
+                owner.render()
+            )
+        };
+        let fact = self.file.callables.callable(target).ok_or_else(outside)?;
+        let identity = fact.dependency_callable.as_ref().ok_or_else(outside)?;
+        let export = self
+            .file
+            .dependency_symbols
+            .get(identity)
+            .ok_or_else(outside)?;
+        let parameters = export.signature.parameters().to_vec();
+        let result = export.signature.result();
+        if parameters.len() != args.len() + 1 || parameters.len() != selected_parameters.len() + 1 {
+            return Err(declined!(
+                "a `super` call to `{name}` whose operands disagree with its exported default"
+            ));
+        }
+        let object = self
+            .coerce(receiver, parameters[0])?
+            .ok_or_else(|| declined!("a `Unit` receiver for a `super` call to `{name}`"))?;
+        let mut arguments = vec![object];
+        arguments.extend(self.arguments(args, &parameters[1..])?);
+        if self.terminated {
+            return Ok(None);
+        }
+        let id = self.file.import(&export.symbol, &parameters, result)?;
+        let func_ref = self.func_ref(id);
+        let call = self.emit_call(func_ref, &arguments)?;
+        match self.builder.inst_results(call).first().copied() {
+            Some(value) => self.convert(value, Some(result), selected_result),
+            None => Ok(None),
+        }
+    }
+
     /// `super.f()` to a method of a superclass an earlier file laid out, through the symbol its
     /// record names.
     fn laid_out_direct_call(
@@ -726,6 +791,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         };
         if kind != krusty::ir::IrSuperCallKind::Function {
             return Err(outside());
+        }
+        // An interface has no layout to record; its default body is the export its module
+        // publishes for the member, which a `super` call enters directly.
+        if let Some(krusty::fir::ResolvedFunctionOverrideTarget::External(target)) = declaration {
+            if self.file.callables.callable(target).is_some_and(|fact| {
+                fact.owner_is_interface
+                    && fact.declaration_owner
+                        == Some(krusty::types::SemanticCallableOwner::Classifier(owner))
+            }) {
+                return self.interface_default_super_call(
+                    SuperTarget {
+                        owner,
+                        name,
+                        kind,
+                        declaration,
+                        parameters,
+                        result: selected_result,
+                    },
+                    target,
+                    receiver,
+                    args,
+                );
+            }
         }
         let record = self.file.laid_out.get(owner).ok_or_else(&outside)?;
         let (function, params, _) = match declaration {

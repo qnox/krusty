@@ -59,6 +59,7 @@ fn forwarder(parameters: Vec<Ty>, result: Ty, realizes: ForwardedMember) -> Modu
         result,
         suspend: false,
         realizes: vec![realizes].into_boxed_slice(),
+        overridden_role: None,
     }
 }
 
@@ -129,6 +130,7 @@ fn a_forwarder_cannot_choose_between_distinct_inherited_class_slots() {
             result: Ty::String,
             suspend: false,
             realizes: targets.into_iter().map(ForwardedMember::Function).collect(),
+            overridden_role: None,
         }],
     );
     assert!(plan
@@ -195,4 +197,33 @@ fn dependency_property_forwarders_check_receiver_getter_and_setter_carriers() {
             .unwrap_err()
             .contains("carried differently"));
     }
+}
+
+#[test]
+fn a_forwarder_of_a_redeclared_any_member_answers_at_its_fixed_slot() {
+    // `interface I { override fun equals(other: Any?): Boolean }` and `class Derived : I by d`:
+    // the interface member keeps `kotlin.Any.equals`'s role, so the forwarder replaces that slot
+    // rather than appending one that `==` never dispatches through.
+    let interface_equals =
+        ResolvedFunctionOverrideTarget::External(ExternalCallableId::from_raw(7));
+    let plan = plan(
+        Vec::new(),
+        vec![ModuleForwarder {
+            parameters: vec![Ty::nullable(Ty::obj("kotlin/Any"))].into_boxed_slice(),
+            result: Ty::Boolean,
+            suspend: false,
+            realizes: vec![ForwardedMember::Function(interface_equals)].into_boxed_slice(),
+            overridden_role: Some(SemanticCallRole::KotlinAnyEquals),
+        }],
+    );
+    let base = plan.table(TypeName::from("Base")).unwrap().unwrap();
+    let derived = plan.table(TypeName::from("Derived")).unwrap().unwrap();
+    let key = PlanKey::Forwarder {
+        class: TypeName::from("Derived"),
+        ordinal: 0,
+    };
+    let equals = super::super::AnyMember::Equals.slot();
+    assert_eq!(derived.slots[&key], equals);
+    assert_eq!(derived.entries[equals as usize], PlannedSlot::Member(key));
+    assert_eq!(derived.len(), base.len(), "the forwarder appends no slot");
 }

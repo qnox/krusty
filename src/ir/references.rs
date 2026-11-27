@@ -122,6 +122,7 @@ impl IrPropertyFunctionReference {
     pub fn checked_operation(
         &self,
         bound_receiver: Option<ExprId>,
+        context_arguments: Vec<ExprId>,
         adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
         function_type: Ty,
     ) -> IrCheckedOperation {
@@ -136,6 +137,7 @@ impl IrPropertyFunctionReference {
             binding: self.binding,
             dispatch_receiver,
             extension_receiver,
+            context_arguments,
             mutable: self.mutable,
             substitutions: self.substitutions.clone(),
             adaptation,
@@ -454,6 +456,10 @@ pub struct PropRef {
     /// into the carrier because such a getter is never called. `None` for a carrier whose `get`
     /// calls the selected accessor.
     pub get: Option<super::FunId>,
+    /// Declared types of the context parameters the reference site bound
+    /// (`CallableReferencesToContextual`), in declaration order. Their values travel in the
+    /// carrier's `boundContextArguments`; the accessors take them before the receiver and value.
+    pub context_types: Vec<Ty>,
 }
 
 impl FuncRef {

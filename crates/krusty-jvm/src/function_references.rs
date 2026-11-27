@@ -204,7 +204,7 @@ pub(super) fn reference_enclosure(
 #[derive(Clone, Copy)]
 pub(super) struct Facades<'a> {
     pub(super) current: &'a str,
-    pub(super) facades: &'a [String],
+    pub(super) facades: &'a [crate::file_facades::FacadeClass],
 }
 
 /// Where a reference sits and what its adapter allows: the node, the class that owns the adapter
@@ -1189,6 +1189,7 @@ pub(super) fn realize(
         if let krusty::ir::IrCallableReferenceTarget::Property(property) = &reference.target {
             let operation = property.checked_operation(
                 reference.bound_receiver,
+                reference.captures.clone(),
                 reference.adaptation.clone(),
                 reference.function_type,
             );

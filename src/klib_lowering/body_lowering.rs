@@ -314,6 +314,16 @@ pub(super) trait CallLinker {
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
 
+    /// The member `callee` a `super` call runs without dispatch. It links as any call of the
+    /// member does, except that a body the unit emits for the call itself is the one it names.
+    fn link_super(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibPublicIdSignature,
+    ) -> Lowered<LinkedCallee> {
+        self.link(ir, callee)
+    }
+
     fn link_reference(
         &mut self,
         _ir: &mut IrFile,
@@ -361,6 +371,19 @@ pub(super) trait CallLinker {
         _signature: &crate::metadata::klib_ir::KlibIrSignature,
     ) -> Lowered<crate::types::TypeName> {
         unsupported("a file-private object value")
+    }
+
+    /// Declare, on the object literal `owner` this library's body serializes at `signature`, the
+    /// members it inherits without overriding them, interface defaults among them, so dispatch
+    /// through the interface members they implement reaches them. A linker that cannot declare
+    /// a dependency body refuses an object literal that inherits one.
+    fn implement_inherited_members(
+        &mut self,
+        _ir: &mut IrFile,
+        _signature: &crate::metadata::klib_ir::KlibIrSignature,
+        _owner: crate::types::TypeName,
+    ) -> Lowered<()> {
+        unsupported("an object literal inheriting a member body")
     }
 
     /// Whether `signature` names a non-public interface of the library of the body being lowered.
@@ -1331,9 +1354,11 @@ impl<'a> BodyLowering<'a> {
         }
         let parameters = self.header.type_parameters();
         // A value of a subtype of `declared`, as `suspendCoroutine` passes its `SafeContinuation`
-        // to a `(Continuation<T>) -> Unit` block, is one by subsumption. It crosses as the checked
-        // source argument does, with the conversion the checker decides for the same two types.
-        if self.linker.is_subtype(parameters, actual, declared) {
+        // to a `(Continuation<T>) -> Unit` block, is one by subsumption, and so is an instance of
+        // a local or anonymous class this body lowers, by its recorded supertypes. It crosses as
+        // the checked source argument does, with the conversion the checker decides for the same
+        // two types.
+        if self.is_supertype_of(declared, actual) {
             return Ok(match crate::types::value_conversion(actual, declared) {
                 None => lowered,
                 Some(_) => self.coercion(lowered, declared),

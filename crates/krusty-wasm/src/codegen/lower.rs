@@ -164,13 +164,6 @@ pub(super) fn lower_file(
         classes: laid_out_classes,
         tables: module_tables,
     } = state;
-    // A classifier-owned static (an object or companion `const val`) is the same storage as a
-    // top-level one: a global initialized with the file, which its qualified reads address.
-    for property in &ir.statics {
-        if property.is_lateinit {
-            return Err("a `lateinit` top-level property".to_string());
-        }
-    }
     let globals = property_registry.prepare_file(ir, |ty| {
         let Some(value) = carrier(ty)? else {
             return Err("a `Unit` top-level property".to_string());
@@ -644,6 +637,14 @@ fn expression_type(
         {
             Ty::Unit
         }
+        IrExpr::Checked(checked_op)
+            if matches!(
+                &**checked_op,
+                krusty::ir::IrCheckedOperation::IllegalProgressionStep { .. }
+            ) =>
+        {
+            return Ok(None)
+        }
         IrExpr::Variable { .. }
         | IrExpr::SetValue { .. }
         | IrExpr::SetStatic { .. }
@@ -668,7 +669,10 @@ fn expression_type(
                 .ok_or_else(|| "an enclosing instance without authenticated storage".to_string())?;
             ir.classes[class as usize].fields[field as usize].ty
         }
-        IrExpr::GetField { class, index, .. } if ir.checked_type(id).is_none() => {
+        IrExpr::GetField { class, index, .. }
+        | IrExpr::LateinitInitialized { class, index, .. }
+            if ir.checked_type(id).is_none() =>
+        {
             ir.classes[*class as usize].fields[*index as usize].ty
         }
         IrExpr::MethodCall { class, index, .. } if ir.checked_type(id).is_none() => {
@@ -711,6 +715,13 @@ fn expression_type(
                 && branches.iter().all(|(condition, _)| condition.is_some()) =>
         {
             Ty::Unit
+        }
+        // A `when` built after checking, as the suspend lowering builds the decision tree of a
+        // suspending condition, names its result on the `when` itself rather than as a checked type.
+        IrExpr::When { .. }
+            if ir.checked_type(id).is_none() && ir.when_result_type(id).is_some() =>
+        {
+            ir.when_result_type(id).expect("guarded by the arm")
         }
         // A top-level property read has its storage's declared type.
         IrExpr::GetStatic(index) if ir.checked_type(id).is_none() => ir.statics[*index as usize].ty,
@@ -1202,6 +1213,17 @@ impl<'a> Body<'a> {
             },
             IrExpr::GetStatic(index) => {
                 self.code.global_get(self.globals[index as usize]);
+                // A read of a `lateinit` top-level property is guarded unless it is the raw
+                // storage read `::p.isInitialized` compares with null.
+                let declaration = &self.ir.statics[index as usize];
+                if declaration.is_lateinit && !self.ir.lateinit_initialization_probes.contains(&id)
+                {
+                    let name = declaration.name.clone();
+                    let Some(reference @ ValType::Ref { .. }) = carrier(declaration.ty)? else {
+                        return Err("a `lateinit` read without a reference carrier".to_string());
+                    };
+                    self.guard_lateinit(reference, &name)?;
+                }
             }
             IrExpr::SetStatic { index, value } => {
                 let ty = self.ir.statics[index as usize].ty;
@@ -1775,6 +1797,7 @@ impl<'a> Body<'a> {
                 ctor_params,
                 external_target,
                 defaults,
+                default_prefix_count,
                 ..
             } => {
                 self.new_object(
@@ -1783,7 +1806,10 @@ impl<'a> Body<'a> {
                     &args,
                     ctor_params.as_deref(),
                     external_target,
-                    &defaults,
+                    dependency_exports::OmittedArguments {
+                        ordinals: &defaults,
+                        prefix: default_prefix_count,
+                    },
                 )?;
             }
             IrExpr::EnumConstant {
@@ -1797,6 +1823,12 @@ impl<'a> Body<'a> {
                 self.no_such_enum_constant(classifier, name)?
             }
             IrExpr::Throw { operand } => self.throw_value(operand)?,
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::IllegalProgressionStep { step } =
+                    &**checked_op =>
+            {
+                self.illegal_progression_step(*step)?
+            }
             IrExpr::Vararg {
                 array_type,
                 spreads,
@@ -1825,7 +1857,7 @@ impl<'a> Body<'a> {
                 class,
                 index,
             } => {
-                self.field_read(receiver, class, index)?;
+                self.guarded_field_read(receiver, class, index)?;
                 // A field that stores `kotlin.Unit`'s instance and is read where the checked use
                 // is `Unit` has no carrier there: the stored reference is discarded, as any value
                 // converted to a type without a carrier is.
@@ -1834,6 +1866,14 @@ impl<'a> Body<'a> {
                     self.code.drop_();
                 }
             }
+            // The raw field a `lateinit` read would guard, for `::p.isInitialized` to compare with
+            // null: the same read as an ordinary field's, without the guard.
+            IrExpr::LateinitInitialized {
+                receiver,
+                class,
+                index,
+            } => self.field_read(receiver, class, index)?,
+            IrExpr::LateinitCheck { operand, name } => self.lateinit_check(operand, &name)?,
             IrExpr::SetField {
                 receiver,
                 class,

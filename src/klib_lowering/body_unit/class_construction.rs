@@ -7,6 +7,21 @@ use crate::ir::{IrClass, IrCtorArg, IrCtorParameterProvenance, IrExpr, IrField};
 /// The field an inner class keeps its outer instance in, after the fields it declares.
 const OUTER_INSTANCE_FIELD: &str = "this$0";
 
+impl<'a> super::MemberClass<'a> {
+    /// The outer instance of the class `header` declares, kept after its declared `fields`.
+    pub(super) fn outer_instance(
+        header: &super::super::class_headers::ClassMemberHeader<'_, 'a>,
+        fields: &[&'a KlibIrField],
+    ) -> Option<super::super::same_library_class::OuterInstance<'a>> {
+        header
+            .outer
+            .map(|outer| super::super::same_library_class::OuterInstance {
+                symbol: outer.this,
+                field: u32::try_from(fields.len()).expect("a field list fits u32"),
+            })
+    }
+}
+
 impl<'u, 's> Linker<'u, 's> {
     pub(super) fn materialize_class(
         &mut self,
@@ -1017,6 +1032,13 @@ impl<'u, 's> Linker<'u, 's> {
         implemented: &[KlibDependencyCallable],
     ) -> Result<(), KlibBodyDeclineReason> {
         if self.declared_member(body).is_none() {
+            // An interface default no walked body reaches through a declaration it implements is
+            // one nothing dispatches to: the closure released no body for it.
+            if self.sources.bodies.is_interface_default(body)
+                && !self.sources.callees.is_object_default(body)
+            {
+                return Ok(());
+            }
             // The class carries the body however dispatch reaches it, so a body the closure did
             // not select uniquely declines rather than leaving the slot without an implementation.
             let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) else {

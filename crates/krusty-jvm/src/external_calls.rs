@@ -201,6 +201,7 @@ fn realize_expressions(
                     )?
                 };
                 let IrExpr::New {
+                    internal,
                     args,
                     external_target,
                     ..
@@ -212,6 +213,15 @@ fn realize_expressions(
                 args.extend(suffix);
                 let args = std::mem::take(args);
                 *external_target = None;
+                // The dependency value class's construction is realized as a call of its static
+                // `constructor-impl` (or `$default` entry); the construction identity is a recorded
+                // fact, not a spelling of the callee.
+                let constructed = *internal;
+                ir.record_erased_value_construction(
+                    index as u32,
+                    constructed,
+                    callable.physical_ret,
+                );
                 ir.exprs[index] = IrExpr::Call {
                     callee: Box::new(Callee::Static {
                         owner,

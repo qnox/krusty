@@ -31,6 +31,7 @@ impl BodyLowering<'_> {
         checked: &CheckedPropertyReference<'_>,
         dispatch_capture: Option<ExprId>,
         extension_capture: Option<ExprId>,
+        context_captures: &[ExprId],
     ) -> Result<Option<ExprId>, FirLoweringFailure> {
         let CheckedPropertyReference {
             target,
@@ -105,12 +106,52 @@ impl BodyLowering<'_> {
         };
 
         let captured = dispatch_capture.or(extension_capture);
-        let mut capture_types = Vec::new();
+        // The declaration's leading context parameters are bound at the reference site: each is a
+        // captured value the adapter reads back in declaration order.
+        let context_types = if context_captures.is_empty() {
+            Vec::new()
+        } else {
+            let declaration = match target {
+                FirPropertyReferenceTarget::Module(target) => {
+                    self.index
+                        .property(*target)
+                        .ok_or(FirLoweringFailure::MissingProperty(*target))?
+                        .declaration
+                }
+                FirPropertyReferenceTarget::SpecializedModule { property, .. } => {
+                    self.index
+                        .property(*property)
+                        .ok_or(FirLoweringFailure::MissingProperty(*property))?
+                        .declaration
+                }
+                FirPropertyReferenceTarget::Classifier { .. }
+                | FirPropertyReferenceTarget::External { .. } => {
+                    return Err(FirLoweringFailure::UnsupportedPropertyReferenceTarget);
+                }
+            };
+            let signature = self
+                .index
+                .signature(declaration)
+                .ok_or(FirLoweringFailure::UnsupportedPropertyReferenceTarget)?;
+            let bindings = self.module_substitution_bindings(substitutions);
+            signature
+                .parameters
+                .get(..context_captures.len())
+                .ok_or(FirLoweringFailure::UnsupportedPropertyReferenceTarget)?
+                .iter()
+                .map(|parameter| crate::types::ty_subst(parameter.get(), &bindings))
+                .collect::<Vec<_>>()
+        };
+        let context_reads = (0..context_types.len() as u32)
+            .map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)))
+            .collect::<Vec<_>>();
+        let mut capture_types = context_types;
         let captured_receiver = if captured.is_some() {
             let receiver =
                 receiver_type.ok_or(FirLoweringFailure::UnsupportedPropertyReferenceTarget)?;
+            let slot = capture_types.len() as u32;
             capture_types.push(receiver.get());
-            Some(self.ir.add_expr(IrExpr::GetValue(0)))
+            Some(self.ir.add_expr(IrExpr::GetValue(slot)))
         } else {
             None
         };
@@ -161,7 +202,7 @@ impl BodyLowering<'_> {
                     target: *target,
                     dispatch_receiver,
                     extension_receiver,
-                    context_arguments: Vec::new(),
+                    context_arguments: context_reads.clone(),
                     substitutions: Vec::new(),
                 }),
             )),
@@ -175,7 +216,7 @@ impl BodyLowering<'_> {
                         target: *property,
                         dispatch_receiver,
                         extension_receiver,
-                        context_arguments: Vec::new(),
+                        context_arguments: context_reads.clone(),
                         substitutions: super::checked::lower_substitutions(substitutions),
                     },
                 )));
@@ -266,30 +307,32 @@ impl BodyLowering<'_> {
             .map(|receiver| receiver.get())
             .into_iter()
             .collect();
-        Ok(Some(self.ir.add_expr(IrExpr::CallableReference(Box::new(
-            IrCallableReference {
-                target: IrCallableReferenceTarget::Property(Box::new(
-                    IrPropertyFunctionReference {
-                        target: target.clone(),
-                        binding,
-                        bound_extension_receiver: extension_capture.is_some(),
-                        mutable,
-                        reflective: false,
-                        writer: None,
-                        substitutions: super::checked::lower_substitutions(substitutions),
-                    },
-                )),
-                adapter: function,
-                captures: Vec::new(),
-                bound_receiver: captured,
-                bound_contexts: 0,
-                function_type: reference_ty,
-                declaration_parameters,
-                declaration_result: property_type.get(),
-                declaration_suspend: false,
-                adaptation: adaptation.cloned().map(Box::new),
-                reflection_owner: None,
-            },
-        )))))
+        Ok(Some(
+            self.ir
+                .add_expr(IrExpr::CallableReference(Box::new(IrCallableReference {
+                    target: IrCallableReferenceTarget::Property(Box::new(
+                        IrPropertyFunctionReference {
+                            target: target.clone(),
+                            binding,
+                            bound_extension_receiver: extension_capture.is_some(),
+                            mutable,
+                            reflective: false,
+                            writer: None,
+                            substitutions: super::checked::lower_substitutions(substitutions),
+                        },
+                    )),
+                    adapter: function,
+                    captures: context_captures.to_vec(),
+                    bound_receiver: captured,
+                    bound_contexts: u32::try_from(context_captures.len())
+                        .expect("too many bound context arguments"),
+                    function_type: reference_ty,
+                    declaration_parameters,
+                    declaration_result: property_type.get(),
+                    declaration_suspend: false,
+                    adaptation: adaptation.cloned().map(Box::new),
+                    reflection_owner: None,
+                }))),
+        ))
     }
 }

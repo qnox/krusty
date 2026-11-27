@@ -134,7 +134,7 @@ pub(super) fn declare(
         owner_end_line,
         !type_params.is_empty(),
     );
-    statuses.record(ir, members);
+    super::generated_members::record_inherited_statuses(statuses, ir, members);
     let GeneratedSerializerMembers {
         descriptor,
         serialize,

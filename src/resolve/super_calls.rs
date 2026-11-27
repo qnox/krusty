@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// Whether a receiver spelling is a `super` qualifier: `super`, `super<T>` or `super@label`.
+pub(super) fn is_super_qualifier(spelling: &str) -> bool {
+    spelling == "super" || spelling.starts_with("super<") || spelling.starts_with("super@")
+}
+
 #[derive(Clone, Debug)]
 pub struct ResolvedSuperCall {
     /// Exact dispatch receiver selected by `super` / `super@Label`. A labeled super may target an
