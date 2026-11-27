@@ -269,6 +269,16 @@ fn wasm_official_dependency_definitely_non_null_assertions_lower_from_their_bodi
     );
 }
 
+/// Both the private class and the distinct local SAM implement the same inherited diamond.
+/// The original whole program also retains null, unrelated-object and evaluation-order checks.
+#[test]
+fn wasm_official_inherited_module_sam_members_reach_their_own_implementation() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/selectedDependencyInterfaceCasts.kt"),
+        "SelectedDependencyInterfaceCasts",
+    );
+}
+
 /// Two files of the consumer each install a different file-private interface of the library:
 /// their members take distinct module-wide numbers, so each call reaches its own member.
 #[test]
