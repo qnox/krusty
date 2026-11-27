@@ -423,7 +423,8 @@ fn unreachable_code_goes_with_its_line_but_not_its_label() {
     folds("(I)I", 1, &source, &expected, true);
 
     let (mut method, labels) = body("(I)I", 1, &source);
-    let result = eliminate(&mut method, "T").expect("analysis succeeds");
+    let result = eliminate(&mut method, "T", crate::kotlin_version::Quirks::NONE)
+        .expect("analysis succeeds");
     assert_eq!(
         result.preserved_unreachable_labels,
         BTreeSet::from([labels[1]])
@@ -464,7 +465,8 @@ fn a_label_beside_a_reached_jump_target_is_not_retained_from_deleted_code() {
     ];
     let (mut method, _) = body("(I)I", 1, &source);
     let (unchanged, _) = body("(I)I", 1, &source);
-    let result = eliminate(&mut method, "T").expect("analysis succeeds");
+    let result = eliminate(&mut method, "T", crate::kotlin_version::Quirks::NONE)
+        .expect("analysis succeeds");
     assert_eq!(result, Elimination::default());
     assert_eq!(method.nodes, unchanged.nodes);
 }
@@ -484,7 +486,8 @@ fn a_label_after_a_throw_beside_a_reached_jump_target_stays_retained() {
         Op(IRETURN),
     ];
     let (mut method, labels) = body("(I)I", 1, &source);
-    let result = eliminate(&mut method, "T").expect("analysis succeeds");
+    let result = eliminate(&mut method, "T", crate::kotlin_version::Quirks::NONE)
+        .expect("analysis succeeds");
     assert_eq!(
         result.preserved_unreachable_labels,
         BTreeSet::from([labels[0]])

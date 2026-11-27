@@ -777,6 +777,8 @@ pub fn shipping_emit_options(
         param_assertions: true,
         inner_class_resolver: Some(classpath_inner_class_resolver(cp)),
         value_classes: std::rc::Rc::default(),
+        // The emitted file's reference profile replaces it (`emit_all_with_class_meta_impl`).
+        optimizer_quirks: Default::default(),
         // `-language-version` is a per-invocation option; the backend applies it with
         // `EmitOptions::with_metadata_version`. The default keeps kotlinc's no-flag stamp.
         metadata_version: None,

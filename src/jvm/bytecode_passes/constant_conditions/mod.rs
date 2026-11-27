@@ -267,11 +267,9 @@ pub(crate) enum GotoThreading {
 }
 
 impl GotoThreading {
-    /// The behavior of the kotlinc release the compilation reproduces.
-    fn of_target() -> Self {
-        if crate::kotlin_version::Quirks::target()
-            .has(crate::kotlin_version::Quirk::ConstantGotoNotThreadedToComparison)
-        {
+    /// The behavior of the kotlinc release whose `quirks` the compilation reproduces.
+    fn of(quirks: crate::kotlin_version::Quirks) -> Self {
+        if quirks.has(crate::kotlin_version::Quirk::ConstantGotoNotThreadedToComparison) {
             GotoThreading::Kept
         } else {
             GotoThreading::ToTheBranchTaken
@@ -285,8 +283,9 @@ impl GotoThreading {
 pub(crate) fn eliminate(
     method: &mut MethodNode,
     owner: &str,
+    quirks: crate::kotlin_version::Quirks,
 ) -> Result<Elimination, AnalyzerError> {
-    eliminate_as(method, owner, GotoThreading::of_target())
+    eliminate_as(method, owner, GotoThreading::of(quirks))
 }
 
 /// [`eliminate`] with the `goto` behavior given.

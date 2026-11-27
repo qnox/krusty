@@ -471,6 +471,7 @@ impl ClassWriter {
         let context = PassContext {
             owner: &self.internal_name,
             value_classes: &*self.value_classes,
+            quirks: self.optimizer_quirks,
             parameter_slots: u16::try_from(entry.len()).ok()?,
             post_coroutine: stage == BodyStage::Transformed,
             kept_for_inlining: stage == BodyStage::KeptForInlining,

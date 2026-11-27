@@ -28,6 +28,9 @@ pub struct EmitOptions {
     /// The file's value classes, for the redundant-boxing pass; the emitter fills it per file.
     pub(crate) value_classes:
         std::rc::Rc<krusty::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors>,
+    /// The quirks of the kotlinc release whose optimizer the bytecode passes reproduce: the
+    /// emitted file's reference profile.
+    pub(crate) optimizer_quirks: krusty::kotlin_version::Quirks,
     /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
     pub java_parameters: bool,
     /// `-Xstring-concat=inline`: always use `StringBuilder`, regardless of class-file version.
@@ -138,6 +141,7 @@ impl Default for EmitOptions {
             lambda_modes: LambdaModes::default(),
             inner_class_resolver: None,
             value_classes: std::rc::Rc::default(),
+            optimizer_quirks: krusty::kotlin_version::Quirks::NONE,
             metadata_version: None,
             annotations_in_metadata: true,
             pre_release_metadata: false,
