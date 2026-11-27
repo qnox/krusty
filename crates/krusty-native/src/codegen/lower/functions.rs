@@ -871,7 +871,12 @@ impl<'a> FileLowering<'a> {
                 );
             }
             for (index, ty) in declared[captures.offsets.len()..].iter().enumerate() {
-                let Some(value) = body.convert(params[index + 1], Some(incoming[index]), *ty)?
+                // A `Unit` parameter is passed as the `Unit` instance, in a reference slot.
+                let Some(value) = body.convert(
+                    params[index + 1],
+                    Some(parameter_slot(incoming[index])),
+                    parameter_slot(*ty),
+                )?
                 else {
                     return Err("a `Unit` argument to a functional interface".into());
                 };
@@ -945,7 +950,10 @@ impl<'a> FileLowering<'a> {
                 );
             }
             for (index, ty) in parameters[captures.offsets.len()..].iter().enumerate() {
-                let Some(value) = body.convert(params[index + 1], Some(any()), *ty)? else {
+                // A `Unit` parameter is passed as the `Unit` instance, in a reference slot.
+                let Some(value) =
+                    body.convert(params[index + 1], Some(any()), parameter_slot(*ty))?
+                else {
                     return Err("a `Unit` lambda parameter".into());
                 };
                 arguments.push(value);
@@ -1079,13 +1087,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         };
         let mut arguments = Vec::with_capacity(args.len());
         for (argument, ty) in args.iter().zip(params) {
-            let Some(value) = self.coerce(*argument, *ty)? else {
+            // A `Unit` argument is passed as the `Unit` instance, in a reference slot.
+            let slot = parameter_slot(*ty);
+            let Some(value) = self.coerce(*argument, slot)? else {
                 return Err("a `Unit` argument to a function value".into());
             };
             if self.terminated {
                 return Ok(None);
             }
-            let Some(value) = self.convert(value, Some(*ty), any())? else {
+            let Some(value) = self.convert(value, Some(slot), any())? else {
                 return Err("a `Unit` argument to a function value".into());
             };
             arguments.push(value);
