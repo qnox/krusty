@@ -230,7 +230,11 @@ pub(super) fn transform(ir: &mut IrFile) {
     }
     // A lambda's calls are given their composer before its callers read it from the singletons
     // or remember it.
-    for lambda in &facts.lambdas {
+    for lambda in facts
+        .lambdas
+        .iter()
+        .filter(|lambda| !matches!(lambda.memoization, Memoization::Inline { .. }))
+    {
         add_lambda_composer_parameters(ir, lambda);
         let slots = Slots::lambda(lambda);
         for inner in &facts.lambdas {
@@ -263,6 +267,15 @@ pub(super) fn transform(ir: &mut IrFile) {
                 })
             {
                 remember(ir, &facts.runtime, lambda, slots);
+            }
+        }
+        for lambda in &facts.lambdas {
+            if lambda.memoization
+                == (Memoization::Inline {
+                    caller: function.function,
+                })
+            {
+                place_lambda(ir, &facts.runtime, &callees, lambda, slots);
             }
         }
         for site in &function.calls {
@@ -334,6 +347,124 @@ fn add_composer_parameters(ir: &mut IrFile, facts: &RestartableFunction) {
     ir.plugin_extended_signatures.insert(function);
 }
 
+/// Make the lambda an inline library composable places in its caller take the caller's `$composer`
+/// and a `$changed` of its own, after the values it captures, and the caller's `$dirty` among them
+/// when its calls pass the caller's parameters on. Its body runs between source-information
+/// markers, not in a group:
+///
+/// ```text
+/// sourceInformationMarkerStart($composer, key, "C4@201L10:file.kt#hash")
+/// … the source statements …
+/// sourceInformationMarkerEnd($composer)
+/// ```
+fn place_lambda(
+    ir: &mut IrFile,
+    runtime: &ComposeRuntime,
+    callees: &crate::fx_hash::HashMap<FunId, CalleeShape>,
+    lambda: &ComposableLambda,
+    caller: Slots,
+) {
+    let template = lambda
+        .inline_template
+        .expect("a lambda an inline call places has its template");
+    let forwards = lambda.calls.iter().any(|site| {
+        site.arguments
+            .iter()
+            .any(|argument| matches!(argument, ArgumentState::Forwarded(_)))
+    });
+    let dirty = forwards.then(|| {
+        caller
+            .dirty
+            .expect("a function that passes its parameters on reads them")
+    });
+    let captures = lambda.captures;
+    let values = lambda.parameters.len() as u32;
+    let extra = u32::from(dirty.is_some());
+    let slots = Slots {
+        first: captures + extra,
+        composer: captures + extra + values,
+        changed: captures + extra + values + 1,
+        changed_ints: 1,
+        default: None,
+        dirty: dirty.map(|_| captures),
+    };
+    // The values the lambda captures, the caller's `$dirty` last, then the ones it is called with,
+    // then the two the composer adds.
+    let dirty_capture = dirty.map(|slot| ir.add_expr(IrExpr::GetValue(slot)));
+    let function = lambda.implementation;
+    let declaration = &mut ir.functions[function as usize];
+    debug_assert_eq!(declaration.params.len(), (captures + values) as usize);
+    if dirty.is_some() {
+        declaration.params.insert(captures as usize, Ty::Int);
+    }
+    declaration
+        .params
+        .extend([Ty::nullable(runtime::composer()), Ty::Int]);
+    declaration
+        .param_checks
+        .resize((captures + values + extra) as usize + 2, None);
+    let body = declaration.body.expect("a lambda has a body");
+    for expression in [body, template] {
+        crate::ir::shift_value_indices(ir, expression, captures, extra);
+        crate::ir::shift_value_indices(ir, expression, captures + extra + values, 2);
+    }
+    let identities = &mut ir.fn_params.entry(function).or_default().identities;
+    if dirty.is_some() {
+        identities.insert(
+            captures as usize,
+            IrParameterIdentity::producer_value("$dirty"),
+        );
+    }
+    identities.extend([
+        IrParameterIdentity::producer_value("$composer"),
+        IrParameterIdentity::producer_value("$changed"),
+    ]);
+    let IrExpr::Lambda {
+        arity,
+        captures: captured,
+        ..
+    } = &mut ir.exprs[lambda.lambda as usize]
+    else {
+        unreachable!("a composable lambda is a lambda");
+    };
+    *arity = composer_arity(lambda.parameters.len());
+    captured.extend(dirty_capture);
+    // The standalone function is never emitted, and its library calls lack the composer.
+    retire_library_calls(ir, body);
+    for site in &lambda.calls {
+        pass_composer(ir, slots, callees, site);
+    }
+    let IrExpr::Block { stmts, value } = ir.exprs[template as usize].clone() else {
+        unreachable!("a placed lambda's template is a block");
+    };
+    let mut statements = Vec::with_capacity(stmts.len() + 2);
+    if let Some(information) = &lambda.source_information {
+        let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
+        let key = ir.add_expr(IrExpr::Const(IrConst::Int(lambda.key)));
+        let text = ir.add_expr(IrExpr::Const(IrConst::String(information.as_str().into())));
+        statements.push(runtime::call(
+            ir,
+            &runtime.source_information_marker_start,
+            None,
+            vec![composer, key, text],
+        ));
+    }
+    statements.extend(stmts);
+    if lambda.source_information.is_some() {
+        let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
+        statements.push(runtime::call(
+            ir,
+            &runtime.source_information_marker_end,
+            None,
+            vec![composer],
+        ));
+    }
+    ir.exprs[template as usize] = IrExpr::Block {
+        stmts: statements,
+        value,
+    };
+}
+
 /// Give the function a composable lambda is lowered to the `$composer` and `$changed` its value
 /// is called with, after the values it captures, and move its locals past them.
 fn add_lambda_composer_parameters(ir: &mut IrFile, lambda: &ComposableLambda) {
@@ -361,7 +492,7 @@ fn add_lambda_composer_parameters(ir: &mut IrFile, lambda: &ComposableLambda) {
     else {
         unreachable!("a composable lambda is a lambda");
     };
-    *arity = (lambda.parameters.len() + 2) as u8;
+    *arity = composer_arity(lambda.parameters.len());
     // The value is called through the runtime's wrapper, never inlined.
     let template = inline_body.take();
     if let Some(template) = template {
@@ -1490,4 +1621,10 @@ fn mark_line(ir: &mut IrFile, expression: ExprId, line: u32) {
     if line != 0 {
         ir.set_statement_line(expression, line);
     }
+}
+
+/// The arity of a composable lambda that takes `values` of its own, then the composer and its
+/// `$changed` mask. A lambda's arity is a byte in the IR, as the JVM's parameter limit bounds it.
+fn composer_arity(values: usize) -> u8 {
+    u8::try_from(values + 2).expect("a composable lambda's arity fits the JVM parameter limit")
 }

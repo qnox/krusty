@@ -204,7 +204,7 @@ pub(super) fn reference_enclosure(
 #[derive(Clone, Copy)]
 pub(super) struct Facades<'a> {
     pub(super) current: &'a str,
-    pub(super) facades: &'a [String],
+    pub(super) facades: &'a [crate::file_facades::FacadeClass],
 }
 
 /// Where a reference sits and what its adapter allows: the node, the class that owns the adapter

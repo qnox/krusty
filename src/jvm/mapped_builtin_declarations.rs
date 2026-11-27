@@ -451,6 +451,11 @@ pub(super) fn overridden_call_realizations_for_declaration(
         .collect()
 }
 
+/// Whether two JVM method descriptors take the same parameters, whatever their results.
+pub(super) fn same_descriptor_parameters(left: &str, right: &str) -> bool {
+    descriptor_parameters(left) == descriptor_parameters(right)
+}
+
 /// The `(…)` parameter half of a JVM method descriptor, including both parens.
 fn descriptor_parameters(descriptor: &str) -> &str {
     match descriptor.find(')') {

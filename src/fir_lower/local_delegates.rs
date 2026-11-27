@@ -88,6 +88,7 @@ impl BodyLowering<'_> {
                     declaration_lambda: self.declaration_lambda,
                     reference,
                     storage_name: plan.storage_name,
+                    storage: None,
                     getter,
                     setter,
                 });
@@ -103,6 +104,27 @@ impl BodyLowering<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Link the plan of the local delegated property whose delegate `value` holds to the
+    /// `variable` declaring it.
+    pub(super) fn record_local_delegate_storage(
+        &mut self,
+        value: crate::fir::LocalValueId,
+        variable: crate::ir::ExprId,
+    ) {
+        let Some(declaration) = self
+            .body
+            .local_delegate_plans()
+            .iter()
+            .find(|plan| plan.storage == value)
+            .map(|plan| plan.declaration)
+        else {
+            return;
+        };
+        if let Some(&plan) = self.ir.local_delegate_plan_ids.get(&declaration) {
+            self.ir.local_delegate_plans[plan as usize].storage = Some(variable);
+        }
     }
 
     fn local_delegate_accessor(

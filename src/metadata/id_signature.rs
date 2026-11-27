@@ -387,6 +387,19 @@ fn path(
     })
 }
 
+/// kotlinc writes a package path as its qualified name split at the dots, so the root package is
+/// one empty segment. Every other boundary names the root package by the empty path, and its
+/// deserializer joins the segments back into the same empty name, so both spellings are one
+/// package.
+fn root_package_as_empty(package: KlibNamePath) -> KlibNamePath {
+    match &*package.segments {
+        [segment] if segment.is_empty() => KlibNamePath {
+            segments: Box::new([]),
+        },
+        _ => package,
+    }
+}
+
 fn decode_common_signature(
     bytes: &[u8],
     base: usize,
@@ -445,7 +458,7 @@ fn decode_common_signature(
     // field 6 is absent.
     let member_id = member_id.or(old_member_id);
     Ok(KlibPublicIdSignature {
-        package: path(package, strings, "package path")?,
+        package: root_package_as_empty(path(package, strings, "package path")?),
         declaration: path(declaration, strings, "declaration path")?,
         member_id,
         mask: mask.unwrap_or(0),
@@ -566,6 +579,20 @@ mod tests {
         assert_eq!(signature.declaration().segments(), ["Widget", "evaluate"]);
         assert_eq!(signature.member_id(), Some(0xfedc_ba98_7654_3210));
         assert_eq!(signature.mask(), 5);
+    }
+
+    #[test]
+    fn root_package_single_empty_segment_is_the_empty_package_path() {
+        let strings = ["", "chained"].map(str::to_string).to_vec();
+        let written = decode_public_id_signature(&public_signature(&[0], &[1], 0x55, 0), &strings)
+            .expect("valid root-package signature")
+            .expect("public root-package signature");
+        let empty = decode_public_id_signature(&public_signature(&[], &[1], 0x55, 0), &strings)
+            .expect("valid empty-package signature")
+            .expect("public empty-package signature");
+
+        assert_eq!(written.package().segments(), [] as [String; 0]);
+        assert_eq!(written, empty);
     }
 
     #[test]

@@ -518,7 +518,6 @@ compiler/testData/diagnostics/tests/generics/kt30590.kt
 compiler/testData/diagnostics/tests/generics/multipleBoundsMemberScope/conflictingReturnType.kt
 compiler/testData/diagnostics/tests/generics/nullability/considerTypeNotNullOnlyIfItHasNotNullBound.kt
 compiler/testData/diagnostics/tests/generics/nullability/smartCasts.kt
-compiler/testData/diagnostics/tests/generics/nullability/smartCastsOnThis.kt
 compiler/testData/diagnostics/tests/generics/projectionsScope/flexibleProjectedScope.kt
 compiler/testData/diagnostics/tests/generics/projectionsScope/recursiveUpperBoundStar.kt
 compiler/testData/diagnostics/tests/generics/projectionsScope/typeParameterBounds.kt
