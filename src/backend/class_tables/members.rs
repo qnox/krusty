@@ -29,8 +29,6 @@ pub(crate) fn any_slot(role: Option<crate::types::SemanticCallRole>) -> Option<u
             | crate::types::SemanticCallRole::KotlinEnumEntries
             | crate::types::SemanticCallRole::KotlinPropertyReferenceGet(_)
             | crate::types::SemanticCallRole::KotlinPropertyReferenceSet(_)
-            | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateGet(_)
-            | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateSet(_)
             | crate::types::SemanticCallRole::KotlinCharSequenceIterator
             | crate::types::SemanticCallRole::DataClassCopy
             | crate::types::SemanticCallRole::IntrinsicConstNumeric(_)
