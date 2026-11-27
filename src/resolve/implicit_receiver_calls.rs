@@ -62,6 +62,11 @@ impl Checker<'_> {
         let receiver = tower_rung
             .receiver
             .expect("this-member selection requires an implicit-receiver rung");
+        let receiver = self.implicit_intersection_call_view(receiver, name);
+        let tower_rung = MemberCallTowerRung {
+            receiver: Some(receiver),
+            ..tower_rung
+        };
         let CallArgs { call, args, .. } = call_args;
         let rt = self.apply_postponed_call_bindings(receiver.ty);
         let type_args = self.resolved_explicit_type_args(scope, call);
