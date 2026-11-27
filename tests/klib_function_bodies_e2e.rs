@@ -18,22 +18,25 @@ use crate::common;
 
 const PROGRAM: &str = include_str!("box_regressions/multimodule/libraryTopLevelFunctionBodies.kt");
 
-fn kotlin_native_root() -> Option<PathBuf> {
-    let root = std::env::var_os("KRUSTY_KOTLIN_NATIVE").map(PathBuf::from);
-    match root {
-        Some(root) if root.join("bin/kotlinc-native").is_file() => Some(root),
-        Some(root) => panic!(
-            "KRUSTY_KOTLIN_NATIVE={} has no bin/kotlinc-native",
-            root.display()
-        ),
-        None if std::env::var_os("KRUSTY_REQUIRE_KLIB").is_some() => {
-            panic!("KRUSTY_REQUIRE_KLIB needs KRUSTY_KOTLIN_NATIVE")
-        }
-        None => {
-            eprintln!("skipping the KLIB body oracle: KRUSTY_KOTLIN_NATIVE is not set");
-            None
-        }
-    }
+/// The provisioned reference Kotlin/Native distribution, whose stdlib the library compiles against.
+/// A missing distribution fails the oracle rather than skipping it.
+fn kotlin_native_root() -> PathBuf {
+    let stdlib = krusty::toolchain::kotlin_stdlib_klib_or_reason(
+        krusty::compilation_target::CompilationTarget::Native,
+    )
+    .unwrap_or_else(|reason| panic!("the KLIB body oracle needs Kotlin/Native: {reason}"));
+    // The stdlib is `<root>/klib/common/stdlib`.
+    let root = stdlib
+        .ancestors()
+        .nth(3)
+        .expect("the Native stdlib sits inside its distribution")
+        .to_path_buf();
+    assert!(
+        root.join("bin/kotlinc-native").is_file(),
+        "the Kotlin/Native distribution at {} has no bin/kotlinc-native",
+        root.display()
+    );
+    root
 }
 
 /// The shared program's library and main sources.
@@ -66,6 +69,7 @@ fn write_library(work: &Path, source: &str) -> PathBuf {
     ])
     .expect("open the Native stdlib KLIB");
     let inputs = [krusty::source::SourceInput::kotlin(source).with_file_stem("Library")];
+    let features = krusty::features::LangFeatures::from_source_in_environment(source);
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
@@ -73,14 +77,14 @@ fn write_library(work: &Path, source: &str) -> PathBuf {
             krusty::compilation_target::CompilationTarget::Native,
             Box::new(libraries.for_compilation()),
         ),
-        &krusty::features::LangFeatures::from_source_in_environment(source),
+        &features,
         &mut diags,
     );
     let backend = KlibBackend::new(
         KlibPlatform::Native,
         KlibStamp::new(
-            krusty::kotlin_version::KotlinVersion::V2_4_20,
-            krusty::language_version::LanguageVersion::V2_4,
+            krusty::kotlin_version::environment_release(),
+            features.language_version(),
         ),
     )
     .with_native_target(krusty_native::NativeTarget::new(
@@ -130,9 +134,7 @@ fn scratch(name: &str) -> PathBuf {
 
 #[test]
 fn kotlinc_native_runs_a_program_against_krusty_written_function_bodies() {
-    let Some(native_root) = kotlin_native_root() else {
-        return;
-    };
+    let native_root = kotlin_native_root();
     let (library_source, main_source) = program_sources();
     let work = scratch("krusty-function-bodies-official-consumer");
     let library = write_library(&work, &library_source);
@@ -263,9 +265,7 @@ const KOTLINC_SHAPED: [&str; 6] = ["answer", "sum", "greet", "isNegative", "diff
 
 #[test]
 fn kotlinc_reads_krusty_written_function_bodies_as_it_writes_them() {
-    let Some(native_root) = kotlin_native_root() else {
-        return;
-    };
+    let native_root = kotlin_native_root();
     let (library_source, _) = program_sources();
     let work = scratch("krusty-function-bodies-dump");
     let krusty_library = write_library(&work, &library_source);
