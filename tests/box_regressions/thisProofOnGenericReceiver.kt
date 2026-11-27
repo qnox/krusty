@@ -1,5 +1,5 @@
-// `this is IntBox` on a receiver `Source<T>` narrows to the subtype: the bare `value` is the
-// subtype's `Int`, not an intersection of `Source<T>.value` and `IntBox.value`.
+// `this is IntBox` on a receiver `Source<T>` keeps `Source<T> & IntBox`: the bare `value` is
+// both `Source<T>.value` and `IntBox.value`, so it is an `Int` for the arithmetic below.
 interface Source<out T> {
     val value: T
 

@@ -35,6 +35,46 @@ impl Checker<'_> {
         self.intersection_property_receiver(&bounds, name, write)
     }
 
+    /// The receiver view of a bare property `name` read through an implicit receiver whose flow
+    /// type is an intersection (`this is B` on an incomparable declaration): the same projection
+    /// an explicit receiver's flow intersection gets, so checked FIR casts `this` to the
+    /// constituent that owns the selected property.
+    pub(super) fn implicit_intersection_property_view(
+        &self,
+        receiver: ImplicitReceiver,
+        name: &str,
+    ) -> ImplicitReceiver {
+        self.implicit_intersection_view(receiver, |bounds| {
+            self.intersection_property_receiver(bounds, name, false)
+        })
+    }
+
+    /// [`Self::implicit_intersection_property_view`] for a bare call of the member `name`.
+    pub(super) fn implicit_intersection_call_view(
+        &self,
+        receiver: ImplicitReceiver,
+        name: &str,
+    ) -> ImplicitReceiver {
+        self.implicit_intersection_view(receiver, |bounds| {
+            self.intersection_member_receiver(bounds, name)
+        })
+    }
+
+    /// A nullable intersection stays whole: a bare member through it is an unsafe call.
+    fn implicit_intersection_view(
+        &self,
+        receiver: ImplicitReceiver,
+        project: impl FnOnce(&[Ty]) -> Option<Ty>,
+    ) -> ImplicitReceiver {
+        if receiver.ty.is_nullable() {
+            return receiver;
+        }
+        let TyKind::Intersection(bounds) = receiver.ty.kind() else {
+            return receiver;
+        };
+        project(bounds.as_slice()).map_or(receiver, |ty| ImplicitReceiver { ty, ..receiver })
+    }
+
     /// The path whose flow type `receiver` reads. A cast `(x as T)` denotes `x`'s path, but its
     /// value has the cast's target type, never the flow intersection proven for `x`.
     fn flow_read_path(&self, receiver: ExprId) -> Option<NarrowPath> {
@@ -237,7 +277,29 @@ impl Checker<'_> {
             .collect::<Vec<_>>();
         match winners.as_slice() {
             [winner] => Some(winner.0),
-            [] => None,
+            // Incomparable results (`Source<T>.value: T` beside `IntBox.value: Int`) belong to one
+            // property overridden down the class hierarchy. kotlinc dispatches it through the
+            // overriding constituent: the one whose classifier inherits every other contributor.
+            [] => {
+                let overriding = properties
+                    .iter()
+                    .filter(|(bound, _)| {
+                        properties.iter().all(|(other, _)| {
+                            other == bound
+                                || crate::assignable::applied_supertype(
+                                    self,
+                                    bound.non_null(),
+                                    other.non_null(),
+                                )
+                                .is_some()
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                match overriding.as_slice() {
+                    [overriding] => Some(overriding.0),
+                    _ => None,
+                }
+            }
             _ if winners.windows(2).all(|pair| pair[0].1 == pair[1].1) => winners
                 .into_iter()
                 .map(|winner| winner.0)

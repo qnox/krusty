@@ -28,27 +28,12 @@ impl Checker<'_> {
         let Some(current) = receivers.iter_mut().find(|receiver| receiver.current) else {
             return;
         };
-        current.ty = narrowed;
-        // An `is B` proof on a receiver of an incomparable declared class keeps both: bare
+        // An `is B` proof on a receiver of an incomparable declared type keeps both: bare
         // members of the declaration and of `B` stay visible (`check(this is B); field = x`).
-        let declared = current.declared_ty;
-        // A type-parameter receiver is judged by its bound: `this is B` on `M : A` with
-        // `B : A` narrows `M` toward `B`, it does not introduce an unrelated class.
-        let declared_class = declared
-            .non_null()
-            .ty_param_bound()
-            .map_or(declared, Ty::non_null);
-        // Comparability is class reachability through the applied hierarchy: `this is B<String>` on
-        // a receiver `A<T>` stays one receiver when `B` extends `A`, whatever the arguments.
-        let reaches = |sub: Ty, sup: Ty| {
-            crate::assignable::applied_supertype(self, sub.non_null(), sup.non_null()).is_some()
+        current.ty = match self.declared_constituent_beside_proof(current.declared_ty, narrowed) {
+            Some(kept) => Ty::intersection(&[narrowed, kept]),
+            None => narrowed,
         };
-        let comparable = narrowed.non_null() == Ty::Nothing
-            || reaches(declared_class, narrowed)
-            || reaches(narrowed, declared_class);
-        if !comparable {
-            current.ty = Ty::intersection(&[narrowed, declared]);
-        }
     }
 }
 

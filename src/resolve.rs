@@ -28945,8 +28945,16 @@ impl<'a> Checker<'a> {
     }
 
     fn implicit_receiver_selection(&self, receiver: ImplicitReceiver) -> ImplicitReceiverSelection {
+        // A flow intersection is a semantic view of the receiver value, not a type it can be
+        // loaded as: the value keeps its declared type, and a member owned by one constituent
+        // reaches it through the smart cast recorded in `narrowed_this_member`.
+        let ty = if matches!(receiver.ty.non_null().kind(), TyKind::Intersection(_)) {
+            receiver.declared_ty
+        } else {
+            receiver.ty
+        };
         ImplicitReceiverSelection {
-            ty: receiver.ty,
+            ty,
             current: receiver.current,
             receiver_depth: receiver.receiver_depth,
             classifier: receiver
@@ -33081,27 +33089,13 @@ impl<'a> Checker<'a> {
                 "smartcast",
                 "apply path={path:?} target={ty:?} compound={compound}",
             );
-            // A single `is B` proof on a value declared as `A` produces `A & B` when neither
-            // classifier contains the other. Root narrowing shadows expose only the newest read
-            // projection, so retain the incomparable declaration constituent before replacing it.
-            // Comparable declarations (`Any` then `String`) remain a single minimal fact.
-            // `Nothing?` is the exact null branch, not an unrelated classifier constituent. It is
-            // already the nullable bottom type and must not be widened by re-attaching the local's
-            // declared non-null classifier (`String?` + a null proof is still `Nothing?`, never
-            // `String & Nothing?`). Classifier type-test proofs continue through the intersection
-            // path below.
+            // Root narrowing shadows expose only the newest read projection, so retain the
+            // declaration constituent an incomparable proof keeps before replacing it.
             let declared = StablePathRead::new(self).declared_ty(scope, path);
-            if ty.non_null() != Ty::Nothing {
-                // A nullable test (`is B?`) still admits null, so the declaration keeps its `?`.
-                let keep_null = ty.is_nullable();
-                if let Some(declared) = declared.map(|d| if keep_null { d } else { d.non_null() }) {
-                    let context = crate::assignable::TyCtx::new();
-                    let comparable = crate::assignable::is_subtype(&context, self, declared, *ty)
-                        || crate::assignable::is_subtype(&context, self, *ty, declared);
-                    if !comparable {
-                        scope.narrow_intersection(path.clone(), declared);
-                    }
-                }
+            if let Some(kept) =
+                declared.and_then(|declared| self.declared_constituent_beside_proof(declared, *ty))
+            {
+                scope.narrow_intersection(path.clone(), kept);
             }
             scope.narrow_intersection(path.clone(), *ty);
             self.apply_narrowing_unchecked(scope, path, *ty);
@@ -43319,7 +43313,9 @@ impl<'a> Checker<'a> {
                             }
                             continue;
                         }
-                        implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
+                        implicit_rungs::ImplicitRung::Receiver(receiver) => {
+                            self.implicit_intersection_property_view(receiver, &n)
+                        }
                     };
                     if context_receiver_priority::is_context_parameter_receiver(
                         scope,
