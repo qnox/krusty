@@ -1751,9 +1751,6 @@ impl super::Emitter<'_> {
                     ));
                     return code.aconst_null();
                 }
-                if lambda_mode == LambdaMode::Indy {
-                    self.run.used_indy_lambdas.borrow_mut().insert(*impl_fn);
-                }
                 let f = &self.ir.functions[*impl_fn as usize];
                 let impl_name = f.name.clone();
                 let impl_params = jvm_function_params(self.ir, *impl_fn);
