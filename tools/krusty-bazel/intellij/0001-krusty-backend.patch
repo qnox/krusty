@@ -1,5 +1,5 @@
 diff --git a/build/jvm-rules/MODULE.bazel b/build/jvm-rules/MODULE.bazel
-index 97c5ad5608..9332f75af0 100644
+index 97c5ad5..9332f75 100644
 --- a/build/jvm-rules/MODULE.bazel
 +++ b/build/jvm-rules/MODULE.bazel
 @@ -121,6 +121,16 @@ backend_config_repo(name = "ij_backend_config")
@@ -21,7 +21,7 @@ index 97c5ad5608..9332f75af0 100644
      is_default = True,
 diff --git a/build/jvm-rules/krusty_compiler.bzl b/build/jvm-rules/krusty_compiler.bzl
 new file mode 100644
-index 0000000000..c0c19a5f3c
+index 0000000..45447ed
 --- /dev/null
 +++ b/build/jvm-rules/krusty_compiler.bzl
 @@ -0,0 +1,40 @@
@@ -66,7 +66,7 @@ index 0000000000..c0c19a5f3c
 +    local = True,
 +)
 diff --git a/build/jvm-rules/rules/common-attrs.bzl b/build/jvm-rules/rules/common-attrs.bzl
-index 317fedc286..90774d920b 100644
+index 317fedc..90774d9 100644
 --- a/build/jvm-rules/rules/common-attrs.bzl
 +++ b/build/jvm-rules/rules/common-attrs.bzl
 @@ -119,6 +119,13 @@ common_attr = add_dicts(
@@ -84,7 +84,7 @@ index 317fedc286..90774d920b 100644
          "_trace": attr.label(default = "//:trace"),
      },
 diff --git a/build/jvm-rules/rules/impl/compile.bzl b/build/jvm-rules/rules/impl/compile.bzl
-index e68fed938c..31fb2d4379 100644
+index e68fed9..f50147a 100644
 --- a/build/jvm-rules/rules/impl/compile.bzl
 +++ b/build/jvm-rules/rules/impl/compile.bzl
 @@ -24,6 +24,7 @@ load(
@@ -95,7 +95,7 @@ index e68fed938c..31fb2d4379 100644
  load("//:rules/impl/builder-args.bzl", "init_builder_args")
  load("//:rules/impl/compiler-plugins.bzl", "collect_compiler_plugins_for_export", "compiler_plugins_from", "exported_compiler_plugins_from")
  load("//:rules/resource.bzl", "ResourceGroupInfo")
-@@ -234,30 +235,66 @@ def _run_jvm_builder(
+@@ -234,30 +235,76 @@ def _run_jvm_builder(
  
      java_runtime = ctx.attr._tool_java_runtime[java_common.JavaRuntimeInfo]
  
@@ -131,13 +131,26 @@ index e68fed938c..31fb2d4379 100644
 +        not plugins.stubs_phase and
 +        not plugins.compile_phase.classpath
      )
++    # The JPS builder's own command line: a target krusty does not compile is handed to it.
++    jvm_builder_command = ctx.attr._jvm_builder_jvm_flags[BuildSettingInfo].value + [
++        ctx.file._jvm_builder_launcher.path,
++        ctx.file._jvm_builder.path,
++    ]
 +    if krusty_ready:
-+        # --cp already carries the module's kotlin-stdlib. The copied binary sits outside a
-+        # checkout that can locate a Kotlin distribution, so the implicit lookup would fail
-+        # the action before any source is read.
-+        args.add("--kotlinc-arg", "-no-stdlib")
-+        # The build's own Kotlin release, so krusty reproduces the kotlinc the JPS builder embeds.
-+        args.add("--kotlinc-arg", "-Xkotlin-reference-version=" + KRUSTY_KOTLIN_VERSION)
++        # The worker's startup arguments apply to every target it compiles. --cp already carries
++        # the module's kotlin-stdlib, and the copied binary sits outside a checkout that can locate
++        # a Kotlin distribution, so the implicit lookup would fail the action before any source is
++        # read. The build's own Kotlin release makes krusty reproduce the kotlinc the JPS builder
++        # embeds. Every work request stays the JPS builder's own, so krusty can forward one it
++        # does not compile, with the reason recorded in the action's output.
++        krusty_startup = [
++            "--kotlinc-arg",
++            "-no-stdlib",
++            "--kotlinc-arg",
++            "-Xkotlin-reference-version=" + KRUSTY_KOTLIN_VERSION,
++        ]
++        for part in [java_runtime.java_executable_exec_path] + jvm_builder_command:
++            krusty_startup += ["--jps-builder", part]
 +        ctx.actions.run(
 +            mnemonic = "KrustyCompile",
 +            env = {
@@ -149,12 +162,13 @@ index e68fed938c..31fb2d4379 100644
 +                transitive = transitiveInputs + [java_runtime.files],
 +            ),
 +            outputs = outputs,
++            tools = [ctx.file._jvm_builder_launcher, ctx.file._jvm_builder],
 +            executable = ctx.file._krusty,
 +            execution_requirements = {
 +                "supports-workers": "1",
 +                "requires-worker-protocol": "json",
 +            },
-+            arguments = [args],
++            arguments = krusty_startup + [args],
 +            progress_message = "compile %%{label} with krusty (kt: %d, java: %d)" % (len(srcs.kt), javaCount),
 +        )
 +    else:
@@ -175,11 +189,7 @@ index e68fed938c..31fb2d4379 100644
 +                "supports-path-mapping": "1",
 +                "supports-multiplex-sandboxing": "1",
 +            },
-+            arguments = ctx.attr._jvm_builder_jvm_flags[BuildSettingInfo].value + [
-+                ctx.file._jvm_builder_launcher.path,
-+                ctx.file._jvm_builder.path,
-+                args,
-+            ],
++            arguments = jvm_builder_command + [args],
 +            progress_message = "compile %%{label} (kt: %d, java: %d)" % (len(srcs.kt), javaCount),
 +        )
  
