@@ -62,7 +62,7 @@ pub use callee_shape::{
 pub use class_roles::ClassRoles;
 pub use default_lambda::load as load_default_lambda;
 pub use default_masks::{expand as expand_default_masks, DefaultMasks, ExtractedDefaultLambda};
-pub use functional_arguments::lambda_placements;
+pub use functional_arguments::{keeps_lambda_as_value, lambda_placements};
 pub use inline_scopes::InlineScopes;
 pub use lambda_expansion::{Lambda, SourceLines};
 pub use name_generator::ClassNameGenerators;
@@ -166,7 +166,7 @@ pub fn inline(
     returns::normalize_local_returns(&mut node)?;
     let constructors =
         object_regeneration::regenerate_objects(&mut node, parameters, lambdas, classes, objects)?;
-    let invokes = functional_arguments::mark_places(&mut node, parameters)?;
+    let invokes = functional_arguments::mark_places(&mut node, parameters, &constructors)?;
     object_regeneration::complete_constructor_calls(&mut node, constructors)?;
     let context = lambda_expansion::Context {
         parameters,

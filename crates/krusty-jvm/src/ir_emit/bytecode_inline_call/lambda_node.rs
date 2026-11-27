@@ -136,6 +136,14 @@ pub(super) fn callable_reference_template(
     ))
 }
 
+/// A literal lambda as route planning sees it before compiling it: its parameters, captured
+/// values and names, with a body that only returns.
+pub(super) struct LambdaShape {
+    pub(super) lambda: inliner::Lambda,
+    /// The caller values the literal captures, each with its type.
+    pub(super) captures: Vec<(u32, Ty)>,
+}
+
 impl Emitter<'_> {
     /// The literal lambda `argument` and its source arity, every type read from the checked IR. An
     /// error names the checked fact the literal lacks; the implementation method never stands in
@@ -466,6 +474,66 @@ impl Emitter<'_> {
             }
             None => InvokeCoercion::Unported,
         }
+    }
+
+    /// The literal lambda `argument` as route planning sees it before compiling it.
+    pub(super) fn lambda_shape(&self, argument: u32) -> Result<LambdaShape, &'static str> {
+        let (lambda, _) = self.literal_lambda(argument)?;
+        let parameter_types: Vec<String> = lambda
+            .parameter_types
+            .iter()
+            .map(|&ty| type_descriptor(ty))
+            .collect();
+        let descriptor = format!(
+            "({}{})V",
+            parameter_types.concat(),
+            lambda
+                .capture_types
+                .iter()
+                .map(|&ty| type_descriptor(ty))
+                .collect::<String>(),
+        );
+        let mut node = MethodNode::new(ACC_STATIC, "invoke", &descriptor);
+        node.max_locals = lambda
+            .parameter_types
+            .iter()
+            .chain(&lambda.capture_types)
+            .map(|&ty| slot_words(ty))
+            .sum();
+        let start = node.new_label();
+        node.nodes = vec![Node::Label(start), Node::Insn(Insn::Op(RETURN))];
+        let shape = inliner::Lambda {
+            node,
+            value_class_parameters: lambda
+                .parameter_coercions
+                .iter()
+                .map(InvokeCoercion::value_class)
+                .collect(),
+            parameter_types,
+            return_type: "V".to_string(),
+            value_class_return: None,
+            captured: 0..0,
+            capture_names: self.capture_names(
+                argument,
+                lambda.impl_fn,
+                lambda.captures.len(),
+                lambda.suspend,
+            ),
+            default_class: None,
+            suspend: lambda.suspend,
+            // The shape's body is only a `return`; no adapter wrote a landing after it.
+            generated_return_landing: false,
+        };
+        let captures = lambda
+            .captures
+            .iter()
+            .copied()
+            .zip(lambda.capture_types.iter().copied())
+            .collect();
+        Ok(LambdaShape {
+            lambda: shape,
+            captures,
+        })
     }
 
     /// Whether the literal lambda `argument`'s body reaches a declaration only its own class may,
