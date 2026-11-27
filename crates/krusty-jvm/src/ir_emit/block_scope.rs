@@ -1033,6 +1033,7 @@ impl Emitter<'_> {
             self.ir.debug_local_provenance(statement),
             Some(
                 IrDebugLocalProvenance::FunctionFrameMarker
+                    | IrDebugLocalProvenance::DeadDefaultBranch
                     | IrDebugLocalProvenance::InlineValue {
                         role: IrInlineLocalRole::DefaultedValue,
                         ..
@@ -1042,10 +1043,18 @@ impl Emitter<'_> {
         if !opens_frame {
             if !*frame_open {
                 self.copied_operand_binding = Some(statement);
+                self.copied_frames.default_slots = self.defaulted_parameters(following);
             }
             return;
         }
+        let dead_branch = matches!(
+            self.ir.debug_local_provenance(statement),
+            Some(IrDebugLocalProvenance::DeadDefaultBranch)
+        );
         if *frame_open {
+            if dead_branch {
+                self.restate_dead_default_line(statement, code);
+            }
             return;
         }
         *frame_open = true;
@@ -1057,16 +1066,34 @@ impl Emitter<'_> {
             self.mark_expression_line(block, line, code);
             code.nop();
         }
-        let default = is_defaulted_parameter(self.ir, statement).then_some(statement);
+        let default =
+            (dead_branch || is_defaulted_parameter(self.ir, statement)).then_some(statement);
         if default.is_some() {
             self.reserve_defaulted_parameter_slots(following);
         }
-        self.pending_copied_frames.push(PendingCopiedFrame {
+        if dead_branch {
+            self.restate_dead_default_line(statement, code);
+        }
+        self.copied_frames.open.push(PendingCopiedFrame {
             block_depth: self.block_depth,
             start: u16::try_from(code.bytes.len()).ok(),
             default,
             enclosing_peak: self.frame.begin_peak(),
         });
+    }
+
+    /// The line a supplied parameter's removed default branch restated after its inline call. The
+    /// stub wrote it whatever line was in effect, so it is written again even where it repeats.
+    fn restate_dead_default_line(&mut self, branch: u32, code: &mut CodeBuilder) {
+        if code.is_dead() {
+            return;
+        }
+        if let Some(line) = self.ir.source_line(branch).filter(|line| *line != 0) {
+            // The stub's first line precedes it where the frame opens on this branch.
+            self.mark_expression_line(branch, line, code);
+            code.forget_line();
+            self.mark_expression_line(branch, line, code);
+        }
     }
 
     /// kotlinc's `markLineNumberAfterInlineIfNeeded` after a same-module inline expansion: inside a
@@ -1759,6 +1786,25 @@ impl Emitter<'_> {
         length: impl Fn(&OpenLocal) -> Option<u16>,
         code: &mut CodeBuilder,
     ) {
+        // The inliner lists a frame's parameters in parameter order, which is slot order: an
+        // omitted parameter is stored after the supplied one that follows it.
+        let operands = locals
+            .iter()
+            .enumerate()
+            .filter(|(_, local)| local.parameter_order)
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>();
+        let mut sorted = operands.clone();
+        sorted.sort_by_key(|&position| (locals[position].inline_frame, locals[position].slot));
+        let mut slots = locals.into_iter().map(Some).collect::<Vec<_>>();
+        let moved = sorted
+            .iter()
+            .map(|&position| slots[position].take())
+            .collect::<Vec<_>>();
+        for (&position, local) in operands.iter().zip(moved) {
+            slots[position] = local;
+        }
+        let locals = slots.into_iter().flatten().collect::<Vec<_>>();
         let mut frames = Vec::new();
         for local in locals {
             if local.opens_inline_frame {
@@ -2243,6 +2289,9 @@ pub(super) struct OpenLocal {
     /// This local binds an inline call operand and starts with the next emitted inline frame,
     /// after all operands have been evaluated, rather than at its own store.
     pub(super) inline_operand: bool,
+    /// This local is a parameter of an expanded function: the inliner lists those in parameter
+    /// order, unlike the operands of a spliced lambda's invocation, which it stores last first.
+    pub(super) parameter_order: bool,
     /// Identity of the inline frame this entry belongs to. This is emission provenance, not a JVM
     /// spelling: locals opened before a frame marker are rebound when that marker is emitted.
     pub(super) inline_frame: Option<u64>,
@@ -2298,4 +2347,14 @@ pub(super) struct PendingCopiedFrame {
     /// The frame's measurement of how far the callee's defaults reached, which the real body's
     /// marker lies above: the stub's locals keep their slots to its end.
     pub(super) enclosing_peak: u16,
+}
+
+/// What a same-module expansion's frame tracks between its first operand and its marker.
+#[derive(Default)]
+pub(super) struct CopiedFrames {
+    /// Expansions whose frame has opened and awaits its marker, innermost last.
+    pub(super) open: Vec<PendingCopiedFrame>,
+    /// The omitted parameters of the expansion whose operands are being stored, by local index,
+    /// that have not yet taken their slots.
+    pub(super) default_slots: Vec<(u32, u32)>,
 }
