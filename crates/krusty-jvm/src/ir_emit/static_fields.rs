@@ -1672,7 +1672,19 @@ pub(super) fn declare_interface_statics(ir: &IrFile, c: &IrClass, cw: &mut Class
         } else {
             property.name.as_str()
         };
-        cw.add_field_late(0x0019, name, &descriptor, value, nullability);
+        // A release that keeps the block property's field in the interface declares it private,
+        // which the JVM refuses to load.
+        let access = if ir.companion_blocks.is_storage(static_index as u32)
+            && !property.is_const
+            && companion_blocks::field_stays_in_interface()
+        {
+            krusty::jvm::classfile::ACC_PRIVATE
+                | krusty::jvm::classfile::ACC_STATIC
+                | if property.is_var { 0 } else { 0x0010 }
+        } else {
+            0x0019
+        };
+        cw.add_field_late(access, name, &descriptor, value, nullability);
         deprecate_moved_interface_field(ir, c, static_index, cw);
     }
 

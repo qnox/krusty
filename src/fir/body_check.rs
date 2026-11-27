@@ -2472,7 +2472,16 @@ impl BodyFirChecker<'_> {
                     Some(StmtLowering::SuperPropertyWrite { target }) => Some(target),
                     _ => None,
                 };
-                let receiver_binding = if super_target.is_none() {
+                // A write through a qualifier names no receiver value: a top-level or associated
+                // property written through its package or classifier has nothing to snapshot.
+                let receiverless = matches!(
+                    self.info.stmt_lowers.get(&statement),
+                    Some(
+                        StmtLowering::TopLevelPropertySet(_)
+                            | StmtLowering::AssociatedPropertyWrite { .. }
+                    )
+                );
+                let receiver_binding = if super_target.is_none() && !receiverless {
                     self.bind_compound_member_receiver(*receiver, name, *value, origin)?
                 } else {
                     None

@@ -52,6 +52,44 @@ fn assert_members_and_metadata_match_kotlinc_on(
     comparisons
 }
 
+/// `box()`'s answer for a program with a stored property in an interface's `companion { … }`
+/// block. 2.4.20 and 2.4.21 emit its field as a private static of the interface, which the JVM
+/// refuses to load, and earlier releases refuse the initializer; krusty reproduces both
+/// ([`krusty::kotlin_version::Quirk::InterfaceBlockPropertyFieldIsPrivateStatic`] and
+/// [`krusty::kotlin_version::Quirk::InterfaceBlockPropertyInitializerProhibited`]), and
+/// `kotlinc_defects_e2e` compares them with kotlinc. Later releases run on every backend.
+fn run_interface_block_program(src: &str, interface: &str) -> String {
+    use krusty::kotlin_version::{Quirk, Quirks};
+    let quirks = Quirks::target();
+    if quirks.has(Quirk::InterfaceBlockPropertyInitializerProhibited) {
+        let rejected = common::compile_and_run_box_files(
+            &[("Main.kt", &format!("{LANGUAGE}{src}"))],
+            &[common::stdlib_jar()],
+            Some(common::jdk_modules().as_path()),
+        );
+        assert_eq!(rejected, None, "the release refuses the initializer");
+        return "OK".to_string();
+    }
+    if quirks.has(Quirk::InterfaceBlockPropertyFieldIsPrivateStatic) {
+        let answer = common::compile_and_run_box_files(
+            &[("Main.kt", &format!("{LANGUAGE}{src}"))],
+            &[common::stdlib_jar()],
+            Some(common::jdk_modules().as_path()),
+        );
+        assert_eq!(
+            answer.as_deref(),
+            Some(
+                format!(
+                    "ERROR:ClassFormatError:Illegal field modifiers in class {interface}: 0x1A"
+                )
+                .as_str()
+            )
+        );
+        return "OK".to_string();
+    }
+    run(src).expect("interface block property")
+}
+
 #[test]
 fn block_members_are_static_members_of_their_class() {
     const SRC: &str = "class A {\n\
@@ -1419,7 +1457,7 @@ fn interface_block_property_is_read_through_an_interface_method() {
         \x20   }\n\
         }\n\
         fun box() = I.blockA + \"K\"\n";
-    assert_eq!(run(SRC).expect("interface block property"), "OK");
+    assert_eq!(run_interface_block_program(SRC, "I"), "OK");
 }
 
 /// Delegated block properties stay on the classifiers that declare them. Two `var a by …`
@@ -1447,7 +1485,7 @@ fn delegated_block_properties_stay_on_their_declaring_classifiers() {
         \x20   val r = C.a + I.a\n\
         \x20   return if (r == \"OK\") \"OK\" else r\n\
         }\n";
-    assert_eq!(run(SRC).expect("delegated block properties"), "OK");
+    assert_eq!(run_interface_block_program(SRC, "I"), "OK");
 }
 
 /// On the 2.5 reference, a delegated companion property's `x$delegate` hoisted to its class is
