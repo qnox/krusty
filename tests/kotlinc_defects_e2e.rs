@@ -91,6 +91,20 @@ const NULL_TYPE_PARAMETER_FUNCTION_VALUE_CONVERSION: &str = "import kotlin.corou
     \x20   return answer\n\
     }\n";
 
+/// A function value held by a type parameter with a nullable function bound, passed where a
+/// suspend function type is expected: the value is cast to the suspend function's class instead of
+/// converted, so a lambda throws `ClassCastException`.
+const TYPE_PARAMETER_FUNCTION_VALUE_CAST: &str = "import kotlin.coroutines.*\n\
+    suspend fun observe(f: (suspend () -> String?)?): String = if (f == null) \"null\" else \"adapter:\" + f()\n\
+    suspend fun <F : (() -> String?)?> pass(f: F) = observe(f)\n\
+    fun box(): String {\n\
+    \x20   var answer = \"unset\"\n\
+    \x20   suspend { pass { \"y\" } }.startCoroutine(Continuation(EmptyCoroutineContext) {\n\
+    \x20       answer = it.fold({ r -> r }, { e -> if (e is ClassCastException) \"CCE\" else \"other\" })\n\
+    \x20   })\n\
+    \x20   return answer\n\
+    }\n";
+
 /// `ContextArgumentEvaluatedBeforeExtensionReceiver`: a context argument written after the
 /// receiver; `box()` reports the order the operands were evaluated in.
 const CONTEXT_ARGUMENT_ORDER: &str = r#"// LANGUAGE: +ContextParameters +ExplicitContextArguments
@@ -194,6 +208,13 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             source: NULL_TYPE_PARAMETER_FUNCTION_VALUE_CONVERSION,
             with_defect: Outcome::Answer("NPE".to_string()),
             fixed: Outcome::Answer("null".to_string()),
+        }),
+        Quirk::TypeParameterFunctionValueSkipsSuspendConversion => Some(Defect {
+            platforms: &[Platform::Jvm],
+            fixed_on: &[],
+            source: TYPE_PARAMETER_FUNCTION_VALUE_CAST,
+            with_defect: Outcome::Answer("CCE".to_string()),
+            fixed: Outcome::Answer("adapter:y".to_string()),
         }),
         Quirk::ContextArgumentEvaluatedBeforeExtensionReceiver => Some(Defect {
             platforms: &[Platform::Jvm],

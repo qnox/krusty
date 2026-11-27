@@ -216,6 +216,19 @@ impl Checker<'_> {
         if !target.suspend && !unit_conversion {
             return None;
         }
+        // Some releases pass a type parameter with a nullable function bound to a suspend
+        // function type unconverted.
+        if target.suspend
+            && nominal.is_ty_param()
+            && nominal.upper_bound_admits_null()
+            && self
+                .file
+                .reference
+                .quirks()
+                .has(crate::kotlin_version::Quirk::TypeParameterFunctionValueSkipsSuspendConversion)
+        {
+            return None;
+        }
         self.expression_function_types(scope, expression, nominal)
             .into_iter()
             .find(|candidate| {
