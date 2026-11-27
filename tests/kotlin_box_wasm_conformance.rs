@@ -1039,28 +1039,6 @@ fn expect_wasm_box(src: &str, stem: &str) {
     }
 }
 
-/// Require both Wasm targets to decline `src` with exactly `reason`.
-fn expect_wasm_decline(src: &str, stem: &str, reason: &str) {
-    for target in WasmTarget::ALL {
-        let lane = WasmLane { target };
-        if !focused_wasm_lane_available(&lane, stem) {
-            return;
-        }
-        let outcome = lane.compile_and_run(
-            &std::env::temp_dir(),
-            stem,
-            &[(format!("{stem}.kt"), src.to_string())],
-            src,
-        );
-        assert_eq!(
-            outcome,
-            Outcome::Declined(reason.to_string()),
-            "{stem} on {}",
-            target.name()
-        );
-    }
-}
-
 // PLATFORM-SPECIFIC: exercise the shared box representation at Wasm's dependency call boundary.
 #[test]
 fn wasm_nested_source_and_dependency_arguments_share_boxing() {
