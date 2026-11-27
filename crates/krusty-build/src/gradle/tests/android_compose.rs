@@ -46,8 +46,8 @@ fn android_compose_app_is_compiled_by_krusty_with_a_handoff_for_what_it_refuses(
 
     // `:app` is refused by the Compose pass, so its Kotlin task is kotlinc's, once, with every
     // reason logged.
-    let header = "krusty: task ':app:compileDebugKotlinWithKrusty' is handed to kotlinc: a krusty \
-                  compiler plugin does not implement everything the module uses";
+    let header = "krusty: task ':app:compileDebugKotlin' is left to kotlinc: krusty does not \
+                  implement everything the module uses";
     let lines = output.lines().collect::<Vec<_>>();
     let at = lines
         .iter()
@@ -96,7 +96,7 @@ fn android_compose_app_is_compiled_by_krusty_with_a_handoff_for_what_it_refuses(
     // under test writes `CREATOR` differently from the plugin krusty reproduces: from 2.5 it is the
     // class's first declaration. The pull request that makes it so removes this exception.
     let kotlin = std::env::var("KRUSTY_GRADLE_KGP_VERSION").unwrap_or_default();
-    let model_differs: &[&str] = if kotlin == "2.5.0-RC" {
+    let model_differs: &[&str] = if kotlin == "2.5.0-RC2" {
         &["sample/model/CounterState.class"]
     } else {
         &[]

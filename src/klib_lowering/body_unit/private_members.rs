@@ -49,9 +49,13 @@ impl<'u, 's> Linker<'u, 's> {
                         value_member: Some(active),
                     },
                 )?;
-                // It is a member of its class like any other, one no subclass overrides.
-                ir.set_method_visibility(function, crate::types::Visibility::Private);
-                register_class_method(ir, class, function);
+                // It is a member of its class like any other, one no subclass overrides. An
+                // inline one is expanded into every call and never dispatched, so the class
+                // carries no method for it.
+                if !ir.inline_only_fns.contains(&function) {
+                    ir.set_method_visibility(function, crate::types::Visibility::Private);
+                    register_class_method(ir, class, function);
+                }
                 function
             }
         };
@@ -91,8 +95,9 @@ impl<'u, 's> Linker<'u, 's> {
     }
 
     /// The class that directly declares the private member `identity`: one this lowering made
-    /// active, or an object the bodies read. Kotlin makes a companion's private member visible in
-    /// its containing class, whose body reads the companion and calls the member on it.
+    /// active, an object the bodies read, or a class enclosing the calling one, which Kotlin lets
+    /// call its private members. Kotlin makes a companion's private member visible in its
+    /// containing class, whose body reads the companion and calls the member on it.
     fn private_member_class(
         &mut self,
         ir: &mut IrFile,
@@ -135,7 +140,10 @@ impl<'u, 's> Linker<'u, 's> {
             return Ok(None);
         };
         let callees: &'s super::super::KlibCalleeFacts<'s> = self.sources.callees;
-        let Some(object) = callees.read_object(classifier) else {
+        let Some(object) = callees
+            .read_class(classifier)
+            .or_else(|| callees.private_member_class(classifier))
+        else {
             return Ok(None);
         };
         let header = super::super::class_headers::authenticate_private_member(
@@ -184,4 +192,34 @@ fn private_class_member_header<'b>(
         member.types,
     )?;
     Ok((member.arena, member.function, header, member.formals))
+}
+
+/// A reference to the private class member `identity`, which the unit emits as `call` invokes it.
+pub(super) fn private_member_reference(
+    bodies: &KlibDeclarationBodies,
+    identity: &KlibDependencyCallable,
+    call: LinkedCallee,
+) -> Result<LinkedCallableReference, KlibBodyDeclineReason> {
+    let (Callee::Local(function), Some(receiver)) = (&call.callee, call.receiver) else {
+        return Err(KlibBodyDeclineReason::SignatureMismatch(
+            "a private member reference reaches no emitted member".to_owned(),
+        ));
+    };
+    let (crate::types::TyKind::Obj(owner, _), Some((_, declaration))) =
+        (receiver.kind(), bodies.function(identity))
+    else {
+        return Err(KlibBodyDeclineReason::SignatureMismatch(
+            "a private member reference has no class receiver".to_owned(),
+        ));
+    };
+    Ok(LinkedCallableReference {
+        target: super::super::body_lowering::LinkedReferenceTarget::PrivateMember {
+            owner,
+            name: declaration.name.as_str().into(),
+            function: *function,
+        },
+        kind: crate::libraries::ExternalCallableKind::Member,
+        extension_receiver_parameter: None,
+        call,
+    })
 }

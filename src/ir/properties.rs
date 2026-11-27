@@ -268,6 +268,8 @@ pub struct MemberExtProp {
     pub type_params: Vec<IrTypeParameter>,
     /// Annotations written on this property's accessor declarations.
     pub accessor_annotations: super::AccessorAnnotations,
+    /// Return-value status the property records in class metadata.
+    pub return_value_status: crate::types::ReturnValueStatus,
 }
 
 /// How a member property is declared, as Kotlin metadata records it; no JVM shape encodes these.
@@ -458,6 +460,11 @@ pub struct IrModuleProperty {
     /// Resolved Kotlin annotation identities. A target backend may interpret annotations in its
     /// namespace; common lowering never turns one into a physical access kind.
     pub annotations: Box<[TypeName]>,
+    /// The identities of the applications that land on the property itself: written without a
+    /// use-site target, or with `@property:`. `annotations` also lists the ones an accessor use-site
+    /// target (`@get:`, `@set:`) sends to an accessor, which `getter_annotations` and
+    /// `setter_annotations` hold.
+    pub property_annotations: Box<[TypeName]>,
     /// The annotations that land on the getter, whether written on it or targeted at it with
     /// `@get:`, with their constant string arguments. A target backend interprets the ones in its
     /// namespace for the accessor it emits.

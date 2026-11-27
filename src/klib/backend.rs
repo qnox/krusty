@@ -854,8 +854,8 @@ fn record_class_function_exports(
 /// another module through an entry: an annotation is instantiated from its declaration instead,
 /// and publishes no constructor. A generic class's entry takes its constructor's declared
 /// parameter types, which a KLIB target realizes as it realizes the class's own storage; an inner
-/// class's entry takes its enclosing instance first, as its constructor does. A class capturing
-/// type parameters of an enclosing declaration has no entry yet. Abstract and sealed classes
+/// class's entry takes its enclosing instance first, as its constructor does, and realizes the
+/// enclosing class's type parameters it captures the same way. Abstract and sealed classes
 /// retain initializer declarations for checked superclass delegation, without allocation exports.
 fn record_constructor_exports(
     ir: &IrFile,
@@ -881,7 +881,6 @@ fn record_constructor_exports(
         || source.is_companion
         || source.is_enum
         || source.is_annotation
-        || !source.captured_type_params.is_empty()
     {
         return Ok(());
     }

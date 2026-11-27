@@ -272,6 +272,7 @@ fn atomicfu_plugins(
         classpath: &[],
         module_name: "box",
         codegen_host: false,
+        module_ir_host: false,
     });
     let errors = resolved
         .diagnostics
@@ -310,7 +311,7 @@ pub(super) fn wasm_test_library(
         CompilationTarget::WasmWasi => "kotlin-test-wasm-wasi",
         _ => return None,
     };
-    let version = krusty::kotlin_version::target().to_string();
+    let version = krusty::kotlin_version::environment_release().to_string();
     let path = krusty::toolchain::ensure_maven_artifact(
         "org.jetbrains.kotlin",
         artifact,
@@ -406,7 +407,7 @@ pub fn compile<B: Backend>(
     } = stdlib_platform(compilation_target, &dependencies, &[]);
     let platform = krusty::frontend::PlatformProvider::new(compilation_target, semantics)
         .with_native_plugins(atomicfu_plugins(directive_source, compilation_target));
-    let features = krusty::features::LangFeatures::from_source(directive_source);
+    let features = krusty::features::LangFeatures::from_source_in_environment(directive_source);
     let mut diags = DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,
@@ -464,7 +465,7 @@ fn module_features(
     directive_source: &str,
     common_file_count: usize,
 ) -> krusty::features::LangFeatures {
-    let mut features = krusty::features::LangFeatures::from_source(directive_source);
+    let mut features = krusty::features::LangFeatures::from_source_in_environment(directive_source);
     if common_file_count != 0 {
         features.enable("MultiPlatformProjects");
     }
@@ -1107,9 +1108,22 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path, source: &str) -> Outcom
         && lane.platform() == box_ratchet::Platform::Native
         && source.contains("// MODULE:")
     {
-        let answer = timed(Stage::TargetOracle, || {
-            super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source)
+        let oracle = timed(Stage::TargetOracle, || {
+            super::kotlin_native_multimodule_support::kotlin_native_multimodule_outcome(&source)
         });
+        let answer = match oracle {
+            Some(super::kotlin_native_multimodule_support::NativeModulesOutcome::Answer(
+                answer,
+            )) => Some(answer),
+            Some(super::kotlin_native_multimodule_support::NativeModulesOutcome::Rejected(
+                reason,
+            )) => {
+                return Outcome::Harness(format!(
+                    "the pinned kotlinc-native oracle rejected the final module: {reason}"
+                ));
+            }
+            None => None,
+        };
         if answer.as_deref() != Some("OK") {
             return Outcome::Harness(format!(
                 "required Native oracle must return OK, got {answer:?}"
@@ -1234,7 +1248,7 @@ pub fn run(lane: &dyn Lane) {
         .unwrap_or_else(|error| panic!("{error}"));
     let relative = |file: &Path| box_ratchet::corpus_key(&corpus, file);
     let platform = lane.platform();
-    let version = krusty::kotlin_version::target();
+    let version = krusty::kotlin_version::environment_release();
     let corpus_cases: BTreeSet<String> = files.iter().map(|file| relative(file)).collect();
     // Triage knob: scan only the cases whose path contains this substring. The expected-failure
     // checks below cover the cases actually scanned, so a narrowed run stays self-consistent.
@@ -1420,7 +1434,7 @@ pub fn run(lane: &dyn Lane) {
             unexpected_failure_keys.extend(mismatches.unexpected_failures.iter().cloned());
             if !mismatches.is_empty() {
                 failed.push((
-                    PathBuf::from(format!("<{} box expectations>", platform.name())),
+                    box_ratchet::expectations_subject(platform),
                     mismatches.report(platform, version),
                 ));
             }
@@ -1518,7 +1532,7 @@ pub fn run(lane: &dyn Lane) {
         eprintln!("  known failure {}: {reason}", file.display());
     }
     for (file, reason) in &failed {
-        eprintln!("FAILED {}: {reason}", file.display());
+        eprintln!("{}", box_ratchet::failed_line(file, reason));
     }
     let byte_reference_failures = bytes.finish();
     for failure in &byte_reference_failures {

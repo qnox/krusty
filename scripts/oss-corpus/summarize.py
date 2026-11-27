@@ -170,6 +170,45 @@ def misses(project):
     return reasons.most_common()
 
 
+# The reasons the plugin logs when krusty fails a compile it took and the module is left to kotlinc
+# anyway; any other reason is a refusal the support check made up front.
+RUNTIME_FALLBACKS = (
+    ('krusty does not implement everything the module uses', 'unsupported'),
+    ('krusty failed with an internal error', 'internal'),
+    ('krusty reported errors', 'errors'),
+)
+
+
+def fallback_class(reason):
+    """`refused` for a compilation the support check left to kotlinc before krusty ran, else how krusty
+    failed once it compiled: `unsupported` (a construct it does not implement), `internal` (a bug) or
+    `errors` (errors kotlinc may not report)."""
+    for text, kind in RUNTIME_FALLBACKS:
+        if reason.startswith(text):
+            return kind
+    return 'refused'
+
+
+FALLBACK_CLASSES = ('refused', 'unsupported', 'internal', 'errors')
+
+
+def outcomes(project):
+    """Compilation counts: `built`, one per class of `fallback_class`, `failed` and `blocked`; they add
+    up to `compilations`. A compilation krusty did not build is blocked when a failed task kept it
+    from running, left to kotlinc when it logged a fallback, and failed otherwise."""
+    counts = collections.Counter()
+    for r in project['rows']:
+        if r['built']:
+            counts['built'] += 1
+        elif r.get('blocked_by'):
+            counts['blocked'] += 1
+        elif r.get('fallback'):
+            counts[fallback_class(r['fallback'])] += 1
+        else:
+            counts['failed'] += 1
+    return counts
+
+
 QUOTED = {quote: re.compile(f'{quote}[^{quote}]*{quote}') for quote in ("'", '`', '"')}
 
 
@@ -508,16 +547,18 @@ def report(projects, stars, surveys, title, previous=None, not_measured=()):
         out += [f'# {title}', '']
     # A published result carries the run that measured it: projects can come from different runs.
     dated = any('measured' in p for p in projects)
-    out += ['| Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Identical classes |'
-            + (' Measured |' if dated else ''),
-            '| --- | ---: | ---: | ---: | --- | ---: | ---: |' + (' --- |' if dated else '')]
+    out += ['| Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Refused up front | Unsupported | Internal error | Reported errors | Failed | Not run |'
+            ' Identical classes |' + (' Measured |' if dated else ''),
+            '| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |' + (' --- |' if dated else '')]
     built = compilations = identical = classes = 0
     for p in projects:
         measured = p['reference_exit'] == 0
         reference = 'ok' if measured else f"failed (exit {p['reference_exit']})"
+        counts = outcomes(p)
+        split = ' | '.join(str(counts[key]) for key in (*FALLBACK_CLASSES, 'failed', 'blocked'))
         star = f"{stars[p['name']]:,}" if p['name'] in stars else 'not fetched'
         out.append(f"| {p['name']} | {star} | {p['loc']['kotlin']:,} | {p['loc']['java']:,} | {reference} | "
-                   f"{p['built']} / {p['compilations']} | {p['identical']:,} / {p['classes']:,}"
+                   f"{p['built']} / {p['compilations']} | {split} | {p['identical']:,} / {p['classes']:,}"
                    f"{share(p['identical'], p['classes'])} |" + (f" {measured_cell(p)} |" if dated else ''))
         if measured:
             built += p['built']

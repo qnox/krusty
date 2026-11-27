@@ -6,8 +6,9 @@
 /// knows it (`+CompanionBlocks` is `+CompanionBlocksAndExtensions` before 2.5). Krusty reads the
 /// directives from the source itself.
 pub fn kotlinc_args(src: &str) -> Vec<String> {
-    let table = krusty::features::FeatureTable::for_version(krusty::kotlin_version::target())
-        .expect("the pinned reference release has a feature table");
+    let table =
+        krusty::features::FeatureTable::for_version(krusty::kotlin_version::environment_release())
+            .expect("the pinned reference release has a feature table");
     let flags = src
         .lines()
         .filter_map(|line| line.trim().strip_prefix("// LANGUAGE:"))

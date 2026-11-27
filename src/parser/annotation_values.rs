@@ -77,9 +77,10 @@ impl Parser<'_> {
             // A spread argument in an annotation (`@A(*arrayOf("O"), "K")` — a `vararg` annotation
             // parameter). Preserve the same spread fact as an ordinary call argument; checking uses
             // it to type the whole array and constant folding flattens its elements into the vararg.
+            let star = self.tok().span;
             self.bump(); // '*'
             let argument = self.parse_annotation_value()?;
-            self.file.spread_arg_ids.insert(argument.0);
+            self.file.spread_arg_stars.insert(argument.0, star);
             Some(argument)
         } else {
             Some(self.parse_expr())

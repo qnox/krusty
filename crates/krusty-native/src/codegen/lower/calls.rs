@@ -121,10 +121,7 @@ impl BodyLowering<'_, '_, '_> {
         } else {
             any()
         };
-        let mut params = Vec::with_capacity(record.parameters.len() + 1);
-        params.push(receiver_ty);
-        params.extend(record.parameters.iter().copied());
-        let ret = record.result;
+        let (params, ret) = Self::module_member_abi(record, Some(receiver_ty));
         let symbol =
             super::super::super::symbols::module_function_symbol(self.file.module_name, target);
         let id = self.file.import(&symbol, &params, ret)?;
@@ -138,6 +135,23 @@ impl BodyLowering<'_, '_, '_> {
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &arguments)?;
         Ok(self.builder.inst_results(call).first().copied())
+    }
+
+    /// The parameters and result a module member's symbol crosses with. The record keeps the
+    /// declared signature; a `suspend` member's symbol also takes its caller's continuation and
+    /// answers `Any?`, as every file realizes it.
+    fn module_member_abi(
+        record: &krusty::ir::IrModuleCallable,
+        receiver: Option<Ty>,
+    ) -> (Vec<Ty>, Ty) {
+        let mut params = Vec::with_capacity(record.parameters.len() + 2);
+        params.extend(receiver);
+        params.extend(record.parameters.iter().copied());
+        if record.is_suspend() {
+            params.push(any());
+            return (params, any());
+        }
+        (params, record.result)
     }
 
     /// A call dispatched through the table of `owner`, a class another file of the module
@@ -180,8 +194,7 @@ impl BodyLowering<'_, '_, '_> {
             model::Dispatch::Class(self.planned_class_slot(owner, target)?)
         };
         let record = &self.file.ir.referenced_module_callables[&target];
-        let params = record.parameters.to_vec();
-        let ret = record.result;
+        let (params, ret) = Self::module_member_abi(record, None);
         let Some(object) = self.receiver(receiver)? else {
             return Ok(None);
         };
@@ -412,6 +425,68 @@ impl BodyLowering<'_, '_, '_> {
                 {
                     return result;
                 }
+                let owner = super::super::super::intrinsics::DeclarationOwner::callable(
+                    realization.physical_owner,
+                    realization.declaration_owner,
+                );
+                // The Kotlin name the declaration PUBLISHES, not the spelling it is realized under.
+                // A physical name is an emit handle: a JVM realization may RENAME a member, and
+                // where the signature mentions a value class kotlinc appends a hash of the erasure
+                // (`UInt.compareTo` is realized as `compareTo-WZ4Q5Ns`). Neither is recoverable
+                // from the spelling, and neither has to be: the contract carries the Kotlin name
+                // beside it. Where it does not, the member declines rather than being guessed at.
+                let name = realization
+                    .reflection_name
+                    .clone()
+                    .unwrap_or_else(|| realization.name.clone());
+                // Intrinsic identity is the declaration's signature, not the types produced by
+                // call-site substitution. `compareTo<String>(...)`, for example, still names the
+                // declaration whose parameter is `T`; using the specialized `params`/`ret` here
+                // would make one declaration acquire a different intrinsic key at every call.
+                let generic_signature = realization.generic_sig.as_deref();
+                let declared_receiver = generic_signature
+                    .and_then(|signature| signature.receiver)
+                    .or(realization.source_receiver);
+                let declared_params = if let Some(signature) = generic_signature {
+                    std::borrow::Cow::Borrowed(signature.params.as_slice())
+                } else {
+                    let parameters = realization
+                        .declared_params
+                        .as_deref()
+                        .unwrap_or(&realization.params);
+                    if realization.is_extension() && parameters.len() > realization.context_count {
+                        let mut parameters = parameters.to_vec();
+                        parameters.remove(realization.context_count);
+                        std::borrow::Cow::Owned(parameters)
+                    } else {
+                        std::borrow::Cow::Borrowed(parameters)
+                    }
+                };
+                let declared_ret = generic_signature
+                    .map(|signature| signature.ret)
+                    .or(realization.declared_ret)
+                    .unwrap_or(realization.ret);
+                let signature = super::super::super::intrinsics::FunctionSignature::new(
+                    owner,
+                    &name,
+                    declared_params.as_ref(),
+                    declared_ret,
+                )
+                .with_receiver(declared_receiver)
+                .with_context_count(realization.context_count)
+                .with_overridden(&realization.overridden_declarations);
+                // The runtime owns `lazy { … }`: the exported body of the library's own `lazy` is
+                // an intrinsic stub that throws, so the export must not win over the construction.
+                if dispatch_receiver.is_none() {
+                    if let Some(realized) = self.lazy_construction(signature, args) {
+                        return realized;
+                    }
+                }
+                if let Some(realized) =
+                    self.floating_range_construction(signature, dispatch_receiver, args, *ret)
+                {
+                    return realized;
+                }
                 let symbols = self.file.dependency_symbols;
                 let export_of = |realization: &krusty::backend::BackendCallableFact| {
                     realization
@@ -467,9 +542,16 @@ impl BodyLowering<'_, '_, '_> {
                         args,
                     );
                 }
-                if let Some(function) = &realization.direct_c_function {
+                // A runtime entry the linked runtime defines is called as it is bound. One it does
+                // not define falls through to the realizations below that name the declaration by
+                // its owner. That second realization is transitional: it shrinks as the runtime
+                // defines more entries, and goes once it defines every one the library binds.
+                if let Some(function) = realization.direct_c_function.as_ref().filter(|function| {
+                    function.abi() == krusty::libraries::CFunctionAbi::Interop
+                        || self.file.runtime_symbols.contains(function.symbol())
+                }) {
                     return self.direct_c_call(
-                        function.symbol(),
+                        function,
                         params,
                         *ret,
                         defaults,
@@ -491,56 +573,6 @@ impl BodyLowering<'_, '_, '_> {
                 ) {
                     return realized;
                 }
-                let owner = super::super::super::intrinsics::DeclarationOwner::callable(
-                    realization.physical_owner,
-                    realization.declaration_owner,
-                );
-                // The Kotlin name the declaration PUBLISHES, not the spelling it is realized under.
-                // A physical name is an emit handle: a JVM realization may RENAME a member, and
-                // where the signature mentions a value class kotlinc appends a hash of the erasure
-                // (`UInt.compareTo` is realized as `compareTo-WZ4Q5Ns`). Neither is recoverable
-                // from the spelling, and neither has to be: the contract carries the Kotlin name
-                // beside it. Where it does not, the member declines rather than being guessed at.
-                let name = realization
-                    .reflection_name
-                    .clone()
-                    .unwrap_or_else(|| realization.name.clone());
-                // Intrinsic identity is the declaration's signature, not the types produced by
-                // call-site substitution. `compareTo<String>(...)`, for example, still names the
-                // declaration whose parameter is `T`; using the specialized `params`/`ret` here
-                // would make one declaration acquire a different intrinsic key at every call.
-                let generic_signature = realization.generic_sig.as_deref();
-                let declared_receiver = generic_signature
-                    .and_then(|signature| signature.receiver)
-                    .or(realization.source_receiver);
-                let declared_params = if let Some(signature) = generic_signature {
-                    std::borrow::Cow::Borrowed(signature.params.as_slice())
-                } else {
-                    let parameters = realization
-                        .declared_params
-                        .as_deref()
-                        .unwrap_or(&realization.params);
-                    if realization.is_extension() && parameters.len() > realization.context_count {
-                        let mut parameters = parameters.to_vec();
-                        parameters.remove(realization.context_count);
-                        std::borrow::Cow::Owned(parameters)
-                    } else {
-                        std::borrow::Cow::Borrowed(parameters)
-                    }
-                };
-                let declared_ret = generic_signature
-                    .map(|signature| signature.ret)
-                    .or(realization.declared_ret)
-                    .unwrap_or(realization.ret);
-                let signature = super::super::super::intrinsics::FunctionSignature::new(
-                    owner,
-                    &name,
-                    declared_params.as_ref(),
-                    declared_ret,
-                )
-                .with_receiver(declared_receiver)
-                .with_context_count(realization.context_count)
-                .with_overridden(&realization.overridden_declarations);
                 match dispatch_receiver {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.

@@ -235,10 +235,7 @@ impl ProductionSignatureSemantics<'_> {
             }
             let module =
                 crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-            let source = crate::symbol_source::CompositeSource::new(vec![
-                &module as &dyn crate::symbol_source::SymbolSource,
-                &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-            ]);
+            let source = self.source_over(&module);
             let source = &source as &dyn crate::symbol_source::SymbolSource;
             let supertypes = crate::symbol_resolver::direct_supertypes(source, current);
             let selected = self
@@ -502,10 +499,7 @@ impl ProductionSignatureSemantics<'_> {
                 .values();
             let module =
                 crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-            let source = crate::symbol_source::CompositeSource::new(vec![
-                &module as &dyn crate::symbol_source::SymbolSource,
-                &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-            ]);
+            let source = self.source_over(&module);
             let oracle = crate::symbol_resolver::SourceOracle(&source);
             let receivers = self.implicit_receivers(scope);
             let mut applicable = properties

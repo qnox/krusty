@@ -10,7 +10,7 @@
 //! for those releases, alongside the isolated nullable control. These tests run each whole program
 //! and also return its `describe()`, pinning which binding the reference release chooses.
 
-use krusty::kotlin_version::{Quirk, Quirks};
+use krusty::kotlin_version::Quirk;
 
 use super::common;
 
@@ -66,8 +66,11 @@ fn a_type_variable_input_binds_the_vararg_as_the_reference_release_does() {
 
 #[test]
 fn the_original_nullable_and_nonnullable_inputs_keep_the_reference_binding_together() {
-    if !krusty::conformance::kotlinc_release_applicable(BEFORE_25, krusty::kotlin_version::target())
-        .expect("the shared fixture declares a valid release range")
+    if !krusty::conformance::kotlinc_release_applicable(
+        BEFORE_25,
+        krusty::kotlin_version::environment_release(),
+    )
+    .expect("the shared fixture declares a valid release range")
     {
         return;
     }
@@ -75,7 +78,9 @@ fn the_original_nullable_and_nonnullable_inputs_keep_the_reference_binding_toget
 }
 
 fn assert_reference_binding(program: &str, nullable: bool) {
-    let element = Quirks::target().has(Quirk::VarargReferenceTakesTypeVariableInputAsElement);
+    let element =
+        krusty::kotlin_version::Quirks::of_release(krusty::kotlin_version::environment_release())
+            .has(Quirk::VarargReferenceTakesTypeVariableInputAsElement);
     let source = source(program);
     let reference = common::kotlinc_box_result(&source);
     assert_eq!(reference, expected(element, nullable), "kotlinc");

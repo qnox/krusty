@@ -93,12 +93,9 @@ impl Checker<'_> {
                 })
         };
         let actual = crate::types::ty_declared_at_call(actual, site);
-        let selected = if fixed_target.is_some() {
-            select_fixed_sam_constructor(&self.fed_source(), signature, target, actual)
-        } else {
-            select_sam_constructor(&self.fed_source(), signature, actual)
-        };
-        let Some(selected) = selected else {
+        let Some(selected) =
+            select_sam_constructor(&self.fed_source(), signature, fixed_target, actual)
+        else {
             return Ok(None);
         };
         let specialized_callable = Ty::fun_with_shape(

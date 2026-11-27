@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use super::server_pool::{self, server_pool_cap};
+use super::server_pool::{self, kotlinc_pool_cap};
 use super::{
     byte_dump, die_with_parent, java_home, kotlinc_lib_dir, protocol_jvm_log_args,
     read_exact_deadline, spawn_owned, ProfGuard,
@@ -305,11 +305,22 @@ const KOTLINC_SERVER_JVM_OPTIONS: [&str; 5] = [
     "-Xmn256m",
 ];
 
+/// What one reference-compiler server holds once warm, for [`server_pool::Budget`]: its 1 GiB heap
+/// and 256 MiB code cache, plus metaspace and thread stacks.
+const KOTLINC_SERVER_RESIDENT_MIB: u64 = 1536;
+
 /// A persistent JVM running the in-process `KotlincServer` compiler, fed compiler arg-lists over a pipe.
 struct KotlincServer {
-    _child: Child,
+    child: Child,
     stdin: ChildStdin,
     stdout: ChildStdout,
+}
+
+impl Drop for KotlincServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl KotlincServer {
@@ -354,7 +365,7 @@ impl KotlincServer {
         let stdin = child.stdin.take()?;
         let stdout = child.stdout.take()?;
         Some(KotlincServer {
-            _child: child,
+            child,
             stdin,
             stdout,
         })
@@ -393,7 +404,7 @@ impl KotlincServer {
 
 /// Pools of persistent compiler servers, one per classpath and JVM-property set. Callers claim a
 /// server, then compile outside the pool lock, so overlapping compiles use distinct JVMs up to
-/// [`server_pool_cap`].
+/// [`kotlinc_pool_cap`].
 type KotlincPools = Mutex<HashMap<String, Arc<server_pool::Pool<KotlincServer>>>>;
 
 /// Compile with the reference compiler via the persistent server. `args` are ordinary `kotlinc` CLI
@@ -409,7 +420,7 @@ type KotlincPools = Mutex<HashMap<String, Arc<server_pool::Pool<KotlincServer>>>
 /// other compile shares, and does not pass it through to the compiler.
 pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
     let jar = kotlin_compiler_jar()?;
-    let release = krusty::kotlin_version::target().to_string();
+    let release = krusty::kotlin_version::environment_release().to_string();
     // The provisioned distribution of the process release is that compiler. An override
     // (`KRUSTY_KOTLINC`) names a different jar and keeps this function on that jar.
     if compiler_jar_for_release(&release).as_deref() == Some(jar.as_ref()) {
@@ -471,7 +482,7 @@ pub fn kotlinc_lib_for_release(release: &str) -> Option<PathBuf> {
     if distribution_is_complete(release) {
         return jar.parent().map(Path::to_path_buf);
     }
-    if release == krusty::kotlin_version::target().to_string() {
+    if release == krusty::kotlin_version::environment_release().to_string() {
         if let Some(jar) = kotlin_compiler_jar() {
             return jar.parent().map(Path::to_path_buf);
         }
@@ -705,13 +716,18 @@ fn kotlinc_compile_on(
         let mut pools = pools.lock().unwrap_or_else(|err| err.into_inner());
         pools
             .entry(pool_key)
-            .or_insert_with(|| Arc::new(server_pool::Pool::new()))
+            .or_insert_with(|| {
+                Arc::new(server_pool::Pool::resident(
+                    server_pool::Budget::process(),
+                    KOTLINC_SERVER_RESIDENT_MIB,
+                ))
+            })
             .clone()
     };
     let admission = Instant::now();
     let spawning = Cell::new(Duration::ZERO);
     pool.with_server(
-        server_pool_cap(),
+        kotlinc_pool_cap(),
         || {
             let started = Instant::now();
             let server = KotlincServer::new(&java, &cp, &compiler, &properties);
@@ -799,15 +815,23 @@ mod provisioning_tests {
         std::fs::create_dir_all(&bin).expect("create bin");
         std::fs::write(bin.join("kotlinc"), "#!/bin/sh\n").expect("write the launcher");
         let zip = work.join("kotlinc.zip");
-        let status = Command::new("jar")
-            .arg("--create")
-            .arg("--file")
-            .arg(&zip)
-            .arg("-C")
+        // Python's zipfile writes the archive: the harness does not depend on a JDK `jar` tool.
+        let status = Command::new("python3")
+            .arg("-I")
+            .arg("-c")
+            .arg(
+                "import os, sys, zipfile\n\
+                 root, out = sys.argv[1], sys.argv[2]\n\
+                 with zipfile.ZipFile(out, 'w') as z:\n\
+                 \x20   for d, _, files in os.walk(root):\n\
+                 \x20       for f in files:\n\
+                 \x20           p = os.path.join(d, f)\n\
+                 \x20           z.write(p, os.path.relpath(p, root))\n",
+            )
             .arg(&tree)
-            .arg("kotlinc")
+            .arg(&zip)
             .status()
-            .expect("run jar");
+            .expect("run python3");
         assert!(status.success(), "archive the payload");
         format!("file://{}", zip.display())
     }
@@ -840,6 +864,21 @@ mod provisioning_tests {
                     .starts_with(".staging")),
             "the staging directory is removed"
         );
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    // A run killed mid-download never reaches its cleanup trap; the next provisioner removes the
+    // staging directory it left.
+    #[test]
+    fn a_staging_directory_a_killed_run_left_is_removed() {
+        let work = super::super::scratch_dir().expect("allocate a directory");
+        let url = archive(&work);
+        let dest = work.join("cache/9.9.5");
+        let stale = dest.join(".staging-1");
+        std::fs::create_dir_all(&stale).expect("create the stale staging directory");
+        std::fs::write(stale.join("kotlinc.zip"), "partial").expect("write the stale download");
+        provision_distribution(&dest, "9.9.5", Some(&url)).expect("provision");
+        assert!(!stale.exists(), "the stale staging directory is removed");
         let _ = std::fs::remove_dir_all(&work);
     }
 
@@ -925,11 +964,20 @@ mod provisioning_tests {
         std::fs::create_dir_all(&tools).expect("create the tool directory");
         let path = std::env::var_os("PATH").expect("PATH");
         for tool in [
-            "bash", "mkdir", "rm", "mv", "chmod", "curl", "unzip", "python3", "jar", "env", "sh",
+            "bash", "mkdir", "rm", "mv", "chmod", "curl", "unzip", "python3", "env", "sh",
         ] {
-            let found = std::env::split_paths(&path)
+            // A wrapper script on PATH (a shell guard around `rm`, say) needs the PATH this test
+            // withholds, so the real executable is the first candidate that is not a script.
+            let candidates: Vec<_> = std::env::split_paths(&path)
                 .map(|dir| dir.join(tool))
-                .find(|candidate| candidate.is_file());
+                .filter(|candidate| candidate.is_file())
+                .collect();
+            let found = candidates
+                .iter()
+                .find(|candidate| {
+                    std::fs::read(candidate).is_ok_and(|bytes| !bytes.starts_with(b"#!"))
+                })
+                .or(candidates.first());
             if let Some(found) = found {
                 std::os::unix::fs::symlink(found, tools.join(tool)).expect("link the tool");
             }

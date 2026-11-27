@@ -2,6 +2,8 @@
 //! Kotlin precedence table. Line breaks are not tokens: each token records whether one precedes it,
 //! and only the line-sensitive grammar points consult that (see `parser/line_breaks.rs`).
 
+mod file_headers;
+
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
 use crate::features::LangFeatures;
@@ -14,6 +16,7 @@ mod annotation_classes;
 mod annotation_values;
 mod anonymous_functions;
 mod class_recovery;
+mod comment_binding;
 mod companion_declarations;
 mod constructors;
 mod context_clause;
@@ -22,6 +25,7 @@ mod declaration_bodies;
 mod declaration_modifiers;
 mod declaration_stream;
 mod destructuring;
+mod enum_entries;
 mod expressions;
 mod file_features;
 mod for_loops;
@@ -621,6 +625,9 @@ struct Parser<'a> {
     /// Whether a physical line break separates `t[i]` from the token before it (always true at
     /// end of input), as kotlinc's `newlineBeforeCurrentToken`.
     newline_before: Vec<bool>,
+    /// Spans where the shared file preamble recognized an `import` directive. `import` is a soft
+    /// keyword, so the grammar consults this inventory instead of a keyword token.
+    file_import_starts: Vec<u32>,
     i: usize,
     file: File,
     diags: &'a mut DiagSink,
@@ -811,6 +818,7 @@ impl<'a> Parser<'a> {
             src,
             t,
             newline_before,
+            file_import_starts: crate::token::file_header::from_tokens(src, tokens).import_starts,
             i: 0,
             file,
             diags,
@@ -1023,47 +1031,6 @@ impl<'a> Parser<'a> {
             .adopt_hoisted_classifiers(id, declaration_index + 1);
     }
 
-    /// Parse one `import` directive, recording its path (and, for a single-name import, the
-    /// classifier reference it names).
-    fn parse_import_directive(&mut self) {
-        self.bump(); // 'import'
-        let import_span = self.tok().span;
-        let segments = self.parse_qualified_name_segments();
-        let fq = segments
-            .iter()
-            .map(|(segment, _)| segment.as_str())
-            .collect::<Vec<_>>()
-            .join(".");
-        // `import a.b.*` — the segment scan consumes the trailing `.` (it only keeps a
-        // segment when an `Ident` follows), leaving us at `*`. Recover the wildcard so it is
-        // recorded as `a.b.*` (the form the import-level builder recognizes).
-        let mut wildcard = false;
-        if self.at(TokenKind::Star) {
-            self.bump(); // '*'
-            wildcard = true;
-        }
-        let mut alias = None;
-        if self.at(TokenKind::Ident) && self.keyword_text("as") {
-            self.bump(); // 'as'
-            if self.at(TokenKind::Ident) {
-                alias = Some(self.text().to_string());
-                self.bump();
-            }
-        }
-        if !fq.is_empty() {
-            if !wildcard {
-                let mut reference = simple_type_ref(&fq, import_span);
-                reference.flags = reference.flags.with_import(true);
-                self.file.detached_type_refs.push(reference);
-            }
-            self.file.import_paths.push(crate::ast::ImportPath {
-                segments,
-                wildcard,
-                alias,
-            });
-        }
-    }
-
     fn parse_file(&mut self) {
         self.parse_file_with_declaration_sink(&mut |_| {});
     }
@@ -1084,8 +1051,7 @@ impl<'a> Parser<'a> {
                 self.parse_annotation();
                 continue;
             }
-            let file_header_item =
-                matches!(self.kind(), TokenKind::KwPackage | TokenKind::KwImport);
+            let file_header_item = self.at(TokenKind::KwPackage) || self.at_import_directive();
             if !file_header_item {
                 if let Some((name, definition)) = self.script.take() {
                     self.parse_script_class(&name, &definition);
@@ -1146,7 +1112,7 @@ impl<'a> Parser<'a> {
                         self.file.package = Some(pkg);
                     }
                 }
-                TokenKind::KwImport => self.parse_import_directive(),
+                TokenKind::Ident if self.at_import_directive() => self.parse_import_directive(),
                 // `fun interface F { fun m(…): R }` — a SAM interface (parsed as an interface).
                 TokenKind::KwFun
                     if self
@@ -1350,7 +1316,7 @@ impl<'a> Parser<'a> {
             return false;
         };
         match token.kind {
-            KwFun | KwClass | KwVal | KwVar | KwImport | KwPackage | At => true,
+            KwFun | KwClass | KwVal | KwVar | KwPackage | At => true,
             Ident => {
                 self.token_is_modifier(token)
                     || (!self.token_is_escaped_ident(token)
@@ -1363,6 +1329,7 @@ impl<'a> Parser<'a> {
                                 | "typealias"
                                 | "data"
                                 | "companion"
+                                | "import"
                         ))
             }
             _ => false,
@@ -2039,140 +2006,7 @@ impl<'a> Parser<'a> {
             let members_only = self.at(TokenKind::Semicolon);
             self.skip_semicolons();
             if !members_only {
-                loop {
-                    let (entry_ann_names, entry_ann_args) = self.parse_enum_entry_prefix();
-                    if !self.at(TokenKind::Ident) {
-                        break;
-                    }
-                    let entry_span = self.tok().span;
-                    let entry_name = self.text().to_string();
-                    self.bump();
-                    // Optional constructor arguments: `RED(0xFF0000)`, incl. named `RED(rgb = 0xFF0000)`.
-                    let (args, arg_names) = if self.eat(TokenKind::LParen) {
-                        let (args, names, _) = self.parse_call_argument_list();
-                        self.expect(TokenKind::RParen, "')'");
-                        (args, names)
-                    } else {
-                        (Vec::new(), Vec::new())
-                    };
-                    // A per-entry class body (`RED { override fun m() = … }`) is an anonymous subclass.
-                    // Capture its method overrides and `val`/`var` properties; anything else bails cleanly.
-                    let mut body = Vec::new();
-                    let mut bprops = Vec::new();
-                    let mut init_order = Vec::new();
-                    if self.eat(TokenKind::LBrace) {
-                        let entry_nested_start = self.file.decls.len();
-                        self.skip_semicolons();
-                        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-                            let bmods = self.parse_member_decl_prefix();
-                            let entry_owner = format!("{name}.{entry_name}");
-                            let nested_start = self.file.decls.len();
-                            if self.parse_and_register_nested_classifier(&entry_owner, &bmods, true)
-                            {
-                                if let Some(&declaration) = self.file.decls.get(nested_start) {
-                                    self.file
-                                        .enum_entry_nested_classifier_owners
-                                        .insert(declaration, entry_span);
-                                }
-                                // An `inner` classifier declared by an enum entry captures the entry value,
-                                // whose source type is the enum—not a separately nameable entry-subclass
-                                // type. Keep the JVM/source nesting path (`Enum.ENTRY.Inner`) while recording
-                                // the semantic dispatch receiver (`Enum`) independently.
-                                if bmods.iter().any(|modifier| modifier == "inner") {
-                                    if let Some(&declaration) = self.file.decls.get(nested_start) {
-                                        if let Decl::Class(nested) = self.file.decl_mut(declaration)
-                                        {
-                                            nested.inner_of = Some(name.clone());
-                                        }
-                                    }
-                                }
-                            } else if self.at(TokenKind::KwFun) {
-                                body.push(self.parse_fun(&bmods));
-                            } else if self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar) {
-                                let property = self.parse_member_property(
-                                    &bmods,
-                                    false,
-                                    bmods.iter().any(|m| m == "abstract"),
-                                );
-                                init_order.push(ClassInit::PropInit(bprops.len()));
-                                bprops.push(property);
-                            } else if self.at(TokenKind::Ident)
-                                && self.keyword_text("init")
-                                && self
-                                    .t
-                                    .get(self.i + 1)
-                                    .is_some_and(|token| token.kind == TokenKind::LBrace)
-                            {
-                                init_order.push(ClassInit::Block(self.parse_init_block()));
-                            } else {
-                                self.diags.error(
-                                    self.tok().span,
-                                    "expected an enum-entry member declaration",
-                                );
-                                while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-                                    self.bump();
-                                }
-                            }
-                            self.skip_semicolons();
-                        }
-                        self.expect(TokenKind::RBrace, "'}'");
-                        // Classifiers are parser-hoisted out of an enum-entry body. Retain the
-                        // structural entry boundary for every outermost classifier created while
-                        // parsing that body, including anonymous objects in properties, methods,
-                        // and init blocks. Descendants remain owned by their containing classifier
-                        // through source containment; attaching all newly created declarations
-                        // directly to the entry would flatten anonymous/named nesting.
-                        let nested = self.file.decls[entry_nested_start..]
-                            .iter()
-                            .copied()
-                            .filter(|declaration| {
-                                matches!(self.file.decl(*declaration), Decl::Class(_))
-                            })
-                            .collect::<Vec<_>>();
-                        for &declaration in &nested {
-                            let Decl::Class(class) = self.file.decl(declaration) else {
-                                continue;
-                            };
-                            let has_nested_owner = nested.iter().copied().any(|candidate| {
-                                if candidate == declaration {
-                                    return false;
-                                }
-                                matches!(self.file.decl(candidate), Decl::Class(owner)
-                                    if owner.span.lo <= class.span.lo
-                                        && class.span.hi <= owner.span.hi)
-                            });
-                            if !has_nested_owner {
-                                self.file
-                                    .enum_entry_nested_classifier_owners
-                                    .entry(declaration)
-                                    .or_insert(entry_span);
-                            }
-                        }
-                    }
-                    entries.push(AstEnumEntry {
-                        name: entry_name,
-                        span: entry_span,
-                        decl_line: 0,
-                        annotations: entry_ann_names,
-                        annotation_args: entry_ann_args,
-                        args,
-                        arg_names,
-                        methods: body,
-                        props: bprops,
-                        init_order,
-                    });
-                    self.skip_semicolons();
-                    if !self.eat(TokenKind::Comma) {
-                        break;
-                    }
-                    // After a trailing comma, a `;` still ends the entry list: `A, ; constructor(…)`
-                    // declares a member, not an entry `constructor`.
-                    let ends_entries = self.at(TokenKind::Semicolon);
-                    self.skip_semicolons();
-                    if ends_entries {
-                        break;
-                    }
-                }
+                entries = self.parse_enum_entries(&name);
             }
             // Members follow a `;` separator (lexed as a newline): `enum class C { A, B; fun f() … }`.
             loop {
@@ -2509,10 +2343,10 @@ impl<'a> Parser<'a> {
                 names.push(None);
                 name_spans.push(None);
             }
-            let spread = self.eat(TokenKind::Star);
+            let star = self.eat_span(TokenKind::Star);
             let arg = self.parse_expr();
-            if spread {
-                self.file.spread_arg_ids.insert(arg.0);
+            if let Some(star) = star {
+                self.file.spread_arg_stars.insert(arg.0, star);
             }
             args.push(arg);
             self.skip_semicolons();
@@ -4146,6 +3980,16 @@ fn unquote_char(raw: &str) -> u16 {
     decode_char_literal_content(inner).unwrap_or(0)
 }
 
+/// The value of verbatim raw-string text. kotlinc reads `\r\n` and a lone `\r` as `\n`, so a raw
+/// string written across such line breaks holds `\n`.
+fn raw_string_value(text: &str) -> KtString {
+    if text.contains('\r') {
+        KtString::from(crate::diag::kotlinc_offsets::kotlinc_text(text).as_str())
+    } else {
+        KtString::from(text)
+    }
+}
+
 /// Unescape a literal chunk of a string template (no surrounding quotes).
 fn unescape_chunk(inner: &str) -> KtString {
     let mut out = KtStringBuf::with_capacity(inner.len());
@@ -4230,7 +4074,7 @@ fn unquote(raw: &str) -> KtString {
             .strip_prefix("\"\"\"")
             .and_then(|s| s.strip_suffix("\"\"\""))
             .unwrap_or(raw);
-        return KtString::from(inner);
+        return raw_string_value(inner);
     }
     let inner = raw
         .strip_prefix('"')

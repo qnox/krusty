@@ -16,6 +16,7 @@
 // not define it, and repeated builds of the same checkout remain cached.
 const _: Option<&str> = option_env!("KRUSTY_BUILD_CHECKOUT");
 
+pub mod analysis;
 mod annotation_names;
 mod convention;
 pub mod ir;
@@ -25,6 +26,6 @@ mod option;
 
 pub use annotation_names::{annotations_from_options, classifier_identities, Presets};
 pub use convention::{Convention, ConventionPlugin};
-pub use krusty_names::TypeName;
+pub use krusty_core::TypeName;
 pub use module_ir_plugin::{ModuleIrPlugin, ModuleIrRefusal};
 pub use option::PluginOption;

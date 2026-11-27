@@ -12,6 +12,7 @@ use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 use crate::plugins::registry::NativePlugins;
 use crate::script_definitions::ScriptDefinition;
 
+mod declaration_outline;
 mod explicit_api;
 mod external_modifier_targets;
 mod header_validation;
@@ -24,6 +25,7 @@ mod modifier_containing_declarations;
 mod no_expect_for_actual;
 mod published_declarations;
 mod published_overrides;
+pub use declaration_outline::{DeclarationOutline, OutlineKind, OutlineNode};
 pub use published_overrides::OverriddenMember;
 mod retained_syntax;
 #[cfg(test)]
@@ -303,11 +305,7 @@ impl ReparseSource {
     }
 
     pub(crate) fn source_line_count(&self) -> u32 {
-        let newlines = u32::try_from(self.text.bytes().filter(|byte| *byte == b'\n').count())
-            .expect("a source file cannot contain more than u32::MAX physical newlines");
-        newlines
-            .checked_add(1)
-            .expect("a source file line count must fit in u32")
+        crate::diag::line_breaks::line_count(&self.text)
     }
 
     /// Run the ordinary checker during Pass 2 when Pass 1 published only a partial semantic index.
@@ -605,6 +603,7 @@ struct UnmatchedExpectRoots<'a> {
     incompatible: &'a crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     symbols: &'a FrontendSymbols,
     module_name: &'a str,
+    reference: crate::features::ReferenceProfile,
     silent: bool,
 }
 
@@ -619,6 +618,7 @@ fn report_unmatched_expect_roots(
         incompatible,
         symbols,
         module_name,
+        reference,
         silent,
     } = context;
     let mut unmatched = headers
@@ -687,7 +687,7 @@ fn report_unmatched_expect_roots(
         diags.error_kind(
             range,
             crate::diag::DiagnosticKind::Actualization,
-            crate::diagnostic_wording::no_actual_for_expect(name, module_name, target),
+            crate::diagnostic_wording::no_actual_for_expect(reference, name, module_name, target),
         );
     }
 }
@@ -1630,6 +1630,7 @@ where
             &files[inferred_count..],
             platform,
             native_plugins.clone(),
+            project_features.reference(),
             target,
             &mut dependency_diags,
         );
@@ -1653,10 +1654,13 @@ where
     }
     let mut symbols = crate::resolve::collect_signatures_with_cp_headers_and_local_contexts(
         &files[..inferred_end],
-        &pass1_headers,
-        &local_class_contexts[..inferred_end],
+        crate::resolve::PassOneHeaders {
+            headers: &pass1_headers,
+            local_contexts: &local_class_contexts[..inferred_end],
+        },
         platform,
         native_plugins,
+        project_features.reference(),
         target,
         diags,
     );
@@ -1673,6 +1677,7 @@ where
                 incompatible: &incompatible_expects,
                 symbols: &symbols,
                 module_name,
+                reference: project_features.reference(),
                 silent: expect_bodies_rejected,
             },
             &mut parse_errors,
@@ -1774,6 +1779,7 @@ where
                 &incompatible_members,
                 &symbols,
                 &pass1_headers,
+                project_features.reference(),
                 diags,
             );
             no_expect_for_actual::report_unactualized_members(
@@ -1782,6 +1788,7 @@ where
                 &expected_members,
                 &symbols,
                 &pass1_headers,
+                project_features.reference(),
                 diags,
             );
         }

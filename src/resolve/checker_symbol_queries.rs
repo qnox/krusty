@@ -36,6 +36,7 @@ impl Checker<'_> {
             self.file_index,
             self.lexical_source_class_names(),
         )
+        .with_visibility_suppression(self.visibility_access_suppressed())
         .with_member_access(self)
     }
 
@@ -173,7 +174,8 @@ impl Checker<'_> {
     pub(super) fn stable_single_top_level_signature(&self, name: &str) -> Option<Signature> {
         let mut declarations = self
             .resolver()
-            .top_level_candidates(name)
+            .owning_level_top_level_functions(name)
+            .overloads
             .into_iter()
             .filter(|function| function.stable_declaration.is_some());
         let declaration = declarations.next()?;

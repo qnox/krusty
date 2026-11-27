@@ -126,7 +126,9 @@ impl Checker<'_> {
                     .functions()
                     .iter()
                     .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
-                    .any(|candidate| same_callable_declaration(candidate, selected))
+                    .any(|candidate| {
+                        crate::symbol_resolver::same_callable_declaration(candidate, selected)
+                    })
             })
             .collect::<Vec<_>>();
         match matching.as_slice() {
@@ -243,26 +245,4 @@ impl Checker<'_> {
             _ => None,
         }
     }
-}
-
-fn same_callable_declaration(
-    left: &crate::libraries::FunctionInfo,
-    right: &crate::libraries::FunctionInfo,
-) -> bool {
-    if let (Some(left), Some(right)) = (left.stable_declaration, right.stable_declaration) {
-        return left == right;
-    }
-    if let (Some(left), Some(right)) = (left.source_member, right.source_member) {
-        return left == right;
-    }
-    if let (Some(left), Some(right)) = (
-        left.callable.external_identity,
-        right.callable.external_identity,
-    ) {
-        return left == right;
-    }
-    left.kind == right.kind
-        && left.callable.owner == right.callable.owner
-        && left.callable.name == right.callable.name
-        && left.callable.descriptor == right.callable.descriptor
 }

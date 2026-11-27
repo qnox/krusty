@@ -71,9 +71,10 @@ the log names, and the default ones, are probed: `<name>.warmup.http.tsv` and st
 status (`000` for a host that does not answer), because Gradle reports any refused download as "not
 found".
 
-A project's job fails when the reference kotlinc build or the krusty build fails, after the
-comparison has recorded how far each got, so the project still appears in the report; the `summary`
-job runs either way.
+A project's job fails only when its reference kotlinc build fails, after the comparison has
+recorded how far it got, so the project still appears in the report; the `summary` job runs either
+way. A compilation krusty fails, and so a failed krusty build, is a result the report carries, not a
+job failure.
 
 The krusty build is also sampled: `perf` records every process at 99 Hz while it runs (the corpus
 binary keeps frame pointers), `hotspots.py` folds the krusty processes' call stacks, and

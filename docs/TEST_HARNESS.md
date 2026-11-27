@@ -17,7 +17,7 @@ which is why `just fmt` and `just fmt-check` also pass `tests/*_e2e.rs` to rustf
 
 `krusty-plugin-api` records the workspace's existing `KRUSTY_BUILD_CHECKOUT` input in Rust dep-info.
 Its `shared_checkout` integration test builds two copies of the real API crate (with the
-`krusty-names` crate it depends on) against one Cargo target, proves each consumer sees its own API,
+`krusty-core` crate it depends on) against one Cargo target, proves each consumer sees its own API,
 and checks unchanged-checkout artifact reuse. The nested Cargo fixtures build offline and
 unoptimized; they do not inherit the
 parent compiler's coverage flags or wrappers. Keep the shared target intact when reproducing this
@@ -224,6 +224,24 @@ checkout at the same tag (`third-party/mockJDKs/mockJDK` from 2.4.20, `compiler/
 before) and extends an older cache that lacks it; a run without it fails instead of compiling
 against another JDK. A mock-JDK run cannot see divergences that only appear against a modern JDK
 surface, so those need their own repository tests.
+
+## JVM Byte-Identity Ratchet
+
+`tests/box_byte_non_identical/jvm/<version>.txt` lists, per exact Kotlin release, the box cases whose
+emitted `.class` files are not byte-for-byte kotlinc's (a release without a file reads its
+predecessor's). Compiler-plugin corpora run in their own harness (see "Plugin box corpora") and
+keep their own inventories, so this list covers the Kotlin box corpus and the owned regressions
+only. A full JVM conformance run, the one that writes the JVM byte report and
+reference-compiles every applicable case, judges it in both directions: a case that is not identical
+and not listed has regressed, and a listed case that is identical now must be removed. For every case
+the base already scored the list only shrinks (`scripts/check-outcome-lists.sh`): a case that
+diverges again is a failure, never a new row, whether it is an upstream case or an owned
+regression. Only a case new to the JVM lane may be listed in the change that adds it: an owned
+`tests/box_regressions` program that the change adds (a rename or move of one the base has is not
+new, and an upstream case sharing the `regressions/` prefix is never new), or a case the base's JVM
+not-applicable list excluded.
+Refresh it after fixing divergences with `KRUSTY_BLESS_BOX_BYTE_IDENTITY=1` on a full local run
+(refused under CI).
 
 ## Box Outcome Ratchet
 
@@ -857,8 +875,15 @@ Performance-relevant harness state:
   (constant-pool ordering, `.kotlin_module` emission). `KRUSTY_LIB_BYTEDIFF_REPORT=1` (with
   `--nocapture`) prints a `LIBDIFF\t<identical|divergent|krusty-only|kotlinc-only>\t<entry>` line
   per lib entry — the convergence inventory for making byte equality the assertion.
-- Persistent JVM pools (kotlinc compiler servers, JavaRunner) scale with the host: `ncpu/2` clamped
-  to `[1, 6]`. `KRUSTY_SERVER_POOL=<n>` overrides in either direction (e.g. `1` on a swapping host).
+- Persistent JVM pools scale with the host: a kotlinc compiler-server pool holds one server per
+  CPU and the JavaRunner and ASM pools half as many, each clamped to `[1, 6]`.
+  `KRUSTY_SERVER_POOL=<n>` overrides in either direction (e.g. `1` on a swapping host).
+  The kotlinc and kotlinc-native servers also share one memory budget, the host's memory (or its
+  container's limit, when lower) less the
+  larger of 3.5 GiB and two fifths of it (about 4 GiB on a 7.6 GiB runner): a pool that would pass it
+  stops another pool's server that has been idle for five seconds, or waits. A cold run that reaches
+  every oracle at once otherwise holds six server JVMs beside the test process.
+  `KRUSTY_SERVER_MEMORY_MIB=<n>` sets the budget, `0` removes it.
 - Directory classpath entries are shipped into the box runner's per-request classloader, so lib
   static state is fresh per `box()` call and runner JVMs are shared across tests.
 

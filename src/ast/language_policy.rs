@@ -44,6 +44,9 @@ pub struct FileLanguagePolicy {
     pub data_copy_respects_ctor_visibility: bool,
     /// Configured property-parameter annotation defaulting, projected once from language features.
     pub property_annotation_default_target_mode: crate::types::PropertyAnnotationDefaultTargetMode,
+    /// What this file's compilation reproduces of kotlinc, projected from its language features so
+    /// every later phase reads it from the file instead of a process setting.
+    pub reference: crate::kotlin_version::ReferenceProfile,
     /// `+UnitConversionsOnArbitraryExpressions`: a call argument whose function value returns
     /// non-`Unit` may be converted to a function type returning `Unit`.
     pub unit_conversions_on_arbitrary_expressions: bool,

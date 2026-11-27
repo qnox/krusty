@@ -137,6 +137,9 @@ struct Anchor {
     before: usize,
     /// The entry's rank in visit order among the orphans.
     visit: usize,
+    /// Whether a method header named the entry: ASM interns a header before the method's code, so
+    /// the entry precedes the code's own entries that share its anchor.
+    header: bool,
 }
 
 impl<'a> Layout<'a> {
@@ -316,35 +319,39 @@ impl<'a> Layout<'a> {
         let mut anchors: Vec<&(usize, Vec<u16>)> = self.sequences.iter().collect();
         anchors.sort_by_key(|(anchor, _)| *anchor);
         let mut anchors = anchors.into_iter().peekable();
-        let orphans: Vec<(usize, u16)> = {
+        let orphans: Vec<(usize, bool, u16)> = {
             let mut anchored: Vec<(Anchor, u16)> = (0..count)
                 .filter_map(|index| Some((self.anchored[index]?, index as u16)))
                 .collect();
             anchored.sort_unstable();
             anchored
                 .into_iter()
-                .map(|(anchor, index)| (anchor.before, index))
+                .map(|(anchor, index)| (anchor.before, anchor.header, index))
                 .collect()
         };
         let mut orphans = orphans.into_iter().peekable();
-        // A sequence goes before an orphan with the same anchor; an anchor past the last entry
-        // places its sequence or orphan at the end, still in anchor order.
+        // A sequence goes before an orphan with the same anchor, unless a method header named the
+        // orphan: that header precedes the code. An anchor past the last entry places its
+        // sequence or orphan at the end, still in anchor order.
         for index in 1..=count {
             let bound = if index == count { usize::MAX } else { index };
             loop {
                 let sequence = anchors.peek().map(|(anchor, _)| *anchor);
-                let orphan = orphans.peek().map(|&(anchor, _)| anchor);
+                let orphan = orphans.peek().map(|&(anchor, header, _)| (anchor, header));
                 match (sequence, orphan) {
                     (Some(sequence), orphan)
-                        if sequence <= bound && orphan.is_none_or(|orphan| sequence <= orphan) =>
+                        if sequence <= bound
+                            && orphan.is_none_or(|(anchor, header)| {
+                                sequence < anchor || sequence == anchor && !header
+                            }) =>
                     {
                         let (_, sequence) = anchors.next().expect("a peeked sequence");
                         for &entry in sequence {
                             self.place(entry, &mut placed, &mut order);
                         }
                     }
-                    (_, Some(orphan)) if orphan <= bound => {
-                        let (_, orphan) = orphans.next().expect("a peeked orphan");
+                    (_, Some((anchor, _))) if anchor <= bound => {
+                        let (_, _, orphan) = orphans.next().expect("a peeked orphan");
                         self.place(orphan, &mut placed, &mut order);
                     }
                     _ => break,
@@ -455,20 +462,26 @@ fn orphan_anchors(
     let mut named_max = 0;
     // The last entry the slots since the last code slot name: the next method's header.
     let mut header_max = 0;
-    let mut pending: Vec<usize> = Vec::new();
+    // Each pending orphan, with whether the visit that reached it was a method header.
+    let mut pending: Vec<(usize, bool)> = Vec::new();
     // Whether the previous slot was code that is not rewritten.
     let mut in_code = false;
     // Orphans with one anchor keep the order the visit reached them in: a method header's
     // descriptor before the entries its code names.
     let mut visits = 0..;
-    let mut settle = |pending: &mut Vec<usize>, before: usize, anchored: &mut [Option<Anchor>]| {
-        for orphan in pending.drain(..) {
-            if before > orphan {
-                let visit = visits.next().expect("an unbounded range");
-                anchored[orphan] = Some(Anchor { before, visit });
+    let mut settle =
+        |pending: &mut Vec<(usize, bool)>, before: usize, anchored: &mut [Option<Anchor>]| {
+            for (orphan, header) in pending.drain(..) {
+                if before > orphan {
+                    let visit = visits.next().expect("an unbounded range");
+                    anchored[orphan] = Some(Anchor {
+                        before,
+                        visit,
+                        header,
+                    });
+                }
             }
-        }
-    };
+        };
     let mut named = Reach::new(read);
     for (position, slot) in read.visit_order().enumerate() {
         let code = match slot.holder {
@@ -493,17 +506,26 @@ fn orphan_anchors(
                         .and_then(|method| code_starts.get(&method).copied())
                         .is_some_and(|code_start| position > code_start)
                 {
-                    pending.push(index);
+                    pending.push((
+                        index,
+                        matches!(slot.holder, Holder::Class | Holder::Parameter(_)),
+                    ));
                 } else if !seen[index] && !orphaned[index] {
                     // `reached` follows ASM's component interning order. Settle at the next
                     // freshly interned component, not the numerically smallest old pool index:
                     // an orphaned descriptor in a later NameAndType belongs after its fresh name.
                     settle(&mut pending, index, &mut anchored);
                 }
-                seen[index] = true;
-                if !orphaned[index] && matches!(slot.holder, Holder::Class | Holder::Parameter(_)) {
+                // Only a header entry the visit interns itself places what is pending after it; a
+                // name or descriptor an earlier method's code already interned leaves the orphan
+                // pending until the method's code interns its first fresh entry.
+                if !orphaned[index]
+                    && !seen[index]
+                    && matches!(slot.holder, Holder::Class | Holder::Parameter(_))
+                {
                     header_max = header_max.max(index);
                 }
+                seen[index] = true;
             }
             if matches!(slot.holder, Holder::Code(..)) {
                 header_max = 0;
@@ -511,8 +533,10 @@ fn orphan_anchors(
             continue;
         };
         if method != Some(at) {
-            // What is pending now the header named: it follows the header's own entries.
-            settle(&mut pending, header_max + 1, &mut anchored);
+            // What is pending now the header named: it follows the header's own fresh entries.
+            if header_max > 0 {
+                settle(&mut pending, header_max + 1, &mut anchored);
+            }
             method = Some(at);
             named_max = header_max;
         }
@@ -520,7 +544,7 @@ fn orphan_anchors(
         header_max = 0;
         for &index in reached {
             if orphaned[index] && !seen[index] {
-                pending.push(index);
+                pending.push((index, false));
             } else if !seen[index] && !orphaned[index] {
                 settle(&mut pending, index, &mut anchored);
             }

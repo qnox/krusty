@@ -83,7 +83,8 @@ pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
 };
 pub(crate) use declaration_specificity::{
-    declarations_equally_specific, retain_most_specific_declarations,
+    declaration_dominance_maxima, declarations_equally_specific, declarations_incomparable,
+    declared_call_shape, retain_most_specific_declarations,
 };
 use extension_specialization::{
     bind_defaulted_ext_ret, bind_defaulted_ext_ret_slots, bind_ext_ret, bind_ext_ret_tracking,
@@ -148,11 +149,13 @@ pub use resolved_symbol::{
 };
 pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamMethodFrame, SamSignature};
 use scope_level_callables::{
-    callables_from_symbols, fn_in_scope, level_functions, level_properties,
-    symbol_levels_in_function_scope, symbols_in_function_scope,
-    tagged_symbol_levels_in_function_scope, FunctionScopeRef,
+    callables_from_symbols, fn_in_scope, level_functions, level_properties, owning_scope_level,
+    symbols_in_function_scope, tagged_symbol_levels_in_function_scope, FunctionScopeRef,
 };
-pub(crate) use scope_level_callables::{CallableImport, FunctionImportScope};
+pub(crate) use scope_level_callables::{
+    nearest_level_distinct, retain_nearest_scope_level, same_callable_declaration, scope_level,
+    CallableImport, FunctionImportScope,
+};
 pub(crate) use statically_known_subtype::{nominal_type, statically_known_subtype};
 
 pub(crate) type GSigBinds = crate::types::TyParamBindings;
@@ -1049,18 +1052,6 @@ impl<'a> SymbolResolver<'a> {
             .unwrap_or_default()
     }
 
-    /// Callable records by Kotlin scope-tower level, nearest first. A declaration with the same
-    /// spelling but the wrong callable facet or an inapplicable receiver does not hide a declaration
-    /// at the next level; selection, not lookup, decides which level is the first applicable one.
-    fn symbol_levels_in_scope(
-        &self,
-        name: &str,
-    ) -> Vec<Vec<std::rc::Rc<crate::libraries::ResolvedSymbols>>> {
-        self.fn_scope
-            .map(|scope| symbol_levels_in_function_scope(&self.src, name, scope))
-            .unwrap_or_default()
-    }
-
     /// `Any` members precede visible extensions on an error receiver.
     pub(crate) fn error_receiver_functions(
         &self,
@@ -1666,7 +1657,13 @@ impl<'a> SymbolResolver<'a> {
                 let method_ref = member_dispatch
                     .then(|| select_instance_reference_from_functions(ty, callables.functions()))
                     .flatten();
-                let property_ref = member_property
+                // A reference may name a property with context parameters: whether the language
+                // binds them is decided where the reference is checked, not by which declarations
+                // the family offers.
+                let referenced_property = member_dispatch
+                    .then(|| self.declared_member_property_for_reference(ty, name, &callables))
+                    .flatten();
+                let property_ref = referenced_property
                     .as_ref()
                     .filter(|_| ty.kotlin_class_internal() != Some(crate::types::wk::any()))
                     .and_then(|property| {
@@ -1783,8 +1780,7 @@ impl<'a> SymbolResolver<'a> {
                 // scoped to `pkg` (the package is scope, not part of the name) and calling this. The caller
                 // reads `overloads` to inspect the family, or `top_level_call` for the arg/type-arg selected
                 // callable (default/vararg-aware) ready to emit.
-                let levels = self.symbol_levels_in_scope(name);
-                let fs = self.nearest_top_level_functions(&levels);
+                let (fs, levels) = self.top_level_tower(name);
                 crate::trace_compiler!(
                     "signature_inference",
                     "top-level candidates={name} {:?}",
@@ -1804,7 +1800,7 @@ impl<'a> SymbolResolver<'a> {
                         .collect::<Vec<_>>(),
                 );
                 let top_level_call = self.pick_top_level(name, &fs, args, type_args, None);
-                let overloads = fs.overloads;
+                let overloads = owning_scope_level(fs.overloads);
                 let values = self.nearest_top_level_properties(levels);
                 if overloads.is_empty() && top_level_call.is_none() && values.is_empty() {
                     return None;
@@ -2861,6 +2857,23 @@ pub struct ResolvedPropertyRef {
     /// `None` for an instance property; `Some(None)` for a same-file extension property;
     /// `Some(Some(owner))` for an extension property emitted on another facade.
     pub extension_facade: Option<Option<TypeName>>,
+    /// Leading context parameters of the declaration's accessors. A reference to a declaration
+    /// that has them can only be formed where `CallableReferencesToContextual` binds them.
+    pub context_count: usize,
+    /// Source names of those context parameters, for diagnostics only.
+    pub context_names: Vec<String>,
+}
+
+impl ResolvedPropertyRef {
+    /// The declared types of the leading context parameters. An extension property's accessors
+    /// list their receiver first in the semantic model, the contexts after it.
+    pub fn context_types(&self) -> &[Ty] {
+        let start = usize::from(self.extension_facade.is_some());
+        self.getter
+            .params
+            .get(start..start + self.context_count)
+            .unwrap_or_default()
+    }
 }
 
 fn select_extension_property_ref(property: PropertyInfo) -> Option<ResolvedPropertyRef> {
@@ -2879,12 +2892,14 @@ fn select_extension_property_ref(property: PropertyInfo) -> Option<ResolvedPrope
         getter.suspend,
         getter.default_call,
     );
-    if getter.suspend || getter.default_call || getter.params.len() != 1 {
+    let context_count = property.context_count;
+    let context_names = property.context_param_names;
+    if getter.suspend || getter.default_call || getter.params.len() != context_count + 1 {
         return None;
     }
-    let setter = property
-        .setter
-        .filter(|setter| setter.params.len() == 2 && setter.physical_ret == Ty::Unit);
+    let setter = property.setter.filter(|setter| {
+        setter.params.len() == context_count + 2 && setter.physical_ret == Ty::Unit
+    });
     let prop_ty = getter.ret;
     let reflection_owner = *getter.params.first()?;
     let facade = (!getter.owner.matches("")).then_some(getter.owner);
@@ -2899,6 +2914,8 @@ fn select_extension_property_ref(property: PropertyInfo) -> Option<ResolvedPrope
         prop_ty,
         source_key,
         stable_declaration: property.stable_declaration,
+        context_count,
+        context_names,
     })
 }
 
@@ -2918,11 +2935,10 @@ fn build_property_reference_from_declaration(
     let getter_visibility = property.visibility;
     let setter_visibility = property.setter_visibility;
     let getter = property.getter.clone();
-    let setter = property
-        .setter
-        .clone()
-        .filter(|setter| setter.params.len() == 1 && setter.physical_ret == Ty::Unit);
-    if !getter.params.is_empty() {
+    let setter = property.setter.clone().filter(|setter| {
+        setter.params.len() == property.context_count + 1 && setter.physical_ret == Ty::Unit
+    });
+    if getter.params.len() != property.context_count {
         crate::trace_compiler!(
             "resolve",
             "property ref rejected {recv:?}.{name}: getter {}.{}{} is not a plain zero-argument accessor",
@@ -2943,6 +2959,8 @@ fn build_property_reference_from_declaration(
         source_key: property.source_key,
         stable_declaration: property.stable_declaration,
         extension_facade: None,
+        context_count: property.context_count,
+        context_names: property.context_param_names.clone(),
     })
 }
 
@@ -3014,6 +3032,16 @@ fn resolved_member_from_info_tracking(
         ResolvedMember::from_function(recv, &o, member, ret),
         bindings,
     )
+}
+
+/// The member property of a family a reference names, with or without context parameters.
+fn referenced_member_property_from_callables(callables: &Callables) -> Option<PropertyInfo> {
+    callables
+        .properties()
+        .iter()
+        .filter(|property| property.kind == PropKind::Member && property.readable())
+        .min_by_key(|property| property.receiver_rank)
+        .cloned()
 }
 
 fn member_property_from_callables(

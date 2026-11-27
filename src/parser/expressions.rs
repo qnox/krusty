@@ -1444,7 +1444,7 @@ impl Parser<'_> {
                 TokenKind::StrChunk => {
                     let text = self.text();
                     let piece = if raw {
-                        KtString::from(text)
+                        super::raw_string_value(text)
                     } else {
                         unescape_chunk(text)
                     };
@@ -1928,7 +1928,6 @@ impl Parser<'_> {
                     | TokenKind::KwWhen
                     | TokenKind::KwClass
                     | TokenKind::KwFun
-                    | TokenKind::KwImport
                     | TokenKind::KwPackage
                     | TokenKind::Eq,
                 ) if depth == 0 => return false,

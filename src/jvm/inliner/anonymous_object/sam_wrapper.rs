@@ -9,16 +9,16 @@
 //! classes, fields, methods.
 
 use crate::jvm::class_node::ClassNode;
-use crate::jvm::classfile::{ClassWriter, InnerClassSpec};
+use crate::jvm::classfile::{ClassFileVersion, ClassWriter, InnerClassSpec};
 
 use super::{remap_declaration, RegenerationError, TypeRemapper};
 
-/// Copy the SAM wrapper `original` as `new_class`, at the caller's class-file version `major` when
-/// that is the newer one, as a regenerated object is written.
+/// Copy the SAM wrapper `original` as `new_class`, at the caller's class-file major version when
+/// that is the newer one and under the caller's preview marking, as a regenerated object is written.
 pub fn copy_sam_wrapper(
     original: &ClassNode,
     new_class: &str,
-    major: u16,
+    caller: ClassFileVersion,
 ) -> Result<Vec<u8>, RegenerationError> {
     if original.source_debug.is_some() {
         return Err(RegenerationError::Unsupported(
@@ -47,7 +47,8 @@ pub fn copy_sam_wrapper(
         cw.set_signature(signature);
     }
     cw.set_access(original.access);
-    cw.set_major(original.major.max(major));
+    cw.set_major(original.major.max(caller.major));
+    cw.set_preview(caller.preview);
     for interface in &original.interfaces {
         cw.add_interface(&remapper.map_type(interface)?);
     }

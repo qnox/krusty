@@ -22,7 +22,7 @@ pub(super) fn plan(
 ) -> Result<krusty::backend::class_statics::ClassStaticPlan, Unsupported> {
     krusty::backend::class_statics::ClassStaticPlan::new(
         ir,
-        krusty::kotlin_version::class_statics_in_program_order(),
+        krusty::kotlin_version::class_statics_in_program_order(ir.reference.quirks()),
     )
     .map_err(|unordered| {
         declined!(
