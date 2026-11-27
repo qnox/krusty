@@ -2037,6 +2037,26 @@ fn wasm_library_abstract_members_dispatch_to_their_overrides() {
     expect_wasm_box(src, "libraryAbstractMemberCalls");
 }
 
+#[test]
+fn wasm_links_a_library_s_class_bodies_from_its_klib() {
+    let source = include_str!("box_regressions/multimodule/libraryClassBodies.kt");
+    let stem = "wasmLibraryClassBodies";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the whole library-classes program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name(),
+        );
+    }
+}
+
 /// The KLIB writer does not record a local call's type arguments yet, so a body calling a generic
 /// function of its own file stays metadata-only rather than holding a call kotlinc cannot read.
 #[test]

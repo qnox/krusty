@@ -7,7 +7,9 @@
 use super::body_tree::{
     BodyExprId, BodyKind, BodyStatement, BodyVariable, CallTarget, FunctionBody, ValueRef,
 };
-use super::ir_tables::{lattice, symbol, IrTables, FUNCTION_SYMBOL};
+use super::ir_tables::{
+    lattice, symbol, IrTables, CLASS_SYMBOL, CONSTRUCTOR_SYMBOL, FIELD_SYMBOL, FUNCTION_SYMBOL,
+};
 use crate::fx_hash::HashMap;
 use crate::ir::IrConst;
 use crate::metadata::protobuf::Pb;
@@ -142,23 +144,12 @@ impl<'t> BodyEncoder<'t> {
                 arguments,
                 origin,
             } => {
-                let signature = match target {
-                    CallTarget::Public(signature) => self.tables.public_signature(signature),
-                    CallTarget::Accessor(signature) => self.tables.accessor_signature(signature),
-                };
-                operation.field_varint(1, symbol(signature, FUNCTION_SYMBOL));
+                operation.field_varint(1, self.callee(target, FUNCTION_SYMBOL));
                 if let Some(origin) = origin {
                     operation.field_varint(4, u64::from(self.tables.string(origin)));
                 }
-                for argument in arguments {
-                    let argument = self.expression(body, *argument);
-                    operation.repeated_message(5, &argument);
-                }
-                let type_arguments = type_arguments
-                    .iter()
-                    .map(|ty| u64::from(self.ty(*ty)))
-                    .collect::<Vec<_>>();
-                operation.field_packed_varints(6, &type_arguments);
+                self.arguments(body, arguments, 5, &mut operation);
+                self.type_arguments(type_arguments, 6, &mut operation);
                 8
             }
             BodyKind::Block { statements, origin } => {
@@ -209,6 +200,55 @@ impl<'t> BodyEncoder<'t> {
                 operation.field_varint(1, self.tables.class_symbol(*class));
                 17
             }
+            BodyKind::ConstructorCall {
+                target,
+                constructor_type_arguments,
+                type_arguments,
+                arguments,
+                origin,
+            } => {
+                operation.field_varint(1, self.callee(target, CONSTRUCTOR_SYMBOL));
+                operation.field_varint(2, u64::from(*constructor_type_arguments));
+                if let Some(origin) = origin {
+                    operation.field_varint(4, u64::from(self.tables.string(origin)));
+                }
+                self.arguments(body, arguments, 5, &mut operation);
+                self.type_arguments(type_arguments, 6, &mut operation);
+                9
+            }
+            BodyKind::DelegatingConstructorCall {
+                target,
+                type_arguments,
+                arguments,
+            } => {
+                operation.field_varint(1, self.callee(target, CONSTRUCTOR_SYMBOL));
+                self.arguments(body, arguments, 3, &mut operation);
+                self.type_arguments(type_arguments, 4, &mut operation);
+                26
+            }
+            BodyKind::InstanceInitializerCall(class) => {
+                let signature =
+                    crate::metadata::id_signature::KlibPublicIdSignature::classifier(*class);
+                let class = self.tables.public_signature(&signature);
+                operation.field_varint(1, symbol(class, CLASS_SYMBOL));
+                28
+            }
+            BodyKind::GetField { property, receiver } => {
+                let access = self.field_access(body, property, *receiver);
+                operation.field_message(1, &access);
+                15
+            }
+            BodyKind::SetField {
+                property,
+                receiver,
+                value,
+            } => {
+                let access = self.field_access(body, property, *receiver);
+                operation.field_message(1, &access);
+                let value = self.expression(body, *value);
+                operation.field_message(2, &value);
+                16
+            }
             BodyKind::StringConcat(parts) => {
                 for part in parts {
                     let part = self.expression(body, *part);
@@ -218,6 +258,52 @@ impl<'t> BodyEncoder<'t> {
             }
         };
         (field, operation)
+    }
+
+    fn callee(&mut self, target: &CallTarget, kind: u64) -> u64 {
+        let signature = match target {
+            CallTarget::Public(signature) => self.tables.public_signature(signature),
+            CallTarget::Accessor(signature) => self.tables.accessor_signature(signature),
+        };
+        symbol(signature, kind)
+    }
+
+    fn arguments(
+        &mut self,
+        body: &FunctionBody,
+        arguments: &[BodyExprId],
+        field: u32,
+        into: &mut Pb,
+    ) {
+        for argument in arguments {
+            let argument = self.expression(body, *argument);
+            into.repeated_message(field, &argument);
+        }
+    }
+
+    fn type_arguments(&mut self, type_arguments: &[Ty], field: u32, into: &mut Pb) {
+        let type_arguments = type_arguments
+            .iter()
+            .map(|ty| u64::from(self.ty(*ty)))
+            .collect::<Vec<_>>();
+        into.field_packed_varints(field, &type_arguments);
+    }
+
+    /// `FieldAccessCommon`: the field's symbol and the instance it belongs to.
+    fn field_access(
+        &mut self,
+        body: &FunctionBody,
+        property: &crate::metadata::id_signature::KlibPublicIdSignature,
+        receiver: Option<BodyExprId>,
+    ) -> Pb {
+        let field = self.tables.field_signature(property);
+        let mut access = Pb::new();
+        access.field_varint(1, symbol(field, FIELD_SYMBOL));
+        if let Some(receiver) = receiver {
+            let receiver = self.expression(body, receiver);
+            access.field_message(3, &receiver);
+        }
+        access
     }
 
     fn constant(&mut self, constant: &IrConst, encoded: &mut Pb) {
