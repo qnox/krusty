@@ -1857,7 +1857,7 @@ impl<'a> Body<'a> {
                 class,
                 index,
             } => {
-                self.field_read(receiver, class, index)?;
+                self.guarded_field_read(receiver, class, index)?;
                 // A field that stores `kotlin.Unit`'s instance and is read where the checked use
                 // is `Unit` has no carrier there: the stored reference is discarded, as any value
                 // converted to a type without a carrier is.
