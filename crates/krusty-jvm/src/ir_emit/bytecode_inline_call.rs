@@ -262,7 +262,15 @@ impl Emitter<'_> {
             &body.code,
             &body.source_cp,
             &body.bootstrap_methods,
-            &mut |o, n, d| self.bodies.member_is_private(o, n, d),
+            &mut |o, n, d| {
+                // A package-scoped member (`this$0` of an inner class, a package-private helper)
+                // is legal only from its owner's own package: relocated into a caller elsewhere
+                // it is an `IllegalAccessError`, which kotlinc's inliner never produces for a
+                // body it accepts.
+                self.bodies.member_is_private(o, n, d)
+                    || (self.bodies.member_is_package_scoped(o, n, d)
+                        && internal_package(o) != internal_package(&self.facade))
+            },
             &mut |o, n, d| self.bodies.member_is_publicly_reachable(o, n, d),
             &mut |class| self.bodies.class_is_publicly_reachable(class),
         ) {
@@ -1966,6 +1974,11 @@ fn methodref_owner<'a>(body: &'a MethodCode, name: &str, descriptor: &str) -> Op
         let (n, d) = name_and_desc(&body.source_cp, *nt_idx)?;
         (n == name && d == descriptor).then(|| class_name(&body.source_cp, *class_idx))?
     })
+}
+
+/// The package of an internal class name (`a/b/C` is `a/b`; a class in the root package is ``).
+fn internal_package(internal: &str) -> &str {
+    internal.rsplit_once('/').map_or("", |(package, _)| package)
 }
 
 #[cfg(test)]

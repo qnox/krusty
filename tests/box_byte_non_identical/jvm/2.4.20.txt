@@ -569,7 +569,6 @@ coroutines/featureIntersection/callableReference/bigArity.kt
 coroutines/featureIntersection/callableReference/bound/emptyLHS.kt
 coroutines/featureIntersection/callableReference/function/genericCallableReferencesWithNullableTypes.kt
 coroutines/featureIntersection/callableReference/longArgs.kt
-coroutines/featureIntersection/delegate.kt
 coroutines/featureIntersection/funInterface.kt
 coroutines/featureIntersection/funInterface/kt49294.kt
 coroutines/featureIntersection/funInterface/kt50950.kt
@@ -1855,7 +1854,6 @@ properties/lateinit/localClass.kt
 properties/primitiveOverrideDelegateAccessor.kt
 properties/privateAccessorOfOverriddenProperty.kt
 properties/privatePropertyWithoutBackingField.kt
-publishedApi/simple.kt
 ranges/contains/evaluationOrderForCollection.kt
 ranges/contains/evaluationOrderForComparableRange.kt
 ranges/contains/evaluationOrderForNullableArgument.kt
@@ -2235,7 +2233,6 @@ regressions/multimodule/dependencyInheritedAbstractMembers.kt
 regressions/multimodule/dependencyInnerClasses.kt
 regressions/multimodule/dependencyInterfaceAppliedAbi.kt
 regressions/multimodule/dependencyMapErasedKeyBarrier.kt
-regressions/multimodule/dependencyMemberContractInitialization.kt
 regressions/multimodule/distinctScalarBackingFieldExport.kt
 regressions/multimodule/inlineLambdaSuspendCompletion.kt
 regressions/multimodule/inlineNarrowElementInRange.kt
@@ -2374,7 +2371,6 @@ sealed/sealedInSameFile.kt
 secondaryConstructors/callFromLocalSubClass.kt
 secondaryConstructors/enums.kt
 secondaryConstructors/localClasses.kt
-serialization/deserializedMembers.kt
 serialization/serializedDefaultArgs.kt
 smartCasts/avoidSmartCastToDerivedForPrivate.kt
 smartCasts/falseSmartCast.kt

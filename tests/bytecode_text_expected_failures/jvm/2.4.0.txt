@@ -97,7 +97,6 @@ nullCheckOptimization/localLateinit/checkedOnce.kt
 nullCheckOptimization/safeCallAndElvisChains.kt
 optimizedDelegatedProperties/definedInSources.kt
 optimizedDelegatedProperties/delegateToAnother.kt
-optimizedDelegatedProperties/inSeparateModule.kt
 optimizedDelegatedProperties/withNonNullMetadataParameter.kt
 properties/lateinit/companionObject.kt
 properties/lateinit/companionObjectFromLambda.kt
