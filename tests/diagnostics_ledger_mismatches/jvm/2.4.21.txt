@@ -5299,7 +5299,6 @@ compiler/testData/diagnostics/tests/resolve/resolveAnnotatedLambdaArgument.kt
 compiler/testData/diagnostics/tests/resolve/resolveTypeArgsForUnresolvedCall.kt
 compiler/testData/diagnostics/tests/resolve/resolveWithRedeclarationError.kt
 compiler/testData/diagnostics/tests/resolve/resolvingToClassMembersInHeader.kt
-compiler/testData/diagnostics/tests/resolve/sealedCompanionFunctionSameNameAsInheritor.kt
 compiler/testData/diagnostics/tests/resolve/specialConstructions/constantsInIf.kt
 compiler/testData/diagnostics/tests/resolve/specialConstructions/elvisAsCall.kt
 compiler/testData/diagnostics/tests/resolve/specialConstructions/exclExclAsCall.kt
