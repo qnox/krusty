@@ -133,6 +133,16 @@ fun box(): String {
 /// `ArrayListAddAllGrowsBeforeReadingItsArgument`: a list appends a range of itself.
 const LIST_ADD_ALL_OF_ITS_RANGE: &str = include_str!("kotlinc_defects/listAddAllOfItsRange.kt");
 
+/// `InlineObjectFieldKeepsOriginalNestedType`: the object the call regenerates stores a nested
+/// object of its own type, which its field does not name.
+const INLINE_OBJECT_NESTED_FIELD: &str = r#"inline fun <reified T> untyped(): Any = object {
+    val type = T::class
+    val nested = object {}
+}
+
+fun box(): String = if (untyped<Int>() is Any) "OK" else "untyped"
+"#;
+
 /// A platform module's class over the class of a library its common module depends on. Compiled
 /// with `-Xseparate-kmp-compilation`, kotlinc-native crashes actualizing the application's
 /// fragments (KT-89466); compiled the way kotlinc's own Native box runner compiles a unit, with its
@@ -211,6 +221,17 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             source: CONTEXT_ARGUMENT_ORDER,
             with_defect: Outcome::Answer("crv".to_string()),
             fixed: Outcome::Answer("rcv".to_string()),
+        }),
+        Quirk::InlineObjectFieldKeepsOriginalNestedType => Some(Defect {
+            platforms: &[Platform::Jvm],
+            fixed_on: &[],
+            source: INLINE_OBJECT_NESTED_FIELD,
+            with_defect: Outcome::Answer(
+                "ERROR:NoSuchFieldError:Class MainKt$box$$inlined$untyped$1 does not have member \
+                 field 'MainKt$box$$inlined$untyped$1$1 nested'"
+                    .to_string(),
+            ),
+            fixed: Outcome::Answer("OK".to_string()),
         }),
         Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument => Some(Defect {
             platforms: &[Platform::Native, Platform::WasmJs, Platform::WasmWasi],

@@ -215,14 +215,7 @@ pub(super) fn linearize_finally_returns(ir: &mut IrFile, expression: ExprId, ret
         stmts: vec![body, leave],
         value: None,
     });
-    let always = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-    let protected_loop = ir.add_expr(IrExpr::While {
-        cond: always,
-        body: loop_body,
-        update: None,
-        post_test: false,
-        label: Some(label),
-    });
+    let protected_loop = ir.add_endless_loop(loop_body, Some(label));
     let protected_body = ir.add_expr(IrExpr::Block {
         stmts: vec![protected_loop],
         value: None,

@@ -194,6 +194,15 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: true,
     }
+    /// A copy of an inline function's anonymous object declares its fields before the objects its
+    /// constructor and methods create are regenerated, so a field whose type is such an object
+    /// keeps the original class's type while the code stores the regenerated copy: reading the
+    /// object throws `NoSuchFieldError`.
+    InlineObjectFieldKeepsOriginalNestedType {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: true,
+    }
     /// A not-null operator (`!!`, the left of `?:`, the receiver of `?.`) applied to a nullable
     /// intersection fixed below an upper type (`pick(a, b)!!` with `S : Base`) narrows it to a new
     /// intersection that publishes `Any`. From 2.5 kotlinc keeps the upper type, so the result still

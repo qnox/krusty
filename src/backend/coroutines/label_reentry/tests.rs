@@ -377,6 +377,7 @@ fn a_loop_holding_the_label_is_entered_without_testing_its_condition() {
         update: None,
         post_test: false,
         label: None,
+        inline_return_frame: false,
     });
 
     let (block, labels) = split(&mut ir, vec![looped]);

@@ -23,7 +23,6 @@ coroutines/nonLocalReturn.kt
 coroutines/stateMachine/kt25893.kt
 coroutines/stateMachine/withTypeParameter.kt
 deadCodeElimination/unusedPrimitiveAndObjectEquals.kt
-defaultArguments/noAnonymousObjectRegenerationInDefaultStub.kt
 enum/enumEntriesIntrinsicForJava.kt
 falseSmartCast.kt
 fieldsForCapturedValues/innerAndOuterThis.kt
@@ -86,7 +85,6 @@ invokedynamic/streamApi.kt
 isArrayOf.kt
 javaFields.kt
 javaStatics.kt
-kt10259_2.kt
 kt10259_3.kt
 kt2202.kt
 kt82651_before.kt

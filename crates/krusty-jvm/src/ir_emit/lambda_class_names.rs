@@ -21,6 +21,19 @@ fn function_owner(ir: &IrFile, function: u32, facade: &str) -> Option<String> {
     }
     match first {
         Some(class) => Some(ir.classes.get(class as usize)?.fq_name()),
+        // Another file's inline function, whose template this file expands, belongs to the class
+        // or facade that file declares it in.
+        None if ir.foreign_inline_templates.contains(&function) => Some(
+            match (
+                ir.functions.get(function as usize)?.dispatch_receiver,
+                ir.foreign_template_facade(function),
+            ) {
+                (Some(owner), _) | (None, Some(owner)) => {
+                    krusty::jvm::names::classfile_internal_name_of(owner).to_owned()
+                }
+                (None, None) => facade.to_owned(),
+            },
+        ),
         None => Some(facade.to_owned()),
     }
 }
@@ -186,8 +199,7 @@ pub(crate) fn specialization_ordinal(
                 candidate.parent.is_none()
                     && specialization_location(ir, candidate, facade, modes).as_ref()
                         == Some(&location)
-                    && candidate.inline_callee_source_name
-                        == specialization.inline_callee_source_name
+                    && inlined_method(candidate) == inlined_method(specialization)
             }
         };
         if same_stem {
@@ -213,7 +225,7 @@ fn specialized_class_ordinal(
         && anonymous_peer(
             ir,
             &location,
-            &specialization.inline_callee_source_name,
+            &inlined_method(specialization),
             facade,
             modes,
         )
@@ -226,7 +238,7 @@ fn specialized_class_ordinal(
         return expansion_ordinal(
             ir,
             &location,
-            &specialization.inline_callee_source_name,
+            &inlined_method(specialization),
             order,
             facade,
             modes,
@@ -234,6 +246,17 @@ fn specialized_class_ordinal(
         );
     }
     specialization_ordinal(ir, implementation, facade, modes)
+}
+
+/// The name of the method an expansion inlined, which names the classes it regenerates
+/// (`…$$inlined$<method>$N`): the callee's own name, or its `$default` entry when the call left an
+/// argument to its default, as kotlinc's `NameGenerator` is keyed by the inlined method.
+fn inlined_method(specialization: &krusty::ir::IrSpecializedFunction) -> String {
+    if specialization.inline_callee_default_entry {
+        format!("{}$default", specialization.inline_callee_source_name)
+    } else {
+        specialization.inline_callee_source_name.clone()
+    }
 }
 
 fn anonymous_view(
@@ -247,9 +270,26 @@ fn anonymous_view(
         caller_source_name: specialization.caller_source_name.clone(),
         inline_callee: specialization.inline_callee,
         inline_callee_source_name: specialization.inline_callee_source_name.clone(),
+        inline_callee_default_entry: specialization.inline_callee_default_entry,
         parent: None,
         consumed_inline_capture: false,
     }
+}
+
+/// The class whose code `function`, a method of a call-site copy of an inline declaration's
+/// lambda or anonymous object, was copied into: the owner of the function that holds the call.
+pub(crate) fn copy_caller_owner(ir: &IrFile, function: u32, facade: &str) -> Option<String> {
+    if let Some(specialization) = ir.specialized_functions.get(&function) {
+        return semantic_owner(ir, specialization, facade);
+    }
+    let class = ir
+        .classes
+        .iter()
+        .position(|class| class.methods.contains(&function))?;
+    let specialization = ir
+        .specialized_anonymous_classes
+        .get(&u32::try_from(class).ok()?)?;
+    semantic_owner(ir, &anonymous_view(specialization), facade)
 }
 
 fn anonymous_peer(
@@ -263,7 +303,7 @@ fn anonymous_peer(
         .values()
         .any(|specialization| {
             specialization.parent.is_none()
-                && specialization.inline_callee_source_name == callee
+                && inlined_method(&anonymous_view(specialization)) == callee
                 && specialization_location(ir, &anonymous_view(specialization), facade, modes)
                     .as_ref()
                     == Some(location)
@@ -295,7 +335,7 @@ fn expansion_ordinal(
             || (current_lambda_class != Some(*function)
                 && !materialized
                 && !super::method_access::lambda_impl_uses_class_strategy(ir, *function, modes))
-            || specialization.inline_callee_source_name != callee
+            || inlined_method(specialization) != callee
             || specialization_location(ir, specialization, facade, modes).as_ref() != Some(location)
         {
             continue;
@@ -306,7 +346,7 @@ fn expansion_ordinal(
     }
     for specialization in ir.specialized_anonymous_classes.values() {
         if specialization.parent.is_some()
-            || specialization.inline_callee_source_name != callee
+            || inlined_method(&anonymous_view(specialization)) != callee
             || specialization_location(ir, &anonymous_view(specialization), facade, modes).as_ref()
                 != Some(location)
         {
@@ -353,7 +393,7 @@ pub(crate) fn anonymous_class_name(
     let ordinal = expansion_ordinal(
         ir,
         &(owner.clone(), caller.clone()),
-        &specialization.inline_callee_source_name,
+        &inlined_method(&view),
         specialization.order,
         facade,
         modes,
@@ -365,7 +405,7 @@ pub(crate) fn anonymous_class_name(
         name.push_str(&caller);
     }
     name.push_str("$$inlined$");
-    name.push_str(&specialization.inline_callee_source_name);
+    name.push_str(&inlined_method(&view));
     name.push('$');
     name.push_str(&ordinal.to_string());
     Some(name)
@@ -393,7 +433,7 @@ fn specialized_class_name(
                 name.push_str(caller);
             }
             name.push_str("$$inlined$");
-            name.push_str(&specialization.inline_callee_source_name);
+            name.push_str(&inlined_method(specialization));
             name.push('$');
             name.push_str(&ordinal.to_string());
             Some(name)

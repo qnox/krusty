@@ -74,6 +74,21 @@ impl ClassWriter {
         Ok(())
     }
 
+    /// The descriptor and signature of the field at `index` among those written, once the objects
+    /// its type names are regenerated.
+    pub(crate) fn retype_copied_field(
+        &mut self,
+        index: usize,
+        desc: &str,
+        signature: Option<&str>,
+    ) {
+        let desc = self.cp.utf8(desc);
+        let signature = signature.map(|signature| self.cp.utf8(signature));
+        let field = &mut self.fields[index];
+        field.desc = desc;
+        field.signature = signature;
+    }
+
     /// `ClassVisitor.visitAnnotation` on the class.
     pub(crate) fn add_copied_class_annotation(&mut self, annotation: &Annotation, visible: bool) {
         let encoded = self.copied_annotation(annotation);

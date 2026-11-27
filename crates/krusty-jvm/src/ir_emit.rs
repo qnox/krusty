@@ -125,6 +125,7 @@ mod inherited_default_forwarders;
 mod inherited_member_target;
 mod interface_compatibility;
 mod intrinsic_probes;
+mod lambda_body_scope;
 mod lambda_class;
 pub(super) mod lambda_class_names;
 mod lambda_implementation_placement;
@@ -348,6 +349,10 @@ pub(crate) struct EmitRun {
     /// emit-run decision: it includes class-owned helpers whose every use was spliced, and is cleared
     /// before the next independent emission of the same IR.
     dead_lambdas: std::cell::RefCell<krusty::fx_hash::HashSet<u32>>,
+    /// Must-inline lambda impls the discovery emit found a real closure for: their call fell back
+    /// to the function object, so the method is written despite its `inline_only` mark, whichever
+    /// class or facade owns it.
+    rescued_lambdas: std::cell::RefCell<krusty::fx_hash::HashSet<u32>>,
     /// Lambda classes to synthesize for `-Xlambdas=class`, recorded as their `invokedynamic`
     /// replacement is emitted and drained by the class driver. They cannot be written inline: the
     /// emitter is mid-way through the ENCLOSING class's writer when it reaches a lambda.
@@ -1036,19 +1041,8 @@ fn emit_all_with_class_meta_impl(
     // Pass 1 (discovery): emit everything, recording live closure implementations. A lambda spliced by the inliner emits neither realization.
     env.run.used_lambdas.borrow_mut().clear();
     env.run.dead_lambdas.borrow_mut().clear();
-    let empty = krusty::fx_hash::HashSet::default();
-    let first = emit_pass(
-        ir,
-        facade,
-        env,
-        metadata,
-        opts,
-        class_meta,
-        &LambdaSelection {
-            dead: &empty,
-            rescued: &empty,
-        },
-    )?;
+    env.run.rescued_lambdas.borrow_mut().clear();
+    let first = emit_pass(ir, facade, env, metadata, opts, class_meta)?;
     let used = env.run.used_lambdas.borrow().clone();
     // A MUST-INLINE message lambda whose call-site splice FELL BACK to a real `invokedynamic`
     // (pass 1 recorded the use): its impl was pre-marked `inline_only` on the assumption the splice
@@ -1097,28 +1091,11 @@ fn emit_all_with_class_meta_impl(
         return Some(first);
     }
     env.run.dead_lambdas.borrow_mut().clone_from(&dead);
-    // Pass 2: re-emit without the dead facade impls, plus any rescued must-inline impls
-    // (deterministic — identical decisions, minus the dead methods, plus the rescued ones; the
-    // facade itself drops when the dead impls were its only members).
-    emit_pass(
-        ir,
-        facade,
-        env,
-        metadata,
-        opts,
-        class_meta,
-        &LambdaSelection {
-            dead: &dead,
-            rescued: &rescued,
-        },
-    )
-}
-
-/// Which facade-owned lambda impls a pass drops (`dead`) or keeps despite a pre-marked inline
-/// (`rescued`) — the only state that differs between emit pass 1 (both empty) and pass 2.
-struct LambdaSelection<'a> {
-    dead: &'a krusty::fx_hash::HashSet<u32>,
-    rescued: &'a krusty::fx_hash::HashSet<u32>,
+    env.run.rescued_lambdas.borrow_mut().clone_from(&rescued);
+    // Pass 2: re-emit without the dead impls, plus any rescued must-inline impls (deterministic —
+    // identical decisions, minus the dead methods, plus the rescued ones; the facade itself drops
+    // when the dead impls were its only members).
+    emit_pass(ir, facade, env, metadata, opts, class_meta)
 }
 
 fn emit_pass(
@@ -1128,7 +1105,6 @@ fn emit_pass(
     metadata: Option<&KotlinMetadata>,
     opts: &EmitOptions,
     class_meta: &dyn Fn(&str) -> Option<KotlinMetadata>,
-    lambdas: &LambdaSelection,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     // `emit_all_with_class_meta_impl` may run a discovery pass and then discard all of its bytes in
     // favor of a second pass without dead lambda implementations. Plans are drained while each
@@ -1193,8 +1169,7 @@ fn emit_pass(
         let emitted = !class_member_fids.contains(&i)
             && f.dispatch_receiver.is_none()
             && f.body.is_some()
-            && (!ir.inline_only_fns.contains(&i) || lambdas.rescued.contains(&i))
-            && !lambdas.dead.contains(&i);
+            && !standalone_method_is_elided(ir, i, env);
         emitted.then_some(i)
     });
     let facade_functions: Vec<u32> = facade_functions.collect();
@@ -1220,36 +1195,18 @@ fn emit_pass(
             jvm_overloads::emit_pending_facade_overloads(ir, &mut overloaded, facade, cw, env)
         });
         let f = &ir.functions[i];
-        let rescued = lambdas.rescued.contains(&(i as u32));
-        if rescued {
-            // A rescued must-inline impl IS emitted despite its `inline_only` mark (see
-            // `emit_all_with_class_meta`) — bypass the early return.
-            emit_method_inner(
-                ir,
-                i as u32,
-                MethodSlot {
-                    static_owner: StaticOwner::Facade,
-                    instance: false,
-                },
-                facade,
-                facade,
-                &mut cw,
-                env,
-            );
-        } else {
-            emit_method(
-                ir,
-                i as u32,
-                MethodSlot {
-                    static_owner: StaticOwner::Facade,
-                    instance: false,
-                },
-                facade,
-                facade,
-                &mut cw,
-                env,
-            );
-        }
+        emit_method(
+            ir,
+            i as u32,
+            MethodSlot {
+                static_owner: StaticOwner::Facade,
+                instance: false,
+            },
+            facade,
+            facade,
+            &mut cw,
+            env,
+        );
         // A facade has no class declaration to close on.
         function_debug::attach_declared_function_debug(
             ir,
@@ -1809,6 +1766,18 @@ fn assert_determined_member_signatures(ir: &IrFile, c: &krusty::ir::IrClass) {
     }
 }
 
+/// Whether the field stores a capture the inlined call supplies, which kotlinc adds to a
+/// regenerated object by descriptor, so it carries no generic signature.
+fn field_is_inlined_capture(c: &krusty::ir::IrClass, field_index: usize) -> bool {
+    c.ctor_args.iter().any(|argument| {
+        argument.field_index == u32::try_from(field_index).ok()
+            && argument
+                .capture
+                .as_ref()
+                .is_some_and(|capture| capture.inlined)
+    })
+}
+
 /// The identity source map of an anonymous object regenerated at an inline call. Its primary file
 /// is the declaration class, not the `$$inlined$` binary name the copy is emitted under.
 fn start_regenerated_anonymous_source_map(
@@ -1822,9 +1791,31 @@ fn start_regenerated_anonymous_source_map(
     let Some(source) = ir.classes.get(specialization.source as usize) else {
         return;
     };
-    let lines = u16::try_from(ir.source_line_count)
-        .unwrap_or(u16::MAX)
-        .max(1);
+    // The primary file is the declaration's: another file's, when the inline function that
+    // declares the object is a template this file only expands.
+    let declaring = match specialization.inline_callee {
+        krusty::ir::IrInlineCallee::Module(callable) => {
+            ir.checked_callable_functions.get(&callable).copied()
+        }
+        krusty::ir::IrInlineCallee::Dependency(_) => None,
+    }
+    .filter(|function| ir.foreign_inline_templates.contains(function))
+    .and_then(|function| ir.foreign_template_source(function))
+    .and_then(|source| ir.source_debug.file(source.source));
+    let line_count = match declaring {
+        Some(file) => {
+            writer.set_source_file(Some(
+                file.name
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(&file.name)
+                    .to_string(),
+            ));
+            file.line_count
+        }
+        None => ir.source_line_count,
+    };
+    let lines = u16::try_from(line_count).unwrap_or(u16::MAX).max(1);
     writer.start_inline_origin_source_map_at(lines, &source.fq_name());
 }
 
@@ -2097,7 +2088,8 @@ fn emit_class(
                 type_parameter,
                 field_visibility::backs_var_property(c, field_index),
             )
-            .filter(|_| !field.is_property_delegate());
+            .filter(|_| !field.is_property_delegate())
+            .filter(|_| !field_is_inlined_capture(c, field_index));
         let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let field_desc = type_descriptor(jvm_value_ty(ty));
         // Coroutine continuation fields are compiler-generated storage, visited eagerly with no
@@ -3116,7 +3108,8 @@ fn emit_enum_class(
                 f.type_param.as_deref(),
                 field_visibility::backs_var_property(c, field_index),
             )
-            .filter(|_| !f.is_property_delegate());
+            .filter(|_| !f.is_property_delegate())
+            .filter(|_| !field_is_inlined_capture(c, field_index));
         cw.add_field_late_sig(
             access,
             &physical_name,
@@ -4423,6 +4416,8 @@ struct Emitter<'a> {
     /// krusty would otherwise need. Pushed/popped around the branchy RHS in `emit_binop`.
     /// Open source locals, in declaration order.
     open_locals: Vec<block_scope::OpenLocal>,
+    /// The outermost scope of the inline lambda whose method is being compiled.
+    lambda_body_scope: lambda_body_scope::LambdaBodyScope,
     /// Method-local identity source for inline frames. This never crosses the JVM boundary; it
     /// keeps debug-table ordering tied to producer provenance instead of generated local names.
     next_inline_frame_identity: u64,
@@ -4580,6 +4575,7 @@ impl<'a> Emitter<'a> {
             loop_stack: Vec::new(),
             non_local_jumps: Default::default(),
             open_locals: Vec::new(),
+            lambda_body_scope: Default::default(),
             next_inline_frame_identity: 0,
             inline_lambda_aliases: HashMap::default(),
             block_depth: 0,

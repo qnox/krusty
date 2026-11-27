@@ -668,6 +668,11 @@ pub struct FirAnonymousObject {
     pub capture_order: Box<[u32]>,
     pub delegate_arguments: Box<[FirInterfaceDelegateArgument]>,
     pub super_arguments: Box<[FirAnonymousSuperArgument]>,
+    /// The declaration's source lines. An object a foreign inline template declares is lowered
+    /// after its own file's syntax is gone, so they travel with the checked expression.
+    pub decl_line: u32,
+    pub decl_start_line: u32,
+    pub decl_end_line: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -233,6 +233,7 @@ fn copied_constructor_code_rewrites_a_shared_operand_once() {
         caller_source_name: "caller".into(),
         inline_callee: crate::ir::IrInlineCallee::Module(crate::fir::CallableId::from_raw(0)),
         inline_callee_source_name: "callee".into(),
+        inline_callee_default_entry: false,
         crossinline_operands: Vec::new(),
         parent: None,
         method_clones: Default::default(),
@@ -342,7 +343,7 @@ fn lifted_captures_after_a_fieldless_one_extend_the_recorded_order_by_constructo
     let name = ir.classes[class as usize].fq_name;
     let lifted = ir.add_expr(IrExpr::UnitInstance);
 
-    let field_base = append_lifted_captures(
+    let field_base = capturing_lambdas::append_lifted_captures(
         &mut ir,
         class,
         construction,

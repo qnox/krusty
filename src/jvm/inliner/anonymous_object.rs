@@ -15,6 +15,8 @@
 
 mod constructor;
 use constructor::DeclaredCapture;
+mod field_names;
+use field_names::FieldNames;
 mod lambda_inlining;
 use lambda_inlining::FieldLambda;
 mod nested_objects;
@@ -23,6 +25,11 @@ mod sam_wrapper;
 mod suspend_methods;
 mod type_remapper;
 
+use super::lambda_expansion::CAPTURED_THIS;
+
+/// The suffix kotlinc gives an object's own outer instance when an inlined lambda captures one too
+/// (`AsmUtil.INLINE_FUN_THIS_0_SUFFIX`).
+const INLINE_FUN_THIS_0_SUFFIX: &str = "$inline_fun";
 use crate::fx_hash::HashMap;
 use std::rc::Rc;
 
@@ -38,6 +45,7 @@ use super::class_roles::ClassRoles;
 use super::name_generator::NameGenerator;
 use super::{InlineError, ObjectLambda};
 
+pub(super) use lambda_inlining::keeps_passed_lambda_as_value;
 pub use sam_wrapper::copy_sam_wrapper;
 pub use suspend_methods::CallSiteSource;
 use suspend_methods::ContinuationMachine;
@@ -137,6 +145,8 @@ pub struct Regeneration<'a> {
     /// The inlined callee is the call site's module's, whose nested objects a copy reuses unless
     /// it must specialize them (kotlinc's `sameModule`).
     pub same_module: bool,
+    /// The reference release's defects the copy reproduces.
+    pub quirks: crate::kotlin_version::Quirks,
 }
 
 /// How a `$$forInline` method of the original becomes its copy's method with a state machine.
@@ -153,6 +163,9 @@ pub struct Regenerated {
     pub bytes: Vec<u8>,
     /// The regenerated constructor's descriptor, which the call site now calls.
     pub constructor_desc: String,
+    /// The order the constructor takes the call's lambdas' captured values in, as positions in
+    /// the call's lambdas.
+    pub lambda_order: Vec<usize>,
     /// A method of the copy still calls `reifiedOperationMarker`.
     pub reified_parameters_remain: bool,
     /// The classes the copy regenerated in turn: the continuations of its suspend methods.
@@ -280,7 +293,9 @@ pub fn regenerate(
                 METADATA_DESC => metadata = Some(annotation),
                 // The copy's map is written with the class; kotlinc drops the original's.
                 SOURCE_DEBUG_EXTENSION_DESC => {}
-                // Rebuilt machines and copied non-lambda continuations publish their own debug metadata.
+                // So is a continuation's `@DebugMetadata`: its machine's, which a copy built for
+                // a suspend method or a suspend lambda's rebuilt machine writes anew, and which a
+                // copied continuation does not keep.
                 DEBUG_METADATA_DESC
                     if regeneration.continuation.is_some()
                         || lambda_machine
@@ -293,6 +308,7 @@ pub fn regenerate(
             }
         }
     }
+    let mut declared_fields: Vec<(String, Option<String>)> = Vec::new();
     for field in &original.fields {
         if is_captured_field_name(&field.name) {
             continue;
@@ -310,6 +326,7 @@ pub fn regenerate(
         {
             remapper.remap_annotation(annotation)?;
         }
+        declared_fields.push((field.desc.clone(), field.signature.clone()));
         cw.add_copied_field(&field)
             .map_err(RegenerationError::Copy)?;
     }
@@ -343,9 +360,14 @@ pub fn regenerate(
         })
         .collect();
     let mut plan = constructor::extract(&constructor_code, old, &declared, call_desc)?;
-    // Preserve the original constructor's physical argument frame before lambda fields are removed.
+    // Preserve the original constructor frame before lambda fields are removed.
     let suspend_value_fields = plan.argument_fields(call_desc, regeneration.suspend_values)?;
-    let lambdas = plan_lambdas(&mut plan, call_desc, regeneration)?;
+    let PlannedLambdas {
+        lambdas,
+        order: lambda_order,
+        renamed_outer,
+        constructor_reads: constructor_reads_lambda,
+    } = plan_lambdas(&mut plan, old, call_desc, regeneration)?;
     plan.desc = remapper.map_desc(&plan.desc)?;
     for field in &mut plan.fields {
         field.desc = remapper.map_desc(&field.desc)?;
@@ -368,16 +390,15 @@ pub fn regenerate(
         .map_err(RegenerationError::Copy)?;
     }
     // kotlinc's `MethodInliner` transforms the constructor first: the objects it constructs are
-    // the copy's first ones, enclosed by the new constructor. What is left of its body reads a
-    // lambda as any method does, from the field the lambda is kept in, so the lambda is inlined
-    // there and the objects it constructs are regenerated.
+    // the copy's first ones, enclosed by the new constructor, and a lambda it invokes while the
+    // object is initialized is inlined there.
     let mut nested = Vec::new();
+    let mut field_retypes: Vec<(String, String)> = Vec::new();
     let mut sam_wrappers = Vec::new();
-    let regenerates_objects = lambda_inlining::reads_lambda(&plan.body, &lambdas)
-        || plan.body.instructions().any(|insn| {
-            references_other_regenerated_class(insn, regeneration.classes, old, &continuations)
-        });
-    let body = if regenerates_objects {
+    let regenerates_objects = plan.body.instructions().any(|insn| {
+        references_other_regenerated_class(insn, regeneration.classes, old, &continuations)
+    });
+    let body = if regenerates_objects || constructor_reads_lambda {
         let mut body = plan.body.clone();
         body.desc.clone_from(&plan.desc);
         let mut objects = NestedObjects {
@@ -400,6 +421,7 @@ pub fn regenerate(
             &mut lines,
             &mut objects,
         )?;
+        field_retypes.extend(objects.renamed.iter().cloned());
         nested.extend(objects.classes);
         sam_wrappers.extend(objects.sam_wrappers);
         reified_parameters_remain |= objects.reified_parameters_remain;
@@ -445,6 +467,9 @@ pub fn regenerate(
             }
         }
         check_captured_field_accesses(&method, old, &declared)?;
+        if let (Some(renamed), Some(code)) = (&renamed_outer, &mut method.code) {
+            constructor::rename_field(code, old, CAPTURED_THIS, renamed);
+        }
         // The continuation a `$$forInline` copy builds is regenerated as the copy's next object
         // when the inliner meets its construction.
         let machine = match (
@@ -502,6 +527,7 @@ pub fn regenerate(
                     &mut lines,
                     &mut objects,
                 )?;
+                field_retypes.extend(objects.renamed.iter().cloned());
                 nested.extend(objects.classes);
                 sam_wrappers.extend(objects.sam_wrappers);
                 reified_parameters_remain |= objects.reified_parameters_remain;
@@ -612,6 +638,31 @@ pub fn regenerate(
         nested.push((continuation, regenerated.bytes));
     }
 
+    // A field of a nested object's type is declared with the copy's type once the copy exists. The
+    // releases with `InlineObjectFieldKeepsOriginalNestedType` declare every field before they
+    // regenerate the objects a method creates, so it keeps the original's.
+    let fields_follow_nested_copies = !regeneration
+        .quirks
+        .has(crate::kotlin_version::Quirk::InlineObjectFieldKeepsOriginalNestedType);
+    for (index, (desc, signature)) in declared_fields
+        .iter()
+        .enumerate()
+        .filter(|_| fields_follow_nested_copies)
+    {
+        let retype = |text: &str| {
+            field_retypes
+                .iter()
+                .fold(text.to_string(), |text, (from, to)| {
+                    text.replace(&format!("L{from};"), &format!("L{to};"))
+                })
+        };
+        let retyped = retype(desc);
+        let retyped_signature = signature.as_deref().map(retype);
+        if retyped != *desc || retyped_signature != *signature {
+            cw.retype_copied_field(index, &retyped, retyped_signature.as_deref());
+        }
+    }
+
     if !lines.lineless {
         cw.set_source_file(original.source_file.clone());
         cw.set_source_map(lines.map);
@@ -670,6 +721,7 @@ pub fn regenerate(
     Ok(Regenerated {
         bytes: cw.finish(),
         constructor_desc: plan.desc,
+        lambda_order,
         reified_parameters_remain,
         nested,
         sam_wrappers,
@@ -740,28 +792,74 @@ fn remap_declaration(
     Ok(())
 }
 
+/// What [`plan_lambdas`] decided for the call's lambdas.
+#[derive(Default)]
+struct PlannedLambdas<'a> {
+    /// The lambdas, in the order the copy's constructor takes their captured values.
+    lambdas: Vec<FieldLambda<'a>>,
+    /// That order, as positions in the call's lambdas.
+    order: Vec<usize>,
+    /// The object's own outer instance's new name, when a lambda captures one too.
+    renamed_outer: Option<String>,
+    /// Whether what is left of the original constructor reads a lambda.
+    constructor_reads: bool,
+}
+
 /// The lambdas the copy inlines, each with the original's field for it and the copy's fields for
 /// its captured values, which `plan` now takes in the lambdas' place
 /// (`extractParametersMappingAndPatchConstructor`). A captured value's field is named after it with
 /// `$inlined` added, numbered when that name is taken (`getNewFieldName`, `addUniqueField`): every
 /// field the original declares is taken first, as kotlinc's `visitField` records each one it
-/// copies before the constructor is patched. The call site's enclosing instance, `this$0`, keeps
-/// its name unnumbered, and lambdas that all capture it share that one field: kotlinc renames the
-/// original's own `this$0` to `this$0$i` instead, which the port does not do yet.
+/// copies before the constructor is patched, and a numbered name the class already holds is
+/// skipped ([`FieldNames`]), where kotlinc would declare it twice. A captured outer instance keeps `this$0`:
+/// the constructor takes it once per lambda and stores the first ([`constructor::Constructor::inline_lambdas`]).
+///
+/// The object's own outer instance, when a lambda captures one too, is renamed `this$0$inline_fun`
+/// (`INLINE_FUN_THIS_0_SUFFIX`), in the plan and in what is left of the original constructor of
+/// `old`: the two can be different objects, even of the same type. That new name is returned for
+/// the copy's methods to read.
 fn plan_lambdas<'a>(
     plan: &mut constructor::Constructor,
+    old: &str,
     call_desc: &str,
     regeneration: &Regeneration<'a>,
-) -> Result<Vec<FieldLambda<'a>>, RegenerationError> {
+) -> Result<PlannedLambdas<'a>, RegenerationError> {
     if regeneration.lambdas.is_empty() {
-        return Ok(Vec::new());
+        return Ok(PlannedLambdas::default());
     }
-    let mut taken: HashMap<String, usize> = HashMap::default();
-    for field in &regeneration.original.fields {
-        *taken.entry(field.name.clone()).or_default() += 1;
+    let mut names = FieldNames::of(regeneration.original);
+    let lambdas_capture_outer = regeneration.lambdas.iter().any(|passed| {
+        passed
+            .lambda
+            .capture_names
+            .iter()
+            .any(|name| name.as_deref() == Some(CAPTURED_THIS))
+    });
+    let mut renamed_outer = None;
+    if lambdas_capture_outer {
+        if let Some(own) = plan
+            .fields
+            .iter_mut()
+            .find(|field| field.name == CAPTURED_THIS)
+        {
+            let renamed = names.allocate(&format!("{CAPTURED_THIS}{INLINE_FUN_THIS_0_SUFFIX}"));
+            constructor::rename_field(&mut plan.body, old, CAPTURED_THIS, &renamed);
+            own.name.clone_from(&renamed);
+            renamed_outer = Some(renamed);
+        }
     }
+    let arguments: Vec<usize> = regeneration
+        .lambdas
+        .iter()
+        .map(|passed| passed.argument)
+        .collect();
+    let order = plan.lambda_order(call_desc, &arguments)?;
+    let arguments: Vec<usize> = order.iter().map(|&position| arguments[position]).collect();
     let mut lambdas = Vec::with_capacity(regeneration.lambdas.len());
-    for passed in regeneration.lambdas {
+    for passed in order
+        .iter()
+        .map(|&position| &regeneration.lambdas[position])
+    {
         let types = passed
             .lambda
             .captured_types()
@@ -778,24 +876,11 @@ fn plan_lambdas<'a>(
             let name = name.as_deref().ok_or(RegenerationError::Unsupported(
                 "a lambda capturing a value the port does not name",
             ))?;
-            if name == CAPTURED_THIS_FIELD {
-                // The call site's own enclosing instance keeps its name and takes no number.
-                if taken.contains_key(CAPTURED_THIS_FIELD) {
-                    return Err(RegenerationError::Unsupported(
-                        "an object declaring `this$0` that a passed lambda also captures",
-                    ));
-                }
+            if name == CAPTURED_THIS {
                 captured.push((name.to_string(), desc));
                 continue;
             }
-            let base = format!("{name}$inlined");
-            let seen = taken.entry(base.clone()).or_default();
-            let unique = match *seen {
-                0 => base,
-                count => format!("{base}${count}"),
-            };
-            *seen += 1;
-            captured.push((unique, desc));
+            captured.push((names.allocate(&format!("{name}$inlined")), desc));
         }
         lambdas.push(FieldLambda {
             field: String::new(),
@@ -803,25 +888,21 @@ fn plan_lambdas<'a>(
             captured,
         });
     }
-    let arguments: Vec<usize> = regeneration
-        .lambdas
-        .iter()
-        .map(|passed| passed.argument)
-        .collect();
     let recaptured: Vec<(String, String)> = lambdas
         .iter()
         .flat_map(|lambda| lambda.captured.iter().cloned())
         .collect();
-    let fields = plan.inline_lambdas(
-        &regeneration.original.name,
-        call_desc,
-        &arguments,
-        &recaptured,
-    )?;
+    let (fields, constructor_reads) =
+        plan.inline_lambdas(old, call_desc, &arguments, &recaptured)?;
     for (lambda, field) in lambdas.iter_mut().zip(fields) {
         lambda.field = field;
     }
-    Ok(lambdas)
+    Ok(PlannedLambdas {
+        lambdas,
+        order,
+        renamed_outer,
+        constructor_reads,
+    })
 }
 
 /// Refuse what the ported stages do not regenerate yet.
@@ -831,9 +912,13 @@ fn check_supported(
     lambda_machine: bool,
     specialization_only: bool,
 ) -> Result<(), RegenerationError> {
-    // Rebuild an enclosing suspend method's continuation or a lambda's own machine. Plain
-    // specialization retains a suspend lambda's machine; a copied non-lambda continuation keeps
-    // its owning method's machine and drops its original debug metadata.
+    // A continuation copied for a suspend method's machine is one coroutine the port regenerates,
+    // and a suspend lambda whose machine is rebuilt over its `invokeSuspend$$forInline` another.
+    // A suspend lambda the call passes no lambda to is the third: its copy only specializes its
+    // reified operations, so its machine and `@DebugMetadata` stay as they are. The continuation of
+    // a suspend method a regenerated object declares is the fourth: kotlinc never builds a machine
+    // for a continuation (`isContinuationNotLambda`), so it is copied like any object, without
+    // its `@DebugMetadata`.
     let regenerated_coroutine = (continuation
         && original.super_name.as_deref() == Some(CONTINUATION_IMPL))
         || lambda_machine
@@ -912,7 +997,8 @@ fn references_other_regenerated_class(
 /// `code`, a method of the copy `new` with its types not yet renamed, as kotlinc's `MethodInliner`
 /// transforms it: every `invoke` of one of `lambdas` becomes the lambda's body, and each object it
 /// constructs that the copy regenerates in turn is regenerated into `objects`, whose originals the
-/// method and the copy's later methods then name by their copies.
+/// method and the copy's later methods then name by their copies. `for_inline` says whether `code`
+/// is a `$$forInline` copy ([`lambda_inlining::inline_into`]).
 fn transform_method(
     mut code: MethodNode,
     new: &str,

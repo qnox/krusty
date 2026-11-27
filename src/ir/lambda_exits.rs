@@ -184,6 +184,7 @@ mod tests {
             update: None,
             post_test: false,
             label: label.map(str::to_string),
+            inline_return_frame: false,
         })
     }
 

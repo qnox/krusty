@@ -492,6 +492,7 @@ mod tests {
                     krusty::fir::CallableId::from_raw(0),
                 ),
                 inline_callee_source_name: "define".to_string(),
+                inline_callee_default_entry: false,
                 parent: None,
                 consumed_inline_capture: false,
             },

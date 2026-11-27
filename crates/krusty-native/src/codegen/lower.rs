@@ -795,10 +795,10 @@ impl<'a> FileLowering<'a> {
                         Linkage::Hidden
                     }
                     krusty::backend::CheckedIrUnitKind::DependencySupport => Linkage::Local,
-                    // A member of a local or anonymous class is reachable from no other file, and
-                    // an inline function that declares the class realizes it again in each file
-                    // it is expanded into, under the same class name. Like the class's
-                    // descriptor, its members stay inside the file.
+                    // A local function, or a member of a local or anonymous class (including an
+                    // inline expansion's specialized copy), is reachable from no other file, and
+                    // an inline function that declares it realizes it again in each file it is
+                    // expanded into, under the same name. It stays inside the file.
                     krusty::backend::CheckedIrUnitKind::Source
                         if function
                             .dispatch_receiver
@@ -1551,6 +1551,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 update,
                 post_test,
                 label,
+                inline_return_frame: _,
             } => self.loop_statement(cond, body, update, post_test, label)?,
             IrExpr::BottomValue {
                 producer,

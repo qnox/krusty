@@ -76,6 +76,7 @@ mod tests {
             update: None,
             post_test: false,
             label: Some("frame".to_string()),
+            inline_return_frame: false,
         })
     }
 
@@ -124,6 +125,7 @@ mod tests {
             update: None,
             post_test: false,
             label: None,
+            inline_return_frame: false,
         });
         let operand = ir.add_expr(IrExpr::Const(IrConst::Null));
         let thrown = ir.add_expr(IrExpr::Throw { operand });
@@ -139,6 +141,7 @@ mod tests {
             update: None,
             post_test: false,
             label: None,
+            inline_return_frame: false,
         });
         let open = frame(&mut ir, vec![escaping]);
         assert!(!ir.loop_never_exits(open));
@@ -160,6 +163,7 @@ mod tests {
             update: None,
             post_test: false,
             label: None,
+            inline_return_frame: false,
         });
         assert!(!ir.loop_never_exits(conditional));
     }

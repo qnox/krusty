@@ -169,30 +169,20 @@ pub(super) fn reads_captured_fields_from_this(
     true
 }
 
-/// Turn each `aload slot` in `code`, a read of the constructor parameter at `slot`, into the read
-/// `aload 0; getfield owner.field` of the field that holds the same value.
-fn read_parameter_from_field(
-    code: &mut MethodNode,
-    slot: u16,
-    owner: &str,
-    field: &str,
-    desc: &str,
-) {
-    let mut nodes = Vec::with_capacity(code.nodes.len());
-    for node in std::mem::take(&mut code.nodes) {
-        if matches!(node, Node::Insn(Insn::Var { op: ALOAD, slot: loaded }) if loaded == slot) {
-            nodes.push(Node::Insn(Insn::Var { op: ALOAD, slot: 0 }));
-            nodes.push(Node::Insn(Insn::Field {
-                op: GETFIELD,
-                owner: owner.to_string(),
-                name: field.to_string(),
-                desc: desc.to_string(),
-            }));
-        } else {
-            nodes.push(node);
+/// Rename every access in `code` to the field `from` of `owner` to `to`.
+pub(super) fn rename_field(code: &mut MethodNode, owner: &str, from: &str, to: &str) {
+    for entry in &mut code.nodes {
+        if let Node::Insn(Insn::Field {
+            owner: field_owner,
+            name,
+            ..
+        }) = entry
+        {
+            if field_owner == owner && name == from {
+                *name = to.to_string();
+            }
         }
     }
-    code.nodes = nodes;
 }
 
 impl Constructor {
@@ -222,24 +212,76 @@ impl Constructor {
         Ok(fields)
     }
 
+    /// The captured field the constructor, called through `call_desc`, stores its argument at
+    /// `index` in: the field a copy that inlines a lambda passed there reads it from.
+    pub(super) fn field_of_argument(&self, call_desc: &str, index: usize) -> Option<&str> {
+        let slot = 1 + argument_descriptors(call_desc)?
+            .get(..index)?
+            .iter()
+            .map(|argument| descriptor_words(argument))
+            .sum::<u16>();
+        self.fields
+            .iter()
+            .find(|field| field.slot == slot)
+            .map(|field| field.name.as_str())
+    }
+
+    /// The order the copy takes the lambdas passed as the arguments at `lambda_arguments` of
+    /// `call_desc` in, as positions in `lambda_arguments`: first each lambda the original keeps in
+    /// a field, in the order it stores the fields (`findCapturedFieldAssignmentInstructions`), then
+    /// each it only reads from its parameter, in argument order. The lambdas' captured values
+    /// follow the other arguments in this order.
+    pub(super) fn lambda_order(
+        &self,
+        call_desc: &str,
+        lambda_arguments: &[usize],
+    ) -> Result<Vec<usize>, RegenerationError> {
+        let arguments = argument_descriptors(call_desc).ok_or(RegenerationError::Unsupported(
+            "a malformed constructor descriptor",
+        ))?;
+        let mut slot = 1u16;
+        let mut slots = Vec::with_capacity(arguments.len());
+        for argument in &arguments {
+            slots.push(slot);
+            slot += descriptor_words(argument);
+        }
+        let slot_of = |position: usize| slots.get(lambda_arguments[position]).copied();
+        let mut order: Vec<usize> = self
+            .fields
+            .iter()
+            .filter_map(|field| {
+                (0..lambda_arguments.len()).find(|&position| slot_of(position) == Some(field.slot))
+            })
+            .collect();
+        for position in 0..lambda_arguments.len() {
+            if !order.contains(&position) {
+                order.push(position);
+            }
+        }
+        Ok(order)
+    }
+
     /// kotlinc's constructor for a copy that inlines the lambdas passed as the arguments at
     /// `lambda_arguments` of `call_desc`: each lambda's field and parameter go, and the values the
     /// lambdas capture, `recaptured` as `(field, descriptor)`, are taken after the other arguments
-    /// and kept in fields of their own. The other arguments close up over the lambdas' slots. The
-    /// lambdas' fields, in `lambda_arguments` order.
+    /// and kept in fields of their own. The other arguments close up over the lambdas' slots.
     ///
-    /// What is left of the original body reads a lambda as a load of the field its constructor
-    /// keeps it in, from `this` of `owner`: a lambda the constructor reads from its parameter, as
-    /// an initializer of the object calling it does, reads the lambda's own field in the new body,
-    /// so the lambda is inlined there as in any other method. A lambda the constructor keeps in no
-    /// field takes the name of one it does not declare, which only this body reads.
+    /// The original constructor reads a lambda it invokes while the object is initialized from its
+    /// parameter, whether or not it also keeps it in a field (one it invokes only there it keeps in
+    /// none). Each such read becomes a read of `owner`'s field for the lambda, under a name no field
+    /// of the original has when there is no field, so the constructor's body inlines it as a method
+    /// of the copy inlines a lambda its field holds (kotlinc's `MethodInliner` over the
+    /// constructor, with the lambdas as its functional arguments).
+    ///
+    /// The lambdas' fields, in `lambda_arguments` order, and whether what is left of the original
+    /// body reads one of them, so that the constructor's body inlines it.
     pub(super) fn inline_lambdas(
         &mut self,
         owner: &str,
         call_desc: &str,
         lambda_arguments: &[usize],
         recaptured: &[(String, String)],
-    ) -> Result<Vec<String>, RegenerationError> {
+    ) -> Result<(Vec<String>, bool), RegenerationError> {
         let unsupported = RegenerationError::Unsupported;
         let arguments = argument_descriptors(call_desc)
             .ok_or(unsupported("a malformed constructor descriptor"))?;
@@ -278,13 +320,16 @@ impl Constructor {
         let mut fields = Vec::new();
         for &argument in lambda_arguments {
             let slot = slots[argument].0;
-            let name = match self.fields.iter().position(|field| field.slot == slot) {
+            let field = match self.fields.iter().position(|field| field.slot == slot) {
                 Some(at) => self.fields.remove(at).name,
-                None => format!("<constructor lambda {argument}>"),
+                None => self.unused_field_name(argument),
             };
-            read_parameter_from_field(&mut self.body, slot, owner, &name, &arguments[argument]);
-            fields.push(name);
+            self.read_parameter_as_field(slot, owner, &field)?;
+            fields.push(field);
         }
+        let reads_lambda = self.body.instructions().any(
+            |insn| matches!(insn, Insn::Field { op: GETFIELD, name, .. } if fields.contains(name)),
+        );
         for field in &mut self.fields {
             field.slot = place(field.slot).ok_or(unsupported("a malformed captured store"))?;
         }
@@ -329,11 +374,71 @@ impl Constructor {
                 .map(|(_, desc)| desc.as_str())
                 .collect::<String>()
         );
-        Ok(fields)
+        Ok((fields, reads_lambda))
     }
 
     /// The new constructor: a label, every captured field's store from its parameter, then the
     /// copied `body`, whose locals that started at its first label now start at the new one.
+    /// A name for the lambda passed as argument `argument` that no field the original body
+    /// accesses has.
+    fn unused_field_name(&self, argument: usize) -> String {
+        let taken = |name: &str| {
+            self.fields.iter().any(|field| field.name == name)
+                || self.body.instructions().any(
+                    |insn| matches!(insn, Insn::Field { name: accessed, .. } if accessed == name),
+                )
+        };
+        let base = format!("$lambda${argument}");
+        let mut name = base.clone();
+        let mut ordinal = 0;
+        while taken(&name) {
+            ordinal += 1;
+            name = format!("{base}${ordinal}");
+        }
+        name
+    }
+
+    /// Turn each read of the reference parameter at `slot` into `aload 0; getfield owner.field`.
+    /// Any other use of the slot (a store, a wide access) is refused.
+    fn read_parameter_as_field(
+        &mut self,
+        slot: u16,
+        owner: &str,
+        field: &str,
+    ) -> Result<(), RegenerationError> {
+        let mut at = 0;
+        while at < self.body.nodes.len() {
+            match &self.body.nodes[at] {
+                Node::Insn(Insn::Var {
+                    op: ALOAD,
+                    slot: read,
+                }) if *read == slot => {
+                    self.body.nodes[at] = Node::Insn(Insn::Var { op: ALOAD, slot: 0 });
+                    self.body.nodes.insert(
+                        at + 1,
+                        Node::Insn(Insn::Field {
+                            op: GETFIELD,
+                            owner: owner.to_string(),
+                            name: field.to_string(),
+                            desc: "Ljava/lang/Object;".to_string(),
+                        }),
+                    );
+                    at += 2;
+                }
+                Node::Insn(Insn::Var { slot: used, .. } | Insn::Iinc { slot: used, .. })
+                    if *used == slot =>
+                {
+                    return Err(RegenerationError::Unsupported(
+                        "a constructor that uses a lambda's parameter other than to read it",
+                    ));
+                }
+                _ => at += 1,
+            }
+        }
+        // The parameter's local goes with the slot, as every lambda's does.
+        Ok(())
+    }
+
     pub(super) fn assemble(&self, new_class: &str, mut body: MethodNode) -> MethodNode {
         let old_start = match body.nodes.first() {
             Some(Node::Label(label)) => Some(*label),
@@ -510,10 +615,11 @@ mod tests {
         )
         .expect("extracts");
         let this = ("this$0".to_string(), "LC;".to_string());
-        let fields = plan
+        let (fields, reads_lambda) = plan
             .inline_lambdas(OWNER, call, &[0, 1], &[this.clone(), this])
             .expect("inlines");
         assert_eq!(fields, ["$a", "$b"]);
+        assert!(!reads_lambda);
         assert_eq!(plan.desc, "(LC;LC;)V");
         assert_eq!(
             plan.fields,
@@ -522,6 +628,68 @@ mod tests {
                 desc: "LC;".to_string(),
                 slot: 1,
             }]
+        );
+    }
+
+    /// `<init>(Object, Object)` keeping only its second lambda in a field and invoking both.
+    fn constructor_reading_lambdas() -> (Constructor, &'static str) {
+        let declared = [DeclaredCapture {
+            name: "$step",
+            desc: STRING,
+        }];
+        let call = "(Ljava/lang/String;Ljava/lang/String;)V";
+        let plan = extract(
+            &constructor(vec![
+                var(ALOAD, 0),
+                var(ALOAD, 2),
+                put(OWNER, "$step"),
+                var(ALOAD, 1),
+                Node::Insn(Insn::Op(0x57)),
+                var(ALOAD, 2),
+                Node::Insn(Insn::Op(0x57)),
+            ]),
+            OWNER,
+            &declared,
+            call,
+        )
+        .expect("extracts");
+        (plan, call)
+    }
+
+    #[test]
+    fn a_lambda_kept_in_a_field_takes_its_captured_values_before_one_only_read() {
+        let (plan, call) = constructor_reading_lambdas();
+        assert_eq!(plan.lambda_order(call, &[0, 1]).expect("orders"), [1, 0]);
+        assert_eq!(plan.lambda_order(call, &[1, 0]).expect("orders"), [0, 1]);
+    }
+
+    #[test]
+    fn every_read_of_a_lambdas_parameter_becomes_a_read_of_its_field() {
+        let (mut plan, call) = constructor_reading_lambdas();
+        let (fields, reads_lambda) = plan
+            .inline_lambdas(OWNER, call, &[1, 0], &[])
+            .expect("inlines");
+        assert_eq!(fields, ["$step", "$lambda$0"]);
+        assert!(reads_lambda);
+        assert_eq!(plan.desc, "()V");
+        let get = |name: &str| {
+            Node::Insn(Insn::Field {
+                op: GETFIELD,
+                owner: OWNER.to_string(),
+                name: name.to_string(),
+                desc: "Ljava/lang/Object;".to_string(),
+            })
+        };
+        assert_eq!(
+            plan.body.nodes[..6],
+            [
+                var(ALOAD, 0),
+                get("$lambda$0"),
+                Node::Insn(Insn::Op(0x57)),
+                var(ALOAD, 0),
+                get("$step"),
+                Node::Insn(Insn::Op(0x57)),
+            ]
         );
     }
 

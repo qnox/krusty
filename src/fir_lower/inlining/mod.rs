@@ -291,6 +291,9 @@ impl BodyLowering<'_> {
         let frame = inline_callee.frame(self.index)?;
         // The name its inline frames are opened under.
         let callee = frame.name.clone();
+        // An operand the call leaves out takes its default, which the callee's default entry
+        // supplies: that entry is what the expansion copies.
+        let callee_default_entry = operands.iter().any(Option::is_none);
         let caller_source_name = match self.body.debug_name() {
             Some(name) => name.to_owned(),
             None => match self.expansion_enclosure {
@@ -1020,6 +1023,7 @@ impl BodyLowering<'_> {
                     source: callee_source,
                     callee: frame.callee,
                     callee_source_name: &callee,
+                    callee_default_entry,
                 },
             ),
             // The plan is empty: a dependency template declares no lambda.
@@ -1051,6 +1055,7 @@ impl BodyLowering<'_> {
                 caller_site: self.caller_site(caller_declaration),
                 inline_callee: frame.callee,
                 inline_callee_source_name: &callee,
+                inline_callee_default_entry: callee_default_entry,
                 crossinline_operands: &crossinline_operands,
                 parent: None,
             },
@@ -1230,6 +1235,7 @@ impl BodyLowering<'_> {
             update: None,
             post_test: false,
             label: Some(label),
+            inline_return_frame: false,
         }));
         let value = match result_slot {
             None => {

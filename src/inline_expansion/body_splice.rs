@@ -318,6 +318,7 @@ fn finish_expansion(
         update: None,
         post_test: false,
         label: Some(label),
+        inline_return_frame: false,
     }));
     if let Some(slot) = result_slot {
         statements.push(ir.add_expr(IrExpr::GetValue(slot)));

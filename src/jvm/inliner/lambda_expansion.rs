@@ -75,6 +75,9 @@ impl Lambda {
     }
 }
 
+/// The name kotlinc gives a captured outer instance (`AsmUtil.CAPTURED_THIS_FIELD`).
+pub(crate) const CAPTURED_THIS: &str = "this$0";
+
 /// How the inlined code's line numbers reach the caller's line table (kotlinc's `SourceMapper`).
 pub trait SourceLines {
     /// `SourceMapCopier.mapLineNumber` of a line of the inlined function's own file; `None` for a
@@ -594,7 +597,7 @@ fn inline_lambda(
     let mut node = super::preprocess_node_before_inline(node)?;
     preparation::remove_fake_variable_initializations(&mut node);
     returns::normalize_local_returns(&mut node)?;
-    let invokes = super::functional_arguments::mark_places(&mut node, &parameters)?;
+    let invokes = super::functional_arguments::mark_places(&mut node, &parameters, &[])?;
     let context = Context {
         parameters: &parameters,
         lambdas: &[],

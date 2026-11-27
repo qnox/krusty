@@ -31,6 +31,9 @@ const INTRINSICS: &str = "kotlin/jvm/internal/Intrinsics";
 pub struct RegeneratedObject {
     pub name: String,
     pub constructor_desc: String,
+    /// The order the copy's constructor takes the passed lambdas' captured values in, as positions
+    /// in the lambdas it was given.
+    pub lambda_order: Vec<usize>,
     /// A method of the copy still calls `reifiedOperationMarker`, so the caller keeps
     /// `needClassReification` for its own caller to specialize.
     pub reified_parameters_remain: bool,
@@ -95,6 +98,13 @@ pub(super) struct PendingConstructor {
     class: String,
     desc: String,
     captured_loads: Vec<Insn>,
+}
+
+impl PendingConstructor {
+    /// Whether this is the constructor of `class`, the copy that keeps the call's lambdas.
+    pub(super) fn constructs(&self, class: &str) -> bool {
+        self.class == class
+    }
 }
 
 /// Regenerate every anonymous object `node` constructs and rename the references to it. Each
@@ -190,7 +200,7 @@ pub(super) fn regenerate_objects(
                 pending.push(PendingConstructor {
                     class: copy.name.clone(),
                     desc: copy.constructor_desc.clone(),
-                    captured_loads: captured_loads(parameters, lambdas, passed),
+                    captured_loads: captured_loads(parameters, lambdas, passed, &copy.lambda_order),
                 });
             }
             if copy.reified_parameters_remain {
@@ -356,9 +366,10 @@ fn captured_loads(
     parameters: &Parameters,
     lambdas: &[Lambda],
     passed: &[(usize, usize)],
+    order: &[usize],
 ) -> Vec<Insn> {
     let mut loads = Vec::new();
-    for &(_, lambda) in passed {
+    for &(_, lambda) in order.iter().map(|&position| &passed[position]) {
         for index in lambdas[lambda].captured.clone() {
             let slot = parameters.real_size()
                 + parameters.captured[..index]

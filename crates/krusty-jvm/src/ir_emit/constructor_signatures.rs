@@ -102,6 +102,13 @@ fn primary_constructor_parameters(ir: &IrFile, class: &IrClass) -> Vec<Construct
                 };
                 return ConstructorParameter::OuterInstance(outer);
             }
+            if argument
+                .capture
+                .as_ref()
+                .is_some_and(|capture| capture.inlined)
+            {
+                return ConstructorParameter::Descriptor(type_descriptor(descriptor));
+            }
             ConstructorParameter::Regular {
                 ty: argument.declared_ty.unwrap_or(argument.ty),
                 descriptor: type_descriptor(descriptor),

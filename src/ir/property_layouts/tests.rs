@@ -102,6 +102,7 @@ fn copy(ir: &mut IrFile, source: u32, name: &str, field: u32) -> u32 {
             caller_source_name: "caller".into(),
             inline_callee: IrInlineCallee::Module(CallableId::from_raw(0)),
             inline_callee_source_name: "callee".into(),
+            inline_callee_default_entry: false,
             crossinline_operands: Vec::new(),
             parent: None,
             method_clones,

@@ -470,6 +470,28 @@ pub(crate) fn foreign_declaration(
     })
 }
 
+/// The foreign inline template whose body holds the call `class` is a call-site copy for: the
+/// copy is that template's expansion, read here and written by the file that declares the
+/// template.
+pub(crate) fn foreign_copy_template(
+    ir: &IrFile,
+    class: &krusty::ir::IrClass,
+) -> Option<krusty::ir::FunId> {
+    let caller = class
+        .lambda
+        .as_ref()
+        .and_then(|lambda| ir.specialized_functions.get(&lambda.invoke))
+        .map(|copy| copy.caller)
+        .or_else(|| {
+            ir.class_id_by_name(class.fq_name)
+                .and_then(|id| ir.specialized_anonymous_classes.get(&id))
+                .map(|copy| copy.caller)
+        })??;
+    enclosing_function(ir, caller, &|function| {
+        ir.foreign_inline_templates.contains(&function)
+    })
+}
+
 /// Whether `class` is declared in another source file's code, which writes it.
 pub(crate) fn declared_by_another_file(ir: &IrFile, class: &krusty::ir::IrClass) -> bool {
     foreign_declaration(ir, class).is_some()
@@ -818,6 +840,7 @@ mod tests {
                     krusty::fir::CallableId::from_raw(0),
                 ),
                 inline_callee_source_name: "update".to_string(),
+                inline_callee_default_entry: false,
                 parent: None,
                 consumed_inline_capture: false,
             },

@@ -132,6 +132,7 @@ impl Realizer<'_> {
                     update: Some(update),
                     post_test: false,
                     label: Some(label),
+                    inline_return_frame: false,
                 })
             } else {
                 let always = self.add(IrExpr::Const(IrConst::Boolean(true)));
@@ -141,6 +142,7 @@ impl Realizer<'_> {
                     update: Some(update),
                     post_test: true,
                     label: Some(label),
+                    inline_return_frame: false,
                 });
                 self.guarded_unless_entered(&header, &variables, first_constant, repeat)
             }
@@ -152,6 +154,7 @@ impl Realizer<'_> {
                 update: Some(increment),
                 post_test: false,
                 label: Some(label),
+                inline_return_frame: false,
             })
         } else {
             // `val loopVariable = inductionVar; inductionVar += step; body` while the bound holds.
@@ -165,6 +168,7 @@ impl Realizer<'_> {
                 update: None,
                 post_test: true,
                 label: Some(label),
+                inline_return_frame: false,
             });
             // kotlinc keeps this loop's `FOR_LOOP_INNER_WHILE` origin (the overflow-guarded one
             // above takes `doWhileCounterLoopOrigin`), so its body's locals outlive the condition.
