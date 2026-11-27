@@ -15,7 +15,8 @@ use super::{
     lambda_class, lambda_class_names, load, method_defaults, native_unsigned_impl_target,
     parse_descriptor_params, physical_call_result_words, prim_newarray_atype, push_zero,
     singleton_instance_load, slot_words, try_emission, ty_from_descriptor_ret, vararg,
-    JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation, LMF_METAFACTORY_DESC,
+    JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation, LMF_ALT_METAFACTORY_DESC,
+    LMF_FLAG_BRIDGES, LMF_METAFACTORY_DESC,
 };
 
 impl super::Emitter<'_> {
@@ -1904,14 +1905,40 @@ impl super::Emitter<'_> {
                         };
                         let impl_mh = emitter.cw.method_handle_ref(6, impl_ref);
                         let inst_mt = emitter.cw.method_type(&inst_desc);
-                        let meta = emitter.cw.method_handle_static(
-                            "java/lang/invoke/LambdaMetafactory",
-                            "metafactory",
-                            LMF_METAFACTORY_DESC,
-                        );
-                        let bootstrap = emitter
-                            .cw
-                            .add_bootstrap(meta, vec![sam_mt, impl_mh, inst_mt]);
+                        let bridges = sam
+                            .as_ref()
+                            .map(|target| lambda_class::sam_bridge_descriptors(target, &sam_desc))
+                            .unwrap_or_default();
+                        let bootstrap = if bridges.is_empty() {
+                            let meta = emitter.cw.method_handle_static(
+                                "java/lang/invoke/LambdaMetafactory",
+                                "metafactory",
+                                LMF_METAFACTORY_DESC,
+                            );
+                            emitter
+                                .cw
+                                .add_bootstrap(meta, vec![sam_mt, impl_mh, inst_mt])
+                        } else {
+                            let meta = emitter.cw.method_handle_static(
+                                "java/lang/invoke/LambdaMetafactory",
+                                "altMetafactory",
+                                LMF_ALT_METAFACTORY_DESC,
+                            );
+                            // `FLAG_BRIDGES`, the bridge count, then each bridge's method type.
+                            let mut arguments = vec![
+                                sam_mt,
+                                impl_mh,
+                                inst_mt,
+                                emitter.cw.const_int(LMF_FLAG_BRIDGES),
+                                emitter.cw.const_int(bridges.len() as i32),
+                            ];
+                            arguments.extend(
+                                bridges
+                                    .iter()
+                                    .map(|descriptor| emitter.cw.method_type(descriptor)),
+                            );
+                            emitter.cw.add_bootstrap(meta, arguments)
+                        };
                         emitter
                             .cw
                             .invoke_dynamic(bootstrap, &sam_method, &indy_desc)
