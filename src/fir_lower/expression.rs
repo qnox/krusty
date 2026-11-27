@@ -920,21 +920,30 @@ impl BodyLowering<'_> {
                 end,
                 end_type,
                 declaration,
-                ..
+                ends_inlined_call,
             } => {
                 let start = self.expression(*start)?;
                 let end = self.expression(*end)?;
-                self.ir.add_expr(IrExpr::Checked(Box::new(
-                    crate::ir::IrCheckedOperation::RangeConstruction {
-                        operation: *operation,
-                        start,
-                        start_type: start_type.get(),
-                        end,
-                        end_type: end_type.get(),
-                        result: expression.ty.get(),
-                        declaration: *declaration,
-                    },
-                )))
+                if let Some(expanded) = self.library_range_expansion(
+                    (*ends_inlined_call, *declaration),
+                    [start, end],
+                    [start_type.get(), end_type.get()],
+                    expression.ty.get(),
+                )? {
+                    expanded
+                } else {
+                    self.ir.add_expr(IrExpr::Checked(Box::new(
+                        crate::ir::IrCheckedOperation::RangeConstruction {
+                            operation: *operation,
+                            start,
+                            start_type: start_type.get(),
+                            end,
+                            end_type: end_type.get(),
+                            result: expression.ty.get(),
+                            declaration: *declaration,
+                        },
+                    )))
+                }
             }
             FirExprKind::InRange {
                 operation,

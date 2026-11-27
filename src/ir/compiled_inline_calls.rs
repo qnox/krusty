@@ -35,6 +35,9 @@ pub struct CompiledInlineOperands {
 #[derive(Default)]
 pub(super) struct CompiledInlineCalls {
     lowering: SameModuleInlining,
+    /// The range classes whose constructions the backend builds through the library's own inline
+    /// declaration (`UInt.rangeTo`), because it does not lay the class out itself.
+    library_built_ranges: Vec<crate::types::TypeName>,
     /// Each call kept for the backend → the function whose compiled body it inlines.
     calls: HashMap<ExprId, FunId>,
 }
@@ -49,6 +52,19 @@ impl IrFile {
     /// any body is lowered.
     pub fn set_same_module_inlining(&mut self, lowering: SameModuleInlining) {
         self.compiled_inline_calls.lowering = lowering;
+    }
+
+    /// Whether a range construction of `class` is the expansion of its library declaration.
+    pub fn builds_range_by_library(&self, class: crate::types::TypeName) -> bool {
+        self.compiled_inline_calls
+            .library_built_ranges
+            .contains(&class)
+    }
+
+    /// Select the range classes the backend does not lay out, whose constructions expand their
+    /// library declarations. Set once, before any body is lowered.
+    pub fn set_library_built_ranges(&mut self, classes: Vec<crate::types::TypeName>) {
+        self.compiled_inline_calls.library_built_ranges = classes;
     }
 
     /// Record that `call` is inlined from the compiled body of `function`. Each operand carries the
@@ -160,12 +176,20 @@ impl IrFile {
 impl InheritedFacts for CompiledInlineCalls {
     fn inherit(&mut self, source: ExprId, target: ExprId) {
         // How the file inlines same-module calls is a file-wide decision.
-        let Self { lowering: _, calls } = self;
+        let Self {
+            lowering: _,
+            library_built_ranges: _,
+            calls,
+        } = self;
         calls.inherit(source, target);
     }
 
     fn relocate(&mut self, source: ExprId, target: ExprId) {
-        let Self { lowering: _, calls } = self;
+        let Self {
+            lowering: _,
+            library_built_ranges: _,
+            calls,
+        } = self;
         calls.relocate(source, target);
     }
 

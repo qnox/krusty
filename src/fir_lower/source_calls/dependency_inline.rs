@@ -190,3 +190,54 @@ impl BodyLowering<'_> {
         Some(expanded)
     }
 }
+
+impl BodyLowering<'_> {
+    /// The expansion of the library declaration a range construction selected, for a target that
+    /// does not lay its range class out: kotlinc expands that inline declaration at the
+    /// construction (`UInt.rangeTo`). `None` when the construction stays a range construction.
+    pub(in super::super) fn library_range_expansion(
+        &mut self,
+        (ends_inlined_call, declaration): (bool, Option<ExternalCallableId>),
+        [start, end]: [ExprId; 2],
+        [start_type, end_type]: [Ty; 2],
+        result: Ty,
+    ) -> Result<Option<ExprId>, super::super::FirLoweringFailure> {
+        let Some(target) = declaration.filter(|_| ends_inlined_call) else {
+            return Ok(None);
+        };
+        let builds_by_library = result
+            .kotlin_class_internal()
+            .is_some_and(|class| self.ir.builds_range_by_library(class));
+        if !builds_by_library
+            || self.ir.same_module_inlining() != crate::ir::SameModuleInlining::ExpandInIr
+            || self.dependency_templates.compiler_implemented(target)
+        {
+            return Ok(None);
+        }
+        let Some(template) = self.dependency_templates.template(self.ir, target).cloned() else {
+            return Ok(None);
+        };
+        let is_extension = self.ir.extension_receiver_fns.contains(&template.function);
+        let arguments = [IrCheckedArgument::Expression {
+            parameter: 0,
+            value: end,
+            context: crate::ir::IrContextArgumentRole::Ordinary,
+        }];
+        // A selected template is an obligation: a construction it cannot expand fails the file.
+        self.dependency_inline_call(DependencyInlineCall {
+            target,
+            template,
+            parameter_types: &[end_type],
+            dispatch_receiver: (!is_extension).then_some(start),
+            dispatch_type: Some(start_type),
+            extension_receiver: is_extension.then_some(start),
+            extension_receiver_parameter: None,
+            arguments: &arguments,
+            substitutions: &[],
+        })
+        .map(Some)
+        .ok_or(super::super::FirLoweringFailure::UnsupportedExternalCall(
+            target,
+        ))
+    }
+}
