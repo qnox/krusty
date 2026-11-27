@@ -23,10 +23,12 @@
 use super::*;
 use krusty::fir::FirPropertyReferenceTarget;
 
-/// Where the three members live, after `kotlin.Any`'s.
-const GET: u32 = 3;
-const SET: u32 = 4;
-const NAME: u32 = 5;
+/// Where the three members live: after `kotlin.Any`'s three and the function slots every function
+/// value's `invoke` takes by its operand count, which a reference fills alike with its getter.
+pub(super) const GET: u32 =
+    krusty::backend::class_tables::FUNCTION_SLOT + crate::classes::FUNCTION_SLOTS;
+pub(super) const SET: u32 = GET + 1;
+pub(super) const NAME: u32 = GET + 2;
 
 /// The emitted pieces of one property-reference site.
 #[derive(Clone, Copy)]
@@ -397,8 +399,8 @@ impl<'a> FileLowering<'a> {
         let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
         let mut vtable = self.any_vtable()?;
         vtable[0] = equals;
-        vtable.push(unreachable);
-        vtable.push(unreachable);
+        // The function slots, `get` and `set`: nothing can call any of them on a local property.
+        vtable.extend((0..crate::classes::FUNCTION_SLOTS + 2).map(|_| unreachable));
         vtable.push(name);
         let any_type = self.import_data("kt_type_any")?;
         // A local delegated property's metadata is a KProperty, but not a KProperty0: Kotlin does
@@ -606,6 +608,9 @@ impl<'a> FileLowering<'a> {
         vtable[0] = self.runtime_member_import("kt_reference_equals")?;
         vtable[1] = self.runtime_member_import("kt_reference_hash_code")?;
         vtable[2] = to_string;
+        // A property reference is also the function `(R) -> V` it reads through, called at the slot
+        // of its operand count, so every function slot holds the getter.
+        vtable.extend((0..crate::classes::FUNCTION_SLOTS).map(|_| getter));
         vtable.push(getter);
         vtable.push(match setter {
             Some(setter) => setter,

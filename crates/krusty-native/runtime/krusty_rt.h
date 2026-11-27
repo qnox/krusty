@@ -189,6 +189,10 @@ typedef struct KObjectHeader {
    generator puts a lambda's and a callable reference's `invoke` there; nothing else in this runtime
    calls through it, and nothing but a function value is ever handed to something that does. */
 #define KT_SLOT_INVOKE 3u /* KRef (*)(KRef self, …) */
+/* The slot holding a function value's `invoke` of `n` physical operands: one number per operand
+   count, so a class implementing several function types holds each body where its callers read
+   it. `KT_SLOT_INVOKE` is the zero-operand one. */
+#define KT_SLOT_INVOKE_N(n) (KT_SLOT_INVOKE + (n))
 
 /* ---- memory ---------------------------------------------------------------------------------- */
 

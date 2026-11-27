@@ -24,9 +24,12 @@ use super::super::super::captures::carried_parameters;
 use super::super::ReferenceDeclaration;
 use super::*;
 
-/// The vtable slot a function value's body occupies: right after `kotlin.Any`'s three, so a
-/// function value answers `equals`/`hashCode`/`toString` like any other object.
-const INVOKE_SLOT: u32 = 3;
+/// The table number a call through a function type of `operands` physical operands reads: the one
+/// every function value of that operand count holds its `invoke` in.
+pub(super) fn function_slot_for(operands: usize) -> Result<u32, Unsupported> {
+    krusty::backend::class_tables::function_slot(crate::classes::FUNCTION_SLOTS, operands)
+        .ok_or_else(|| declined!("a function value called with {operands} operands"))
+}
 
 /// A declaration marker is shared only within the scope that authenticates its identity.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -555,7 +558,9 @@ impl<'a> FileLowering<'a> {
                         }
                         None => None,
                     };
-                    vtable.push(thunk);
+                    // Called at the slot of its operand count, which the callers of its function
+                    // type read, so every one holds the body.
+                    vtable.extend((0..crate::classes::FUNCTION_SLOTS).map(|_| thunk));
                     // A REFERENCE answers `KCallable.name` too, and a program reaches it through
                     // a variable rather than through the written reference — so the answer is a
                     // member of the object rather than a constant folded at the site. It takes
@@ -567,6 +572,7 @@ impl<'a> FileLowering<'a> {
                     if let Some(declared) = self.reference_declaration_name(index as u32) {
                         let name =
                             self.declare_local_function(&format!("{base}_name"), &[any()], any())?;
+                        vtable.push(thunk);
                         vtable.push(thunk);
                         vtable.push(name);
                         self.define_reference_name(name, &base, &declared)?;
@@ -693,7 +699,13 @@ impl<'a> FileLowering<'a> {
                 return Err("a functional interface declared outside this file".into());
             }
             krusty::ir::IrSamMethod::FunctionTypeInvoke => {
-                (None, model::Dispatch::Class(model::FUNCTION_SLOT))
+                let operands = target.declared_parameters.len();
+                let slot = krusty::backend::class_tables::function_slot(
+                    crate::classes::FUNCTION_SLOTS,
+                    operands,
+                )
+                .ok_or_else(|| declined!("a function type of {operands} operands"))?;
+                (None, model::Dispatch::Class(slot))
             }
         };
 
@@ -782,7 +794,10 @@ impl<'a> FileLowering<'a> {
                 &vec![any(); arity],
                 any(),
             )?;
-            vtable[model::FUNCTION_SLOT as usize] = boxed;
+            let slot =
+                krusty::backend::class_tables::function_slot(crate::classes::FUNCTION_SLOTS, arity)
+                    .ok_or_else(|| declined!("a functional interface of {arity} operands"))?;
+            vtable[slot as usize] = boxed;
         }
 
         let mut interfaces: Vec<DataId> = Vec::new();
@@ -1102,7 +1117,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         let result = self.dispatch(
             function,
-            INVOKE_SLOT,
+            function_slot_for(arguments.len())?,
             &vec![any(); arguments.len()],
             any(),
             &arguments,
@@ -1157,7 +1172,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     ) -> Result<Option<Value>, Unsupported> {
         let result = self.dispatch(
             function,
-            INVOKE_SLOT,
+            function_slot_for(arguments.len())?,
             &vec![any(); arguments.len()],
             any(),
             arguments,
