@@ -159,7 +159,7 @@ impl<'u, 's> Linker<'u, 's> {
             ir.classes[class as usize].init_body = Some(initialize);
             None
         } else {
-            let delegate = secondary_delegation(&plan, superclass, &self.constructors)?;
+            let delegate = secondary_delegation(&plan, superclass, self.constructors)?;
             let secondaries = &mut ir.classes[class as usize].secondary_ctors;
             secondaries.push(materialized_secondary(
                 &plan.header,
