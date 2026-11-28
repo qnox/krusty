@@ -1429,12 +1429,11 @@ impl Parser<'_> {
     /// Parse a string template: `TemplateStart (StrChunk | Dollar Ident | Dollar { expr })* TemplateEnd`.
     fn parse_template(&mut self) -> ExprId {
         let start = self.tok().span;
-        if self.text().starts_with('$') && !self.multi_dollar_interpolation {
-            self.diags.error(
-                start,
-                "multi-dollar string interpolation is disabled by the language feature set",
-            );
-        }
+        let unsupported = self
+            .text()
+            .starts_with('$')
+            .then(|| self.unsupported_multi_dollar.clone())
+            .flatten();
         // A raw (triple-quoted) template's chunks are verbatim — no escape processing.
         let raw = self.kind() == TokenKind::RawTemplateStart;
         self.bump(); // TemplateStart / RawTemplateStart
@@ -1479,9 +1478,11 @@ impl Parser<'_> {
                 }
             }
         }
-        let end = self.t[self.i.saturating_sub(1)].span;
-        self.file
-            .add_expr(Expr::Template(parts), Span::new(start.lo, end.hi))
+        let span = Span::new(start.lo, self.t[self.i.saturating_sub(1)].span.hi);
+        if let Some(report) = unsupported {
+            self.diags.report_error(span, report);
+        }
+        self.file.add_expr(Expr::Template(parts), span)
     }
 
     /// `try { … } catch (e: T) { … } …` — krusty supports one or more `catch` clauses; `finally` is

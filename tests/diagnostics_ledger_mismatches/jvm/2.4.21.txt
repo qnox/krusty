@@ -27,7 +27,6 @@ compiler/testData/diagnostics/tests/DefaultValuesTypechecking.kt
 compiler/testData/diagnostics/tests/DeferredTypes.kt
 compiler/testData/diagnostics/tests/DeprecatedGetSetPropertyDelegateConvention.kt
 compiler/testData/diagnostics/tests/DeprecatedUnaryOperatorConventions.kt
-compiler/testData/diagnostics/tests/DisabledMultiDollarInterpolation.kt
 compiler/testData/diagnostics/tests/EmptyThrow.kt
 compiler/testData/diagnostics/tests/EnumEntryAsType.kt
 compiler/testData/diagnostics/tests/ExtensionCallInvoke.kt
@@ -1914,11 +1913,8 @@ compiler/testData/diagnostics/tests/destructuring/nameBasedDestructuringShortFor
 compiler/testData/diagnostics/tests/destructuring/nameBasedDestructuringVisibilityFullForm.kt
 compiler/testData/diagnostics/tests/destructuring/nameBasedDestructuringVisibilityShortForm.kt
 compiler/testData/diagnostics/tests/destructuring/nbdUnresolvedReferenceFunctionCallExpected.kt
-compiler/testData/diagnostics/tests/destructuring/newDestructuringSyntax.kt
-compiler/testData/diagnostics/tests/destructuring/newDestructuringSyntaxWithoutLf.kt
 compiler/testData/diagnostics/tests/destructuring/optInErrorInDestructuring.kt
 compiler/testData/diagnostics/tests/destructuring/optInErrorInDestructuringOld.kt
-compiler/testData/diagnostics/tests/destructuring/parensShortFormWithInitializerWithoutLf.kt
 compiler/testData/diagnostics/tests/destructuring/positionalDestructuringFullFormErrors.kt
 compiler/testData/diagnostics/tests/destructuring/positionalDestructuringShortFormErrors.kt
 compiler/testData/diagnostics/tests/destructuring/topLevelWithLambda.kt

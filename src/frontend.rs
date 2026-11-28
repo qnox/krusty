@@ -1384,7 +1384,7 @@ where
                 .any(|diagnostic| diagnostic.severity == Severity::Error);
         parse_errors.push(parse_error);
         syntax_errors.push(parser_error);
-        header_validation::validate_after_parsing(&file, parser_error, diags);
+        header_validation::validate_after_parsing(&file, &features, parser_error, diags);
         diags.sort_source_order_from(diagnostics_before);
         let extracted = pass1_builder.add_source(
             index,

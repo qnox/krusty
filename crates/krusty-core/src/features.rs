@@ -310,6 +310,40 @@ impl LangFeatures {
         self.enabled.contains(name)
     }
 
+    /// The message of kotlinc's `UNSUPPORTED_FEATURE` for a construct that needs the feature
+    /// `name`, or `None` when these settings enable it. The message is the one kotlinc's
+    /// `LanguageFeatureMessageRenderer` renders: an experimental feature, one a later language
+    /// version enables, or one these settings disable.
+    pub fn unsupported_message(&self, name: &str) -> Option<String> {
+        if self.has(name) {
+            return None;
+        }
+        // A release older than the feature cannot enable it; it is worded as the earliest
+        // supported release that declares it renders it.
+        let feature = std::iter::once(self.release())
+            .chain(crate::kotlin_version::KotlinVersion::supported())
+            .filter_map(FeatureTable::for_version)
+            .find_map(|table| table.get(name))
+            .unwrap_or_else(|| panic!("no supported kotlinc has the language feature {name}"));
+        let presentable = &feature.presentable_name;
+        let message = match feature.since_version {
+            None => {
+                let default_flag = format!("-XXLanguage:+{name}");
+                let flag = feature.flag.as_deref().unwrap_or(&default_flag);
+                format!(
+                    "The feature \"{presentable}\" is experimental and should be enabled explicitly. \
+                     This can be done by supplying the compiler argument '{flag}', but note that no \
+                     stability guarantees are provided."
+                )
+            }
+            Some(since) if since > self.language_version => format!(
+                "The feature \"{presentable}\" is only available since language version {since}"
+            ),
+            Some(_) => format!("The feature \"{presentable}\" is disabled"),
+        };
+        Some(message)
+    }
+
     pub fn enable(&mut self, name: &str) {
         self.set(name, true);
     }
@@ -744,5 +778,29 @@ mod tests {
                 "{release}"
             );
         }
+    }
+
+    #[test]
+    fn unsupported_features_are_worded_like_kotlincs_renderer() {
+        let mut features = LangFeatures::for_language_version(LanguageVersion::V2_4);
+        let message = |features: &LangFeatures, name| features.unsupported_message(name);
+        assert_eq!(message(&features, "MultiDollarInterpolation"), None);
+        features.disable("MultiDollarInterpolation");
+        assert_eq!(
+            message(&features, "MultiDollarInterpolation").as_deref(),
+            Some("The feature \"multi dollar interpolation\" is disabled")
+        );
+        assert_eq!(
+            message(&features, "NameBasedDestructuring").as_deref(),
+            Some("The feature \"name based destructuring\" is only available since language version 2.5")
+        );
+        assert_eq!(
+            message(&features, "CollectionLiterals").as_deref(),
+            Some(
+                "The feature \"collection literals\" is experimental and should be enabled explicitly. \
+                 This can be done by supplying the compiler argument '-Xcollection-literals', but note \
+                 that no stability guarantees are provided."
+            )
+        );
     }
 }
