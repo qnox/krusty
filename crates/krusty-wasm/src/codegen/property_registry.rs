@@ -72,10 +72,11 @@ pub(super) struct PropertyRegistry {
     module: HashMap<PropertyId, TopLevelProperty>,
     members: HashMap<PropertyId, MemberProperty>,
     accessors: HashMap<PropertyId, AccessorProperty>,
-    /// The function that initializes the statics of one class, by the class that owns them. A file
-    /// reading a `companion { }` block property another file declares calls it first, so it is
-    /// reserved by whichever file needs it first and defined by the file that declares the class.
-    owner_initializers: HashMap<TypeName, u32>,
+    /// The function that activates one class, by the class: its superclasses, superinterfaces,
+    /// own statics and companions, as an access in its own file does. A file reading a
+    /// `companion { }` block property another file declares calls it first, so it is reserved by
+    /// whichever file needs it first and defined by the file that declares the class.
+    owner_activations: HashMap<TypeName, u32>,
 }
 
 impl PropertyRegistry {
@@ -89,7 +90,7 @@ impl PropertyRegistry {
                 self.module.clear();
                 self.members.clear();
                 self.accessors.clear();
-                self.owner_initializers.clear();
+                self.owner_activations.clear();
             }
         }
     }
@@ -334,21 +335,21 @@ impl PropertyRegistry {
         Ok(entry)
     }
 
-    /// The initializer function of `owner`'s statics, reserving it with `declare` when no file has.
-    pub(super) fn owner_initializer(
+    /// The activation function of `owner`, reserving it with `declare` when no file has.
+    pub(super) fn owner_activation(
         &mut self,
         owner: TypeName,
         declare: impl FnOnce() -> u32,
     ) -> u32 {
-        *self.owner_initializers.entry(owner).or_insert_with(declare)
+        *self.owner_activations.entry(owner).or_insert_with(declare)
     }
 
-    pub(super) fn reserved_owner_initializer(&self, owner: TypeName) -> Option<u32> {
-        self.owner_initializers.get(&owner).copied()
+    pub(super) fn reserved_owner_activation(&self, owner: TypeName) -> Option<u32> {
+        self.owner_activations.get(&owner).copied()
     }
 
-    pub(super) fn reserved_owner_initializers(&self) -> impl Iterator<Item = (TypeName, u32)> + '_ {
-        self.owner_initializers
+    pub(super) fn reserved_owner_activations(&self) -> impl Iterator<Item = (TypeName, u32)> + '_ {
+        self.owner_activations
             .iter()
             .map(|(owner, function)| (*owner, *function))
     }
@@ -474,7 +475,7 @@ impl PropertyRegistry {
                 reference.placement,
                 reference.flags.has(DeclarationFlags::CONST),
             ) {
-                self.owner_initializer(declaring_class, || module.declare());
+                self.owner_activation(declaring_class, || module.declare());
             }
         }
         Ok(globals)

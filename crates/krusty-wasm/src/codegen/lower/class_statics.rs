@@ -3,7 +3,9 @@
 //! Which statics wait for their class, and what each activation point initializes, is
 //! [`ClassStaticPlan`]'s. Here each class of the plan gets one function that runs its statics in
 //! declaration order behind a once-only `i32` global, and each activation point the plan names
-//! calls it.
+//! calls it. Another file reaches a class of this one through the class's activation function,
+//! which initializes it the way an access in this file does: superclasses, superinterfaces and
+//! companions included.
 
 use super::*;
 use krusty::backend::class_statics::ClassStaticPlan;
@@ -20,9 +22,9 @@ struct ClassInitializer {
 pub(super) struct ClassInitializers {
     plan: ClassStaticPlan,
     classes: HashMap<ClassId, ClassInitializer>,
-    /// Initializers another file reserved for a class of this file that runs no statics of its own:
-    /// they stay callable and do nothing.
-    unused: Vec<u32>,
+    /// The activation function of each class of this file another file can reach: every class
+    /// with statics, and every class another file reserved one for.
+    activations: Vec<(ClassId, u32)>,
 }
 
 impl ClassInitializers {
@@ -38,28 +40,36 @@ impl ClassInitializers {
             .classes()
             .iter()
             .map(|group| {
-                // A file that reads this class's statics before this file is lowered reserved the
-                // function, which this file defines.
-                let owner = ir.classes[group.class as usize].fq_name;
                 let initializer = ClassInitializer {
-                    function: properties.owner_initializer(owner, || module.declare()),
+                    function: module.declare(),
                     flag: module.global(ValType::I32),
                 };
                 (group.class, initializer)
             })
             .collect();
-        let unused = properties
-            .reserved_owner_initializers()
-            .filter(|(owner, _)| {
-                ir.class_id_by_name(*owner)
-                    .is_some_and(|class| !plan.has_statics(class))
+        // A file that reads a class's statics before this file is lowered reserved its
+        // activation function, which this file defines.
+        let mut activations: Vec<(ClassId, u32)> = plan
+            .classes()
+            .iter()
+            .map(|group| {
+                let owner = ir.classes[group.class as usize].fq_name;
+                (
+                    group.class,
+                    properties.owner_activation(owner, || module.declare()),
+                )
             })
-            .map(|(_, function)| function)
             .collect();
+        activations.extend(
+            properties
+                .reserved_owner_activations()
+                .filter_map(|(owner, function)| Some((ir.class_id_by_name(owner)?, function)))
+                .filter(|(class, _)| !plan.has_statics(*class)),
+        );
         Ok(Self {
             plan,
             classes,
-            unused,
+            activations,
         })
     }
 
@@ -101,10 +111,11 @@ impl ClassInitializers {
             let Body { code, locals, .. } = body;
             module.define(initializer.function, Function { ty, locals, code });
         }
-        for &function in &self.unused {
+        for &(class, function) in &self.activations {
             let ty = module.func_type(Vec::new(), Vec::new());
-            let Body { code, locals, .. } =
-                Body::new(context, module, runtime, &[], Default::default(), Ty::Unit);
+            let mut body = Body::new(context, module, runtime, &[], Default::default(), Ty::Unit);
+            body.activate_class(class, None)?;
+            let Body { code, locals, .. } = body;
             module.define(function, Function { ty, locals, code });
         }
         Ok(())
@@ -135,8 +146,8 @@ impl Body<'_> {
             Some(krusty::ir::IrLocalPropertyLayout::TopLevelStorage { storage, .. }) => {
                 self.initialize_static_owner(*storage)
             }
-            // A `companion { }` block property of another file: its owner's initializer, which
-            // that file defines, runs the owner's statics once.
+            // A `companion { }` block property of another file: its owner's activation function,
+            // which that file defines, initializes the owner as an access there would.
             _ => {
                 let owner =
                     self.ir
@@ -149,7 +160,7 @@ impl Body<'_> {
                             krusty::ir::IrStaticPlacement::Package => None,
                         });
                 if let Some(function) =
-                    owner.and_then(|owner| self.properties.reserved_owner_initializer(owner))
+                    owner.and_then(|owner| self.properties.reserved_owner_activation(owner))
                 {
                     self.code.call(function);
                 }
