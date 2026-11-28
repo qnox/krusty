@@ -47,6 +47,22 @@ pub struct NumberedInterface {
     pub(crate) closure: Vec<TypeName>,
 }
 
+impl NumberedInterface {
+    /// The module interfaces it extends, transitively, itself first.
+    pub fn closure(&self) -> &[TypeName] {
+        &self.closure
+    }
+}
+
+/// What an implementor that supplies only an interface's abstract member inherits at one number.
+#[derive(Clone, Copy, Debug)]
+pub struct InheritedDeclaration {
+    pub number: u32,
+    /// The most specific declaration's callable, or `None` where it is a property accessor or
+    /// stands at the number only through a bridge.
+    pub callable: Option<CallableId>,
+}
+
 /// The module's interface member numbers.
 #[derive(Clone, Debug, Default)]
 pub struct ModuleInterfaces {
@@ -264,6 +280,55 @@ impl ModuleInterfaces {
             Carriers::Function { parameters, result } => Some((parameters, *result)),
             Carriers::Property => None,
         }
+    }
+
+    /// What an implementor that supplies only `interface`'s abstract member inherits at each
+    /// number the interface (with its closure) declares, ascending: the callable of the most
+    /// specific declaration there, or `None` where that declaration is a property accessor or
+    /// stands at the number only through a bridge. A file that does not declare the interface
+    /// builds such an implementor from these alone; the declaring file defines each body under
+    /// the member's module symbol.
+    pub fn inherited_declarations(
+        &self,
+        interface: TypeName,
+    ) -> Option<Result<Vec<InheritedDeclaration>, &str>> {
+        let closure = match self.interface(interface)? {
+            Ok(numbered) => &numbered.closure,
+            Err(reason) => return Some(Err(reason)),
+        };
+        let extends = |from: TypeName, to: TypeName| {
+            from != to
+                && self
+                    .interface(from)
+                    .and_then(Result::ok)
+                    .is_some_and(|numbered| numbered.closure.contains(&to))
+        };
+        let interfaces = closure.iter().copied().collect::<HashSet<_>>();
+        let entries = self
+            .numbers_of(&interfaces)
+            .into_iter()
+            .map(|number| {
+                let candidates = self
+                    .member(number)
+                    .declarations
+                    .iter()
+                    .filter(|declaration| interfaces.contains(&declaration.interface))
+                    .collect::<Vec<_>>();
+                let nearest = candidates.iter().find(|candidate| {
+                    !candidates
+                        .iter()
+                        .any(|other| extends(other.interface, candidate.interface))
+                });
+                let callable = nearest.and_then(|declaration| match declaration.member {
+                    PlanKey::Callable(callable) if declaration.bridged_from.is_none() => {
+                        Some(callable)
+                    }
+                    _ => None,
+                });
+                InheritedDeclaration { number, callable }
+            })
+            .collect();
+        Some(Ok(entries))
     }
 
     /// Every number `interfaces` (each with its closure) declares, ascending.

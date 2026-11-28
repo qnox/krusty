@@ -192,7 +192,6 @@ coroutines/featureIntersection/breakWithNonEmptyStack.kt
 coroutines/featureIntersection/callableReference/function/adapted.kt
 coroutines/featureIntersection/callableReference/function/genericCallableReferencesWithNullableTypes.kt
 coroutines/featureIntersection/funInterface.kt
-coroutines/featureIntersection/funInterface/kt47549.kt
 coroutines/featureIntersection/funInterface/kt49294.kt
 coroutines/featureIntersection/funInterface/kt50950.kt
 coroutines/featureIntersection/safeCallOnTwoReceivers.kt
@@ -338,14 +337,10 @@ fp/atan2ZeroGuadrantsDouble.kt
 fp/powDouble.kt
 fp/powFloat.kt
 fullValueClasses/construction.kt
-funInterface/basicFunInterfaceConversionClash.kt
 funInterface/funInterfaceWithSuspendMethod.kt
-funInterface/inlinedSamWrapper.kt
 funInterface/kt49384.kt
 funInterface/kt77685-sam.kt
 funInterface/kt77685.kt
-funInterface/kt79092-sam.kt
-funInterface/kt79092.kt
 funInterface/multimodule.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 funInterface/suspendFunctionAndFunInterfaceSharedClassSplit.kt
@@ -391,12 +386,6 @@ inlineClasses/boxReturnValueOnOverride/kt35234a.kt
 inlineClasses/bridgesWhenInlineClassImplementsGenericInterfaceGeneric.kt
 inlineClasses/defaultParameterValues/kt26554.kt
 inlineClasses/dnnInValue.kt
-inlineClasses/funInterface/kt51121.kt
-inlineClasses/funInterface/kt51121_2.kt
-inlineClasses/funInterface/mangledSamWrappers.kt
-inlineClasses/funInterface/mangledSamWrappersGeneric.kt
-inlineClasses/funInterfaceDoubleSuffux.kt
-inlineClasses/funInterfaceDoubleSuffux2.kt
 inlineClasses/inlineClassCollection/inlineCollectionOfInlineClass.kt
 inlineClasses/inlineClassCollection/inlineCollectionOfInlineClassGeneric.kt
 inlineClasses/inlineClassCollection/inlineListOfInlineClass.kt
