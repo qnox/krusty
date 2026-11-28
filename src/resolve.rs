@@ -16104,7 +16104,7 @@ fun rejected(owner: Owner) { owner.hidden() }
             assert!(
                 errors
                     .iter()
-                    .any(|error| error.contains("null cannot be a value of a non-null type")),
+                    .any(|error| error.contains("Null cannot be a value of a non-null type")),
                 "{source}: {errors:?}"
             );
         }
@@ -16886,7 +16886,7 @@ fun use() {
 
         assert_eq!(
             errors,
-            ["argument type mismatch: actual type is '() -> Unit', but '(Int) -> Unit' was expected."]
+            ["Argument type mismatch: actual type is '() -> Unit', but '(Int) -> Unit' was expected."]
         );
     }
 
@@ -19403,11 +19403,11 @@ fun box(): String {
         let (_, _, diagnostics) = retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         let expected = [
             (
-                "argument type mismatch: actual type is 'String', but 'Int' was expected.",
+                "Argument type mismatch: actual type is 'String', but 'Int' was expected.",
                 "\"x\"",
             ),
             (
-                "argument type mismatch: actual type is 'Int', but 'String' was expected.",
+                "Argument type mismatch: actual type is 'Int', but 'String' was expected.",
                 "1",
             ),
         ]
@@ -21899,7 +21899,7 @@ fun use() {
         ok("fun max(a: Int, b: Int): Int = if (a > b) a else b");
         err_contains(
             "fun f(a: Int, b: String): Int = if (a > 0) a else b",
-            "return type mismatch: expected 'Int', actual 'Any'.",
+            "Return type mismatch: expected 'Int', actual 'Any'.",
         );
     }
 
@@ -21907,7 +21907,7 @@ fun use() {
     fn return_type_mismatch() {
         err_contains(
             "fun f(a: Int): String = a",
-            "return type mismatch: expected 'String', actual 'Int'.",
+            "Return type mismatch: expected 'String', actual 'Int'.",
         );
     }
 
@@ -22105,7 +22105,7 @@ fun use() {
         );
         err_contains(
             "fun a(x: Int): Int = x\nfun b(): Int = a(\"s\")",
-            "argument type mismatch: actual type is 'String', but 'Int' was expected.",
+            "Argument type mismatch: actual type is 'String', but 'Int' was expected.",
         );
     }
 
@@ -22160,8 +22160,8 @@ fun use() {
         assert_eq!(
             errors,
             [
-                "condition type mismatch: inferred type is 'Int' but 'Boolean' was expected.",
-                "condition type mismatch: inferred type is 'Int' but 'Boolean' was expected.",
+                "Condition type mismatch: inferred type is 'Int' but 'Boolean' was expected.",
+                "Condition type mismatch: inferred type is 'Int' but 'Boolean' was expected.",
             ]
         );
     }
@@ -22176,7 +22176,7 @@ fun use() {
         // the Java-only member set in `mapped_string_scope_e2e`, which checks against a real stdlib.)
         err_contains(
             "fun f(s: String): String = s.substring(\"x\")",
-            "argument type mismatch: actual type is 'String', but 'Int' was expected.",
+            "Argument type mismatch: actual type is 'String', but 'Int' was expected.",
         );
         let (errors, _) = check("fun f(a: Int): Int = a.substring(1)");
         assert_eq!(
@@ -38403,7 +38403,7 @@ impl<'a> Checker<'a> {
                 );
             }
             if let Some((expected, constraint, argument)) = violation {
-                self.expect_assignable(expected, constraint, self.span(argument), "type argument");
+                self.expect_assignable(expected, constraint, self.span(argument), "bound argument");
             } else {
                 self.expect_assignable(bound, binding, self.span(call), "type argument");
             }
@@ -39040,8 +39040,8 @@ impl<'a> Checker<'a> {
             "resolve",
             "assignability failure context={ctx} expected={expected:?} actual={actual:?} span={span:?}"
         );
-        if let Some(message) = self.assignability_error_message(expected, actual, ctx) {
-            self.diags.error(span, message);
+        if let Some(finding) = self.assignability_error_message(expected, actual, ctx) {
+            self.diags.report_finding(span, finding);
         }
     }
 

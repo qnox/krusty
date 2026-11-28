@@ -358,7 +358,7 @@ mod tests {
                 messages,
                 [
                     "function 'missing' must have a body.",
-                    "initializer type mismatch: expected 'String', actual 'Int'.",
+                    "Initializer type mismatch: expected 'String', actual 'Int'.",
                 ]
             );
         }

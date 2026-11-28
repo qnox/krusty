@@ -190,9 +190,9 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         declaration: crate::fir::DeclarationId,
         origin: crate::fir::OriginId,
-        message: String,
+        finding: impl Into<crate::diag::Finding>,
     ) -> crate::fir::DiagnosticId {
-        self.record_source_finding(declaration, origin, message, None, None)
+        self.record_source_finding(declaration, origin, finding.into(), None)
     }
 
     /// kotlinc's ambiguity for a call whose most specific candidates tie, naming each candidate by
@@ -210,15 +210,14 @@ impl ProductionSignatureSemantics<'_> {
             spelling: spelling.to_owned(),
             candidates: candidates.into(),
         };
-        self.record_source_finding(scope.owner, origin, message, None, Some(named))
+        self.record_source_finding(scope.owner, origin, message.into(), Some(named))
     }
 
     fn record_source_finding(
         &self,
         declaration: crate::fir::DeclarationId,
         origin: crate::fir::OriginId,
-        message: String,
-        name: Option<crate::diag::DiagnosticName>,
+        finding: crate::diag::Finding,
         named_candidates: Option<NamedCandidates>,
     ) -> crate::fir::DiagnosticId {
         let fallback = self
@@ -239,7 +238,7 @@ impl ProductionSignatureSemantics<'_> {
         let Some((file, span)) = location else {
             return Self::failure();
         };
-        self.record_source_finding_at(declaration, (file, span), message, name, named_candidates)
+        self.record_source_finding_at(declaration, (file, span), finding, named_candidates)
     }
 
     /// Record a finding at `span` of `file`, once per location and message.
@@ -247,8 +246,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         declaration: crate::fir::DeclarationId,
         (file, span): (u32, Span),
-        message: String,
-        name: Option<crate::diag::DiagnosticName>,
+        crate::diag::Finding { name, message }: crate::diag::Finding,
         named_candidates: Option<NamedCandidates>,
     ) -> crate::fir::DiagnosticId {
         let mut diagnostics = self.diagnostics.borrow_mut();
@@ -272,7 +270,7 @@ impl ProductionSignatureSemantics<'_> {
         spelling: &str,
     ) -> crate::fir::DiagnosticId {
         let report = crate::diagnostic_wording::unresolved_reference(spelling);
-        self.record_source_finding(declaration, origin, report.message, Some(report.name), None)
+        self.record_source_diagnostic(declaration, origin, report)
     }
 
     /// Report `UNSAFE_CALL` when the member exists on the receiver's non-null type; otherwise report
@@ -340,6 +338,6 @@ impl ProductionSignatureSemantics<'_> {
             receiver,
             hidden_deprecated,
         );
-        self.record_source_finding(scope.owner, origin, report.message, Some(report.name), None)
+        self.record_source_diagnostic(scope.owner, origin, report)
     }
 }

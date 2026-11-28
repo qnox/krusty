@@ -143,6 +143,30 @@ pub struct NamedMessage {
     pub message: String,
 }
 
+/// A diagnostic's message and, when its report names it, kotlinc's name for it.
+pub struct Finding {
+    pub name: Option<DiagnosticName>,
+    pub message: String,
+}
+
+impl From<String> for Finding {
+    fn from(message: String) -> Self {
+        Self {
+            name: None,
+            message,
+        }
+    }
+}
+
+impl From<NamedMessage> for Finding {
+    fn from(report: NamedMessage) -> Self {
+        Self {
+            name: Some(report.name),
+            message: report.message,
+        }
+    }
+}
+
 impl NamedMessage {
     /// The text kotlinc prints for this message ([`render_message`]).
     pub fn printed(&self, names: DiagnosticNames) -> Cow<'_, str> {
@@ -309,6 +333,14 @@ impl DiagSink {
     /// Report a factory's error under its name.
     pub fn report_error(&mut self, span: Span, report: NamedMessage) {
         self.error_named(span, report.name, report.message);
+    }
+
+    /// Report an error under the name its finding carries, or unnamed.
+    pub fn report_finding(&mut self, span: Span, finding: Finding) {
+        match finding.name {
+            Some(name) => self.error_named(span, name, finding.message),
+            None => self.error(span, finding.message),
+        }
     }
 
     /// Report an error under its kotlinc name. `msg` is kotlinc's `renderMessage()`.

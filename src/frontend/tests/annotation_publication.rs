@@ -387,7 +387,7 @@ fn checked_target_applications_publish_valid_policies_and_isolate_invalid_recove
             .iter()
             .map(|diagnostic| diagnostic.msg.as_str())
             .collect::<Vec<_>>(),
-        ["argument type mismatch: actual type is 'MyTarget', but 'AnnotationTarget' was expected."]
+        ["Argument type mismatch: actual type is 'MyTarget', but 'AnnotationTarget' was expected."]
     );
     let policies = analysis
         .streamed
