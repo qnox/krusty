@@ -1151,6 +1151,7 @@ impl Body<'_> {
                 if !storage.direct_read {
                     return Err("a top-level property read that requires an accessor".to_string());
                 }
+                self.initialize_storage_owner(target)?;
                 self.code.global_get(storage.global);
                 // A `lateinit` property's storage is read through its guard, as a read of the
                 // storage in its own file is, unless it is the raw read `isInitialized` makes.
@@ -1245,6 +1246,7 @@ impl Body<'_> {
                     return Err("a top-level property write that requires an accessor".to_string());
                 }
                 self.value(value, storage.ty)?;
+                self.initialize_storage_owner(target)?;
                 self.code.global_set(storage.global);
                 return Ok(());
             }
@@ -1439,8 +1441,14 @@ impl Body<'_> {
             .referenced_module_properties
             .get(&target)
             .ok_or_else(|| "a cross-file property with no module record".to_string())?;
+        // A `companion { }` block property's checked receiver is the class that declared the
+        // block, which names its storage's owner rather than an operand of the access.
+        let block_member = matches!(
+            reference.placement,
+            krusty::ir::IrStaticPlacement::CompanionBlock { .. }
+        );
         if reference.owner.is_some()
-            || reference.extension_receiver.is_some()
+            || (reference.extension_receiver.is_some() && !block_member)
             || !reference.context_parameters.is_empty()
         {
             return Err("a cross-file property storage with a receiver".to_string());
@@ -1805,6 +1813,7 @@ pub(super) fn define_class_functions(
                 class: id,
                 ordinal: 0,
             };
+            body.enter_constructor(id)?;
             body.primary_constructor(id)?;
             let lowered = body.finish();
             let carriers = constructor_carriers(module, ir, id, &parameters)?;
@@ -1829,6 +1838,7 @@ pub(super) fn define_class_functions(
                 class: id,
                 ordinal: ordinal as u32 + 1,
             };
+            body.enter_constructor(id)?;
             body.secondary_constructor(id, ordinal)?;
             let lowered = body.finish();
             let carriers = constructor_carriers(module, ir, id, &parameters)?;
@@ -1869,7 +1879,7 @@ pub(super) fn define_class_functions(
                 .flatten()
                 .map(|owner| owner as ClassId);
             for activated in owner.into_iter().chain([id]) {
-                body.activate_superclasses(activated, owner)?;
+                body.activate_class(activated, owner)?;
             }
             body.allocate(id)?;
             body.code
@@ -2351,7 +2361,7 @@ impl Body<'_> {
         // idempotent, and a constructor reached from its own companion still finds the instance
         // the getter published before that companion's constructor. An enum's companion is
         // created after its constants, not from a constructor.
-        self.initialize_companion(class)?;
+        self.initialize_own_companion(class)?;
         for &statement in &declaration.super_arg_prelude {
             self.statement(statement)?;
         }
@@ -2499,7 +2509,7 @@ impl Body<'_> {
         }
         // A delegation argument may use the companion before the primary constructor runs.
         // The getter is idempotent, including when construction already initialized it.
-        self.initialize_companion(class)?;
+        self.initialize_own_companion(class)?;
         for &statement in &secondary.delegate_prelude {
             self.statement(statement)?;
         }
@@ -2551,74 +2561,44 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// Initialize `class` the way `new` does, before any constructor argument runs.
-    ///
-    /// JVMS 5.5 initializes a superclass before the subclass. Each class's companion goes
-    /// through the singleton getter, which publishes the instance before the companion
-    /// constructor, so a companion that constructs its holder does not re-enter. `initializing`
-    /// is a class whose initialization is already in progress, so activation skips it.
-    fn activate_class(
+    /// Initialize a superclass declared in another module through the activation its laid-out
+    /// record holds. A superclass with no record has nothing to initialize.
+    pub(super) fn activate_dependency_superclass(
         &mut self,
-        class: ClassId,
-        initializing: Option<ClassId>,
+        superclass: TypeName,
     ) -> Result<(), Unsupported> {
-        let mut chain = vec![class];
-        loop {
-            let parent = self
-                .file_classes()?
-                .tables
-                .table(*chain.last().expect("non-empty"))
-                .superclass;
-            let Some(parent) = parent else {
-                break;
-            };
-            chain.push(parent);
-        }
-        self.activate_laid_out(*chain.last().expect("non-empty"))?;
-        for &owner in chain.iter().rev() {
-            if Some(owner) != initializing {
-                self.initialize_companion(owner)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Initialize what a superclass of `class` an earlier file laid out initializes before its
-    /// construction: its companions, and its superclasses', root first.
-    fn activate_laid_out(&mut self, class: ClassId) -> Result<(), Unsupported> {
         let activation = self
-            .file_classes()?
-            .laid_out_superclass(class)
-            .map(|superclass| superclass.activation.clone())
+            .laid_out_classes
+            .get(superclass)
+            .map(|record| record.activation.clone())
             .unwrap_or_default();
-        for getter in activation {
-            self.code.call(getter).drop_();
+        for function in activation {
+            self.code.call(function);
         }
         Ok(())
     }
 
-    /// Initialize the superclasses of `class`, as constructing it does first.
-    pub(super) fn activate_superclasses(
-        &mut self,
-        class: ClassId,
-        initializing: Option<ClassId>,
-    ) -> Result<(), Unsupported> {
-        match self.file_classes()?.tables.table(class).superclass {
-            Some(parent) => self.activate_class(parent, initializing),
-            None => self.activate_laid_out(class),
+    /// Initialize `class`'s companion when its recorded activation does: a constructor reaches
+    /// it again, idempotently, for code that uses the companion before construction finishes.
+    fn initialize_own_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let declaration = &self.ir.classes[class as usize];
+        let step = krusty::ir::IrClassActivationStep::Companion(declaration.fq_name);
+        if declaration.activation.contains(&step) {
+            self.initialize_companion(class)?;
         }
+        Ok(())
     }
 
-    /// Run the companion's typed initializer when this class has one. The getter's result is
-    /// unused: construction needs the initialization, not the instance.
-    fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
+    /// Run the typed initializer of `class`'s companion. The getter's result is unused:
+    /// construction needs the initialization, not the instance.
+    pub(super) fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
         let declaration = &self.ir.classes[class as usize];
-        if declaration.is_enum || declaration.is_enum_entry {
-            return Ok(());
-        }
-        let Some(companion) = declaration.companion_class else {
-            return Ok(());
-        };
+        let companion = declaration.companion_class.ok_or_else(|| {
+            format!(
+                "a companion step of `{}`, which has none",
+                declaration.fq_name()
+            )
+        })?;
         self.singleton(companion)?;
         self.code.drop_();
         Ok(())

@@ -190,6 +190,7 @@ fn static_slot(ir: &mut IrFile, name: String, ty: Ty) -> u32 {
         accessor_lines: IrAccessorLines::default(),
         source_order: u32::MAX,
         property_delegate: false,
+        deferred: false,
     });
     index
 }

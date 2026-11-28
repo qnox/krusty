@@ -98,6 +98,7 @@ pub(super) fn add_cached_descriptor(
         },
         source_order: u32::MAX,
         property_delegate: false,
+        deferred: false,
     });
     index
 }

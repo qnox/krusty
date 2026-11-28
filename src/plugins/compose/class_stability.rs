@@ -350,6 +350,7 @@ fn mark(ir: &mut IrFile, index: usize, reads: Option<Vec<TypeName>>, parameters:
         accessor_lines: IrAccessorLines::default(),
         source_order: u32::MAX,
         property_delegate: false,
+        deferred: false,
     });
 }
 

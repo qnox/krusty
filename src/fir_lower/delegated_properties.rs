@@ -830,6 +830,7 @@ fn push_delegate_static(
         accessor_lines: crate::ir::IrAccessorLines::default(),
         source_order,
         property_delegate: true,
+        deferred: false,
     });
     Ok(index)
 }

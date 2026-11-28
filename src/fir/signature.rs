@@ -61,6 +61,7 @@ pub use serialization_records::{
     ResolvedCustomSerializerConstructorTarget, ResolvedTypeUseSerializerConstruction,
 };
 mod file_annotations;
+mod property_lookup;
 pub(crate) use file_annotations::FileAnnotationFacts;
 mod result_expectation;
 mod source_inventory;
@@ -1530,6 +1531,7 @@ pub struct ResolvedModuleIndex {
     top_level_declarations_by_name: HashMap<DeclarationNameId, Vec<DeclarationId>>,
     properties: HashMap<PropertyId, ResolvedPropertyHeader>,
     property_by_declaration: HashMap<DeclarationId, PropertyId>,
+    companion_block_properties: property_lookup::CompanionBlockProperties,
     /// Source identities and typed roles parallel to a property's resolved context-parameter
     /// prefix. The property owns these facts even when an implicit/bodyless accessor has no
     /// independent stable declaration.
@@ -2734,18 +2736,6 @@ impl ResolvedModuleIndex {
         )
     }
 
-    pub fn property_declaration(&self, property: PropertyId) -> Option<DeclarationId> {
-        self.property(property).map(|property| property.declaration)
-    }
-
-    pub fn property(&self, property: PropertyId) -> Option<ResolvedPropertyHeader> {
-        self.properties.get(&property).copied()
-    }
-
-    pub fn property_for_declaration(&self, declaration: DeclarationId) -> Option<PropertyId> {
-        self.property_by_declaration.get(&declaration).copied()
-    }
-
     pub fn publish_property_shape(
         &mut self,
         id: PropertyId,
@@ -2787,6 +2777,7 @@ impl ResolvedModuleIndex {
                 .is_none(),
             "a resolved property identity may be published only once"
         );
+        self.record_companion_block_property(declaration, extension_receiver);
         id
     }
 

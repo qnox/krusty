@@ -112,6 +112,7 @@ pub(super) fn add_cached_serializer_delegate(
         accessor_lines: crate::ir::IrAccessorLines::default(),
         source_order: u32::MAX,
         property_delegate: false,
+        deferred: false,
     });
     anonymous
 }

@@ -268,6 +268,7 @@ impl<'a> CommonIrBodySink<'a> {
         finalize_data_classes(index, self.ir)?;
         super::module_declarations::publish_referenced(index, self.ir)?;
         super::companion_blocks::realize_companion_block_calls(self.ir);
+        super::class_activation::record(index, self.ir);
         // Equality with a safe-call operand short-circuits the other operand when the receiver is
         // null. Record that source evaluation order in common IR before any backend consumes it.
         super::safe_call_equality::fold_safe_call_equalities(self.ir);

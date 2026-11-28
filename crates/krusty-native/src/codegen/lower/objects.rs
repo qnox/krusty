@@ -1274,6 +1274,7 @@ impl<'a> FileLowering<'a> {
                 ordinal: ordinal as u32 + 1,
             };
             body.record_semantic_slots(&semantic_slots);
+            body.enter_constructor(class)?;
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 body.bind_parameter(slot as u32, *value, *ty)?;
             }
@@ -1804,6 +1805,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(id, signature, Ty::Unit, &name, &mut |body, params| {
             body.scope = krusty::ir::IrEnclosure::Constructor { class, ordinal: 0 };
             body.record_semantic_slots(&semantic_slots);
+            body.enter_constructor(class)?;
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 body.bind_parameter(slot as u32, *value, *ty)?;
             }
@@ -2408,56 +2410,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let func_ref = self.func_ref(constructor);
         self.emit_call(func_ref, &arguments)?;
         self.constructed(object, class)
-    }
-
-    /// Initialize `class` the way `new` does, before any constructor argument runs.
-    ///
-    /// A superclass's companion runs before the subclass's. The singleton getter is the
-    /// typed initializer and publishes the instance before the companion constructor, so a
-    /// companion that constructs its holder does not re-enter. An enum's companion stays
-    /// with the enum initializer.
-    pub(super) fn activate_class(&mut self, class: ClassId) -> Result<(), Unsupported> {
-        let mut chain = vec![class];
-        loop {
-            let parent = self
-                .file
-                .model
-                .layout(*chain.last().expect("non-empty"))
-                .superclass;
-            let Some(parent) = parent else {
-                break;
-            };
-            chain.push(parent);
-        }
-        self.activate_laid_out_superclass(*chain.last().expect("non-empty"))?;
-        if self.terminated {
-            return Ok(());
-        }
-        for &owner in chain.iter().rev() {
-            let getter = {
-                let ir = self.file.ir;
-                let classes = &self.file.classes;
-                let declaration = &ir.classes[owner as usize];
-                if model::is_enum(declaration) {
-                    None
-                } else {
-                    declaration
-                        .companion_class
-                        .and_then(|companion| ir.class_id_by_name(companion))
-                        .and_then(|companion| classes[companion as usize].singleton)
-                        .map(|(_, getter)| getter)
-                }
-            };
-            let Some(getter) = getter else {
-                continue;
-            };
-            let func_ref = self.func_ref(getter);
-            self.emit_call(func_ref, &[])?;
-            if self.terminated {
-                return Ok(());
-            }
-        }
-        Ok(())
     }
 
     pub(super) fn method_call(
