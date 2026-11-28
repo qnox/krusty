@@ -79,9 +79,11 @@ fn collect_loop_entry_writes(
                 }
             }
             Expr::IncDec { target, .. } => {
+                // An increment is an operator write of the variable's own value, as a compound
+                // assignment is: kotlinc keeps the variable's smart cast at the loop entry.
                 if let Expr::Name(name) = file.expr(*target) {
                     if let Some(binding) = entry.get(name) {
-                        written.borrow_mut().insert(binding.flow_identity);
+                        compound.borrow_mut().insert(binding.flow_identity);
                     }
                 }
                 visit_expression(file, *target, entry, written, compound);
@@ -129,7 +131,7 @@ fn collect_loop_entry_writes(
             }
             Stmt::IncDec { name, .. } => {
                 if let Some(binding) = visible.get(name) {
-                    written.borrow_mut().insert(binding.flow_identity);
+                    compound.borrow_mut().insert(binding.flow_identity);
                 }
             }
             Stmt::Local { name, init, .. } => {
@@ -347,8 +349,9 @@ fn collect_loop_entry_writes(
 struct LoopEntryWrites {
     /// Writes that replace the binding regardless of later overload selection.
     definite: HashSet<u32>,
-    /// Compound targets that invalidate ordinary path/local flow on the loop back edge while
-    /// leaving saved Boolean implications intact.
+    /// Compound-assignment and increment targets that invalidate ordinary path/local flow on the
+    /// loop back edge while leaving the variable's smart-cast proof and saved Boolean implications
+    /// intact.
     compound: HashSet<u32>,
 }
 
@@ -430,8 +433,12 @@ impl Checker<'_> {
                 scope.forget_paths_rooted_at(&PathRoot::Value(binding.flow_identity));
                 if definite {
                     self.forget_implied_facts(scope, binding.flow_identity);
+                    self.record_local_read_fact(scope, &name, None);
+                } else {
+                    // Only a plain assignment ends the variable's smart cast at the loop entry; an
+                    // operator write (`i++`, `i += 1`) leaves the proof in place, as in kotlinc.
+                    scope.narrow_local(&name, None);
                 }
-                self.record_local_read_fact(scope, &name, None);
             }
         }
     }

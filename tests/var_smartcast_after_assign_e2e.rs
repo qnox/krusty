@@ -89,3 +89,19 @@ fn proof_dies_after_a_branch_that_writes_the_var_joins() {
     );
     common::expect_identical_rejection(&result, "join after a write in one branch");
 }
+
+#[test]
+fn a_plain_assignment_in_a_loop_ends_the_smart_cast_at_its_entry() {
+    // Any `=` in the loop body ends the smart cast before the body runs, even one that assigns a
+    // value of the narrowed type; an operator write (`i++`) alone keeps it
+    // (box_regressions/loopOperatorWriteKeepsSmartCast.kt).
+    const SRC: &str =
+        "fun same() { var i: Any = 1; if (i is Int) { while (i != 10) { i++; i = 5 } } }\n\
+        fun other() { var i: Int? = 1; if (i != null) { while (i != 10) { i.inc(); i = i } } }\n";
+    let result = common::compiler_diagnostics(
+        &[("Main.kt", SRC)],
+        &[common::stdlib_jar(), common::jdk_modules()],
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr).len(), 2);
+    common::expect_identical_rejection(&result, "plain assignment in a loop");
+}
