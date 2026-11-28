@@ -105,10 +105,12 @@ impl Host {
              const module = new WebAssembly.Module(bytes);\n"
         );
         match self.target {
+            // `console.log` queues its output on a piped stdout, so the module's own writes join
+            // the same stream rather than overtaking it with a synchronous write.
             WasmTarget::Js => format!(
                 "{read}let memory;\nlet exports;\n{}\
                  const imports = {{\n  krusty: {{\n    write: (pointer, length) => {{\n      \
-                 fs.writeSync(1, new Uint8Array(memory.buffer, pointer, length));\n    }},\n  }},\n{}}};\n\
+                 process.stdout.write(new Uint8Array(memory.buffer, pointer, length).slice());\n    }},\n  }},\n{}}};\n\
                  const instance = new WebAssembly.Instance(module, imports);\n\
                  exports = instance.exports;\n\
                  memory = exports.memory;\n\

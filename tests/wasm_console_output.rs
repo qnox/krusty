@@ -11,9 +11,16 @@ fn console_output_on_each_wasm_target_is_the_target_stdlib_s() {
     let stem = "consolePrinting";
     super::super::box_reference_classes::checked_box(source, stem)
         .expect("the exact Kotlin compiler must run the complete console fixture");
+    let large = "x".repeat(200_000);
     for (target, printed) in [
-        (WasmTarget::Js, "text\n\nno newline\n42\n[1, 2]\nc\nnull\n"),
-        (WasmTarget::Wasi, "text\n\nno newline42\n[1, 2]\nc\n"),
+        (
+            WasmTarget::Js,
+            format!("text\n\nno newline\n42\n[1, 2]\nc\nnull\n{large}\n"),
+        ),
+        (
+            WasmTarget::Wasi,
+            format!("text\n\nno newline42\n[1, 2]\nc\n{large}\n"),
+        ),
     ] {
         let lane = WasmLane { target };
         if !focused_wasm_lane_available(&lane, stem) {

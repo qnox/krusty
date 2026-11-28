@@ -8,5 +8,7 @@ fun box(): String {
     println(listOf(1, 2))
     print('c')
     println(null as Any?)
+    // Larger than a pipe buffer, so a host that queues it must keep it ahead of the answer.
+    println("x".repeat(200_000))
     return "OK"
 }
