@@ -251,11 +251,10 @@ impl Checker<'_> {
                 if constrained {
                     continue;
                 }
-                self.diags.error(
+                self.diags.report_error(
                     self.call_callee_name_span(call),
-                    format!(
-                        "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                        crate::types::type_parameter_source_name(formal)
+                    crate::diagnostic_wording::cannot_infer_parameter_type(
+                        crate::types::type_parameter_source_name(formal),
                     ),
                 );
             }
@@ -314,11 +313,10 @@ impl Checker<'_> {
                     .as_ref()
                     .and_then(|signature| signature.formals.get(type_args.len()))
                 {
-                    self.diags.error(
+                    self.diags.report_error(
                         self.call_callee_name_span(call),
-                        format!(
-                            "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                            crate::types::type_parameter_source_name(formal)
+                        crate::diagnostic_wording::cannot_infer_parameter_type(
+                            crate::types::type_parameter_source_name(formal),
                         ),
                     );
                 }
@@ -422,11 +420,10 @@ impl Checker<'_> {
                         .all(|&bound| self.receiver_is_assignable(actual, bound))
                 });
                 if !satisfies_bounds {
-                    self.diags.error(
+                    self.diags.report_error(
                         self.span(call),
-                        format!(
-                            "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                            crate::types::type_parameter_source_name(formal)
+                        crate::diagnostic_wording::cannot_infer_parameter_type(
+                            crate::types::type_parameter_source_name(formal),
                         ),
                     );
                     return Some(Ty::Error);
@@ -751,12 +748,11 @@ impl Checker<'_> {
         implicit_lambda_label: Option<&str>,
     ) {
         let ContextualFormal { signature, formal } = inferred;
-        let message = format!(
-            "cannot infer type for type parameter '{}'. Specify it explicitly.",
-            crate::types::type_parameter_source_name(formal)
+        let report = crate::diagnostic_wording::cannot_infer_parameter_type(
+            crate::types::type_parameter_source_name(formal),
         );
         self.diags
-            .error(self.call_callee_name_span(call), message.clone());
+            .report_error(self.call_callee_name_span(call), report.clone());
 
         for (source, &argument) in args.iter().enumerate() {
             let Some(parameter) = argument_parameters
@@ -771,7 +767,7 @@ impl Checker<'_> {
             let Expr::Lambda { params, body } = self.file.expr(argument).clone() else {
                 continue;
             };
-            self.diags.error(self.span(argument), message.clone());
+            self.diags.report_error(self.span(argument), report.clone());
             // The selected declaration still owns the lambda's shape, with its context, receiver
             // and value roles: `(T) -> String` gives it an implicit `it`. Only the formal that
             // could not be inferred is unavailable, and its uses read as `Any`.
@@ -1271,11 +1267,10 @@ impl Checker<'_> {
             .bindings(&self.fed_source(), &signature);
             for formal in &signature.formals {
                 if !receiver_bindings.contains_key(formal.as_str()) {
-                    self.diags.error(
+                    self.diags.report_error(
                         self.call_callee_name_span(call),
-                        format!(
-                            "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                            crate::types::type_parameter_source_name(formal)
+                        crate::diagnostic_wording::cannot_infer_parameter_type(
+                            crate::types::type_parameter_source_name(formal),
                         ),
                     );
                 }

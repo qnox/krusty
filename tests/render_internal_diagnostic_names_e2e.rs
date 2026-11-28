@@ -490,6 +490,19 @@ fun c(f: Boolean) { val x: Int; if (f) x = 1; x = 2 }
             ],
             errors: 3,
         },
+        // A call whose type parameter inference leaves without a type.
+        Case {
+            file: "Infer.kt",
+            source: "\
+fun <T> make(): List<T> = emptyList()
+fun use() { make() }
+",
+            arguments: &[],
+            diagnostics: &[
+                "Infer.kt:2:13: error: [CANNOT_INFER_PARAMETER_TYPE] Cannot infer type for type parameter 'T'. Specify it explicitly.",
+            ],
+            errors: 1,
+        },
         Case {
             file: "Forbidden.kt",
             source: "\
