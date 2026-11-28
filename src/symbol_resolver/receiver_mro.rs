@@ -239,7 +239,12 @@ impl ReceiverMro {
                 || (recv_args.len() == applied_args.len()
                     && applied_args
                         .iter()
-                        .all(|arg| arg.is_erased_top() || arg.is_ty_param())))
+                        .zip(recv_args)
+                        // A type parameter the receiver passes through unchanged (`List<T>` read as
+                        // `Collection<T>`) is the receiver's own argument, not an erased formal.
+                        .all(|(arg, recv)| {
+                            arg != recv && (arg.is_erased_top() || arg.is_ty_param())
+                        })))
         {
             self.recv
         } else {
