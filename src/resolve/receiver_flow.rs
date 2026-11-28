@@ -38,6 +38,26 @@ impl Checker<'_> {
 }
 
 impl Checker<'_> {
+    /// Commit the constituent of a flow intersection that owns a selected member as the receiver's
+    /// view. A receiver whose value already carries a recorded smart-cast conversion (`this` after
+    /// `this is B`) converts to the projected constituent, not to the narrowed type it was read at.
+    pub(super) fn project_receiver_view(&mut self, receiver: ExprId, projected: Ty) -> Ty {
+        if let Some(conversion) = self.selected_value_smartcasts.get_mut(&receiver) {
+            *conversion = projected;
+        }
+        // A `this` expression denotes its implicit receiver, which is read at that same view. A
+        // property read through an implicit receiver (`delegate`, `a`) also records that receiver,
+        // but the projection is of the property's value, not of the receiver it was read from.
+        if matches!(self.file.expr(receiver), Expr::Name(name) if name == "this") {
+            if let Some(selection) = self.implicit_receiver_selections.get_mut(&receiver) {
+                selection.ty = projected;
+            }
+        }
+        self.set(receiver, projected)
+    }
+}
+
+impl Checker<'_> {
     /// The access path a checked expression denotes: the value its name read selected, followed by
     /// the member properties selected through plain (`.`) and safe (`?.`) reads. `None` for
     /// anything else (a call result, an indexed read, a temporary) — a proof on it says nothing
