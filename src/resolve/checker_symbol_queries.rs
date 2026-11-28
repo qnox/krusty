@@ -25,12 +25,14 @@ impl Checker<'_> {
         .with_callable_access(self)
     }
 
-    /// How a reference to `classifier` is invisible here, if it is. A classifier reference is
-    /// exempted by `INVISIBLE_REFERENCE` alone; `INVISIBLE_MEMBER` exempts members.
+    /// Why a reference to `classifier` is denied here, if it is. A visibility denial is exempted by
+    /// `INVISIBLE_REFERENCE` alone (`INVISIBLE_MEMBER` exempts members); a package its module does
+    /// not export is reported whatever the visibility suppression, and the caller honours the
+    /// denial's own [`suppression_name`](crate::symbol_resolver::ClassifierDenial::suppression_name).
     pub(super) fn inaccessible_classifier_reference(
         &self,
         classifier: TypeName,
-    ) -> Option<crate::symbol_source::ClassifierAccess> {
+    ) -> Option<crate::symbol_resolver::ClassifierDenial> {
         self.resolver()
             .with_visibility_suppression(self.suppresses_diagnostic("INVISIBLE_REFERENCE"))
             .inaccessible_classifier_access(classifier)

@@ -9,6 +9,7 @@ impl Checker<'_> {
     pub(super) fn check_expression_usage(&mut self, scope: &CheckerScope<'_>, expression: ExprId) {
         self.check_expression_opt_in(scope, expression);
         self.check_expression_deprecation(expression);
+        self.check_expression_module_export(expression);
         self.check_expression_dsl_scope(expression);
         self.check_reserved_underscore_reference(expression);
         self.record_suspension_point(expression);
