@@ -113,7 +113,6 @@ compiler/testData/diagnostics/tests/accessJavaFromKotlinViaStaticImport2.kt
 compiler/testData/diagnostics/tests/accessJavaFromKotlinViaStaticImportAndPermits.kt
 compiler/testData/diagnostics/tests/accessJavaFromKotlinViaStaticImportWithoutPermits.kt
 compiler/testData/diagnostics/tests/adjustDiagnosticForChangeTypeFixInIde.kt
-compiler/testData/diagnostics/tests/ambiguityNamedVararg.kt
 compiler/testData/diagnostics/tests/ambiguityWithVarargManyExamples.kt
 compiler/testData/diagnostics/tests/ambiguousLabelInExtensionFunctionWithOuterClass.kt
 compiler/testData/diagnostics/tests/ambiguousLabelInSuper.kt
@@ -438,10 +437,8 @@ compiler/testData/diagnostics/tests/callResolution/eagerLambdaAnalysis/throwable
 compiler/testData/diagnostics/tests/callResolution/eagerLambdaAnalysis/typeVariableInvariantReturnTypeFeatureDisabled.kt
 compiler/testData/diagnostics/tests/callResolution/eagerLambdaAnalysis/typeVariableInvariantReturnTypeFeatureEnabled.kt
 compiler/testData/diagnostics/tests/callResolution/eagerLambdaAnalysis/withContextSensitiveResolution.kt
-compiler/testData/diagnostics/tests/callResolution/errorCandidates.kt
 compiler/testData/diagnostics/tests/callResolution/exponentialArraySetWithPlusAssign.kt
 compiler/testData/diagnostics/tests/callResolution/incorrectPlusOperatorFromJava.kt
-compiler/testData/diagnostics/tests/callResolution/kt50386.kt
 compiler/testData/diagnostics/tests/callResolution/lambdaAsReceiver.kt
 compiler/testData/diagnostics/tests/callResolution/overloadsWithNumericNullableTypes.kt
 compiler/testData/diagnostics/tests/callResolution/overloadsWithNumericTypes.kt
@@ -557,7 +554,6 @@ compiler/testData/diagnostics/tests/callableReference/resolve/kt9601.kt
 compiler/testData/diagnostics/tests/callableReference/resolve/moreSpecificAmbiguousExtensions.kt
 compiler/testData/diagnostics/tests/callableReference/resolve/multipleOutersAndMultipleCallableReferences.kt
 compiler/testData/diagnostics/tests/callableReference/resolve/noAmbiguityBetweenTopLevelAndMemberProperty.kt
-compiler/testData/diagnostics/tests/callableReference/resolve/overloadAmbiguityForSimpleLastExpressionOfBlock.kt
 compiler/testData/diagnostics/tests/callableReference/resolve/overloads.kt
 compiler/testData/diagnostics/tests/callableReference/resolve/resolveCallableReferencesAfterAllSimpleArguments.kt
 compiler/testData/diagnostics/tests/callableReference/resolve/resolveReferenceAgainstKFunctionAndKPrpoerty.kt
@@ -2446,9 +2442,6 @@ compiler/testData/diagnostics/tests/imports/CheckVisibility_sameModule.kt
 compiler/testData/diagnostics/tests/imports/ClassImportsConflicting.kt
 compiler/testData/diagnostics/tests/imports/DefaultImportsPriority.kt
 compiler/testData/diagnostics/tests/imports/DoubleImports.kt
-compiler/testData/diagnostics/tests/imports/EnumEntryVsStaticAmbiguity.kt
-compiler/testData/diagnostics/tests/imports/EnumEntryVsStaticAmbiguity2.kt
-compiler/testData/diagnostics/tests/imports/EnumEntryVsStaticAmbiguity3.kt
 compiler/testData/diagnostics/tests/imports/EnumEntryVsStaticAmbiguity4.kt
 compiler/testData/diagnostics/tests/imports/ExplicitImportsAmbiguity.kt
 compiler/testData/diagnostics/tests/imports/ExplicitPackageImportsAmbiguity.kt
@@ -2555,7 +2548,6 @@ compiler/testData/diagnostics/tests/inference/assertThatInNumerousIf.kt
 compiler/testData/diagnostics/tests/inference/callableReferences/adaptation/kt81841.kt
 compiler/testData/diagnostics/tests/inference/callableReferences/adaptation/kt81913.kt
 compiler/testData/diagnostics/tests/inference/callableReferences/adaptation/varargAdaptationWithTypeVariables.kt
-compiler/testData/diagnostics/tests/inference/cannotCompleteResolveAmbiguity.kt
 compiler/testData/diagnostics/tests/inference/cannotCompleteResolveFunctionLiteralsNoUse.kt
 compiler/testData/diagnostics/tests/inference/cannotCompleteResolveNoInfoForParameter.kt
 compiler/testData/diagnostics/tests/inference/cannotCompleteResolveNoneApplicable.kt
@@ -3015,7 +3007,6 @@ compiler/testData/diagnostics/tests/inference/regressions/kt2741.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt2842.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt2883.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt3007.kt
-compiler/testData/diagnostics/tests/inference/regressions/kt32862_both.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt32862_none.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt3301.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt34282.kt
@@ -3482,7 +3473,6 @@ compiler/testData/diagnostics/tests/javac/fieldsResolution/ResolutionPriority.kt
 compiler/testData/diagnostics/tests/javac/fieldsResolution/SameFieldInSupertypes.kt
 compiler/testData/diagnostics/tests/javac/fieldsResolution/StaticImport.kt
 compiler/testData/diagnostics/tests/javac/fieldsResolution/StaticImportsAmbiguity.kt
-compiler/testData/diagnostics/tests/javac/imports/AllUnderImportsAmbiguity.kt
 compiler/testData/diagnostics/tests/javac/imports/AllUnderImportsLessPriority.kt
 compiler/testData/diagnostics/tests/javac/imports/ClassImportsConflicting.kt
 compiler/testData/diagnostics/tests/javac/imports/CurrentPackageAndAllUnderImport.kt
@@ -3913,7 +3903,6 @@ compiler/testData/diagnostics/tests/multiplatform/defaultArguments/constructor.k
 compiler/testData/diagnostics/tests/multiplatform/defaultArguments/constructorDefaultArgsViaActualTypealias.kt
 compiler/testData/diagnostics/tests/multiplatform/defaultArguments/expectedDeclaresDefaultArguments.kt
 compiler/testData/diagnostics/tests/multiplatform/defaultArguments/expectedInheritsDefaultArguments.kt
-compiler/testData/diagnostics/tests/multiplatform/defaultArguments/expectedVsNonExpectedWithDefaults.kt
 compiler/testData/diagnostics/tests/multiplatform/defaultArguments/methodDefaultArgsViaActualFakeOverride/delegation.kt
 compiler/testData/diagnostics/tests/multiplatform/defaultArguments/methodDefaultArgsViaActualFakeOverride/delegation2.kt
 compiler/testData/diagnostics/tests/multiplatform/defaultArguments/methodDefaultArgsViaActualFakeOverride/intersectionOverride.kt
@@ -4190,7 +4179,6 @@ compiler/testData/diagnostics/tests/nullabilityAndSmartCasts/QualifiedExpression
 compiler/testData/diagnostics/tests/nullabilityAndSmartCasts/ReceiverNullability.kt
 compiler/testData/diagnostics/tests/nullabilityAndSmartCasts/SenselessNullInWhen.kt
 compiler/testData/diagnostics/tests/nullabilityAndSmartCasts/augmentedAssignment.kt
-compiler/testData/diagnostics/tests/nullabilityAndSmartCasts/funcLiteralArgsInsideAmbiguity.kt
 compiler/testData/diagnostics/tests/nullabilityAndSmartCasts/kt1270.kt
 compiler/testData/diagnostics/tests/nullabilityAndSmartCasts/kt1680.kt
 compiler/testData/diagnostics/tests/nullabilityAndSmartCasts/kt1778.kt
@@ -4289,12 +4277,10 @@ compiler/testData/diagnostics/tests/overload/RedeclarationThroughDestructuring.k
 compiler/testData/diagnostics/tests/overload/RedeclarationThroughDestructuringOld.kt
 compiler/testData/diagnostics/tests/overload/TypeParameterMultipleBounds.kt
 compiler/testData/diagnostics/tests/overload/conflictingOverloadsWithContextParameters.kt
-compiler/testData/diagnostics/tests/overload/defaultParameters.kt
 compiler/testData/diagnostics/tests/overload/disambiguateByFailedAbstractClassCheck.kt
 compiler/testData/diagnostics/tests/overload/doubleWinsOverFloat.kt
 compiler/testData/diagnostics/tests/overload/kt10939.kt
 compiler/testData/diagnostics/tests/overload/kt22004.kt
-compiler/testData/diagnostics/tests/overload/kt2493.kt
 compiler/testData/diagnostics/tests/overload/kt61168WithFix.kt
 compiler/testData/diagnostics/tests/overload/noConflictingOverloadsWithDeprecatedHidden/ConflictingOverloadsFunsDifferentReturnInClass.kt
 compiler/testData/diagnostics/tests/overload/noConflictingOverloadsWithDeprecatedHidden/ConflictingOverloadsIdenticalFunsInClass.kt
@@ -4574,7 +4560,6 @@ compiler/testData/diagnostics/tests/properties/inferenceFromGetters/objectExpres
 compiler/testData/diagnostics/tests/properties/inferenceFromGetters/primaryConstructorParameter.kt
 compiler/testData/diagnostics/tests/properties/inferenceFromGetters/recursiveGetter.kt
 compiler/testData/diagnostics/tests/properties/inferenceFromGetters/vars.kt
-compiler/testData/diagnostics/tests/properties/javaAccessorConversion.kt
 compiler/testData/diagnostics/tests/properties/javaAccessorsComplex.kt
 compiler/testData/diagnostics/tests/properties/javaFieldAndKotlinProperty/javaFieldAndCompanionProperty.kt
 compiler/testData/diagnostics/tests/properties/javaFieldAndKotlinProperty/javaFieldAndKotlinInvisibleProperty.kt
@@ -5371,8 +5356,6 @@ compiler/testData/diagnostics/tests/strictEquals/disabled/disabledFeature.kt
 compiler/testData/diagnostics/tests/strictEquals/enabled/wrongElementsAnnotated.kt
 compiler/testData/diagnostics/tests/substitutions/kt4887.kt
 compiler/testData/diagnostics/tests/substitutions/starProjections.kt
-compiler/testData/diagnostics/tests/substitutions/upperBoundsSubstitutionForOverloadResolutionWithAmbiguity.kt
-compiler/testData/diagnostics/tests/substitutions/upperBoundsSubstitutionForOverloadResolutionWithErrorTypes.kt
 compiler/testData/diagnostics/tests/subtyping/extFunctionTypeAsSuperType.kt
 compiler/testData/diagnostics/tests/subtyping/findClosestCorrespondingSupertype.kt
 compiler/testData/diagnostics/tests/subtyping/kFunctionalCST.kt
@@ -5766,7 +5749,6 @@ compiler/testData/diagnostics/tests/valueClasses/valueClassesInsideAnnotations.k
 compiler/testData/diagnostics/tests/valueClasses/varargsOnParametersOfValueClassType.kt
 compiler/testData/diagnostics/tests/valueParameterWithoutExplicitType.kt
 compiler/testData/diagnostics/tests/varOverriddenByValThroughIntersection.kt
-compiler/testData/diagnostics/tests/varargs/AmbiguousVararg.kt
 compiler/testData/diagnostics/tests/varargs/MostSepcificVarargsWithJava.kt
 compiler/testData/diagnostics/tests/varargs/NullableTypeForVarargArgument.kt
 compiler/testData/diagnostics/tests/varargs/assignArrayToVararagInNamedForm.kt
@@ -5943,7 +5925,6 @@ compiler/testData/diagnostics/tests/whileConditionExpectedType.kt
 compiler/testData/diagnostics/testsWithStdLib/ArrayOfNothing.kt
 compiler/testData/diagnostics/testsWithStdLib/ArrayOfNothingDisabled.kt
 compiler/testData/diagnostics/testsWithStdLib/CallCompanionProtectedNonStatic.kt
-compiler/testData/diagnostics/testsWithStdLib/CallToMainRedeclaredInMultiFile.kt
 compiler/testData/diagnostics/testsWithStdLib/ClassIdDiagnosticRendering.kt
 compiler/testData/diagnostics/testsWithStdLib/InaccessibleInternalClass.kt
 compiler/testData/diagnostics/testsWithStdLib/PropertyDelegateWithPrivateSet.kt

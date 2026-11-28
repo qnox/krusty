@@ -6214,20 +6214,18 @@ impl<'a> Checker<'a> {
             if applicable_only {
                 return None;
             }
-            let mut message = "overload resolution ambiguity between candidates:".to_string();
-            for member in &sam_tied {
-                message.push('\n');
-                // Render from the selected semantic record itself. Looking back into a source AST
-                // would make diagnostics depend on declaration origin and can match the wrong sibling
-                // overload when return types coincide.
-                let parameters =
-                    Self::callable_ref_parameters(&member.params, &member.call_sig.param_names);
-                message.push_str(&format!(
-                    "fun {name}({parameters}): {}",
-                    member.ret.source_name()
-                ));
-            }
-            self.diags.error(self.call_callee_name_span(call), message);
+            // Render from the selected semantic record itself. Looking back into a source AST would
+            // make diagnostics depend on declaration origin and can match the wrong sibling
+            // overload when return types coincide.
+            let message = crate::diagnostic_wording::overload_resolution_ambiguity(
+                sam_tied.iter().map(|member| {
+                    let parameters =
+                        Self::callable_ref_parameters(&member.params, &member.call_sig.param_names);
+                    format!("fun {name}({parameters}): {}", member.ret.source_name())
+                }),
+            );
+            self.diags
+                .report_error(self.call_callee_name_span(call), message);
             return Some(Ty::Error);
         }
         if applicable_only && applicable_scored.is_empty() {
@@ -7914,7 +7912,7 @@ impl<'a> Checker<'a> {
                         match resolution {
                             InvokeResolution::Selected(result) => return result,
                             InvokeResolution::Ambiguous(overloads) => {
-                                self.diags.error(
+                                self.diags.report_error(
                                     span,
                                     self.ambiguous_member_candidates_message(
                                         CALLABLE_INVOKE_OPERATOR,
@@ -8000,7 +7998,7 @@ impl<'a> Checker<'a> {
                             match resolution {
                                 InvokeResolution::Selected(result) => return result,
                                 InvokeResolution::Ambiguous(overloads) => {
-                                    self.diags.error(
+                                    self.diags.report_error(
                                         span,
                                         self.ambiguous_member_candidates_message(
                                             CALLABLE_INVOKE_OPERATOR,
@@ -12798,13 +12796,9 @@ impl<'a> Checker<'a> {
                 });
                 if let Some(candidates) = ambiguous {
                     if !error_argument {
-                        let mut message =
-                            "overload resolution ambiguity between candidates:".to_string();
-                        for candidate in &candidates {
-                            message.push('\n');
-                            message.push_str(&Self::callable_candidate_display(&fname, candidate));
-                        }
-                        self.diags.error(self.call_callee_name_span(call), message);
+                        let message = Self::ambiguous_candidates_message(&fname, &candidates);
+                        self.diags
+                            .report_error(self.call_callee_name_span(call), message);
                     }
                     return Ty::Error;
                 }
@@ -12929,7 +12923,7 @@ impl<'a> Checker<'a> {
                     ) {
                         InvokeResolution::Selected(t) => return t,
                         InvokeResolution::Ambiguous(candidates) => {
-                            self.diags.error(
+                            self.diags.report_error(
                                 span,
                                 self.ambiguous_member_candidates_message(
                                     CALLABLE_INVOKE_OPERATOR,
@@ -21569,7 +21563,7 @@ fun use() {
         assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
         assert_eq!(
             diagnostics.diags[0].msg,
-            "overload resolution ambiguity between candidates:\n\
+            "Overload resolution ambiguity between candidates:\n\
              fun tie(a: Long): String\n\
              fun tie(a: Byte): String"
         );
@@ -27146,7 +27140,7 @@ impl<'a> Checker<'a> {
             ExtensionRefSelection::Ambiguous(candidates) => {
                 let message = Self::ambiguous_candidates_message(name, &candidates);
                 self.diags
-                    .error(self.member_name_span(expression, name), message);
+                    .report_error(self.member_name_span(expression, name), message);
                 Some(Ty::Error)
             }
             ExtensionRefSelection::Inaccessible => {
@@ -27271,16 +27265,21 @@ impl<'a> Checker<'a> {
         self.member_candidates_message(INAPPLICABLE_OVERLOAD_PREFIX, name, candidates)
     }
 
+    /// kotlinc's ambiguity over member `candidates`, each rendered once, in candidate order.
     fn ambiguous_member_candidates_message(
         &self,
         name: &str,
         candidates: &[crate::libraries::FunctionInfo],
-    ) -> String {
-        self.member_candidates_message(
-            "overload resolution ambiguity between candidates:",
-            name,
-            candidates,
-        )
+    ) -> crate::diag::NamedMessage {
+        let mut displays = Vec::<String>::new();
+        for candidate in candidates {
+            let display = self.member_candidate_display(name, candidate);
+            if !displays.contains(&display) {
+                displays.push(display);
+            }
+        }
+        displays.truncate(MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES);
+        crate::diagnostic_wording::overload_resolution_ambiguity(displays)
     }
 
     fn member_candidates_message(
@@ -28106,16 +28105,12 @@ impl<'a> Checker<'a> {
             if maximal.is_empty() {
                 return None;
             }
-            let mut message = "overload resolution ambiguity between candidates:".to_string();
-            for index in maximal {
-                message.push('\n');
-                message.push_str(&Self::callable_candidate_display(
-                    name,
-                    &candidates[index].0,
-                ));
-            }
+            let message = Self::ambiguous_candidates_message(
+                name,
+                maximal.into_iter().map(|index| &candidates[index].0),
+            );
             self.diags
-                .error(self.member_name_span(expression, name), message);
+                .report_error(self.member_name_span(expression, name), message);
             return Some(Ty::Error);
         };
         let (
@@ -41567,7 +41562,7 @@ impl<'a> Checker<'a> {
                     let message = ambiguous_classifier_message(candidates, |candidate| {
                         resolver.classifier(candidate)
                     });
-                    self.diags.error(r.span, message);
+                    self.diags.report_error(r.span, message);
                 }
             }
             return true;
@@ -46438,7 +46433,8 @@ impl<'a> Checker<'a> {
                 }
                 CallableCandidateSelection::Ambiguous(candidates, _) => {
                     let message = Self::ambiguous_candidates_message(name, &candidates);
-                    self.diags.error(self.call_callee_name_span(e), message);
+                    self.diags
+                        .report_error(self.call_callee_name_span(e), message);
                     // No candidate shapes the lambdas of an ambiguous call.
                     self.report_unshaped_lambda_diagnostics(scope, args, Some(name));
                     return Some(Ty::Error);

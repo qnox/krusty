@@ -470,11 +470,9 @@ impl Checker<'_> {
     }
 
     pub(super) fn report_accessor_ambiguity(&mut self, span: super::Span, candidates: Vec<String>) {
-        let mut message = "overload resolution ambiguity between candidates:".to_string();
-        for candidate in candidates {
-            message.push('\n');
-            message.push_str(&candidate);
-        }
-        self.diags.error(span, message);
+        self.diags.report_error(
+            span,
+            crate::diagnostic_wording::overload_resolution_ambiguity(candidates),
+        );
     }
 }

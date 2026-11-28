@@ -285,25 +285,23 @@ impl Checker<'_> {
             }
             return realized;
         }
-        let message = if candidates.is_empty() {
-            format!("none of the local function candidates for '{name}' is applicable")
+        let span = self.member_name_span(expression, name);
+        if candidates.is_empty() {
+            self.diags.error(
+                span,
+                format!("none of the local function candidates for '{name}' is applicable"),
+            );
         } else {
-            let mut message = "overload resolution ambiguity between candidates:".to_string();
-            for index in maximal {
-                let Stmt::LocalFun(function) = self.file.stmt(candidates[index].0) else {
-                    unreachable!("a local reference candidate must be a local function")
-                };
-                message.push('\n');
-                message.push_str(&source_function_display(
-                    self.file,
-                    function,
-                    candidates[index].2,
-                ));
-            }
-            message
-        };
-        self.diags
-            .error(self.member_name_span(expression, name), message);
+            let message = crate::diagnostic_wording::overload_resolution_ambiguity(
+                maximal.into_iter().map(|index| {
+                    let Stmt::LocalFun(function) = self.file.stmt(candidates[index].0) else {
+                        unreachable!("a local reference candidate must be a local function")
+                    };
+                    source_function_display(self.file, function, candidates[index].2)
+                }),
+            );
+            self.diags.report_error(span, message);
+        }
         Ty::Error
     }
 }

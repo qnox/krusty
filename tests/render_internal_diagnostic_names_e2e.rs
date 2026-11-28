@@ -503,6 +503,29 @@ fun use() { make() }
             ],
             errors: 1,
         },
+        // Equally specific top-level, member and `invoke` candidates, listed in declaration order.
+        Case {
+            file: "Amb.kt",
+            source: "\
+fun tie(a: Long): String = \"\"
+fun tie(a: Byte): String = \"\"
+class C { fun m(a: Long) {}; fun m(a: Byte) {}; operator fun invoke(a: Long) {}; operator fun invoke(a: Byte) {} }
+fun use(c: C) { tie(1); c.m(1); c(1) }
+",
+            arguments: &[],
+            diagnostics: &[
+                "Amb.kt:4:17: error: [OVERLOAD_RESOLUTION_AMBIGUITY] Overload resolution ambiguity between candidates:",
+                "fun tie(a: Long): String",
+                "fun tie(a: Byte): String",
+                "Amb.kt:4:27: error: [OVERLOAD_RESOLUTION_AMBIGUITY] Overload resolution ambiguity between candidates:",
+                "fun m(a: Long): Unit",
+                "fun m(a: Byte): Unit",
+                "Amb.kt:4:33: error: [OVERLOAD_RESOLUTION_AMBIGUITY] Overload resolution ambiguity between candidates:",
+                "fun invoke(a: Long): Unit",
+                "fun invoke(a: Byte): Unit",
+            ],
+            errors: 3,
+        },
         Case {
             file: "Forbidden.kt",
             source: "\

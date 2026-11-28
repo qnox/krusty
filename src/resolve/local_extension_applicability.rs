@@ -130,20 +130,16 @@ impl Checker<'_> {
         name: &str,
         candidates: &[LocalExtensionReferenceCandidate],
     ) -> Ty {
-        let mut message = "overload resolution ambiguity between candidates:".to_string();
-        for candidate in candidates {
-            let Stmt::LocalFun(function) = self.file.stmt(candidate.statement) else {
-                unreachable!("a local-extension reference candidate must be a local function")
-            };
-            message.push('\n');
-            message.push_str(&super::source_function_display(
-                self.file,
-                function,
-                candidate.signature.ret,
-            ));
-        }
+        let message = crate::diagnostic_wording::overload_resolution_ambiguity(
+            candidates.iter().map(|candidate| {
+                let Stmt::LocalFun(function) = self.file.stmt(candidate.statement) else {
+                    unreachable!("a local-extension reference candidate must be a local function")
+                };
+                super::source_function_display(self.file, function, candidate.signature.ret)
+            }),
+        );
         self.diags
-            .error(self.member_name_span(expression, name), message);
+            .report_error(self.member_name_span(expression, name), message);
         Ty::Error
     }
 

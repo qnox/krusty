@@ -315,16 +315,19 @@ impl Checker<'_> {
                     Expr::CallableRef { name, .. } => name.as_str(),
                     _ => "constructor",
                 };
-                let mut message = "overload resolution ambiguity between candidates:".to_string();
-                for candidate in ambiguous {
-                    let mut displayed = candidate.clone();
-                    displayed.ret = target;
-                    let display = Self::library_member_candidate_display("constructor", &displayed);
-                    message.push('\n');
-                    message.push_str(display.strip_prefix("fun ").unwrap_or(&display));
-                }
+                let message = crate::diagnostic_wording::overload_resolution_ambiguity(
+                    ambiguous.iter().map(|candidate| {
+                        let mut displayed = candidate.clone();
+                        displayed.ret = target;
+                        let display =
+                            Self::library_member_candidate_display("constructor", &displayed);
+                        display
+                            .strip_prefix("fun ")
+                            .map_or_else(|| display.clone(), str::to_owned)
+                    }),
+                );
                 self.diags
-                    .error(self.member_name_span(expression, name), message);
+                    .report_error(self.member_name_span(expression, name), message);
                 return Some(Ty::Error);
             }
             selected
