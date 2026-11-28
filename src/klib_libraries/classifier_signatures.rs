@@ -42,6 +42,9 @@ pub(super) struct SignedClassifier {
     pub(super) module: Option<String>,
     pub(super) modality: KotlinModality,
     pub(super) is_value: bool,
+    /// A value class's components: the value parameters its primary constructor declares, read
+    /// before a private constructor leaves the published candidates. Empty for any other class.
+    pub(super) value_class_components: Box<[String]>,
     pub(super) primary_constructor: Option<KlibPublicIdSignature>,
     pub(super) type_parameters: ClassTypeParameters,
     /// Whether this classifier's KLIB is a friend of the current compilation.
@@ -203,6 +206,17 @@ pub(super) fn sign_package_classes(
             .filter(|(constructor, _)| constructor.is_primary)
             .map(|(_, signature)| signature.clone());
         let primary_constructor = primaries.next();
+        let value_class_components =
+            if crate::metadata::semantic::class_is_value(class.metadata_flags) {
+                class
+                    .constructors
+                    .iter()
+                    .find(|constructor| constructor.is_primary)
+                    .map(|primary| primary.param_names.clone().into_boxed_slice())
+                    .unwrap_or_default()
+            } else {
+                Box::default()
+            };
         if primaries.next().is_some() {
             return Err(unsignable(
                 package,
@@ -306,6 +320,7 @@ pub(super) fn sign_package_classes(
                 module: module.map(str::to_owned),
                 modality: class.modality,
                 is_value: crate::metadata::semantic::class_is_value(class.metadata_flags),
+                value_class_components,
                 primary_constructor,
                 type_parameters,
                 internal_friend,

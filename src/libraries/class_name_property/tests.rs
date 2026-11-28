@@ -42,6 +42,7 @@ fn name_property(name: &str) -> PropertyInfo {
         constant: None,
         annotations: Vec::new(),
         return_value_status: Default::default(),
+        read_stability: Default::default(),
     };
     let getter = format!("<get-{name}>");
     declared_property(

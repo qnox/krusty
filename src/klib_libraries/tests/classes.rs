@@ -10,7 +10,7 @@ use super::*;
 use crate::klib::KlibArchive;
 use crate::libraries::{
     ClassifierAccess, ExternalCallableRealization, LibraryMember, LibraryType, PropKind,
-    PropertyInfo, TypeKind,
+    PropertyInfo, PropertyReadStability, TypeKind,
 };
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrMember};
@@ -1209,5 +1209,60 @@ fn an_unsignable_member_rejects_the_library_set() {
         error.to_string(),
         "cannot sign KLIB declaration Outer.Nested in package `p`: \
          enclosing class p/Outer is absent from its fragment"
+    );
+}
+
+#[test]
+fn only_a_value_class_component_keeps_its_stability_for_another_module() {
+    let stable = |name: &str| {
+        let mut property = super::implementation_inventory::fixture_property(name, false);
+        property.read_stability = PropertyReadStability::Stable;
+        property
+    };
+    let class_with_value = |is_value: bool, constructor: Visibility| {
+        let mut class = in_memory_class(1);
+        class.constructors[0].visibility = constructor;
+        class.properties = vec![stable("value"), stable("other")];
+        if is_value {
+            class.metadata_flags |= 1 << 13;
+        }
+        class
+    };
+    let libraries = KlibLibraries::from_packages(vec![(
+        segments(&["p"]),
+        package_with_classes(vec![
+            ("p/Wrapper", class_with_value(true, Visibility::Public)),
+            // A private primary constructor is not a published candidate, but it still declares
+            // the components.
+            ("p/Hidden", class_with_value(true, Visibility::Private)),
+            ("p/Plain", class_with_value(false, Visibility::Public)),
+        ]),
+    )])
+    .expect("in-memory classes are signable");
+    let stability = |class: &str, property: &str| {
+        let shape = libraries
+            .classifier(type_name(class))
+            .expect("the class is published");
+        declared_property(&shape, property).read_stability
+    };
+    assert_eq!(
+        stability("p/Wrapper", "value"),
+        PropertyReadStability::ValueClassComponentOfOtherModule
+    );
+    assert_eq!(
+        stability("p/Wrapper", "other"),
+        PropertyReadStability::Unstable
+    );
+    assert_eq!(
+        stability("p/Hidden", "value"),
+        PropertyReadStability::ValueClassComponentOfOtherModule
+    );
+    assert_eq!(
+        stability("p/Hidden", "other"),
+        PropertyReadStability::Unstable
+    );
+    assert_eq!(
+        stability("p/Plain", "value"),
+        PropertyReadStability::Unstable
     );
 }

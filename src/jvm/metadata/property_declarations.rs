@@ -476,11 +476,12 @@ pub(super) fn decode_properties(
             is_const: flags & is_const_bit != 0,
             // An absent flag word is the default public final `val`; only the legacy word lacks
             // the getter facts.
-            read_stability: if modern_flags.is_none() && legacy_flags.is_some() {
-                crate::libraries::PropertyReadStability::Unstable
-            } else {
-                declared_read_stability(flags, getter_flags, has_context_parameters)
-            },
+            read_stability: crate::metadata::property_read_stability::declared_read_stability(
+                modern_flags,
+                legacy_flags.is_some(),
+                getter_flags,
+                has_context_parameters,
+            ),
             is_abstract: (flags >> 4) & 0x3 == 2,
             is_final: (flags >> 4) & 0x3 == 0,
             is_var,
@@ -504,27 +505,6 @@ pub(super) fn decode_properties(
 
 fn accessor_is_inline(flags: Option<u64>) -> bool {
     flags.is_some_and(|flags| flags & crate::metadata::property_flags::ACCESSOR_IS_INLINE != 0)
-}
-
-/// Whether repeated reads of a decoded property observe one value, from its modern flag word and
-/// its getter's flag word. kotlinc omits the getter word when it equals the property's default, so
-/// an absent word is a default getter.
-fn declared_read_stability(
-    flags: u64,
-    getter_flags: Option<u64>,
-    has_context_parameters: bool,
-) -> crate::libraries::PropertyReadStability {
-    use crate::metadata::property_flags::{
-        ACCESSOR_IS_NOT_DEFAULT, IS_DELEGATED, IS_VAR, MODALITY_MASK,
-    };
-    let custom_getter = getter_flags.is_some_and(|getter| getter & ACCESSOR_IS_NOT_DEFAULT != 0);
-    crate::libraries::PropertyReadStability::from_declaration(
-        flags & IS_VAR != 0,
-        custom_getter || flags & IS_DELEGATED != 0,
-        // Open, abstract, or sealed: an override may replace the default getter.
-        flags & MODALITY_MASK != 0,
-        has_context_parameters,
-    )
 }
 
 struct ParsedPropertySignature<'a> {
@@ -617,11 +597,8 @@ fn build_property_generic_sig(
 
 #[cfg(test)]
 mod tests {
-    use super::{accessor_is_inline, declared_read_stability};
-    use crate::libraries::PropertyReadStability;
-    use crate::metadata::property_flags::{
-        ACCESSOR_IS_INLINE, ACCESSOR_IS_NOT_DEFAULT, IS_DELEGATED, IS_VAR,
-    };
+    use super::accessor_is_inline;
+    use crate::metadata::property_flags::{ACCESSOR_IS_INLINE, ACCESSOR_IS_NOT_DEFAULT};
 
     #[test]
     fn only_an_accessor_word_with_the_inline_bit_is_inline() {
@@ -631,33 +608,5 @@ mod tests {
         assert!(accessor_is_inline(Some(
             ACCESSOR_IS_NOT_DEFAULT | ACCESSOR_IS_INLINE
         )));
-    }
-
-    #[test]
-    fn declaration_facts_define_property_read_stability() {
-        assert_eq!(
-            declared_read_stability(0, None, false),
-            PropertyReadStability::Stable
-        );
-        assert_eq!(
-            declared_read_stability(1 << 4, None, false),
-            PropertyReadStability::StableOnFinalReceiver
-        );
-        assert_eq!(
-            declared_read_stability(IS_VAR, None, false),
-            PropertyReadStability::Unstable
-        );
-        assert_eq!(
-            declared_read_stability(IS_DELEGATED, None, false),
-            PropertyReadStability::Unstable
-        );
-        assert_eq!(
-            declared_read_stability(0, Some(ACCESSOR_IS_NOT_DEFAULT), false),
-            PropertyReadStability::Unstable
-        );
-        assert_eq!(
-            declared_read_stability(0, None, true),
-            PropertyReadStability::Unstable
-        );
     }
 }

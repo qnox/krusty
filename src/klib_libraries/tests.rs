@@ -1364,6 +1364,7 @@ fn same_spelled_function_and_property_type_parameters_keep_distinct_identities()
         constant: None,
         annotations: Vec::new(),
         return_value_status: Default::default(),
+        read_stability: Default::default(),
     };
     let libraries = KlibLibraries::from_packages(vec![(
         segments(&["p"]),
