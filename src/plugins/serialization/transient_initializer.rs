@@ -17,24 +17,15 @@ use crate::plugins::{FrontendClassCheckContext, FrontendPluginDiagnostic};
 use crate::types::type_name;
 
 use super::generated_classifier::serializable_by_plugin;
-use super::{PluginRelease, TRANSIENT_FQ};
+use super::TRANSIENT_FQ;
 
-/// The plugin's wording for `TRANSIENT_MISSING_INITIALIZER`, which follows the plugin release, not the
-/// target Kotlin version: the 2.4.20 plugin ends the sentence with a full stop. Without a known
-/// release it is the newest wording.
-fn transient_missing_initializer(release: Option<PluginRelease>) -> &'static str {
-    if release.is_none_or(|release| release >= PluginRelease::V2_4_20) {
-        "this property is marked as @Transient and therefore must have an initializing expression."
-    } else {
-        "this property is marked as @Transient and therefore must have an initializing expression"
-    }
-}
+/// The plugin's wording for `TRANSIENT_MISSING_INITIALIZER`.
+const TRANSIENT_MISSING_INITIALIZER: &str =
+    "this property is marked as @Transient and therefore must have an initializing expression.";
 
 pub(super) fn missing_initializers<'a>(
     ctx: &'a FrontendClassCheckContext<'a>,
-    release: Option<PluginRelease>,
 ) -> impl Iterator<Item = FrontendPluginDiagnostic> + 'a {
-    let message = transient_missing_initializer(release);
     let checked = matches!(ctx.kind, TypeKind::Class)
         && serializable_by_plugin(ctx.annotations, ctx.annotation_class_arguments);
     let transient = type_name(TRANSIENT_FQ);
@@ -48,7 +39,10 @@ pub(super) fn missing_initializers<'a>(
                 && !property.is_lateinit
         })
         .map(|property| {
-            FrontendPluginDiagnostic::error(property.declaration_span, message.to_string())
+            FrontendPluginDiagnostic::error(
+                property.declaration_span,
+                TRANSIENT_MISSING_INITIALIZER.to_string(),
+            )
         })
 }
 
@@ -81,15 +75,12 @@ mod tests {
         properties: &[FrontendPropertyFacts],
     ) -> Vec<FrontendPluginDiagnostic> {
         let annotations = [type_name(SERIALIZABLE_FQ)];
-        missing_initializers(
-            &FrontendClassCheckContext {
-                kind,
-                annotations: &annotations,
-                annotation_class_arguments: class_arguments,
-                properties,
-            },
-            None,
-        )
+        missing_initializers(&FrontendClassCheckContext {
+            kind,
+            annotations: &annotations,
+            annotation_class_arguments: class_arguments,
+            properties,
+        })
         .collect()
     }
 
@@ -105,25 +96,9 @@ mod tests {
             reported(TypeKind::Class, &[], &properties),
             vec![FrontendPluginDiagnostic::error(
                 Span::new(10, 20),
-                transient_missing_initializer(None).to_string(),
+                TRANSIENT_MISSING_INITIALIZER.to_string(),
             )]
         );
-    }
-
-    #[test]
-    fn the_wording_follows_the_plugin_release() {
-        let earlier =
-            "this property is marked as @Transient and therefore must have an initializing expression";
-        let full_stop = format!("{earlier}.");
-        assert_eq!(
-            transient_missing_initializer(PluginRelease::parse("2.4.10-release-377")),
-            earlier
-        );
-        assert_eq!(
-            transient_missing_initializer(PluginRelease::parse("2.4.20")),
-            full_stop
-        );
-        assert_eq!(transient_missing_initializer(None), full_stop);
     }
 
     #[test]

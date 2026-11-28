@@ -759,54 +759,35 @@ impl DelegateConventionFamilies {
         self.members.is_empty() && self.member_extensions.is_empty() && self.extensions.is_empty()
     }
 
-    /// The candidates a total failure names: every rung's candidates, members first, unless the
-    /// release names only the earliest rung that contributed any
-    /// ([`Quirk::DelegateFailureNamesFirstRungOnly`]).
-    ///
-    /// [`Quirk::DelegateFailureNamesFirstRungOnly`]: crate::kotlin_version::Quirk::DelegateFailureNamesFirstRungOnly
+    /// The candidates a total failure names: every rung's candidates, members first.
     pub(crate) fn diagnostic_candidates(
         &self,
-        reference: crate::kotlin_version::ReferenceProfile,
         name: &str,
         result: &mut dyn FnMut(
             DelegateConventionCandidate<'_>,
         ) -> Result<Ty, crate::fir::DiagnosticId>,
     ) -> Result<Vec<DelegateConventionDiagnosticCandidate>, crate::fir::DiagnosticId> {
-        let every_rung = !reference
-            .quirks()
-            .has(crate::kotlin_version::Quirk::DelegateFailureNamesFirstRungOnly);
-        let members = every_rung || !self.members.is_empty();
-        let member_extensions = every_rung || !members && !self.member_extensions.is_empty();
-        let extensions = every_rung || !members && !member_extensions;
-        let mut candidates = Vec::new();
-        if members {
-            candidates.extend(delegate_convention_candidates_from_functions(
-                &self.members,
+        let mut candidates =
+            delegate_convention_candidates_from_functions(&self.members, name, &mut |candidate| {
+                result(DelegateConventionCandidate::Function(candidate))
+            })?;
+        for candidate in &self.member_extensions {
+            let context_count = candidate.context_count.min(candidate.params.len());
+            let (context, value) = candidate.params.split_at(context_count);
+            candidates.push(delegate_convention_diagnostic_candidate(
                 name,
-                &mut |candidate| result(DelegateConventionCandidate::Function(candidate)),
-            )?);
+                Some(candidate.extension_receiver),
+                context,
+                value,
+                &candidate.parameter_names,
+                result(DelegateConventionCandidate::MemberExtension(candidate))?,
+            ));
         }
-        if member_extensions {
-            for candidate in &self.member_extensions {
-                let context_count = candidate.context_count.min(candidate.params.len());
-                let (context, value) = candidate.params.split_at(context_count);
-                candidates.push(delegate_convention_diagnostic_candidate(
-                    name,
-                    Some(candidate.extension_receiver),
-                    context,
-                    value,
-                    &candidate.parameter_names,
-                    result(DelegateConventionCandidate::MemberExtension(candidate))?,
-                ));
-            }
-        }
-        if extensions {
-            candidates.extend(delegate_convention_candidates_from_functions(
-                &self.extensions,
-                name,
-                &mut |candidate| result(DelegateConventionCandidate::Function(candidate)),
-            )?);
-        }
+        candidates.extend(delegate_convention_candidates_from_functions(
+            &self.extensions,
+            name,
+            &mut |candidate| result(DelegateConventionCandidate::Function(candidate)),
+        )?);
         Ok(candidates)
     }
 }
@@ -1198,7 +1179,7 @@ impl Checker<'_> {
         let property = query.property;
         let value = query.value;
         let candidates = families
-            .diagnostic_candidates(self.file.reference, name, &mut |candidate| {
+            .diagnostic_candidates(name, &mut |candidate| {
                 Ok(match candidate {
                     DelegateConventionCandidate::Function(function) => function.callable.ret,
                     DelegateConventionCandidate::MemberExtension(candidate)

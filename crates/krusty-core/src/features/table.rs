@@ -27,8 +27,7 @@ macro_rules! releases {
 }
 
 releases! {
-    V2_4_0 => "2.4.0",
-    V2_4_20 => "2.4.20",
+    V2_4_21 => "2.4.21",
 }
 
 /// Features later releases split or renamed, by the older feature that stands for them.
@@ -296,7 +295,7 @@ mod tests {
     /// The suffix kotlinc's `toDeprecationWarningMessage` appends while the deprecating feature is off.
     #[test]
     fn a_deprecation_warning_names_the_version_and_issue() {
-        let table = FeatureTable::for_version(KotlinVersion::V2_4_20).unwrap();
+        let table = FeatureTable::for_version(KotlinVersion::V2_4_21).unwrap();
         let feature = table
             .get("ForbidValueClassRecursionViaTypeParameters")
             .unwrap();
@@ -321,7 +320,7 @@ mod tests {
     /// `EnumEntries` is a language 1.9 feature that also needs API 1.8.
     #[test]
     fn a_default_needs_both_the_language_and_the_api_version() {
-        let table = FeatureTable::for_version(KotlinVersion::V2_4_20).unwrap();
+        let table = FeatureTable::for_version(KotlinVersion::V2_4_21).unwrap();
         let feature = table.get("EnumEntries").unwrap();
         assert_eq!(feature.since_version, Some(LanguageVersion::new(1, 9)));
         assert_eq!(feature.since_api_version, LanguageVersion::new(1, 8));
@@ -335,7 +334,7 @@ mod tests {
     /// argument that enables it, or `-XXLanguage:+Feature` when no argument does.
     #[test]
     fn a_feature_carries_the_words_kotlinc_reports_it_by() {
-        let table = FeatureTable::for_version(KotlinVersion::V2_4_20).unwrap();
+        let table = FeatureTable::for_version(KotlinVersion::V2_4_21).unwrap();
         let feature = table.get("ContextParameters").unwrap();
         assert_eq!(feature.presentable_name, "context parameters");
         assert_eq!(feature.flag.as_deref(), Some("-Xcontext-parameters"));
@@ -344,7 +343,7 @@ mod tests {
 
     #[test]
     fn a_feature_a_later_release_split_keeps_its_older_spelling_here() {
-        let table = FeatureTable::for_version(KotlinVersion::V2_4_20).unwrap();
+        let table = FeatureTable::for_version(KotlinVersion::V2_4_21).unwrap();
         assert_eq!(
             table.language_argument("+CompanionBlocks"),
             "-XXLanguage:+CompanionBlocksAndExtensions"
@@ -363,12 +362,12 @@ mod tests {
         );
     }
 
-    /// Measured with kotlinc 2.4.20: `-XXLanguage:+CompanionBlocksAndExtensions` warns that it
+    /// Measured with kotlinc 2.4.21: `-XXLanguage:+CompanionBlocksAndExtensions` warns that it
     /// forces pre-release binaries; `+NameBasedDestructuring` (released in 2.5, no marker) does not.
     #[test]
     fn only_unreleased_marked_features_force_pre_release_binaries() {
-        let table = FeatureTable::for_version(KotlinVersion::V2_4_20).unwrap();
-        let versions = LanguageVersionPolicy::for_release(KotlinVersion::V2_4_20).unwrap();
+        let table = FeatureTable::for_version(KotlinVersion::V2_4_21).unwrap();
+        let versions = LanguageVersionPolicy::for_release(KotlinVersion::V2_4_21).unwrap();
         let forces = |name: &str, language_version| {
             table
                 .get(name)

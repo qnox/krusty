@@ -218,6 +218,10 @@ jobs:
     # Linux runners (16 GB) had free slots.
     needs: [route]
     runs-on: ${{ fromJSON(needs.route.outputs.runs-on || '{}')['plugin-host'] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    permissions:
+      contents: read
+      # The package-cache step exchanges the job's GitHub OIDC token for a cache token.
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -249,9 +253,16 @@ jobs:
           # change added is downloaded (Central answered 429 to a full download of ~190 MB).
           restore-keys: |
             plugin-host-${{ github.job }}-
+      # What the restored cache lacks comes from Maven Central through Infragnite's package cache
+      # (maven.infragnite.dev), which takes the cache token as a Basic password; Central answered
+      # 429 to direct downloads of a new pin.
+      - name: send the host's downloads through the package cache
+        uses: infragnite/package-cache-action@3301abc273091e9b02fb391abdfd3a887a18ef4f # main
       - name: plugin host tests
         # The real-download test provisions into the cache restored above, not a directory of its own.
-        run: KRUSTY_CACHE_DIR="$HOME/.cache/krusty" cargo test --profile gate -p krusty-plugin-host -- --include-ignored
+        run: |
+          export KRUSTY_MAVEN_REPOSITORY="https://cache:${PACKAGE_CACHE_TOKEN}@${PACKAGE_CACHE_URL#https://}/maven"
+          KRUSTY_CACHE_DIR="$HOME/.cache/krusty" cargo test --profile gate -p krusty-plugin-host -- --include-ignored
       - &save-plugin-host-runtime
         name: save plugin host runtime
         if: github.ref == 'refs/heads/master' && steps.plugin-host-runtime.outputs.cache-hit != 'true'
@@ -1526,7 +1537,7 @@ jobs:
         include:
           # Gradle maintains only the latest minor of the current major and of the previous one:
           # 9.9 and 8.14. Each lane runs that line's latest patch.
-          - { kotlin: 2.4.10, gradle: 8.14.8, suite: boundary }
+          - { kotlin: 2.4.21, gradle: 8.14.8, suite: boundary }
     runs-on: ${{ fromJSON(needs.build-tool-bins.outputs.runs-on || '{}')['gradle'][format('{0}|{1}|{2}', matrix.kotlin, matrix.gradle, matrix.suite)] || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     permissions:
       contents: read

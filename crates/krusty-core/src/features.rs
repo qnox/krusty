@@ -729,31 +729,10 @@ mod tests {
     }
 
     #[test]
-    fn value_class_recursion_deprecation_exists_since_2_4_20() {
+    fn value_class_recursion_deprecation_is_reported() {
         const FEATURE: &str = "ForbidValueClassRecursionViaTypeParameters";
         const MESSAGE: &str = "value class cannot be recursive.";
-        assert_eq!(
-            LangFeatures::for_release(
-                KotlinVersion::V2_4_0,
-                LanguageVersion::V2_4,
-                LanguageVersion::V2_4,
-            )
-            .deprecation_warning_message(FEATURE, MESSAGE),
-            None
-        );
-        assert_eq!(
-            LangFeatures::for_release(
-                KotlinVersion::V2_4_10,
-                LanguageVersion::V2_4,
-                LanguageVersion::V2_4,
-            )
-            .deprecation_warning_message(FEATURE, MESSAGE),
-            None
-        );
-        for release in KotlinVersion::supported()
-            .into_iter()
-            .filter(|release| *release >= KotlinVersion::V2_4_20)
-        {
+        for release in KotlinVersion::supported() {
             assert_eq!(
                 LangFeatures::for_release(release, LanguageVersion::V2_4, LanguageVersion::V2_4)
                     .deprecation_warning_message(FEATURE, MESSAGE),

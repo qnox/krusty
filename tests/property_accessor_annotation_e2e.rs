@@ -667,7 +667,7 @@ fn an_annotation_on_a_wrong_accessor_target_is_rejected_like_kotlinc() {
         "Wrong.kt:38:9: this annotation is not applicable to target 'value parameter'. \
          Applicable targets: getter",
     ];
-    let ledger: &[&str] = common::for_reference(&[(KotlinVersion::V2_4_0, LEDGER)]);
+    let ledger: &[&str] = common::for_reference(&[(KotlinVersion::V2_4_21, LEDGER)]);
     let sources = [("Wrong.kt", WRONG_TARGETS)];
     assert_eq!(common::reference_error_ledger(&sources, &[]), ledger);
     common::assert_errors_match_kotlinc(&sources, &[]);
@@ -1009,7 +1009,7 @@ fn an_imported_target_entry_is_checked_by_the_entry_it_selects_like_kotlinc() {
         "Uses.kt:6:16: this annotation is not applicable to target 'getter'. Applicable targets: \
          setter",
     ];
-    let ledger: &[&str] = common::for_reference(&[(KotlinVersion::V2_4_0, LEDGER)]);
+    let ledger: &[&str] = common::for_reference(&[(KotlinVersion::V2_4_21, LEDGER)]);
     let sources = [
         ("Targets.kt", IMPORTED_TARGETS),
         (
@@ -1045,7 +1045,7 @@ fn a_same_named_entry_of_another_enum_is_rejected_like_kotlinc() {
         "Mismatch.kt:16:9: this annotation is not applicable to target 'getter'. Applicable \
          targets:",
     ];
-    let ledger: &[&str] = common::for_reference(&[(KotlinVersion::V2_4_0, LEDGER)]);
+    let ledger: &[&str] = common::for_reference(&[(KotlinVersion::V2_4_21, LEDGER)]);
     let sources = [(
         "Mismatch.kt",
         "package accessors\n\

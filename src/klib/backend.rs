@@ -1353,7 +1353,7 @@ mod target_binding_tests {
 
     fn stamp() -> KlibStamp {
         KlibStamp::new(
-            crate::kotlin_version::KotlinVersion::V2_4_20,
+            crate::kotlin_version::KotlinVersion::V2_4_21,
             crate::language_version::LanguageVersion::V2_4,
         )
     }
@@ -1374,7 +1374,7 @@ mod target_binding_tests {
             manifest(&neutral),
             "abi_version=2.4.0\n\
              builtins_platform=NATIVE\n\
-             compiler_version=2.4.20\n\
+             compiler_version=2.4.21\n\
              ir_signature_versions=1,2\n\
              metadata_version=2.4.0\n\
              native_targets=\n\
@@ -1389,7 +1389,7 @@ mod target_binding_tests {
             manifest(&targeted),
             "abi_version=2.4.0\n\
              builtins_platform=NATIVE\n\
-             compiler_version=2.4.20\n\
+             compiler_version=2.4.21\n\
              ir_signature_versions=1,2\n\
              metadata_version=2.4.0\n\
              native_targets=linux_x64\n\

@@ -507,8 +507,8 @@ mod tests {
                 stubs: Some("stubs".into()),
                 check: CaseCheck::Classes,
                 kotlin: KotlinBracket {
-                    min: Some(KotlinVersion::V2_4_0),
-                    max: Some(KotlinVersion::V2_4_20)
+                    min: Some(KotlinVersion::new(2, 4, 0)),
+                    max: Some(KotlinVersion::new(2, 4, 20))
                 },
             }
         );
@@ -559,15 +559,15 @@ mod tests {
     #[test]
     fn a_bracket_is_inclusive_and_either_end_may_be_open() {
         let bracket = KotlinBracket::parse("2.4.0..2.4.20").unwrap();
-        assert!(bracket.contains(KotlinVersion::V2_4_0));
-        assert!(bracket.contains(KotlinVersion::V2_4_20));
+        assert!(bracket.contains(KotlinVersion::new(2, 4, 0)));
+        assert!(bracket.contains(KotlinVersion::new(2, 4, 20)));
         assert!(!bracket.contains(KotlinVersion::V2_4_21));
         let open = KotlinBracket::parse("2.4.20..").unwrap();
-        assert!(!open.contains(KotlinVersion::V2_4_10));
+        assert!(!open.contains(KotlinVersion::new(2, 4, 10)));
         assert!(open.contains(KotlinVersion::V2_4_21));
         assert!(KotlinBracket::parse("..")
             .unwrap()
-            .contains(KotlinVersion::V2_4_0));
+            .contains(KotlinVersion::new(2, 4, 0)));
     }
 
     #[test]
@@ -577,7 +577,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            corpus.compiler_arguments(KotlinVersion::V2_4_0),
+            corpus.compiler_arguments(KotlinVersion::new(2, 4, 0)),
             Err(
                 "box directive `// WITH_DEMO` is not available for kotlinc 2.4.0: the demo corpus \
                  covers Kotlin 2.4.20.."

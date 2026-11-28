@@ -1344,10 +1344,7 @@ pub fn map_call_args<T: Copy>(
     if errors.is_empty() {
         Ok(slots)
     } else {
-        Err(CallArgMappingFailure {
-            errors,
-            recovery_argument,
-        })
+        Err(CallArgMappingFailure { errors })
     }
 }
 

@@ -823,17 +823,15 @@ impl Checker<'_> {
         Some(Ty::Error)
     }
 
-    /// Choose the rejected candidate that owns the diagnostic by the target version's policy.
+    /// Choose the rejected candidate that owns the diagnostic.
     pub(super) fn rejected_call_owner(
         &self,
         call: ExprId,
         args: &[ExprId],
         candidates: &[crate::libraries::FunctionInfo],
     ) -> RejectedCallOwner {
-        let contested =
-            crate::diagnostic_wording::inapplicable_member_joins_extensions(self.file.reference)
-                && candidates.iter().any(|candidate| !candidate.is_extension())
-                && candidates.iter().any(|candidate| candidate.is_extension());
+        let contested = candidates.iter().any(|candidate| !candidate.is_extension())
+            && candidates.iter().any(|candidate| candidate.is_extension());
         if !contested {
             return RejectedCallOwner::Member;
         }

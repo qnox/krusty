@@ -1,4 +1,4 @@
-# Kotlin 2.4.20 compiler/testData/cli/jvm cases krusty does not reproduce yet, relative to
+# Kotlin 2.4.21 compiler/testData/cli/jvm cases krusty does not reproduce yet, relative to
 # that directory. Regenerate with KRUSTY_BLESS_CLI_EXPECTATIONS=1 on a full local run.
 # The list only shrinks.
 XXmultiPlatformProject/firMultiplatformCompilationWithError.args

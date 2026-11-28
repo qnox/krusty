@@ -12,6 +12,9 @@ repositories:
   - mavenLocal
 dependencies:
   - ../first
+settings:
+  kotlin:
+    version: 2.4.21
 --- app/src/main.kt
 fun main() = Unit
 --- first/module.yaml
@@ -20,6 +23,9 @@ repositories:
   - mavenLocal
 dependencies:
   - ../second
+settings:
+  kotlin:
+    version: 2.4.21
 --- first/src/First.kt
 class First
 --- second/module.yaml
@@ -28,6 +34,9 @@ repositories:
   - mavenLocal
 dependencies:
   - ../first
+settings:
+  kotlin:
+    version: 2.4.21
 --- second/src/Second.kt
 class Second
 --- krusty-refusal

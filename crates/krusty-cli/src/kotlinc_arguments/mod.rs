@@ -88,7 +88,7 @@ mod tests {
     use super::*;
 
     fn lifecycle(arguments: &[&str]) -> Vec<(Lifecycle, String)> {
-        let catalog = Catalog::for_version(KotlinVersion::V2_4_20).unwrap();
+        let catalog = Catalog::for_version(KotlinVersion::V2_4_21).unwrap();
         let tokenized = tokenize(
             catalog,
             arguments
@@ -97,10 +97,10 @@ mod tests {
                 .collect(),
             Vec::new(),
         );
-        lifecycle_warnings(&tokenized, KotlinVersion::V2_4_20)
+        lifecycle_warnings(&tokenized, KotlinVersion::V2_4_21)
     }
 
-    /// kotlinc 2.4.20's words for both lifecycle states (measured).
+    /// kotlinc 2.4.21's words for both lifecycle states (measured).
     #[test]
     fn deprecated_and_removed_arguments_are_warned_in_kotlincs_words() {
         assert_eq!(

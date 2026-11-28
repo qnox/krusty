@@ -15277,18 +15277,6 @@ mod tests {
     mod explicit_backing_fields;
     mod range_membership;
 
-    /// Where NO_VALUE_FOR_PARAMETER is anchored: `argument` in the argument list, or the callee's
-    /// name where the reference version reports it there. That table row is checked against kotlinc
-    /// by `tests/diagnostic_wording_versions_e2e.rs`; these tests check the resolver follows it.
-    fn missing_argument_anchor<'a>(argument: &'a str, callee: &'a str) -> &'a str {
-        match crate::diagnostic_wording::no_value_for_parameter_anchor(
-            crate::kotlin_version::ReferenceProfile::default(),
-        ) {
-            crate::diagnostic_wording::Anchor::ValueArguments => argument,
-            crate::diagnostic_wording::Anchor::ReferencedNameByQualified => callee,
-        }
-    }
-
     fn initialized_jvm_libraries(
         classpath: std::rc::Rc<crate::jvm::classpath::Classpath>,
     ) -> crate::jvm::jvm_libraries::JvmLibraries {
@@ -16174,12 +16162,10 @@ fun rejected(owner: Owner) { owner.hidden() }
 
         assert_eq!(
             errors,
-            [crate::diagnostic_wording::unresolved_reference_on(
-                crate::kotlin_version::ReferenceProfile::default(),
-                "component2",
-                Some("Box")
-            )
-            .message]
+            [
+                crate::diagnostic_wording::unresolved_reference_on("component2", Some("Box"))
+                    .message
+            ]
         );
     }
 
@@ -19353,22 +19339,14 @@ fun box(): String {
         let (_, _, diagnostics) = retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         let mixing = "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.";
         let missing = "no value passed for parameter 'a'.";
-        // kotlinc reports in source order. Where the missing argument anchors on the value arguments
-        // (2.4.0 and 2.4.10), both diagnostics start at the positional `1` and the mixing error,
-        // reported while mapping arguments, comes first; on the callee it precedes the mixing error.
+        // kotlinc reports in source order: the missing argument anchors on the callee, so it
+        // precedes the mixing error at the positional `1`.
         let expected = ["knownPair", "known", "mixExt"]
             .into_iter()
             .flat_map(|callee| {
-                let missing = (missing, missing_argument_anchor("1)", callee), Some(callee));
+                let missing = (missing, callee, Some(callee));
                 let mixing = (mixing, "1", None);
-                match crate::diagnostic_wording::no_value_for_parameter_anchor(
-                    crate::kotlin_version::ReferenceProfile::default(),
-                ) {
-                    crate::diagnostic_wording::Anchor::ValueArguments => [mixing, missing],
-                    crate::diagnostic_wording::Anchor::ReferencedNameByQualified => {
-                        [missing, mixing]
-                    }
-                }
+                [missing, mixing]
             })
             .collect::<Vec<_>>();
         let actual = diagnostics
@@ -21820,14 +21798,12 @@ fun use() {
     fn call_argument_mapping_recovery_requires_overload_unanimity() {
         let duplicate = CallArgMappingFailure {
             errors: vec![CallArgMappingError::AlreadyPassed { argument: 1 }],
-            recovery_argument: None,
         };
         let unknown = CallArgMappingFailure {
             errors: vec![CallArgMappingError::NoParameterNamed {
                 name: "a".to_string(),
                 argument: 0,
             }],
-            recovery_argument: None,
         };
 
         for mut conflicts in [
@@ -22144,7 +22120,7 @@ fun use() {
         assert_eq!(diagnostic.msg, "no value passed for parameter 'right'.");
         assert_eq!(
             &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
-            missing_argument_anchor("1", "pair")
+            "pair"
         );
         let editor_span = diagnostic.editor_span.expect("official editor range");
         assert_eq!(
@@ -22164,7 +22140,7 @@ fun use() {
         assert_eq!(diagnostic.msg, "no value passed for parameter 'right'.");
         assert_eq!(
             &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
-            missing_argument_anchor("left", "namedPair")
+            "namedPair"
         );
         let editor_span = diagnostic.editor_span.expect("official editor range");
         assert_eq!(
@@ -22205,12 +22181,10 @@ fun use() {
         let (errors, _) = check("fun f(a: Int): Int = a.substring(1)");
         assert_eq!(
             errors,
-            [crate::diagnostic_wording::unresolved_reference_on(
-                crate::kotlin_version::ReferenceProfile::default(),
-                "substring",
-                Some("Int")
-            )
-            .message]
+            [
+                crate::diagnostic_wording::unresolved_reference_on("substring", Some("Int"))
+                    .message
+            ]
         );
     }
 
@@ -22417,12 +22391,7 @@ fun use() {
         let (errors, _) = check("class Point(val x: Int)\nfun f(p: Point): Int = p.z");
         assert_eq!(
             errors,
-            [crate::diagnostic_wording::unresolved_reference_on(
-                crate::kotlin_version::ReferenceProfile::default(),
-                "z",
-                Some("Point")
-            )
-            .message]
+            [crate::diagnostic_wording::unresolved_reference_on("z", Some("Point")).message]
         );
         err_contains(
             "class Point(val x: Int)\nfun f(): Point = Point()",
@@ -27535,12 +27504,8 @@ impl<'a> Checker<'a> {
         e: ExprId,
     ) {
         if !self.error_receiver_expression_flavored(scope, operand, operand_diag_mark) {
-            let report = crate::diagnostic_wording::unresolved_operator_reference_on(
-                self.file.reference,
-                "not",
-                "!",
-                None,
-            );
+            let report =
+                crate::diagnostic_wording::unresolved_operator_reference_on("not", "!", None);
             self.diags.report_error(self.span(e), report);
         }
     }
@@ -29321,25 +29286,6 @@ impl<'a> Checker<'a> {
             .flatten()
     }
 
-    fn call_recovery_span(&self, call: ExprId, args: &[ExprId], fallback: Span) -> Span {
-        let trailing = self.file.call_has_trailing_lambda.contains(&call.0);
-        let last_index = args.len().checked_sub(1 + usize::from(trailing));
-        let Some(last_index) = last_index else {
-            return fallback;
-        };
-        let start = self
-            .call_argument_name_span(call, last_index)
-            .unwrap_or_else(|| self.span(args[last_index]))
-            .lo;
-        let end = self
-            .file
-            .trailing_call_close_paren_ends
-            .get(&call.0)
-            .copied()
-            .unwrap_or_else(|| self.span(call).hi);
-        Span::new(start, end)
-    }
-
     fn report_call_arg_mapping_error(
         &mut self,
         call: ExprId,
@@ -29352,13 +29298,6 @@ impl<'a> Checker<'a> {
             self.file.expr(call),
             failure.errors,
         );
-        let recovery_span = failure.recovery_argument.map(|argument| {
-            let fallback = args
-                .get(argument)
-                .map(|argument| self.span(*argument))
-                .unwrap_or_else(|| self.call_argument_list_span(call, args));
-            self.call_recovery_span(call, args, fallback)
-        });
         // kotlinc lists one call's mapping errors in source order; where they share a position,
         // in the order mapping found them.
         let reported_from = self.diags.diags.len();
@@ -29375,11 +29314,7 @@ impl<'a> Checker<'a> {
                     .get(*argument)
                     .map(|argument| self.span(*argument))
                     .unwrap_or_else(|| self.call_argument_list_span(call, args)),
-                CallArgMappingError::MissingRequired { .. } => self.anchored_span(
-                    crate::diagnostic_wording::no_value_for_parameter_anchor(self.file.reference),
-                    call,
-                    || recovery_span.unwrap_or_else(|| self.call_argument_list_span(call, args)),
-                ),
+                CallArgMappingError::MissingRequired { .. } => self.call_callee_name_span(call),
             };
             if error.highlights_callee() {
                 self.diags.error_with_editor_span(
@@ -37080,11 +37015,7 @@ impl<'a> Checker<'a> {
                 missing.and_then(|index| names_complete.then(|| &param_names[index]))
             {
                 let editor_span = self.call_callee_name_span(call);
-                let span = self.anchored_span(
-                    crate::diagnostic_wording::no_value_for_parameter_anchor(self.file.reference),
-                    call,
-                    || span,
-                );
+                let span = self.call_callee_name_span(call);
                 self.diags.error_with_editor_span(
                     span,
                     editor_span,
@@ -41768,7 +41699,6 @@ impl<'a> Checker<'a> {
                 self.diags.report_error(
                     operator_span,
                     crate::diagnostic_wording::unresolved_operator_reference_on(
-                        self.file.reference,
                         operator_name,
                         if decrement { "--" } else { "++" },
                         Some(read_ty.source_name().as_ref()),

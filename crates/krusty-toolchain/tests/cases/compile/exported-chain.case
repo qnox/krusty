@@ -17,6 +17,9 @@ repositories:
   - mavenLocal
 dependencies:
   - ../mid
+settings:
+  kotlin:
+    version: 2.4.21
 --- app/src/main/kotlin/app/Main.kt
 package app
 
@@ -30,6 +33,9 @@ dependencies:
   - org.example:mid-impl:1.0
   - ../base: exported
   - org.example:mid-api:1.0: exported
+settings:
+  kotlin:
+    version: 2.4.21
 --- mid/src/main/kotlin/mid/Mid.kt
 package mid
 
@@ -42,6 +48,9 @@ repositories:
 dependencies:
   - ../hidden
   - org.example:base-api:1.0: exported
+settings:
+  kotlin:
+    version: 2.4.21
 --- base/src/main/kotlin/base/Base.kt
 package base
 
@@ -53,6 +62,9 @@ product: jvm/lib
 layout: maven-like
 repositories:
   - mavenLocal
+settings:
+  kotlin:
+    version: 2.4.21
 --- hidden/src/main/kotlin/hidden/Hidden.kt
 package hidden
 
@@ -87,40 +99,40 @@ class Hidden
 --- krusty-argv
 -Xjdk-release=25
 -jdk-home=<directory>/jdk
--classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
 -no-stdlib
 -module-name=hidden
--Xkotlin-reference-version=2.4.20
+-Xkotlin-reference-version=2.4.21
 -d
 <directory>/project/build/artifacts/CompiledJvmArtifact/hiddenjvm/kotlin-output
 <directory>/project/hidden/src/main/kotlin/hidden/Hidden.kt
 ----
 -Xjdk-release=25
 -jdk-home=<directory>/jdk
--classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/hiddenjvm/kotlin-output:<directory>/home/.m2/repository/org/example/base-api/1.0/base-api-1.0.jar:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/hiddenjvm/kotlin-output:<directory>/home/.m2/repository/org/example/base-api/1.0/base-api-1.0.jar:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
 -no-stdlib
 -module-name=base
--Xkotlin-reference-version=2.4.20
+-Xkotlin-reference-version=2.4.21
 -d
 <directory>/project/build/artifacts/CompiledJvmArtifact/basejvm/kotlin-output
 <directory>/project/base/src/main/kotlin/base/Base.kt
 ----
 -Xjdk-release=25
 -jdk-home=<directory>/jdk
--classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/basejvm/kotlin-output:<directory>/project/build/artifacts/CompiledJvmArtifact/basejvm/resources-output:<directory>/home/.m2/repository/org/example/mid-api/1.0/mid-api-1.0.jar:<directory>/home/.m2/repository/org/example/mid-impl/1.0/mid-impl-1.0.jar:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/example/base-api/1.0/base-api-1.0.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/basejvm/kotlin-output:<directory>/project/build/artifacts/CompiledJvmArtifact/basejvm/resources-output:<directory>/home/.m2/repository/org/example/mid-api/1.0/mid-api-1.0.jar:<directory>/home/.m2/repository/org/example/mid-impl/1.0/mid-impl-1.0.jar:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar:<directory>/home/.m2/repository/org/example/base-api/1.0/base-api-1.0.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
 -no-stdlib
 -module-name=mid
--Xkotlin-reference-version=2.4.20
+-Xkotlin-reference-version=2.4.21
 -d
 <directory>/project/build/artifacts/CompiledJvmArtifact/midjvm/kotlin-output
 <directory>/project/mid/src/main/kotlin/mid/Mid.kt
 ----
 -Xjdk-release=25
 -jdk-home=<directory>/jdk
--classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/midjvm/kotlin-output:<directory>/project/build/artifacts/CompiledJvmArtifact/basejvm/kotlin-output:<directory>/project/build/artifacts/CompiledJvmArtifact/basejvm/resources-output:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/example/mid-api/1.0/mid-api-1.0.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar:<directory>/home/.m2/repository/org/example/base-api/1.0/base-api-1.0.jar
+-classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/midjvm/kotlin-output:<directory>/project/build/artifacts/CompiledJvmArtifact/basejvm/kotlin-output:<directory>/project/build/artifacts/CompiledJvmArtifact/basejvm/resources-output:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar:<directory>/home/.m2/repository/org/example/mid-api/1.0/mid-api-1.0.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar:<directory>/home/.m2/repository/org/example/base-api/1.0/base-api-1.0.jar
 -no-stdlib
 -module-name=app
--Xkotlin-reference-version=2.4.20
+-Xkotlin-reference-version=2.4.21
 -d
 <directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
 <directory>/project/app/src/main/kotlin/app/Main.kt

@@ -96,73 +96,6 @@ macro_rules! quirks {
 }
 
 quirks! {
-    /// A delegate whose `getValue`/`setValue` resolves nowhere names only the candidates of the
-    /// earliest convention rung that contributed any (members, then member extensions, then
-    /// extensions). Later releases name every rung's candidates, members first.
-    DelegateFailureNamesFirstRungOnly {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
-    }
-    /// Once no visible candidate applies, the candidates the site cannot see still compete scope
-    /// level by scope level, nearest first, instead of as one visibility-error group across the
-    /// tower: under a suppressed visibility error an explicitly imported `Any.tag` takes the call
-    /// from a star-imported `String.tag`.
-    InvisibleCandidatesKeepScopeLevels {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
-    }
-    /// `+UnitConversionsOnArbitraryExpressions` is known but converts no function value whose
-    /// result is not `Unit` (KT-84393).
-    UnitConversionRejectsNonUnitResult {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: true,
-    }
-    /// A suspend function declared to return `Unit` that forwards a tail call returns the callee's
-    /// result as it is, instead of adapting it to `Unit`.
-    SuspendUnitTailCallKeepsCalleeResult {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
-    }
-    /// An anonymous context parameter is unnamed in the IR, so it gets no local-variable row; its
-    /// label reaches only reflection and null assertions.
-    AnonymousContextParameterIsNotLocal {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
-    }
-    /// A context parameter passed on as a context argument is read at the offsets of its
-    /// declaration, so the load marks the line the declaration starts on. Later releases read it
-    /// with no offsets, which marks nothing.
-    ContextParameterLoadMarksDeclarationLine {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
-    }
-    /// A repeated anonymous context label is numbered after `#` (`$context-String#1`) instead of
-    /// `$` (`$context-String$1`).
-    AnonymousContextOrdinalAfterHash {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
-    }
-    /// `@Metadata.xi` of a `k=3` synthetic class holds the IR flags alone, without the class's
-    /// normalized visibility in bits 8–10.
-    SyntheticClassXiOmitsVisibility {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
-    }
-    /// A synthetic annotation implementation stamps nullability on its constructor, `equals` and
-    /// `toString`.
-    AnnotationImplCarriesNullability {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
-    }
     /// A `null` function value suspend-converted to a nullable suspend function type converts to an
     /// adapter whose `invoke` yields `null`, instead of staying `null` (KT-89451).
     NullFunctionValueConvertsToAdapter {
@@ -170,36 +103,13 @@ quirks! {
         fixed_in: Some(KotlinVersion::V2_5_0),
         defect: true,
     }
-    /// A function value held by a type parameter with a nullable function bound, passed where a
-    /// suspend function type is expected, is not converted at all: the value is cast to the suspend
-    /// function's class, so `null` stays `null` and any other value throws `ClassCastException`.
-    TypeParameterFunctionValueSkipsSuspendConversion {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: true,
-    }
     /// A `null` function value held by a type parameter with a nullable function bound, passed
     /// where a suspend function type is expected, converts to an adapter that invokes it without a
-    /// null check: calling it throws `NullPointerException`. Earlier releases do not convert the
-    /// value ([`Quirk::TypeParameterFunctionValueSkipsSuspendConversion`]).
+    /// null check: calling it throws `NullPointerException`.
     NullTypeParameterFunctionValueIsDereferenced {
-        since: Some(KotlinVersion::V2_4_20),
+        since: None,
         fixed_in: Some(KotlinVersion::V2_5_0),
         defect: true,
-    }
-    /// An interface's `$DefaultImpls` forwarder for a default it only inherits maps its body to
-    /// the interface's declaration line; later releases give it no line.
-    InheritedHolderForwarderMapsInterfaceLine {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
-    }
-    /// A library compiled below language 2.3 stamps KLIB `metadata_version` `1.4.1` instead of the
-    /// language level's own (read off `kotlinc-native -p library -Xmetadata-klib`).
-    KlibLegacyMetadataVersionBelowLanguage23 {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
     }
     /// A callable reference to a `vararg` function takes an expected input that the enclosing call
     /// declares as one of its own type variables (`f: (T) -> Int`) as one collected element, even
@@ -373,12 +283,12 @@ mod tests {
     #[test]
     fn a_quirk_spans_since_up_to_its_fix() {
         let affected = Affected {
-            since: Some(KotlinVersion::V2_4_10),
+            since: Some(KotlinVersion::new(2, 4, 10)),
             fixed_in: Some(KotlinVersion::V2_4_21),
         };
-        assert!(!affected.contains(KotlinVersion::V2_4_0));
-        assert!(affected.contains(KotlinVersion::V2_4_10));
-        assert!(affected.contains(KotlinVersion::V2_4_20));
+        assert!(!affected.contains(KotlinVersion::new(2, 4, 0)));
+        assert!(affected.contains(KotlinVersion::new(2, 4, 10)));
+        assert!(affected.contains(KotlinVersion::new(2, 4, 20)));
         assert!(!affected.contains(KotlinVersion::V2_4_21));
         assert!(!affected.contains(KotlinVersion::new(2, 10, 0)));
         let open = Affected {
@@ -445,9 +355,9 @@ mod tests {
     fn precedes_orders_numerically() {
         let releases = [
             KotlinVersion::new(1, 9, 25),
-            KotlinVersion::V2_4_0,
+            KotlinVersion::new(2, 4, 0),
             KotlinVersion::new(2, 4, 9),
-            KotlinVersion::V2_4_10,
+            KotlinVersion::new(2, 4, 10),
             KotlinVersion::new(2, 10, 0),
             KotlinVersion::new(3, 0, 0),
         ];

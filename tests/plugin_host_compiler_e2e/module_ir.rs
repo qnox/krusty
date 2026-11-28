@@ -1,4 +1,4 @@
-//! A module's IR built in the real host, checked against kotlinc 2.4.20's own: one IR plugin dumps
+//! A module's IR built in the real host, checked against kotlinc 2.4.21's own: one IR plugin dumps
 //! the module under kotlinc from source and under the host from krusty's IR, and the dumps must be
 //! the same. Ignored by default because it downloads; CI runs it.
 
@@ -31,7 +31,7 @@ fn stdlib(runtime: &HostRuntime) -> PathBuf {
     runtime
         .compiler_classpath
         .iter()
-        .find(|jar| jar.ends_with("kotlin-stdlib-2.4.20.jar"))
+        .find(|jar| jar.ends_with("kotlin-stdlib-2.4.21.jar"))
         .unwrap()
         .clone()
 }
@@ -304,7 +304,7 @@ fn sample() -> ModuleIr {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn the_host_builds_a_modules_ir_as_kotlinc_builds_it_from_source() {
     let (runtime, _) = runtime();
     let expected = kotlinc_dump(&runtime, SAMPLE);
@@ -367,7 +367,7 @@ fn rewritten_sample() -> ModuleIr {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn the_host_returns_the_module_its_plugins_leave() {
     let (runtime, _) = runtime();
     let mut host = host_with(&runtime, &[rewrite_plugin(&runtime)], &[]);
@@ -378,7 +378,7 @@ fn the_host_returns_the_module_its_plugins_leave() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn the_host_is_a_module_ir_plugin_that_returns_the_module_its_plugins_leave() {
     let (runtime, _) = runtime();
     let mut host = host_with(&runtime, &[rewrite_plugin(&runtime)], &[]);
@@ -392,7 +392,7 @@ fn the_host_is_a_module_ir_plugin_that_returns_the_module_its_plugins_leave() {
 /// IR a plugin leaves that the plugin IR cannot carry back refuses the module by what it is, rather
 /// than returning the module without it.
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn ir_a_plugin_leaves_that_the_plugin_ir_does_not_cover_refuses_the_module() {
     assert_eq!(
         rewrite_refusal("branch"),
@@ -403,7 +403,7 @@ fn ir_a_plugin_leaves_that_the_plugin_ir_does_not_cover_refuses_the_module() {
 /// A default value is not part of the plugin IR's parameter, so the module is refused rather than
 /// returned with the parameter's default dropped.
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_parameter_default_a_plugin_adds_refuses_the_module() {
     assert_eq!(
         rewrite_refusal("default"),
@@ -414,7 +414,7 @@ fn a_parameter_default_a_plugin_adds_refuses_the_module() {
 /// A callable identity names a function, never a property, so a call of an accessor is refused
 /// rather than returned as a call of a function that does not exist.
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_property_accessor_call_a_plugin_adds_refuses_the_module() {
     assert_eq!(
         rewrite_refusal("accessor"),
@@ -425,7 +425,7 @@ fn a_property_accessor_call_a_plugin_adds_refuses_the_module() {
 /// The plugin IR's function has no modifiers or annotations, so a plugin that adds either is
 /// refused rather than returned without them.
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_function_modifier_or_annotation_a_plugin_adds_refuses_the_module() {
     assert_eq!(
         rewrite_refusal("inline"),
@@ -440,7 +440,7 @@ fn a_function_modifier_or_annotation_a_plugin_adds_refuses_the_module() {
 /// A type annotation travels as its class alone, so one with an argument is refused rather than
 /// returned as the same annotation with another argument.
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_type_annotation_argument_a_plugin_adds_refuses_the_module() {
     assert_eq!(
         rewrite_refusal("typeannotation"),
@@ -451,7 +451,7 @@ fn a_type_annotation_argument_a_plugin_adds_refuses_the_module() {
 /// The wire carries UTF-8, so a string constant with an unpaired surrogate is refused rather than
 /// returned as a different string.
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_string_with_an_unpaired_surrogate_a_plugin_adds_refuses_the_module() {
     assert_eq!(
         rewrite_refusal("surrogate"),
@@ -520,7 +520,7 @@ fn krusty_ir_at(
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn krusty_builds_the_ir_kotlinc_builds_from_source() {
     let (runtime, _) = runtime();
     let module = krusty_ir(&runtime, SAMPLE);
@@ -536,7 +536,7 @@ fn krusty_builds_the_ir_kotlinc_builds_from_source() {
 /// Visibilities, each kind of constant, an extension, a member and a generic call with an explicit
 /// type argument, and offsets past characters that take two UTF-8 bytes.
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn krusty_builds_the_ir_of_calls_and_constants_as_kotlinc_does() {
     let (runtime, _) = runtime();
     let module = krusty_ir(&runtime, CALLS);
@@ -551,7 +551,7 @@ fn krusty_builds_the_ir_of_calls_and_constants_as_kotlinc_does() {
 /// A file written with `\r\n` line breaks and one lone `\r`, which kotlinc reads as `\n`s: its
 /// offsets, lines and columns are kotlinc's.
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn krusty_measures_a_file_with_carriage_returns_as_kotlinc_reads_it() {
     let (runtime, _) = runtime();
     let text = std::fs::read_to_string(CALLS)
@@ -574,7 +574,7 @@ fn krusty_measures_a_file_with_carriage_returns_as_kotlinc_reads_it() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn ir_the_host_cannot_build_is_refused_and_leaves_the_session_able_to_build_its_module() {
     let (runtime, _) = runtime();
     let out = temporary("refused-dump.txt");
@@ -612,7 +612,7 @@ fn ir_the_host_cannot_build_is_refused_and_leaves_the_session_able_to_build_its_
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_module_is_built_only_in_an_open_session() {
     let (runtime, env) = runtime();
     let mut host = start(&runtime, &env);
@@ -625,7 +625,7 @@ fn a_module_is_built_only_in_an_open_session() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_module_whose_paths_do_not_name_every_source_is_refused() {
     let (runtime, _) = runtime();
     let (module, diags) = krusty_ir_at(&runtime, SAMPLE, &[]);
@@ -649,7 +649,7 @@ fn a_module_whose_paths_do_not_name_every_source_is_refused() {
 /// A function or parameter with something kotlinc's IR records that krusty's plugin IR does not
 /// carry yet is refused where it is written, not built without it.
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_function_with_what_the_plugin_ir_does_not_carry_is_refused_where_it_is_written() {
     let (runtime, _) = runtime();
     // Each source, the text the refusal spans and what it names.

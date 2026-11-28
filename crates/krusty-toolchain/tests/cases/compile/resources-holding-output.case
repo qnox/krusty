@@ -9,6 +9,9 @@ plugins:
   - ./tools/whole
 --- tools/whole/module.yaml
 product: jvm/amper-plugin
+settings:
+  kotlin:
+    version: 2.4.21
 --- tools/whole/plugin.yaml
 tasks:
   declare:
@@ -23,6 +26,9 @@ repositories:
   - mavenLocal
 plugins:
   whole: enabled
+settings:
+  kotlin:
+    version: 2.4.21
 --- src/Lib.kt
 object Lib
 --- krusty-refusal

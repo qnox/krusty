@@ -983,8 +983,8 @@ fn the_real_krusty_compiles_a_library_and_the_application_that_uses_it() {
         return;
     };
     let settings = format!(
-        "settings:\n  jvm:\n    jdk:\n      version: {}\n",
-        real.jdk_major
+        "settings:\n  jvm:\n    jdk:\n      version: {}\n  kotlin:\n    version: {}\n",
+        real.jdk_major, KOTLIN_VERSION
     );
     let project: Files = vec![
         ("project.yaml".into(), "modules:\n  - app\n  - lib\n".into()),
@@ -1018,7 +1018,7 @@ fn the_real_krusty_compiles_a_library_and_the_application_that_uses_it() {
     let root = support::materialize(&temp, &project);
     Resolving::write_repository(&directory, &repository);
     let local = directory.join(Resolving::HOME).join(".m2/repository");
-    let stdlib = local.join("org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar");
+    let stdlib = local.join("org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar");
     let annotations = local.join("org/jetbrains/annotations/13.0/annotations-13.0.jar");
     std::fs::copy(real.kotlin_lib.join("kotlin-stdlib.jar"), &stdlib).unwrap();
     std::fs::copy(real.kotlin_lib.join("annotations-13.0.jar"), &annotations).unwrap();
@@ -1146,6 +1146,10 @@ fn diamond() -> CompileCase {
                 text.push_str(&format!("  - ../{dependency}\n"));
             }
         }
+        text.push_str(&format!(
+            "settings:\n  kotlin:\n    version: {}\n",
+            KOTLIN_VERSION
+        ));
         text
     };
     let mut project = vec![(
@@ -1541,3 +1545,7 @@ fn a_module_whose_inputs_and_output_are_unchanged_is_not_compiled_again() {
         );
     }
 }
+
+/// The Kotlin version a compiling project pins. The toolchain's default is a release krusty does
+/// not support, so a project krusty compiles names a supported one.
+const KOTLIN_VERSION: &str = "2.4.21";

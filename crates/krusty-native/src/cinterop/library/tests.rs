@@ -1,4 +1,4 @@
-//! Interop libraries built from the headers in `testdata`, compared with what Kotlin/Native 2.4.20's
+//! Interop libraries built from the headers in `testdata`, compared with what Kotlin/Native 2.4.21's
 //! `cinterop -Xccall-mode direct -no-default-libs` writes for the same `.def` file and headers.
 //!
 //! Each `<case>.expected` is the reference library rendered by [`render_library`]: its layout, its
@@ -35,7 +35,7 @@ fn build(name: &str, def: &str) -> PathBuf {
         target: NativeTarget::new(Arch::X86_64, Os::Linux),
         system_dirs: vec![IncludeDir::Builtin(HEADERS)],
         sysroot: None,
-        stamp: KlibStamp::new(KotlinVersion::V2_4_20, LanguageVersion::V2_4),
+        stamp: KlibStamp::new(KotlinVersion::V2_4_21, LanguageVersion::V2_4),
         extra_headers: Vec::new(),
         extra_compiler_options: Vec::new(),
     })

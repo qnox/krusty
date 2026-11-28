@@ -22,15 +22,9 @@ fn assert_unresolved_against_library(
         file: "Main.kt".to_string(),
         line: 1,
         column,
-        message: krusty::diagnostic_wording::unresolved_reference_on(
-            krusty::kotlin_version::ReferenceProfile::of_release(
-                krusty::kotlin_version::environment_release(),
-            ),
-            name,
-            receiver,
-        )
-        .printed(krusty::diag::DiagnosticNames::Hidden)
-        .into_owned(),
+        message: krusty::diagnostic_wording::unresolved_reference_on(name, receiver)
+            .printed(krusty::diag::DiagnosticNames::Hidden)
+            .into_owned(),
     }];
     assert_eq!(result.krusty_code, 1, "{}", result.krusty_stderr);
     assert_eq!(result.reference_code, 1, "{}", result.reference_stderr);

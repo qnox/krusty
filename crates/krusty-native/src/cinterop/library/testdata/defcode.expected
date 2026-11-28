@@ -647,7 +647,7 @@ fq_name: defcode
 === default/manifest
 abi_version=2.4.0
 builtins_platform=NATIVE
-compiler_version=2.4.20
+compiler_version=2.4.21
 depends=stdlib
 exportForwardDeclarations=
 headers=defcode.h

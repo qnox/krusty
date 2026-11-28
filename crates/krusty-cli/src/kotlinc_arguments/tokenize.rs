@@ -443,11 +443,9 @@ mod tests {
         );
     }
 
-    /// 2.4.0 reports an obsolete argument as unknown; 2.4.20 parses the removed argument.
+    /// The reference release parses a removed argument rather than reporting it as unknown.
     #[test]
     fn removed_arguments_follow_the_reference_release() {
-        let old = parse(KotlinVersion::V2_4_0, &["-Xuse-k2"]);
-        assert_eq!(old.errors(), vec!["Invalid argument: -Xuse-k2"]);
         let new = parse(KotlinVersion::newest(), &["-Xuse-k2"]);
         assert_eq!(new.errors(), Vec::<String>::new());
         assert_eq!(new.occurrences.len(), 1);

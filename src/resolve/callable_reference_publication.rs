@@ -18,16 +18,13 @@ enum ReferenceConstraintDiagnostic {
 }
 
 impl SelectedReferenceDiagnostic {
-    pub(super) fn into_message(self, reference: crate::kotlin_version::ReferenceProfile) -> String {
+    pub(super) fn into_message(self) -> String {
         match self.kind {
             ReferenceConstraintDiagnostic::Callable => {
                 format!("inapplicable candidate(s): {}", self.candidate)
             }
             ReferenceConstraintDiagnostic::ExtensionReceiver => {
-                crate::diagnostic_wording::callable_reference_receiver_mismatch(
-                    reference,
-                    &self.candidate,
-                )
+                crate::diagnostic_wording::callable_reference_receiver_mismatch(&self.candidate)
             }
         }
     }

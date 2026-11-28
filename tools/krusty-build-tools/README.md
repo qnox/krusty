@@ -5,7 +5,7 @@ implementation that compiles Kotlin/JVM with the krusty binary. A build tool tha
 Build Tools API implementation from a classpath, such as JetBrains' Kotlin Toolchain, compiles
 with krusty when this jar takes the place of `org.jetbrains.kotlin:kotlin-build-tools-impl`.
 
-- One jar stands in for one Kotlin release (`-PkotlinVersion`, 2.4.20 by default): the build tool
+- One jar stands in for one Kotlin release (`-PkotlinVersion`, 2.4.21 by default): the build tool
   picks the implementation by its configured Kotlin version, and krusty compiles as that release
   (`-Xkotlin-reference-version`).
 - Compiler arguments are forwarded as kotlinc command-line strings, which krusty parses itself.
@@ -48,7 +48,7 @@ configurations.kotlinBuildToolsApiClasspath {
     exclude(group = "org.jetbrains.kotlin", module = "kotlin-build-tools-compat")
 }
 dependencies {
-    kotlinBuildToolsApiClasspath(files("krusty-build-tools-0.0.1-kotlin-2.4.20.jar"))
+    kotlinBuildToolsApiClasspath(files("krusty-build-tools-0.0.1-kotlin-2.4.21.jar"))
 }
 ```
 
@@ -64,7 +64,7 @@ that artifact; use a cache directory of its own, since every project built with 
 Kotlin version then compiles with krusty:
 
 ```sh
-./install-into-kotlin-cache.sh build/libs/krusty-build-tools-0.0.1-kotlin-2.4.20.jar ~/.cache/krusty-kotlin
+./install-into-kotlin-cache.sh build/libs/krusty-build-tools-0.0.1-kotlin-2.4.21.jar ~/.cache/krusty-kotlin
 KOTLIN_SHARED_CACHE_DIR=~/.cache/krusty-kotlin KRUSTY_BIN=/path/to/krusty ./kotlin build
 ```
 

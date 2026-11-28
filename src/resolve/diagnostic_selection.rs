@@ -10,7 +10,6 @@ use crate::types::TyKind;
 /// narrowed type, a safe call the non-null one, a platform type its Kotlin spelling, and the null
 /// literal `Nothing?`. Type parameters and failed types have no reportable receiver type.
 pub(crate) fn unresolved_member_message(
-    reference: crate::kotlin_version::ReferenceProfile,
     name: &str,
     receiver: Ty,
     hidden_deprecated: bool,
@@ -25,38 +24,10 @@ pub(crate) fn unresolved_member_message(
         TyKind::PlatformNullable(inner) => Some(inner.source_name()),
         _ => Some(receiver.source_name()),
     };
-    crate::diagnostic_wording::unresolved_reference_on(reference, name, rendered.as_deref())
-}
-
-impl SymbolTable {
-    /// [`unresolved_member_message`] under this
-    /// compilation's profile.
-    pub(crate) fn unresolved_member_message(
-        &self,
-        name: &str,
-        receiver: Ty,
-        hidden_deprecated: bool,
-    ) -> crate::diag::NamedMessage {
-        unresolved_member_message(self.reference, name, receiver, hidden_deprecated)
-    }
+    crate::diagnostic_wording::unresolved_reference_on(name, rendered.as_deref())
 }
 
 impl Checker<'_> {
-    /// The span selected by one versioned diagnostic positioning strategy.
-    pub(super) fn anchored_span(
-        &self,
-        anchor: crate::diagnostic_wording::Anchor,
-        call: ExprId,
-        value_arguments: impl FnOnce() -> Span,
-    ) -> Span {
-        match anchor {
-            crate::diagnostic_wording::Anchor::ValueArguments => value_arguments(),
-            crate::diagnostic_wording::Anchor::ReferencedNameByQualified => {
-                self.call_callee_name_span(call)
-            }
-        }
-    }
-
     pub(super) fn call_callee_name_span(&self, call: ExprId) -> Span {
         let callee = match self.file.expr(call) {
             Expr::Call { callee, .. } => callee,
@@ -136,7 +107,7 @@ impl Checker<'_> {
         {
             crate::diagnostic_wording::unresolved_reference(name)
         } else {
-            unresolved_member_message(self.file.reference, name, receiver_ty, hidden_deprecated)
+            unresolved_member_message(name, receiver_ty, hidden_deprecated)
         }
     }
 }

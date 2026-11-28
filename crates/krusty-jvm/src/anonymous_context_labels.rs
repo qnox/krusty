@@ -6,16 +6,6 @@
 
 use krusty::types::{Ty, TyKind};
 
-/// What separates a repeated anonymous context label from its ordinal: `$context-String$1`, or
-/// `$context-String#1` ([`krusty::kotlin_version::Quirk::AnonymousContextOrdinalAfterHash`]).
-fn ordinal_separator(quirks: krusty::kotlin_version::Quirks) -> char {
-    if quirks.has(krusty::kotlin_version::Quirk::AnonymousContextOrdinalAfterHash) {
-        '#'
-    } else {
-        '$'
-    }
-}
-
 fn label(ty: Ty) -> String {
     let stem = {
         let unexpected = ty.non_null();
@@ -35,10 +25,7 @@ fn label(ty: Ty) -> String {
 
 /// The labels of one parameter list, `None` where a parameter is not an anonymous context
 /// parameter. A label that occurs more than once is numbered by occurrence.
-pub(super) fn disambiguated(
-    quirks: krusty::kotlin_version::Quirks,
-    anonymous: Vec<Option<Ty>>,
-) -> Vec<Option<String>> {
+pub(super) fn disambiguated(anonymous: Vec<Option<Ty>>) -> Vec<Option<String>> {
     let bases = anonymous
         .into_iter()
         .map(|ty| ty.map(label))
@@ -57,19 +44,15 @@ pub(super) fn disambiguated(
             } else {
                 let ordinal = seen.entry(base).or_default();
                 *ordinal += 1;
-                Some(format!("{base}{}{ordinal}", ordinal_separator(quirks)))
+                Some(format!("{base}${ordinal}"))
             }
         })
         .collect()
 }
 
 /// The label of the `index`th of a callable's anonymous context parameters.
-pub(super) fn label_at(
-    quirks: krusty::kotlin_version::Quirks,
-    anonymous: &[Ty],
-    index: usize,
-) -> String {
-    disambiguated(quirks, anonymous.iter().copied().map(Some).collect())
+pub(super) fn label_at(anonymous: &[Ty], index: usize) -> String {
+    disambiguated(anonymous.iter().copied().map(Some).collect())
         .swap_remove(index)
         .expect("every anonymous context parameter has a label")
 }

@@ -199,7 +199,7 @@ fn an_optional_annotation_in_a_platform_source_is_rejected_like_kotlinc() {
     const MESSAGE: &str =
         "Plat.kt:3:10: declaration annotated with '@OptionalExpectation' can only \
         be used in common module sources.";
-    let ledger: &[&str] = common::for_reference(&[(KotlinVersion::V2_4_0, &[MESSAGE])]);
+    let ledger: &[&str] = common::for_reference(&[(KotlinVersion::V2_4_21, &[MESSAGE])]);
     let sources = [(
         "Plat.kt",
         "class Registry {\n\
@@ -230,7 +230,7 @@ fn an_optional_annotation_on_a_platform_accessor_is_rejected_like_kotlinc() {
         "Plat.kt:4:6: declaration annotated with '@OptionalExpectation' can only be used in \
          common module sources.",
     ];
-    let ledger: &[&str] = common::for_reference(&[(KotlinVersion::V2_4_0, LEDGER)]);
+    let ledger: &[&str] = common::for_reference(&[(KotlinVersion::V2_4_21, LEDGER)]);
     let sources = [(
         "Plat.kt",
         "var count: Int = 0\n\

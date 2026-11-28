@@ -1,6 +1,6 @@
 //! A function value passed where a different function type is expected is converted the way kotlinc
 //! converts it: a regular value to a `suspend` function type (suspend conversion) and, under
-//! `+UnitConversionsOnArbitraryExpressions` (KT-84393, from 2.4.20), a value returning non-`Unit`
+//! `+UnitConversionsOnArbitraryExpressions` (KT-84393), a value returning non-`Unit`
 //! to one returning `Unit` (unit conversion). Both, alone or together, compile to one carrier: a
 //! synthetic `FunctionReferenceImpl` bound to the value, reflecting `Intrinsics.Kotlin`'s
 //! `suspendConversion<N>`, whose `invoke` calls the value's `FunctionN.invoke` (discarding its result
@@ -41,11 +41,9 @@ fn assert_conversion_matches_kotlinc(
     common::expect_box_same_as_kotlinc(source, &format!("{stem}Run"));
 }
 
-/// Require krusty to report exactly kotlinc's errors for `source`, entry for entry, and answer
-/// whether kotlinc accepted it. kotlinc 2.4.0 and 2.4.10 know
-/// `UnitConversionsOnArbitraryExpressions` but convert no arbitrary value (KT-84393), so the same
-/// program is rejected there and compiled from 2.4.20 on.
-fn accepted_like_kotlinc(source: &str) -> bool {
+/// Require krusty to report exactly kotlinc's errors for `source`, entry for entry, and require
+/// kotlinc to accept it.
+fn assert_accepted_like_kotlinc(source: &str) {
     let sources = [("Main.kt", source)];
     let reference_args = common::language_directives::kotlinc_args(source);
     let expected = common::reference_error_ledger(&sources, &reference_args);
@@ -55,7 +53,11 @@ fn accepted_like_kotlinc(source: &str) -> bool {
         "krusty's ledger against kotlinc {}",
         krusty::kotlin_version::environment_release()
     );
-    expected.is_empty()
+    assert_eq!(
+        expected,
+        Vec::<String>::new(),
+        "kotlinc accepts the program"
+    );
 }
 
 const UNIT_SOURCE: &str = "fun consume(f: () -> Unit) {\n\
@@ -77,15 +79,14 @@ const UNIT_SOURCE: &str = "fun consume(f: () -> Unit) {\n\
 #[test]
 fn unit_conversion_of_a_value_is_kotlincs_bound_carrier() {
     let source = format!("{UNIT_CONVERSIONS}{UNIT_SOURCE}");
-    if accepted_like_kotlinc(&source) {
-        assert_conversion_matches_kotlinc(
-            "UnitValue",
-            &source,
-            &["UnitValueKt$pass$1"],
-            "UnitValueKt",
-            "public static final void pass(kotlin.jvm.functions.Function0<java.lang.String>);",
-        );
-    }
+    assert_accepted_like_kotlinc(&source);
+    assert_conversion_matches_kotlinc(
+        "UnitValue",
+        &source,
+        &["UnitValueKt$pass$1"],
+        "UnitValueKt",
+        "public static final void pass(kotlin.jvm.functions.Function0<java.lang.String>);",
+    );
 }
 
 const UNIT_AND_SUSPEND_SOURCE: &str = "import kotlin.coroutines.*\n\
@@ -108,15 +109,14 @@ const UNIT_AND_SUSPEND_SOURCE: &str = "import kotlin.coroutines.*\n\
 #[test]
 fn unit_and_suspend_conversion_of_a_value_is_one_carrier() {
     let source = format!("{UNIT_CONVERSIONS}{UNIT_AND_SUSPEND_SOURCE}");
-    if accepted_like_kotlinc(&source) {
-        assert_conversion_matches_kotlinc(
-            "UnitSuspendValue",
-            &source,
-            &["UnitSuspendValueKt$pass$1"],
-            "UnitSuspendValueKt",
-            "public static final void pass(kotlin.jvm.functions.Function0<java.lang.String>);",
-        );
-    }
+    assert_accepted_like_kotlinc(&source);
+    assert_conversion_matches_kotlinc(
+        "UnitSuspendValue",
+        &source,
+        &["UnitSuspendValueKt$pass$1"],
+        "UnitSuspendValueKt",
+        "public static final void pass(kotlin.jvm.functions.Function0<java.lang.String>);",
+    );
 }
 
 const SUBTYPE_SOURCE: &str = "abstract class Source : () -> String {\n\
@@ -140,15 +140,14 @@ const SUBTYPE_SOURCE: &str = "abstract class Source : () -> String {\n\
 #[test]
 fn unit_conversion_of_a_function_subtype_converts_its_function_supertype() {
     let source = format!("{UNIT_CONVERSIONS}{SUBTYPE_SOURCE}");
-    if accepted_like_kotlinc(&source) {
-        assert_conversion_matches_kotlinc(
-            "SubtypeValue",
-            &source,
-            &["SubtypeValueKt$box$1"],
-            "SubtypeValueKt",
-            "public static final java.lang.String box();",
-        );
-    }
+    assert_accepted_like_kotlinc(&source);
+    assert_conversion_matches_kotlinc(
+        "SubtypeValue",
+        &source,
+        &["SubtypeValueKt$box$1"],
+        "SubtypeValueKt",
+        "public static final java.lang.String box();",
+    );
 }
 
 const SUSPEND_SOURCE: &str = "import kotlin.coroutines.*\n\
@@ -233,9 +232,8 @@ fn conversion_carriers(classes: &[(String, Vec<u8>)]) -> Vec<(String, String)> {
 #[test]
 fn conversion_carriers_take_kotlincs_names() {
     let source = format!("{UNIT_CONVERSIONS}{NAMING_SOURCE}");
-    if accepted_like_kotlinc(&source) {
-        assert_carrier_names_match_kotlinc(&source);
-    }
+    assert_accepted_like_kotlinc(&source);
+    assert_carrier_names_match_kotlinc(&source);
 }
 
 /// Compile `source` with both compilers and require krusty's conversion carriers to be kotlinc's,
@@ -353,9 +351,8 @@ fn named_and_conditional_arguments_convert_a_function_value() {
         \x20   consume(if (calls > 0) g else h)\n\
         \x20   return if (calls == 2) \"OK\" else \"calls: $calls\"\n\
         }\n";
-    if accepted_like_kotlinc(SOURCE) {
-        common::expect_box_same_as_kotlinc(SOURCE, "ArgumentFormsRun");
-    }
+    assert_accepted_like_kotlinc(SOURCE);
+    common::expect_box_same_as_kotlinc(SOURCE, "ArgumentFormsRun");
 }
 
 /// A value that is already `suspend` unit-converts to a `suspend` parameter. `pause` genuinely
@@ -415,8 +412,8 @@ fn kotlinc_backend_outcome(stem: &str, source: &str) -> Vec<String> {
 }
 
 /// kotlinc applies kind conversion before unit conversion and lets the value already have the
-/// expected kind, so a `suspend () -> String` value reaches a `suspend () -> Unit` parameter from
-/// 2.4.20 on. kotlinc 2.4.20's frontend accepts it, but its JVM lowering then fails a requirement
+/// expected kind, so a `suspend () -> String` value reaches a `suspend () -> Unit` parameter.
+/// kotlinc's frontend accepts it, but its JVM lowering then fails a requirement
 /// that the converted value be a regular function type, so it writes no class to compare
 /// instruction for instruction. krusty compiles the program: its carrier has the class header,
 /// members and `@Metadata` kotlinc writes for the same target type converted from a regular value,
@@ -424,12 +421,8 @@ fn kotlinc_backend_outcome(stem: &str, source: &str) -> Vec<String> {
 #[test]
 fn an_already_suspend_value_unit_converts_to_a_suspend_parameter() {
     let source = format!("{UNIT_CONVERSIONS}{SUSPEND_UNIT_SOURCE}");
-    let accepted = accepted_like_kotlinc(&source);
+    assert_accepted_like_kotlinc(&source);
     let backend = kotlinc_backend_outcome("SuspendUnitValue", &source);
-    if !accepted {
-        assert_eq!(backend, ["exit code 1"], "kotlinc rejects the argument");
-        return;
-    }
     assert_eq!(
         backend.first().map(String::as_str),
         Some("exit code 2"),
@@ -536,4 +529,22 @@ fn a_suspend_value_is_not_converted_to_a_regular_function_type() {
         &[("Main.kt", SOURCE)],
         &common::language_directives::kotlinc_args(SOURCE),
     );
+}
+
+/// A function value held by a type parameter with a nullable function bound, passed where a
+/// suspend function type is expected, is suspend-converted through its bound: the callee sees an
+/// adapter, never a cast of the value to the suspend function's class.
+#[test]
+fn a_type_parameter_function_value_suspend_converts_through_its_bound() {
+    const SOURCE: &str = "import kotlin.coroutines.*\n\
+        suspend fun observe(f: (suspend () -> String?)?): String = if (f == null) \"null\" else \"adapter:\" + f()\n\
+        suspend fun <F : (() -> String?)?> pass(f: F) = observe(f)\n\
+        fun box(): String {\n\
+        \x20   var answer = \"unset\"\n\
+        \x20   suspend { pass { \"y\" } }.startCoroutine(Continuation(EmptyCoroutineContext) {\n\
+        \x20       answer = it.fold({ r -> r }, { e -> if (e is ClassCastException) \"CCE\" else \"other\" })\n\
+        \x20   })\n\
+        \x20   return if (answer == \"adapter:y\") \"OK\" else answer\n\
+        }\n";
+    common::expect_box_same_as_kotlinc(SOURCE, "TypeParameterSuspendConversionRun");
 }

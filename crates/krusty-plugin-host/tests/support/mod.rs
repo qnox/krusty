@@ -1,4 +1,4 @@
-//! What the tests of the real host share: one provisioned kotlinc 2.4.20 runtime per test process.
+//! What the tests of the real host share: one provisioned kotlinc 2.4.21 runtime per test process.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -12,7 +12,7 @@ pub fn runtime() -> (HostRuntime, Environment) {
         .get_or_init(|| {
             let env = Environment::from_process().expect("a cache directory");
             let request = Request {
-                kotlin_version: "2.4.20",
+                kotlin_version: "2.4.21",
                 reason: "the plugin host test",
                 min_java: 8,
             };

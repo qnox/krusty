@@ -1,4 +1,4 @@
-# Kotlin 2.4.0 compiler/testData/codegen/bytecodeText cases krusty does not reproduce yet,
+# Kotlin 2.4.21 compiler/testData/codegen/bytecodeText cases krusty does not reproduce yet,
 # relative to that directory. Regenerate with KRUSTY_BLESS_BYTECODE_TEXT_EXPECTATIONS=1
 # on a full local run. The list only shrinks.
 accessorNaming.kt
@@ -77,7 +77,7 @@ interfaces/noPrivateMemberInJavaInterface.kt
 intrinsics/javaObjectType.kt
 intrinsics/javaPrimitiveType.kt
 intrinsicsCompare/charSmartCast.kt
-intrinsicsCompare/intSmartCast_after.kt
+intrinsicsCompare/intSmartCast.kt
 intrinsicsCompare/longSmartCast.kt
 intrinsicsTrim/trimIndentPositive.kt
 intrinsicsTrim/trimMarginPositive.kt
@@ -124,13 +124,6 @@ temporaryVals/safeCallElvisSafeCallElvisSomething.kt
 toArray/noAccessorForToArray.kt
 typeAnnotationsOfLocalFunctions.kt
 unsignedTypes/whenByUnsigned.kt
-valueClasses/conditionalExpressions.kt
-valueClasses/equalsBoxTest.kt
-valueClasses/mfvcDeclaration.kt
-valueClasses/mfvcReassignments.kt
-valueClasses/passingMFVC2Functions.kt
-valueClasses/regularClassWithMFVC.kt
-valueClasses/tryExpressions.kt
 varargs/doNotCopyImmediatelyCreatedArrays.kt
 when/whenNull.kt
 when/whenZero.kt

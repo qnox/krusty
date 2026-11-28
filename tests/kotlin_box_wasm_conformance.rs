@@ -1349,10 +1349,7 @@ fn wasm_reference_array_store_bounds_follow_the_value_under_every_bounds_policy(
 /// must run `box()` to `OK`, and an unchecked one must stop at the exact host trap.
 fn expect_reference_array_bounds(source: &str, name: &str) {
     use krusty::kotlin_version::{KotlinVersion, ReleaseRecords};
-    const DEFAULTS: ReleaseRecords<bool> = ReleaseRecords::new(&[
-        (KotlinVersion::V2_4_0, false),
-        (KotlinVersion::V2_4_20, true),
-    ]);
+    const DEFAULTS: ReleaseRecords<bool> = ReleaseRecords::new(&[(KotlinVersion::V2_4_21, true)]);
     assert_eq!(DEFAULTS.check(), Ok(()));
     let default = *DEFAULTS
         .get(krusty::kotlin_version::environment_release())

@@ -125,10 +125,9 @@ pub(super) fn emit_sam_wrapper_class(
 
     if wrapper.public_inline {
         // A non-private inline function's wrapper is part of that function's public ABI.
-        let xi = super::metadata_policy::synthetic_class_xi(
-            env.quirks,
-            super::metadata_policy::SYNTHETIC_PUBLIC,
-        ) | super::metadata_policy::METADATA_PUBLIC_ABI_FLAG;
+        let xi =
+            super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_PUBLIC)
+                | super::metadata_policy::METADATA_PUBLIC_ABI_FLAG;
         cw.set_kotlin_metadata(3, env.metadata_stamp, xi, &[], &[]);
         env.run.finish_class(cw)
     } else {
