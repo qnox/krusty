@@ -111,11 +111,11 @@ impl BodyLowering<'_> {
             named: false,
         }));
         let value_read = self.ir.add_expr(IrExpr::GetValue(value_slot));
-        let matches = self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::InstanceOf,
-            arg: value_read,
-            type_operand: comparison_ty,
-        });
+        let matches = self.ir.add_expr(IrExpr::type_op(
+            IrTypeOp::InstanceOf,
+            value_read,
+            comparison_ty,
+        ));
         let value_read = self.ir.add_expr(IrExpr::GetValue(value_slot));
         let value = self.coerce_range_operand(value_read, comparison_ty);
         let scalar_slot = self.allocate_temporary();
@@ -246,11 +246,11 @@ impl BodyLowering<'_> {
     }
 
     fn coerce_range_operand(&mut self, expression: ExprId, target: Ty) -> ExprId {
-        self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: expression,
-            type_operand: target,
-        })
+        self.ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            expression,
+            target,
+        ))
     }
 
     fn comparison(&mut self, operation: IrBinOp, ty: Ty, lhs: u32, rhs: u32) -> ExprId {

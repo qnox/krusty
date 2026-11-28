@@ -80,6 +80,7 @@ pub(super) fn record_suspend_results(
             op: IrTypeOp::ImplicitCoercion,
             arg: call,
             type_operand,
+            ..
         } = *expression
         else {
             return None;
@@ -130,6 +131,7 @@ fn keep_handed_over_boxes(ir: &mut IrFile) {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: call,
                 type_operand,
+                ..
             } if !type_operand.is_nullable()
                 && matches!(
                     ir.value_class_suspend_calls.get(&call),

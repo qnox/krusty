@@ -207,6 +207,7 @@ fn tail_forward_call(
             op: IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } if type_operand == declared_return
             && (!uses_carrier(ir, type_operand)
                 || crosses_as_same_box(ir, function, arg, suspend_functions)) =>
@@ -251,6 +252,7 @@ fn tail_expression(
                             op: IrTypeOp::ImplicitCoercion,
                             arg,
                             type_operand: Ty::Unit,
+                            ..
                         } => arg,
                         _ => statement,
                     };
@@ -424,6 +426,7 @@ fn peel_returned_tail(
         op: IrTypeOp::ImplicitCoercion | IrTypeOp::Cast,
         arg,
         type_operand,
+        ..
     } = ir.exprs[value as usize]
     {
         if type_operand.non_null() != declared_return.non_null()

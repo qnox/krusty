@@ -216,19 +216,11 @@ fn writer(
     // reaches this adapter unchecked. Kotlin/Wasm's own bridge casts it to the declared parameter
     // type before the setter body runs: a value of another class fails here, before the write.
     if shape.ty.obj_internal().is_some() {
-        value = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: value,
-            type_operand: shape.ty,
-        });
+        value = ir.add_expr(IrExpr::type_op(IrTypeOp::Cast, value, shape.ty));
     }
     let declared = shape.declared.map_or(shape.ty, |(_, declared)| declared);
     if declared != shape.ty {
-        value = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: value,
-            type_operand: declared,
-        });
+        value = ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, value, declared));
     }
     let write = ir.add_expr(IrExpr::Checked(Box::new(
         IrCheckedOperation::PropertyWrite {
@@ -289,11 +281,7 @@ fn receivers(ir: &mut IrFile, shape: &ReadShape) -> Receivers {
         let value = ir.add_expr(IrExpr::GetValue(shape.contexts.len() as u32));
         match shape.declared {
             Some((Some(declared), _)) if shape.extension && declared != receiver => {
-                ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: value,
-                    type_operand: declared,
-                })
+                ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, value, declared))
             }
             _ => value,
         }
@@ -435,11 +423,7 @@ fn read(
         return Some(if declared == shape.ty {
             read
         } else {
-            ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: read,
-                type_operand: shape.ty,
-            })
+            ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, read, shape.ty))
         });
     }
     let FirPropertyReferenceTarget::External { getter, .. } = &reference.target else {

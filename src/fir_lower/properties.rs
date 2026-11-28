@@ -1656,11 +1656,11 @@ pub(super) fn add_accessor_function(ir: &mut IrFile, input: AccessorFunctionInpu
         AccessorResult::AsDeclared => false,
     };
     let value = if crosses_boundary {
-        ir.add_expr(IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::ImplicitCoercion,
-            arg: value,
-            type_operand: ret,
-        })
+        ir.add_expr(IrExpr::type_op(
+            crate::ir::IrTypeOp::ImplicitCoercion,
+            value,
+            ret,
+        ))
     } else {
         value
     };

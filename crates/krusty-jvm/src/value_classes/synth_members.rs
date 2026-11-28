@@ -666,18 +666,14 @@ pub(super) fn synth_value_members(
             // static: v = slot 0, other = slot 1.
             let mut stmts = Vec::new();
             let other = ir.add_expr(IrExpr::GetValue(1));
-            let not_inst = ir.add_expr(IrExpr::TypeOp {
-                op: krusty::ir::IrTypeOp::NotInstanceOf,
-                arg: other,
-                type_operand: x_ir,
-            });
+            let not_inst = ir.add_expr(IrExpr::type_op(
+                krusty::ir::IrTypeOp::NotInstanceOf,
+                other,
+                x_ir,
+            ));
             stmts.push(guard_false(ir, not_inst));
             let other_v = ir.add_expr(IrExpr::GetValue(1));
-            let ocast = ir.add_expr(IrExpr::TypeOp {
-                op: krusty::ir::IrTypeOp::Cast,
-                arg: other_v,
-                type_operand: x_ir,
-            });
+            let ocast = ir.add_expr(IrExpr::type_op(krusty::ir::IrTypeOp::Cast, other_v, x_ir));
             // `unbox-impl`'s return is erased to the fully erased carrier before emission. The
             // temporary is declared as the immediate underlying and erased to that same carrier.
             // The call descriptor has to name the carrier now: a nested value class would otherwise

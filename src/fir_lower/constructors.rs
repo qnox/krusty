@@ -1142,22 +1142,14 @@ fn rewrite_anonymous_super_forward(
     }
     let node = ir.expr(expression).clone();
     match node {
-        IrExpr::TypeOp {
-            op,
-            arg,
-            type_operand,
-        } => {
+        IrExpr::TypeOp { op, arg, .. } => {
             let next = if op == IrTypeOp::ImplicitCoercion {
                 shells
             } else {
                 shells.saturating_sub(1)
             };
             let arg = rewrite_anonymous_super_forward(ir, arg, next, parameter, declaration)?;
-            Ok(ir.add_expr(IrExpr::TypeOp {
-                op,
-                arg,
-                type_operand,
-            }))
+            Ok(ir.add_expr(ir.expr(expression).clone().with_arg(arg)))
         }
         IrExpr::NotNullAssert { operand, check } => {
             let operand = rewrite_anonymous_super_forward(

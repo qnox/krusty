@@ -513,6 +513,7 @@ impl Translation<'_, '_> {
                 op,
                 arg,
                 type_operand,
+                ..
             } => self.type_operator(*op, *arg, *type_operand),
             IrExpr::Equality { op, mode, lhs, rhs } => self.equality(*op, Some(*mode), *lhs, *rhs),
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(expression, *op, *lhs, *rhs),

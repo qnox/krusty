@@ -46,6 +46,7 @@ pub(super) fn box_vc_tail(
             op: krusty::ir::IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } if !prim_only && is_ref(type_operand) => {
             let arg = *arg;
             box_vc_tail(ir, arg, under, rets, prim_only);

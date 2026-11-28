@@ -81,11 +81,11 @@ impl IrFile {
         let class_type = self.declared_class_self_type(internal)?;
         let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
         let reference = self.parameter_read(0, any);
-        let test = self.add_expr(IrExpr::TypeOp {
-            op: super::IrTypeOp::InstanceOf,
-            arg: reference,
-            type_operand: class_type,
-        });
+        let test = self.add_expr(IrExpr::type_op(
+            super::IrTypeOp::InstanceOf,
+            reference,
+            class_type,
+        ));
         self.set_logical_type(test, Ty::Boolean);
         Some(self.add_generated_entry("<is>$test", vec![any], Ty::Boolean, test))
     }

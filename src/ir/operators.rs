@@ -87,6 +87,28 @@ pub enum IrTypeOp {
     ImplicitCoercion,
 }
 
+impl super::IrExpr {
+    /// A type operation of `op` on `arg` against `type_operand`. Every producer builds it here, so
+    /// a fact the operation gains later is added at this one place.
+    pub fn type_op(op: IrTypeOp, arg: super::ExprId, type_operand: crate::types::Ty) -> Self {
+        Self::TypeOp {
+            op,
+            arg,
+            type_operand,
+        }
+    }
+
+    /// This expression with its operand replaced by `new_arg`, every other part of the payload
+    /// kept. A pass that moves a type operation over a different operand copies it through here,
+    /// so a fact the operation records survives the rewrite.
+    pub fn with_arg(mut self, new_arg: super::ExprId) -> Self {
+        if let Self::TypeOp { arg, .. } = &mut self {
+            *arg = new_arg;
+        }
+        self
+    }
+}
+
 impl IrTypeOp {
     /// The operator of a checked `as` cast to `target`. A cast to a type parameter follows the
     /// parameter's upper-bound nullability. Kotlin's implicit bound is `Any?`, so `value as E` in
@@ -105,6 +127,7 @@ impl IrTypeOp {
 #[cfg(test)]
 mod cast_operator_tests {
     use super::IrTypeOp;
+    use crate::ir::IrExpr;
     use crate::types::Ty;
 
     #[test]
@@ -120,5 +143,20 @@ mod cast_operator_tests {
         for (target, expected) in cases {
             assert_eq!(IrTypeOp::cast_to(target), expected, "{target:?}");
         }
+    }
+
+    #[test]
+    fn with_arg_replaces_only_the_operand() {
+        let original = IrExpr::type_op(IrTypeOp::SafeCast, 1, Ty::obj("kotlin/String"));
+        let IrExpr::TypeOp {
+            op,
+            arg,
+            type_operand,
+        } = original.with_arg(7)
+        else {
+            panic!("a type operation stays a type operation");
+        };
+        assert_eq!((op, arg), (IrTypeOp::SafeCast, 7));
+        assert_eq!(type_operand, Ty::obj("kotlin/String"));
     }
 }

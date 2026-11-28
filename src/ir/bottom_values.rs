@@ -51,6 +51,7 @@ fn completion_for(ir: &IrFile, mut expression: ExprId) -> Option<IrBottomValueCo
                 op: IrTypeOp::ImplicitCoercion,
                 arg,
                 type_operand,
+                ..
             } if !type_operand.is_nullable() && type_operand.non_null() == Ty::Nothing => {
                 substituted_generic = true;
                 expression = *arg;
@@ -230,11 +231,11 @@ mod tests {
         };
         assert_eq!(*producer, read);
 
-        let coerced = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: read,
-            type_operand: Ty::Nothing,
-        });
+        let coerced = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            read,
+            Ty::Nothing,
+        ));
         let substituted = complete_bottom_value(&mut ir, coerced, Ty::Nothing);
         assert!(matches!(
             ir.expr(substituted),

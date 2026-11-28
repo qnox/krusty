@@ -96,11 +96,11 @@ pub(super) fn resumed_carrier(
         "(){}",
         krusty::jvm::names::type_descriptor(physical.non_null())
     );
-    let boxed = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: resumed,
-        type_operand: Ty::nullable(Ty::obj_name(classifier)),
-    });
+    let boxed = ir.add_expr(IrExpr::type_op(
+        IrTypeOp::Cast,
+        resumed,
+        Ty::nullable(Ty::obj_name(classifier)),
+    ));
     let unboxed = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::realized_virtual(
             classifier,
@@ -143,11 +143,7 @@ pub(super) fn boxed_carrier(
         "({})L{owner};",
         krusty::jvm::names::type_descriptor(physical.non_null())
     );
-    let cast = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: value,
-        type_operand: carrier,
-    });
+    let cast = ir.add_expr(IrExpr::type_op(IrTypeOp::Cast, value, carrier));
     let boxed = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::Static {
             owner: classifier,

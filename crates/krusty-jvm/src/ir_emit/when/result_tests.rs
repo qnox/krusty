@@ -13,11 +13,11 @@ fn conditional_function(result: Option<Ty>) -> IrFile {
     let condition = ir.add_expr(IrExpr::GetValue(0));
     let text = ir.add_expr(IrExpr::Const(IrConst::String("a".into())));
     let number = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-    let boxed = ir.add_expr(IrExpr::TypeOp {
-        op: krusty::ir::IrTypeOp::ImplicitCoercion,
-        arg: number,
-        type_operand: Ty::obj("kotlin/Any"),
-    });
+    let boxed = ir.add_expr(IrExpr::type_op(
+        krusty::ir::IrTypeOp::ImplicitCoercion,
+        number,
+        Ty::obj("kotlin/Any"),
+    ));
     let branches = vec![(Some(condition), text), (None, boxed)];
     let when = match result {
         Some(result) => ir.add_when(branches, result),

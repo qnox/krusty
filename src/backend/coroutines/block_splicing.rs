@@ -255,17 +255,9 @@ pub(super) fn value_block(ir: &mut IrFile, e: ExprId) -> Option<(Vec<ExprId>, Ex
         // Checked result coercions do not make a source grouping block semantically observable.
         // Lift the block's statements and reapply the exact operation to its value; no type or
         // conversion decision is repeated here.
-        IrExpr::TypeOp {
-            op,
-            arg,
-            type_operand,
-        } => {
+        operation @ IrExpr::TypeOp { arg, .. } => {
             let (statements, value) = value_block(ir, arg)?;
-            let value = ir.add_expr(IrExpr::TypeOp {
-                op,
-                arg: value,
-                type_operand,
-            });
+            let value = ir.add_expr(operation.with_arg(value));
             Some((statements, value))
         }
         _ => None,

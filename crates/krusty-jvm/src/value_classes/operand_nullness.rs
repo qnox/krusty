@@ -68,6 +68,7 @@ fn operand_nonnull(
             op: krusty::ir::IrTypeOp::ImplicitCoercion,
             type_operand,
             arg,
+            ..
         } => {
             non_null_ty(type_operand)
                 || operand_nonnull(exprs, rets, fields, slots, constructs_value_class, *arg)

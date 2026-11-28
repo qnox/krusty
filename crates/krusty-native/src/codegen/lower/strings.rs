@@ -160,6 +160,7 @@ fn contiguous_trim_operand(ir: &IrFile, mut expression: u32) -> bool {
                 op: IrTypeOp::Cast | IrTypeOp::CastNonNull,
                 arg,
                 type_operand,
+                ..
             } if type_operand.is_reference() => expression = *arg,
             _ => return false,
         }
@@ -175,25 +176,25 @@ mod tests {
     fn trim_reference_casts_preserve_storage_but_unknown_receivers_do_not_prove_it() {
         let mut ir = IrFile::default();
         let text = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::String("  OK  ".into())));
-        let cast = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::CastNonNull,
-            arg: text,
-            type_operand: Ty::obj("kotlin/CharSequence"),
-        });
+        let cast = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::CastNonNull,
+            text,
+            Ty::obj("kotlin/CharSequence"),
+        ));
         assert!(contiguous_trim_operand(&ir, cast));
         let unknown = ir.add_expr(IrExpr::GetValue(0));
         ir.set_logical_type(unknown, Ty::obj("kotlin/CharSequence"));
-        let cast_unknown = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::CastNonNull,
-            arg: unknown,
-            type_operand: Ty::obj("kotlin/CharSequence"),
-        });
+        let cast_unknown = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::CastNonNull,
+            unknown,
+            Ty::obj("kotlin/CharSequence"),
+        ));
         assert!(!contiguous_trim_operand(&ir, cast_unknown));
-        let safe = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::SafeCast,
-            arg: text,
-            type_operand: Ty::obj("kotlin/CharSequence"),
-        });
+        let safe = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::SafeCast,
+            text,
+            Ty::obj("kotlin/CharSequence"),
+        ));
         assert!(!contiguous_trim_operand(&ir, safe));
     }
 

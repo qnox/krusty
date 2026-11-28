@@ -545,11 +545,11 @@ fn synthesize_equals(
 
     const OTHER: u32 = 2;
     let other_value = ir.add_expr(IrExpr::GetValue(1));
-    let cast = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: other_value,
-        type_operand: Ty::obj_name(classifier),
-    });
+    let cast = ir.add_expr(IrExpr::type_op(
+        IrTypeOp::Cast,
+        other_value,
+        Ty::obj_name(classifier),
+    ));
     if fields.is_empty() {
         // A `data object` has no property to compare, so nothing reads the narrowed value. kotlinc
         // still emits the `checkcast` -- it is the type test's own result -- and DISCARDS it rather

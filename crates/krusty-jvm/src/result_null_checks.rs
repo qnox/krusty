@@ -30,6 +30,7 @@ pub(super) fn check_before_result_coercion(ir: &mut IrFile) {
                 op: IrTypeOp::ImplicitCoercion,
                 arg,
                 type_operand,
+                ..
             } = ir.exprs[coercion as usize]
             else {
                 return None;
@@ -61,11 +62,8 @@ pub(super) fn check_before_result_coercion(ir: &mut IrFile) {
             operand: arg,
             check,
         };
-        ir.exprs[assertion as usize] = IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: root,
-            type_operand,
-        };
+        ir.exprs[assertion as usize] =
+            IrExpr::type_op(IrTypeOp::ImplicitCoercion, root, type_operand);
         if ir.declaration_result_coercions.remove(&coercion) {
             ir.declaration_result_coercions.insert(assertion);
         }
@@ -99,6 +97,7 @@ fn retain_checked_result_at_non_null_coercion(ir: &mut IrFile) {
             op: IrTypeOp::ImplicitCoercion,
             arg: inner,
             type_operand: target,
+            ..
         } = ir.exprs[index]
         else {
             continue;
@@ -112,6 +111,7 @@ fn retain_checked_result_at_non_null_coercion(ir: &mut IrFile) {
             op: IrTypeOp::ImplicitCoercion,
             arg: checked,
             type_operand: nullable,
+            ..
         } = ir.exprs[inner as usize]
         else {
             continue;
@@ -126,11 +126,7 @@ fn retain_checked_result_at_non_null_coercion(ir: &mut IrFile) {
                 }
             )
         {
-            ir.exprs[index] = IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: checked,
-                type_operand: target,
-            };
+            ir.exprs[index] = IrExpr::type_op(IrTypeOp::ImplicitCoercion, checked, target);
             ir.declaration_result_coercions.remove(&inner);
             ir.declaration_result_coercions.insert(index as ExprId);
         }
@@ -178,6 +174,7 @@ fn materialize_unnamed_checks_before_result_coercion(ir: &mut IrFile) {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: produced,
                 type_operand,
+                ..
             } = ir.exprs.get(*coercion as usize)?
             else {
                 return None;
@@ -190,6 +187,7 @@ fn materialize_unnamed_checks_before_result_coercion(ir: &mut IrFile) {
                     op: IrTypeOp::ImplicitCoercion,
                     arg: yielded,
                     type_operand: yielded_type,
+                    ..
                 } if yielded_type == type_operand => {
                     let IrExpr::GetValue(yielded_value) = ir.exprs.get(*yielded as usize)? else {
                         return None;
@@ -237,11 +235,8 @@ fn materialize_unnamed_checks_before_result_coercion(ir: &mut IrFile) {
         *init = Some(produced);
         if needs_result_coercion {
             let (coerced, _) = krusty::ir::clone_expression_dag(ir, result);
-            ir.exprs[coerced as usize] = IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: result,
-                type_operand,
-            };
+            ir.exprs[coerced as usize] =
+                IrExpr::type_op(IrTypeOp::ImplicitCoercion, result, type_operand);
             let IrExpr::Block { value, .. } = &mut ir.exprs[block as usize] else {
                 unreachable!("a collected unnamed check is owned by a block");
             };
@@ -282,11 +277,11 @@ mod tests {
                 args: Vec::new(),
             });
             ir.call_declared_ret.insert(call, declared);
-            let conversion = ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: call,
-                type_operand: Ty::nullable(Ty::String),
-            });
+            let conversion = ir.add_expr(IrExpr::type_op(
+                IrTypeOp::ImplicitCoercion,
+                call,
+                Ty::nullable(Ty::String),
+            ));
             if marked {
                 ir.declaration_result_coercions.insert(conversion);
             }
@@ -294,11 +289,11 @@ mod tests {
                 operand: conversion,
                 check: NullCheck::Source,
             });
-            let outer = ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: assertion,
-                type_operand: target,
-            });
+            let outer = ir.add_expr(IrExpr::type_op(
+                IrTypeOp::ImplicitCoercion,
+                assertion,
+                target,
+            ));
 
             check_before_result_coercion(&mut ir);
 
@@ -341,11 +336,7 @@ mod tests {
         ir.call_declared_ret
             .insert(call, Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any"))));
         let set = Ty::obj("kotlin/collections/Set");
-        let initial_coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: call,
-            type_operand: set,
-        });
+        let initial_coercion = ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, call, set));
         ir.declaration_result_coercions.insert(initial_coercion);
         let declaration = ir.add_expr(IrExpr::Variable {
             index: 0,
@@ -385,8 +376,7 @@ mod tests {
             IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg,
-                type_operand,
-            } if *arg == result && *type_operand == set
+                type_operand, .. } if *arg == result && *type_operand == set
         ));
         assert!(!ir.declaration_result_coercions.contains(&initial_coercion));
     }

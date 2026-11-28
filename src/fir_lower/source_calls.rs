@@ -892,11 +892,11 @@ impl BodyLowering<'_> {
                 let [append_parameter] = member.parameters.as_ref() else {
                     return None;
                 };
-                let append_argument = self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: part,
-                    type_operand: append_parameter.get(),
-                });
+                let append_argument = self.ir.add_expr(IrExpr::type_op(
+                    IrTypeOp::ImplicitCoercion,
+                    part,
+                    append_parameter.get(),
+                ));
                 (
                     member.declaration,
                     Some(accumulator),
@@ -1667,11 +1667,11 @@ impl BodyLowering<'_> {
             let receiver = self.direct_call_operand(receiver, specialized);
             if operand.is_some_and(|operand| !operand.is_reference()) && specialized.is_reference()
             {
-                self.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: receiver,
-                    type_operand: specialized,
-                })
+                self.ir.add_expr(IrExpr::type_op(
+                    IrTypeOp::ImplicitCoercion,
+                    receiver,
+                    specialized,
+                ))
             } else {
                 receiver
             }
@@ -1679,11 +1679,11 @@ impl BodyLowering<'_> {
             self.spill_call_operand(receiver, specialized, statements)
         };
         if !specialized.is_reference() && declared.is_reference() {
-            self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: receiver,
-                type_operand: declared,
-            })
+            self.ir.add_expr(IrExpr::type_op(
+                IrTypeOp::ImplicitCoercion,
+                receiver,
+                declared,
+            ))
         } else {
             receiver
         }
@@ -1958,11 +1958,11 @@ impl BodyLowering<'_> {
                     .position(|candidate| *candidate == function)?
                     as u32;
                 let receiver = if enum_entry_class.is_some() {
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: crate::ir::IrTypeOp::Cast,
-                        arg: receiver,
-                        type_operand: Ty::obj_name(self.ir.classes[class as usize].fq_name_id()),
-                    })
+                    self.ir.add_expr(IrExpr::type_op(
+                        crate::ir::IrTypeOp::Cast,
+                        receiver,
+                        Ty::obj_name(self.ir.classes[class as usize].fq_name_id()),
+                    ))
                 } else {
                     receiver
                 };
@@ -2176,11 +2176,11 @@ impl BodyLowering<'_> {
                             } => {
                                 let declared = *declared_parameters.get(parameter)?;
                                 if !parameter_ty.is_reference() && declared.is_reference() {
-                                    self.ir.add_expr(IrExpr::TypeOp {
-                                        op: IrTypeOp::ImplicitCoercion,
-                                        arg: value,
-                                        type_operand: declared,
-                                    })
+                                    self.ir.add_expr(IrExpr::type_op(
+                                        IrTypeOp::ImplicitCoercion,
+                                        value,
+                                        declared,
+                                    ))
                                 } else {
                                     value
                                 }

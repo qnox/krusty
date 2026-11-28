@@ -184,11 +184,11 @@ impl BodyLowering<'_> {
             return Ok(None);
         }
         let read = self.ir.add_expr(IrExpr::GetValue(local_index));
-        Ok(Some(self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: read,
-            type_operand: target.canonical_semantic(),
-        })))
+        Ok(Some(self.ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            read,
+            target.canonical_semantic(),
+        ))))
     }
 
     /// The `null` proof the first of a compiler-generated `when`'s two branches gives its `else`:
@@ -227,11 +227,9 @@ impl BodyLowering<'_> {
         {
             return None;
         }
-        let cast = self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: lowered,
-            type_operand: proven,
-        });
+        let cast = self
+            .ir
+            .add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, lowered, proven));
         let cast = self.typed(cast, proven);
         if super::is_value_of(proven, expected) {
             return Some(cast);

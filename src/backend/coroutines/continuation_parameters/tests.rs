@@ -68,7 +68,7 @@ fn a_body_that_does_not_suspend_returns_its_value_through_the_new_signature() {
     };
     assert!(matches!(
         ir.exprs[completed as usize],
-        IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg, type_operand }
+        IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg, type_operand, .. }
             if arg == read_local && type_operand == any()
     ));
 }
@@ -138,6 +138,7 @@ fn a_call_to_a_suspend_function_that_completes_in_place_passes_a_continuation() 
         op: IrTypeOp::ImplicitCoercion,
         arg: invoked,
         type_operand,
+        ..
     } = ir.exprs[call as usize]
     else {
         panic!("the call is read at its declared result");
@@ -257,7 +258,7 @@ fn an_expression_body_is_returned_by_a_new_block_that_keeps_it() {
     };
     assert!(matches!(
         ir.exprs[completed as usize],
-        IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg, type_operand }
+        IrExpr::TypeOp { op: IrTypeOp::ImplicitCoercion, arg, type_operand, .. }
             if arg == seven && type_operand == any()
     ));
 }
@@ -305,8 +306,7 @@ fn a_non_unit_loop_completes_through_the_return_it_already_has() {
         IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
             arg,
-            type_operand,
-        } if arg == seven && type_operand == any()
+            type_operand, .. } if arg == seven && type_operand == any()
     ));
     assert!(matches!(
         ir.exprs[seven as usize],

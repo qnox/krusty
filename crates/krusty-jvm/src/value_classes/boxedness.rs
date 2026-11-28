@@ -152,6 +152,7 @@ impl ReprCtx<'_> {
                     | krusty::ir::IrTypeOp::SafeCast,
                 arg,
                 type_operand,
+                ..
             } => {
                 is_x(type_operand)
                     && (self.is_boxed_vc(*arg, x)
@@ -168,6 +169,7 @@ impl ReprCtx<'_> {
                 op: krusty::ir::IrTypeOp::ImplicitCoercion,
                 arg,
                 type_operand,
+                ..
             } => {
                 // The coercion itself is the checked representation boundary. A non-null `X` target
                 // promises the unboxed carrier after step 5, even when its operand is an erased generic

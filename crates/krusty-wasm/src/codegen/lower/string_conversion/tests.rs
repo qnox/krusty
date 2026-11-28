@@ -109,11 +109,11 @@ fn ordinary_string_conversion_supports_nullable_and_erased_unsigned_boxes() {
 
             let mut ir = IrFile::default();
             let scalar = receiver(&mut ir, ty);
-            let erased = ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: scalar,
-                type_operand: Ty::obj_name(krusty::types::wk::any()),
-            });
+            let erased = ir.add_expr(IrExpr::type_op(
+                IrTypeOp::ImplicitCoercion,
+                scalar,
+                Ty::obj_name(krusty::types::wk::any()),
+            ));
             ir.set_logical_type(erased, Ty::obj_name(krusty::types::wk::any()));
             let value = ir.add_expr(IrExpr::StringConcat(vec![erased]));
             ir.set_logical_type(value, Ty::String);

@@ -570,11 +570,11 @@ impl BodyLowering<'_> {
                         });
                         if operand_ty != target.get() {
                             self.ir.set_logical_type(asserted, operand_ty.non_null());
-                            self.ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::ImplicitCoercion,
-                                arg: asserted,
-                                type_operand: target.get(),
-                            })
+                            self.ir.add_expr(IrExpr::type_op(
+                                IrTypeOp::ImplicitCoercion,
+                                asserted,
+                                target.get(),
+                            ))
                         } else {
                             asserted
                         }
@@ -597,11 +597,11 @@ impl BodyLowering<'_> {
                         plan.same_erased_upper_bound,
                     ),
                     FirTypeOperation::Cast => {
-                        let cast = self.ir.add_expr(IrExpr::TypeOp {
-                            op: lower_type_operation(*operation, target.get()),
-                            arg: operand,
-                            type_operand: target.get(),
-                        });
+                        let cast = self.ir.add_expr(IrExpr::type_op(
+                            lower_type_operation(*operation, target.get()),
+                            operand,
+                            target.get(),
+                        ));
                         self.ir.written_casts.insert(cast);
                         cast
                     }
@@ -656,11 +656,11 @@ impl BodyLowering<'_> {
                             _ => Ty::Int,
                         };
                         let updated = self.ir.add_arithmetic(IrBinOp::Add, operand, delta, sum);
-                        self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: updated,
-                            type_operand: result,
-                        })
+                        self.ir.add_expr(IrExpr::type_op(
+                            IrTypeOp::ImplicitCoercion,
+                            updated,
+                            result,
+                        ))
                     }
                     FirUnaryOperation::BitwiseNot => {
                         // `inv` xors with every bit set in the carrier. `ULong` is that `long`
@@ -801,11 +801,11 @@ impl BodyLowering<'_> {
                         Some(promoted) if source == *nullable => {
                             self.safe_numeric_conversion(source, value, operand, promoted)?
                         }
-                        Some(promoted) => self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: value,
-                            type_operand: promoted,
-                        }),
+                        Some(promoted) => self.ir.add_expr(IrExpr::type_op(
+                            IrTypeOp::ImplicitCoercion,
+                            value,
+                            promoted,
+                        )),
                     });
                 }
                 self.ir.add_expr(IrExpr::Equality {
@@ -862,19 +862,19 @@ impl BodyLowering<'_> {
                 };
                 let converted = |lowering: &mut Self, temporary, primitive: ResolvedTy| {
                     let value = lowering.ir.add_expr(IrExpr::GetValue(temporary));
-                    let unboxed = lowering.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: value,
-                        type_operand: primitive.get(),
-                    });
+                    let unboxed = lowering.ir.add_expr(IrExpr::type_op(
+                        IrTypeOp::ImplicitCoercion,
+                        value,
+                        primitive.get(),
+                    ));
                     if primitive == *comparison {
                         unboxed
                     } else {
-                        lowering.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: unboxed,
-                            type_operand: comparison.get(),
-                        })
+                        lowering.ir.add_expr(IrExpr::type_op(
+                            IrTypeOp::ImplicitCoercion,
+                            unboxed,
+                            comparison.get(),
+                        ))
                     }
                 };
                 let lhs_present = converted(self, lhs_temporary, *lhs_primitive);
@@ -1680,11 +1680,9 @@ impl BodyLowering<'_> {
                 self.ir.set_source_line_if_absent(selected, source_line);
             }
         }
-        let coercion = self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: call,
-            type_operand: result,
-        });
+        let coercion = self
+            .ir
+            .add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, call, result));
         self.ir.declaration_result_coercions.insert(coercion);
         coercion
     }
@@ -1799,30 +1797,30 @@ impl BodyLowering<'_> {
         }
         let converted = match conversion.kind {
             FirConversionKind::NumericWidening { to }
-            | FirConversionKind::NumericConversion { to } => self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: expression,
-                type_operand: to.get(),
-            }),
+            | FirConversionKind::NumericConversion { to } => self.ir.add_expr(IrExpr::type_op(
+                IrTypeOp::ImplicitCoercion,
+                expression,
+                to.get(),
+            )),
             FirConversionKind::NullabilityWidening { .. }
                 if source_type == crate::types::Ty::Unit =>
             {
                 self.unit_value_after_effect(expression)
             }
-            FirConversionKind::NullabilityWidening { to } => self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: expression,
-                type_operand: to.get(),
-            }),
-            FirConversionKind::SmartCast { to } => self.ir.add_expr(IrExpr::TypeOp {
-                op: if to.get().is_reference() {
+            FirConversionKind::NullabilityWidening { to } => self.ir.add_expr(IrExpr::type_op(
+                IrTypeOp::ImplicitCoercion,
+                expression,
+                to.get(),
+            )),
+            FirConversionKind::SmartCast { to } => self.ir.add_expr(IrExpr::type_op(
+                if to.get().is_reference() {
                     IrTypeOp::Cast
                 } else {
                     IrTypeOp::ImplicitCoercion
                 },
-                arg: expression,
-                type_operand: to.get(),
-            }),
+                expression,
+                to.get(),
+            )),
             FirConversionKind::PlatformNarrowing { narrowing, to } => {
                 let check = self
                     .body
@@ -1861,11 +1859,11 @@ impl BodyLowering<'_> {
                     });
                     if source_type != to.get() {
                         self.ir.set_logical_type(asserted, source_type.non_null());
-                        self.ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: asserted,
-                            type_operand: to.get(),
-                        })
+                        self.ir.add_expr(IrExpr::type_op(
+                            IrTypeOp::ImplicitCoercion,
+                            asserted,
+                            to.get(),
+                        ))
                     } else {
                         asserted
                     }
@@ -2008,11 +2006,9 @@ impl BodyLowering<'_> {
         });
         let mut result = self.checked_value_read(temporary, reused.is_some());
         if source_type != target {
-            result = self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: result,
-                type_operand: target,
-            });
+            result = self
+                .ir
+                .add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, result, target));
         }
         self.ir.add_expr(IrExpr::Block {
             stmts: stored.into_iter().chain([check]).collect(),
@@ -2096,11 +2092,11 @@ impl BodyLowering<'_> {
                 value: Some(unit),
             });
         }
-        self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: expression,
-            type_operand: target,
-        })
+        self.ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            expression,
+            target,
+        ))
     }
 
     /// kotlinc's safe conversion of a nullable numeric operand to its comparison type:
@@ -2133,16 +2129,14 @@ impl BodyLowering<'_> {
             rhs: null,
         });
         let read = self.ir.add_expr(IrExpr::GetValue(temporary));
-        let present = self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: read,
-            type_operand: operand,
-        });
-        let converted = self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: present,
-            type_operand: promoted,
-        });
+        let present = self
+            .ir
+            .add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, read, operand));
+        let converted = self.ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            present,
+            promoted,
+        ));
         let result_type = Ty::nullable(promoted);
         let selector = self.coerce_result(converted, result_type);
         let null_result = self.ir.add_expr(IrExpr::Const(IrConst::Null));
@@ -2189,11 +2183,11 @@ impl BodyLowering<'_> {
                 .set_start_line_if_absent(selector_read, receiver_line);
             self.ir.set_source_line(selector_read, receiver_line);
         }
-        let selector_read = self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: selector_read,
-            type_operand: receiver_type.non_null().canonical_semantic(),
-        });
+        let selector_read = self.ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            selector_read,
+            receiver_type.non_null().canonical_semantic(),
+        ));
         self.set_expression_state(receiver.value, LoweringState::Lowered(selector_read));
         // The selector reads the temporary, not the receiver expression: a constant receiver does
         // not make the selected operation intrinsic-const.

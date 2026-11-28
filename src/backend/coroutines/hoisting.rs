@@ -295,12 +295,8 @@ fn sink_result_coercion_into_block(
     body: ExprId,
     suspend_set: &HashSet<u32>,
 ) -> ExprId {
-    let IrExpr::TypeOp {
-        op,
-        arg,
-        type_operand,
-    } = ir.exprs[body as usize].clone()
-    else {
+    let operation = ir.exprs[body as usize].clone();
+    let IrExpr::TypeOp { arg, .. } = operation else {
         return body;
     };
     let IrExpr::Block {
@@ -315,11 +311,7 @@ fn sink_result_coercion_into_block(
     {
         return body;
     }
-    let coerced = ir.add_expr(IrExpr::TypeOp {
-        op,
-        arg: value,
-        type_operand,
-    });
+    let coerced = ir.add_expr(operation.with_arg(value));
     ir.add_expr(IrExpr::Block {
         stmts,
         value: Some(coerced),
@@ -1018,17 +1010,9 @@ fn hoist_expr(
             ir.exprs[e as usize] = IrExpr::StringConcat(np);
             e
         }
-        IrExpr::TypeOp {
-            op,
-            arg,
-            type_operand,
-        } => {
+        IrExpr::TypeOp { arg, .. } => {
             let na = hoist_expr(ir, arg, suspend_set, typing, value_types, prelude);
-            ir.exprs[e as usize] = IrExpr::TypeOp {
-                op,
-                arg: na,
-                type_operand,
-            };
+            ir.exprs[e as usize] = ir.exprs[e as usize].clone().with_arg(na);
             e
         }
         IrExpr::Variable {

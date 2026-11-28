@@ -21,11 +21,11 @@ fn type_test_implementation(ir: &mut IrFile, name: &str) -> u32 {
     let tested = reified_parameter().ty();
     let operand = ir.add_expr(IrExpr::GetValue(0));
     ir.set_logical_type(operand, Ty::nullable(Ty::obj("kotlin/Any")));
-    let test = ir.add_expr(IrExpr::TypeOp {
-        op: krusty::ir::IrTypeOp::InstanceOf,
-        arg: operand,
-        type_operand: tested,
-    });
+    let test = ir.add_expr(IrExpr::type_op(
+        krusty::ir::IrTypeOp::InstanceOf,
+        operand,
+        tested,
+    ));
     ir.set_logical_type(test, Ty::Boolean);
     let returned = ir.add_expr(IrExpr::Return(Some(test)));
     ir.set_logical_type(returned, Ty::Nothing);

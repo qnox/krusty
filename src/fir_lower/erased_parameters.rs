@@ -46,10 +46,7 @@ impl BodyLowering<'_> {
         if actual == declared {
             return value;
         }
-        self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: value,
-            type_operand: declared,
-        })
+        self.ir
+            .add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, value, declared))
     }
 }

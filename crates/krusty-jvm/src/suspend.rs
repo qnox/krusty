@@ -1458,14 +1458,7 @@ fn build_state_machine(
                 let mut init = getf(ir, cont_for_f, fld);
                 // A reference spill lives in an `Object`-typed field — `checkcast` back on restore.
                 if ty.is_reference() && ty != object_ty() {
-                    init = k(
-                        ir,
-                        IrExpr::TypeOp {
-                            op: IrTypeOp::Cast,
-                            arg: init,
-                            type_operand: ty,
-                        },
-                    );
+                    init = k(ir, IrExpr::type_op(IrTypeOp::Cast, init, ty));
                 }
                 let restore = IrExpr::SetValue {
                     var: local,
@@ -2724,11 +2717,11 @@ impl Flat<'_> {
                             let rv = self.gv(self.r_v);
                             // `r_v` is typed `Object` (the resume/exception slot); `athrow` needs a
                             // `Throwable`.
-                            let exc = self.add(IrExpr::TypeOp {
-                                op: IrTypeOp::Cast,
-                                arg: rv,
-                                type_operand: Ty::obj("java/lang/Throwable"),
-                            });
+                            let exc = self.add(IrExpr::type_op(
+                                IrTypeOp::Cast,
+                                rv,
+                                Ty::obj("java/lang/Throwable"),
+                            ));
                             fh_stmts.push(self.add(IrExpr::Throw { operand: exc }));
                             self.flatten(&fh_stmts, fin_handler, None);
                             // Continue after the try (normal path only).
@@ -2805,11 +2798,7 @@ impl Flat<'_> {
                             // (`throw e`).
                             let ev = self.catch_spills[&catch.body];
                             let rv = self.gv(self.r_v);
-                            let cast = self.add(IrExpr::TypeOp {
-                                op: IrTypeOp::Cast,
-                                arg: rv,
-                                type_operand: exc_ty,
-                            });
+                            let cast = self.add(IrExpr::type_op(IrTypeOp::Cast, rv, exc_ty));
                             let bind = self.add(IrExpr::SetValue {
                                 var: ev,
                                 value: cast,
@@ -2827,11 +2816,8 @@ impl Flat<'_> {
                             collect_getvalue(self.ir, catch.body, catch.var, &mut reads);
                             for n in reads {
                                 let rv = self.gv(self.r_v);
-                                self.ir.exprs[n as usize] = IrExpr::TypeOp {
-                                    op: IrTypeOp::Cast,
-                                    arg: rv,
-                                    type_operand: exc_ty,
-                                };
+                                self.ir.exprs[n as usize] =
+                                    IrExpr::type_op(IrTypeOp::Cast, rv, exc_ty);
                             }
                             self.block_stmts(catch.body)
                         };
@@ -2846,21 +2832,17 @@ impl Flat<'_> {
                             break; // later arms are dead
                         }
                         let rv = self.gv(self.r_v);
-                        let guard = self.add(IrExpr::TypeOp {
-                            op: IrTypeOp::InstanceOf,
-                            arg: rv,
-                            type_operand: exc_ty,
-                        });
+                        let guard = self.add(IrExpr::type_op(IrTypeOp::InstanceOf, rv, exc_ty));
                         arms.push((Some(guard), blk));
                     }
                     if !full_cover {
                         // else: no arm matches — re-throw the stashed exception.
                         let rv = self.gv(self.r_v);
-                        let exc = self.add(IrExpr::TypeOp {
-                            op: IrTypeOp::Cast,
-                            arg: rv,
-                            type_operand: Ty::obj("java/lang/Throwable"),
-                        });
+                        let exc = self.add(IrExpr::type_op(
+                            IrTypeOp::Cast,
+                            rv,
+                            Ty::obj("java/lang/Throwable"),
+                        ));
                         let thr = self.add(IrExpr::Throw { operand: exc });
                         arms.push((
                             None,

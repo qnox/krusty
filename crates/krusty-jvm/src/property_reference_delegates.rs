@@ -950,11 +950,7 @@ fn coerce(ir: &mut IrFile, value: ExprId, from: Ty, to: Ty) -> ExprId {
     if from == to {
         return value;
     }
-    ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: value,
-        type_operand: to,
-    })
+    ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, value, to))
 }
 
 /// A fresh read of the bound receiver.

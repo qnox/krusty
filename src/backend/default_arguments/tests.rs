@@ -82,6 +82,7 @@ fn render(ir: &IrFile, expression: ExprId) -> String {
             op,
             arg,
             type_operand,
+            ..
         } => format!("({} {op:?} {})", render(ir, *arg), ty(*type_operand)),
         IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
             format!("({} {op:?} {})", render(ir, *lhs), render(ir, *rhs))
@@ -1054,6 +1055,7 @@ fn cross_file_member_defaults_use_the_provider_frame_before_coercing_the_result(
         op: crate::ir::IrTypeOp::ImplicitCoercion,
         arg: call,
         type_operand,
+        ..
     } = ir.expr(site)
     else {
         panic!("the caller coerces the provider's result to its checked result");

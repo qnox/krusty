@@ -20,11 +20,11 @@ impl BodyLowering<'_> {
             .copied()
             .ok_or(super::FirLoweringFailure::MissingLocalClass(owner))?;
         let classifier = self.ir.classes[class as usize].fq_name_id();
-        let receiver = self.ir.add_expr(crate::ir::IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::Cast,
-            arg: receiver,
-            type_operand: crate::types::Ty::obj_name(classifier),
-        });
+        let receiver = self.ir.add_expr(crate::ir::IrExpr::type_op(
+            crate::ir::IrTypeOp::Cast,
+            receiver,
+            crate::types::Ty::obj_name(classifier),
+        ));
         Ok((receiver, classifier))
     }
 

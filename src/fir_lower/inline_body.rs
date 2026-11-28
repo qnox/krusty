@@ -216,15 +216,15 @@ impl BodyLowering<'_> {
                 }
                 crate::fir::FirInlineValue::Cause => return None,
             };
-            let operation = self.ir.add_expr(IrExpr::TypeOp {
-                op: if *negated {
+            let operation = self.ir.add_expr(IrExpr::type_op(
+                if *negated {
                     crate::ir::IrTypeOp::NotInstanceOf
                 } else {
                     crate::ir::IrTypeOp::InstanceOf
                 },
-                arg: argument,
-                type_operand: runtime.reified_runtime.get(),
-            });
+                argument,
+                runtime.reified_runtime.get(),
+            ));
             self.ir.set_logical_type(operation, Ty::Boolean);
             let expanded = self.wrap_call_statements(statements, operation);
             self.ir.set_logical_type(expanded, Ty::Boolean);
@@ -958,22 +958,22 @@ impl BodyLowering<'_> {
                 // is what the value-class representation boundary reads to unbox a value-class
                 // element here — while a scalar element's coercion unboxes directly.
                 let bound = if element_ty.get().is_reference() {
-                    let cast = self.ir.add_expr(IrExpr::TypeOp {
-                        op: crate::ir::IrTypeOp::Cast,
-                        arg: read,
-                        type_operand: element_ty.get(),
-                    });
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: crate::ir::IrTypeOp::ImplicitCoercion,
-                        arg: cast,
-                        type_operand: element_ty.get(),
-                    })
+                    let cast = self.ir.add_expr(IrExpr::type_op(
+                        crate::ir::IrTypeOp::Cast,
+                        read,
+                        element_ty.get(),
+                    ));
+                    self.ir.add_expr(IrExpr::type_op(
+                        crate::ir::IrTypeOp::ImplicitCoercion,
+                        cast,
+                        element_ty.get(),
+                    ))
                 } else {
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: crate::ir::IrTypeOp::ImplicitCoercion,
-                        arg: read,
-                        type_operand: element_ty.get(),
-                    })
+                    self.ir.add_expr(IrExpr::type_op(
+                        crate::ir::IrTypeOp::ImplicitCoercion,
+                        read,
+                        element_ty.get(),
+                    ))
                 };
                 let parameter_declaration = self.ir.add_expr(IrExpr::Variable {
                     index: it_slot,
@@ -1263,11 +1263,11 @@ impl BodyLowering<'_> {
             label: Some(label),
         });
         let read = self.ir.add_expr(IrExpr::GetValue(result_slot));
-        let narrowed = self.ir.add_expr(IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::ImplicitCoercion,
-            arg: read,
-            type_operand: result_ty,
-        });
+        let narrowed = self.ir.add_expr(IrExpr::type_op(
+            crate::ir::IrTypeOp::ImplicitCoercion,
+            read,
+            result_ty,
+        ));
         Some(self.ir.add_expr(IrExpr::Block {
             stmts: vec![declaration, carried],
             value: Some(narrowed),

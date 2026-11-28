@@ -299,6 +299,7 @@ impl Emitter<'_> {
                 op: krusty::ir::IrTypeOp::ImplicitCoercion,
                 arg,
                 type_operand,
+                ..
             } => {
                 // `!!` gives its non-null result a coercion of its own over the nullable one. Over
                 // a call-result boundary that keeps one JVM representation, that boundary's erased
@@ -308,6 +309,7 @@ impl Emitter<'_> {
                     op: krusty::ir::IrTypeOp::ImplicitCoercion,
                     arg: checked,
                     type_operand: nullable,
+                    ..
                 } = self.ir.expr(*arg)
                 {
                     if nullable.is_nullable()
@@ -383,6 +385,7 @@ impl Emitter<'_> {
                     op: krusty::ir::IrTypeOp::ImplicitCoercion,
                     arg,
                     type_operand,
+                    ..
                 } if ir_ty_to_jvm(type_operand).is_reference() => receiver = *arg,
                 _ => return None,
             }
@@ -399,6 +402,7 @@ impl Emitter<'_> {
             op: krusty::ir::IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } = self.ir.expr(expression)
         else {
             return None;

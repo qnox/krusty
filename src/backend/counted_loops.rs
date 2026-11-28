@@ -424,11 +424,11 @@ impl Realizer<'_> {
         ) {
             return expression;
         }
-        self.add(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: expression,
-            type_operand: target,
-        })
+        self.add(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            expression,
+            target,
+        ))
     }
 
     /// `asElementType` of an unsigned bound: kotlinc converts a `UInt`/`ULong` value to its
@@ -443,11 +443,7 @@ impl Realizer<'_> {
         {
             return value;
         }
-        let converted = self.add(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: value,
-            type_operand: ty,
-        });
+        let converted = self.add(IrExpr::type_op(IrTypeOp::ImplicitCoercion, value, ty));
         self.inlined_calls.push(converted);
         converted
     }
