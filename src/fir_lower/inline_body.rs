@@ -40,6 +40,25 @@ fn first_body_line(ir: &crate::ir::IrFile, body: ExprId) -> Option<u32> {
     }
 }
 
+/// The closing-brace line of a lambda whose body is only its implicit `Unit` return. kotlinc marks
+/// that return on the brace, so the brace is the first line the inlined lambda has.
+fn empty_body_brace_line(ir: &crate::ir::IrFile, body: ExprId, lambda: ExprId) -> Option<u32> {
+    let empty = match ir.expr(body) {
+        IrExpr::UnitInstance => true,
+        IrExpr::Block { stmts, value } => {
+            stmts.is_empty()
+                && (*value).is_none_or(|value| matches!(ir.expr(value), IrExpr::UnitInstance))
+        }
+        _ => false,
+    };
+    if !empty {
+        return None;
+    }
+    ir.end_line(body)
+        .or_else(|| ir.end_line(lambda))
+        .filter(|line| *line != 0)
+}
+
 /// Whether a lambda body ends in the `Unit` its implicit return yields: the value itself, or the
 /// coercion `{ effects; Unit }`.
 fn ends_in_unit(ir: &crate::ir::IrFile, body: ExprId) -> bool {
@@ -1615,7 +1634,10 @@ impl BodyLowering<'_> {
         if let Some(line) = call_line {
             self.ir.set_statement_line(marker, line);
             if frame.inline_only
-                && (callable_reference || first_body_line(self.ir, template) == Some(line))
+                && (callable_reference
+                    || first_body_line(self.ir, template)
+                        .or_else(|| empty_body_brace_line(self.ir, template, lambda))
+                        == Some(line))
             {
                 self.ir.inline_synthetic_lines.insert(marker);
             }

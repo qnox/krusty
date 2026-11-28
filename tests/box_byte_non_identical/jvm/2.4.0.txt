@@ -185,7 +185,6 @@ callableReference/arrayConstructor.kt
 callableReference/arrayConstructorArgument.kt
 callableReference/bound/arrayConstructorArgument.kt
 callableReference/bound/arrayGetIntrinsic.kt
-callableReference/bound/captureVarInPropertyInit.kt
 callableReference/bound/companionObjectReceiverInheritsFromOuter.kt
 callableReference/bound/emptyLHS.kt
 callableReference/bound/equals/nullableReceiverInEquals.kt
@@ -226,7 +225,6 @@ callableReference/function/newArray.kt
 callableReference/function/sortListOfStrings.kt
 callableReference/function/specialCalls.kt
 callableReference/function/topLevelFromTopLevelUnitManyArgs.kt
-callableReference/function/traitImplMethodWithClassReceiver.kt
 callableReference/genericConstructorReference.kt
 callableReference/generticReferences.kt
 callableReference/inlineArrayConstructors.kt
@@ -353,7 +351,6 @@ compileKotlinAgainstKotlin/coroutinesBinary.kt
 compileKotlinAgainstKotlin/doublyNestedClass.kt
 compileKotlinAgainstKotlin/inlineClasses/inlineClassInlineProperty.kt
 compileKotlinAgainstKotlin/inlineClasses/privateCompanionObjectValInDifferentModule.kt
-compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
 compileKotlinAgainstKotlin/internalSetterOverridden.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superCallFromInterface2.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superPropAccessFromInterface2.kt
@@ -438,7 +435,6 @@ controlStructures/kt2416.kt
 controlStructures/kt2597.kt
 controlStructures/kt3203_2.kt
 controlStructures/kt42455.kt
-controlStructures/kt910.kt
 controlStructures/slowDsl/slowHtmlLikeDsl.kt
 controlStructures/tryCatchFinallyChain.kt
 controlStructures/tryCatchInExpressions/catch.kt
@@ -453,7 +449,6 @@ controlStructures/tryCatchInExpressions/kt17572_ext.kt
 controlStructures/tryCatchInExpressions/kt17572_nested.kt
 controlStructures/tryCatchInExpressions/kt17573.kt
 controlStructures/tryCatchInExpressions/kt17573_nested.kt
-controlStructures/tryCatchInExpressions/kt8608.kt
 controlStructures/tryCatchInExpressions/kt9644try.kt
 controlStructures/tryCatchInExpressions/multipleCatchBlocks.kt
 controlStructures/tryCatchInExpressions/nonLocalReturnInTryFinally.kt
@@ -584,7 +579,6 @@ coroutines/inlineClasses/direct/boxReturnValueOfSuspendFunctionReference.kt
 coroutines/inlineClasses/direct/boxUnboxInsideCoroutine_InlineInt.kt
 coroutines/inlineClasses/direct/boxUnboxInsideCoroutine_Int.kt
 coroutines/inlineClasses/direct/boxUnboxInsideCoroutine_Long.kt
-coroutines/inlineClasses/direct/boxUnboxInsideCoroutine_nonLocalReturn.kt
 coroutines/inlineClasses/direct/bridgeGenerationCrossinline.kt
 coroutines/inlineClasses/direct/covariantOverrideSuspendFunSameJvmType.kt
 coroutines/inlineClasses/direct/covariantOverrideSuspendFunWithNullableInlineClassSameJvmType.kt
@@ -605,7 +599,6 @@ coroutines/inlineClasses/resume/boxReturnValueOfSuspendFunctionReference.kt
 coroutines/inlineClasses/resume/boxUnboxInsideCoroutine_InlineInt.kt
 coroutines/inlineClasses/resume/boxUnboxInsideCoroutine_Int.kt
 coroutines/inlineClasses/resume/boxUnboxInsideCoroutine_Long.kt
-coroutines/inlineClasses/resume/boxUnboxInsideCoroutine_nonLocalReturn.kt
 coroutines/inlineClasses/resume/bridgeGenerationCrossinline.kt
 coroutines/inlineClasses/resume/covariantOverrideSuspendFunSameJvmType.kt
 coroutines/inlineClasses/resume/covariantOverrideSuspendFunWithNullableInlineClassSameJvmType.kt
@@ -630,7 +623,6 @@ coroutines/inlineClasses/resumeWithException/boxTypeParameterOfSuperTypeResult.k
 coroutines/inlineClasses/resumeWithException/boxUnboxInsideCoroutine_InlineInt.kt
 coroutines/inlineClasses/resumeWithException/boxUnboxInsideCoroutine_Int.kt
 coroutines/inlineClasses/resumeWithException/boxUnboxInsideCoroutine_Long.kt
-coroutines/inlineClasses/resumeWithException/boxUnboxInsideCoroutine_nonLocalReturn.kt
 coroutines/inlineClasses/resumeWithException/bridgeGenerationCrossinline.kt
 coroutines/inlineClasses/resumeWithException/covariantOverrideSuspendFunSameJvmType.kt
 coroutines/inlineClasses/resumeWithException/covariantOverrideSuspendFunWithNullableInlineClassSameJvmType.kt
@@ -1171,8 +1163,6 @@ inference/pcla/issues/kt48633.kt
 inference/pcla/issues/kt49160a.kt
 inference/pcla/issues/kt49160b.kt
 inference/pcla/issues/kt49887.kt
-inference/pcla/issues/kt53639.kt
-inference/pcla/issues/kt59798.kt
 inference/pcla/issues/kt60291b.kt
 inference/pcla/issues/kt60291c.kt
 inference/pcla/issues/kt60447a.kt
@@ -1232,7 +1222,6 @@ inline/inlineLambdaWithCapture.kt
 inline/innerInlineFunCapturesOuter.kt
 inline/iteratorOnInlineFunctionResult.kt
 inline/kt26117.kt
-inline/kt26466.kt
 inline/kt67024.kt
 inline/kt67866.kt
 inline/kt69041.kt
@@ -1699,8 +1688,6 @@ objects/anonymousObjectPropertyInitialization.kt
 objects/companionObjectAccess/kt27117.kt
 objects/companionObjectAccess/kt27117_lv12.kt
 objects/companionObjectAccess/kt27117_lv13.kt
-objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInlineLambdaInNestedClass.kt
-objects/companionObjectAccess/privateCompanionObjectAccessedFromInlineLambdaInNestedClass.kt
 objects/compoundAssignmentToArrayAccessToExtensionPropertyImportedFromObject.kt
 objects/compoundAssignmentToArrayAccessToPropertyImportedFromObject.kt
 objects/flist.kt
@@ -1708,7 +1695,6 @@ objects/interfaceCompanionObjectReference.kt
 objects/kt11117.kt
 objects/kt2663.kt
 objects/kt2663_3.kt
-objects/kt32749.kt
 objects/localFunctionInObjectInitializer_kt4516.kt
 objects/objectInLocalAnonymousObject.kt
 objects/objectInitialization_kt5523.kt
@@ -2142,7 +2128,6 @@ regressions/implicitItContext.kt
 regressions/inaccessibleOperatorRanksBelowResolved.kt
 regressions/inapplicableFunctionValueYieldsToLaterCallLevel.kt
 regressions/inferredDeclarationOpenDependencyBranch.kt
-regressions/inferredResultCallsPastLexicalValue.kt
 regressions/inlineAnonymousObjectAcrossFiles.kt
 regressions/inlineCallsInInitializerLambda.kt
 regressions/inlineCrossinlineLambdaAcrossFiles.kt
@@ -2224,7 +2209,6 @@ regressions/multimodule/multimoduleFloatingBitReferences.kt
 regressions/multimodule/multimoduleInheritedGenericInlineMembers.kt
 regressions/multimodule/multimoduleLocalMemberExtensionExpectReceiver.kt
 regressions/multimodule/multimoduleOverriddenAnyMemberOnAliasActualizedBase.kt
-regressions/multimodule/multimoduleReceiverReturningScopeFunctions.kt
 regressions/multimodule/multimoduleReifiedCallableOrigins.kt
 regressions/multimodule/sourceLibraryClassIdentity.kt
 regressions/multimodule/sourceLibraryClassLayout.kt
@@ -2233,7 +2217,6 @@ regressions/multimodule/valueClassBoxedInAnotherModule.kt
 regressions/multimodule/valueClassConstructedInAnotherModule.kt
 regressions/namedInterfaceDelegateOrder.kt
 regressions/nestedGenericCallTakesOutermostParameter.kt
-regressions/nestedResultOfEnclosingTypeParameter.kt
 regressions/nestedResultOnlyCallArgumentOfMemberCall.kt
 regressions/nestedSpreadArrayFactories.kt
 regressions/nonNullIntersectionPublishesAny.kt
