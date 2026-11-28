@@ -137,41 +137,6 @@ fn library_backend(
 }
 
 impl NativeLane {
-    /// Compile every module but the last into a KLIB only, link the last module's program against
-    /// those KLIBs, and run it.
-    fn compile_klib_modules_and_run(
-        &self,
-        scratch: &Path,
-        stem: &str,
-        modules: &[krusty::conformance::ModuleUnit],
-        directive_source: &str,
-    ) -> Outcome {
-        let target = self.target.expect("checked by `unavailable`");
-        let backend = CraneliftBackend::new(target)
-            .with_entry(Entry::Box)
-            .verified();
-        let library = match library_backend(target, directive_source) {
-            Ok(library) => library,
-            Err(outcome) => return outcome,
-        };
-        let program = match box_lane::compile_modules_from_klibs(
-            ModuleCase {
-                scratch,
-                stem,
-                modules,
-            },
-            directive_source,
-            TestTarget::Native,
-            &backend,
-            &library,
-            DECLINE_PREFIX,
-        ) {
-            Ok(program) => program,
-            Err(outcome) => return outcome,
-        };
-        self.run_artifacts(scratch, stem, "klib-modules", directive_source, program)
-    }
-
     fn run_artifacts(
         &self,
         scratch: &Path,
@@ -242,6 +207,39 @@ impl NativeLane {
 }
 
 impl Lane for NativeLane {
+    fn compile_klib_modules_and_run(
+        &self,
+        scratch: &Path,
+        stem: &str,
+        modules: &[krusty::conformance::ModuleUnit],
+        directive_source: &str,
+    ) -> Outcome {
+        let target = self.target.expect("checked by `unavailable`");
+        let backend = CraneliftBackend::new(target)
+            .with_entry(Entry::Box)
+            .verified();
+        let library = match library_backend(target, directive_source) {
+            Ok(library) => library,
+            Err(outcome) => return outcome,
+        };
+        let program = match box_lane::compile_modules_from_klibs(
+            ModuleCase {
+                scratch,
+                stem,
+                modules,
+            },
+            directive_source,
+            TestTarget::Native,
+            &backend,
+            &library,
+            DECLINE_PREFIX,
+        ) {
+            Ok(program) => program,
+            Err(outcome) => return outcome,
+        };
+        self.run_artifacts(scratch, stem, "klib-modules", directive_source, program)
+    }
+
     fn platform(&self) -> Platform {
         Platform::Native
     }

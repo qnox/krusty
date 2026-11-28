@@ -30,6 +30,7 @@ use krusty::conformance::TestTarget;
 use krusty::diag::{DiagSink, Severity};
 use krusty::source::SourceInput;
 
+use super::box_lane_klib_route::KlibRoute;
 use super::box_lane_profile::{timed, Stage};
 use super::box_ratchet::{self, Platform};
 
@@ -110,6 +111,16 @@ pub trait Lane: Sync {
 
     /// Compile independently analyzed source modules and run the resulting target program.
     fn compile_modules_and_run(
+        &self,
+        scratch: &Path,
+        stem: &str,
+        modules: &[krusty::conformance::ModuleUnit],
+        directive_source: &str,
+    ) -> Outcome;
+
+    /// Compile every module but the last into a KLIB only, link the last module's program against
+    /// those KLIBs with [`compile_modules_from_klibs`], and run it.
+    fn compile_klib_modules_and_run(
         &self,
         scratch: &Path,
         stem: &str,
@@ -1190,7 +1201,13 @@ fn owned_fatal_outcomes_cannot_be_blessed_as_box_failures() {
     );
 }
 
-fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path, source: &str) -> Outcome {
+fn outcome(
+    lane: &dyn Lane,
+    klib_route: &KlibRoute,
+    scratch: &Path,
+    file: &Path,
+    source: &str,
+) -> Outcome {
     let source = source.to_owned();
     let stem = file
         .file_stem()
@@ -1276,9 +1293,33 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path, source: &str) -> Outcom
             }
             emitted.insert(unit.name.clone());
         }
-        return timed(Stage::Lane, || {
-            lane.compile_modules_and_run(scratch, stem, &units, &source)
-        });
+        let started = Instant::now();
+        let source_route = || {
+            timed(Stage::Lane, || {
+                lane.compile_modules_and_run(scratch, stem, &units, &source)
+            })
+        };
+        if !klib_route.enabled() {
+            return source_route();
+        }
+        // Measured beside the KLIB route, a source-route panic becomes the same outcome the
+        // corpus runner would record for it, so the case stays in both routes' comparison.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(source_route))
+            .unwrap_or_else(panic_outcome);
+        let source_time = started.elapsed();
+        let started = Instant::now();
+        // The KLIB route is measured, never ratcheted: its panic is its own outcome and
+        // leaves the source route's verdict alone.
+        let klib = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            lane.compile_klib_modules_and_run(scratch, stem, &units, &source)
+        }))
+        .unwrap_or_else(panic_outcome);
+        klib_route.record(
+            file.to_path_buf(),
+            (&result, source_time),
+            (klib, started.elapsed()),
+        );
+        return result;
     }
     let sources = match prepare_sources(&source, stem, lane.test_target()) {
         Ok(sources) => sources,
@@ -1336,6 +1377,21 @@ fn unexpected_failure_reason_report(
         .filter(|(file, _)| unexpected.contains(&relative(file)))
         .map(|(file, reason)| format!("  unexpected {}: {reason}\n", file.display()))
         .collect()
+}
+
+/// A panic inside the compiler, as the outcome of the case it interrupted, attributed to the file
+/// the panic hook recorded.
+fn panic_outcome(panic: Box<dyn std::any::Any + Send>) -> Outcome {
+    let message = panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_else(|| "panic".to_string());
+    let origin = LAST_PANIC_FILE.with(|last| last.borrow_mut().take());
+    Outcome::CompilerPanic(match origin {
+        Some(origin) => format!("{message} ({origin})"),
+        None => message,
+    })
 }
 
 /// Run the whole corpus through `lane` and hold it to the lane's committed ratchet.
@@ -1402,6 +1458,7 @@ pub fn run(lane: &dyn Lane) {
     let pool = pool.build().expect("build the worker pool");
 
     let bytes = super::box_klib_bytes::ByteRun::new(lane);
+    let klib_route = KlibRoute::from_env(lane.env_infix());
     let started = Instant::now();
     let progress = super::box_lane_profile::ProgressReporter::new(
         lane.label(),
@@ -1421,21 +1478,10 @@ pub fn run(lane: &dyn Lane) {
                 let source = std::fs::read_to_string(file);
                 let result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &source {
-                        Ok(source) => outcome(lane, &scratch.0, file, source),
+                        Ok(source) => outcome(lane, &klib_route, &scratch.0, file, source),
                         Err(error) => Outcome::Harness(format!("reading case: {error}")),
                     }))
-                    .unwrap_or_else(|panic| {
-                        let message = panic
-                            .downcast_ref::<String>()
-                            .cloned()
-                            .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                            .unwrap_or_else(|| "panic".to_string());
-                        let origin = LAST_PANIC_FILE.with(|last| last.borrow_mut().take());
-                        Outcome::CompilerPanic(match origin {
-                            Some(origin) => format!("{message} ({origin})"),
-                            None => message,
-                        })
-                    });
+                    .unwrap_or_else(panic_outcome);
                 bytes.record(
                     lane,
                     file,
@@ -1578,6 +1624,13 @@ pub fn run(lane: &dyn Lane) {
         "{}",
         unexpected_failure_reason_report(&traced, &unexpected_failure_keys, relative)
     );
+    if let Ok(path) = std::env::var(env("BOX_KLIB_ROUTE_REPORT")) {
+        std::fs::write(path, klib_route.rows(relative))
+            .unwrap_or_else(|error| panic!("failed to write {label} KLIB route report: {error}"));
+    }
+    if let Some(parity) = klib_route.report(platform.name(), relative) {
+        eprint!("{parity}");
+    }
 
     // Triage: name the cases behind one decline reason, so a line in the table below can be
     // followed back to the source that produced it.
@@ -1920,4 +1973,45 @@ fn report_line_has_a_stable_shape() {
         report_line("native", &[("scanned", 3), ("passed", 1)]),
         "native conformance: scanned 3, passed 1"
     );
+}
+
+#[test]
+fn a_module_links_each_direct_dependency_before_that_dependency_s_own_libraries() {
+    let source = "\
+// MODULE: a
+// FILE: a.kt
+fun a() = 1
+// MODULE: b(a)
+// FILE: b.kt
+fun b() = a()
+// MODULE: c(b)
+// FILE: c.kt
+fun c() = b()
+// MODULE: main(c)(a)
+// FILE: main.kt
+fun box() = \"OK\"
+";
+    let modules = krusty::conformance::split_modules(source).expect("valid module graph");
+    let units = krusty::conformance::module_units(&modules);
+    let mut generated = BTreeMap::new();
+    for unit in &units[..units.len() - 1] {
+        let (transitive, _) = dependency_closure(unit, &generated).expect("dependencies built");
+        let archive = PathBuf::from(format!("{}.klib", unit.name));
+        generated.insert(
+            unit.name.clone(),
+            GeneratedDependency {
+                archive,
+                transitive,
+            },
+        );
+    }
+    let program = units.last().expect("a final module");
+    let (libraries, friends) = dependency_closure(program, &generated).expect("dependencies built");
+    // The first library that provides a signature wins, so a module's own dependency must precede
+    // the libraries it reached only through that dependency.
+    assert_eq!(
+        libraries,
+        ["c.klib", "b.klib", "a.klib"].map(PathBuf::from).to_vec()
+    );
+    assert_eq!(friends, vec![PathBuf::from("a.klib")]);
 }

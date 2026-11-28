@@ -25,6 +25,8 @@ mod box_jvm_compile;
 mod box_klib_bytes;
 #[path = "box_lane.rs"]
 mod box_lane;
+#[path = "box_lane_klib_route.rs"]
+mod box_lane_klib_route;
 #[path = "box_lane_profile.rs"]
 mod box_lane_profile;
 #[path = "box_ratchet.rs"]
