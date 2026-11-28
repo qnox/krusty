@@ -273,7 +273,7 @@ impl ProductionSignatureSemantics<'_> {
         self.record_source_diagnostic(declaration, origin, report)
     }
 
-    /// Report `UNSAFE_CALL` when the member exists on the receiver's non-null type; otherwise report
+    /// Report `UNSAFE_CALL` when the callee exists on the receiver's non-null type; otherwise report
     /// `UNRESOLVED_REFERENCE` with the same receiver facts as body checking.
     pub(super) fn record_missing_member(
         &self,
@@ -309,7 +309,7 @@ impl ProductionSignatureSemantics<'_> {
             Some((file, span)) if non_null_member => self.record_source_diagnostic_at(
                 scope.owner,
                 file,
-                Span::new(span.lo.saturating_sub(1), span.hi),
+                Span::new(span.lo.saturating_sub(1), span.lo),
                 crate::diagnostic_wording::unsafe_call(&receiver.source_name()),
             ),
             _ => self.record_unresolved_member(scope, origin, receiver, spelling),

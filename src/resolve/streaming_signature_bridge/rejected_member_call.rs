@@ -812,7 +812,7 @@ impl ProductionSignatureSemantics<'_> {
         candidates: &[crate::libraries::FunctionInfo],
     ) -> crate::fir::DiagnosticId {
         if candidates.is_empty() {
-            self.record_unresolved_member(scope, origin, receiver, spelling)
+            self.record_missing_member(scope, origin, receiver, spelling)
         } else {
             self.record_inapplicable_member_call(scope.owner, origin, spelling, candidates)
         }

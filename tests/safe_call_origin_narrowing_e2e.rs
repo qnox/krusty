@@ -85,10 +85,9 @@ fn assert_both_reject_unsafe_receiver(rejected: RejectedUnsafeReceiver<'_>) {
         (
             1,
             format!(
-                "{krusty_path}:{line}:{krusty_column}: error: {krusty_message}\n{source_line}\n{}{}\nkrusty: 1 error(s)\n",
+                "{krusty_path}:{line}:{krusty_column}: error: {krusty_message}\n{source_line}\n{}^\nkrusty: 1 error(s)\n",
+                // krusty's UNSAFE_CALL marks the receiver's dot alone, as kotlinc's does.
                 " ".repeat(krusty_column - 1),
-                // krusty underlines five characters from the dot where kotlinc marks the dot alone.
-                "^".repeat(5)
             )
             .as_str()
         )

@@ -4837,7 +4837,7 @@ impl<'a> Checker<'a> {
             {
                 if report_diagnostics {
                     let nullable_member_span =
-                        Span::new(diagnostic_span.lo.saturating_sub(1), diagnostic_span.hi);
+                        Span::new(diagnostic_span.lo.saturating_sub(1), diagnostic_span.lo);
                     let receiver = self.diagnostic_type_name(rt, &[rt]);
                     self.diags.report_error(
                         nullable_member_span,
