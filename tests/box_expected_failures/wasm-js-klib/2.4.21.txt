@@ -475,11 +475,9 @@ initializers/throw2.kt
 inline/crossModuleTypeOf.kt
 inline/crossinlineLambdaAllocation.kt
 inline/defaultArgs.kt
-inline/defaultArgsLateinitLowering.kt
 inline/inline16.kt
 inline/inline17.kt
 inline/inline21.kt
-inline/lateinitProperty.kt
 inline/localObjectReturnedFromWhen.kt
 inline/propertyAccessorInline.kt
 inline/typeParameterSymbolIsUnbound.kt
