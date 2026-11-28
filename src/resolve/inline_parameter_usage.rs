@@ -74,11 +74,15 @@ impl Checker<'_> {
                 continue;
             };
             let message = format!(
-                "illegal usage of inline parameter '{}: {}'. Add 'noinline' modifier to the parameter declaration.",
+                "Illegal usage of inline parameter '{}: {}'. Add 'noinline' modifier to the parameter declaration.",
                 parameter.name,
                 parameter.ty.source_name(),
             );
-            self.diags.error(self.span(read), message);
+            self.diags.error_named(
+                self.span(read),
+                crate::diag::names::USAGE_IS_NOT_INLINABLE,
+                message,
+            );
         }
     }
 

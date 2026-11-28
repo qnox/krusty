@@ -6271,11 +6271,11 @@ fun conditional(r: Runtime?, flag: Boolean) = run {
         vec![
             (
                 0,
-                crate::diag::Span::new(124, 131),
+                crate::diag::Span::new(124, 125),
                 None,
                 crate::diag::Severity::Error,
                 crate::diag::DiagnosticKind::Compiler,
-                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Runtime?'.",
+                "Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Runtime?'.",
                 None,
             ),
         ],

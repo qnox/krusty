@@ -405,10 +405,30 @@ impl DiagSink {
     }
 
     pub fn error_kind(&mut self, span: Span, kind: DiagnosticKind, msg: impl Into<String>) {
+        self.push_error_of_kind(span, kind, None, msg.into());
+    }
+
+    /// [`Self::error_kind`] under its kotlinc name. `msg` is kotlinc's `renderMessage()`.
+    pub fn error_named_kind(
+        &mut self,
+        span: Span,
+        kind: DiagnosticKind,
+        name: DiagnosticName,
+        msg: impl Into<String>,
+    ) {
+        self.push_error_of_kind(span, kind, Some(name), msg.into());
+    }
+
+    fn push_error_of_kind(
+        &mut self,
+        span: Span,
+        kind: DiagnosticKind,
+        name: Option<DiagnosticName>,
+        msg: String,
+    ) {
         if !self.accepts(span) {
             return;
         }
-        let msg = msg.into();
         crate::trace_compiler!(
             "diagnostic",
             "file={} span={span:?} kind={kind:?} message={msg}",
@@ -418,7 +438,7 @@ impl DiagSink {
             span,
             editor_span: None,
             severity: Severity::Error,
-            name: None,
+            name,
             kind,
             msg,
             identity: None,

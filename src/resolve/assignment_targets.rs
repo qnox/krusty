@@ -50,12 +50,16 @@ impl Checker<'_> {
         Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
     }
 
-    pub(super) fn report_val_reassignment(&mut self, span: Span, message: impl Into<String>) {
+    pub(super) fn report_val_reassignment(&mut self, span: Span) {
         if self.unreachable_statement_depth != 0 {
             return;
         }
-        self.diags
-            .error_kind(span, crate::diag::DiagnosticKind::ValReassignment, message);
+        self.diags.error_named_kind(
+            span,
+            crate::diag::DiagnosticKind::ValReassignment,
+            crate::diag::names::VAL_REASSIGNMENT,
+            "'val' cannot be reassigned.",
+        );
     }
 
     /// kotlinc's assignment plugin. `target = value`, where `target` is a non-local `val` property
