@@ -124,19 +124,16 @@ impl FunctionHeader {
     }
 }
 
+/// The header of the closure `function`, whose types `types` names (the enclosing body's type
+/// parameters and the non-public classes its header uses), after the `captures` prefix.
 pub(in super::super) fn closure_header(
     arena: &KlibIrArena,
     function: &KlibIrFunction,
-    enclosing: &FunctionHeader,
+    types: KlibTypeParameters,
     captures: &[CaptureParameter],
 ) -> Result<FunctionHeader, KlibBodyDeclineReason> {
-    let mut header = raw_function_header_with_class(
-        None,
-        HeaderPurpose::Body(None),
-        arena,
-        function,
-        enclosing.type_parameters.clone(),
-    )?;
+    let mut header =
+        raw_function_header_with_class(None, HeaderPurpose::Body(None), arena, function, types)?;
     let prefix = u32::try_from(captures.len()).expect("a capture list fits u32");
     for parameter in header.values.values_mut() {
         parameter.index += prefix;
