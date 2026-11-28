@@ -377,6 +377,25 @@ impl Emitter<'_> {
         carrier
     }
 
+    /// `StackValue.coerce` of a lambda body's reference value `carrier` to the reference class
+    /// its method declares as `declared`, at the body's return: the carrier the method returns.
+    fn cast_lambda_result(&mut self, declared: Ty, carrier: Ty, code: &mut CodeBuilder) -> Ty {
+        let physical = ir_ty_to_jvm(&declared);
+        if carrier.is_jvm_scalar()
+            || physical.is_jvm_scalar()
+            || self.is_value_class_ty(&declared)
+            || type_descriptor(physical) == type_descriptor(carrier)
+        {
+            return carrier;
+        }
+        let Some(internal) = checkcast_internal(physical) else {
+            return carrier;
+        };
+        let class = self.cw.class_ref(&internal);
+        code.checkcast(class);
+        physical
+    }
+
     /// `StackValue.coerce` of the lambda body's result of Kotlin type `semantic`, which the body
     /// leaves as `carrier`, to the `Object` the replaced `invoke` returns, as the byte splice places
     /// it after the inline body.
@@ -696,6 +715,27 @@ impl Emitter<'_> {
             Ty::obj("java/lang/Object")
         } else {
             result
+        };
+        // kotlinc's lambda method returns its declared result: a reference body value of another
+        // class is cast to it inside the lambda's frame (`{ it.values }` for an `Iterable`
+        // result), which leaves the callee's own cast after `invoke` redundant.
+        let result = if scratch.is_dead() || type_descriptor(result) == "V" {
+            result
+        } else {
+            // The implicit return of a value body carries the line its result ends on, which an
+            // inlined call ending the body made the line mapper forget (`{ xs.map { … } }`). A
+            // reference's adapter returns on the reference's own line, marked at its start.
+            let mut tail = inline_body;
+            while let IrExpr::Block {
+                value: Some(value), ..
+            } = self.ir.expr(tail)
+            {
+                tail = *value;
+            }
+            if let Some(line) = self.ir.end_line(tail).filter(|_| reference_line.is_none()) {
+                self.mark_expression_line(tail, line, &mut scratch);
+            }
+            self.cast_lambda_result(declared_result, result, &mut scratch)
         };
         // A `Unit` body may or may not leave `Unit.INSTANCE`; any other body leaves its value. A
         // body that always throws or returns non-locally ends without a return of its own.

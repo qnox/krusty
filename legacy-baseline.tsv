@@ -20,8 +20,8 @@
 8	uses	merge_generic_upper_bindings
 8	uses	complete_bottom_constraint_bindings
 # Unifiers that run beside the call constraint system, and name-keyed substitution.
-48	uses	unify_ty
-29	uses	unify_ty_from_symbols
+47	uses	unify_ty
+30	uses	unify_ty_from_symbols
 42	uses	unify_inferred_ty
 7	uses	unify_inferred_ty_with_source
 7	uses	unify_ty_common
