@@ -187,7 +187,6 @@ controlStructures/forInCharSequenceWithIndex/forInStringWithIndexNameBasedDestru
 controlStructures/forInIterableWithIndex/forInListWithIndexNameBasedDestructuringShortForm.kt
 controlStructures/forInSequenceWithIndex/forInSequenceWithIndexNameBasedDestructuringShortForm.kt
 controlStructures/kt416.kt
-controlStructures/kt513.kt
 controlStructures/kt628.kt
 controlflow/for_loops.kt
 controlflow/for_loops_array_break_continue.kt
@@ -765,7 +764,6 @@ reflection/typeOf/nonReifiedTypeParameters/upperBoundUsesOuterClassParameter.kt
 reflection/typeOf/nonReifiedTypeParameters/upperBounds.kt
 reflection/typeOf/reifiedAsNestedArgument.kt
 reflection/typeOf/typeOfCapturedStar.kt
-regressions/kt15196.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
 regressions/kt5056.kt
