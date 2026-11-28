@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Contract of scripts/strip-comment-footers.sh against a stand-in `gh`: a comment, review comment or
 # review that ends with an integration's footer is written back without it, by the method its kind
-# takes; a clean comment and Dependabot's text are not written at all. A sweep covers reviews too.
+# takes; a clean comment, one that is only a footer, and Dependabot's text are not written at all.
+# A sweep covers reviews too, and a refused write fails the run without stopping the sweep.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -36,6 +37,7 @@ if [[ $method == GET ]]; then
     cat "$GH_FAKE/api/$path.json"
   fi
 else
+  [[ $path == "${GH_FAKE_REFUSE:-}" ]] && exit 1
   echo "$method $path" >> "$GH_FAKE/writes"
   mkdir -p "$(dirname "$GH_FAKE/body/$path")"
   cp "${field#body=@}" "$GH_FAKE/body/$path"
@@ -94,6 +96,22 @@ writes "clean comment" ""
 item repos/o/r/issues/comments/5 'dependabot[bot]' "Release notes.$footer"
 run --comment repos/o/r/issues/comments/5
 writes "dependabot" ""
+
+# A comment that is only a footer is left alone: GitHub refuses an empty body.
+item repos/o/r/issues/comments/9 qnox "$footer"
+run --comment repos/o/r/issues/comments/9
+writes "only a footer" ""
+
+# A refused write is reported, the rest of a sweep goes on, and the run fails.
+item repos/o/r/issues/comments/10 qnox "Refused.$footer"
+jq -s . "$work/api/repos/o/r/issues/comments/10.json" "$work/api/repos/o/r/issues/comments/1.json" \
+  > "$work/api/repos/o/r/issues/comments.list"
+echo '[]' > "$work/api/repos/o/r/pulls/comments.list"
+echo '[]' > "$work/api/repos/o/r/issues.list"
+if GH_FAKE_REFUSE=repos/o/r/issues/comments/10 run --since 2026-01-01T00:00:00Z; then
+  fail "a refused write did not fail the run"
+fi
+writes "refused write" "PATCH repos/o/r/issues/comments/1"
 
 # A sweep reads both repository-wide comment listings and the reviews of each pull request (not
 # issue) updated since then, and writes only what carries a footer. A listed review has no API URL

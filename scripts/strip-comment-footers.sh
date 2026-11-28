@@ -18,6 +18,7 @@ strip=$(cd "$(dirname "$0")" && pwd)/check-attribution.sh
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cleaned=0
+failed=0
 
 # <api-url> <author login> <body file>
 clean() {
@@ -25,9 +26,19 @@ clean() {
   [[ $author == 'dependabot[bot]' ]] && return 0
   "$strip" --strip-footer "$body" > "$work/clean"
   cmp -s "$body" "$work/clean" && return 0
+  # GitHub refuses an empty body, so a comment that is only a footer stays as it is.
+  if ! grep -q '[^[:space:]]' "$work/clean"; then
+    echo "left $url: it is only a footer"
+    return 0
+  fi
   # A review's body is replaced with PUT; a comment's with PATCH.
   [[ $url == */reviews/* ]] && method=PUT
-  gh api -X "$method" "$url" -F "body=@$work/clean" > /dev/null
+  # One refused write does not stop a sweep; the run still fails at the end.
+  if ! gh api -X "$method" "$url" -F "body=@$work/clean" > /dev/null; then
+    echo "::error title=attribution::could not remove the footer from $url"
+    failed=$((failed + 1))
+    return 0
+  fi
   echo "removed the footer from $url"
   cleaned=$((cleaned + 1))
 }
@@ -62,4 +73,5 @@ case "${1:-}" in
     ;;
 esac
 
-echo "strip-comment-footers: $cleaned cleaned"
+echo "strip-comment-footers: $cleaned cleaned, $failed failed"
+((failed == 0))
