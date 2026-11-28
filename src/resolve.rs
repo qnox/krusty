@@ -32602,9 +32602,9 @@ impl<'a> Checker<'a> {
         nullable: bool,
         infer_arguments: bool,
     ) -> Option<Ty> {
+        // A function classifier is its function type; a callable nominal one (`KProperty1`) stays.
         let runtime_tt =
-            crate::symbol_resolver::classifier_callable_signature(&self.fed_source(), tt)
-                .unwrap_or(tt);
+            crate::symbol_resolver::declared_function_type(&self.fed_source(), tt).unwrap_or(tt);
         let runtime_tt = stable_ty
             .filter(|_| infer_arguments)
             .map(|declared| {

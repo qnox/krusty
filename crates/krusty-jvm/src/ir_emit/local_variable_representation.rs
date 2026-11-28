@@ -210,6 +210,11 @@ impl Emitter<'_> {
             .map(|initializer| self.value_ty(initializer))
             // A local declaration always owns a value slot. Semantic Unit is the singleton here;
             // only a callable control-flow return uses the JVM void representation.
+            .or_else(|| {
+                initializer
+                    .and_then(|initializer| self.safe_cast_uncast_operand(declaration, initializer))
+                    .map(|uncast| self.value_ty(uncast))
+            })
             .unwrap_or_else(|| slot_type(self.ir, declaration, semantic_ty));
 
         // The synthetic zero on an inline-return result exists for common-IR definite assignment;
@@ -449,8 +454,9 @@ impl Emitter<'_> {
                     source
                 } else if let Some((holder, elem, _)) = shared_cell_snapshot(self.ir, declaration) {
                     self.emit_shared_cell_read(holder, elem, false, code)
-                } else if let Some(uncast) =
-                    self.erased_slot_smart_cast_operand(declaration, initializer, slot_ty)
+                } else if let Some(uncast) = self
+                    .erased_slot_smart_cast_operand(declaration, initializer, slot_ty)
+                    .or_else(|| self.safe_cast_uncast_operand(declaration, initializer))
                 {
                     self.emit_consumed_operand(uncast, code)
                 } else {
@@ -498,6 +504,17 @@ impl Emitter<'_> {
         (erased_parameter || self.is_invoke_parameter(declaration))
             .then(|| self.consumed_implicit_cast_operand(initializer))
             .flatten()
+    }
+
+    /// The value beneath the smart casts of a safe cast's operand, which its temporary holds. A
+    /// smart cast is kotlinc's implicit cast: the safe cast stores the value uncast, tests it, and
+    /// casts it only to its own target.
+    fn safe_cast_uncast_operand(&self, declaration: ExprId, initializer: ExprId) -> Option<ExprId> {
+        if !self.ir.safe_cast_temporaries.contains(&declaration) {
+            return None;
+        }
+        self.consumed_implicit_cast_operand(initializer)
+            .filter(|&uncast| self.value_ty(uncast).is_reference())
     }
 
     /// An inlined lambda's parameter, bound from the operand its body's `invoke` passes.
