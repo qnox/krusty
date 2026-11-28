@@ -18,10 +18,23 @@ pub(crate) fn unify_receiver_from_symbols(
     receiver: Ty,
     bindings: &mut GSigBinds,
 ) {
-    // A value proved to be several types is each of them: every constituent constrains the
-    // declared receiver's formals.
-    if let TyKind::Intersection(parts) = receiver.non_null().kind() {
+    // A value proved to be several types is each of them: against a declared classifier
+    // receiver, every constituent constrains its formals, at the receiver's own nullability. A
+    // bare formal receiver (`<T> T.also`) is bound to the whole intersection instead, as kotlinc
+    // binds it.
+    let parts = match receiver.non_null().kind() {
+        TyKind::Intersection(parts) if declared.non_null().kotlin_class_internal().is_some() => {
+            Some(parts)
+        }
+        _ => None,
+    };
+    if let Some(parts) = parts {
         for &part in parts.iter() {
+            let part = if receiver.is_nullable() {
+                Ty::nullable(part)
+            } else {
+                part
+            };
             unify_receiver_from_symbols(source, declared, part, bindings);
         }
         return;

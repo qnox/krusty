@@ -189,40 +189,23 @@ pub(crate) fn function_shape_matches(src: &dyn SymbolSource, actual: Ty, declare
 
 impl ReceiverMro {
     pub(crate) fn new(src: &dyn SymbolSource, recv: Ty) -> ReceiverMro {
-        // An intersection is every one of its constituents, in the order the flow proved them
-        // (the declared type first). A declared extension receiver is met through the first
-        // constituent whose supertype closure reaches it: a later constituent starts after every
-        // rung of the earlier ones, so a candidate applicable to the declared type outranks one
-        // that needs the smart cast (`A.cast()` over `B.cast()` for an `A` proved to be `B`).
-        if let TyKind::Intersection(parts) = recv.non_null().kind() {
-            let mut ranks: Vec<(Ty, u32)> = Vec::new();
-            let mut offset = 0u32;
-            for &part in parts.iter() {
-                let closure = ReceiverMro::new(src, part).ranks;
-                let depth = closure
-                    .iter()
-                    .map(|&(_, rung)| rung)
-                    .max()
-                    .map_or(0, |rung| rung + 1);
-                for (applied, rung) in closure {
-                    let internal = applied.kotlin_class_internal();
-                    if !ranks
-                        .iter()
-                        .any(|(seen, _)| seen.kotlin_class_internal() == internal)
-                    {
-                        ranks.push((applied, offset + rung));
+        let mut ranks = Vec::new();
+        if let Some(components) = super::hierarchy_projection::intersection_components(recv) {
+            // An intersection has no classifier of its own: it is each component, so an extension
+            // declared on any supertype of any component applies, at that component's rung. Two
+            // components at one rung tie, as kotlinc reports `A.cast()` and `B.cast()` ambiguous
+            // on an `A` proved to be `B`.
+            for component in components {
+                for (applied, rung) in ReceiverMro::new(src, *component).ranks {
+                    match ranks.iter_mut().find(|(seen, _): &&mut (Ty, u32)| {
+                        seen.kotlin_class_internal() == applied.kotlin_class_internal()
+                    }) {
+                        Some((_, seen_rung)) => *seen_rung = (*seen_rung).min(rung),
+                        None => ranks.push((applied, rung)),
                     }
                 }
-                offset += depth;
             }
-            return ReceiverMro {
-                recv,
-                ranks,
-                type_variables: Vec::new(),
-            };
-        }
-        let mut ranks = Vec::new();
-        if let Some(internal) = recv.erased_recv().kotlin_class_internal() {
+        } else if let Some(internal) = recv.erased_recv().kotlin_class_internal() {
             let root = if recv.non_null().obj_internal().is_some() {
                 recv.non_null()
             } else {
