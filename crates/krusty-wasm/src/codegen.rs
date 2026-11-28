@@ -426,7 +426,7 @@ impl Backend for WasmBackend {
         started
             .runtime
             .class_tokens
-            .finalize(&mut started.module, &started.runtime.objects);
+            .finalize(&mut started.module, &mut started.runtime.objects);
         let start = started.module.declare();
         let ty = started.module.func_type(Vec::new(), Vec::new());
         let mut code = Code::default();

@@ -21,7 +21,7 @@
 
 use krusty::backend::class_names::{ReflectionNameKind, ReflectionNames, ANONYMOUS_OBJECT_NAME};
 use krusty::fx_hash::HashMap;
-use krusty::types::TypeName;
+use krusty::types::{wk, TypeName};
 
 use super::encode::{BlockType, Code, CompositeType, Function, HeapType, Module, SubType, ValType};
 use super::objects::{immutable, ObjectRoot};
@@ -154,6 +154,8 @@ pub(super) struct ClassTokens {
     /// The function `(token, value) -> i32` choosing among [`Self::tests`], declared by the first
     /// `isInstance` of a token that is not a literal and written when the module is finished.
     is_instance: Option<u32>,
+    /// `$String`, whose values carry no dispatch table.
+    string: u32,
 }
 
 /// The runtime functions a class token's table calls.
@@ -233,6 +235,7 @@ impl ClassTokens {
             table,
             tests: Vec::new(),
             is_instance: None,
+            string: runtime.string,
         }
     }
 
@@ -246,6 +249,33 @@ impl ClassTokens {
         self.tests.push((info, test));
     }
 
+    /// Register, once, the test of the class whose record is `info` and whose instances are the
+    /// values of the struct `structure` and its subtypes.
+    pub(super) fn register_struct_test(&mut self, module: &mut Module, info: u32, structure: u32) {
+        self.register_heap_test(module, info, HeapType::Concrete(structure));
+    }
+
+    /// Register, once, the test of the class whose record is `info` and whose instances are the
+    /// values of the heap type `heap`.
+    pub(super) fn register_heap_test(&mut self, module: &mut Module, info: u32, heap: HeapType) {
+        if self.has_test(info) {
+            return;
+        }
+        let ty = module.func_type(vec![super::objects::REFERENCE], vec![ValType::I32]);
+        let test = module.declare();
+        let mut code = Code::default();
+        code.local_get(0).ref_test(false, heap);
+        module.define(
+            test,
+            Function {
+                ty,
+                locals: Vec::new(),
+                code,
+            },
+        );
+        self.register_test(info, test);
+    }
+
     /// The function `(token, value) -> i32` answering `KClass.isInstance` for any token, which
     /// [`Self::finalize`] writes once every class literal of the module has registered its test.
     pub(super) fn is_instance(&mut self, module: &mut Module) -> u32 {
@@ -253,15 +283,19 @@ impl ClassTokens {
     }
 
     /// Write the function [`Self::is_instance`] declared: the test registered for the token's
-    /// record, by a class literal or by the declaration of a class with instances. A record of a
-    /// runtime representation (a string, a box, an array) no class literal named carries no way to
-    /// test a value, so it traps rather than answer from a guess.
-    pub(super) fn finalize(&self, module: &mut Module, objects: &ObjectRoot) {
+    /// record, by a class literal or by the declaration of a class with instances. A record with
+    /// no registered test names a final runtime representation (a string, a box, an array) that
+    /// no class literal of the module named, so its instances are the values whose own record is
+    /// that record.
+    pub(super) fn finalize(&self, module: &mut Module, objects: &mut ObjectRoot) {
         let Some(function) = self.is_instance else {
             return;
         };
+        let string_info = objects.type_infos.global(module, wk::string());
+        let info_ty = objects.type_infos.ty;
         let token = HeapType::Concrete(self.structure);
-        let record = ValType::reference(objects.type_infos.ty);
+        let record = ValType::reference(info_ty);
+        let nullable_record = ValType::nullable(info_ty);
         let mut code = Code::default();
         // The value is a local the token's record follows.
         code.local_get(1).ref_is_null().if_(BlockType::Empty);
@@ -277,7 +311,26 @@ impl ClassTokens {
                 .if_(BlockType::Empty);
             code.local_get(1).call(*test).return_().end();
         }
-        code.unreachable();
+        // The value's own record: a string's, or its dispatch table's, which a runtime object
+        // without one (a function value) lacks.
+        code.local_get(1)
+            .ref_test(false, HeapType::Concrete(self.string))
+            .if_(BlockType::Value(nullable_record))
+            .global_get(string_info)
+            .else_()
+            .local_get(1)
+            .ref_test(false, HeapType::Concrete(objects.object))
+            .if_(BlockType::Value(nullable_record))
+            .local_get(1)
+            .ref_cast(false, HeapType::Concrete(objects.object))
+            .struct_get(objects.object, 0)
+            .struct_get(objects.any_table, super::objects::TYPE_INFO_FIELD)
+            .else_()
+            .ref_null(HeapType::Concrete(info_ty))
+            .end()
+            .end()
+            .local_get(2)
+            .ref_eq();
         let ty = module.func_type(vec![super::objects::REFERENCE; 2], vec![ValType::I32]);
         module.define(
             function,
