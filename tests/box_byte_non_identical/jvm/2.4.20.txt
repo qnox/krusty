@@ -826,7 +826,6 @@ coroutines/varSpilling/kt64139.kt
 coroutines/varSpilling/kt75926.kt
 coroutines/varSpilling/kt79276.kt
 coroutines/varSpilling/kt83372.kt
-coroutines/varSpilling/kt85203.kt
 coroutines/varSpilling/kt85203_2.kt
 coroutines/varSpilling/nullSpilling.kt
 coroutines/varSpilling/refinedIntTypesAnalysis.kt

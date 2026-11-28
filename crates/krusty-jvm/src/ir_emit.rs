@@ -1928,6 +1928,21 @@ fn emit_class(
             &metadata.enclosing_method,
             &metadata.enclosing_descriptor,
         );
+        // A continuation of an `inline` function is generated inside it: code inlining the
+        // function copies the class, so kotlinc writes its identity source map.
+        if metadata
+            .enclosing_function
+            .is_some_and(|function| ir.inline_fns.contains(&function))
+        {
+            enclosure::start_inline_class_source_map(
+                ir,
+                env.override_results,
+                c,
+                None,
+                facade,
+                &mut cw,
+            );
+        }
     }
     sealed_subtypes::register(
         &mut cw,

@@ -19,6 +19,7 @@ pub enum SuspendMarker {
     BeforeFakeContinuationConstructorCall = 4,
     AfterFakeContinuationConstructorCall = 5,
     BeforeInlineSuspend = 6,
+    AfterInlineSuspend = 7,
     BeforeUnboxInlineClass = 8,
     AfterUnboxInlineClass = 9,
     SuspendLambdaParameter = 10,
