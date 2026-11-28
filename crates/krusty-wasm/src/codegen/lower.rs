@@ -1279,7 +1279,7 @@ impl<'a> Body<'a> {
                 let target = self.find_loop(label.as_deref())?.next;
                 self.control_transfer(exceptions::Transfer::Branch(target), None)?;
             }
-            IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(id, op, lhs, rhs)?,
+            IrExpr::PrimitiveBinOp { op, lhs, rhs, .. } => self.binary(id, op, lhs, rhs)?,
             IrExpr::Equality { op, mode, lhs, rhs } => self.equality(op, mode, lhs, rhs)?,
             IrExpr::RefGet { holder, elem } => self.shared_cell_read(holder, elem)?,
             IrExpr::RefSet {

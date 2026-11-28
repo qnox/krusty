@@ -99,11 +99,9 @@ pub(super) fn operation(
             let lhs = coerce(ir, receiver, receiver_ty, arithmetic(carrier(lhs_ty)));
             let rhs = coerce(ir, *argument, parameter, arithmetic(carrier(rhs_ty)));
             if arithmetic(result) == result {
-                return Some(BuiltinMemberOperation::Value(IrExpr::PrimitiveBinOp {
-                    op,
-                    lhs,
-                    rhs,
-                }));
+                return Some(BuiltinMemberOperation::Value(IrExpr::primitive_bin_op(
+                    op, lhs, rhs,
+                )));
             }
             let value = ir.add_arithmetic(op, lhs, rhs, arithmetic(result));
             Some(BuiltinMemberOperation::Value(IrExpr::TypeOp {
@@ -165,11 +163,7 @@ fn unary_operation(
             } else {
                 IrConst::Int(-1)
             }));
-            Some(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::BitXor,
-                lhs: operand,
-                rhs: all_bits,
-            })
+            Some(IrExpr::primitive_bin_op(IrBinOp::BitXor, operand, all_bits))
         }
         _ => None,
     };
@@ -287,8 +281,7 @@ mod tests {
             IrExpr::PrimitiveBinOp {
                 op: IrBinOp::Ushr,
                 lhs,
-                rhs,
-            } if matches!(
+                rhs, .. } if matches!(
                 ir.expr(*lhs),
                 IrExpr::TypeOp { type_operand: Ty::Int, .. }
             ) && matches!(
@@ -318,8 +311,7 @@ mod tests {
             IrExpr::PrimitiveBinOp {
                 op: IrBinOp::Shl,
                 lhs,
-                rhs,
-            } if matches!(
+                rhs, .. } if matches!(
                 ir.expr(*lhs),
                 IrExpr::TypeOp { type_operand: Ty::Long, .. }
             ) && matches!(

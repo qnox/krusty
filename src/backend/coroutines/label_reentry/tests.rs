@@ -97,7 +97,7 @@ fn stmts(ir: &IrFile, block: ExprId) -> Vec<ExprId> {
 /// `label == value`, read from the machine's label slot.
 fn is_label(ir: &IrFile, expression: ExprId, value: i32) -> bool {
     matches!(ir.exprs[expression as usize],
-        IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs, rhs }
+        IrExpr::PrimitiveBinOp { op: IrBinOp::Eq, lhs, rhs, .. }
             if matches!(ir.exprs[lhs as usize], IrExpr::GetValue(0))
                 && matches!(ir.exprs[rhs as usize], IrExpr::Const(IrConst::Int(v)) if v == value))
 }

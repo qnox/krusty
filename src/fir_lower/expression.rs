@@ -391,11 +391,11 @@ impl BodyLowering<'_> {
                     }
                 }
                 let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: lower_binary_operation(*operation),
-                    lhs: call,
-                    rhs: zero,
-                })
+                self.ir.add_expr(IrExpr::primitive_bin_op(
+                    lower_binary_operation(*operation),
+                    call,
+                    zero,
+                ))
             }
             FirExprKind::ContainmentCall { call, negated } => {
                 let call = self
@@ -738,7 +738,7 @@ impl BodyLowering<'_> {
                         let rhs = self.expression(*rhs)?;
                         let op = lower_binary_operation(*operation);
                         if op.yields_boolean() {
-                            self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs })
+                            self.ir.add_expr(IrExpr::primitive_bin_op(op, lhs, rhs))
                         } else {
                             // The checked type of the operator call is the selected operator's
                             // declared result: `Int.plus(Long): Long`, `Char.minus(Char): Int`.
@@ -854,11 +854,9 @@ impl BodyLowering<'_> {
                 let null_test = |lowering: &mut Self, temporary| {
                     let value = lowering.ir.add_expr(IrExpr::GetValue(temporary));
                     let null = lowering.ir.add_expr(IrExpr::Const(IrConst::Null));
-                    lowering.ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: IrBinOp::RefEq,
-                        lhs: value,
-                        rhs: null,
-                    })
+                    lowering
+                        .ir
+                        .add_expr(IrExpr::primitive_bin_op(IrBinOp::RefEq, value, null))
                 };
                 let converted = |lowering: &mut Self, temporary, primitive: ResolvedTy| {
                     let value = lowering.ir.add_expr(IrExpr::GetValue(temporary));
@@ -879,11 +877,11 @@ impl BodyLowering<'_> {
                 };
                 let lhs_present = converted(self, lhs_temporary, *lhs_primitive);
                 let rhs_present = converted(self, rhs_temporary, *rhs_primitive);
-                let present_comparison = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: lower_binary_operation(*operation),
-                    lhs: lhs_present,
-                    rhs: rhs_present,
-                });
+                let present_comparison = self.ir.add_expr(IrExpr::primitive_bin_op(
+                    lower_binary_operation(*operation),
+                    lhs_present,
+                    rhs_present,
+                ));
                 let rhs_is_null = null_test(self, rhs_temporary);
                 let rhs_null_result = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(
                     *operation == FirBinaryOperation::NotEqual,
@@ -1091,11 +1089,9 @@ impl BodyLowering<'_> {
                 }
                 let condition_lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
                 let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-                let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Eq,
-                    lhs: condition_lhs,
-                    rhs: null,
-                });
+                let condition =
+                    self.ir
+                        .add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, condition_lhs, null));
                 let next_link = match self.body.expr(*rhs).map(|rhs| &rhs.kind) {
                     Some(FirExprKind::Elvis { lhs: next, .. }) => Some(*next),
                     _ => None,
@@ -2127,11 +2123,9 @@ impl BodyLowering<'_> {
         });
         let condition_read = self.ir.add_expr(IrExpr::GetValue(temporary));
         let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-        let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Eq,
-            lhs: condition_read,
-            rhs: null,
-        });
+        let condition =
+            self.ir
+                .add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, condition_read, null));
         let read = self.ir.add_expr(IrExpr::GetValue(temporary));
         let present = self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
@@ -2200,11 +2194,9 @@ impl BodyLowering<'_> {
         self.constants.bind_temporary(receiver.value);
         let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let condition_read = self.ir.add_expr(IrExpr::GetValue(temporary));
-        let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Eq,
-            lhs: condition_read,
-            rhs: null,
-        });
+        let condition =
+            self.ir
+                .add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, condition_read, null));
         if safe_call_line != 0 {
             for read in [condition_read, condition] {
                 self.ir.set_source_line(read, safe_call_line);

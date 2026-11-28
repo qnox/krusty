@@ -860,7 +860,7 @@ fn hoist_expr(
     }
     match ir.exprs[e as usize].clone() {
         // Unconditional value nodes: recurse, rewriting children.
-        IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
+        IrExpr::PrimitiveBinOp { lhs, rhs, .. } => {
             // Primitive operations have the same unconditional left-to-right operand contract as
             // calls, constructors, templates, and varargs. The shared planner can sequence any
             // number of direct suspension points (`await() + await()`) and snapshots an effectful
@@ -873,11 +873,7 @@ fn hoist_expr(
             };
             let nl = new_operands[0].expect("binary operands have no default-argument holes");
             let nr = new_operands[1].expect("binary operands have no default-argument holes");
-            ir.exprs[e as usize] = IrExpr::PrimitiveBinOp {
-                op,
-                lhs: nl,
-                rhs: nr,
-            };
+            ir.exprs[e as usize] = ir.exprs[e as usize].clone().with_operands(nl, nr);
             e
         }
         IrExpr::Equality { op, mode, lhs, rhs } => {

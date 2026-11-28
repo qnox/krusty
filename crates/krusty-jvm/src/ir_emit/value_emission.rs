@@ -1536,7 +1536,9 @@ impl super::Emitter<'_> {
                 type_operand,
             } => self.emit_type_operation(e, *op, *arg, *type_operand, code),
             IrExpr::Equality { .. } => self.emit_comparison(e, code),
-            IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.emit_binop(e, *op, *lhs, *rhs, code),
+            IrExpr::PrimitiveBinOp { op, lhs, rhs, .. } => {
+                self.emit_binop(e, *op, *lhs, *rhs, code)
+            }
             IrExpr::PrimitiveNeg { operand, ty } => {
                 self.emit_value(*operand, code);
                 self.mark_intrinsic_instruction(e, code);

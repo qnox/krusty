@@ -1489,14 +1489,7 @@ fn build_state_machine(
         let recv = k(ir, IrExpr::GetValue(cont_v));
         let lbl = getf(ir, recv, 1);
         let sc = cint(ir, i as i32);
-        let cond = k(
-            ir,
-            IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Eq,
-                lhs: lbl,
-                rhs: sc,
-            },
-        );
+        let cond = k(ir, IrExpr::primitive_bin_op(IrBinOp::Eq, lbl, sc));
         let block = k(
             ir,
             IrExpr::Block {
@@ -1868,11 +1861,7 @@ impl Flat<'_> {
         out.push(var);
         let vr = self.gv(vv);
         let sr = self.gv(self.suspended_v);
-        let is = self.add(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::RefEq,
-            lhs: vr,
-            rhs: sr,
-        });
+        let is = self.add(IrExpr::primitive_bin_op(IrBinOp::RefEq, vr, sr));
         let sv = self.gv(self.suspended_v);
         let ret = self.add(IrExpr::Return(Some(sv)));
         // The branch body must be a `Block` (as in `emit_cond`/`emit_when_stmt`): the When-statement
@@ -3281,18 +3270,10 @@ fn wrap_dispatch_for_handlers(
                 index: field_base + 1,
             });
             let sc = ir.add_expr(IrExpr::Const(IrConst::Int(s as i32)));
-            let eq = ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Eq,
-                lhs: lbl,
-                rhs: sc,
-            });
+            let eq = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, lbl, sc));
             cond = Some(match cond {
                 None => eq,
-                Some(c) => ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Or,
-                    lhs: c,
-                    rhs: eq,
-                }),
+                Some(c) => ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Or, c, eq)),
             });
         }
         // route: `this.result = e; this.label = h`

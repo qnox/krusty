@@ -515,7 +515,7 @@ impl Translation<'_, '_> {
                 type_operand,
             } => self.type_operator(*op, *arg, *type_operand),
             IrExpr::Equality { op, mode, lhs, rhs } => self.equality(*op, Some(*mode), *lhs, *rhs),
-            IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(expression, *op, *lhs, *rhs),
+            IrExpr::PrimitiveBinOp { op, lhs, rhs, .. } => self.binary(expression, *op, *lhs, *rhs),
             IrExpr::PrimitiveNeg { operand, ty } => {
                 let operand = self.expr(*operand)?;
                 if self.ty(operand) != *ty {

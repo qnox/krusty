@@ -458,11 +458,7 @@ impl ParcelRuntime {
         });
         let read = ir.add_expr(IrExpr::GetValue(temporary));
         let null = ir.add_expr(IrExpr::Const(IrConst::Null));
-        let is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::RefEq,
-            lhs: read,
-            rhs: null,
-        });
+        let is_null = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::RefEq, read, null));
         let absent = self.write_flag(ir, parcel, 0);
         let present = self.write_flag(ir, parcel, 1);
         let stored = ir.add_expr(IrExpr::GetValue(temporary));
@@ -497,11 +493,7 @@ impl ParcelRuntime {
         // `if (parcel.readInt() == 0) null else read()`.
         let flag = self.read_value(ir, ParcelValue::Int, context);
         let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-        let absent = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Eq,
-            lhs: flag,
-            rhs: zero,
-        });
+        let absent = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, flag, zero));
         let null = ir.add_expr(IrExpr::Const(IrConst::Null));
         let read = self.read_value(ir, serializer.value, context);
         // The member's result is the value itself, so boxing it to `ty` is the value's own box (an
@@ -630,11 +622,7 @@ impl ParcelRuntime {
             ParcelValue::Boolean => {
                 // `readInt() != 0`.
                 let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Ne,
-                    lhs: read,
-                    rhs: zero,
-                })
+                ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Ne, read, zero))
             }
             ParcelValue::Short | ParcelValue::Char => ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,

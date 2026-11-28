@@ -416,7 +416,7 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
             };
             format!("{short_circuit}{exhaustive}when[{branches}]")
         }
-        IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
+        IrExpr::PrimitiveBinOp { op, lhs, rhs, .. } => {
             let negation = if ir.negations.contains(&expression) {
                 "negation "
             } else {

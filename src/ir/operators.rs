@@ -29,6 +29,25 @@ pub enum IrBinOp {
     Ushr,
 }
 
+impl super::IrExpr {
+    /// A primitive binary operation of `op` on `lhs` and `rhs`. Every producer builds it here, so
+    /// a fact the operation gains later is added at this one place.
+    pub fn primitive_bin_op(op: IrBinOp, lhs: super::ExprId, rhs: super::ExprId) -> Self {
+        Self::PrimitiveBinOp { op, lhs, rhs }
+    }
+
+    /// This primitive binary operation with its operands replaced, every other part of its payload
+    /// kept. A pass that rebuilds the operation over rewritten operands copies it through here, so
+    /// a fact the operation records survives the rewrite.
+    pub fn with_operands(mut self, new_lhs: super::ExprId, new_rhs: super::ExprId) -> Self {
+        if let Self::PrimitiveBinOp { lhs, rhs, .. } = &mut self {
+            *lhs = new_lhs;
+            *rhs = new_rhs;
+        }
+        self
+    }
+}
+
 impl IrBinOp {
     /// The binary operation an exact builtin operator member realizes (`Int.plus`, `Long.and`,
     /// `Int.shl`): the operation its source operator form lowers to. Every backend realizes the
@@ -105,6 +124,7 @@ impl IrTypeOp {
 #[cfg(test)]
 mod cast_operator_tests {
     use super::IrTypeOp;
+    use crate::ir::IrExpr;
     use crate::types::Ty;
 
     #[test]
@@ -120,5 +140,15 @@ mod cast_operator_tests {
         for (target, expected) in cases {
             assert_eq!(IrTypeOp::cast_to(target), expected, "{target:?}");
         }
+    }
+
+    #[test]
+    fn with_operands_replaces_only_the_operands() {
+        let IrExpr::PrimitiveBinOp { op, lhs, rhs } =
+            IrExpr::primitive_bin_op(super::IrBinOp::Div, 1, 2).with_operands(7, 8)
+        else {
+            panic!("a binary operation stays a binary operation");
+        };
+        assert_eq!((op, lhs, rhs), (super::IrBinOp::Div, 7, 8));
     }
 }

@@ -150,11 +150,11 @@ fn missing_field_check(
             seen,
             crate::types::Ty::Int,
         );
-        let missing = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::Ne,
-            lhs: required,
-            rhs: masked,
-        });
+        let missing = ir.add_expr(IrExpr::primitive_bin_op(
+            crate::ir::IrBinOp::Ne,
+            required,
+            masked,
+        ));
         let seen_arg = ir.add_expr(IrExpr::GetValue(1));
         let required_arg = ir.add_expr(IrExpr::Const(IrConst::Int(required_mask)));
         let descriptor = descriptor_access(ir, serializer_id, cached_descriptor);
@@ -197,11 +197,11 @@ fn multi_mask_check(
             seen,
             crate::types::Ty::Int,
         );
-        missing_conditions.push(ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::Ne,
-            lhs: expected,
-            rhs: masked,
-        }));
+        missing_conditions.push(ir.add_expr(IrExpr::primitive_bin_op(
+            crate::ir::IrBinOp::Ne,
+            expected,
+            masked,
+        )));
     }
     let mut missing_conditions = missing_conditions.into_iter();
     let mut missing = missing_conditions
@@ -566,11 +566,11 @@ pub(super) fn complete_deserialization_constructor(
         let masked =
             ir.add_arithmetic(crate::ir::IrBinOp::BitAnd, seen, bit, crate::types::Ty::Int);
         let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-        let absent = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::Eq,
-            lhs: masked,
-            rhs: zero,
-        });
+        let absent = ir.add_expr(IrExpr::primitive_bin_op(
+            crate::ir::IrBinOp::Eq,
+            masked,
+            zero,
+        ));
         let store_default = store_field_default(ir, class_id, this, field, default);
         let defaulted = ir.add_expr(IrExpr::Block {
             stmts: vec![store_default],

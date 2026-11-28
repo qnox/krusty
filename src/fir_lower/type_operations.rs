@@ -81,15 +81,15 @@ impl BodyLowering<'_> {
         }
         if admits_null_at_runtime(operand_type) && same_erased_upper_bound {
             let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-            return self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: if negated {
+            return self.ir.add_expr(IrExpr::primitive_bin_op(
+                if negated {
                     IrBinOp::RefEq
                 } else {
                     IrBinOp::RefNe
                 },
-                lhs: operand,
-                rhs: null,
-            });
+                operand,
+                null,
+            ));
         }
         self.instance_check(negated, operand, target.non_null())
     }

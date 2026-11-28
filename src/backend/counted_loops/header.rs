@@ -160,18 +160,14 @@ impl ProgressionHeader {
             Direction::Increasing | Direction::Unknown => (induction, variables.last),
         };
         let Some(compare) = realizer.unsigned_compare.clone() else {
-            return realizer.add(IrExpr::PrimitiveBinOp { op, lhs, rhs });
+            return realizer.add(IrExpr::primitive_bin_op(op, lhs, rhs));
         };
         // `lhs.compareTo(rhs) < 0` (`<= 0`) through the selected unsigned comparison: kotlinc calls
         // the inline `UInt.compareTo`, whose body is that comparison.
         let compared = realizer.runtime_call(&compare, vec![lhs, rhs]);
         realizer.inlined_call(compared);
         let zero = realizer.add(IrExpr::Const(IrConst::Int(0)));
-        realizer.add(IrExpr::PrimitiveBinOp {
-            op,
-            lhs: compared,
-            rhs: zero,
-        })
+        realizer.add(IrExpr::primitive_bin_op(op, compared, zero))
     }
 
     /// The entry condition evaluated between two constant bounds.
@@ -285,11 +281,7 @@ impl Realizer<'_> {
         let zero = self.add(IrExpr::Const(IrConst::Int(0)));
         let minus_one = self.add_checked(IrExpr::Const(IrConst::Int(-1)), Ty::Int);
         let last = self.add_checked(
-            IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Add,
-                lhs: size,
-                rhs: minus_one,
-            },
+            IrExpr::primitive_bin_op(IrBinOp::Add, size, minus_one),
             Ty::Int,
         );
         self.range_literal_header(ty, FirRangeOperation::Through, zero, last)
@@ -640,10 +632,6 @@ impl Realizer<'_> {
     fn compare_with_zero(&mut self, value: ExprId, step_ty: Ty, op: IrBinOp) -> ExprId {
         let value = self.reread(value);
         let zero = self.add(IrExpr::Const(step_constant(step_ty, 0)));
-        self.add(IrExpr::PrimitiveBinOp {
-            op,
-            lhs: value,
-            rhs: zero,
-        })
+        self.add(IrExpr::primitive_bin_op(op, value, zero))
     }
 }

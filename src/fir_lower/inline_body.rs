@@ -837,11 +837,11 @@ impl BodyLowering<'_> {
                     statements.push(cursor_declaration);
                 }
                 let cursor = self.ir.add_expr(IrExpr::GetValue(cursor_slot));
-                let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: crate::ir::IrBinOp::Lt,
-                    lhs: cursor,
-                    rhs: size,
-                });
+                let condition = self.ir.add_expr(IrExpr::primitive_bin_op(
+                    crate::ir::IrBinOp::Lt,
+                    cursor,
+                    size,
+                ));
                 let receiver = self.ir.add_expr(IrExpr::GetValue(receiver_slot));
                 let cursor = self.ir.add_expr(IrExpr::GetValue(cursor_slot));
                 let element = match traversal {
@@ -932,11 +932,11 @@ impl BodyLowering<'_> {
             if let crate::fir::FirInlineIterationIndex::Checked { overflow } = index {
                 let current = self.ir.add_expr(IrExpr::GetValue(current_index_slot));
                 let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                let negative = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: crate::ir::IrBinOp::Lt,
-                    lhs: current,
-                    rhs: zero,
-                });
+                let negative = self.ir.add_expr(IrExpr::primitive_bin_op(
+                    crate::ir::IrBinOp::Lt,
+                    current,
+                    zero,
+                ));
                 let overflow = self.external_inline_plan_call(overflow, |_, _| None)?;
                 body_statements.push(self.ir.add_expr(IrExpr::When {
                     branches: vec![(Some(negative), overflow)],

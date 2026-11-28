@@ -117,11 +117,7 @@ pub(super) fn resumed_carrier(
     }
     let tested = ir.add_expr(ir.exprs[resumed as usize].clone());
     let null = ir.add_expr(IrExpr::Const(IrConst::Null));
-    let is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Eq,
-        lhs: tested,
-        rhs: null,
-    });
+    let is_null = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, tested, null));
     let passed = ir.add_expr(IrExpr::Const(IrConst::Null));
     ir.add_when(
         vec![(Some(is_null), passed), (None, unboxed)],
@@ -163,11 +159,7 @@ pub(super) fn boxed_carrier(
     }
     let tested = ir.add_expr(ir.exprs[value as usize].clone());
     let null = ir.add_expr(IrExpr::Const(IrConst::Null));
-    let is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Eq,
-        lhs: tested,
-        rhs: null,
-    });
+    let is_null = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, tested, null));
     let passed = ir.add_expr(IrExpr::Const(IrConst::Null));
     ir.add_when(
         vec![(Some(is_null), passed), (None, boxed)],

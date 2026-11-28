@@ -30,7 +30,7 @@ fn iinc_delta_of(ir: &IrFile, value: u32, var: u32) -> Option<i8> {
         } => arg,
         _ => value,
     };
-    let IrExpr::PrimitiveBinOp { op, lhs, rhs } = *ir.expr(arithmetic) else {
+    let IrExpr::PrimitiveBinOp { op, lhs, rhs, .. } = *ir.expr(arithmetic) else {
         return None;
     };
     let constant = |expr| match ir.expr(expr) {

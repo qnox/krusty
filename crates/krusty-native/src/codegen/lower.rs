@@ -2004,7 +2004,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     )
                 }
             }
-            IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(id, op, lhs, rhs),
+            IrExpr::PrimitiveBinOp { op, lhs, rhs, .. } => self.binary(id, op, lhs, rhs),
             IrExpr::Equality { op, mode, lhs, rhs } => self.equality(op, mode, lhs, rhs),
             IrExpr::PrimitiveNeg { operand, ty } => self.negate(operand, ty),
             IrExpr::StringConcat(parts) => self.concat(&parts),

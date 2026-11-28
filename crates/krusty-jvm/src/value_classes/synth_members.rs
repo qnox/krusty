@@ -714,11 +714,7 @@ pub(super) fn synth_value_members(
                     args: vec![v, tmp],
                 });
                 let zero = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::Int(0)));
-                ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: krusty::ir::IrBinOp::Eq,
-                    lhs: eq,
-                    rhs: zero,
-                })
+                ir.add_expr(IrExpr::primitive_bin_op(krusty::ir::IrBinOp::Eq, eq, zero))
             } else {
                 vc_underlying_ne(ir, v, tmp, terminal_underlying)
             };
@@ -1056,17 +1052,13 @@ fn vc_underlying_eq(
             args: vec![a, b],
         });
         let zero = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::Int(0)));
-        return ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: krusty::ir::IrBinOp::Eq,
-            lhs: call,
-            rhs: zero,
-        });
+        return ir.add_expr(IrExpr::primitive_bin_op(
+            krusty::ir::IrBinOp::Eq,
+            call,
+            zero,
+        ));
     }
-    ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: krusty::ir::IrBinOp::Eq,
-        lhs: a,
-        rhs: b,
-    })
+    ir.add_expr(IrExpr::primitive_bin_op(krusty::ir::IrBinOp::Eq, a, b))
 }
 
 /// `equals-impl0` over a non-null nested value class or unsigned carrier: that class's own
@@ -1122,17 +1114,13 @@ fn vc_underlying_ne(ir: &mut IrFile, a: ExprId, b: ExprId, underlying: Ty) -> Ex
             args: vec![a, b],
         });
         let zero = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::Int(0)));
-        return ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: krusty::ir::IrBinOp::Ne,
-            lhs: call,
-            rhs: zero,
-        });
+        return ir.add_expr(IrExpr::primitive_bin_op(
+            krusty::ir::IrBinOp::Ne,
+            call,
+            zero,
+        ));
     }
-    ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: krusty::ir::IrBinOp::Ne,
-        lhs: a,
-        rhs: b,
-    })
+    ir.add_expr(IrExpr::primitive_bin_op(krusty::ir::IrBinOp::Ne, a, b))
 }
 
 fn guard_false(ir: &mut IrFile, cond: ExprId) -> ExprId {
@@ -1187,11 +1175,11 @@ fn nested_value_text(
         // kotlinc's `v == null ? "null" : Nested.toString-impl(v)`, whose second read of `v` the
         // null-check fold keeps on the stack (`dup; ifnonnull; pop`).
         let null = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::Null));
-        let is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: krusty::ir::IrBinOp::RefEq,
-            lhs: value,
-            rhs: null,
-        });
+        let is_null = ir.add_expr(IrExpr::primitive_bin_op(
+            krusty::ir::IrBinOp::RefEq,
+            value,
+            null,
+        ));
         let text = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::String("null".into())));
         let present = ir.add_expr(IrExpr::GetValue(slot));
         let named = nested_to_string_impl(ir, nested, underlying.non_null(), under, present);
@@ -1273,11 +1261,11 @@ fn property_hash(ir: &mut IrFile, underlying: Ty) -> ExprId {
     }
     let value = ir.add_expr(IrExpr::GetValue(0));
     let null = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::Null));
-    let is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: krusty::ir::IrBinOp::RefEq,
-        lhs: value,
-        rhs: null,
-    });
+    let is_null = ir.add_expr(IrExpr::primitive_bin_op(
+        krusty::ir::IrBinOp::RefEq,
+        value,
+        null,
+    ));
     let zero = ir.add_expr(IrExpr::Const(krusty::ir::IrConst::Int(0)));
     let non_null = hash(ir);
     ir.add_when(vec![(Some(is_null), zero), (None, non_null)], Ty::Int)

@@ -68,11 +68,11 @@ impl BodyLowering<'_> {
         let reference =
             self.function_value_adapter(from.non_null(), to.non_null(), ordinal, present);
         let null = self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
-        let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::Ne,
-            lhs: tested,
-            rhs: null,
-        });
+        let condition = self.ir.add_expr(IrExpr::primitive_bin_op(
+            crate::ir::IrBinOp::Ne,
+            tested,
+            null,
+        ));
         let absent = self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
         let guarded = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(condition), reference), (None, absent)],
@@ -219,11 +219,9 @@ impl BodyLowering<'_> {
     ) -> ExprId {
         let read = self.ir.add_expr(IrExpr::GetValue(temporary));
         let null = self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
-        let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::Eq,
-            lhs: read,
-            rhs: null,
-        });
+        let condition =
+            self.ir
+                .add_expr(IrExpr::primitive_bin_op(crate::ir::IrBinOp::Eq, read, null));
         let null_result = self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
         let guarded = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(condition), null_result), (None, invoke)],

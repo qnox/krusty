@@ -142,7 +142,9 @@ fn evaluates_without_local_writes(ir: &IrFile, expression: u32, shape: &dyn Emit
         // `sb.appendLine(a < b)` and `sb.appendLine(if (c) x else y)` stay in place. An eager
         // `And`/`Or` in value position holds its left operand in a `BooleanOperand` temporary
         // (`binary_operation.rs`), so it keeps the stored path; source `&&`/`||` is a `When`.
-        IrExpr::PrimitiveBinOp { op, lhs, rhs } if !matches!(op, IrBinOp::And | IrBinOp::Or) => {
+        IrExpr::PrimitiveBinOp { op, lhs, rhs, .. }
+            if !matches!(op, IrBinOp::And | IrBinOp::Or) =>
+        {
             evaluates_without_local_writes(ir, *lhs, shape)
                 && evaluates_without_local_writes(ir, *rhs, shape)
         }
@@ -209,7 +211,7 @@ mod tests {
         let mut ir = IrFile::default();
         let lhs = ir.add_expr(IrExpr::GetValue(0));
         let rhs = ir.add_expr(IrExpr::GetValue(1));
-        let expression = ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs });
+        let expression = ir.add_expr(IrExpr::primitive_bin_op(op, lhs, rhs));
         (ir, expression)
     }
 

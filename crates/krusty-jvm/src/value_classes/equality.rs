@@ -107,7 +107,7 @@ pub(super) fn realize(
     fresh: &mut u32,
 ) {
     let (op, lhs, rhs) = match ir.exprs[id as usize] {
-        IrExpr::PrimitiveBinOp { op, lhs, rhs } | IrExpr::Equality { op, lhs, rhs, .. } => {
+        IrExpr::PrimitiveBinOp { op, lhs, rhs, .. } | IrExpr::Equality { op, lhs, rhs, .. } => {
             (op, lhs, rhs)
         }
         _ => unreachable!("a specialized equality is a primitive or recorded `==`/`!=`"),
@@ -165,11 +165,7 @@ pub(super) fn realize(
         let both_null = if right.nullable {
             let right_value = read(ir, right_slot);
             let null = constant(ir, IrConst::Null);
-            ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Eq,
-                lhs: right_value,
-                rhs: null,
-            })
+            ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, right_value, null))
         } else {
             constant(ir, IrConst::Boolean(false))
         };
@@ -192,11 +188,7 @@ pub(super) fn negated_if(ir: &mut IrFile, value: ExprId, negate: bool) -> IrExpr
         };
     }
     let zero = constant(ir, IrConst::Int(0));
-    IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Eq,
-        lhs: value,
-        rhs: zero,
-    }
+    IrExpr::primitive_bin_op(IrBinOp::Eq, value, zero)
 }
 
 /// `equals-impl0(left, right)` over two carriers, or `equals-impl(left, right)` with a reference.
@@ -240,11 +232,7 @@ pub(super) fn compare(
 fn if_null(ir: &mut IrFile, slot: u32, when_null: ExprId, otherwise: ExprId) -> ExprId {
     let value = ir.add_expr(IrExpr::GetValue(slot));
     let null = constant(ir, IrConst::Null);
-    let is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Eq,
-        lhs: value,
-        rhs: null,
-    });
+    let is_null = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, value, null));
     ir.add_when(
         vec![(Some(is_null), when_null), (None, otherwise)],
         Ty::Boolean,

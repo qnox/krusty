@@ -28,11 +28,7 @@ impl IrFile {
 
     fn negation_of(&mut self, operand: ExprId) -> IrExpr {
         let false_value = self.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-        IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Eq,
-            lhs: operand,
-            rhs: false_value,
-        }
+        IrExpr::primitive_bin_op(IrBinOp::Eq, operand, false_value)
     }
 
     /// The operand of `expression` when it is a recorded negation.

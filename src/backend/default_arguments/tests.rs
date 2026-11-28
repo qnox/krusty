@@ -83,7 +83,7 @@ fn render(ir: &IrFile, expression: ExprId) -> String {
             arg,
             type_operand,
         } => format!("({} {op:?} {})", render(ir, *arg), ty(*type_operand)),
-        IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
+        IrExpr::PrimitiveBinOp { op, lhs, rhs, .. } => {
             format!("({} {op:?} {})", render(ir, *lhs), render(ir, *rhs))
         }
         IrExpr::When { branches } => branches

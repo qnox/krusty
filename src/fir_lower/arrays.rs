@@ -155,11 +155,9 @@ impl BodyLowering<'_> {
 
         let index = self.ir.add_expr(IrExpr::GetValue(index_slot));
         let bound = self.read_operand(&size);
-        let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Lt,
-            lhs: index,
-            rhs: bound,
-        });
+        let condition = self
+            .ir
+            .add_expr(IrExpr::primitive_bin_op(IrBinOp::Lt, index, bound));
         let element_index_slot = self.allocate_temporary();
         let index = self.ir.add_expr(IrExpr::GetValue(index_slot));
         let element_index = self.ir.add_expr(IrExpr::Variable {

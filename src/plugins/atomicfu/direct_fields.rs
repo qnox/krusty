@@ -104,11 +104,9 @@ impl Lowering<'_> {
         match self.representation {
             FieldRepresentation::WasmValue => {
                 let current = self.read(instance);
-                let equal = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Eq,
-                    lhs: current,
-                    rhs: expected,
-                });
+                let equal =
+                    self.ir
+                        .add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, current, expected));
                 let store = self.write(instance, update);
                 let yes = self.bool(true);
                 let then_branch = self.ir.add_expr(IrExpr::Block {
