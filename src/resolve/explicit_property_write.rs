@@ -252,7 +252,7 @@ impl Checker<'_> {
                             name,
                             crate::symbol_resolver::PropertyAccess::Write,
                         );
-                    self.diags.error(
+                    self.diags.report_error(
                         self.assignment_member_name_span(s, name),
                         super::diagnostic_selection::unresolved_member_message(
                             self.file.language.reference,

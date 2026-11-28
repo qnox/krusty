@@ -172,17 +172,12 @@ impl Checker<'_> {
             };
 
         for (segment_expression, segment) in segments.iter().skip(1) {
-            // The ordinary qualifier step continues the chain; the type position reads the
-            // Kotlin declaration of a classifier it reaches through its JVM realization.
+            // The ordinary qualifier step continues the chain with the classifier as written: a
+            // JDK class a Kotlin classifier maps onto (`java.lang.String`) keeps its own statics.
+            // Only the applied type reads the mapped Kotlin declaration.
             let step = self.qualifier_step(prefix, Some(*segment_expression), segment)?;
-            let next_prefix = match step.resolved {
-                ResolvedQualifier::Classifier(classifier) => ResolvedQualifier::Classifier(
-                    self.libraries.canonical_source_type_name(classifier),
-                ),
-                resolved => resolved,
-            };
             let selected_alias = step.alias;
-            prefix = next_prefix;
+            prefix = step.resolved;
             if let Some(binding) = QualifierBinding::of(prefix) {
                 bound.push((*segment_expression, binding, selected_alias.is_some()));
             }
@@ -240,6 +235,9 @@ impl Checker<'_> {
             alias,
             bound_outer,
         } = segment;
+        // The type position reads the Kotlin declaration of a classifier written through its JVM
+        // realization (`java.util.Map` is `kotlin.collections.Map` as a type).
+        let internal = self.libraries.canonical_source_type_name(internal);
         let arguments = self
             .file
             .call_type_args
@@ -422,4 +420,19 @@ impl Checker<'_> {
             .get(&expression.0)
             .is_some_and(|arguments| !arguments.is_empty())
     }
+}
+
+/// The receiver an unbound reference's classifier LHS dispatches on: the applied type, with the
+/// builtin value representation of a primitive or `kotlin.String` classifier.
+pub(super) fn unbound_ref_receiver_ty(applied: Ty) -> Ty {
+    applied.unboxed_primitive().unwrap_or_else(|| {
+        if applied
+            .obj_internal()
+            .is_some_and(|internal| internal.matches("kotlin/String"))
+        {
+            Ty::String
+        } else {
+            applied
+        }
+    })
 }

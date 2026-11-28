@@ -1364,6 +1364,41 @@ impl Checker<'_> {
                     intersection_bindings.insert(formal.clone(), views);
                 }
             }
+            // A literal is built from the classifier its type variable's OTHER bounds name: one
+            // such classifier builds it, and two leave its type ambiguous (a lower bound
+            // `MutableSet<E>` and an expected upper `Set<*>` both declare a factory).
+            let ambiguous_literals = inference_actuals
+                .iter()
+                .filter_map(|&(argument, parameter, _, whole_array)| {
+                    if whole_array
+                        || !matches!(
+                            argument_kinds[argument],
+                            CallArgKind::CollectionLiteral { .. }
+                        )
+                    {
+                        return None;
+                    }
+                    let mut declared = signature.params[parameter];
+                    if candidate.call_sig.vararg_index == Some(parameter) {
+                        declared = declared.array_read_elem().unwrap_or(declared);
+                    }
+                    let (TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) =
+                        declared.non_null().kind()
+                    else {
+                        return None;
+                    };
+                    let lowers = preliminary
+                        .lower_inputs
+                        .get(formal.as_str())
+                        .map_or(&[][..], Vec::as_slice);
+                    let upper = expected_literal_targets
+                        .as_ref()
+                        .and_then(|targets| targets.get(formal.as_str()))
+                        .copied();
+                    let classifiers = self.literal_bound_classifiers(lowers, upper);
+                    (!classifiers.is_empty()).then_some((argument, classifiers))
+                })
+                .collect::<Vec<_>>();
             let variables = call_variables.variables();
             let selected = call_site_publication::declared_selection(
                 variables,
@@ -1371,6 +1406,7 @@ impl Checker<'_> {
                 specialized_bindings,
                 intersection_bindings,
                 index,
+                ambiguous_literals,
             );
             let shapes = call_site_publication::CandidateParameterShapes {
                 selection: selection_params,
@@ -1418,13 +1454,14 @@ impl Checker<'_> {
             );
         }
         // kotlinc ranks a visibility error below every resolved candidate, on any tower rung: an
-        // inaccessible member leaves the call to an accessible extension and is reported only
-        // when nothing accessible applies.
+        // invisible candidate leaves the call to a visible one and is reported, or silenced by a
+        // `@Suppress`, only when nothing visible applies. The invisible candidates then compete as
+        // one group across scope levels (see `site_tower_rank`).
         if applicable.iter().any(|(_, _, _, _, _, candidate, _, _)| {
-            self.member_candidate_accessible(candidate, extension_receiver)
+            self.candidate_visible(candidate, extension_receiver)
         }) {
             applicable.retain(|(_, _, _, _, _, candidate, _, _)| {
-                self.member_candidate_accessible(candidate, extension_receiver)
+                self.candidate_visible(candidate, extension_receiver)
             });
         }
         // Applicability is evaluated one callable-tower rung at a time. A declaration from a
@@ -1435,19 +1472,11 @@ impl Checker<'_> {
         // Later rules share one rung. Argument score there is type fit and omitted defaults;
         // a vararg loses only after element specificity, as a tie-break among equal shapes.
         let tower_rank = |candidate: &SelectedCallable| {
-            if candidate.is_extension()
-                && crate::symbol_resolver::hides_members(&candidate.callable)
-            {
-                (0_u8, (0_u8, 0_u32), candidate.receiver_rank)
-            } else if candidate.kind == crate::libraries::FnKind::Member {
-                (1_u8, (0_u8, 0_u32), candidate.receiver_rank)
-            } else {
-                (
-                    2_u8,
-                    candidate.scope_rung.selection_key(candidate.scope_rank),
-                    candidate.receiver_rank,
-                )
-            }
+            crate::symbol_resolver::site_tower_rank(
+                crate::symbol_resolver::callable_tower_rank(candidate),
+                self.candidate_visible(candidate, extension_receiver),
+                self,
+            )
         };
         let nearest_available_rung = applicable
             .iter()
@@ -1798,6 +1827,15 @@ impl Checker<'_> {
             selected.callable.default_realization.is_some(),
             selected.callable.descriptor,
         );
+        // Each commit of the call replaces what an earlier commit published for its literals.
+        let mut ambiguities = self.collection_literal_ambiguities.borrow_mut();
+        for argument in args {
+            ambiguities.remove(argument);
+        }
+        for (argument, classifiers) in &selected.ambiguous_literals {
+            ambiguities.insert(args[*argument], classifiers.clone());
+        }
+        drop(ambiguities);
         Some(if missing_context {
             CallableCandidateSelection::MissingContext(Box::new(selected))
         } else {

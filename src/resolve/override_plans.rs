@@ -836,6 +836,9 @@ fn publish_inherited_interface_property_plans(
                     overridden_setter_value: setter_value(&applied),
                     declared_receiver: None,
                     implementation_receiver: None,
+                    declared_contexts: Vec::new(),
+                    implementation_contexts: Vec::new(),
+                    declared_context_identities: Vec::new(),
                     implementation_mutable: implementation.setter.is_some(),
                     overridden_return_value_status: applied.return_value_status,
                     overridden_visibility: applied.visibility,
@@ -1010,6 +1013,27 @@ fn append_property_override_edges(
                         )
                     }),
                 implementation_receiver,
+                declared_contexts: declared
+                    .getter
+                    .params
+                    .get(..declared.context_count)
+                    .expect("a provider getter declares its context parameters first")
+                    .iter()
+                    .map(|ty| {
+                        resolved_ty(
+                            *ty,
+                            "provider declaration context parameter entering stable FIR",
+                        )
+                    })
+                    .collect(),
+                implementation_contexts: implementation
+                    .context_parameters
+                    .iter()
+                    .map(|ty| {
+                        resolved_ty(*ty, "implementation context parameter entering stable FIR")
+                    })
+                    .collect(),
+                declared_context_identities: declared.context_parameter_identities.clone(),
                 overridden_setter_value: setter_value(&applied),
                 implementation_mutable,
                 overridden_return_value_status: applied.return_value_status,
@@ -1084,11 +1108,20 @@ fn property_override_plans(
     let names = class
         .declared_props
         .keys()
+        .chain(class.contextual_props.keys())
         .chain(class.member_ext_props.keys());
     for name in declaration_ordered(class, names) {
         let members = class
             .declared_props
             .get(name)
+            .map(|property| property.stable_declaration);
+        // A context-parameter property is overloadable by its context shape: every declaration
+        // under the name is an implementation candidate.
+        let contextual = class
+            .contextual_props
+            .get(name)
+            .into_iter()
+            .flatten()
             .map(|property| property.stable_declaration);
         let member_extensions = class
             .member_ext_props
@@ -1096,7 +1129,12 @@ fn property_override_plans(
             .into_iter()
             .flatten()
             .map(|property| property.stable_declaration);
-        for declaration in members.into_iter().chain(member_extensions).flatten() {
+        for declaration in members
+            .into_iter()
+            .chain(contextual)
+            .chain(member_extensions)
+            .flatten()
+        {
             let Some(implementation) =
                 overriding_property(index, class.internal_name(), name, declaration)
             else {

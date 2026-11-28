@@ -933,10 +933,50 @@ pub(super) fn object_inherited_defaults(
     if class.kind != TypeKind::Object {
         return Ok(Vec::new());
     }
-    let Some(plan) = declared_instances_plan(class, bodies, callees)? else {
+    match declared_instances_plan(class, bodies, callees)? {
+        Some(plan) => inherited_defaults(&plan, bodies),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// The interface defaults the admitted class `selected` constructs inherits, held as an object's
+/// are until a walked body calls a declaration one implements. A default a materialized
+/// superclass inherits as well belongs to that superclass, which the constructor's delegation
+/// materializes and whose own table carries it.
+pub(super) fn constructor_inherited_defaults(
+    selected: KlibBodyCallable<'_>,
+    bodies: &KlibDeclarationBodies,
+    callees: &super::KlibCalleeFacts<'_>,
+) -> Result<Vec<InheritedDefault>, KlibBodyDeclineReason> {
+    let Some(plan) = plan(selected, bodies, callees)? else {
         return Ok(Vec::new());
     };
-    Ok(inherited_implementations(&plan, bodies)?
+    let mut defaults = inherited_defaults(&plan, bodies)?;
+    if let Some(superclass) = plan.superclass.as_ref().filter(|call| call.materialized) {
+        let crate::klib_libraries::LocatedMember::One {
+            module,
+            arena,
+            class,
+            ..
+        } = bodies.member_owner(&superclass.constructor)
+        else {
+            return Err(mismatch(
+                "a materialized superclass constructor has no serialized class",
+            ));
+        };
+        let inherited = bodies
+            .inherited_implementations(&module, arena, class)
+            .map_err(mismatch)?;
+        defaults.retain(|default| !inherited.iter().any(|(body, _)| *body == default.body));
+    }
+    Ok(defaults)
+}
+
+fn inherited_defaults(
+    plan: &ClassInitialization<'_, '_>,
+    bodies: &KlibDeclarationBodies,
+) -> Result<Vec<InheritedDefault>, KlibBodyDeclineReason> {
+    Ok(inherited_implementations(plan, bodies)?
         .into_iter()
         .filter(|(body, _)| {
             matches!(

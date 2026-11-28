@@ -12,7 +12,7 @@
 //! in declaration order. A private constructor's is planned with the class's other synthetic
 //! accessors (`static_accessors`), at the first call from another class.
 
-use super::constructor_defaults::emit_ctor_marker_accessor;
+use super::constructor_defaults::{emit_ctor_marker_accessor, MarkerAccessorAttributes};
 use super::{class_ctor_jvm_tys, jvm_tys, secondary_prefix_jvm_tys, ClassWriter};
 use crate::method_parameters::{
     primary_constructor_identities, secondary_constructor_identities, OwnerConstructorPrefix,
@@ -20,7 +20,7 @@ use crate::method_parameters::{
 use krusty::ir::{
     ClassId, CtorDelegateTarget, IrClass, IrConstructorAccess, IrConstructorTarget, IrFile,
 };
-use krusty::types::TypeName;
+use krusty::types::{Ty, TypeName};
 
 /// Whether this construction goes through the value-class `DefaultConstructorMarker` accessor.
 pub(super) fn uses_value_class_marker_accessor(
@@ -136,7 +136,7 @@ pub(super) fn emit_accessor(
             .copied()
             .chain(declared)
             .collect::<Vec<_>>();
-        emit_ctor_marker_accessor(owner, &parameters, &identities, cw);
+        emit_ctor_marker_accessor(owner, &parameters, &identities, None, cw);
         return;
     };
     let constructor = &class.secondary_ctors[secondary as usize];
@@ -149,7 +149,49 @@ pub(super) fn emit_accessor(
         .collect::<Vec<_>>();
     let identities =
         secondary_constructor_identities(ir, class, constructor, &owner_prefix, &parameters);
-    emit_ctor_marker_accessor(owner, &parameters, &identities, cw);
+    let attributes = secondary_annotations_ride_accessor(class, constructor).then_some(
+        MarkerAccessorAttributes {
+            annotations: &constructor.annotations,
+            parameters: &[],
+        },
+    );
+    emit_ctor_marker_accessor(owner, &parameters, &identities, attributes, cw);
+}
+
+/// Whether kotlinc writes the declared annotations of the primary constructor of `class` on its
+/// marker accessor: it takes a value class, and the private constructor keeps none of them.
+pub(super) fn primary_annotations_ride_accessor(ir: &IrFile, class: &IrClass) -> bool {
+    !class.is_sealed && !class.is_enum && ir.has_value_param_ctor(&class.fq_name())
+}
+
+/// Whether the primary constructor of `class` itself carries its parameters' user annotations.
+pub(super) fn primary_parameters_keep_annotations(ir: &IrFile, class: &IrClass) -> bool {
+    !class.ctor_param_annotations.is_empty() && !primary_annotations_ride_accessor(ir, class)
+}
+
+/// Write the declared annotations of the primary constructor of `class`, whose JVM parameters are
+/// `parameters`, on the constructor itself, unless they ride its marker accessor.
+pub(super) fn emit_primary_declared_annotations(
+    cw: &mut ClassWriter,
+    ir: &IrFile,
+    class: &IrClass,
+    parameters: &[Ty],
+) {
+    if !primary_annotations_ride_accessor(ir, class) {
+        super::function_annotations::emit_constructor_declared(
+            cw,
+            &class.primary_ctor_annotations,
+            &super::method_descriptor(parameters, Ty::Unit),
+        );
+    }
+}
+
+/// The same for the secondary `constructor` of `class`.
+pub(super) fn secondary_annotations_ride_accessor(
+    class: &IrClass,
+    constructor: &krusty::ir::IrSecondaryCtor,
+) -> bool {
+    !class.is_sealed && !class.is_enum && constructor.vc_params
 }
 
 /// Private constructor `target` of a non-sealed class, as `(class, ordinal)`, when code outside

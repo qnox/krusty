@@ -255,6 +255,7 @@ pub(super) fn emit_ctor_marker_accessor(
     owner: &str,
     real_params: &[Ty],
     real_parameter_identities: &[Option<String>],
+    attributes: Option<MarkerAccessorAttributes<'_>>,
     cw: &mut ClassWriter,
 ) {
     assert_eq!(
@@ -275,7 +276,17 @@ pub(super) fn emit_ctor_marker_accessor(
     let mut stub_params = real_params.to_vec();
     stub_params.push(marker);
     let desc = method_descriptor(&stub_params, Ty::Unit);
-    cw.reserve_descriptor(&desc);
+    match &attributes {
+        Some(attributes) => cw.reserve_method_pool_with_annotations(
+            "<init>",
+            &desc,
+            None,
+            &[],
+            attributes.annotations,
+            &[],
+        ),
+        None => cw.reserve_descriptor(&desc),
+    }
     let mut code = CodeBuilder::new(total);
     code.aload(0);
     for &(pslot, pty) in &param_slots {
@@ -309,6 +320,18 @@ pub(super) fn emit_ctor_marker_accessor(
         slot,
     ));
     cw.set_method_debug("<init>", &desc, None, &locals);
+    if let Some(attributes) = attributes {
+        super::function_annotations::emit_constructor_declared(cw, attributes.annotations, &desc);
+        cw.set_method_param_annotations("<init>", &desc, attributes.parameters);
+    }
+}
+
+/// The declared attributes of a constructor that takes a value class. kotlinc leaves the private
+/// constructor bare and writes them on its marker accessor instead.
+pub(super) struct MarkerAccessorAttributes<'a> {
+    pub(super) annotations: &'a krusty::ir::DeclarationAnnotations,
+    /// The annotations of each source parameter; the accessor's marker takes none.
+    pub(super) parameters: &'a [krusty::ir::DeclarationAnnotations],
 }
 
 /// Push the `int` masks of the omitted parameters and the `DefaultConstructorMarker` that select a

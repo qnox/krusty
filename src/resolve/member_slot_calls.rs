@@ -266,15 +266,30 @@ impl Checker<'_> {
             }
         };
 
-        let selected_receiver = self
+        let unnarrowed = self.unnarrowed_member_receiver(scope, &tower_rung, rt, &selected);
+        match unnarrowed {
+            Some(declared) => self.unnarrowed_dispatch_calls.insert(call, declared),
+            None => self.unnarrowed_dispatch_calls.remove(&call),
+        };
+        let selected_receiver = unnarrowed
             // A type parameter's lookup receiver is its complete declared bound intersection;
             // `rt` remains the source value type so the ordinary no-projection case still records
             // that value unchanged.
-            .selected_intersection_member_receiver(member_receiver, &selected)
+            .or_else(|| self.selected_intersection_member_receiver(member_receiver, &selected))
             .unwrap_or(rt);
-        let mut member = self
-            .resolver()
-            .commit_selected_member_function(member_receiver, selected);
+        let flow_result = tower_rung
+            .explicit_receiver
+            .and_then(|receiver| self.flow_intersection_member_result(scope, receiver, &selected));
+        let mut member = match flow_result {
+            Some(ret) => self.resolver().commit_selected_member_function_result(
+                member_receiver,
+                selected,
+                ret,
+            ),
+            None => self
+                .resolver()
+                .commit_selected_member_function(member_receiver, selected),
+        };
         // Candidate lookup may have reached an inherited body-local rung (`E.foo` for a receiver
         // of type `F`). That rung owns generic specialization and declaration selection, but the
         // checked call still dispatches on the source receiver `F`. In particular, Kotlin protected

@@ -154,16 +154,21 @@ pub(crate) struct ModulePropertyOverride {
     /// member property. It crosses an accessor like the value does, so it decides a bridge too.
     pub(crate) declared_receiver: Option<Ty>,
     pub(crate) implementation_receiver: Option<Ty>,
+    /// The context parameters on each side, which lead the accessors' operands.
+    pub(crate) declared_contexts: Vec<Ty>,
+    pub(crate) implementation_contexts: Vec<Ty>,
     pub(crate) depth: u32,
 }
 
 impl ModulePropertyOverride {
     /// The value and receiver types either side of the edge carries.
-    fn carried_types(&self) -> impl Iterator<Item = Ty> {
+    fn carried_types(&self) -> impl Iterator<Item = Ty> + '_ {
         [self.declared_type, self.implementation_type]
             .into_iter()
             .chain(self.declared_receiver)
             .chain(self.implementation_receiver)
+            .chain(self.declared_contexts.iter().copied())
+            .chain(self.implementation_contexts.iter().copied())
     }
 }
 
@@ -499,6 +504,12 @@ fn property_override(edge: &crate::fir::ResolvedPropertyOverride) -> ModulePrope
         implementation_type: edge.implementation_type.get(),
         declared_receiver: edge.declared_receiver.map(|ty| ty.get()),
         implementation_receiver: edge.implementation_receiver.map(|ty| ty.get()),
+        declared_contexts: edge.declared_contexts.iter().map(|ty| ty.get()).collect(),
+        implementation_contexts: edge
+            .implementation_contexts
+            .iter()
+            .map(|ty| ty.get())
+            .collect(),
         depth: edge.depth,
     }
 }

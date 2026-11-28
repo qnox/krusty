@@ -50,6 +50,9 @@ impl BodyLowering<'_> {
         if debug.positionless {
             self.ir.mark_positionless(lowered);
         }
+        if debug.context_parameter_load {
+            self.ir.mark_context_parameter_load(lowered);
+        }
         // An expression the parser recorded no span for (an implicit receiver, a jump written as
         // a block statement) has no offsets of its own: fir2ir builds its elements at the offsets
         // of the element that contains it, so its nodes stay unsettled for that element to stamp.

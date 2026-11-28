@@ -271,6 +271,12 @@ pub(super) fn prepare_common_ir(
     .map_err(crate::backend::CommonIrPreparationError::Invariant)?;
     let classifiers = file.classifiers.module();
     let module_name = file.module_name;
+    let exported_constructors = file
+        .dependency_exports
+        .constructors()
+        .iter()
+        .map(|(constructor, _)| *constructor)
+        .collect::<Vec<_>>();
     crate::backend::default_arguments::realize(
         &mut file.ir,
         &mut file.callables,
@@ -283,6 +289,7 @@ pub(super) fn prepare_common_ir(
                 },
             )
         },
+        &exported_constructors,
     );
     crate::backend::coroutines::add_continuation_parameters(&mut file.ir)
         .map_err(crate::backend::CommonIrPreparationError::Suspend)?;

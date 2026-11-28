@@ -104,6 +104,15 @@ quirks! {
         fixed_in: Some(KotlinVersion::V2_4_20),
         defect: false,
     }
+    /// Once no visible candidate applies, the candidates the site cannot see still compete scope
+    /// level by scope level, nearest first, instead of as one visibility-error group across the
+    /// tower: under a suppressed visibility error an explicitly imported `Any.tag` takes the call
+    /// from a star-imported `String.tag`.
+    InvisibleCandidatesKeepScopeLevels {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
+    }
     /// `+UnitConversionsOnArbitraryExpressions` is known but converts no function value whose
     /// result is not `Unit` (KT-84393).
     UnitConversionRejectsNonUnitResult {
@@ -125,6 +134,14 @@ quirks! {
         fixed_in: Some(KotlinVersion::V2_4_20),
         defect: false,
     }
+    /// A context parameter passed on as a context argument is read at the offsets of its
+    /// declaration, so the load marks the line the declaration starts on. Later releases read it
+    /// with no offsets, which marks nothing.
+    ContextParameterLoadMarksDeclarationLine {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
+    }
     /// A repeated anonymous context label is numbered after `#` (`$context-String#1`) instead of
     /// `$` (`$context-String$1`).
     AnonymousContextOrdinalAfterHash {
@@ -142,6 +159,37 @@ quirks! {
     /// A synthetic annotation implementation stamps nullability on its constructor, `equals` and
     /// `toString`.
     AnnotationImplCarriesNullability {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
+    }
+    /// A `null` function value suspend-converted to a nullable suspend function type converts to an
+    /// adapter whose `invoke` yields `null`, instead of staying `null` (KT-89451).
+    NullFunctionValueConvertsToAdapter {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_5_0),
+        defect: true,
+    }
+    /// A function value held by a type parameter with a nullable function bound, passed where a
+    /// suspend function type is expected, is not converted at all: the value is cast to the suspend
+    /// function's class, so `null` stays `null` and any other value throws `ClassCastException`.
+    TypeParameterFunctionValueSkipsSuspendConversion {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: true,
+    }
+    /// A `null` function value held by a type parameter with a nullable function bound, passed
+    /// where a suspend function type is expected, converts to an adapter that invokes it without a
+    /// null check: calling it throws `NullPointerException`. Earlier releases do not convert the
+    /// value ([`Quirk::TypeParameterFunctionValueSkipsSuspendConversion`]).
+    NullTypeParameterFunctionValueIsDereferenced {
+        since: Some(KotlinVersion::V2_4_20),
+        fixed_in: Some(KotlinVersion::V2_5_0),
+        defect: true,
+    }
+    /// An interface's `$DefaultImpls` forwarder for a default it only inherits maps its body to
+    /// the interface's declaration line; later releases give it no line.
+    InheritedHolderForwarderMapsInterfaceLine {
         since: None,
         fixed_in: Some(KotlinVersion::V2_4_20),
         defect: false,
@@ -178,6 +226,13 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: false,
     }
+    /// A function reference class's constructor numbers its bound receiver parameter
+    /// (`receiver0`). From 2.5 kotlinc passes at most one bound receiver and names it `receiver`.
+    FunctionReferenceNumbersBoundReceiver {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
     /// A class's static state initializes with its `companion object` first: the companion is
     /// constructed, then every `companion { }` block property of the class is stored, then the
     /// companion's initializer body runs. From 2.5 kotlinc initializes in program order: the block
@@ -203,6 +258,28 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: false,
     }
+    /// A `tailrec` function's recursive infix call or operator expression is reported at the infix
+    /// name or the operator token. From 2.5 the position is the start of the whole expression,
+    /// as wide as the function's name.
+    TailrecDotlessCallReportedAtOperator {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
+    /// In a `tailrec` function a recursive call followed by `return Unit` is not a tail call:
+    /// reading the `Unit` object is an instruction after it. From 2.5 it is not.
+    TailrecUnitObjectReturnFollowsCall {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
+    /// In a `tailrec` function with a non-null result, a recursive call that is the left operand of
+    /// `?:` in tail position is itself a tail call. From 2.5 an elvis operand never is.
+    TailrecElvisLeftOperandIsTail {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
     /// The Kotlin/Native and Kotlin/Wasm standard library's `ArrayList.addAll` makes room for the
     /// new elements before it reads the argument, so a range of the list being appended to is
     /// invalidated first: `list.addAll(list.subList(0, 2))` raises
@@ -210,6 +287,17 @@ quirks! {
     /// the argument first and appends the range. A library quirk, which only those platforms'
     /// backends test.
     ArrayListAddAllGrowsBeforeReadingItsArgument {
+        since: None,
+        fixed_in: None,
+        defect: true,
+    }
+    /// A Kotlin subclass of a Java class that realizes a builtin under another JVM name and also
+    /// declares a method under the builtin's Kotlin name (`charAt(int)` beside its own
+    /// `get(int)`) gets the builtin's entry under the Kotlin name, delegating to the renamed
+    /// method. The entry overrides the unrelated Java method, so a call to it reaches `charAt`, and
+    /// a class over a final one fails to load. The Java method is not the builtin's override, so a
+    /// subclass inherits it unchanged.
+    JavaRenamedBuiltinEntryOverridesJavaMember {
         since: None,
         fixed_in: None,
         defect: true,

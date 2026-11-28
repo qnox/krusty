@@ -441,6 +441,9 @@ fn copied_override(explicit: bool) -> (IrFile, u32) {
                 implementation_type: Ty::String,
                 declared_receiver: None,
                 implementation_receiver: None,
+                declared_contexts: Vec::new(),
+                implementation_contexts: Vec::new(),
+                declared_context_identities: Vec::new(),
                 overridden_setter_value: None,
                 implementation_mutable: true,
                 has_kotlin_superclass_override: false,
@@ -455,9 +458,6 @@ struct ReferenceMembers;
 
 impl crate::backend::class_tables::Representation for ReferenceMembers {
     fn same(&self, _: Ty, _: Ty) -> bool {
-        true
-    }
-    fn is_reference(&self, _: Ty) -> bool {
         true
     }
     fn owns_base(&self, _: crate::types::TypeName) -> bool {

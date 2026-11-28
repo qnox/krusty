@@ -1771,6 +1771,7 @@ impl BodyFirChecker<'_> {
             });
         }
         let super_arguments = self.anonymous_super_arguments(transient, class)?;
+        self.record_settled_class_name(transient, declaration);
         Ok(FirExprKind::AnonymousObject(FirAnonymousObject {
             declaration,
             captures,
@@ -2073,6 +2074,7 @@ impl BodyFirChecker<'_> {
         for (capture, stored) in captures.iter_mut().zip(stored) {
             capture.stored = stored;
         }
+        self.record_settled_class_name(transient, declaration);
         Ok(self.body.add_statement(FirStatement {
             origin,
             kind: FirStatementKind::LocalDeclaration {

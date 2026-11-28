@@ -16,6 +16,7 @@ mod collection_canonicalization;
 mod declaration_headers;
 mod declared_members;
 mod facade_package_callables;
+mod mapped_builtin_faces;
 mod symbol_source;
 use classpath_annotation_classes::{
     annotation_element_defaults, classpath_annotation_targets, java_annotation_parameter_list,
@@ -1046,49 +1047,6 @@ impl JvmLibraries {
         self.cp.builtin_members_name(kotlin)
     }
 
-    /// Metadata declarations realized by the mapped collection interfaces in a concrete JVM class's
-    /// hierarchy. The provider walks the physical hierarchy only to discover applied interfaces; the
-    /// member set and Kotlin inheritance come from `.kotlin_builtins`.
-    fn mapped_collection_members(&self, internal: TypeName) -> Vec<MappedBuiltinMember> {
-        let mut mappings = Vec::new();
-        let mut seen = crate::fx_hash::HashSet::default();
-        let mut pending = std::collections::VecDeque::new();
-        pending.push_back(super::jvm_class_map::to_jvm_type_name(internal));
-        while let Some(owner) = pending.pop_front() {
-            if !seen.insert(owner) {
-                continue;
-            }
-            if let Some(kotlin) =
-                super::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name(owner)
-            {
-                for mapping in self.cp.mapped_builtin_members_name(kotlin) {
-                    if mapping.physical_owner != owner {
-                        continue;
-                    }
-                    if !mappings.contains(&mapping) {
-                        mappings.push(mapping);
-                    }
-                }
-            }
-            if let Some(class) = self.cp.find_name(owner) {
-                pending.extend(class.interfaces.iter_ids().chain(class.super_class));
-            }
-        }
-        mappings
-    }
-
-    /// Kotlin source renames for function members only. Property mappings are consumed separately
-    /// by `declared_callables_for`, where they become `PropertyInfo` declarations backed by the
-    /// concrete class's physical zero-argument method.
-    fn mapped_collection_function_renames(&self, internal: TypeName) -> Vec<MappedBuiltinMember> {
-        self.mapped_collection_members(internal)
-            .into_iter()
-            .filter(|mapping| {
-                !mapping.is_property() && mapping.source_name != mapping.physical_name
-            })
-            .collect()
-    }
-
     /// The generic signature for `owner.jvm_name`, metadata-primary. When `@Metadata` DESCRIBES this
     /// function (a Kotlin callable), its metadata gsig is authoritative — the JVM-agnostic, Kotlin-faithful
     /// signature (nullability, variance, Kotlin type identities, and no synthetic `suspend` Continuation /
@@ -1754,7 +1712,13 @@ impl JvmLibraries {
                 } else if declaration.is_some() {
                     members.push(member);
                 } else if m.is_static() {
-                    provider_normalization::publish_classifier_static(&mut companion, member);
+                    // A mapped Kotlin classifier (`kotlin.collections.Map`) is realized by a JDK
+                    // class, but its Kotlin static scope is empty: the realization's statics
+                    // (`java.util.Map.of`) belong to the Java classifier, which only its own
+                    // spelling (an explicit `java.util.Map` import or a qualified name) selects.
+                    if ci.this_class == internal_name {
+                        provider_normalization::publish_classifier_static(&mut companion, member);
+                    }
                 } else {
                     // `java.lang.Number.intValue` is Kotlin's `Number.toInt`. The table records the
                     // classfile owner (`java/lang/Number`); the requested name may be the Kotlin
@@ -3803,9 +3767,11 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn inherits_classifier_callables(&self, internal: TypeName) -> bool {
-        self.cp
-            .find_name(internal)
-            .is_some_and(|classifier| !classifier.meta.is_present())
+        // A mapped Kotlin classifier is a Kotlin declaration realized by a JDK class: it has no
+        // Java statics to inherit.
+        self.cp.find_name(internal).is_some_and(|classifier| {
+            !classifier.meta.is_present() && classifier.this_class == internal
+        })
     }
 
     fn function_type(&self, arity: usize) -> Option<Ty> {

@@ -745,6 +745,9 @@ pub struct FunDecl {
     /// a `$default` stub's entry pc to this line, which differs from [`Self::decl_line`] exactly when
     /// an expression body starts on a later line than the signature. Filled by the same post-pass.
     pub sig_line: u32,
+    /// 1-based source line of the `context` keyword that opens the declaration's `context(…)`
+    /// clause; 0 without one. Filled by the same post-pass.
+    pub context_line: u32,
     /// The lines the body ENDS on. Filled by the same parser post-pass as `decl_line`.
     pub body_lines: FunBodyLines,
     /// Bit-packed `is_inline`/`is_final`/`is_open`/`is_override`/`is_abstract`/`is_suspend`/`is_tailrec`/
@@ -948,6 +951,8 @@ pub struct AstEnumEntry {
     pub annotations: Vec<AnnotationRef>,
     /// The argument expressions of each annotation in `annotations` (same order/length).
     pub annotation_args: Vec<Vec<ExprId>>,
+    /// Whether the entry wrote a constructor call (`RED()`), as opposed to `RED`.
+    pub explicit_call: bool,
     /// Constructor arguments (`RED(0xFF0000)` → the two arg expr ids); empty for `RED` with no args.
     pub args: Vec<ExprId>,
     /// Per-argument name for a NAMED argument (`RED(rgb = 0xFF0000)`), parallel to `args`; `None` for

@@ -64,6 +64,7 @@ impl CallSig {
             required: self.required.saturating_sub(start),
             vararg: self.vararg,
             vararg_index: self.vararg_index.and_then(|index| index.checked_sub(start)),
+            vararg_element_mapped_whole: self.vararg_element_mapped_whole,
         }
     }
 
@@ -101,6 +102,7 @@ impl CallSig {
             param_defaults: param_defaults.into(),
             vararg: vararg_index.is_some(),
             vararg_index,
+            vararg_element_mapped_whole: self.vararg_element_mapped_whole,
         }
     }
 }

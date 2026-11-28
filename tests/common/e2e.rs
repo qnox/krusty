@@ -634,7 +634,7 @@ pub fn krusty_error_blocks_with_args(
         .output()
         .expect("run krusty diagnostic fixture");
     let _ = std::fs::remove_dir_all(work);
-    error_blocks(&String::from_utf8_lossy(&output.stderr), false)
+    error_blocks(&String::from_utf8_lossy(&output.stderr), true)
 }
 
 /// Assert krusty's CLI reports exactly kotlinc's errors for `sources`, complete multi-line

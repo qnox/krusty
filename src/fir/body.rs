@@ -863,6 +863,13 @@ pub enum FirAdaptedReferenceArgument {
     Vararg {
         values: Box<[u32]>,
         whole_array: bool,
+        /// The checker's record that kotlinc mapped the single collected input as the whole array
+        /// before binding the vararg's element type to it (KT-90169). The input is still
+        /// collected, but the reference reports no vararg conversion.
+        mapped_whole: bool,
+        /// The declaration's vararg parameter type under the reference's specialization, which a
+        /// collected vararg is built as.
+        array_type: ResolvedTy,
     },
 }
 
@@ -874,6 +881,23 @@ pub struct FirReferenceAdaptation {
     pub parameter_types: Box<[ResolvedTy]>,
     pub result_type: ResolvedTy,
     pub suspend_conversion: bool,
+}
+
+impl FirReferenceAdaptation {
+    /// Whether the reference reports a vararg conversion: it collects inputs into a vararg that
+    /// kotlinc's argument mapping did not take as the whole array.
+    pub fn vararg_conversion(&self) -> bool {
+        self.arguments.iter().any(|argument| {
+            matches!(
+                argument,
+                FirAdaptedReferenceArgument::Vararg {
+                    whole_array: false,
+                    mapped_whole: false,
+                    ..
+                }
+            )
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1583,6 +1607,9 @@ pub struct FirBody {
     /// Naming provenance of each expression the reference compiler realizes as a class of its own
     /// (a callable reference). A naming fact, not a lowering decision.
     generated_class_provenance: HashMap<FirExprId, FirGeneratedClassProvenance>,
+    /// Settled naming provenance of each local or anonymous class this body declares, where
+    /// resolution changed what the naming walk numbered before it.
+    settled_class_names: HashMap<DeclarationId, FirGeneratedClassProvenance>,
     /// Source forms checking normalized away, which metadata's constant-initializer rule reads.
     source_forms: HashMap<FirExprId, FirSourceForm>,
     /// Local-storage blocks originating from postfix `++`/`--`, whose checked shape snapshots the
@@ -1677,6 +1704,7 @@ impl FirBody {
             destructuring_loop_containers: HashSet::default(),
             debug_lines: Default::default(),
             generated_class_provenance: HashMap::default(),
+            settled_class_names: HashMap::default(),
             source_forms: HashMap::default(),
             postfix_updates: HashSet::default(),
             implicit_context_arguments: HashSet::default(),
@@ -2424,6 +2452,20 @@ impl FirBody {
         expression: FirExprId,
     ) -> Option<&FirGeneratedClassProvenance> {
         self.generated_class_provenance.get(&expression)
+    }
+
+    pub(crate) fn set_settled_class_name(
+        &mut self,
+        class: DeclarationId,
+        provenance: FirGeneratedClassProvenance,
+    ) {
+        self.settled_class_names.insert(class, provenance);
+    }
+
+    /// The settled naming provenance of local or anonymous class `class`, when it replaces the one
+    /// published with the class's declaration.
+    pub fn settled_class_name(&self, class: DeclarationId) -> Option<&FirGeneratedClassProvenance> {
+        self.settled_class_names.get(&class)
     }
 
     pub fn expr(&self, id: FirExprId) -> Option<&FirExpr> {

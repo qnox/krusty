@@ -325,31 +325,50 @@ impl BodyFirChecker<'_> {
         provenance: &crate::ast::LocalClassNameProvenance,
         expression: FirExprId,
     ) {
+        if let Some(provenance) = self.stable_class_name_provenance(provenance) {
+            self.body
+                .set_generated_class_provenance(expression, provenance);
+        }
+    }
+
+    /// Record the settled name of local or anonymous class `transient` (stable `class`), when
+    /// resolution changed what the file's naming walk numbered.
+    pub(super) fn record_settled_class_name(
+        &mut self,
+        transient: crate::ast::DeclId,
+        class: crate::fir::DeclarationId,
+    ) {
+        let info = self.info;
+        let Some(provenance) = info.generated_class_names.classes.get(&transient) else {
+            return;
+        };
+        if let Some(provenance) = self.stable_class_name_provenance(provenance) {
+            self.body.set_settled_class_name(class, provenance);
+        }
+    }
+
+    /// A naming provenance with its lexical owner as a stable classifier declaration.
+    fn stable_class_name_provenance(
+        &self,
+        provenance: &crate::ast::LocalClassNameProvenance,
+    ) -> Option<crate::fir::FirGeneratedClassProvenance> {
         let lexical_owner =
             match provenance.lexical_owner {
-                Some(owner) => {
-                    // The walk names the parser classifier that lexically contains the node. After
-                    // actualization that parser node is the expect class, whose header is gone, and
-                    // the same binding is aliased onto the actual classifier that is emitted. The
-                    // surviving header is the owner the JVM class is realized from.
-                    let Some(owner) = self.session.active_source.as_ref().and_then(|active| {
-                        active.canonical_classifier_declaration(owner, self.index)
-                    }) else {
-                        return;
-                    };
-                    Some(owner)
-                }
+                // The walk names the parser classifier that lexically contains the node. After
+                // actualization that parser node is the expect class, whose header is gone, and the
+                // same binding is aliased onto the actual classifier that is emitted. The surviving
+                // header is the owner the JVM class is realized from.
+                Some(owner) => Some(self.session.active_source.as_ref().and_then(|active| {
+                    active.canonical_classifier_declaration(owner, self.index)
+                })?),
                 None => None,
             };
-        self.body.set_generated_class_provenance(
-            expression,
-            crate::fir::FirGeneratedClassProvenance {
-                lexical_owner,
-                segments: provenance.segments.clone().into_boxed_slice(),
-                ordinal: provenance.ordinal,
-                parents: provenance.parents.clone().into_boxed_slice(),
-            },
-        );
+        Some(crate::fir::FirGeneratedClassProvenance {
+            lexical_owner,
+            segments: provenance.segments.clone().into_boxed_slice(),
+            ordinal: provenance.ordinal,
+            parents: provenance.parents.clone().into_boxed_slice(),
+        })
     }
 
     pub(super) fn checked_storage_read(

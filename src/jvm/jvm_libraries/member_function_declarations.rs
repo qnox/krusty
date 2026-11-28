@@ -83,18 +83,32 @@ impl JvmLibraries {
                     // call still goes to `remove(I)`. A member that already carries a `physical_name`
                     // is a synthesized alias (a value-class mangled member, or a builtin whose Kotlin
                     // name was recorded there), never a raw Java method — leave it alone.
-                    let scope_name = m.physical_name.as_ref().map_or_else(
-                        || {
-                            function_renames
-                                .iter()
-                                .find(|mapping| {
-                                    mapping.physical_name == m.name
-                                        && mapping.descriptor == m.descriptor
-                                })
-                                .map_or(m.name.as_str(), |mapping| mapping.source_name.as_str())
-                        },
-                        |_| m.name.as_str(),
-                    );
+                    let rename = m
+                        .physical_name
+                        .is_none()
+                        .then(|| {
+                            function_renames.iter().find(|mapping| {
+                                mapping.physical_name == m.name
+                                    && mapping.descriptor == m.descriptor
+                            })
+                        })
+                        .flatten();
+                    let scope_name =
+                        rename.map_or(m.name.as_str(), |mapping| mapping.source_name.as_str());
+                    // kotlinc keeps a renamed copy only HIDDEN when the class also declares the
+                    // Kotlin name itself (`java.nio.CharBuffer` declares `charAt(int)` and
+                    // `get(int)`): the copy still overrides the builtin, but calls and the
+                    // class's members see only the declared `get`.
+                    let hidden_rename = scope_name != m.name
+                        && t.members.iter().any(|other| {
+                            !other.is_member_extension()
+                            && other.physical_name.is_none()
+                            && other.name == scope_name
+                            && crate::jvm::mapped_builtin_declarations::same_descriptor_parameters(
+                                &other.descriptor,
+                                &m.descriptor,
+                            )
+                        });
                     if scope_name == name {
                         crate::trace_compiler!(
                             "resolve",
@@ -231,7 +245,21 @@ impl JvmLibraries {
                             metadata_ret
                                 .map_or(base, |meta| overlay_metadata_collection_names(base, meta))
                         };
-                        let call_sig = m.call_sig.clone();
+                        let mut call_sig = m.call_sig.clone();
+                        if let Some(mapping) = rename.filter(|mapping| {
+                            mapping.parameter_names.len() == call_sig.parameter_identities.len()
+                        }) {
+                            call_sig.param_names = mapping.parameter_names.to_vec();
+                            call_sig.parameter_identities = mapping
+                                .parameter_names
+                                .iter()
+                                .map(|name| {
+                                    crate::fir::ResolvedParameterIdentity::Source(
+                                        name.as_str().into(),
+                                    )
+                                })
+                                .collect();
+                        }
                         // A generic-return builtin member (`Map.get(K): V?`) resolves to the erased
                         // classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin
                         // nullability. Recover the source `V?` from the builtin `@Metadata`. Applied
@@ -384,11 +412,19 @@ impl JvmLibraries {
                                 inline: m.inline,
                                 reified: m.reified,
                                 suspend,
-                                operator: m.is_operator(),
+                                // A Java method renamed to a builtin (`charAt` as `get`) is the
+                                // operator a Java method declared under that name would be.
+                                operator: m.is_operator()
+                                    || rename.is_some()
+                                        && !t.is_kotlin
+                                        && java_method_has_operator_convention(
+                                            scope_name,
+                                            m.params.len(),
+                                        ),
                                 infix: m.is_infix(),
                                 is_abstract: m.is_abstract(),
                                 is_final: m.is_final(),
-                                deprecated_hidden: m.deprecated_hidden(),
+                                deprecated_hidden: m.deprecated_hidden() || hidden_rename,
                                 inherited_by_delegation: m.inherited_by_delegation(),
                                 signature_polymorphic: m.is_signature_polymorphic(),
                                 return_value_status: m.return_value_status,

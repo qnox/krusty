@@ -43,7 +43,7 @@ impl<'a> SymbolResolver<'a> {
             visibility_suppressed: false,
             type_variables: &[],
             eager_lambda_results: false,
-            member_access: None,
+            callable_access: None,
         }
     }
 
@@ -60,7 +60,7 @@ impl<'a> SymbolResolver<'a> {
             visibility_suppressed: false,
             type_variables: &[],
             eager_lambda_results: false,
-            member_access: None,
+            callable_access: None,
         }
     }
 
@@ -81,7 +81,7 @@ impl<'a> SymbolResolver<'a> {
             visibility_suppressed: false,
             type_variables: &[],
             eager_lambda_results: false,
-            member_access: None,
+            callable_access: None,
         }
     }
 
@@ -101,7 +101,7 @@ impl<'a> SymbolResolver<'a> {
             visibility_suppressed: false,
             type_variables: &[],
             eager_lambda_results: false,
-            member_access: None,
+            callable_access: None,
         }
     }
 

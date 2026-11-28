@@ -76,7 +76,13 @@ impl<'checker, 'source> StablePathRead<'checker, 'source> {
                 .visible_flow_value(scope, *identity)
                 .map(|(_, local)| local.declared_ty),
             (PathRoot::TopLevel(property), None) => Some(property.ty),
-            (PathRoot::Receiver(_), None) => None,
+            // The receiver's own declared type, before any proof about `this`.
+            (PathRoot::Receiver(identity), None) => self
+                .checker
+                .declared_implicit_receivers(scope)
+                .into_iter()
+                .find(|receiver| receiver.identity == *identity)
+                .map(|receiver| receiver.declared_ty),
         }
     }
 }

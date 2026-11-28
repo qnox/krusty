@@ -52,9 +52,11 @@ lint: attribution-tests smoke-selection-tests versioning-tests runner-profile-te
 reference-cache-tests:
     bash scripts/test-prune-reference-cache.sh
 
-# The attribution check's removal of the footer an integration appends to pull request text.
+# The attribution check's removal of the footer an integration appends to pull request text and
+# comments.
 attribution-tests:
     bash scripts/test-check-attribution.sh
+    bash scripts/test-strip-comment-footers.sh
 
 # The smoke check's lane selection, against a disposable repository with deleted and renamed paths.
 smoke-selection-tests:

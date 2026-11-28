@@ -79,6 +79,7 @@ impl Parser<'_> {
             delegation_line: delegation_offset,
             decl_end_line: 0,
             visibility: visibility_of(modifiers),
+            visibility_written: has_visibility_modifier(modifiers),
         }
     }
 }

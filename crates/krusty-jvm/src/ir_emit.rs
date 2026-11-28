@@ -717,7 +717,7 @@ fn attach_synth_nullability(
     }
     // The USER annotations written on the primary-constructor parameters, per source parameter
     // (the same slots `ctor_params` above describes).
-    if !c.ctor_param_annotations.is_empty() {
+    if constructor_accessors::primary_parameters_keep_annotations(ir, c) {
         let user: Vec<krusty::ir::DeclarationAnnotations> = source_parameters
             .iter()
             .map(|parameter| {
@@ -2464,17 +2464,7 @@ fn emit_class(
         }
         // Declared PRIMARY-constructor annotations (`class C @Mark constructor(…)`), with the same
         // `Deprecated` / `ACC_SYNTHETIC` companions a secondary constructor's carry.
-        let primary_annotations = &c.primary_ctor_annotations;
-        if !primary_annotations.retains_none() {
-            let ctor_desc = method_descriptor(&param_tys, Ty::Unit);
-            cw.set_method_annotations("<init>", &ctor_desc, primary_annotations);
-            if primary_annotations.deprecated() {
-                cw.mark_method_deprecated("<init>", &ctor_desc);
-            }
-            if function_annotations::hidden_realization_is_synthetic(primary_annotations) {
-                cw.set_method_synthetic("<init>", &ctor_desc);
-            }
-        }
+        constructor_accessors::emit_primary_declared_annotations(&mut cw, ir, c, &param_tys);
         // A default on any primary-ctor parameter → kotlinc's synthetic
         // `<init>(params…, int mask, DefaultConstructorMarker)` overload (fills the masked slots from the
         // defaults, then `invokespecial` the real `<init>`).
@@ -3267,7 +3257,7 @@ fn emit_enum_class(
                 defaults,
                 secondary_lines: None,
                 target_uses_marker_accessor: false,
-                deprecated: false,
+                deprecated: c.primary_ctor_annotations.deprecated(),
                 access: ACC_SYNTHETIC,
             },
             &mut cw,

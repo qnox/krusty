@@ -141,6 +141,9 @@ pub(super) struct FrozenClosure {
 pub(super) struct ClosureRoots<'r, 'a> {
     pub(super) callables: &'r [KlibBodyCallable<'a>],
     pub(super) objects: &'r [crate::libraries::KlibBodyClassContract],
+    /// The dependency members the emitted source calls through dispatch, which release the
+    /// inherited defaults implementing them as a walked body's call does.
+    pub(super) dispatched_calls: &'r HashSet<KlibDependencyCallable>,
 }
 
 /// Freeze declaration contracts along the exact producer graph before ordinary body lowering.
@@ -185,6 +188,7 @@ pub(super) fn declarations(
             .collect(),
         inherited_defaults: Vec::new(),
         object_defaults: HashSet::default(),
+        dispatched_calls: roots.dispatched_calls,
         capabilities,
     };
     // An object the emitted source reads as a value is materialized as one a body reads.
@@ -407,6 +411,14 @@ pub(super) fn declarations(
                     .map(|member| (member.clone(), member_class.clone())),
             );
             state.dispatched.extend(dispatched);
+            // Its inherited interface defaults wait, as an object's do, for a walked body to call
+            // a declaration one implements.
+            for default in facts
+                .constructor_inherited_defaults(&identity, bodies)
+                .map_err(|reason| format!("an invalid class member: {reason:?}"))?
+            {
+                hold_inherited_default(&mut state, default, member_class.clone());
+            }
             // The declarations the class's initialization names without emitting them.
             for declaration in facts
                 .constructor_declaration_evidence(&identity, bodies)
@@ -604,8 +616,9 @@ struct ClosureState<'c, 'u> {
     /// Interface default bodies a class of the file inherits, emitted for its dispatch record
     /// though no support unit materializes the interface.
     emitted_defaults: HashSet<KlibDependencyCallable>,
-    /// Interface defaults a materialized object or local class inherits, each with the object
-    /// that emits it (none for a local class), not yet released: a default is dispatched to only once a walked body calls a declaration it
+    /// Interface defaults a materialized object, constructed class or local class inherits, each
+    /// with the class that emits it (none for a local class), not yet released: a default is
+    /// dispatched to only once a walked body or the emitted source calls a declaration it
     /// implements, so reaching it earlier would walk a body nothing can run.
     inherited_defaults: Vec<(
         crate::klib_lowering::InheritedDefault,
@@ -613,6 +626,8 @@ struct ClosureState<'c, 'u> {
     )>,
     /// The inherited defaults released, whose bodies their object emits.
     object_defaults: HashSet<KlibDependencyCallable>,
+    /// The dependency members the emitted source calls through dispatch.
+    dispatched_calls: &'c HashSet<KlibDependencyCallable>,
     capabilities: &'c super::DependencyLeafCapabilities<'u>,
 }
 
@@ -722,10 +737,9 @@ fn next_pending(
         let (released, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut state.inherited_defaults)
             .into_iter()
             .partition(|(default, _)| {
-                default
-                    .implemented
-                    .iter()
-                    .any(|callee| visited.contains(callee))
+                default.implemented.iter().any(|callee| {
+                    visited.contains(callee) || state.dispatched_calls.contains(callee)
+                })
             });
         state.inherited_defaults = waiting;
         if released.is_empty() {
@@ -751,19 +765,30 @@ fn hold_local_class_defaults(
     defaults: Vec<(KlibDependencyCallable, Vec<KlibDependencyCallable>)>,
 ) {
     for (body, implemented) in defaults {
-        if state.object_defaults.contains(&body)
-            || state
-                .inherited_defaults
-                .iter()
-                .any(|(held, _)| held.body == body)
-        {
-            continue;
-        }
-        state.inherited_defaults.push((
+        hold_inherited_default(
+            state,
             crate::klib_lowering::InheritedDefault { body, implemented },
             None,
-        ));
+        );
     }
+}
+
+/// Hold `default`, emitted with `class`, until a walked body calls a declaration it implements.
+/// A default already held or released is held once.
+fn hold_inherited_default(
+    state: &mut ClosureState<'_, '_>,
+    default: crate::klib_lowering::InheritedDefault,
+    class: Option<crate::libraries::KlibBodyClassContract>,
+) {
+    if state.object_defaults.contains(&default.body)
+        || state
+            .inherited_defaults
+            .iter()
+            .any(|(held, _)| held.body == default.body)
+    {
+        return;
+    }
+    state.inherited_defaults.push((default, class));
 }
 
 fn walk_declared_instances(
@@ -853,6 +878,26 @@ pub(super) fn ordinary_root_objects(
         }
     }
     Ok(objects)
+}
+
+/// The dependency members `source` calls on an instance, whichever body dispatch then runs: a
+/// call of one reaches the interface defaults implementing it that a materialized class inherits.
+pub(super) fn dispatched_source_calls(
+    source: &CheckedIrFile<'_>,
+) -> Result<Vec<KlibDependencyCallable>, String> {
+    let mut calls = Vec::new();
+    for (expression, target, construction) in emitted_file_targets(source)? {
+        if construction {
+            continue;
+        }
+        let Some(selected) = source.callables.klib_body_callable_at(expression, target) else {
+            continue;
+        };
+        if selected.kind() == ExternalCallableKind::Member {
+            calls.push(selected.identity().clone());
+        }
+    }
+    Ok(calls)
 }
 
 pub(super) fn ordinary_roots<'a>(

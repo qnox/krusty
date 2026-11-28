@@ -107,7 +107,16 @@ impl BodyLowering<'_> {
             operands.push(self.typed(read, capture.ty));
             captures.push(capture);
         }
-        let header = closure_header(self.arena, function, self.header, &captures)?;
+        // The closure's parameters and result may name a class private to the body's library,
+        // as the body's own expressions do.
+        let mut types = self.header.type_parameters().clone();
+        super::super::private_signature_classes::bind_with(
+            &mut types,
+            self.arena,
+            function,
+            &|signature| self.linker.local_class(signature),
+        )?;
+        let header = closure_header(self.arena, function, types, &captures)?;
         if header.params()[captures.len()..] != *signature.params
             || header.result() != signature.ret
         {

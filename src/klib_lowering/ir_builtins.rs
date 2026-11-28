@@ -52,14 +52,14 @@ const FLOATING_POINT: [&str; 2] = ["kotlin/Float", "kotlin/Double"];
 
 /// A relational operator over two operands of one primitive type, answering `Boolean`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct BuiltinRelation {
-    pub(super) operator: IrBinOp,
-    pub(super) operand: Ty,
+pub(crate) struct BuiltinRelation {
+    pub(crate) operator: IrBinOp,
+    pub(crate) operand: Ty,
 }
 
 /// One operator lowering realizes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum BuiltinOperator {
+pub(crate) enum BuiltinOperator {
     Relation(BuiltinRelation),
     /// `EQEQ(arg0: Any?, arg1: Any?): Boolean`, Kotlin's `==`.
     Equals,
@@ -96,7 +96,7 @@ pub(super) enum BuiltinOperator {
 
 /// The `Any` member a data class generates over an array property's content.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) enum DataClassArrayMember {
+pub(crate) enum DataClassArrayMember {
     ToString,
     HashCode,
 }
@@ -121,9 +121,13 @@ impl DataClassArrayMember {
     }
 }
 
-/// The built-in operators lowering realizes, by exact signature.
-pub(super) struct IrBuiltinOperators {
+/// The built-in operators lowering realizes, by exact signature, and the signature a KLIB body
+/// writer gives each operator.
+pub(crate) struct IrBuiltinOperators {
     operators: HashMap<KlibPublicIdSignature, BuiltinOperator>,
+    /// Each operator's declarations in declaration order. An operator a library may sign two
+    /// ways is written under the first, kotlinc's own built-ins' signature.
+    declared: Vec<(BuiltinOperator, KlibPublicIdSignature)>,
 }
 
 /// Whether this exact call emits a declaration edge or an existing common-IR operation.
@@ -135,7 +139,7 @@ pub(super) enum BuiltinCallDisposition {
 }
 
 impl IrBuiltinOperators {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let package = PACKAGE.map(str::to_owned);
         let builtins = DeclarationContainer::<KotlinType> {
             package: &package,
@@ -152,7 +156,7 @@ impl IrBuiltinOperators {
                 expect: false,
             }]
         });
-        let mut operators = HashMap::default();
+        let mut declared = Vec::new();
         let mut declare = |container, name, params: Vec<&KotlinType>, operator| {
             let shape = CallableShape {
                 name,
@@ -166,7 +170,7 @@ impl IrBuiltinOperators {
             };
             let signature = callable_signature(container, &shape)
                 .expect("a built-in operator's shape names no type parameter");
-            operators.insert(signature, operator);
+            declared.push((operator, signature));
         };
         for operand in OPERANDS {
             let operand = KotlinType::class(operand);
@@ -249,6 +253,7 @@ impl IrBuiltinOperators {
                 );
             }
         }
+        let mut declared_operators = declared;
         let kotlin = DeclarationContainer::<KotlinType> {
             package: &kotlin_package,
             classes: &[],
@@ -268,12 +273,12 @@ impl IrBuiltinOperators {
             };
             let signature = callable_signature(kotlin, &shape)
                 .expect("the floating-point extension names no type parameter");
-            operators.insert(
-                signature,
+            declared_operators.push((
                 BuiltinOperator::IsNan {
                     operand: semantic_ty(&declared, &HashMap::default()),
                 },
-            );
+                signature,
+            ));
         }
         let any = KotlinType::class("kotlin/Any");
         let operand = KotlinType::Param {
@@ -296,8 +301,23 @@ impl IrBuiltinOperators {
         };
         let signature = callable_signature(builtins, &shape)
             .expect("`CHECK_NOT_NULL` names its own type parameter");
-        operators.insert(signature, BuiltinOperator::CheckNotNull);
-        Self { operators }
+        declared_operators.push((BuiltinOperator::CheckNotNull, signature));
+        let operators = declared_operators
+            .iter()
+            .map(|(operator, signature)| (signature.clone(), *operator))
+            .collect();
+        Self {
+            operators,
+            declared: declared_operators,
+        }
+    }
+
+    /// The signature a body writer calls `operator` by, if it is one of this table's.
+    pub(crate) fn signature(&self, operator: BuiltinOperator) -> Option<&KlibPublicIdSignature> {
+        self.declared
+            .iter()
+            .find(|(declared, _)| *declared == operator)
+            .map(|(_, signature)| signature)
     }
 
     /// The operator declared under exactly `signature`, if it is one of this table's.

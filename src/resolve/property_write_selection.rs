@@ -126,6 +126,13 @@ impl Checker<'_> {
         receiver: ImplicitReceiver,
         name: &str,
     ) -> Result<Option<ImplicitPropertyWriteResolution>, Vec<String>> {
+        // A smart cast that adds no property of this name writes through the declared receiver.
+        let receiver = self
+            .unnarrowed_property_receiver(receiver.declared_ty, receiver.ty, name, true)
+            .map_or(receiver, |declared| ImplicitReceiver {
+                ty: declared,
+                ..receiver
+            });
         if let Some(property) = self.checked_body_local_property_for_write(receiver.ty, name) {
             return Ok(Some(ImplicitPropertyWriteResolution {
                 receiver,

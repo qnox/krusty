@@ -185,3 +185,51 @@ fun box(): String {
         "SuspendFunctionCastProof",
     );
 }
+
+/// A `null` value of a nullable function type converted to a nullable suspend function type: a
+/// parameter, a type parameter with a nullable function bound, a call result and a local `var`,
+/// with a value result and a `Unit` result. Kotlin 2.5 keeps the value `null` (KT-89451); earlier
+/// releases convert it to an adapter whose call yields `null`, or, for a type parameter, throws
+/// `NullPointerException`. The shared box regressions hold each program once per behaviour, each
+/// with its releases: a direct call with a continuation that is never resumed, and the original
+/// `startCoroutine` entry observed through `Result.fold`. Both programs for the configured release
+/// must return `OK` under kotlinc and krusty.
+#[test]
+fn a_null_function_value_converts_as_kotlinc_does() {
+    let quirks =
+        krusty::kotlin_version::Quirks::of_release(krusty::kotlin_version::environment_release());
+    let programs = if !quirks.has(krusty::kotlin_version::Quirk::NullFunctionValueConvertsToAdapter)
+    {
+        [
+            include_str!("box_regressions/NullFunctionValueSuspendConversion.kt"),
+            include_str!("box_regressions/NullFunctionValueStartCoroutine.kt"),
+        ]
+    } else if quirks
+        .has(krusty::kotlin_version::Quirk::NullTypeParameterFunctionValueIsDereferenced)
+    {
+        [
+            include_str!("box_regressions/NullFunctionValueSuspendConversionAdapter.kt"),
+            include_str!("box_regressions/NullFunctionValueStartCoroutineAdapter.kt"),
+        ]
+    } else {
+        [
+            include_str!(
+                "box_regressions/NullFunctionValueSuspendConversionAdapterBeforeTypeParameterConversion.kt"
+            ),
+            include_str!(
+                "box_regressions/NullFunctionValueStartCoroutineAdapterBeforeTypeParameterConversion.kt"
+            ),
+        ]
+    };
+    for src in programs {
+        assert_eq!(
+            common::kotlinc_box_result(src),
+            "OK",
+            "kotlinc's observation"
+        );
+        assert_eq!(
+            common::expect_box_run_with_stdlib(src, "NullFunctionValueSuspendConversion"),
+            "OK"
+        );
+    }
+}

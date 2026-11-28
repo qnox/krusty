@@ -4,9 +4,9 @@ use super::constructed_standard_serializers::constructed_standard_serializer;
 use super::type_argument_serializers::named_serializer;
 use super::type_parameter_serializers::TypeParameterSerializers;
 use super::{
-    build_contextual_property_serializer, build_polymorphic_serializer, class_ty,
-    generated_serializer_accessor, is_nullable, kserializer_of, serializer_of_name,
-    type_is_contextual, wrap_nullable_serializer, KSERIALIZER_FQ,
+    build_contextual_property_serializer, class_ty, generated_serializer_accessor, is_nullable,
+    kserializer_of, serializer_of_name, type_is_contextual, wrap_nullable_serializer,
+    KSERIALIZER_FQ,
 };
 use crate::ir::Spelled;
 use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
@@ -95,6 +95,12 @@ pub(super) fn child_cache_element_plan(
     let Some(classifier) = ty.kotlin_class_internal() else {
         return Ok(None);
     };
+    // kotlinc builds the serializer of a type whose own argument is a star projection (`Box<*>`)
+    // in `childSerializers` itself; a star projection deeper in the type (`List<Box<*>>`) is
+    // cached as its outer serializer is.
+    if has_star_projected_argument(*ty) {
+        return Ok(None);
+    }
     // kotlinc caches every element whose serializer is a constructed instance rather than a
     // singleton: a standard serializer's, an enum's, an object's `ObjectSerializer`, a generic
     // class's generated serializer, a sealed or abstract class's runtime serializer, or an external
@@ -108,10 +114,15 @@ pub(super) fn child_cache_element_plan(
         || super::cached_serializer::local_serializable_object(ir, ctx, classifier).is_some()
         || super::cached_serializer::local_generic_serializable_class(ir, ctx, classifier)
         || super::cached_serializer::local_polymorphic_serializable_class(ir, ctx, classifier)
+        || is_local_interface(ir, classifier)
         || constructs_custom_serializer(ir, classifier)
         || matches!(
             ctx.external_serializer(classifier),
-            Some(ExternalSerializer::Object { .. } | ExternalSerializer::Companion { .. })
+            Some(
+                ExternalSerializer::Object { .. }
+                    | ExternalSerializer::Companion { .. }
+                    | ExternalSerializer::Polymorphic
+            )
         );
     if !cacheable {
         return Ok(None);
@@ -119,6 +130,21 @@ pub(super) fn child_cache_element_plan(
     element_serializer_plan_in(ir, ctx, ty, TypeParameterSerializers::NONE, annotated)
         .map(Some)
         .ok_or(UnderivableChildCacheElement)
+}
+
+/// Whether one of `ty`'s own type arguments is a star projection.
+fn has_star_projected_argument(ty: Ty) -> bool {
+    matches!(ty.non_null().kind(), TyKind::Obj(_, arguments)
+        if arguments.iter().any(|argument| matches!(argument.kind(), TyKind::StarProjection(_))))
+}
+
+/// An interface declared in this file: with no serializer of its own it is serialized as
+/// `PolymorphicSerializer(<interface>::class, [])`, a constructed instance kotlinc caches like the
+/// external interface's.
+fn is_local_interface(ir: &IrFile, classifier: TypeName) -> bool {
+    ir.classes
+        .iter()
+        .any(|class| class.fq_name_id() == classifier && class.is_interface)
 }
 
 fn is_reference_array(classifier: TypeName) -> bool {
@@ -710,6 +736,9 @@ fn serializer_plan(
                 arguments,
             });
         }
+        Some(ExternalSerializer::Polymorphic) => {
+            return Some(ElementSerializerPlan::Polymorphic(fq_name));
+        }
         _ => {}
     }
     if let Some(builtin) = builtin_element_serializer(ty) {
@@ -912,7 +941,11 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
             build_contextual_property_serializer(ir, classifier, fallback, arguments)
         }
         ElementSerializerPlan::Polymorphic(classifier) => {
-            build_polymorphic_serializer(ir, classifier)
+            // An element's serializer has no serial-info annotations to carry: kotlinc passes the
+            // empty array through the two-argument constructor.
+            let annotations =
+                super::cached_serializer::serial_info_annotations(ir, classifier, false);
+            super::cached_serializer::polymorphic_serializer(ir, classifier, annotations)
         }
         ElementSerializerPlan::Object {
             object,

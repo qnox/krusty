@@ -157,7 +157,9 @@ fn a_body_disagreeing_with_the_declared_result_is_still_rejected() {
             1,
             format!(
                 "{path}:3:55: error: return type mismatch: expected 'Mono<Auth>!', actual \
-                 'String'.\nkrusty: 1 error(s)\n"
+                 'String'.\nfun use(m: Mono<Auth>): Mono<Auth> = m.onErrorExact {{ \"not a Mono\" }}\n{}{}\nkrusty: 1 error(s)\n",
+                " ".repeat(54),
+                "^".repeat(12)
             )
             .as_str()
         ),

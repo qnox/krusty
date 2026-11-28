@@ -95,6 +95,44 @@ pub(crate) fn ct_sym_releases(path: &Path) -> Result<Option<Vec<u8>>, String> {
         .map_err(|error| error.diagnostic())
 }
 
+/// Read every module descriptor `release`'s view of the `ct.sym` at `path` holds, as kotlinc does
+/// when it builds the module graph, and name the first that does not read. The message is
+/// kotlinc's own, with the failure ASM raised as its cause.
+pub(crate) fn validate_module_descriptors(path: &Path, release: u8) -> Result<(), String> {
+    let Some(mut archive) = File::open(path)
+        .ok()
+        .and_then(|file| crate::archive::open_file(file).ok())
+    else {
+        return Ok(());
+    };
+    for ordinal in 0..archive.entry_count() {
+        let name =
+            archive_entry_name(&archive, path, ordinal).map_err(|error| error.diagnostic())?;
+        let Some((folder, rest)) = name.split_once('/') else {
+            continue;
+        };
+        if !(rest.ends_with("/module-info.sig") || rest == "module-info.sig")
+            || !folder_releases(folder).any(|served| served == release)
+        {
+            continue;
+        }
+        let name = name.to_string();
+        let Some(bytes) = archive.entry_bytes(ordinal) else {
+            continue;
+        };
+        if let Err(error) = super::module_descriptor::validate(&bytes) {
+            return Err(format!(
+                "could not load module definition from: {}!/{name}. The file might be broken by \
+                 incorrect post-processing via bytecode tools. Please remove this file from the \
+                 classpath.\nCaused by: {}",
+                path.display(),
+                error.cause()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The releases the archive's top-level folders name, ascending.
 fn archive_releases(
     archive: &impl ArchiveEntries,

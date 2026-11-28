@@ -498,7 +498,7 @@ fn standalone_analysis_preserves_parse_and_signature_failure_results() {
             .iter()
             .map(|diagnostic| diagnostic.msg.as_str())
             .collect::<Vec<_>>(),
-        ["unresolved reference 'Missing'."]
+        ["Unresolved reference 'Missing'."]
     );
     assert!(symbols.is_some());
     assert!(info.is_none());
@@ -910,7 +910,7 @@ fn exhausted_conflict_display_budget_preserves_qualified_call_diagnostics() {
     assert!(!target_messages.contains(&"none of the following candidates is applicable:"));
     assert!(!target_messages
         .iter()
-        .any(|message| message.starts_with("unresolved reference")));
+        .any(|message| message.starts_with("Unresolved reference")));
 }
 
 #[test]
@@ -1082,9 +1082,9 @@ fn script_declarations_do_not_enter_module_scope() {
         emitted(&diags),
         // The signature's type is resolved before either body.
         [
-            (1, 58, "unresolved reference 'ScriptClass'."),
-            (1, 25, "unresolved reference 'scriptFunction'."),
-            (1, 72, "unresolved reference 'ScriptClass'."),
+            (1, 58, "Unresolved reference 'ScriptClass'."),
+            (1, 25, "Unresolved reference 'scriptFunction'."),
+            (1, 72, "Unresolved reference 'ScriptClass'."),
         ]
     );
 }
@@ -1861,7 +1861,7 @@ fn dependency_symbols_do_not_expose_nested_classifier_outside_subclass() {
         diagnostics
             .diags
             .iter()
-            .any(|diagnostic| diagnostic.msg.contains("unresolved reference 'Category'")),
+            .any(|diagnostic| diagnostic.msg.contains("Unresolved reference 'Category'")),
         "{:?}",
         diagnostics.diags
     );
@@ -2084,8 +2084,8 @@ fn preinferred_local_enum_keeps_its_semantic_owner() {
             .collect::<Vec<_>>(),
         [
             "modifier 'enum' is not applicable to 'local class'.",
-            "unresolved reference 'Missing'.",
-            "unresolved reference 'Choice'.",
+            "Unresolved reference 'Missing'.",
+            "Unresolved reference 'Choice'.",
         ]
     );
     let index = analysis

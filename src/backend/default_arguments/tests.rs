@@ -186,6 +186,7 @@ fn an_exported_dependency_declaration_publishes_its_entry_without_a_caller() {
         &mut CheckedBackendCallables::default(),
         |function| function == exported_function,
         |_| false,
+        &[],
     );
 
     let entry = ir.default_entries[&exported_function];
@@ -232,6 +233,7 @@ fn a_published_entry_takes_the_frame_and_one_mask_word_per_32_parameters() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     let entry = ir.default_entries[&function];
@@ -303,6 +305,7 @@ fn a_default_reads_an_earlier_parameter_and_its_own_locals_move_past_the_masks()
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     let entry = ir.default_entries[&function];
@@ -352,6 +355,7 @@ fn an_entry_receives_a_shared_cell_parameter_as_the_declaration_does() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     let entry = ir.default_entries[&function];
@@ -395,6 +399,7 @@ fn a_call_site_passes_every_parameter_and_constant_mask_words() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     let entry = ir.default_entries[&function];
@@ -458,6 +463,7 @@ fn a_member_entry_takes_the_receiver_and_dispatches_through_the_method() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     let entry = ir.default_entries[&function];
@@ -549,6 +555,7 @@ fn an_actual_member_publishes_its_entry_under_its_expect() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     assert!(ir.default_entries.contains_key(&function));
@@ -631,6 +638,7 @@ fn a_value_class_member_entry_calls_the_member_directly() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     let entry = ir.default_entries[&function];
@@ -701,6 +709,7 @@ fn an_inherited_default_calls_the_entry_of_its_provider_in_this_file() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     assert_eq!(ir.default_entries.len(), 1);
@@ -768,6 +777,7 @@ fn an_override_narrowing_its_providers_result_coerces_the_entry_value() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     let entry = ir.default_entries[&provider];
@@ -819,6 +829,7 @@ fn an_actual_entry_is_keyed_by_its_expect_and_calls_the_actual() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     let entry = ir.default_entries[&function];
@@ -937,6 +948,7 @@ fn inherited_member_defaults_in_another_file_keep_receiver_out_of_masks() {
             &mut CheckedBackendCallables::default(),
             |_| false,
             |_| false,
+            &[],
         );
 
         let IrExpr::Call {
@@ -1035,6 +1047,7 @@ fn cross_file_member_defaults_use_the_provider_frame_before_coercing_the_result(
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     let IrExpr::TypeOp {
@@ -1178,6 +1191,7 @@ fn shapes_this_lowering_cannot_realize_keep_their_checked_form() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     assert_eq!(format!("{:?}", ir.exprs), before);
@@ -1252,7 +1266,7 @@ fn an_entry_keeps_the_checked_facts_frozen_for_its_defaults() {
     let mut facts = CheckedBackendCallables::freeze(&ir, &SingletonMember(target))
         .expect("the selected dependency member has a frozen fact");
 
-    realize(&mut ir, &mut facts, |_| false, |_| false);
+    realize(&mut ir, &mut facts, |_| false, |_| false, &[]);
 
     let entry = ir.default_entries[&function];
     assert_eq!(ir.default_entries.len(), 1);

@@ -442,12 +442,9 @@ impl ProductionSignatureSemantics<'_> {
                 AdaptedRefArgument::Vararg {
                     values,
                     whole_array,
+                    ..
                 } => {
-                    let declared = if *whole_array {
-                        declared
-                    } else {
-                        declared.array_read_elem().unwrap_or(declared)
-                    };
+                    let declared = reference_selection::vararg_input_type(declared, *whole_array);
                     for value in values {
                         crate::symbol_resolver::unify_ty(
                             declared,
