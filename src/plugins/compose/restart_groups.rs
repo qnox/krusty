@@ -252,7 +252,12 @@ pub(super) fn transform(ir: &mut IrFile) {
         lambda_group(ir, &facts.runtime, lambda);
         annotate_lambda(ir, lambda);
     }
-    super::singleton_lambdas::memoize(ir, &facts.runtime, &facts.lambdas, facts.singletons);
+    super::singleton_lambdas::memoize(
+        ir,
+        &facts.runtime,
+        &facts.lambdas,
+        (facts.singletons, facts.singleton_creation),
+    );
     for lambda in &facts.lambdas {
         if matches!(lambda.memoization, Memoization::Instance { .. }) {
             instantiate(ir, &facts.runtime, lambda);

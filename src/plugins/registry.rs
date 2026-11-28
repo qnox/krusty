@@ -419,11 +419,14 @@ impl Resolved {
 /// its diagnostics' wording from the compiler-plugin jar's release.
 fn build_compose(
     _act: &Activation,
-    _release: Option<&str>,
+    release: Option<&str>,
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
-    Box::new(ComposePlugin::new(ComposeOptions::from_options(options)))
+    Box::new(
+        ComposePlugin::new(ComposeOptions::from_options(options))
+            .with_compiler_plugin_release(release.and_then(PluginRelease::parse)),
+    )
 }
 
 fn build_serialization(

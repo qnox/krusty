@@ -16,6 +16,7 @@ use super::class_stability::ParameterStability;
 use super::durable_keys::{package_hash, radix_string, KeyPath};
 use super::restart_groups::SLOTS_PER_INT;
 use super::runtime::ComposeRuntime;
+use super::singleton_lambdas::SingletonCreation;
 use super::{ComposeOptions, COMPOSABLE};
 
 mod inline_library_calls;
@@ -31,7 +32,17 @@ pub struct ComposeFileFacts {
     pub(super) lambdas: Vec<ComposableLambda>,
     /// The class holding those that capture nothing: the file's `ComposableSingletons$<File>Kt`.
     pub(super) singletons: TypeName,
+    /// Where the singletons are created.
+    pub(super) singleton_creation: SingletonCreation,
     pub(super) runtime: ComposeRuntime,
+}
+
+/// How the plugin is configured for one compilation: its options and the release facts of the
+/// plugin it reproduces.
+#[derive(Clone, Copy)]
+pub(super) struct Settings<'a> {
+    pub(super) options: &'a ComposeOptions,
+    pub(super) singleton_creation: SingletonCreation,
 }
 
 /// A function that is not composable and takes composable function values: for each such
@@ -199,9 +210,13 @@ pub(super) fn record(
     ir: &mut IrFile,
     source: &PluginSourceView<'_>,
     runtime: &mut dyn PluginRuntime,
-    options: &ComposeOptions,
+    settings: Settings<'_>,
     rejections: &mut Vec<PluginRejection>,
 ) {
+    let Settings {
+        options,
+        singleton_creation,
+    } = settings;
     let composable = crate::types::type_name(COMPOSABLE);
     let composable_functions = ir
         .function_annotations
@@ -267,6 +282,7 @@ pub(super) fn record(
         source,
         file_reference: &file_reference,
         singletons: &singletons_name,
+        singleton_creation,
         runtime: &*runtime,
     };
     let mut functions = Vec::new();
@@ -940,6 +956,7 @@ refusal: true,
                 lambda_takers,
                 lambdas: composable_lambdas,
                 singletons,
+                singleton_creation,
                 runtime,
             }));
         }
@@ -1763,6 +1780,8 @@ struct BodyScope<'a> {
     file_reference: &'a str,
     /// The source name of the file's `ComposableSingletons` class.
     singletons: &'a str,
+    /// Where the singletons are created, which names the declaration their lambdas are lifted from.
+    singleton_creation: SingletonCreation,
     /// The runtime, which decides the stability of the types a lambda is called with.
     runtime: &'a dyn PluginRuntime,
 }
@@ -2274,7 +2293,11 @@ impl BodyScope<'_> {
         let positions = self.positions;
         // kotlinc names a singleton after its property, and a remembered lambda after its caller.
         let owner = match memoization {
-            Memoization::Singleton => format!("{}.lambda${key}", self.singletons),
+            Memoization::Singleton => format!(
+                "{}.{}",
+                self.singletons,
+                self.singleton_creation.holder_name(key)
+            ),
             Memoization::Remembered { .. }
             | Memoization::Instance { .. }
             | Memoization::Inline { .. } => qualified_caller.to_string(),
