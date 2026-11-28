@@ -28,12 +28,13 @@ pub fn no_actual_for_expect(
     }
 }
 
-/// `ACTUAL_WITHOUT_EXPECT`, with its platform-incompatibility suffix already rendered by the caller.
-pub fn actual_without_expect(reference: ReferenceProfile, rendered: &str) -> String {
+/// `ACTUAL_WITHOUT_EXPECT`, with its platform-incompatibility suffix already rendered by the caller;
+/// `listing` is empty or starts with its own line break.
+pub fn actual_without_expect(reference: ReferenceProfile, rendered: &str, listing: &str) -> String {
     if reference.at_least(KotlinVersion::V2_4_20) {
-        format!("'{rendered}' has no corresponding 'expect' declaration")
+        format!("'{rendered}' has no corresponding 'expect' declaration{listing}")
     } else {
-        format!("'{rendered}' has no corresponding expected declaration")
+        format!("'{rendered}' has no corresponding expected declaration{listing}")
     }
 }
 

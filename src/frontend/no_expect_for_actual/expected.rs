@@ -6,7 +6,7 @@
 //! either way — the reference compiler shows `List<*>` and `(Int) -> String` as written, not as
 //! identities — so it is rendered from the declaration syntax while that syntax is still live.
 
-use crate::ast::{FunDecl, Param, PropDecl, TypeRef};
+use crate::ast::{ClassDecl, FunBody, FunDecl, Param, PropDecl, TypeRef};
 
 use super::{callable_modifiers, property_modifiers};
 
@@ -110,9 +110,27 @@ fn written_parameter(parameter: &Param) -> String {
     )
 }
 
-pub(super) fn written_function(function: &FunDecl) -> String {
+/// Whether the function's result is inferred from an expression body, so that it has no written
+/// form and resolution alone can say what it is.
+pub(super) fn awaits_inferred_return(function: &FunDecl) -> bool {
+    function.ret.is_none() && matches!(function.body, FunBody::Expr(_))
+}
+
+/// A declaration's leading keyword and the space after it; a member that wrote none has neither.
+fn keyword_prefix(keyword: &str) -> String {
+    if keyword.is_empty() {
+        String::new()
+    } else {
+        format!("{keyword} ")
+    }
+}
+
+/// The function as written. One whose result is inferred ends at the colon: the type is resolved
+/// later and joined where it is listed.
+pub(super) fn written_function(function: &FunDecl, keyword: &str) -> String {
     format!(
-        "expect {}fun {}{}{}({}): {}",
+        "{}{}fun {}{}{}({}): {}",
+        keyword_prefix(keyword),
         callable_modifiers(function),
         written_formals(&function.type_params, &function.type_param_bounds),
         written_receiver(function.receiver.as_ref()),
@@ -124,18 +142,25 @@ pub(super) fn written_function(function: &FunDecl) -> String {
             .map(written_parameter)
             .collect::<Vec<_>>()
             .join(", "),
-        function
-            .ret
-            .as_ref()
-            .map_or_else(|| "Unit".to_string(), written_type),
+        function.ret.as_ref().map_or_else(
+            || {
+                if awaits_inferred_return(function) {
+                    String::new()
+                } else {
+                    "Unit".to_string()
+                }
+            },
+            written_type
+        ),
     )
 }
 
 /// An `expect` property always writes its type — there is no initializer to infer one from — so a
 /// property without one is not rendered rather than guessed at.
-pub(super) fn written_property(property: &PropDecl) -> Option<String> {
+pub(super) fn written_property(property: &PropDecl, keyword: &str) -> Option<String> {
     Some(format!(
-        "expect {}{} {}{}{}: {}",
+        "{}{}{} {}{}{}: {}",
+        keyword_prefix(keyword),
         property_modifiers(property),
         if property.is_var { "var" } else { "val" },
         written_formals(&property.type_params, &property.type_param_bounds),
@@ -143,4 +168,49 @@ pub(super) fn written_property(property: &PropDecl) -> Option<String> {
         property.name,
         written_type(property.ty.as_ref()?),
     ))
+}
+
+/// A constructor as the source wrote it, behind `prefix` (`expect `, `actual ` or nothing): its
+/// parameters' names and written types, a default shown as `...`, and the declaring classifier
+/// standing in for the result.
+fn written_constructor(prefix: &str, owner: &str, parameters: Vec<String>) -> String {
+    format!("{prefix}constructor({}): {owner}", parameters.join(", "))
+}
+
+/// The classifier's PRIMARY constructor, when it wrote one.
+pub(super) fn written_primary_constructor(class: &ClassDecl, prefix: &str, owner: &str) -> String {
+    written_constructor(
+        prefix,
+        owner,
+        class
+            .props
+            .iter()
+            .map(|parameter| {
+                format!(
+                    "{}{}: {}{}",
+                    if parameter.is_vararg { "vararg " } else { "" },
+                    parameter.name,
+                    written_type(&parameter.ty),
+                    if parameter.default.is_some() {
+                        " = ..."
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect(),
+    )
+}
+
+/// One SECONDARY constructor.
+pub(super) fn written_secondary_constructor(
+    parameters: &[Param],
+    prefix: &str,
+    owner: &str,
+) -> String {
+    written_constructor(
+        prefix,
+        owner,
+        parameters.iter().map(written_parameter).collect(),
+    )
 }

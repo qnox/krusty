@@ -77,7 +77,45 @@ pub struct Actualization {
     /// The reference compiler requires an `expect`/`actual` pair to name its type parameters
     /// identically and reports a rename as an incompatibility BETWEEN two declarations it
     /// considers counterparts — not as an implementation that answered for nothing.
-    pub incompatible_members: crate::fx_hash::HashSet<DeclarationId>,
+    pub incompatible_members: crate::fx_hash::HashMap<DeclarationId, DeclarationId>,
+    /// For each top-level implementation that paired with nothing, the same-keyed `expect`
+    /// declarations it was compared with and why each was rejected. The reference compiler lists
+    /// them beneath the implementation's own error.
+    pub incompatible_actuals: Vec<IncompatibleActual>,
+}
+
+/// One rejected comparison of a top-level implementation with an `expect` declaration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IncompatibleActual {
+    pub actual: DeclarationId,
+    pub expect: DeclarationId,
+    pub mismatch: ShapeMismatch,
+}
+
+/// Why two same-keyed declarations are not an `expect`/`actual` pair, as far as the reference
+/// compiler's listing names it. Only the disagreements measured against it are named; a
+/// declaration that differs in several measured ways, or in any other, is `Unmeasured` and the
+/// report refuses to render rather than guess which sentence kotlinc picks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShapeMismatch {
+    /// A receiver, context or value parameter type differs.
+    ParameterTypes,
+    /// A type parameter's upper bounds differ.
+    UpperBounds,
+    /// Two constructors declare a different number of value parameters.
+    ValueParameterCount,
+    Unmeasured,
+}
+
+impl ShapeMismatch {
+    fn of(bounds_match: bool, inputs_match: bool) -> Result<(), ShapeMismatch> {
+        match (bounds_match, inputs_match) {
+            (true, true) => Ok(()),
+            (true, false) => Err(ShapeMismatch::ParameterTypes),
+            (false, true) => Err(ShapeMismatch::UpperBounds),
+            (false, false) => Err(ShapeMismatch::Unmeasured),
+        }
+    }
 }
 
 /// One `actual` classifier and the `expect` members it never implemented.
@@ -476,14 +514,14 @@ pub fn actualization(
         false
     }
 
-    fn callable_parameter_shapes_match(
+    fn callable_shape_mismatch(
         headers: &StreamedHeaderModule,
         expect: DeclarationId,
         candidate: DeclarationId,
         actualized_aliases: &[ActualizedAlias],
         bindings: &ActualizationTypeBindings,
         type_parameters: TypeParameterScope,
-    ) -> bool {
+    ) -> Result<(), ShapeMismatch> {
         let (Some(expect_source), Some(candidate_source)) = (
             headers
                 .declarations
@@ -494,7 +532,7 @@ pub fn actualization(
                 .anchor(candidate)
                 .map(|anchor| anchor.source),
         ) else {
-            return false;
+            return Err(ShapeMismatch::Unmeasured);
         };
         let scope = MatchScope {
             bindings,
@@ -546,14 +584,19 @@ pub fn actualization(
                         .flags
                         .has(crate::fir::DeclarationFlags::GENERATED_STRUCTURAL_MEMBER)
             };
-            return generated_structural_member(expect) && generated_structural_member(candidate);
+            return if generated_structural_member(expect) && generated_structural_member(candidate)
+            {
+                Ok(())
+            } else {
+                Err(ShapeMismatch::Unmeasured)
+            };
         };
         let expect_type_parameters = headers.syntax.type_parameters(expect_type_parameters);
         let candidate_type_parameters = headers.syntax.type_parameters(candidate_type_parameters);
         if expect_type_parameters.len() != candidate_type_parameters.len()
             || expect_context_count != candidate_context_count
         {
-            return false;
+            return Err(ShapeMismatch::Unmeasured);
         }
         let own = expect_type_parameters
             .iter()
@@ -562,9 +605,9 @@ pub fn actualization(
             .collect::<Vec<_>>();
         let Some(type_parameters) = positional_type_parameters(headers, expect, candidate, &own)
         else {
-            return false;
+            return Err(ShapeMismatch::Unmeasured);
         };
-        if !type_parameter_bounds_match(
+        let bounds_match = type_parameter_bounds_match(
             headers,
             expect_bounds,
             candidate_bounds,
@@ -572,9 +615,7 @@ pub fn actualization(
             &type_parameters,
             actualized_aliases,
             scope,
-        ) {
-            return false;
-        }
+        );
         let receiver_matches = match (expect_receiver, candidate_receiver) {
             (Some(expect), Some(candidate)) => type_shape_matches(
                 headers,
@@ -589,7 +630,7 @@ pub fn actualization(
         };
         let expect_parameters = headers.syntax.parameters(expect_parameters);
         let candidate_parameters = headers.syntax.parameters(candidate_parameters);
-        receiver_matches
+        let inputs_match = receiver_matches
             && expect_parameters.len() == candidate_parameters.len()
             && expect_parameters
                 .iter()
@@ -604,10 +645,11 @@ pub fn actualization(
                             actualized_aliases,
                             scope,
                         )
-                })
+                });
+        ShapeMismatch::of(bounds_match, inputs_match)
     }
 
-    fn property_input_shapes_match(
+    fn callable_parameter_shapes_match(
         headers: &StreamedHeaderModule,
         expect: DeclarationId,
         candidate: DeclarationId,
@@ -615,6 +657,25 @@ pub fn actualization(
         bindings: &ActualizationTypeBindings,
         type_parameters: TypeParameterScope,
     ) -> bool {
+        callable_shape_mismatch(
+            headers,
+            expect,
+            candidate,
+            actualized_aliases,
+            bindings,
+            type_parameters,
+        )
+        .is_ok()
+    }
+
+    fn property_shape_mismatch(
+        headers: &StreamedHeaderModule,
+        expect: DeclarationId,
+        candidate: DeclarationId,
+        actualized_aliases: &[ActualizedAlias],
+        bindings: &ActualizationTypeBindings,
+        type_parameters: TypeParameterScope,
+    ) -> Result<(), ShapeMismatch> {
         let (Some(expect_source), Some(candidate_source)) = (
             headers
                 .declarations
@@ -625,7 +686,7 @@ pub fn actualization(
                 .anchor(candidate)
                 .map(|anchor| anchor.source),
         ) else {
-            return false;
+            return Err(ShapeMismatch::Unmeasured);
         };
         let scope = MatchScope {
             bindings,
@@ -663,15 +724,15 @@ pub fn actualization(
             headers.syntax.declaration(candidate),
         )
         else {
-            return false;
+            return Err(ShapeMismatch::Unmeasured);
         };
         if expect_mutable && !candidate_mutable {
-            return false;
+            return Err(ShapeMismatch::Unmeasured);
         }
         let expect_type_parameters = headers.syntax.type_parameters(expect_type_parameters);
         let candidate_type_parameters = headers.syntax.type_parameters(candidate_type_parameters);
         if expect_type_parameters.len() != candidate_type_parameters.len() {
-            return false;
+            return Err(ShapeMismatch::Unmeasured);
         }
         let own = expect_type_parameters
             .iter()
@@ -680,9 +741,9 @@ pub fn actualization(
             .collect::<Vec<_>>();
         let Some(type_parameters) = positional_type_parameters(headers, expect, candidate, &own)
         else {
-            return false;
+            return Err(ShapeMismatch::Unmeasured);
         };
-        if !type_parameter_bounds_match(
+        let bounds_match = type_parameter_bounds_match(
             headers,
             expect_bounds,
             candidate_bounds,
@@ -690,9 +751,7 @@ pub fn actualization(
             &type_parameters,
             actualized_aliases,
             scope,
-        ) {
-            return false;
-        }
+        );
         let receiver_matches = match (expect_receiver, candidate_receiver) {
             (Some(expect), Some(candidate)) => type_shape_matches(
                 headers,
@@ -707,7 +766,7 @@ pub fn actualization(
         };
         let expect_context = headers.syntax.parameters(expect_context);
         let candidate_context = headers.syntax.parameters(candidate_context);
-        receiver_matches
+        let inputs_match = receiver_matches
             && expect_context.len() == candidate_context.len()
             && expect_context
                 .iter()
@@ -721,7 +780,27 @@ pub fn actualization(
                         actualized_aliases,
                         scope,
                     )
-                })
+                });
+        ShapeMismatch::of(bounds_match, inputs_match)
+    }
+
+    fn property_input_shapes_match(
+        headers: &StreamedHeaderModule,
+        expect: DeclarationId,
+        candidate: DeclarationId,
+        actualized_aliases: &[ActualizedAlias],
+        bindings: &ActualizationTypeBindings,
+        type_parameters: TypeParameterScope,
+    ) -> bool {
+        property_shape_mismatch(
+            headers,
+            expect,
+            candidate,
+            actualized_aliases,
+            bindings,
+            type_parameters,
+        )
+        .is_ok()
     }
 
     /// The type parameters in scope from a declaration's OWNERS, outermost first.
@@ -865,13 +944,13 @@ pub fn actualization(
     ///
     /// A constructor is its own header kind: it carries no receiver and no type parameters of its
     /// own — the classifier's are in scope — so its parameters are the whole of its input shape.
-    fn constructor_parameter_shapes_match(
+    fn constructor_shape_mismatch(
         headers: &StreamedHeaderModule,
         expect: DeclarationId,
         candidate: DeclarationId,
         actualized_aliases: &[ActualizedAlias],
         bindings: &ActualizationTypeBindings,
-    ) -> bool {
+    ) -> Result<(), ShapeMismatch> {
         let (
             Some(HeaderDeclaration {
                 kind:
@@ -894,7 +973,7 @@ pub fn actualization(
             headers.syntax.declaration(candidate),
         )
         else {
-            return false;
+            return Err(ShapeMismatch::Unmeasured);
         };
         let (Some(expect_source), Some(candidate_source)) = (
             headers
@@ -906,7 +985,7 @@ pub fn actualization(
                 .anchor(candidate)
                 .map(|anchor| anchor.source),
         ) else {
-            return false;
+            return Err(ShapeMismatch::Unmeasured);
         };
         let scope = MatchScope {
             bindings,
@@ -918,7 +997,7 @@ pub fn actualization(
         };
         let Some(type_parameters) = positional_type_parameters(headers, expect, candidate, &[])
         else {
-            return false;
+            return Err(ShapeMismatch::Unmeasured);
         };
         let expect_parameters = headers.syntax.parameters(expect_parameters);
         let candidate_parameters = headers.syntax.parameters(candidate_parameters);
@@ -931,8 +1010,11 @@ pub fn actualization(
                 && candidate_parameters
                     .iter()
                     .all(|parameter| parameter.flags.has_default()));
-        counts_compatible
-            && expect_parameters
+        if !counts_compatible {
+            return Err(ShapeMismatch::ValueParameterCount);
+        }
+        let types_match =
+            expect_parameters
                 .iter()
                 .zip(candidate_parameters)
                 .all(|(expect, candidate)| {
@@ -945,7 +1027,22 @@ pub fn actualization(
                             actualized_aliases,
                             scope,
                         )
-                })
+                });
+        if types_match {
+            Ok(())
+        } else {
+            Err(ShapeMismatch::ParameterTypes)
+        }
+    }
+
+    fn constructor_parameter_shapes_match(
+        headers: &StreamedHeaderModule,
+        expect: DeclarationId,
+        candidate: DeclarationId,
+        actualized_aliases: &[ActualizedAlias],
+        bindings: &ActualizationTypeBindings,
+    ) -> bool {
+        constructor_shape_mismatch(headers, expect, candidate, actualized_aliases, bindings).is_ok()
     }
 
     /// Whether `constructor` belongs to an annotation class.
@@ -1115,7 +1212,8 @@ pub fn actualization(
     }
     let mut incompatible = crate::fx_hash::HashSet::default();
     let mut unactualized_members: Vec<UnactualizedMembers> = Vec::new();
-    let mut incompatible_members = crate::fx_hash::HashSet::default();
+    let mut incompatible_members = crate::fx_hash::HashMap::default();
+    let mut incompatible_actuals = Vec::new();
     let mut select_top_level = |stub: &DeclarationStub, aliases: &[ActualizedAlias]| {
         let candidates = actuals.get(&key(headers, stub)?)?;
         let actual = select_actual(
@@ -1128,6 +1226,34 @@ pub fn actualization(
         );
         if actual.is_none() {
             incompatible.insert(stub.id);
+            for candidate in candidates {
+                let mismatch = match stub.kind {
+                    DeclarationKind::Function => callable_shape_mismatch(
+                        headers,
+                        stub.id,
+                        *candidate,
+                        aliases,
+                        bindings,
+                        TypeParameterScope::Declared,
+                    ),
+                    DeclarationKind::Property => property_shape_mismatch(
+                        headers,
+                        stub.id,
+                        *candidate,
+                        aliases,
+                        bindings,
+                        TypeParameterScope::Declared,
+                    ),
+                    _ => Err(ShapeMismatch::Unmeasured),
+                };
+                if let Err(mismatch) = mismatch {
+                    incompatible_actuals.push(IncompatibleActual {
+                        actual: *candidate,
+                        expect: stub.id,
+                        mismatch,
+                    });
+                }
+            }
         }
         actual.map(|actual| ActualizedDeclarationPair {
             expect: stub.id,
@@ -1411,8 +1537,43 @@ pub fn actualization(
                     bindings,
                     TypeParameterScope::Positional,
                 ) {
-                    incompatible_members.insert(renamed);
+                    incompatible_members.insert(renamed, child.id);
                 } else if !discharged_by_dependency() && owes(child) {
+                    for candidate in candidates {
+                        let mismatch = match child.kind {
+                            DeclarationKind::Function => callable_shape_mismatch(
+                                headers,
+                                child.id,
+                                *candidate,
+                                &actualized_aliases,
+                                bindings,
+                                TypeParameterScope::Declared,
+                            ),
+                            DeclarationKind::Property => property_shape_mismatch(
+                                headers,
+                                child.id,
+                                *candidate,
+                                &actualized_aliases,
+                                bindings,
+                                TypeParameterScope::Declared,
+                            ),
+                            DeclarationKind::Constructor => constructor_shape_mismatch(
+                                headers,
+                                child.id,
+                                *candidate,
+                                &actualized_aliases,
+                                bindings,
+                            ),
+                            _ => Err(ShapeMismatch::Unmeasured),
+                        };
+                        if let Err(mismatch) = mismatch {
+                            incompatible_actuals.push(IncompatibleActual {
+                                actual: *candidate,
+                                expect: child.id,
+                                mismatch,
+                            });
+                        }
+                    }
                     owed.push(owed_member());
                 }
                 continue;
@@ -1455,6 +1616,7 @@ pub fn actualization(
         unmarked,
         unactualized_members,
         incompatible_members,
+        incompatible_actuals,
         incompatible,
     }
 }

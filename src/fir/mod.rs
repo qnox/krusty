@@ -63,7 +63,8 @@ pub use enum_entries_factory::EnumEntriesFactory;
 pub use header::*;
 // The candidate facts an unactualized declaration's report lists, for the frontend's renderer.
 pub(crate) use header::actualization::{
-    IncompatibilityReason, IncompatibleCandidate, InheritedDependencyMember,
+    IncompatibilityReason, IncompatibleActual, IncompatibleCandidate, InheritedDependencyMember,
+    ShapeMismatch,
 };
 pub use inherited_defaults::*;
 pub use inline_body::*;
