@@ -93,7 +93,18 @@ impl ProductionSignatureSemantics<'_> {
                 .filter_map(|ty| ty.ty_param_name())
                 .collect::<crate::fx_hash::HashSet<_>>()
         })?;
-        let mut owner = Some(scope.owner);
+        self.extend_with_declared_type_parameters(scope.owner, &mut visible);
+        Ok(visible)
+    }
+
+    /// Every type parameter that `declaration` and its lexical owners declare: fixed types inside
+    /// the declaration, never variables a call still has to solve.
+    pub(super) fn extend_with_declared_type_parameters(
+        &self,
+        declaration: crate::fir::DeclarationId,
+        visible: &mut crate::fx_hash::HashSet<&'static str>,
+    ) {
+        let mut owner = Some(declaration);
         while let Some(declaration) = owner {
             if let Some(generic) = self
                 .callable_signature(declaration)
@@ -120,6 +131,5 @@ impl ProductionSignatureSemantics<'_> {
                 .anchor(declaration)
                 .and_then(|anchor| anchor.owner);
         }
-        Ok(visible)
     }
 }

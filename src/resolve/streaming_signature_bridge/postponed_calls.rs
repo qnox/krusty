@@ -6,7 +6,7 @@
 //! ordinary selector, then exposes only the selected declaration's constraints for commitment.
 
 use super::*;
-use crate::types::TyKind;
+use crate::types::{collect_type_parameters, TyKind};
 
 pub(super) struct PostponedCallableFamily {
     callables: crate::libraries::Callables,
@@ -87,37 +87,6 @@ fn merge_active_constraints(
                 })
                 .or_insert(actual);
         }
-    }
-}
-
-pub(super) fn collect_type_parameters(
-    ty: Ty,
-    parameters: &mut crate::fx_hash::HashSet<&'static str>,
-) {
-    match ty.kind() {
-        TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
-            parameters.insert(name.as_str());
-        }
-        TyKind::Nullable(inner)
-        | TyKind::PlatformNullable(inner)
-        | TyKind::MutabilityFlexible(inner)
-        | TyKind::InProjection(inner)
-        | TyKind::OutProjection(inner) => collect_type_parameters(inner, parameters),
-        // A star's upper bound is a computed capture fact, not a source occurrence that can
-        // constrain a postponed call's type parameters.
-        TyKind::StarProjection(_) => {}
-        TyKind::Obj(_, arguments) => {
-            for argument in arguments {
-                collect_type_parameters(*argument, parameters);
-            }
-        }
-        TyKind::Fun(signature) => {
-            for parameter in &signature.params {
-                collect_type_parameters(*parameter, parameters);
-            }
-            collect_type_parameters(signature.ret, parameters);
-        }
-        _ => {}
     }
 }
 
