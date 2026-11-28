@@ -228,8 +228,21 @@ pub(super) fn emit_dependencies<B: Backend>(
         }
     }
     let target_realizes_intrinsic = |operation| backend.realizes_dependency_intrinsic(operation);
+    let getter_classifiers = CheckedBackendClassifiers::new(module_facts, platform);
     let target_realizes_getter = |signature: crate::backend::DependencyGetterSignature<'_>| {
-        backend.realizes_dependency_getter(signature)
+        // The provider's declaration of the owner says which property stores a value class.
+        let owner = crate::backend::BackendClassifierSource::classifier(
+            &getter_classifiers,
+            signature.owner,
+        );
+        let value_declaration = owner
+            .as_ref()
+            .and_then(|fact| fact.value_declaration.as_ref())
+            .filter(|declaration| &*declaration.property == signature.name);
+        backend.realizes_dependency_getter(crate::backend::DependencyGetterSignature {
+            value_declaration,
+            ..signature
+        })
     };
     let capabilities = emitted_roots::OrdinaryRootCapabilities {
         realizes_intrinsic: &target_realizes_intrinsic,

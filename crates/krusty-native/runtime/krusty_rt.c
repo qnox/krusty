@@ -2770,6 +2770,9 @@ kt_boolean kt_range_iterator_has_next(KRef iterator) {
     if (kt_walk_is(iterator)) {
         return kt_walk_has_next(iterator);
     }
+    if (!kt_is_range_iterator(iterator) && iterator->header.type->walk_has_next != NULL) {
+        return iterator->header.type->walk_has_next(iterator);
+    }
     if (!kt_is_range_iterator(iterator)) {
         KT_FAIL("krusty: this value is no iterator\n");
     }

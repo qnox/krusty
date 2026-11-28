@@ -864,31 +864,19 @@ fun box(): String {
 }
 
 #[test]
-fn wasm_declines_an_instruction_wrapper_whose_body_lowering_does_not_model() {
-    // PLATFORM-SPECIFIC: pin the Wasm intrinsic-support decline, including its category ownership.
-    // `pow` reaches fdlibm's `__ieee754_pow`, whose locals have no initializer: the wrapper is not
-    // support code, so its call declines instead of failing compilation.
-    expect_wasm_decline(
+fn wasm_lowers_the_library_body_of_pow_over_unsigned_locals() {
+    // PLATFORM-SPECIFIC: pin that Wasm lowers fdlibm's library body of `pow`; Native declares it
+    // `external` libm and the JVM calls `Math.pow`.
+    // `pow` reaches fdlibm's `__ieee754_pow`, whose locals have no initializer and whose bit tests
+    // compare unsigned values: the library body lowers with the unsigned storage getter, the
+    // unsigned comparison, and a deferred unsigned local starting at its carrier's zero.
+    expect_wasm_box(
         r#"
 import kotlin.math.pow
 
 fun box(): String = if (2.0.pow(3.0) == 8.0) "OK" else "pow"
 "#,
-        "wasmUnmodelledInstructionWrapper",
-        concat!(
-            r#"a dependency callable whose target code was not emitted: `pow`; "#,
-            r#"selected declaration KlibDependencyCallable { module: "kotlin", declaration: Public(KlibPublicIdSignature { package: KlibNamePath { segments: ["kotlin", "math"] }, declaration: KlibNamePath { segments: ["pow"] }, member_id: Some(15712335000106601333), mask: 0 }) }; "#,
-            r#"owner Some(Package(TypeName("kotlin/math"))); "#,
-            r#"kind Extension; "#,
-            r#"realization Dispatch; "#,
-            r#"checked parameters [Obj(TypeName("kotlin/Double"), [])]; "#,
-            r#"checked result Obj(TypeName("kotlin/Double"), []); "#,
-            r#"provider parameters [Obj(TypeName("kotlin/Double"), []), Obj(TypeName("kotlin/Double"), [])]; "#,
-            r#"provider result Obj(TypeName("kotlin/Double"), []); "#,
-            r#"declared parameters Some([Obj(TypeName("kotlin/Double"), []), Obj(TypeName("kotlin/Double"), [])]); "#,
-            r#"declared result None; "#,
-            r#"compiler operation None"#,
-        ),
+        "wasmLibraryPow",
     );
 }
 
@@ -1050,28 +1038,6 @@ fn expect_wasm_box(src: &str, stem: &str) {
             src,
         );
         assert_eq!(outcome, Outcome::Pass, "{stem} on {}", target.name());
-    }
-}
-
-/// Require both Wasm targets to decline `src` with exactly `reason`.
-fn expect_wasm_decline(src: &str, stem: &str, reason: &str) {
-    for target in WasmTarget::ALL {
-        let lane = WasmLane { target };
-        if !focused_wasm_lane_available(&lane, stem) {
-            return;
-        }
-        let outcome = lane.compile_and_run(
-            &std::env::temp_dir(),
-            stem,
-            &[(format!("{stem}.kt"), src.to_string())],
-            src,
-        );
-        assert_eq!(
-            outcome,
-            Outcome::Declined(reason.to_string()),
-            "{stem} on {}",
-            target.name()
-        );
     }
 }
 

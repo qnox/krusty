@@ -266,6 +266,12 @@ impl Backend for CraneliftBackend {
         lower::represents_dependency_classifier(classifier)
     }
 
+    fn dependency_classifier_representation(
+        &self,
+    ) -> std::rc::Rc<dyn Fn(krusty::backend::DependencyClassifier) -> bool> {
+        std::rc::Rc::new(lower::represents_dependency_classifier)
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,

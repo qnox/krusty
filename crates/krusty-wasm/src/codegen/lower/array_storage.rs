@@ -167,6 +167,7 @@ mod tests {
             name,
             parameters: &[],
             result: Ty::obj(result),
+            value_declaration: None,
         }
     }
 
@@ -178,6 +179,7 @@ mod tests {
                 name: "storage",
                 parameters: &[],
                 result: Ty::obj_name(storage),
+                value_declaration: None,
             }));
         }
         let int_storage = "kotlin/wasm/internal/WasmIntArray";

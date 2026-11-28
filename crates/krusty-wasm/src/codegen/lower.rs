@@ -52,7 +52,9 @@ use tests::lower_alone;
 pub(super) use array_storage::realizes_storage_getter;
 pub(super) use exceptions::runtime_lays_out;
 pub(super) use scalar_instructions::is_scalar_operation;
-pub(super) use scalar_value_classes::runtime_value_declaration;
+pub(super) use scalar_value_classes::{
+    realizes_scalar_value_storage_getter, runtime_value_declaration,
+};
 pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerIntrinsic) -> bool {
@@ -1194,6 +1196,11 @@ impl<'a> Body<'a> {
                         // The nullable reference local's Wasm default is sufficient: every read
                         // is erased at an authenticated dependency call, and the exact singleton
                         // access was proved to have no initialization effect.
+                    } else if self.ir.deferred_local_types.contains_key(&id) {
+                        // A local declared without an initializer holds a target-neutral zero
+                        // that stands for its type's own: a Wasm local starts at it, whatever the
+                        // carrier, where the placeholder constant has no value of an unsigned
+                        // type's carrier.
                     } else if let Some(init) = init {
                         self.value(init, ty)?;
                         self.code.local_set(local);
@@ -1626,7 +1633,8 @@ impl<'a> Body<'a> {
                     .and_then(|fact| fact.compiler_operation())
                     .and_then(intrinsic_operations::member_operation) =>
             {
-                intrinsic_operations::string_get_frame(
+                intrinsic_operations::call_frame(
+                    operation,
                     params,
                     *ret,
                     defaults,

@@ -240,6 +240,14 @@ pub trait Backend {
         false
     }
 
+    /// [`represents_dependency_classifier`](Self::represents_dependency_classifier) as a value
+    /// common lowering keeps for the file, which is how it decides what the target lays out.
+    fn dependency_classifier_representation(
+        &self,
+    ) -> std::rc::Rc<dyn Fn(DependencyClassifier) -> bool> {
+        std::rc::Rc::new(|_| false)
+    }
+
     /// The dependency classes this target lays out itself (each one it
     /// [represents](Self::represents_dependency_classifier)) whose values it dispatches a call of a
     /// supertype's member on, as it does a builtin class's: `CharSequence.length` on a

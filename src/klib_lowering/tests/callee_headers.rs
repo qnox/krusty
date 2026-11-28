@@ -1638,6 +1638,9 @@ fn stdlib_calls_reach_header_declared_callees() {
     // its closure did not read. An internal top-level function no selection records now links
     // as a file-private one does, with the formals its identity mints, so bodies reach past a
     // generic one and decline further on, on the newest release three of them at a member call.
+    // An unsigned constant is serialized as its signed bits, typed unsigned, and now lowers: the
+    // six reaches that declined at it go on to decline at a member call or a property accessor
+    // signature, where the deeper bodies are counted once per path that reaches them.
     let expected = if crate::kotlin_version::environment_release()
         >= crate::kotlin_version::KotlinVersion::V2_4_20
     {
@@ -1656,9 +1659,8 @@ fn stdlib_calls_reach_header_declared_callees() {
                      indices)",
                     6,
                 ),
-                ("it uses a call of a member function)", 95),
-                ("it uses a call through a property accessor signature)", 41),
-                ("it uses a constant of another type than its value's)", 6),
+                ("it uses a call of a member function)", 97),
+                ("it uses a call through a property accessor signature)", 47),
                 (
                     "it uses an enum value whose class the closure did not read)",
                     1,
@@ -1685,9 +1687,8 @@ fn stdlib_calls_reach_header_declared_callees() {
                      indices)",
                     6,
                 ),
-                ("it uses a call of a member function)", 84),
-                ("it uses a call through a property accessor signature)", 41),
-                ("it uses a constant of another type than its value's)", 6),
+                ("it uses a call of a member function)", 86),
+                ("it uses a call through a property accessor signature)", 47),
                 (
                     "it uses an enum value whose class the closure did not read)",
                     1,
