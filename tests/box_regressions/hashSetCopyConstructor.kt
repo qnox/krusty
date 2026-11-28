@@ -1,5 +1,23 @@
 // `HashSet(elements)` and `LinkedHashSet(elements)` copy any collection: duplicates collapse, the
-// copy owns its storage, and a linked copy keeps the order the elements were walked in.
+// copy owns its storage, and a linked copy keeps the order the elements were walked in. An exception
+// from the source's `hasNext` ends the copy before `next` runs.
+var walked = ""
+
+val raising = object : AbstractCollection<String>() {
+    override val size: Int get() = 1
+    override fun iterator(): Iterator<String> = object : Iterator<String> {
+        override fun hasNext(): Boolean {
+            walked += "hasNext;"
+            throw IllegalStateException("from hasNext")
+        }
+
+        override fun next(): String {
+            walked += "next;"
+            return "x"
+        }
+    }
+}
+
 fun box(): String {
     val source = listOf("b", "a", "b", "c")
     val set = HashSet(source)
@@ -19,5 +37,13 @@ fun box(): String {
     if (!empty.isEmpty()) return "Fail empty"
     empty.add("x")
     if (empty.size != 1) return "Fail grow"
+
+    val caught = try {
+        HashSet(raising)
+        "no exception"
+    } catch (e: IllegalStateException) {
+        e.message
+    }
+    if (caught != "from hasNext" || walked != "hasNext;") return "Fail raising: $caught $walked"
     return "OK"
 }

@@ -827,7 +827,12 @@ KRef kt_hash_set_copy_of(KRef elements) {
     }
     KRef set = kt_map_shaped(&kt_type_hash_set, size);
     KRef iterator = kt_iterable_iterator(elements);
-    while (!kt_map_raised() && kt_iterator_has_next(iterator)) {
+    while (!kt_map_raised()) {
+        /* `hasNext` may raise, and `next` must not run on its placeholder answer when it does. */
+        kt_boolean more = kt_iterator_has_next(iterator);
+        if (kt_map_raised() || !more) {
+            break;
+        }
         KRef element = kt_iterator_next(iterator);
         if (kt_map_raised()) {
             return NULL;
