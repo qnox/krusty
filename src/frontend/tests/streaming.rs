@@ -3064,7 +3064,7 @@ fn signature_graph_rejects_an_eager_same_file_forward_read_before_pass_two() {
         [(
             0,
             Span::new(12, 17),
-            "variable 'later' must be initialized."
+            "Variable 'later' must be initialized."
         )],
     );
 }

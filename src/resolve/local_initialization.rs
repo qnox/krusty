@@ -4,10 +4,10 @@
 //! kotlinc's variable-initialization analysis runs over the control-flow graph of the whole body.
 //! For each deferred local it tracks whether the local is definitely and whether it may already be
 //! initialized:
-//! - a read where the local is not definitely initialized is `variable 'x' must be initialized.`;
-//! - a write to a `val` that may already be initialized is `'val' cannot be reassigned.`;
+//! - a read where the local is not definitely initialized is `UNINITIALIZED_VARIABLE`;
+//! - a write to a `val` that may already be initialized is `VAL_REASSIGNMENT`;
 //! - a write to an enclosing `val` from a lambda or function that is not called in place is
-//!   `captured values cannot be initialized because of possible reassignments.`
+//!   `CAPTURED_VAL_INITIALIZATION`.
 //!
 //! Local and anonymous class bodies read and write their captures through class storage, which the
 //! analysis does not follow yet: their reads and writes of enclosing deferred locals are not checked.
@@ -132,7 +132,7 @@ struct Analysis<'c, 'a> {
     try_writes: Vec<BTreeSet<u32>>,
     report: bool,
     reported: HashSet<(Span, String)>,
-    diagnostics: Vec<(Span, String)>,
+    diagnostics: Vec<(Span, crate::diag::NamedMessage)>,
 }
 
 impl Checker<'_> {
@@ -217,16 +217,16 @@ impl Checker<'_> {
         };
         analysis.expr(body);
         let diagnostics = analysis.diagnostics;
-        for (span, message) in diagnostics {
-            self.diags.error(span, message);
+        for (span, report) in diagnostics {
+            self.diags.report_error(span, report);
         }
     }
 }
 
 impl Analysis<'_, '_> {
-    fn emit(&mut self, span: Span, message: String) {
-        if self.report && self.reported.insert((span, message.clone())) {
-            self.diagnostics.push((span, message));
+    fn emit(&mut self, span: Span, report: crate::diag::NamedMessage) {
+        if self.report && self.reported.insert((span, report.message.clone())) {
+            self.diagnostics.push((span, report));
         }
     }
 
@@ -242,8 +242,8 @@ impl Analysis<'_, '_> {
             return;
         };
         if !self.flow.definite.contains(&identity) {
-            let message = format!("variable '{}' must be initialized.", local.name);
-            self.emit(span, message);
+            let report = crate::diagnostic_wording::uninitialized_variable(&local.name);
+            self.emit(span, report);
         }
     }
 
@@ -253,13 +253,15 @@ impl Analysis<'_, '_> {
         };
         if local.is_val {
             if local.frame < self.frame {
+                let message =
+                    "Captured values cannot be initialized because of possible reassignments.";
                 self.emit(
                     span,
-                    "captured values cannot be initialized because of possible reassignments."
-                        .to_string(),
+                    named(crate::diag::names::CAPTURED_VAL_INITIALIZATION, message),
                 );
             } else if self.flow.possible.contains(&identity) {
-                self.emit(span, "'val' cannot be reassigned.".to_string());
+                let message = "'val' cannot be reassigned.";
+                self.emit(span, named(crate::diag::names::VAL_REASSIGNMENT, message));
             }
         }
         self.flow.definite.insert(identity);
@@ -805,4 +807,11 @@ fn child_expressions(file: &crate::ast::File, expression: ExprId) -> Vec<ExprId>
     );
     debug_assert!(statements.is_empty(), "only a block holds statements");
     children
+}
+
+fn named(name: crate::diag::DiagnosticName, message: &str) -> crate::diag::NamedMessage {
+    crate::diag::NamedMessage {
+        name,
+        message: message.to_string(),
+    }
 }

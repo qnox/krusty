@@ -733,7 +733,6 @@ compiler/testData/diagnostics/tests/classpathSubstitution/cyclicSupertype2.kt
 compiler/testData/diagnostics/tests/classpathSubstitution/cyclicSupertypeBetweenModules.kt
 compiler/testData/diagnostics/tests/collectionLiteralInLambdaReturningAnnotation.kt
 compiler/testData/diagnostics/tests/collectionLiterals/cfg/clArgumentInfluencesOverload.kt
-compiler/testData/diagnostics/tests/collectionLiterals/cfg/collectionLiteralsAndSmartcasts.kt
 compiler/testData/diagnostics/tests/collectionLiterals/cfg/contractFromInsideCollectionLiteral.kt
 compiler/testData/diagnostics/tests/collectionLiterals/cfg/enumCLInEnumInitializer.kt
 compiler/testData/diagnostics/tests/collectionLiterals/cfg/nonCLArgumentInfluencesOverloadForCL.kt
@@ -1224,8 +1223,6 @@ compiler/testData/diagnostics/tests/controlFlowAnalysis/UninitializedOrReassigne
 compiler/testData/diagnostics/tests/controlFlowAnalysis/accessToCompanionInBaseEnumInitSection_function.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/accessToCompanionInBaseEnumInitSection_property.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/accessValueParameterInDefaultValue.kt
-compiler/testData/diagnostics/tests/controlFlowAnalysis/assignedInTryWithCatch.kt
-compiler/testData/diagnostics/tests/controlFlowAnalysis/assignedInTryWithoutCatch.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/assignmentInLocalsInConstructor.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/backingFieldInsideGetter.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/breakContinueInTryFinallyInLoop.kt
@@ -1275,7 +1272,6 @@ compiler/testData/diagnostics/tests/controlFlowAnalysis/definiteReturn/singleRet
 compiler/testData/diagnostics/tests/controlFlowAnalysis/definiteReturnInWhen.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/delegatedMemberProperyWriteInInit.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/delegatedPropertyEarlyAccess.kt
-compiler/testData/diagnostics/tests/controlFlowAnalysis/doWhileAssignment.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/doWhileNotDefined.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/elvisNotProcessed.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/enumCompanionInterdependence.kt
@@ -1285,9 +1281,7 @@ compiler/testData/diagnostics/tests/controlFlowAnalysis/enumEntryAssignment.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/enumInterdependence.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/fieldAsClassDelegate.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/fieldInitialization.kt
-compiler/testData/diagnostics/tests/controlFlowAnalysis/initializationInLambda.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/initializationInLocalClass.kt
-compiler/testData/diagnostics/tests/controlFlowAnalysis/initializationInLocalFun.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/initializationInLocalViaExplicitThis.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/inlinedBreakContinueFeatureDisabled.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/kt1027.kt
@@ -1296,8 +1290,6 @@ compiler/testData/diagnostics/tests/controlFlowAnalysis/kt1185enums.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/kt1977.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/kt2330.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/kt2334.kt
-compiler/testData/diagnostics/tests/controlFlowAnalysis/kt2369.kt
-compiler/testData/diagnostics/tests/controlFlowAnalysis/kt2845.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/kt2960.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/kt3444.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/kt3501.kt
@@ -1306,7 +1298,6 @@ compiler/testData/diagnostics/tests/controlFlowAnalysis/kt6788.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/kt843.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/kt897.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/lambdaCaptureInConstructor.kt
-compiler/testData/diagnostics/tests/controlFlowAnalysis/lambdaCaptureInExtensionReceiver.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/lambdaCaptureInJavaFunction.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/lambdaCaptureInitializedPropertyInOtherArgument.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/lambdaCaptureUninitializedInOtherArgument.kt
@@ -1319,10 +1310,8 @@ compiler/testData/diagnostics/tests/controlFlowAnalysis/propertiesInitWithOtherI
 compiler/testData/diagnostics/tests/controlFlowAnalysis/propertiesInitWithOtherInstanceThisLabel.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/propertiesInitWithParent.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/propertiesOrderInPackage.kt
-compiler/testData/diagnostics/tests/controlFlowAnalysis/reassignmentInCatch.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/reassignmentInConcurrentLambdas.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/reassignmentInTryCatch.kt
-compiler/testData/diagnostics/tests/controlFlowAnalysis/reassignmentInTryCatchWithJumps.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/referenceToPropertyInitializer.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/repeatUnitializedErrorOnlyForLocalVars.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/safeCallAfterVariableInitialization.kt
@@ -1330,7 +1319,6 @@ compiler/testData/diagnostics/tests/controlFlowAnalysis/smartcastOnThisInInitial
 compiler/testData/diagnostics/tests/controlFlowAnalysis/tryCatchFinallyIfs.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/uninintializedProperyWithDirectAndDelayedInitialization.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/uninitializedCompanionOfEnum.kt
-compiler/testData/diagnostics/tests/controlFlowAnalysis/uninitializedInLocalDeclarations.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/uninitializedQualifiedEnumEntry.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/unmappedArgs.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/unnecessaryLateinit/lateinitRecursiveInLambda.kt
@@ -1341,7 +1329,6 @@ compiler/testData/diagnostics/tests/controlFlowAnalysis/unnecessaryLateinit/late
 compiler/testData/diagnostics/tests/controlFlowAnalysis/unnecessaryLateinit/lateinitWithMultipleConstructorsAndDelegation.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/unnecessaryLateinit/secondaryConstructorDelegateItself.kt
 compiler/testData/diagnostics/tests/controlFlowAnalysis/unnecessaryLateinit/secondaryConstructorDelegateLoop.kt
-compiler/testData/diagnostics/tests/controlFlowAnalysis/useUninitializedInLambda.kt
 compiler/testData/diagnostics/tests/controlStructures/ForLoopWithExtensionIteratorOnNullable.kt
 compiler/testData/diagnostics/tests/controlStructures/ForbidStatementAsDirectFunctionBody.kt
 compiler/testData/diagnostics/tests/controlStructures/breakContinueInCrossInlineLambda.kt
@@ -4648,14 +4635,7 @@ compiler/testData/diagnostics/tests/qualifiers/noRootIdePackageInCli.kt
 compiler/testData/diagnostics/tests/qualifiers/noRootIdePackageInCliDisabled.kt
 compiler/testData/diagnostics/tests/rawTypes/kt79777.kt
 compiler/testData/diagnostics/tests/rawTypes/overrideRawTypedJavaMethodWithGenericTyped.kt
-compiler/testData/diagnostics/tests/reassignment/afterfor.kt
-compiler/testData/diagnostics/tests/reassignment/dowhile.kt
-compiler/testData/diagnostics/tests/reassignment/else.kt
-compiler/testData/diagnostics/tests/reassignment/foronly.kt
-compiler/testData/diagnostics/tests/reassignment/if.kt
-compiler/testData/diagnostics/tests/reassignment/ifelse.kt
 compiler/testData/diagnostics/tests/reassignment/when.kt
-compiler/testData/diagnostics/tests/reassignment/whiletrue.kt
 compiler/testData/diagnostics/tests/receiverResolutionInDelegatedConstructor.kt
 compiler/testData/diagnostics/tests/receiverResolutionInDelegatedConstructorAfter.kt
 compiler/testData/diagnostics/tests/recovery/absentLeftHandSide.kt
@@ -4782,7 +4762,6 @@ compiler/testData/diagnostics/tests/regressions/kt402.kt
 compiler/testData/diagnostics/tests/regressions/kt411.kt
 compiler/testData/diagnostics/tests/regressions/kt442.kt
 compiler/testData/diagnostics/tests/regressions/kt443.kt
-compiler/testData/diagnostics/tests/regressions/kt455.kt
 compiler/testData/diagnostics/tests/regressions/kt456.kt
 compiler/testData/diagnostics/tests/regressions/kt4827.kt
 compiler/testData/diagnostics/tests/regressions/kt498.kt
@@ -5264,7 +5243,6 @@ compiler/testData/diagnostics/tests/smartCasts/loops/elvisIfBreakInsideWhileTrue
 compiler/testData/diagnostics/tests/smartCasts/loops/elvisInsideDoWhile.kt
 compiler/testData/diagnostics/tests/smartCasts/loops/endlessLoops.kt
 compiler/testData/diagnostics/tests/smartCasts/loops/forLoopWithAssignment.kt
-compiler/testData/diagnostics/tests/smartCasts/loops/ifBreakAssignInsideWhileTrue.kt
 compiler/testData/diagnostics/tests/smartCasts/loops/loopInInitBlock.kt
 compiler/testData/diagnostics/tests/smartCasts/loops/nestedDoWhile.kt
 compiler/testData/diagnostics/tests/smartCasts/loops/nestedDoWhileWithLongContinue.kt
@@ -6116,26 +6094,10 @@ compiler/testData/diagnostics/testsWithStdLib/comparingSmartCastValueToBoolean.k
 compiler/testData/diagnostics/testsWithStdLib/comparingTripleWithPair.kt
 compiler/testData/diagnostics/testsWithStdLib/contextParametersFunctions.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/complexConditionWithSafeCall.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/flowInlining/breakContinuesInInlinedLambda.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/flowInlining/labeledReturns.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/flowInlining/nestedTryCatchFinally.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/flowInlining/nestedTryCatchs.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/flowInlining/nonReturningInlinedLambda.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/flowInlining/safeCallAndInPlaceReturn.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/flowInlining/severalJumpOutsFromInlinedLambda.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/flowInlining/throwIfNotCalled.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/flowInlining/tryCatch.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/flowInlining/tryCatchFinally.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/flowInlining/typeMismatch.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/initialization/atLeastOnce/valDefiniteReassignment.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/initialization/atLeastOnce/varDefiniteInitialization.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/initialization/atLeastOnce/varIndefiniteInitialization.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/initialization/exactlyOnce/valDefiniteInitialization.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/initialization/exactlyOnce/valDefiniteReassignment.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/initialization/exactlyOnce/valIndefiniteInitialization.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/initialization/exactlyOnce/varIndefiniteInitialization.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/initialization/exactlyOnce/withReceiver.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/controlflow/initialization/unknown/unknownInvocations.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/dsl/accessorsAllowedInK2.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/dsl/accessorsAllowedInK2MultiModule.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/dsl/contractInDestructuringDeclaration.kt
@@ -6215,11 +6177,8 @@ compiler/testData/diagnostics/testsWithStdLib/contracts/fromSource/bad/callsInPl
 compiler/testData/diagnostics/testsWithStdLib/contracts/fromSource/bad/noOptIn.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/fromSource/bad/returnsImplies/propertyGetter.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/fromSource/bad/returnsImplies/redundantConditions.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/fromSource/good/callsInPlace/atLeastOnce.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/fromSource/good/callsInPlace/atMostOnce.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/fromSource/good/callsInPlace/infiniteLoop.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/fromSource/good/callsInPlace/tryFinally.kt
-compiler/testData/diagnostics/testsWithStdLib/contracts/fromSource/good/callsInPlace/unknown.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/fromSource/good/returnsImplies/booleanOperators.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/fromSource/good/returnsImplies/eqNotEq.kt
 compiler/testData/diagnostics/testsWithStdLib/contracts/fromSource/good/returnsImplies/propertyAccessors.kt
@@ -6384,7 +6343,6 @@ compiler/testData/diagnostics/testsWithStdLib/elvisOnJavaList.kt
 compiler/testData/diagnostics/testsWithStdLib/equalityCompatibilityCommonCases.kt
 compiler/testData/diagnostics/testsWithStdLib/equalityCompatibilityOldBehavior_Off.kt
 compiler/testData/diagnostics/testsWithStdLib/equalityCompatibilityOldBehavior_On.kt
-compiler/testData/diagnostics/testsWithStdLib/errorsInUnreachable.kt
 compiler/testData/diagnostics/testsWithStdLib/experimental/annotation.kt
 compiler/testData/diagnostics/testsWithStdLib/experimental/constVal.kt
 compiler/testData/diagnostics/testsWithStdLib/experimental/deeplyNestedClass.kt

@@ -474,6 +474,22 @@ fun e(s: String?) = s.trim()
             ],
             errors: 6,
         },
+        // Definite-assignment errors of deferred locals.
+        Case {
+            file: "Flow.kt",
+            source: "\
+fun a(): Int { val x: Int; return x }
+fun b() { val x: Int; val f = { x = 1 }; f() }
+fun c(f: Boolean) { val x: Int; if (f) x = 1; x = 2 }
+",
+            arguments: &[],
+            diagnostics: &[
+                "Flow.kt:1:35: error: [UNINITIALIZED_VARIABLE] Variable 'x' must be initialized.",
+                "Flow.kt:2:33: error: [CAPTURED_VAL_INITIALIZATION] Captured values cannot be initialized because of possible reassignments.",
+                "Flow.kt:3:47: error: [VAL_REASSIGNMENT] 'val' cannot be reassigned.",
+            ],
+            errors: 3,
+        },
         Case {
             file: "Forbidden.kt",
             source: "\

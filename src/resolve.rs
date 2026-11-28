@@ -17719,7 +17719,7 @@ val later = 1
 "#,
         );
         assert_eq!(errs.len(), 1);
-        assert_eq!(errs, ["variable 'later' must be initialized."]);
+        assert_eq!(errs, ["Variable 'later' must be initialized."]);
     }
 
     #[test]
@@ -25538,7 +25538,7 @@ struct Checker<'a> {
     stable_federated_symbol_cache: SymbolQueryCache,
     /// Whether the declaration being typed may not read this name AT ALL. An eager initializer runs
     /// in declaration order, so a module property declared later in the same file has no value yet;
-    /// kotlinc rejects `val eager = later` with "variable 'later' must be initialized". The symbol
+    /// kotlinc rejects `val eager = later` with "Variable 'later' must be initialized". The symbol
     /// table has no notion of position, so the engine records the rejected read at its source span.
     demand_rejects: Option<DemandReject<'a>>,
     expr_types: Vec<Ty>,

@@ -109,6 +109,14 @@ pub fn argument_type_mismatch(actual: &str, expected: &str) -> NamedMessage {
     }
 }
 
+/// `UNINITIALIZED_VARIABLE`: a read of a local that no path has definitely assigned yet.
+pub fn uninitialized_variable(name: &str) -> NamedMessage {
+    NamedMessage {
+        name: names::UNINITIALIZED_VARIABLE,
+        message: format!("Variable '{name}' must be initialized."),
+    }
+}
+
 /// `UNSAFE_CALL`: a member that exists only on the non-null type, called on a nullable receiver.
 pub fn unsafe_call(receiver: &str) -> NamedMessage {
     NamedMessage {
