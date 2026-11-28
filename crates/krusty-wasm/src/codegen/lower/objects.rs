@@ -1505,6 +1505,15 @@ impl Body<'_> {
         Ok(())
     }
 
+    /// Whether a cast to `ty` has a class, an interface or an array to test.
+    pub(super) fn is_testable_cast_target(&self, ty: Ty) -> Result<bool, Unsupported> {
+        let ty = ty.non_null();
+        Ok(ty.is_array()
+            || self.class_structure(ty)?.is_some()
+            || self.interface_of_type(ty).is_some()
+            || self.library_interface_of_type(ty).is_some())
+    }
+
     /// The interface `ty` names, when it is one of this file or numbered for the module.
     pub(super) fn interface_of_type(&self, ty: Ty) -> Option<TypeName> {
         let TyKind::Obj(name, _) = ty.non_null().kind() else {

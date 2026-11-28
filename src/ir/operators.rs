@@ -95,7 +95,16 @@ impl super::IrExpr {
             op,
             arg,
             type_operand,
+            erased: None,
         }
+    }
+
+    /// This type operation recording the erasure a cast to a type parameter checks.
+    pub fn with_erased(mut self, erasure: Option<crate::types::Ty>) -> Self {
+        if let Self::TypeOp { erased, .. } = &mut self {
+            *erased = erasure;
+        }
+        self
     }
 
     /// This expression with its operand replaced by `new_arg`, every other part of the payload
@@ -147,16 +156,19 @@ mod cast_operator_tests {
 
     #[test]
     fn with_arg_replaces_only_the_operand() {
-        let original = IrExpr::type_op(IrTypeOp::SafeCast, 1, Ty::obj("kotlin/String"));
+        let original = IrExpr::type_op(IrTypeOp::Cast, 1, Ty::ty_param("T", Ty::obj("kotlin/Any")))
+            .with_erased(Some(Ty::obj("kotlin/String")));
         let IrExpr::TypeOp {
             op,
             arg,
             type_operand,
+            erased,
         } = original.with_arg(7)
         else {
             panic!("a type operation stays a type operation");
         };
-        assert_eq!((op, arg), (IrTypeOp::SafeCast, 7));
-        assert_eq!(type_operand, Ty::obj("kotlin/String"));
+        assert_eq!((op, arg), (IrTypeOp::Cast, 7));
+        assert!(type_operand.is_ty_param());
+        assert_eq!(erased, Some(Ty::obj("kotlin/String")));
     }
 }

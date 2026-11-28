@@ -74,6 +74,7 @@ impl IrFile {
         mut value: ExprId,
         operand_type: Ty,
         target: Ty,
+        erased: Option<Ty>,
         temporary: impl FnOnce() -> u32,
     ) -> ExprId {
         // A safe cast to either `Nothing` or `Nothing?` can never produce a non-null value. Fold
@@ -129,6 +130,13 @@ impl IrFile {
         };
         let read = self.add_expr(IrExpr::GetValue(operand_slot));
         let matches = self.instance_check(false, read, runtime_target);
+        if let IrExpr::TypeOp {
+            erased: test_erased,
+            ..
+        } = &mut self.exprs[matches as usize]
+        {
+            *test_erased = erased;
+        }
         let read = self.add_expr(IrExpr::GetValue(operand_slot));
         // `as? T` yields `T?`. A concrete primitive already names its boxed wrapper (`Int?`).
         // A type parameter does not: an inline call later substitutes `T` with `Int`, and a
@@ -139,7 +147,8 @@ impl IrFile {
         } else {
             runtime_target
         };
-        let cast = self.add_expr(IrExpr::type_op(IrTypeOp::Cast, read, cast_target));
+        let cast =
+            self.add_expr(IrExpr::type_op(IrTypeOp::Cast, read, cast_target).with_erased(erased));
         let null = self.add_expr(IrExpr::Const(IrConst::Null));
         let result = self.add_expr(IrExpr::When {
             branches: vec![(Some(matches), cast), (None, null)],

@@ -556,12 +556,13 @@ impl BodyLowering<'_> {
                     .ty
                     .get();
                 let operand = self.expression(operand_id)?;
-                let operand =
-                    if operand_ty == Ty::Unit && !matches!(operation, FirTypeOperation::SafeCast) {
-                        self.unit_value_after_effect(operand)
-                    } else {
-                        operand
-                    };
+                let operand = if operand_ty == Ty::Unit
+                    && !matches!(operation, FirTypeOperation::SafeCast(_))
+                {
+                    self.unit_value_after_effect(operand)
+                } else {
+                    operand
+                };
                 match operation {
                     FirTypeOperation::NotNullAssertion => {
                         let asserted = self.ir.add_expr(IrExpr::NotNullAssert {
@@ -579,8 +580,8 @@ impl BodyLowering<'_> {
                             asserted
                         }
                     }
-                    FirTypeOperation::SafeCast => {
-                        self.safe_cast_expression(operand_id, target.get())?
+                    FirTypeOperation::SafeCast(plan) => {
+                        self.safe_cast_expression(operand_id, target.get(), plan.erased)?
                     }
                     FirTypeOperation::Is(plan) => self.type_test(
                         false,
@@ -596,12 +597,15 @@ impl BodyLowering<'_> {
                         target.get(),
                         plan.same_erased_upper_bound,
                     ),
-                    FirTypeOperation::Cast => {
-                        let cast = self.ir.add_expr(IrExpr::type_op(
-                            lower_type_operation(*operation, target.get()),
-                            operand,
-                            target.get(),
-                        ));
+                    FirTypeOperation::Cast(plan) => {
+                        let cast = self.ir.add_expr(
+                            IrExpr::type_op(
+                                lower_type_operation(*operation, target.get()),
+                                operand,
+                                target.get(),
+                            )
+                            .with_erased(plan.erased),
+                        );
                         self.ir.written_casts.insert(cast);
                         cast
                     }
@@ -2650,8 +2654,8 @@ fn lower_type_operation(operation: FirTypeOperation, target: crate::types::Ty) -
     match operation {
         FirTypeOperation::Is(_) => IrTypeOp::InstanceOf,
         FirTypeOperation::NotIs(_) => IrTypeOp::NotInstanceOf,
-        FirTypeOperation::Cast => IrTypeOp::cast_to(target),
-        FirTypeOperation::SafeCast => {
+        FirTypeOperation::Cast(_) => IrTypeOp::cast_to(target),
+        FirTypeOperation::SafeCast(_) => {
             unreachable!("safe casts expand to checked control flow before common IR")
         }
         FirTypeOperation::NotNullAssertion => unreachable!("lowered as NotNullAssert"),

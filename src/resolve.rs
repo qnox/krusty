@@ -2682,6 +2682,11 @@ pub enum ExprLowering {
         target: Ty,
         same_erased_upper_bound: bool,
     },
+    /// Runtime plan of a checked cast `x as T` or `x as? T`. `erased` is the erasure the cast
+    /// checks when `T` is a type parameter.
+    RuntimeCast {
+        erased: Option<Ty>,
+    },
     /// `receiver.(callable)` after the callable has been proven to have an extension-function type.
     /// `target` is the complete unbound function shape (context parameters, extension receiver, value
     /// parameters, result, and suspend bit); `result` is the same shape with only the extension
@@ -41586,6 +41591,14 @@ impl<'a> Checker<'a> {
             // A safe cast `x as? T` has type `T?` — `null` on a runtime mismatch. For a primitive `T`
             // (`as? Int`) that nullable form is the boxed wrapper (`Int?`). A plain `x as T` keeps `T`.
             let tt = self.cast_target_with_operand_arguments(operand_ty, tt);
+            // A reified parameter is specialized at its inline site, so it is checked as written.
+            let erased = scope
+                .reified_tparam(&ty.name)
+                .is_none()
+                .then(|| tt.cast_erasure())
+                .flatten();
+            self.expr_lowers
+                .insert(e, ExprLowering::RuntimeCast { erased });
             if nullable {
                 Ty::nullable(tt)
             } else {

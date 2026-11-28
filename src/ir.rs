@@ -447,6 +447,9 @@ pub enum IrExpr {
         op: IrTypeOp,
         arg: ExprId,
         type_operand: Ty,
+        /// What a cast checks at run time when `type_operand` is a type parameter: its erasure,
+        /// recorded by the checker. `None` for every other operation.
+        erased: Option<Ty>,
     },
     /// `IrWhile` loop. `update` (if present) runs after `body` each iteration, at the `continue`
     /// target — it carries a `for`-loop's increment so `continue` advances the loop rather than

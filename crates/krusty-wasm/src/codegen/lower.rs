@@ -1692,6 +1692,15 @@ impl<'a> Body<'a> {
             } if let Callee::Intrinsic { operation, .. } = &**call_callee => {
                 self.intrinsic(*operation, dispatch_receiver, &args)?
             }
+            // `as R` for a type parameter `R`: the checker recorded the erasure the cast tests.
+            IrExpr::TypeOp {
+                op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
+                arg,
+                erased: Some(erased),
+                ..
+            } if self.is_testable_cast_target(erased)? => {
+                self.cast(arg, erased, op == IrTypeOp::CastNonNull)?
+            }
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
