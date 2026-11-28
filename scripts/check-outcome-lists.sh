@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The platform/version outcome manifests only shrink: a change may remove entries, never add one, so a
 # regression cannot be recorded as expected and a fix cannot pay for one. That covers the box
-# expected failures and not-applicable lists, the byte-identity non-identical lists, the CLI corpus failures, the diagnostics
+# expected failures and not-applicable lists, the byte-identity non-identical lists (the JVM box
+# lane's and each plugin corpus's), the CLI corpus failures, the diagnostics
 # false accepts, and uncovered KLIB implementations. A release records a manifest only where it differs from its predecessor's, and a
 # release with none reads the newest one below it, so what is compared is the manifest each release
 # READS: deleting a release's own file is an addition when the inherited one lists more. A release
@@ -205,7 +206,7 @@ while read -r lane; do
   done
 done < <(
   { git ls-tree -r --name-only "$base"; git ls-tree -r --name-only "$head"; } |
-    grep -E '^(tests/(box_byte_non_identical|box_expected_failures|box_expected_not_applicable|cli_expected_failures|diagnostics_false_accepts|diagnostics_ledger_mismatches|klib_uncovered_implementations)|src/plugins/[^/]+/boxes/(expected_not_applicable|included))/[^/]+/[^/]+\.txt$' |
+    grep -E '^(tests/(box_byte_non_identical|box_expected_failures|box_expected_not_applicable|cli_expected_failures|diagnostics_false_accepts|diagnostics_ledger_mismatches|klib_uncovered_implementations)|src/plugins/[^/]+/boxes/(byte_non_identical|expected_not_applicable|included))/[^/]+/[^/]+\.txt$' |
     sed 's|/[^/]*$||' | sort -u
 )
 
