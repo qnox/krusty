@@ -365,7 +365,7 @@ fn producing_jdk_identity() -> Result<&'static [u8], String> {
     static IDENTITY: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
     IDENTITY
         .get_or_init(|| {
-            let home = common::selected_java_home().ok_or_else(|| {
+            let home = common::jdk_homes::selected_java_home().ok_or_else(|| {
                 "no reference JDK is selected: set KRUSTY_REF_JAVA_HOME or JAVA_HOME".to_string()
             })?;
             common::producing_jdk::jdk_identity(Path::new(&home))
@@ -375,10 +375,10 @@ fn producing_jdk_identity() -> Result<&'static [u8], String> {
 }
 
 /// Exact modules image of the JDK that runs kotlinc and javac. This deliberately shares
-/// [`common::selected_java_home`]'s `KRUSTY_REF_JAVA_HOME`-before-`JAVA_HOME` precedence instead of
+/// [`common::jdk_homes::selected_java_home`]'s `KRUSTY_REF_JAVA_HOME`-before-`JAVA_HOME` precedence instead of
 /// consulting the compiler-under-test's independently selected frontend toolchain.
 fn producing_jdk_modules() -> Result<PathBuf, String> {
-    reference_jdk_modules(common::selected_java_home().as_deref())
+    reference_jdk_modules(common::jdk_homes::selected_java_home().as_deref())
 }
 
 fn reference_jdk_modules(home: Option<&str>) -> Result<PathBuf, String> {
