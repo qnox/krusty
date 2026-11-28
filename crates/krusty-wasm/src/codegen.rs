@@ -161,13 +161,13 @@ impl Backend for WasmBackend {
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
-        // `Unit`'s value is the runtime's own, as a source reference of it is. Every enum
-        // constant is laid out with the runtime's `kotlin.Enum` base, so its members are too.
-        classifier == krusty::types::wk::string()
-            || classifier == krusty::types::wk::kotlin_enum()
-            || classifier == krusty::types::wk::unit()
-            || lower::is_string_builder(classifier)
-            || lower::runtime_lays_out(classifier)
+        represents_dependency_classifier(classifier)
+    }
+
+    fn dependency_classifier_representation(
+        &self,
+    ) -> std::rc::Rc<dyn Fn(krusty::backend::DependencyClassifier) -> bool> {
+        std::rc::Rc::new(represents_dependency_classifier)
     }
 
     /// The runtime's `StringBuilder` answers the `Appendable` and `CharSequence` members it
@@ -1333,4 +1333,14 @@ mod tests {
             }
         }
     }
+}
+
+/// `Unit`'s value is the runtime's own, as a source reference of it is. Every enum constant is
+/// laid out with the runtime's `kotlin.Enum` base, so its members are too.
+fn represents_dependency_classifier(classifier: krusty::backend::DependencyClassifier) -> bool {
+    classifier == krusty::types::wk::string()
+        || classifier == krusty::types::wk::kotlin_enum()
+        || classifier == krusty::types::wk::unit()
+        || lower::is_string_builder(classifier)
+        || lower::runtime_lays_out(classifier)
 }

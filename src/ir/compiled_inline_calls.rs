@@ -35,9 +35,8 @@ pub struct CompiledInlineOperands {
 #[derive(Default)]
 pub(super) struct CompiledInlineCalls {
     lowering: SameModuleInlining,
-    /// The range classes whose constructions the backend builds through the library's own inline
-    /// declaration (`UInt.rangeTo`), because it does not lay the class out itself.
-    library_built_ranges: Vec<crate::types::TypeName>,
+    /// Which dependency classifiers the backend lays out itself.
+    target_representation: Option<std::rc::Rc<dyn Fn(crate::types::TypeName) -> bool>>,
     /// Each call kept for the backend → the function whose compiled body it inlines.
     calls: HashMap<ExprId, FunId>,
 }
@@ -54,17 +53,21 @@ impl IrFile {
         self.compiled_inline_calls.lowering = lowering;
     }
 
-    /// Whether a range construction of `class` is the expansion of its library declaration.
-    pub fn builds_range_by_library(&self, class: crate::types::TypeName) -> bool {
+    /// Whether the backend lays the dependency classifier `class` out itself.
+    pub fn target_represents(&self, class: crate::types::TypeName) -> bool {
         self.compiled_inline_calls
-            .library_built_ranges
-            .contains(&class)
+            .target_representation
+            .as_ref()
+            .is_some_and(|represents| represents(class))
     }
 
-    /// Select the range classes the backend does not lay out, whose constructions expand their
-    /// library declarations. Set once, before any body is lowered.
-    pub fn set_library_built_ranges(&mut self, classes: Vec<crate::types::TypeName>) {
-        self.compiled_inline_calls.library_built_ranges = classes;
+    /// State which dependency classifiers the backend lays out itself. Set once, before any body
+    /// is lowered.
+    pub fn set_target_representation(
+        &mut self,
+        represents: std::rc::Rc<dyn Fn(crate::types::TypeName) -> bool>,
+    ) {
+        self.compiled_inline_calls.target_representation = Some(represents);
     }
 
     /// Record that `call` is inlined from the compiled body of `function`. Each operand carries the
@@ -178,7 +181,7 @@ impl InheritedFacts for CompiledInlineCalls {
         // How the file inlines same-module calls is a file-wide decision.
         let Self {
             lowering: _,
-            library_built_ranges: _,
+            target_representation: _,
             calls,
         } = self;
         calls.inherit(source, target);
@@ -187,7 +190,7 @@ impl InheritedFacts for CompiledInlineCalls {
     fn relocate(&mut self, source: ExprId, target: ExprId) {
         let Self {
             lowering: _,
-            library_built_ranges: _,
+            target_representation: _,
             calls,
         } = self;
         calls.relocate(source, target);

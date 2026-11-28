@@ -205,10 +205,10 @@ impl BodyLowering<'_> {
         let Some(target) = declaration.filter(|_| ends_inlined_call) else {
             return Ok(None);
         };
-        let builds_by_library = result
+        let built_by_library = result
             .kotlin_class_internal()
-            .is_some_and(|class| self.ir.builds_range_by_library(class));
-        if !builds_by_library
+            .is_some_and(|class| !self.ir.target_represents(class));
+        if !built_by_library
             || self.ir.same_module_inlining() != crate::ir::SameModuleInlining::ExpandInIr
             || self.dependency_templates.compiler_implemented(target)
         {

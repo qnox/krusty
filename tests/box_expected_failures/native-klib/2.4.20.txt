@@ -434,7 +434,6 @@ ktype/nonReified_fun.kt
 ktype/nonReified_recursionInReified.kt
 ktype/nonReified_reifiedUpperBound.kt
 lambda/lambda_kt49360_withFlow.kt
-lower/forLoopsLowering/progressions.kt
 multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
 multiplatform/k2/basic/delegatedByExpectExtensionProperty.kt
 multiplatform/k2/basic/expectActualFakeOverrides2.kt
