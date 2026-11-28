@@ -174,7 +174,7 @@ fn a_conflicting_jvm_target_is_reported_in_kotlincs_words() {
     assert_eq!(result.status.code(), Some(code), "kotlinc's exit status");
     assert_eq!(
         String::from_utf8_lossy(&result.stderr),
-        format!("krusty: error: {message}\n")
+        format!("error: {message}\n")
     );
     assert!(!output.exists(), "krusty wrote {}", output.display());
 }

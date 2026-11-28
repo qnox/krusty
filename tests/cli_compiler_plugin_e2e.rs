@@ -482,7 +482,7 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
         (
             Some(2),
             String::new(),
-            "krusty: error: unknown value for parameter -Xexplicit-api: 'sideways'. Value should be one \
+            "error: unknown value for parameter -Xexplicit-api: 'sideways'. Value should be one \
              of {disable, strict, warning}\n\
              krusty: error: krusty does not implement the kotlinc argument '-Xvalidate-bytecode'\n"
                 .to_string()
@@ -495,7 +495,7 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
                 Some(2),
                 String::new(),
                 format!(
-                    "krusty: error: {argument}=nonesuch selects an output shape krusty does not emit\n"
+                    "error: unknown `{argument}` argument: nonesuch\n.Supported arguments: class, indy\n"
                 )
             ),
             "{argument}"

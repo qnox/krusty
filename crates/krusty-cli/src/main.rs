@@ -622,7 +622,8 @@ fn fails_kotlinc_too(opts: &cli::Options) -> bool {
         .any(|error| !opts.refusals.contains(error))
 }
 
-/// The options krusty reports and exits on before compiling: invalid ones, and ones it refuses.
+/// The options krusty reports and exits on before compiling: invalid ones, as kotlinc's `error:`
+/// lines, and ones krusty refuses, as `krusty: error:` lines.
 fn error_report(opts: &cli::Options) -> Option<String> {
     if opts.errors.is_empty() {
         return None;
@@ -630,7 +631,13 @@ fn error_report(opts: &cli::Options) -> Option<String> {
     Some(
         opts.errors
             .iter()
-            .map(|error| format!("krusty: error: {error}\n"))
+            .map(|error| {
+                if opts.refusals.contains(error) {
+                    format!("krusty: error: {error}\n")
+                } else {
+                    format!("error: {error}\n")
+                }
+            })
             .collect(),
     )
 }

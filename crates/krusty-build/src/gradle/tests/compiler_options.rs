@@ -277,7 +277,7 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
     {
         let case = "explicit-api-bad-mode";
         let argument = "-Xexplicit-api=sideways";
-        let expected = "krusty: error: unknown value for parameter -Xexplicit-api: 'sideways'. \
+        let expected = "error: unknown value for parameter -Xexplicit-api: 'sideways'. \
                         Value should be one of {disable, strict, warning}";
         clear_invocation_log(log);
         clear_invocation_log(&fixture.probes);
@@ -336,7 +336,7 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
         assert_eq!(
             std::fs::read_to_string(refusals_record).expect("refusals record"),
             format!(
-                "krusty rejects the command line\nkrusty: error: {kind} version 1.9 is no longer \
+                "krusty rejects the command line\nerror: {kind} version 1.9 is no longer \
                  supported; use version 2.0 or greater instead.\n"
             ),
             "{case}: {rendered}",
