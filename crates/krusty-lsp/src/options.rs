@@ -94,6 +94,9 @@ impl LspOptions {
         arguments: &[String],
         env: &mut impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, String> {
+        // The release whose argument table reads the language arguments, chosen once as the
+        // compiler's own reading of them chooses it.
+        let release = krusty_cli::cli::configured_reference()?;
         let mut options = Self::default();
         let mut args = arguments.iter().cloned();
         let mut stdio = false;
@@ -159,7 +162,7 @@ impl LspOptions {
                 }
                 "-deps-sources" => options.deps_sources = Some(true),
                 "-no-deps-sources" => options.deps_sources = Some(false),
-                _ => match krusty_cli::cli::language_argument(&argument) {
+                _ => match krusty_cli::cli::language_argument(release, &argument) {
                     Some(LanguageArgument::Alone) => options.language_arguments.push(argument),
                     Some(LanguageArgument::WithValue) => {
                         let value = required_value(&argument, &mut args)?;
