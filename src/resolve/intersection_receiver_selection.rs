@@ -1,38 +1,10 @@
 //! Receiver views committed after selection from a semantic intersection.
 
+use super::scope::PathRoot;
 use super::*;
 use crate::types::TyKind;
 
 impl Checker<'_> {
-    /// Project the current implicit receiver's flow intersection onto the constituent that owns the
-    /// member a bare call names, as [`Self::flow_intersection_member_receiver`] does for `this.name`.
-    pub(super) fn project_implicit_receiver_for_member(
-        &self,
-        scope: &CheckerScope<'_>,
-        receivers: &mut [ImplicitReceiver],
-        name: &str,
-        expected: Option<Ty>,
-    ) {
-        let Some(path) = self.current_receiver_path(scope) else {
-            return;
-        };
-        let bounds = self.lookup_intersection_narrowing(scope, &path);
-        let Some(projected) = self.intersection_member_receiver(&bounds, name) else {
-            return;
-        };
-        // kotlinc completes a call that must satisfy a proper expected type apart from the
-        // builder's variables, so a result reached through the smart-cast receiver no longer
-        // carries them.
-        if self.postponed_call_mentions(projected)
-            && expected.is_some_and(|expected| !self.postponed_call_mentions(expected))
-        {
-            return;
-        }
-        if let Some(current) = receivers.iter_mut().find(|receiver| receiver.current) {
-            current.ty = projected;
-        }
-    }
-
     /// Project a flow intersection onto the constituent that owns the member being used. Candidate
     /// collection and overload selection remain the resolver's job; this operation only chooses the
     /// receiver view exposed by the proven intersection. When two bounds contribute the same
@@ -54,12 +26,14 @@ impl Checker<'_> {
     /// override returns the most specific result among the constituents' members of the same
     /// shape, whichever constituent dispatches the call: on `Option<Pair<A, B>> & Some<*>`,
     /// `get()` dispatches through `Some<*>` but returns `Pair<A, B>`, not `Some<*>`'s `Any?`.
-    /// `None` without such an override, or when its result is the selected one.
+    /// The same override types a bare call through a smart-cast `this`. `None` without such an
+    /// override, or when its result is the selected one.
     pub(super) fn flow_intersection_member_result(
         &self,
         scope: &CheckerScope<'_>,
-        receiver: ExprId,
+        rung: &MemberCallTowerRung,
         selected: &crate::libraries::FunctionInfo,
+        expected: Option<Ty>,
     ) -> Option<Ty> {
         // A member's own type arguments are inferred at the call and already applied to the
         // selected result; the constituents' members carry only their receiver's substitution.
@@ -70,13 +44,24 @@ impl Checker<'_> {
         {
             return None;
         }
-        let path = self.flow_read_path(receiver)?;
+        let path = match (rung.explicit_receiver, rung.receiver) {
+            (Some(receiver), _) => self.flow_read_path(receiver)?,
+            (None, Some(receiver)) => NarrowPath::root_only(PathRoot::Receiver(receiver.identity)),
+            (None, None) => return None,
+        };
         let bounds = self.lookup_intersection_narrowing(scope, &path);
         if bounds.len() < 2 {
             return None;
         }
         let families = self.intersection_member_families(&bounds, &selected.callable.name);
         let (_, result) = self.intersection_override(&families)?;
+        // kotlinc completes a call that must satisfy a proper expected type apart from the
+        // builder's variables, so the override's result no longer carries them.
+        if self.postponed_call_mentions(result)
+            && expected.is_some_and(|expected| !self.postponed_call_mentions(expected))
+        {
+            return None;
+        }
         (result != selected.callable.ret).then_some(result)
     }
 

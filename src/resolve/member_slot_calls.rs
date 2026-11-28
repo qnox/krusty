@@ -277,9 +277,8 @@ impl Checker<'_> {
             // that value unchanged.
             .or_else(|| self.selected_intersection_member_receiver(member_receiver, &selected))
             .unwrap_or(rt);
-        let flow_result = tower_rung
-            .explicit_receiver
-            .and_then(|receiver| self.flow_intersection_member_result(scope, receiver, &selected));
+        let flow_result =
+            self.flow_intersection_member_result(scope, &tower_rung, &selected, expected);
         let mut member = match flow_result {
             Some(ret) => self.resolver().commit_selected_member_function_result(
                 member_receiver,
