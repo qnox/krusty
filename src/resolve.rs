@@ -26972,7 +26972,7 @@ impl<'a> Checker<'a> {
             receiver,
             unbound,
             expected,
-            self.file.reference.quirks(),
+            self.file.reference,
             self,
         ) {
             ExtensionReferenceChoice::Selected(selected) => {
@@ -27674,7 +27674,7 @@ impl<'a> Checker<'a> {
             if callable_reference_selection::select_adapted_instance_candidate(
                 callable_reference_selection::ReferenceSource {
                     source: &source,
-                    quirks: self.file.reference.quirks(),
+                    profile: self.file.reference,
                 },
                 &candidates,
                 self.file.language.callable_references_to_contextual,
@@ -28433,7 +28433,7 @@ impl<'a> Checker<'a> {
             callable_reference_selection::select_adapted_instance_candidate(
                 callable_reference_selection::ReferenceSource {
                     source: &source,
-                    quirks: self.file.reference.quirks(),
+                    profile: self.file.reference,
                 },
                 overloads,
                 self.file.language.callable_references_to_contextual,
@@ -40438,7 +40438,7 @@ impl<'a> Checker<'a> {
                 if t == Ty::Null {
                     return self.set(e, Ty::Nothing);
                 }
-                let narrowed = t.not_null_operator_result(self.file.reference.quirks());
+                let narrowed = t.not_null_operator_result(self.file.reference);
                 // A successful assertion proves the same stable access path non-null for the rest
                 // of this lexical flow (`x!!.let { use(x) }`, and later statements). Reassignments
                 // invalidate the fact through the ordinary scope machinery; temporaries and
@@ -44929,7 +44929,7 @@ impl<'a> Checker<'a> {
                         callable_reference_selection::select_adapted_instance_candidate(
                             callable_reference_selection::ReferenceSource {
                                 source: &source,
-                                quirks: self.file.reference.quirks(),
+                                profile: self.file.reference,
                             },
                             &candidates,
                             self.file.language.callable_references_to_contextual,
@@ -45232,7 +45232,7 @@ impl<'a> Checker<'a> {
                     callable_reference_selection::select_adapted_instance_candidate(
                         callable_reference_selection::ReferenceSource {
                             source: &source,
-                            quirks: self.file.reference.quirks(),
+                            profile: self.file.reference,
                         },
                         &receiver_candidates.overloads,
                         self.file.language.callable_references_to_contextual,

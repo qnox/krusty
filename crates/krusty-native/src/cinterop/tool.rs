@@ -14,7 +14,7 @@ use super::link_facts::{self, LinkerOptions};
 use super::preprocessor::IncludeDir;
 use crate::NativeTarget;
 use krusty::klib::write::KlibStamp;
-use krusty::kotlin_version;
+use krusty::kotlin_version::KotlinVersion;
 use krusty::language_version::LanguageVersion;
 
 /// One `cinterop` invocation, as Kotlin/Native's tool takes it.
@@ -41,11 +41,15 @@ pub struct CinteropOptions {
     pub no_pack: bool,
     /// `-Xmodule-name`: the library's unique name, in place of the output's file name.
     pub module_name: Option<String>,
+    /// The kotlinc release this invocation reproduces, chosen once by its driver. The library is
+    /// stamped as that release's cinterop writes it.
+    pub release: KotlinVersion,
 }
 
 impl CinteropOptions {
-    /// The options of an invocation that names only `output`, for `target`.
-    pub fn new(output: PathBuf, target: NativeTarget) -> Self {
+    /// The options of an invocation that names only `output`, for `target`, reproducing
+    /// `release`.
+    pub fn new(output: PathBuf, target: NativeTarget, release: KotlinVersion) -> Self {
         Self {
             def: None,
             headers: Vec::new(),
@@ -56,6 +60,7 @@ impl CinteropOptions {
             linker_options: Vec::new(),
             no_pack: false,
             module_name: None,
+            release,
         }
     }
 }
@@ -124,7 +129,10 @@ pub fn build_interop_library(options: &CinteropOptions) -> Result<PathBuf, Cinte
         target: options.target,
         system_dirs: system_include_dirs(options.target),
         sysroot: Some(PathBuf::from("/")),
-        stamp: KlibStamp::new(kotlin_version::environment_release(), LanguageVersion::V2_4),
+        stamp: KlibStamp::new(
+            options.release,
+            LanguageVersion::default_for(options.release),
+        ),
         extra_headers: options.headers.clone(),
         extra_compiler_options: options.compiler_options.clone(),
     })?;

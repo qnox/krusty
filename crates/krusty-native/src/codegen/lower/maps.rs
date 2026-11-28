@@ -59,7 +59,7 @@ pub(super) fn runtime_symbol(
         map_symbol(declaration?, signature)
     } else if collection.kind == krusty::types::CollectionKind::Set {
         set_symbol(
-            file.ir.reference.quirks(),
+            file.ir.reference,
             set_declaration(file, signature)?,
             signature,
         )
@@ -158,7 +158,7 @@ fn is_map_set_extension(signature: super::super::super::intrinsics::FunctionSign
 /// A set's `size` and `isEmpty` are the map's: a set IS a map with no values, and both questions
 /// are about its keys.
 fn set_symbol(
-    quirks: krusty::kotlin_version::Quirks,
+    profile: krusty::kotlin_version::ReferenceProfile,
     declaration: classifier_shapes::CollectionDeclaration,
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
@@ -177,7 +177,7 @@ fn set_symbol(
             Ty::Boolean,
         ),
         ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
-            super::lists::collection_add_all_symbol(quirks),
+            super::lists::collection_add_all_symbol(profile),
             vec![any(), any()],
             Ty::Boolean,
         ),
@@ -401,7 +401,7 @@ impl BodyLowering<'_, '_, '_> {
             }
         } else if is_set(self.file, ty) {
             set_symbol(
-                self.file.ir.reference.quirks(),
+                self.file.ir.reference,
                 set_declaration(self.file, signature)?,
                 signature,
             )?
@@ -477,7 +477,7 @@ impl BodyLowering<'_, '_, '_> {
         let (symbol, carried, answer) = match kind {
             krusty::types::CollectionKind::Map => map_symbol(declaration, signature)?,
             krusty::types::CollectionKind::Set => {
-                set_symbol(self.file.ir.reference.quirks(), declaration, signature)?
+                set_symbol(self.file.ir.reference, declaration, signature)?
             }
             krusty::types::CollectionKind::MapEntry => {
                 map_entry_symbol(Some(declaration), signature)?
@@ -520,8 +520,8 @@ impl BodyLowering<'_, '_, '_> {
 mod tests {
     use super::*;
 
-    fn quirks() -> krusty::kotlin_version::Quirks {
-        krusty::kotlin_version::ReferenceProfile::default().quirks()
+    fn profile() -> krusty::kotlin_version::ReferenceProfile {
+        krusty::kotlin_version::ReferenceProfile::default()
     }
 
     fn signature<'a>(
@@ -614,13 +614,13 @@ mod tests {
         let size = signature("kotlin/collections/Set", "size", &[], Ty::Int);
         let clear = signature("kotlin/collections/MutableSet", "clear", &[], Ty::Unit);
         let hash_set = CollectionDeclaration::Implementation(StandardCollectionImplementation::Set);
-        assert!(set_symbol(quirks(), face(false), size).is_some());
-        assert!(set_symbol(quirks(), face(true), size).is_none());
-        assert!(set_symbol(quirks(), face(true), clear).is_some());
-        assert!(set_symbol(quirks(), face(false), clear).is_none());
-        assert!(set_symbol(quirks(), hash_set, clear).is_some());
+        assert!(set_symbol(profile(), face(false), size).is_some());
+        assert!(set_symbol(profile(), face(true), size).is_none());
+        assert!(set_symbol(profile(), face(true), clear).is_some());
+        assert!(set_symbol(profile(), face(false), clear).is_none());
+        assert!(set_symbol(profile(), hash_set, clear).is_some());
         assert!(set_symbol(
-            quirks(),
+            profile(),
             CollectionDeclaration::Implementation(StandardCollectionImplementation::List),
             size
         )

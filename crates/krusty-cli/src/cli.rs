@@ -344,16 +344,22 @@ pub enum LanguageArgument {
     WithValue,
 }
 
+/// The reference release a krusty command reproduces when its arguments name none: the one
+/// [`krusty::kotlin_version::REFERENCE_VERSION_VARIABLE`] selects, or the newest supported one. Every
+/// command-line driver (the compiler, `kotlinc-native`, `cinterop`, the language server) chooses
+/// its release through this once, and an invalid environment is an error, never another release.
+pub fn configured_reference() -> Result<KotlinVersion, String> {
+    krusty::kotlin_version::configured_target()
+}
+
 /// Whether `argument` selects language settings in the reference release's argument table: the
 /// language or API version, `-progressive`, `-XXLanguage`, or an `@Enables`/`@Disables`
 /// argument. A caller that mixes its own options with kotlinc's uses this to hand exactly these to
 /// [`language_settings`].
-pub fn language_argument(argument: &str) -> Option<LanguageArgument> {
+pub fn language_argument(reference: KotlinVersion, argument: &str) -> Option<LanguageArgument> {
     if argument.starts_with("-XXLanguage:") {
         return Some(LanguageArgument::Alone);
     }
-    let reference =
-        krusty::kotlin_version::configured_target().unwrap_or_else(|_| KotlinVersion::newest());
     let catalog = Catalog::for_version(reference)
         .expect("every supported reference release has an argument table");
     let key = argument.split_once('=').map_or(argument, |(key, _)| key);
@@ -371,9 +377,7 @@ pub fn language_argument(argument: &str) -> Option<LanguageArgument> {
 /// How `argument`, any argument of the reference release's table, occupies a command line: as
 /// kotlinc's tokenizer reads it, an argument with a value that is not joined by `=` takes the
 /// next one, and a boolean stands alone. `None` for an argument the table does not list.
-pub fn argument_occupancy(argument: &str) -> Option<LanguageArgument> {
-    let reference =
-        krusty::kotlin_version::configured_target().unwrap_or_else(|_| KotlinVersion::newest());
+pub fn argument_occupancy(reference: KotlinVersion, argument: &str) -> Option<LanguageArgument> {
     let catalog = Catalog::for_version(reference)
         .expect("every supported reference release has an argument table");
     let key = argument.split_once('=').map_or(argument, |(key, _)| key);
@@ -401,9 +405,16 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
     let expanded = kotlinc_arguments::argfile::expand(argv, &mut argfile_problems);
     let arguments = take_reference_version(expanded, &mut opts);
     let arguments = take_defect_fixes(arguments, &mut opts);
-    let reference_version = opts.kotlin_reference_version.unwrap_or_else(|| {
-        krusty::kotlin_version::configured_target().unwrap_or_else(|_| KotlinVersion::newest())
-    });
+    let reference_version = match opts.kotlin_reference_version {
+        Some(version) => version,
+        None => match configured_reference() {
+            Ok(version) => version,
+            Err(error) => {
+                opts.argument_errors.push(error);
+                return opts;
+            }
+        },
+    };
     let catalog = Catalog::for_version(reference_version)
         .expect("every supported reference release has an argument table");
     let tokenized = kotlinc_arguments::tokenize(catalog, arguments, argfile_problems);
@@ -853,6 +864,41 @@ mod tests {
 
     fn parse_args(args: &[&str]) -> Options {
         parse(args.iter().map(|s| s.to_string()))
+    }
+
+    /// A caller's options are read in the argument table of the release its driver chose, for
+    /// every supported release: language arguments are recognized with their occupancy, and an
+    /// argument of the compilation alone is not a language argument.
+    #[test]
+    fn language_arguments_are_read_in_the_chosen_release_table() {
+        for release in KotlinVersion::supported() {
+            assert_eq!(
+                language_argument(release, "-language-version"),
+                Some(LanguageArgument::WithValue),
+                "{release}"
+            );
+            assert_eq!(
+                language_argument(release, "-language-version=2.4"),
+                Some(LanguageArgument::Alone),
+                "{release}"
+            );
+            assert_eq!(
+                language_argument(release, "-XXLanguage:+ContextParameters"),
+                Some(LanguageArgument::Alone),
+                "{release}"
+            );
+            assert_eq!(language_argument(release, "-d"), None, "{release}");
+            assert_eq!(
+                argument_occupancy(release, "-d"),
+                Some(LanguageArgument::WithValue),
+                "{release}"
+            );
+            assert_eq!(
+                argument_occupancy(release, "-no-such-argument"),
+                None,
+                "{release}"
+            );
+        }
     }
 
     /// `-progressive` accepts a release whose progressive features are all modeled, and turns

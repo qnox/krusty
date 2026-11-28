@@ -50,7 +50,7 @@ impl ProductionSignatureSemantics<'_> {
             receiver.get(),
             unbound,
             Some(expected),
-            self.table.reference.quirks(),
+            self.table.reference,
             &rules,
         ) else {
             return Err(Self::failure());

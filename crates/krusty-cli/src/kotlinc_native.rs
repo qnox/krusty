@@ -55,6 +55,8 @@ pub enum Invocation {
 
 /// Read the arguments that follow `krusty kotlinc-native`.
 pub fn parse(arguments: &[String]) -> Result<Invocation, String> {
+    // The driver chooses the reproduced release once; its argument table reads every option.
+    let release = crate::cli::configured_reference()?;
     // The shared compiler arguments and the sources, in command-line order, for kotlinc's reader.
     let mut shared = Vec::new();
     let mut has_sources = false;
@@ -107,9 +109,9 @@ pub fn parse(arguments: &[String]) -> Result<Invocation, String> {
             crate::cli::FIX_KOTLINC_DEFECTS if joined.is_none() => defects = KotlincDefects::Fix,
             other if other.starts_with('-') => {
                 let occupancy = if SHARED_ARGUMENTS.contains(&other) {
-                    crate::cli::argument_occupancy(argument)
+                    crate::cli::argument_occupancy(release, argument)
                 } else {
-                    crate::cli::language_argument(argument)
+                    crate::cli::language_argument(release, argument)
                 };
                 match occupancy {
                     Some(LanguageArgument::Alone) => shared.push(argument.clone()),

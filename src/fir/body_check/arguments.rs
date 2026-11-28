@@ -1546,7 +1546,6 @@ impl BodyFirChecker<'_> {
             if !self
                 .file
                 .reference
-                .quirks()
                 .has(crate::kotlin_version::Quirk::ContextArgumentEvaluatedBeforeExtensionReceiver)
             {
                 self.body.record_receiver_ordered_context_argument(value);

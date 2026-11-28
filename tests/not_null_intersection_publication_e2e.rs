@@ -7,7 +7,7 @@
 //! on. This test runs it with every input and assertion kept and also returns its `describe()`,
 //! pinning which answer the reference release gives for `!!`.
 
-use krusty::kotlin_version::{Quirk, Quirks};
+use krusty::kotlin_version::{Quirk, ReferenceProfile};
 
 use super::common;
 
@@ -28,7 +28,7 @@ fn source() -> String {
 
 #[test]
 fn a_not_null_assertion_publishes_the_type_the_reference_release_does() {
-    let drops = Quirks::of_release(krusty::kotlin_version::environment_release())
+    let drops = ReferenceProfile::of_release(krusty::kotlin_version::environment_release())
         .has(Quirk::NotNullOperatorDropsIntersectionApproximation);
     let source = source();
     let reference = common::kotlinc_box_result(&source);

@@ -109,8 +109,13 @@ pub fn parse(arguments: &[String]) -> Result<Invocation, String> {
     if def.is_none() && headers.is_empty() {
         return Err("cinterop needs a -def file or a -header".to_string());
     }
-    let mut options =
-        CinteropOptions::new(output.unwrap_or_else(|| PathBuf::from("nativelib")), target);
+    // The driver chooses the reproduced release once; an invalid environment fails here.
+    let release = crate::cli::configured_reference()?;
+    let mut options = CinteropOptions::new(
+        output.unwrap_or_else(|| PathBuf::from("nativelib")),
+        target,
+        release,
+    );
     options.def = def;
     options.headers = headers;
     options.package = package;
@@ -143,6 +148,7 @@ mod tests {
         let mut expected = CinteropOptions::new(
             PathBuf::from("out/zlib"),
             NativeTarget::from_konan_name("linux_arm64").expect("a target"),
+            krusty::kotlin_version::environment_release(),
         );
         expected.def = Some(PathBuf::from("zlib.def"));
         expected.headers = vec!["extra.h".to_string()];

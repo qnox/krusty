@@ -6,12 +6,12 @@
 //! as one [`Quirk`]: a named behavior with the range of releases that have it.
 //!
 //! The releases a quirk spans are recorded once, in the `quirks!` table below, and nowhere else. A
-//! release's whole profile is resolved once into a [`Quirks`] bit set ([`Quirks::of_release`]);
-//! a compilation reproduces its [`super::ReferenceProfile::quirks`], and consumers test one bit and never compare
-//! versions themselves.
+//! release's whole profile is resolved once into a private bit set held by its
+//! [`super::ReferenceProfile`]. Consumers ask the compilation's profile
+//! ([`super::ReferenceProfile::has`]) and never hold the bit set or compare versions themselves.
 //!
 //! - **A new quirk** is one entry in that table and one `has` test at the place that implements
-//!   the old behavior. Adding a release to the `kotlin-versions` manifest needs no edit here.
+//!   the old behavior, read from the profile the phase already carries. Adding a release to the `kotlin-versions` manifest needs no edit here.
 //! - **A defect** is a quirk that makes kotlinc compile a program wrongly: it rejects valid code,
 //!   computes a wrong value, or binds a call the language rules bind otherwise. Every defect has a
 //!   program in `tests/kotlinc_defects_e2e.rs` that shows kotlinc still has it in the releases the
@@ -187,14 +187,11 @@ const _: () = assert!(Quirk::ALL.len() <= u64::BITS as usize);
 
 /// The quirks one release has: its whole profile, resolved once. Testing a member is one bit test.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Quirks(u64);
+pub(super) struct Quirks(u64);
 
 impl Quirks {
-    /// No quirks at all: the behavior of the newest kotlinc krusty models.
-    pub const NONE: Self = Self(0);
-
     /// Every quirk `release` has.
-    pub const fn of_release(release: KotlinVersion) -> Self {
+    pub(super) const fn of_release(release: KotlinVersion) -> Self {
         let mut bits = 0;
         let mut index = 0;
         while index < Quirk::ALL.len() {
@@ -209,7 +206,7 @@ impl Quirks {
 
     /// This profile as a compilation under `defects` reproduces it: unchanged, or without its
     /// defects.
-    pub const fn under(self, defects: super::KotlincDefects) -> Self {
+    pub(super) const fn under(self, defects: super::KotlincDefects) -> Self {
         match defects {
             super::KotlincDefects::Reproduce => self,
             super::KotlincDefects::Fix => Self(self.0 & !Self::DEFECTS.0),
@@ -230,26 +227,17 @@ impl Quirks {
     };
 
     /// Whether this profile has `quirk`.
-    pub const fn has(self, quirk: Quirk) -> bool {
+    pub(super) const fn has(self, quirk: Quirk) -> bool {
         self.0 & Self::bit(quirk) != 0
     }
 
-    /// This profile with `quirk` on or off, so a test of a rule that takes a profile can compare
-    /// the quirk's behavior with the fixed one.
-    pub const fn with(self, quirk: Quirk, present: bool) -> Self {
+    /// This profile with `quirk` on or off.
+    pub(super) const fn with(self, quirk: Quirk, present: bool) -> Self {
         if present {
             Self(self.0 | Self::bit(quirk))
         } else {
             Self(self.0 & !Self::bit(quirk))
         }
-    }
-
-    /// The quirks in this profile, in declaration order.
-    pub fn iter(self) -> impl Iterator<Item = Quirk> {
-        Quirk::ALL
-            .iter()
-            .copied()
-            .filter(move |&quirk| self.has(quirk))
     }
 
     const fn bit(quirk: Quirk) -> u64 {
@@ -310,24 +298,18 @@ mod tests {
                     "{quirk:?} on {release}"
                 );
             }
-            assert_eq!(
-                profile.iter().collect::<Vec<_>>(),
-                Quirk::ALL
-                    .iter()
-                    .copied()
-                    .filter(|&quirk| profile.has(quirk))
-                    .collect::<Vec<_>>()
-            );
         }
     }
 
     #[test]
     fn a_profile_toggles_one_quirk() {
         let quirk = Quirk::ALL[0];
-        let on = Quirks::NONE.with(quirk, true);
+        let on = Quirks::default().with(quirk, true);
         assert!(on.has(quirk));
-        assert_eq!(on.iter().collect::<Vec<_>>(), [quirk]);
-        assert_eq!(on.with(quirk, false), Quirks::NONE);
+        assert!(Quirk::ALL
+            .iter()
+            .all(|&other| on.has(other) == (other == quirk)));
+        assert_eq!(on.with(quirk, false), Quirks::default());
     }
 
     #[test]

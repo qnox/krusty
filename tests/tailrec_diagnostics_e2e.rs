@@ -5,13 +5,13 @@
 //! family of source forms; the list beside it is kotlinc's complete output for that file.
 
 use super::common;
-use krusty::kotlin_version::{Quirk, Quirks};
+use krusty::kotlin_version::{Quirk, ReferenceProfile};
 
 /// The lists beside the fixtures are kotlinc 2.5's output. Earlier releases differ in the
 /// positions of dotless calls, in `return Unit` and in `?:`, so there kotlinc's own output on the
 /// same source is the only expectation.
 fn is_listed_release() -> bool {
-    let release = Quirks::of_release(krusty::kotlin_version::environment_release());
+    let release = ReferenceProfile::of_release(krusty::kotlin_version::environment_release());
     ![
         Quirk::TailrecDotlessCallReportedAtOperator,
         Quirk::TailrecUnitObjectReturnFollowsCall,

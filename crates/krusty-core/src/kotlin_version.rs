@@ -4,8 +4,8 @@
 //! compilers do not agree on everything a user can observe. kotlinc 2.4.20, for instance, rewords
 //! a batch of diagnostics and reports NO_VALUE_FOR_PARAMETER at a different position than 2.4.10.
 //! A behavior that differs between reference versions is a [`Quirk`]: its releases are recorded
-//! once, in the quirk table, and code tests the reproduced profile ([`ReferenceProfile::quirks`]) instead of
-//! comparing versions. Diagnostic wording lives in [`crate::diagnostic_wording`], keyed by version.
+//! once, in the quirk table, and code asks the compilation's profile ([`ReferenceProfile::has`]) instead
+//! of comparing versions. Diagnostic wording lives in [`crate::diagnostic_wording`], keyed by version.
 //!
 //! The reference profile is a value, never process state: [`ReferenceProfile`] pairs the release a
 //! compilation reproduces with its defects mode, and travels with the compilation's language
@@ -21,7 +21,8 @@ use std::path::PathBuf;
 
 mod quirks;
 
-pub use quirks::{Quirk, Quirks};
+pub use quirks::Quirk;
+use quirks::Quirks;
 
 /// Where a release sits before its stable `major.minor.patch`.
 ///
@@ -314,8 +315,19 @@ impl ReferenceProfile {
         self.defects
     }
 
-    pub fn quirks(&self) -> Quirks {
-        self.quirks
+    /// Whether this compilation reproduces `quirk`: its release has it, and the defects mode keeps
+    /// it. This is the one quirk query; a phase asks the profile it carries.
+    pub const fn has(&self, quirk: Quirk) -> bool {
+        self.quirks.has(quirk)
+    }
+
+    /// This profile with `quirk` on or off, so a test of a rule can compare the quirk's behavior
+    /// with the fixed one under an otherwise unchanged profile.
+    pub const fn with_quirk(self, quirk: Quirk, present: bool) -> Self {
+        Self {
+            quirks: self.quirks.with(quirk, present),
+            ..self
+        }
     }
 
     /// Whether the release is `version` or newer. A behavior difference is a [`Quirk`] instead;
@@ -470,7 +482,7 @@ mod tests {
         assert_eq!(reproduce.defects(), KotlincDefects::Reproduce);
         assert_eq!(fix.defects(), KotlincDefects::Fix);
         assert_eq!(reproduce.release(), fix.release());
-        assert_eq!(fix.quirks(), reproduce.quirks().under(KotlincDefects::Fix));
+        assert_eq!(fix.quirks, reproduce.quirks.under(KotlincDefects::Fix));
         assert_eq!(fix.with_defects(KotlincDefects::Reproduce), reproduce);
     }
 
