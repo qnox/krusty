@@ -88,6 +88,7 @@ use krusty::backend::class_tables::module_slots::ModuleSlotPlan;
 use krusty::backend::class_tables::AnyMember;
 use krusty::backend::{CheckedBackendCallables, DependencyExportSignatures};
 use krusty::ir::{Callee, ClassId, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
+use krusty::libraries::RuntimeExceptionKind;
 use krusty::types::{EqualityMode, Ty, TyKind, TypeName};
 
 use super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
@@ -2459,6 +2460,12 @@ impl<'a> Body<'a> {
         // not encode it. Shifts take an ordinary Int count, so the value (left operand) decides.
         let opcode = opcode(op, operand, unsigned)
             .ok_or_else(|| format!("the operator {op:?} on `{}`", describe(left)))?;
+        if matches!(op, IrBinOp::Div | IrBinOp::Rem)
+            && operand != ValType::F32
+            && operand != ValType::F64
+        {
+            self.throw_on_zero_divisor(operand)?;
+        }
         match opcode {
             Opcode::Plain(opcode) => {
                 self.code.op(opcode);
@@ -2472,6 +2479,39 @@ impl<'a> Body<'a> {
         }
         // `Char`, `UByte` and `UShort` arithmetic stays inside the value's own width.
         self.mask_narrow_bits(result);
+        Ok(())
+    }
+
+    /// With the divisor on top of the stack, throw Kotlin's `ArithmeticException` when it is zero
+    /// (wasm's `div_s` and `rem_s` trap instead). A program with no library declaring the
+    /// exception keeps the trap.
+    fn throw_on_zero_divisor(&mut self, operand: ValType) -> Result<(), Unsupported> {
+        let identity = RuntimeExceptionKind::Arithmetic.classifier();
+        if self.classifiers.classifier(identity).is_none() {
+            return Ok(());
+        }
+        let structure = self
+            .runtime
+            .exception_class(self.module, self.classifiers, identity)?;
+        let divisor = self.local(operand);
+        self.code.local_tee(divisor);
+        self.code.op(if operand == ValType::I64 {
+            EQZ64
+        } else {
+            EQZ32
+        });
+        self.code.if_(BlockType::Empty);
+        self.string_constant("/ by zero");
+        let message = self.local(STRING);
+        self.code.local_set(message);
+        self.runtime.exceptions.construct_class(
+            &mut self.code,
+            structure,
+            Some(message),
+            self.runtime.string,
+        )?;
+        self.code.throw(self.runtime.exceptions.tag).end();
+        self.code.local_get(divisor);
         Ok(())
     }
 

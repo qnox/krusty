@@ -32,7 +32,6 @@ annotations/instances/repeatableInstantiation.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
 annotations/instances/unsignedAndBooleanArrays.kt
 annotations/instances/withDefaults.kt
-arithmetic/division.kt
 arrays/forInUnsignedArray/forInUnsignedArrayReversed.kt
 arrays/kt47483.kt
 associatedObjects/associatedObjectNested.kt
@@ -75,7 +74,6 @@ bce/forUntilWithStep.kt
 bce/forWithIndex.kt
 bce/inheritance.kt
 bce/withGetter.kt
-binaryOp/divisionByZero.kt
 binaryOp/eqNullableDoubles.kt
 binaryOp/eqNullableDoublesWithTP.kt
 binaryOp/kt44402.kt
@@ -172,7 +170,6 @@ companionBlocksAndExtensions/innerClasses.kt
 companionBlocksAndExtensions/multiModule.kt
 companionBlocksAndExtensions/nestedClasses.kt
 constants/comparisonFalse.kt
-constants/divisionByZero.kt
 constants/kt9532.kt
 contextParameters/contextualCallableReference.kt
 contextParameters/explicitPassing.kt
