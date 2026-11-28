@@ -256,8 +256,6 @@ coroutines/featureIntersection/breakWithNonEmptyStack.kt
 coroutines/featureIntersection/callableReference/function/adapted.kt
 coroutines/featureIntersection/callableReference/function/genericCallableReferencesWithNullableTypes.kt
 coroutines/featureIntersection/funInterface.kt
-coroutines/featureIntersection/funInterface/kt47549.kt
-coroutines/featureIntersection/funInterface/kt47549_1.kt
 coroutines/featureIntersection/funInterface/kt49294.kt
 coroutines/featureIntersection/funInterface/kt50950.kt
 coroutines/featureIntersection/safeCallOnTwoReceivers.kt
@@ -444,14 +442,11 @@ fp/remainderVsModFloat.kt
 fullValueClasses/construction.kt
 fullValueClasses/inapplicableTypes.kt
 funInterface/equality/localFunctionReferences.kt
-funInterface/funInterfaceInheritance.kt
 funInterface/funInterfaceWithSuspendMethod.kt
 funInterface/kt41670.kt
 funInterface/kt49384.kt
 funInterface/kt77685-sam.kt
 funInterface/kt77685.kt
-funInterface/kt79092-sam.kt
-funInterface/kt79092.kt
 funInterface/nonAbstractMethod.kt
 funInterface/nullableSam.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
@@ -567,7 +562,6 @@ ir/serializationRegressions/anonFakeOverride.kt
 ir/serializationRegressions/useImportedMember.kt
 jdk/noStringToCharArray.kt
 jsAstOptimizations/inlineEmptyFunction.kt
-jvm8/defaults/enable/kt55083_indyLambdaForFunInterface.kt
 ktype/ktype1_basics1.kt
 ktype/ktype1_inner.kt
 ktype/nonReified_class.kt

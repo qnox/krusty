@@ -123,26 +123,10 @@ pub(super) struct JdAccessBridgeMember<'a> {
     pub(super) suspend: bool,
 }
 
-/// Emit the `access$<name>$jd` bridge for an `enable`-mode interface default method. An ordinary
-/// bridge marks the non-virtual call; coroutine lowering gives a suspend bridge's whole generated
-/// body the interface declaration line.
-pub(super) fn emit_jd_access_bridge(
-    cw: &mut ClassWriter,
-    interface: krusty::types::TypeName,
-    decl_line: u32,
-    member: JdAccessBridgeMember<'_>,
-) {
-    let target = InheritedMemberTarget {
-        params: member.param_tys,
-        ret: member.ret,
-        value_class_params: &[],
-        value_class_ret: None,
-    };
-    emit_specialized_jd_access_bridge(cw, interface, decl_line, member, target);
-}
-
-/// Emit the `access$<name>$jd` bridge an interface republishes an inherited default under: the
-/// bridge declares `member`'s shape and calls the default as `target` declares it.
+/// Emit an `enable`-mode interface's `access$<name>$jd` bridge: for its own default method, or the
+/// one it republishes an inherited default under. The bridge declares `member`'s shape and calls
+/// the default as `target` declares it; an ordinary bridge marks the non-virtual call, and
+/// coroutine lowering gives a suspend bridge's whole generated body the declaration line.
 pub(super) fn emit_specialized_jd_access_bridge(
     cw: &mut ClassWriter,
     interface: krusty::types::TypeName,

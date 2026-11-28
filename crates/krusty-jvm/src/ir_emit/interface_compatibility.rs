@@ -141,7 +141,9 @@ pub(super) fn emit_inherited_default_surface(
                 }
             }
             // A Kotlin default method somewhere above: bridge through this interface itself.
-            _ => JdHolderTarget::AccessBridge,
+            _ => JdHolderTarget::AccessBridge {
+                result: physical_ret,
+            },
         };
         // A suspend member's trailing continuation, not its vararg array, is the last physical
         // parameter, so only a non-suspend vararg member keeps ACC_VARARGS on this surface.
@@ -156,7 +158,7 @@ pub(super) fn emit_inherited_default_surface(
         } else {
             0
         };
-        if matches!(target, JdHolderTarget::AccessBridge) {
+        if matches!(target, JdHolderTarget::AccessBridge { .. }) {
             access_bridges::emit_specialized_jd_access_bridge(
                 cw,
                 c.fq_name,
@@ -348,6 +350,7 @@ pub(super) fn emit_own_member_forward(
         Vec::new()
     };
     let ret = jvm_declared_ty(&env.override_results.physical_result(ir, fid));
+    let bridge_result = jvm_declared_ty(&f.ret);
     emit_holder_forward(
         di,
         HolderForward {
@@ -386,7 +389,9 @@ pub(super) fn emit_own_member_forward(
                 end: ir.function_position(fid).end_line.unwrap_or(0),
             },
             varargs: method_access::varargs_access(ir, fid),
-            target: JdHolderTarget::AccessBridge,
+            target: JdHolderTarget::AccessBridge {
+                result: bridge_result,
+            },
             annotations: ForwardAnnotations {
                 declared: ir.function_annotations.get(&fid),
                 parameters: &ir.declared_parameters(fid).annotations,
@@ -489,7 +494,7 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
         &retained_where(true),
         reflected,
     );
-    let deprecated = matches!(target, JdHolderTarget::AccessBridge);
+    let deprecated = matches!(target, JdHolderTarget::AccessBridge { .. });
     if deprecated {
         cw.seed_utf8("Ljava/lang/Deprecated;");
     }
@@ -543,14 +548,21 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
         code.checkcast(declaring_class);
     }
     match target {
-        JdHolderTarget::AccessBridge => {
+        JdHolderTarget::AccessBridge { result } => {
             let mut slot = 1u16;
             for ty in param_tys {
                 load(*ty, slot, &mut code);
                 slot += slot_words(*ty);
             }
-            let bridge = cw.interface_methodref(&fq, &format!("access${member_name}$jd"), &desc);
-            code.invokestatic(bridge, argument_words as i32, slot_words(ret) as i32);
+            let bridge_desc = method_descriptor(&with_receiver, result);
+            let bridge =
+                cw.interface_methodref(&fq, &format!("access${member_name}$jd"), &bridge_desc);
+            code.invokestatic(bridge, argument_words as i32, slot_words(result) as i32);
+            // kotlinc boxes the bridge's declared scalar back into the boxed result an override
+            // of a generic member is declared with on the JVM.
+            if result.is_jvm_scalar() && ret.is_reference() {
+                box_prim_free(cw, &mut code, result);
+            }
         }
         JdHolderTarget::DependencyHolder {
             holder, descriptor, ..
@@ -614,8 +626,10 @@ fn jd_declared_param_tys(ir: &IrFile, fid: u32) -> Vec<Ty> {
 
 /// Where an `enable`-mode holder forward sends its call.
 enum JdHolderTarget<'a> {
-    /// The interface's own `access$<name>$jd` bridge (the member is a default method here).
-    AccessBridge,
+    /// The interface's own `access$<name>$jd` bridge (the member is a default method here),
+    /// declared with `result`: the member's Kotlin result, even where an override of a generic
+    /// member boxes it on the JVM.
+    AccessBridge { result: Ty },
     /// The `$DefaultImpls` static holding the inherited body: a `disable`-compiled dependency's,
     /// or under `disable` an ancestor's of this module. There is no default method to bridge to.
     DependencyHolder {
