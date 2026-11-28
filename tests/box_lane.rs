@@ -1294,24 +1294,31 @@ fn outcome(
             emitted.insert(unit.name.clone());
         }
         let started = Instant::now();
-        let result = timed(Stage::Lane, || {
-            lane.compile_modules_and_run(scratch, stem, &units, &source)
-        });
-        if klib_route.enabled() {
-            let source_time = started.elapsed();
-            let started = Instant::now();
-            // The KLIB route is measured, never ratcheted: its panic is its own outcome and
-            // leaves the source route's verdict alone.
-            let klib = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                lane.compile_klib_modules_and_run(scratch, stem, &units, &source)
-            }))
-            .unwrap_or_else(panic_outcome);
-            klib_route.record(
-                file.to_path_buf(),
-                (&result, source_time),
-                (klib, started.elapsed()),
-            );
+        let source_route = || {
+            timed(Stage::Lane, || {
+                lane.compile_modules_and_run(scratch, stem, &units, &source)
+            })
+        };
+        if !klib_route.enabled() {
+            return source_route();
         }
+        // Measured beside the KLIB route, a source-route panic becomes the same outcome the
+        // corpus runner would record for it, so the case stays in both routes' comparison.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(source_route))
+            .unwrap_or_else(panic_outcome);
+        let source_time = started.elapsed();
+        let started = Instant::now();
+        // The KLIB route is measured, never ratcheted: its panic is its own outcome and
+        // leaves the source route's verdict alone.
+        let klib = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            lane.compile_klib_modules_and_run(scratch, stem, &units, &source)
+        }))
+        .unwrap_or_else(panic_outcome);
+        klib_route.record(
+            file.to_path_buf(),
+            (&result, source_time),
+            (klib, started.elapsed()),
+        );
         return result;
     }
     let sources = match prepare_sources(&source, stem, lane.test_target()) {
