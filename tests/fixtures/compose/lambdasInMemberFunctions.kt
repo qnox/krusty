@@ -2,7 +2,8 @@
 // WITH_STDLIB
 // WITH_COMPOSE
 // A composable lambda passed from a member function of a class, as an Android activity passes its
-// content: the lambda captures a local, so it is built where it is passed.
+// content: the lambda captures a local, so it is built where it is passed. A member extension's
+// durable keys name its receiver ahead of the function.
 // MODULE: lib
 // FILE: lib.kt
 package lib
@@ -53,6 +54,10 @@ class Activity : Host() {
 
     fun nothing() {
         setContent { Label("none") }
+    }
+
+    fun String.titled() {
+        setContent { Label(this) }
     }
 }
 
