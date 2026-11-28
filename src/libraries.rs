@@ -34,6 +34,7 @@ mod inline_kind;
 pub(crate) mod intrinsic_const_numeric;
 mod klib_body_accessor;
 mod klib_body_class;
+mod linear_memory;
 mod member_flags;
 mod member_records;
 mod metadata_normalization;
@@ -140,6 +141,7 @@ pub(crate) use klib_body_class::test_fixture as klib_body_class_fixture;
 pub(crate) use klib_body_class::{
     KlibBodyClassContract, KlibBodyClassParameters, KlibClassStorage, KlibStoredField,
 };
+pub use linear_memory::LinearMemoryOperation;
 pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
     associated_function_parameter_identities, associated_property_parameter_identities,

@@ -220,6 +220,12 @@ pub trait Backend {
         false
     }
 
+    /// Whether a dependency-support body may call a bodyless `@WasmImport` declaration, which the
+    /// target imports from its host under the provider-authenticated names.
+    fn imports_wasm_functions(&self) -> bool {
+        false
+    }
+
     /// A positive target implementation of a provider-authenticated declaration. This does not
     /// authorize common folding or replace a retained dependency export.
     fn realizes_dependency_intrinsic(&self, _operation: BackendCompilerIntrinsic) -> bool {

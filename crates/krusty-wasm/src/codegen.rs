@@ -183,6 +183,10 @@ impl Backend for WasmBackend {
         true
     }
 
+    fn imports_wasm_functions(&self) -> bool {
+        true
+    }
+
     fn realizes_dependency_intrinsic(
         &self,
         operation: krusty::backend::BackendCompilerIntrinsic,

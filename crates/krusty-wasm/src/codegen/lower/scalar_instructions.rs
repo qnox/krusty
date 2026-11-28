@@ -40,6 +40,12 @@ impl Body<'_> {
         let operation = self
             .scalar_operation_of(target)
             .ok_or_else(|| "a call of an unauthenticated scalar operation".to_string())?;
+        if let CompilerIntrinsic::LinearMemory(memory) = operation {
+            if receiver.is_some() {
+                return Err("a linear-memory instruction called with a receiver".to_string());
+            }
+            return self.linear_memory_call(memory, params, ret, args);
+        }
         if let Some(op) = IrBinOp::of_primitive_operator(operation) {
             let (Some(lhs), [rhs]) = (receiver, args) else {
                 return Err(format!(
@@ -114,7 +120,9 @@ impl Body<'_> {
 pub(in crate::codegen) fn is_scalar_operation(operation: CompilerIntrinsic) -> bool {
     matches!(
         operation,
-        CompilerIntrinsic::ScalarInstruction(_) | CompilerIntrinsic::ReinterpretBits
+        CompilerIntrinsic::ScalarInstruction(_)
+            | CompilerIntrinsic::ReinterpretBits
+            | CompilerIntrinsic::LinearMemory(_)
     )
 }
 

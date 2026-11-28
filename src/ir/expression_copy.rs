@@ -316,6 +316,7 @@ fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, action: Exp
         fn_params: _,
         fn_declared_spellings: _,
         fn_source_names: _,
+        host_imports: _,
         class_declared_spellings: _,
         class_superclass_positions: _,
         prop_declared_spellings: _,

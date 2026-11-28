@@ -27,6 +27,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::ClassName(_)
         | CompilerIntrinsic::ReinterpretBits
         | CompilerIntrinsic::ScalarInstruction(_)
+        | CompilerIntrinsic::LinearMemory(_)
         | CompilerIntrinsic::FloatingIsNaN { .. }
         | CompilerIntrinsic::FloatingIsInfinite { .. }
         | CompilerIntrinsic::FloatingAdjacent { .. }

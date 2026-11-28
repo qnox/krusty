@@ -750,6 +750,21 @@ impl Code {
         self.op(0x36).index(2).index(offset)
     }
 
+    /// The memory access `opcode` with alignment exponent `align` and no offset.
+    pub(super) fn memory_access(&mut self, opcode: u8, align: u32) -> &mut Self {
+        self.op(opcode).index(align).index(0)
+    }
+
+    /// `memory.size` of memory 0.
+    pub(super) fn memory_size(&mut self) -> &mut Self {
+        self.op(0x3f).index(0)
+    }
+
+    /// `memory.grow` of memory 0.
+    pub(super) fn memory_grow(&mut self) -> &mut Self {
+        self.op(0x40).index(0)
+    }
+
     pub(super) fn i32_const(&mut self, value: i32) -> &mut Self {
         self.op(0x41);
         sleb(&mut self.bytes, i64::from(value));

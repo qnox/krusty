@@ -12,10 +12,8 @@ use crate::libraries::{
     KlibDeclarationSignature, KlibDependencyCallable, ScalarClass, ScalarComparison,
     ScalarInstruction, SurrogateHalf,
 };
-use crate::metadata::klib_ir::tree::{
-    KlibIrArena, KlibIrArguments, KlibIrExprKind, KlibIrFunction, KlibIrNullability, KlibIrType,
-};
-use crate::metadata::klib_ir::{KlibIrConstant, KlibIrSignature, KlibIrSymbolKind};
+use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrFunction, KlibIrNullability, KlibIrType};
+use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
 use crate::metadata::semantic::{
     AnnotationApplication, AnnotationArgument, KotlinFunction, KotlinFunctionTypeShape, KotlinType,
 };
@@ -25,6 +23,11 @@ use super::declaration_signatures::SignedFunction;
 
 mod atomic_array_elements;
 mod char_array_text;
+mod ir_annotation_arguments;
+mod wasm_imports;
+
+use ir_annotation_arguments::ir_string_annotation;
+pub(crate) use wasm_imports::wasm_import;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TargetIntrinsicPlatform {
@@ -110,6 +113,7 @@ impl KlibIntrinsicFacts {
             shape.operation,
             CompilerIntrinsic::ReinterpretBits
                 | CompilerIntrinsic::ScalarInstruction(_)
+                | CompilerIntrinsic::LinearMemory(_)
                 | CompilerIntrinsic::AssertionSwitch
         ) {
             return;
@@ -443,6 +447,13 @@ fn wasm_shape(
             }
             CompilerIntrinsic::ReinterpretBits
         }
+        _ if !extension
+            && let Some(memory) = crate::libraries::LinearMemoryOperation::of_wasm_op(
+                operation, &operands, result,
+            ) =>
+        {
+            CompilerIntrinsic::LinearMemory(memory)
+        }
         _ => {
             let (instruction, class) = wasm_scalar_instruction(operation)?;
             let operand = *operands.first()?;
@@ -637,57 +648,6 @@ pub(crate) fn is_runtime_entry_ir(
         && function.body.is_none()
 }
 
-fn ir_string_annotation<'a>(
-    arena: &'a KlibIrArena,
-    annotations: &'a [crate::metadata::klib_ir::tree::KlibIrAnnotation],
-    package: &[&str],
-    declaration: &[&str],
-) -> Option<&'a str> {
-    let mut matches = annotations.iter().filter(|annotation| {
-        if annotation.access.symbol.kind != KlibIrSymbolKind::Constructor
-            || annotation.constructor_type_arguments != 0
-            || !annotation.access.type_arguments.is_empty()
-        {
-            return false;
-        }
-        let KlibIrSignature::Public(signature) = &annotation.access.symbol.signature else {
-            return false;
-        };
-        signature
-            .package()
-            .segments()
-            .iter()
-            .map(String::as_str)
-            .eq(package.iter().copied())
-            && signature
-                .declaration()
-                .segments()
-                .iter()
-                .map(String::as_str)
-                .eq(declaration.iter().copied())
-    });
-    let annotation = matches.next()?;
-    if matches.next().is_some() {
-        return None;
-    }
-    let arguments = match &annotation.access.arguments {
-        KlibIrArguments::Flat(arguments) => arguments.as_slice(),
-        KlibIrArguments::Split {
-            dispatch_receiver: None,
-            extension_receiver: None,
-            values,
-        } => values.as_slice(),
-        KlibIrArguments::Split { .. } => return None,
-    };
-    let &[Some(argument)] = arguments else {
-        return None;
-    };
-    match &arena.expr(argument).kind {
-        KlibIrExprKind::Const(KlibIrConstant::String(value)) => Some(value),
-        _ => None,
-    }
-}
-
 fn ir_semantic_type(
     arena: &KlibIrArena,
     id: crate::metadata::klib_ir::tree::KlibIrTypeId,
@@ -729,6 +689,7 @@ fn ir_semantic_type(
         "ULong" => Some(Ty::ULong),
         "Float" => Some(Ty::Float),
         "Double" => Some(Ty::Double),
+        "Unit" => Some(Ty::Unit),
         _ => None,
     }
 }
@@ -1655,12 +1616,15 @@ fn exact_type(ty: &KotlinType, classifier: &str) -> bool {
 fn semantic_type(ty: &KotlinType) -> Option<Ty> {
     [
         ("kotlin/Boolean", Ty::Boolean),
+        ("kotlin/Byte", Ty::Byte),
+        ("kotlin/Short", Ty::Short),
         ("kotlin/Int", Ty::Int),
         ("kotlin/UInt", Ty::UInt),
         ("kotlin/Long", Ty::Long),
         ("kotlin/ULong", Ty::ULong),
         ("kotlin/Float", Ty::Float),
         ("kotlin/Double", Ty::Double),
+        ("kotlin/Unit", Ty::Unit),
     ]
     .into_iter()
     .find_map(|(classifier, semantic)| exact_type(ty, classifier).then_some(semantic))

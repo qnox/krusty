@@ -109,7 +109,10 @@ fn body_code(
     let IrExpr::Const(IrConst::String(code)) = ir.expr(*code) else {
         return None;
     };
-    Some((String::from_utf16_lossy(&code.units().collect::<Vec<_>>()), returns_the_call))
+    Some((
+        String::from_utf16_lossy(&code.units().collect::<Vec<_>>()),
+        returns_the_call,
+    ))
 }
 
 fn crossing(ty: Ty) -> Result<Crossing, Unsupported> {
