@@ -6,6 +6,25 @@ pub fn mask_words(parameters: usize) -> usize {
     parameters.div_ceil(32)
 }
 
+/// The physical operands of the default-argument entry of a declaration whose own operands are
+/// `operands`: the declaration's parameters, the mask words `masks`, then, for a suspend
+/// declaration (`coroutine`), its trailing continuation, which continuation passing appends to the
+/// entry after the masks.
+pub fn entry_frame<T: Copy>(
+    operands: &[T],
+    coroutine: bool,
+    masks: impl IntoIterator<Item = T>,
+) -> Vec<T> {
+    let (parameters, continuation) = match (coroutine, operands.split_last()) {
+        (true, Some((continuation, parameters))) => (parameters, Some(*continuation)),
+        _ => (operands, None),
+    };
+    let mut frame = parameters.to_vec();
+    frame.extend(masks);
+    frame.extend(continuation);
+    frame
+}
+
 /// The mask words of a call to a declaration of `parameters` parameters that leaves `omitted` out.
 pub fn omission_masks(parameters: usize, omitted: impl IntoIterator<Item = usize>) -> Vec<u32> {
     let mut masks = vec![0_u32; mask_words(parameters)];

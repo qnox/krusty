@@ -155,6 +155,18 @@ fn fill(mask: u32, bit: i32, slot: u32, value: &str) -> String {
 }
 
 #[test]
+fn a_suspend_entry_frame_puts_the_masks_before_the_continuation() {
+    assert_eq!(
+        entry_frame(&["r", "p", "q"], false, ["m"]),
+        ["r", "p", "q", "m"]
+    );
+    assert_eq!(
+        entry_frame(&["r", "p", "k"], true, ["m"]),
+        ["r", "p", "m", "k"]
+    );
+}
+
+#[test]
 fn masks_take_one_word_per_32_parameters() {
     assert_eq!(mask_words(1), 1);
     assert_eq!(mask_words(32), 1);
