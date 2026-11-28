@@ -149,11 +149,11 @@ impl BodyLowering<'_> {
     ) -> ExprId {
         let read = self.ir.add_expr(IrExpr::GetValue(slot));
         if source != target {
-            self.ir.add_expr(IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::ImplicitCoercion,
-                arg: read,
-                type_operand: target,
-            })
+            self.ir.add_expr(IrExpr::type_op(
+                crate::ir::IrTypeOp::ImplicitCoercion,
+                read,
+                target,
+            ))
         } else {
             read
         }

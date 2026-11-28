@@ -653,6 +653,7 @@ impl Emitter<'_> {
             op: IrTypeOp::ImplicitCoercion,
             arg: source,
             type_operand: intermediate,
+            ..
         } = self.ir.expr(arg)
         else {
             return arg;
@@ -697,6 +698,7 @@ impl Emitter<'_> {
             op,
             arg,
             type_operand,
+            ..
         } = *self.ir.expr(expression)
         else {
             return None;

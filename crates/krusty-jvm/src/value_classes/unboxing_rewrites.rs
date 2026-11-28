@@ -31,11 +31,11 @@ pub(super) fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under
     let cast = if is_cast_to_box(ir, new_id, x) {
         new_id
     } else {
-        ir.add_expr(IrExpr::TypeOp {
-            op: krusty::ir::IrTypeOp::Cast,
-            arg: new_id,
-            type_operand: boxed_value_ty(x),
-        })
+        ir.add_expr(IrExpr::type_op(
+            krusty::ir::IrTypeOp::Cast,
+            new_id,
+            boxed_value_ty(x),
+        ))
     };
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
     ir.exprs[id as usize] = IrExpr::Call {
@@ -55,11 +55,7 @@ pub(super) fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under
 /// Replace an erased-reference expression with an explicit cast to its known boxed value class.
 pub(super) fn narrow_wrap(ir: &mut IrFile, id: ExprId, x: TypeName) {
     let arg = clone_below_representation_wrapper(ir, id);
-    ir.exprs[id as usize] = IrExpr::TypeOp {
-        op: krusty::ir::IrTypeOp::Cast,
-        arg,
-        type_operand: boxed_value_ty(x),
-    };
+    ir.exprs[id as usize] = IrExpr::type_op(krusty::ir::IrTypeOp::Cast, arg, boxed_value_ty(x));
 }
 
 /// Whether `id` is a checked cast to the non-null box of `x`: a written `as X` (`CastNonNull`)

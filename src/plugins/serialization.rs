@@ -736,11 +736,7 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
             "encodeToString" => ir.exprs[mid] = call(ENCODE_TO_STRING_DESC),
             "decodeFromString" => {
                 let decoded = ir.add_expr(call(DECODE_FROM_STRING_DESC));
-                ir.exprs[mid] = IrExpr::TypeOp {
-                    op: IrTypeOp::Cast,
-                    arg: decoded,
-                    type_operand: serialized,
-                };
+                ir.exprs[mid] = IrExpr::type_op(IrTypeOp::Cast, decoded, serialized);
             }
             _ => {}
         }
@@ -1019,11 +1015,11 @@ impl SerializationPlugin {
             if let Some(target) = target {
                 ir.construction_targets.insert(new, target);
             }
-            ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: new,
-                type_operand: kserializer_of(Ty::obj_name(class_name)),
-            })
+            ir.add_expr(IrExpr::type_op(
+                IrTypeOp::Cast,
+                new,
+                kserializer_of(Ty::obj_name(class_name)),
+            ))
         } else if let Some(oid) = ir
             .classes
             .iter()
@@ -2242,6 +2238,7 @@ mod tests {
             op,
             arg,
             type_operand,
+            ..
         } = ir.expr(v).clone()
         else {
             panic!("expected a narrowing cast, got {:?}", ir.expr(v));
@@ -2556,6 +2553,7 @@ mod tests {
                 op: IrTypeOp::Cast,
                 arg: inner,
                 type_operand,
+                ..
             } => {
                 assert_eq!(*type_operand, Ty::obj("demo/Foo"));
                 *inner

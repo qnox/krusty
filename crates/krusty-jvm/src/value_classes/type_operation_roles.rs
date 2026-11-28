@@ -139,6 +139,7 @@ pub(super) fn record_primitive_array_type_operations(ir: &mut IrFile, under: &Un
             op,
             arg,
             type_operand,
+            ..
         } = expr
         else {
             continue;
@@ -192,11 +193,11 @@ mod tests {
         super::super::unboxing_rewrites::unbox_wrap(&mut ir, arg, array, &under);
         let unbox_cast = ir.value_class_unbox_type_operation_edges[&arg];
         let same_spelling_arg = ir.add_expr(IrExpr::GetValue(1));
-        let same_spelling_cast = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: same_spelling_arg,
-            type_operand: Ty::obj_name(array),
-        });
+        let same_spelling_cast = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::Cast,
+            same_spelling_arg,
+            Ty::obj_name(array),
+        ));
         ir.add_expr(IrExpr::Call {
             callee: Box::new(Callee::Virtual {
                 owner: krusty::types::type_name("sample/Ordinary"),
@@ -210,11 +211,11 @@ mod tests {
             dispatch_receiver: Some(same_spelling_cast),
             args: vec![],
         });
-        let instance = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::InstanceOf,
-            arg: same_spelling_arg,
-            type_operand: Ty::obj_name(array),
-        });
+        let instance = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::InstanceOf,
+            same_spelling_arg,
+            Ty::obj_name(array),
+        ));
 
         record_primitive_array_type_operations(&mut ir, &under);
 
@@ -267,11 +268,7 @@ mod tests {
                 IrTypeOp::SafeCast,
                 IrTypeOp::ImplicitCoercion,
             ] {
-                operations.push(ir.add_expr(IrExpr::TypeOp {
-                    op,
-                    arg,
-                    type_operand: Ty::obj_name(array),
-                }));
+                operations.push(ir.add_expr(IrExpr::type_op(op, arg, Ty::obj_name(array))));
             }
         }
         record_primitive_array_type_operations(&mut ir, &under);

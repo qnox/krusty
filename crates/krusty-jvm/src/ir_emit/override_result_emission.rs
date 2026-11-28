@@ -135,6 +135,7 @@ impl Emitter<'_> {
             op: IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } = self.ir.expr(value)
         else {
             return false;

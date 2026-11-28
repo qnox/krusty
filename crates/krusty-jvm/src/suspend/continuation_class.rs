@@ -106,11 +106,11 @@ pub(super) fn build_continuation_class(
         value: or_lbl,
     });
     let this_call = ir.add_expr(IrExpr::GetValue(0));
-    let this_as_cont = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: this_call,
-        type_operand: continuation_ty(),
-    });
+    let this_as_cont = ir.add_expr(IrExpr::type_op(
+        IrTypeOp::Cast,
+        this_call,
+        continuation_ty(),
+    ));
     // The outer fn now takes its real value parameters before the continuation. On re-entry the values
     // are irrelevant (the loop-top restore overwrites them from the captured fields), so pass type-
     // correct placeholders, exactly as kotlinc passes `iconst_0`/`aconst_null`.

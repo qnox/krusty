@@ -327,11 +327,11 @@ fn adapt_recorded_argument(
     let Some(carrier) = unsigned_projection_carrier(physical) else {
         return Ok(());
     };
-    let coercion = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: argument,
-        type_operand: carrier,
-    });
+    let coercion = ir.add_expr(IrExpr::type_op(
+        IrTypeOp::ImplicitCoercion,
+        argument,
+        carrier,
+    ));
     replace_call_argument(ir, call, argument, coercion)
 }
 
@@ -444,11 +444,7 @@ mod tests {
     fn an_unsigned_boundary_coercion_becomes_the_primitive_carrier() {
         let mut ir = IrFile::default();
         let value = ir.add_expr(IrExpr::Const(IrConst::Int(3)));
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: value,
-            type_operand: Ty::UInt,
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, value, Ty::UInt));
         let call = call_passing(&mut ir, coercion);
         ir.declaration_argument_boundaries.insert(
             call,
@@ -494,11 +490,11 @@ mod tests {
     fn an_unsigned_type_parameter_boundary_is_retargeted_in_place() {
         let mut ir = IrFile::default();
         let value = ir.add_expr(IrExpr::Const(IrConst::Int(3)));
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: value,
-            type_operand: Ty::ty_param("T", Ty::UInt),
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            value,
+            Ty::ty_param("T", Ty::UInt),
+        ));
         let call = call_passing(&mut ir, coercion);
         ir.declaration_argument_boundaries.insert(
             call,
@@ -541,11 +537,11 @@ mod tests {
     fn a_function_conversion_is_not_rewritten_to_a_scalar() {
         let mut ir = IrFile::default();
         let value = ir.add_expr(IrExpr::Const(IrConst::Null));
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: value,
-            type_operand: Ty::fun(vec![Ty::String], Ty::Int),
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            value,
+            Ty::fun(vec![Ty::String], Ty::Int),
+        ));
         let call = call_passing(&mut ir, coercion);
         ir.declaration_argument_boundaries.insert(
             call,
@@ -569,11 +565,11 @@ mod tests {
     fn a_signed_type_parameter_does_not_need_a_physical_signature() {
         let mut ir = IrFile::default();
         let value = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: value,
-            type_operand: Ty::ty_param("T", Ty::Char),
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            value,
+            Ty::ty_param("T", Ty::Char),
+        ));
         let call = call_passing(&mut ir, coercion);
         ir.declaration_argument_boundaries.insert(
             call,
@@ -593,11 +589,11 @@ mod tests {
     fn an_intersection_class_bound_uses_the_semantic_parameter_identity() {
         let mut ir = IrFile::default();
         let value = ir.add_expr(IrExpr::Const(IrConst::Int(3)));
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: value,
-            type_operand: Ty::ty_param("T", Ty::ty_param("X", Ty::obj("kotlin/Any"))),
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            value,
+            Ty::ty_param("T", Ty::ty_param("X", Ty::obj("kotlin/Any"))),
+        ));
         let call = call_passing(&mut ir, coercion);
         ir.signatures.insert(
             0,

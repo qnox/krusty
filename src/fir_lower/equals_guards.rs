@@ -27,11 +27,7 @@ pub(super) fn identity_and_type_guards(
         guards.push(return_guard(ir, identical, true));
     }
     let other_value = ir.add_expr(IrExpr::GetValue(other_slot));
-    let wrong_type = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::NotInstanceOf,
-        arg: other_value,
-        type_operand: bound,
-    });
+    let wrong_type = ir.add_expr(IrExpr::type_op(IrTypeOp::NotInstanceOf, other_value, bound));
     guards.push(return_guard(ir, wrong_type, false));
     guards
 }

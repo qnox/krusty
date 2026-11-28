@@ -1979,6 +1979,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 op,
                 arg,
                 type_operand,
+                ..
             } => {
                 if matches!(
                     op,

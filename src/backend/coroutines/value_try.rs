@@ -5,7 +5,7 @@
 
 use crate::fx_hash::HashSet;
 
-use crate::ir::{Callee, ExprId, IrExpr, IrFile, IrTypeOp};
+use crate::ir::{Callee, ExprId, IrExpr, IrFile};
 use crate::types::Ty;
 
 use super::control_flow::stmt_diverges;
@@ -26,7 +26,8 @@ pub(super) struct ValueTryParts {
 
 #[derive(Clone)]
 pub(super) enum ValueBranchWrap {
-    TypeOp(IrTypeOp, Ty),
+    /// The checked type operation itself, so every part of its payload moves onto each branch.
+    TypeOp(IrExpr),
     /// A value-class representation wrapper a target pass already selected before this
     /// normalization. It is a pure one-argument conversion, so applying it to each selected `try` value preserves
     /// the wrapper around the value while exposing the suspension to the state-machine normalizer.
@@ -67,12 +68,10 @@ pub(super) fn suspending_value_try(
     // An expression body whose value coerces to its declared return type wraps the `Try` in a
     // `TypeOp`. Move that operation onto each selected branch, like `desugar_value_when`.
     let (try_expr, branch_wrap) = match ir.exprs[expression as usize].clone() {
-        IrExpr::TypeOp {
-            op,
-            arg,
-            type_operand,
-        } if matches!(ir.exprs[arg as usize], IrExpr::Try { .. }) => {
-            (arg, Some(ValueBranchWrap::TypeOp(op, type_operand)))
+        operation @ IrExpr::TypeOp { arg, .. }
+            if matches!(ir.exprs[arg as usize], IrExpr::Try { .. }) =>
+        {
+            (arg, Some(ValueBranchWrap::TypeOp(operation)))
         }
         IrExpr::Call {
             callee,
@@ -181,11 +180,7 @@ pub(super) fn assign_branch_to_tmp(
         } else {
             if let Some(wrap) = wrap {
                 v = match wrap {
-                    ValueBranchWrap::TypeOp(op, type_operand) => ir.add_expr(IrExpr::TypeOp {
-                        op,
-                        arg: v,
-                        type_operand,
-                    }),
+                    ValueBranchWrap::TypeOp(operation) => ir.add_expr(operation.with_arg(v)),
                     ValueBranchWrap::ValueClassBox(callee) => ir.add_expr(IrExpr::Call {
                         callee: Box::new(callee),
                         dispatch_receiver: None,

@@ -48,11 +48,11 @@ fn decode_local_ty(ir: &IrFile, ty: Ty) -> Ty {
 /// without a cast and krusty emitted none. kotlinc narrows unconditionally, and the difference is
 /// three bytes plus its pool entries at EVERY element of every generated serializer.
 pub(super) fn narrowed(ir: &mut IrFile, serializer: ExprId, interface: &str) -> ExprId {
-    ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: serializer,
-        type_operand: class_ty(interface),
-    })
+    ir.add_expr(IrExpr::type_op(
+        IrTypeOp::Cast,
+        serializer,
+        class_ty(interface),
+    ))
 }
 
 impl ElementDecode<'_> {
@@ -121,11 +121,11 @@ impl ElementDecode<'_> {
                 Ty::nullable(class_ty("kotlin/Any")),
             ]),
         );
-        ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: raw,
-            type_operand: decode_local_ty(ir, ty),
-        })
+        ir.add_expr(IrExpr::type_op(
+            IrTypeOp::Cast,
+            raw,
+            decode_local_ty(ir, ty),
+        ))
     }
 
     fn block(&self, ir: &mut IrFile, ctx: &PluginContext, k: usize) -> ExprId {

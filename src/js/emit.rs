@@ -437,6 +437,7 @@ fn emit_return(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) 
             op,
             arg,
             type_operand,
+            ..
         } if !matches!(op, IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf)
             && !(*op == IrTypeOp::ImplicitCoercion
                 && (js_uses_ulong_carrier(type_operand)
@@ -988,6 +989,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             op,
             arg,
             type_operand,
+            ..
         } => {
             let a = emit_expr(ir, *arg, inst);
             let source_type = ir.checked_type(*arg);

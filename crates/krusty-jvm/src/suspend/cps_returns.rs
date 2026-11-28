@@ -20,11 +20,7 @@ pub(super) fn ensure_tail_return(ir: &mut IrFile, body: ExprId, unit_ret: bool) 
     let mut added_units = Vec::new();
     match value {
         Some(v) if !unit_ret => {
-            let boxed = ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: v,
-                type_operand: object_ty(),
-            });
+            let boxed = ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, v, object_ty()));
             stmts.push(ir.add_expr(IrExpr::Return(Some(boxed))));
         }
         Some(v) => {
@@ -132,11 +128,7 @@ pub(super) fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
         IrExpr::Return(Some(v)) => {
             // Already an Object-yielding suspension return (COROUTINE_SUSPENDED) needs no box; but a
             // double coercion to Object is harmless (identity on a reference), so box uniformly.
-            let boxed = ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: v,
-                type_operand: object_ty(),
-            });
+            let boxed = ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, v, object_ty()));
             ir.exprs[e as usize] = IrExpr::Return(Some(boxed));
             box_returns(ir, v)
         }
@@ -280,6 +272,7 @@ fn collect_tail_calls(
             op: IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } if type_operand == Ty::Unit => {
             if tail_calls.contains(&arg) {
                 if let Some(slot) = slot.filter(|_| !immediate_return) {

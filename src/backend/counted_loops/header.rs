@@ -202,11 +202,11 @@ fn step_type(ty: Ty) -> Ty {
 impl Realizer<'_> {
     fn exclusive_bound(&mut self, last: ExprId, direction: Direction, ty: Ty) -> Option<ExprId> {
         let moved = self.moved_bound(last, direction)?;
-        Some(self.ir.add_expr(IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::ImplicitCoercion,
-            arg: moved,
-            type_operand: ty,
-        }))
+        Some(self.ir.add_expr(IrExpr::type_op(
+            crate::ir::IrTypeOp::ImplicitCoercion,
+            moved,
+            ty,
+        )))
     }
 
     /// `convertToExclusiveUpperBound`/`convertToExclusiveLowerBound` of a constant bound: the

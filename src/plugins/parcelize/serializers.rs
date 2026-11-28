@@ -466,11 +466,11 @@ impl ParcelRuntime {
         let absent = self.write_flag(ir, parcel, 0);
         let present = self.write_flag(ir, parcel, 1);
         let stored = ir.add_expr(IrExpr::GetValue(temporary));
-        let unboxed = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: stored,
-            type_operand: serializer.value.source(),
-        });
+        let unboxed = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            stored,
+            serializer.value.source(),
+        ));
         let written = self.write_value(ir, serializer.value, context, unboxed);
         let otherwise = ir.add_expr(IrExpr::Block {
             stmts: vec![present, written],
@@ -507,11 +507,7 @@ impl ParcelRuntime {
         // The member's result is the value itself, so boxing it to `ty` is the value's own box (an
         // unsigned integer's `box-impl`), not that of the signed type `Parcel` declares.
         ir.set_logical_type(read, serializer.value.source());
-        let boxed = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: read,
-            type_operand: ty,
-        });
+        let boxed = ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, read, ty));
         ir.add_when(vec![(Some(absent), null), (None, boxed)], ty)
     }
 
@@ -564,11 +560,9 @@ impl ParcelRuntime {
                 let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
                 ir.add_when(vec![(Some(arg), one), (None, zero)], Ty::Int)
             }
-            ParcelValue::Short | ParcelValue::Char => ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg,
-                type_operand: Ty::Int,
-            }),
+            ParcelValue::Short | ParcelValue::Char => {
+                ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, arg, Ty::Int))
+            }
             _ => arg,
         };
         let member = value
@@ -596,11 +590,7 @@ impl ParcelRuntime {
             let creator = ir.add_expr(IrExpr::GetStatic(context.target(name).creator));
             let source = ir.add_expr(IrExpr::GetValue(parcel));
             let read = call(ir, &self.create_from_parcel, creator, vec![source]);
-            return ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: read,
-                type_operand: Ty::obj_name(name),
-            });
+            return ir.add_expr(IrExpr::type_op(IrTypeOp::Cast, read, Ty::obj_name(name)));
         }
         let receiver = ir.add_expr(IrExpr::GetValue(parcel));
         let member = value.member().expect("a directly read value has a member");
@@ -636,11 +626,11 @@ impl ParcelRuntime {
                     rhs: zero,
                 })
             }
-            ParcelValue::Short | ParcelValue::Char => ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: read,
-                type_operand: value.signed().source(),
-            }),
+            ParcelValue::Short | ParcelValue::Char => ir.add_expr(IrExpr::type_op(
+                IrTypeOp::ImplicitCoercion,
+                read,
+                value.signed().source(),
+            )),
             _ => read,
         }
     }

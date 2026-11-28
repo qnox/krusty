@@ -108,11 +108,11 @@ pub(super) fn cached_strategy(
         return None;
     }
     let cached = read_cached_slot(ir, local, k);
-    Some(ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: cached,
-        type_operand: class_ty(strategy_interface),
-    }))
+    Some(ir.add_expr(IrExpr::type_op(
+        IrTypeOp::Cast,
+        cached,
+        class_ty(strategy_interface),
+    )))
 }
 
 /// Read element `k` out of a `Lazy[]` cache already loaded into `cache_local` — `cache[k].value`.

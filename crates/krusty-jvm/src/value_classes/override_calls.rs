@@ -150,6 +150,7 @@ impl OverrideStatics {
                         op: IrTypeOp::ImplicitCoercion,
                         arg,
                         type_operand,
+                        ..
                     }) if type_operand != parameter => *arg,
                     _ => argument,
                 })

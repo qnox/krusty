@@ -1340,11 +1340,8 @@ impl<'a> BodyLowering<'a> {
     /// `value` converted to `ty` by the coercion checked FIR lowering places at a generic
     /// declaration's boundary, which the target represents.
     fn coercion(&mut self, value: ExprId, ty: Ty) -> ExprId {
-        self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: value,
-            type_operand: ty,
-        })
+        self.ir
+            .add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, value, ty))
     }
 
     /// Lower `id` as a value of the declared type `declared` where the body produces its erasure,

@@ -1258,8 +1258,7 @@ pub(crate) fn lower_value_classes(
             let IrExpr::TypeOp {
                 op: krusty::ir::IrTypeOp::Cast | krusty::ir::IrTypeOp::CastNonNull,
                 arg,
-                type_operand,
-            } = e
+                type_operand, .. } = e
             else {
                 return None;
             };
@@ -1544,6 +1543,7 @@ pub(crate) fn lower_value_classes(
             op: krusty::ir::IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } = expression
         else {
             continue;
@@ -1566,6 +1566,7 @@ pub(crate) fn lower_value_classes(
             op: krusty::ir::IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } = ir.expr(coercion)
         else {
             continue;
@@ -1809,6 +1810,7 @@ pub(crate) fn lower_value_classes(
                 op: krusty::ir::IrTypeOp::ImplicitCoercion,
                 arg,
                 type_operand,
+                ..
             } if type_operand.is_nullable()
                 && type_operand
                     .non_null()
@@ -2545,6 +2547,7 @@ pub(crate) fn lower_value_classes(
                     | krusty::ir::IrTypeOp::NotInstanceOf),
                 arg,
                 type_operand,
+                ..
             } = &ir.exprs[id as usize]
             {
                 let to_self = type_operand
@@ -2601,6 +2604,7 @@ pub(crate) fn lower_value_classes(
                 op: krusty::ir::IrTypeOp::ImplicitCoercion,
                 arg,
                 type_operand,
+                ..
             } = &ir.exprs[id as usize]
             {
                 // `null` coerced to a nullable reference-carried value class (`null as X?`) is the
@@ -3765,6 +3769,7 @@ impl ReprCtx<'_> {
             op: krusty::ir::IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } = &self.exprs[id as usize]
         {
             if !type_operand.non_null().is_ty_param() {
@@ -3836,6 +3841,7 @@ fn value_class_equals_argument(exprs: &[IrExpr], argument: ExprId) -> ExprId {
             op: krusty::ir::IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } if type_operand
             .non_null()
             .obj_internal()
@@ -3991,6 +3997,7 @@ fn repr(context: &ReprCtx<'_>, id: ExprId) -> Repr {
             op: krusty::ir::IrTypeOp::Cast | krusty::ir::IrTypeOp::CastNonNull,
             type_operand,
             arg,
+            ..
         } if type_operand
             .non_null()
             .obj_internal()
@@ -4091,11 +4098,11 @@ fn prop_access(
             .physical_type(receiver)
             .is_some_and(|ty| ty.is_erased_top())
         {
-            ir.add_expr(IrExpr::TypeOp {
-                op: krusty::ir::IrTypeOp::Cast,
-                arg: receiver,
-                type_operand: boxed_value_ty(x),
-            })
+            ir.add_expr(IrExpr::type_op(
+                krusty::ir::IrTypeOp::Cast,
+                receiver,
+                boxed_value_ty(x),
+            ))
         } else {
             receiver
         };
@@ -4135,11 +4142,7 @@ fn prop_access(
     } else {
         erase(&result, under)
     };
-    IrExpr::TypeOp {
-        op: krusty::ir::IrTypeOp::ImplicitCoercion,
-        arg: inner,
-        type_operand: target,
-    }
+    IrExpr::type_op(krusty::ir::IrTypeOp::ImplicitCoercion, inner, target)
 }
 
 /// Whether this value class's declared property crosses a generic JVM slot. The declaration's

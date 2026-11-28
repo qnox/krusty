@@ -1155,11 +1155,11 @@ fn realize_class(
                 }
                 value = *inner;
             }
-            let boxed = ir.add_expr(IrExpr::TypeOp {
-                op: krusty::ir::IrTypeOp::ImplicitCoercion,
-                arg: value,
-                type_operand: result,
-            });
+            let boxed = ir.add_expr(IrExpr::type_op(
+                krusty::ir::IrTypeOp::ImplicitCoercion,
+                value,
+                result,
+            ));
             ir.exprs[expression as usize] = IrExpr::Return(Some(boxed));
         }
     }

@@ -60,11 +60,11 @@ impl BodyLowering<'_> {
             None => self.checked_value_read(slot, false),
         };
         let read = self.checked_value_read(slot, stable.is_some());
-        let present = self.ir.add_expr(IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::ImplicitCoercion,
-            arg: read,
-            type_operand: from.non_null(),
-        });
+        let present = self.ir.add_expr(IrExpr::type_op(
+            crate::ir::IrTypeOp::ImplicitCoercion,
+            read,
+            from.non_null(),
+        ));
         let reference =
             self.function_value_adapter(from.non_null(), to.non_null(), ordinal, present);
         let null = self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
@@ -111,11 +111,11 @@ impl BodyLowering<'_> {
         let callee = match guard {
             Some((_, temporary)) => {
                 let read = self.ir.add_expr(IrExpr::GetValue(temporary));
-                self.ir.add_expr(IrExpr::TypeOp {
-                    op: crate::ir::IrTypeOp::ImplicitCoercion,
-                    arg: read,
-                    type_operand: from.non_null(),
-                })
+                self.ir.add_expr(IrExpr::type_op(
+                    crate::ir::IrTypeOp::ImplicitCoercion,
+                    read,
+                    from.non_null(),
+                ))
             }
             None => self.ir.add_expr(IrExpr::GetValue(0)),
         };
@@ -149,11 +149,11 @@ impl BodyLowering<'_> {
                     (invoke, erased_result)
                 } else {
                     let result = Ty::nullable(source.ret);
-                    let read = self.ir.add_expr(IrExpr::TypeOp {
-                        op: crate::ir::IrTypeOp::ImplicitCoercion,
-                        arg: invoke,
-                        type_operand: result,
-                    });
+                    let read = self.ir.add_expr(IrExpr::type_op(
+                        crate::ir::IrTypeOp::ImplicitCoercion,
+                        invoke,
+                        result,
+                    ));
                     (read, result)
                 };
                 self.null_guarded_invoke(variable, temporary, invoke, result)

@@ -286,6 +286,7 @@ fn integral_constant(
             op: crate::ir::IrTypeOp::ImplicitCoercion,
             arg,
             type_operand: crate::types::Ty::Int,
+            ..
         } => integral_constant(ir, *arg),
         _ => None,
     }

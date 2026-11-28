@@ -377,11 +377,7 @@ fn reread_through_erased_holder(ir: &mut IrFile, id: ExprId, specialized: Ty, er
     if let IrExpr::RefGet { elem, .. } = &mut ir.exprs[moved_id as usize] {
         *elem = erased;
     }
-    ir.exprs[id as usize] = IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: moved_id,
-        type_operand: specialized,
-    };
+    ir.exprs[id as usize] = IrExpr::type_op(IrTypeOp::ImplicitCoercion, moved_id, specialized);
 }
 
 fn box_into_erased_holder(ir: &mut IrFile, id: ExprId, erased: Ty) {
@@ -410,11 +406,7 @@ fn box_into_erased_holder(ir: &mut IrFile, id: ExprId, erased: Ty) {
 }
 
 fn coerce_to(ir: &mut IrFile, value: ExprId, target: Ty) -> ExprId {
-    ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: value,
-        type_operand: target,
-    })
+    ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, value, target))
 }
 
 fn value_slot(ir: &IrFile, expr: ExprId) -> Option<u32> {
@@ -772,6 +764,7 @@ mod tests {
             op: IrTypeOp::ImplicitCoercion,
             arg: moved,
             type_operand,
+            ..
         } = ir.expr(read)
         else {
             panic!("read");
@@ -1007,6 +1000,7 @@ mod tests {
             op: IrTypeOp::ImplicitCoercion,
             arg: moved,
             type_operand: Ty::Int,
+            ..
         } = ir.expr(specialized_read)
         else {
             panic!("specialized read");
@@ -1052,6 +1046,7 @@ mod tests {
             op: IrTypeOp::ImplicitCoercion,
             arg: moved,
             type_operand: Ty::Int,
+            ..
         } = ir.expr(read)
         else {
             panic!("specialized read");
@@ -1069,8 +1064,7 @@ mod tests {
             IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg,
-                type_operand,
-            } if *arg == written && *type_operand == erased
+                type_operand, .. } if *arg == written && *type_operand == erased
         ));
     }
 }

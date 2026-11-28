@@ -286,11 +286,7 @@ impl Realizer<'_> {
             }
         }
         self.add_checked(
-            IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: operand,
-                type_operand: target,
-            },
+            IrExpr::type_op(IrTypeOp::ImplicitCoercion, operand, target),
             target,
         )
     }

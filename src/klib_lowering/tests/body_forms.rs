@@ -120,8 +120,7 @@ fn a_generic_local_call_publishes_its_declared_result() {
             crate::ir::IrExpr::TypeOp {
                 op: crate::ir::IrTypeOp::ImplicitCoercion,
                 arg,
-                type_operand,
-            } if *arg == call && *type_operand == Ty::String
+                type_operand, .. } if *arg == call && *type_operand == Ty::String
         )
     }));
 }

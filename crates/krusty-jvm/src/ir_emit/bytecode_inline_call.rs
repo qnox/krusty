@@ -1399,6 +1399,7 @@ impl Emitter<'_> {
                     op: IrTypeOp::ImplicitCoercion,
                     arg,
                     type_operand,
+                    ..
                 } if self.reference_view_coercion(*arg, *type_operand) => current = *arg,
                 _ => return None,
             }

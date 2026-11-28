@@ -637,11 +637,11 @@ fn carrier_expression(
         let elements = constructor_arguments
             .drain(..bound_contexts)
             .map(|value| {
-                ir.add_expr(IrExpr::TypeOp {
-                    op: krusty::ir::IrTypeOp::ImplicitCoercion,
-                    arg: value,
-                    type_operand: any,
-                })
+                ir.add_expr(IrExpr::type_op(
+                    krusty::ir::IrTypeOp::ImplicitCoercion,
+                    value,
+                    any,
+                ))
             })
             .collect::<Vec<_>>();
         let array = ir.add_expr(IrExpr::Vararg {
@@ -659,11 +659,11 @@ fn carrier_expression(
     // one: a value read at an erased type (a generic call's result) is handed on without a cast to
     // its own type, as kotlinc hands it, and a value-class receiver is bound as its box.
     constructor_arguments.extend(bound_receiver.map(|receiver| {
-        ir.add_expr(IrExpr::TypeOp {
-            op: krusty::ir::IrTypeOp::ImplicitCoercion,
-            arg: receiver,
-            type_operand: Ty::nullable(Ty::obj("kotlin/Any")),
-        })
+        ir.add_expr(IrExpr::type_op(
+            krusty::ir::IrTypeOp::ImplicitCoercion,
+            receiver,
+            Ty::nullable(Ty::obj("kotlin/Any")),
+        ))
     }));
     // The constructor's declared parameters say that a value-class receiver is bound as its box.
     match constructor_arguments.as_slice() {
@@ -876,11 +876,11 @@ fn realize_own_invoke(
                 args: vec![index],
             });
             ir.set_logical_type(element, any);
-            ir.exprs[current as usize] = IrExpr::TypeOp {
-                op: krusty::ir::IrTypeOp::ImplicitCoercion,
-                arg: element,
-                type_operand: context_types[value],
-            };
+            ir.exprs[current as usize] = IrExpr::type_op(
+                krusty::ir::IrTypeOp::ImplicitCoercion,
+                element,
+                context_types[value],
+            );
             continue;
         }
         let (field, coerced) = fields[value - bound_contexts];
@@ -895,11 +895,11 @@ fn realize_own_invoke(
         };
         ir.exprs[current as usize] = match coerced {
             // The runtime base class stores the bound receiver as an object.
-            Some(receiver_ty) => IrExpr::TypeOp {
-                op: krusty::ir::IrTypeOp::ImplicitCoercion,
-                arg: ir.add_expr(read),
-                type_operand: receiver_ty,
-            },
+            Some(receiver_ty) => IrExpr::type_op(
+                krusty::ir::IrTypeOp::ImplicitCoercion,
+                ir.add_expr(read),
+                receiver_ty,
+            ),
             None => read,
         };
     }
@@ -965,11 +965,11 @@ fn realize_own_invoke(
         if result == Ty::Unit && matches!(ir.exprs[value as usize], IrExpr::UnitInstance) {
             ir.exprs[current as usize] = IrExpr::Return(None);
         } else if result != function_type.ret {
-            let boxed = ir.add_expr(IrExpr::TypeOp {
-                op: krusty::ir::IrTypeOp::ImplicitCoercion,
-                arg: value,
-                type_operand: result,
-            });
+            let boxed = ir.add_expr(IrExpr::type_op(
+                krusty::ir::IrTypeOp::ImplicitCoercion,
+                value,
+                result,
+            ));
             ir.exprs[current as usize] = IrExpr::Return(Some(boxed));
         }
     }

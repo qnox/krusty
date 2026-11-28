@@ -182,6 +182,7 @@ fn safe_call_result(ir: &IrFile, selector: ExprId) -> ExprId {
             op: crate::ir::IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } if ir
             .checked_type(arg)
             .is_some_and(|value| Ty::nullable(value) == type_operand) =>

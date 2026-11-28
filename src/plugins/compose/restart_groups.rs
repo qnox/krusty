@@ -674,11 +674,11 @@ fn instantiate(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLam
 /// Replace `lambda` in its call's arguments by `wrapper`, cast to the composable calling
 /// convention. `key` is the wrapper's first argument.
 fn pass_wrapped(ir: &mut IrFile, lambda: &ComposableLambda, key: ExprId, wrapper: ExprId) {
-    let value = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: wrapper,
-        type_operand: runtime::composable_function(&lambda.parameter_types()),
-    });
+    let value = ir.add_expr(IrExpr::type_op(
+        IrTypeOp::ImplicitCoercion,
+        wrapper,
+        runtime::composable_function(&lambda.parameter_types()),
+    ));
     // kotlinc builds the call at the lambda's offsets, so the lambda's line begins at its key.
     if lambda.opening_line != 0 {
         for expression in [key, wrapper, value] {
@@ -1429,11 +1429,11 @@ fn update_scope(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableFu
         named: false,
     });
     let read = ir.add_expr(IrExpr::GetValue(temporary));
-    let receiver = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: read,
-        type_operand: scope_ty.non_null(),
-    });
+    let receiver = ir.add_expr(IrExpr::type_op(
+        IrTypeOp::ImplicitCoercion,
+        read,
+        scope_ty.non_null(),
+    ));
     let null = ir.add_expr(IrExpr::Const(IrConst::Null));
     let tested = ir.add_expr(IrExpr::GetValue(temporary));
     let condition = ir.add_expr(IrExpr::PrimitiveBinOp {

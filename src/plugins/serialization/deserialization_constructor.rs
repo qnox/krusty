@@ -68,11 +68,11 @@ pub(super) fn add_cached_descriptor(
         }));
     }
     let value = ir.add_expr(IrExpr::GetValue(descriptor_value));
-    let value = ir.add_expr(IrExpr::TypeOp {
-        op: crate::ir::IrTypeOp::Cast,
-        arg: value,
-        type_operand: descriptor_ty,
-    });
+    let value = ir.add_expr(IrExpr::type_op(
+        crate::ir::IrTypeOp::Cast,
+        value,
+        descriptor_ty,
+    ));
     let init = ir.add_expr(IrExpr::Block {
         stmts: statements,
         value: Some(value),
@@ -497,11 +497,11 @@ pub(super) fn complete_deserialization_constructor(
             }
             // An unsigned slot carries its box, unboxed into the field as kotlinc does.
             let argument = if field_ty.is_unsigned() {
-                ir.add_expr(IrExpr::TypeOp {
-                    op: crate::ir::IrTypeOp::ImplicitCoercion,
-                    arg: argument,
-                    type_operand: *field_ty,
-                })
+                ir.add_expr(IrExpr::type_op(
+                    crate::ir::IrTypeOp::ImplicitCoercion,
+                    argument,
+                    *field_ty,
+                ))
             } else {
                 argument
             };

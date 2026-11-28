@@ -26,11 +26,11 @@ fn converting_a_checked_exhaustive_when_without_else_preserves_its_proof() {
         .all(|(condition, _)| condition.is_some()));
     assert_eq!(ir.whens.exhaustive.get(&original), Some(&Ty::Int));
     let result = Ty::nullable(Ty::Int);
-    let conversion = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: original,
-        type_operand: result,
-    });
+    let conversion = ir.add_expr(IrExpr::type_op(
+        IrTypeOp::ImplicitCoercion,
+        original,
+        result,
+    ));
     let converted = normalize_value_when(&mut ir, conversion)
         .expect("the actual coroutine normalizer distributes the conversion");
     assert_ne!(converted, original);
@@ -66,8 +66,7 @@ fn converting_a_checked_exhaustive_when_without_else_preserves_its_proof() {
             IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg,
-                type_operand,
-            } if *arg == original_value && *type_operand == result
+                type_operand, .. } if *arg == original_value && *type_operand == result
         ));
     }
 }

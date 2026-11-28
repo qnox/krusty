@@ -75,11 +75,11 @@ pub(super) fn enum_values_array(ir: &mut IrFile, classifier: TypeName) -> ExprId
         dispatch_receiver: None,
         args: vec![],
     });
-    ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: values,
-        type_operand: Ty::obj_args("kotlin/Array", &[Ty::obj("kotlin/Enum")]),
-    })
+    ir.add_expr(IrExpr::type_op(
+        IrTypeOp::Cast,
+        values,
+        Ty::obj_args("kotlin/Array", &[Ty::obj("kotlin/Enum")]),
+    ))
 }
 
 /// Each entry's `@SerialName`, in declaration order; `None` for an entry without one.

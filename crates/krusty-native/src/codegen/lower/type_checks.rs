@@ -746,6 +746,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             op: IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } = self.file.ir.expr(expression)
         else {
             return None;
@@ -846,6 +847,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             op: IrTypeOp::ImplicitCoercion,
             arg: inner,
             type_operand,
+            ..
         } = self.file.ir.expr(arg)
         else {
             return None;

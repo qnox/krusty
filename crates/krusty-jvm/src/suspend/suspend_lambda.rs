@@ -147,11 +147,7 @@ pub(super) fn route(
             ir.add_expr(IrExpr::CurrentContinuation)
         } else {
             let this = ir.add_expr(IrExpr::GetValue(0));
-            ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: this,
-                type_operand: continuation_ty(),
-            })
+            ir.add_expr(IrExpr::type_op(IrTypeOp::Cast, this, continuation_ty()))
         };
         if !append_continuation(
             ir,
@@ -597,11 +593,7 @@ fn read_parameters(
         });
         field += 1;
         let init = if field_ty(parameter.ty) == Ty::nullable(Ty::obj("kotlin/Any")) {
-            ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::Cast,
-                arg: stored,
-                type_operand: parameter.ty,
-            })
+            ir.add_expr(IrExpr::type_op(IrTypeOp::Cast, stored, parameter.ty))
         } else {
             stored
         };

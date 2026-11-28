@@ -522,6 +522,7 @@ fn is_reified_type_test(
         op: IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf,
         arg,
         type_operand,
+        ..
     } = ir.expr(*operation)
     else {
         return false;

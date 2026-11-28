@@ -234,10 +234,10 @@ impl BodyLowering<'_> {
     }
 
     fn coerce_when_operand(&mut self, value: ExprId, target: ResolvedTy) -> ExprId {
-        self.ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: value,
-            type_operand: target.get(),
-        })
+        self.ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            value,
+            target.get(),
+        ))
     }
 }

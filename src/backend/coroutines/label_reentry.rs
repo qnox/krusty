@@ -356,11 +356,7 @@ impl Split<'_> {
 
         // The statement completes with the value where it held the call.
         let value = ir.add_expr(IrExpr::GetValue(result));
-        ir.exprs[leaf.call as usize] = IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: value,
-            type_operand: logical,
-        };
+        ir.exprs[leaf.call as usize] = IrExpr::type_op(IrTypeOp::Cast, value, logical);
         let completes = self.label_is(ir, 0);
         let complete = when(ir, vec![(Some(completes), leaf.stmt)]);
         Ok(ir.add_expr(IrExpr::Block {
