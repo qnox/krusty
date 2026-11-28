@@ -861,3 +861,81 @@ fn a_reused_classpath_reads_each_overlay_class_s_own_constants() {
         Vec::<&str>::new()
     );
 }
+
+/// `static final String X = null` is not a non-null constant, so kotlinc leaves it flexible and the
+/// elvis smart-cast makes `return x` legal. On a reused classpath the field must not keep another
+/// `JavaClass.X`: a previous constant freezes as an invalid property constant and the case reports
+/// a diagnostic kotlinc does not.
+#[test]
+fn a_null_final_static_string_matches_kotlinc_after_another_java_class() {
+    const KOTLIN: &str = "fun test(x1: String?): String {\n    \
+        val x: String?\n    \
+        x = x1 ?: JavaClass.X\n    \
+        return x\n}\n";
+    let source = |field: &str| {
+        format!(
+            "// FILE: JavaClass.java\npublic class JavaClass {{\n    {field}\n}}\n\n\
+             // FILE: main.kt\n{KOTLIN}"
+        )
+    };
+    let classpath = [common::stdlib_jar()];
+    let jdk = common::jdk_modules();
+    for field in [
+        "public static final String X = \"previousCase\";",
+        "public static final int X = 1;",
+        "public static final Object X = null;",
+        "public static String X = null;",
+    ] {
+        let _ = compile_box_case(&source(field), "main", &classpath, Some(&jdk), &|_| {});
+    }
+    let null_field = source("public static final String X = null;");
+    let (compiled, files) = recording_diagnostics(|| {
+        compile_box_case(&null_field, "main", &classpath, Some(&jdk), &|_| {})
+    });
+    let diagnostics = files
+        .iter()
+        .flat_map(|file| file.diagnostics.iter())
+        .map(|diagnostic| {
+            diagnostic
+                .name
+                .map(|name| name.as_str().to_string())
+                .unwrap_or_else(|| "<unnamed>".to_string())
+        })
+        .collect::<Vec<_>>();
+    let failure = match &compiled {
+        Ok(_) => String::new(),
+        Err(CompileFailure::Rejected { report, .. }) => report.clone(),
+        Err(CompileFailure::Harness(reason)) => reason.clone(),
+    };
+    assert!(
+        compiled.is_ok() && diagnostics.is_empty(),
+        "reused classpath reported {diagnostics:?}\n{failure}"
+    );
+
+    let scratch = common::scratch_dir().expect("scratch directory");
+    let java = scratch.join("JavaClass.java");
+    let kotlin = scratch.join("main.kt");
+    let output = scratch.join("out");
+    std::fs::write(
+        &java,
+        "public class JavaClass {\n    public static final String X = null;\n}\n",
+    )
+    .expect("write Java");
+    std::fs::write(&kotlin, KOTLIN).expect("write Kotlin");
+    std::fs::create_dir_all(&output).expect("create kotlinc output");
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        output.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        common::stdlib_jar().to_string_lossy().into_owned(),
+        java.to_string_lossy().into_owned(),
+        kotlin.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc available");
+    let _ = std::fs::remove_dir_all(scratch);
+    assert_eq!(
+        (code, stderr.trim()),
+        (0, ""),
+        "kotlinc does not accept the null final field"
+    );
+}
