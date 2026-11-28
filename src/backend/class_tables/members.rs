@@ -347,13 +347,10 @@ pub(crate) fn overridden_functions(
                 // naming the dependency type declines at the call site, where the type it named
                 // is still in sight.
                 //
-                // `invoke` is the exception, because it is the one dependency member this target
-                // already gives a FIXED number: a function value's body sits right after
-                // `kotlin.Any`'s three and the runtime names that number itself
-                // (`KT_SLOT_INVOKE`), so every caller through a function type reads it rather
-                // than asking. One that cannot take that slot outright — its operands are not all
-                // references — gets a `Slot::FunctionBridge` there instead, placed where the
-                // method's own slot is known; nothing is recorded here.
+                // `invoke` over a function type is no exception to that, and a caller through the
+                // function type reaches it through a `Slot::FunctionBridge` placed after the
+                // method's own slot, listed in `ClassTable::function_invokes`; nothing is recorded
+                // here.
             }
         }
     }

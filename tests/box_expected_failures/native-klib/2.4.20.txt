@@ -278,8 +278,6 @@ coroutines/simpleException.kt
 coroutines/simpleWithDefaultValue.kt
 coroutines/stackUnwinding/rethrowInFinallyWithSuspension.kt
 coroutines/stopAfter.kt
-coroutines/suspendConversion/intersectionTypeToSubtypeConversion.kt
-coroutines/suspendConversion/subtypeOfFunctionalTypeToSuspendConversion.kt
 coroutines/suspendConversion/suspendConversionBetweenFunInterfaces.kt
 coroutines/suspendFunctionAsCoroutine/handleException.kt
 coroutines/suspendFunctionAsCoroutine/ifExpressionInsideCoroutine_1_3.kt
@@ -289,8 +287,6 @@ coroutines/suspendFunctionAsCoroutine/superCall.kt
 coroutines/suspendFunctionAsCoroutine/superCallAbstractClass.kt
 coroutines/suspendFunctionAsCoroutine/superCallInterface.kt
 coroutines/suspendFunctionAsCoroutine/superCallOverload.kt
-coroutines/suspendFunctionAsSupertype.kt
-coroutines/suspendFunctionAsSupertypeWithInlinedFunInKlib.kt
 coroutines/suspendFunctionTypeCall/manyParametersNoCapture.kt
 coroutines/suspensionInsideSafeCallWithElvis.kt
 coroutines/tailCallOptimizations/crossinline.kt
@@ -348,7 +344,6 @@ fullValueClasses/construction.kt
 funInterface/basicFunInterfaceConversionClash.kt
 funInterface/funInterfaceWithSuspendMethod.kt
 funInterface/inlinedSamWrapper.kt
-funInterface/intersectionTypeToFunInterfaceConversion.kt
 funInterface/kt49384.kt
 funInterface/kt77685-sam.kt
 funInterface/kt77685.kt

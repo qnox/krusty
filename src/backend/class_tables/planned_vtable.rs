@@ -111,7 +111,6 @@ pub(super) fn planned_class_table(
     for (slot, entry) in planned.entries.iter().enumerate() {
         vtable.push(match *entry {
             PlannedSlot::Any(member) => Slot::AnyMember(member),
-            PlannedSlot::Reserved => Slot::Abstract,
             PlannedSlot::Inherited { slot } if elsewhere(slot as usize) => Slot::Inherited { slot },
             PlannedSlot::Inherited { .. } => {
                 return Err("an opaque producer slot without its laid-out superclass".into())
@@ -359,6 +358,7 @@ pub(super) fn planned_class_table(
         slots,
         interface_bridges,
         direct_methods,
+        function_invokes: planned.function_invokes.clone(),
     })
 }
 

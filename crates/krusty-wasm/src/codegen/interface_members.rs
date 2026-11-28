@@ -20,7 +20,7 @@
 use krusty::fx_hash::HashMap;
 
 use krusty::backend::class_tables::module_interfaces::ModuleInterfaces;
-use krusty::backend::class_tables::module_slots::PlanKey;
+use krusty::backend::class_tables::module_slots::{carried, PlanKey};
 use krusty::backend::class_tables::planned_itable::InterfaceEntry;
 use krusty::backend::class_tables::{function_key, Slot, SlotKey};
 use krusty::backend::interface_identity::{member_identity, property_member_identity};
@@ -1087,8 +1087,14 @@ impl FileRecorder<'_, '_, '_> {
             }
         };
         let declared = member_signature(declaration.0, declaration.1)?;
-        let implemented =
-            member_signature(&edge.implementation_parameters, edge.implementation_result)?;
+        // What the placed function physically takes: a `suspend` override's frame carries its
+        // continuation after the source parameters and answers the erased result.
+        let (implemented_parameters, implemented_result) = carried(
+            &edge.implementation_parameters,
+            edge.implementation_result,
+            edge.suspend,
+        );
+        let implemented = member_signature(&implemented_parameters, implemented_result)?;
         let special_bridge = self
             .recording
             .classifiers
@@ -1103,7 +1109,7 @@ impl FileRecorder<'_, '_, '_> {
             });
         let adapters = self.adapters_for_placed(
             declaration,
-            (&edge.implementation_parameters, edge.implementation_result),
+            (&implemented_parameters, implemented_result),
             &declared,
             &implemented,
             &placed,

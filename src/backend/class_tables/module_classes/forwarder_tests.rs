@@ -7,11 +7,8 @@ struct IntsAndReferences;
 
 impl Representation for IntsAndReferences {
     fn same(&self, left: Ty, right: Ty) -> bool {
-        left == right || (self.is_reference(left) && self.is_reference(right))
-    }
-
-    fn is_reference(&self, ty: Ty) -> bool {
-        ty != Ty::Int && ty != Ty::Unit
+        left == right
+            || (left != Ty::Int && left != Ty::Unit && right != Ty::Int && right != Ty::Unit)
     }
 
     fn owns_base(&self, _: TypeName) -> bool {

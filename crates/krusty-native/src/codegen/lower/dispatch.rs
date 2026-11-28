@@ -332,8 +332,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// A call through one of the receiver's tables: its vtable by class slot —
-    /// `receiver.type.vtable[slot](receiver, args…)` — or, for a module interface member, the
-    /// member's stub, which the final link writes from every implementation in the program (see
+    /// `receiver.type.vtable[slot](receiver, args…)` — or, for a module interface member or a
+    /// function type, the stub the final link writes from every implementation in the program (see
     /// `native::interface_calls`).
     pub(super) fn dispatch_through(
         &mut self,
@@ -350,11 +350,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         all_arguments.extend_from_slice(arguments);
         let slot = match through {
             model::Dispatch::Class(slot) => slot,
-            model::Dispatch::Interface(number) => {
-                let stub = super::super::super::interface_calls::stub_symbol(
-                    self.file.module_name,
-                    number,
-                );
+            model::Dispatch::Interface(_) | model::Dispatch::Function(_) => {
+                let stub = match through {
+                    model::Dispatch::Function(operands) => {
+                        super::super::super::interface_calls::function_stub_symbol(operands)
+                    }
+                    model::Dispatch::Interface(number) => {
+                        super::super::super::interface_calls::stub_symbol(
+                            self.file.module_name,
+                            number,
+                        )
+                    }
+                    model::Dispatch::Class(_) => unreachable!("matched above"),
+                };
                 let stub = self.file.import(&stub, &all_params, ret)?;
                 let func_ref = self.func_ref(stub);
                 let call = self.emit_call(func_ref, &all_arguments)?;

@@ -37,15 +37,18 @@ pub(crate) fn finalize_suspend_bridges(
         let owner = class.fq_name_id();
         for (ordinal, bridge) in class.bridges.iter_mut().enumerate() {
             let ordinal = u32::try_from(ordinal).expect("bridge ordinals fit u32");
+            if bridge_adopts_continuation(bridge) {
+                continue;
+            }
             let target = bridge.target_name.as_deref().unwrap_or(&bridge.name);
             let named_target = suspend_targets.contains(&(
                 class.fq_name,
                 target.to_string(),
                 bridge.concrete_params.len(),
             ));
-            let targets_suspend_member = bridge.target_function.is_some_and(|function| {
-                suspend_functions.contains(&function) && !bridge_adopts_continuation(bridge)
-            });
+            let targets_suspend_member = bridge
+                .target_function
+                .is_some_and(|function| suspend_functions.contains(&function));
             if !named_target && !targets_suspend_member {
                 continue;
             }

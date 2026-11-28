@@ -266,7 +266,6 @@ coroutines/featureIntersection/funInterface/kt49294.kt
 coroutines/featureIntersection/funInterface/kt50950.kt
 coroutines/featureIntersection/safeCallOnTwoReceivers.kt
 coroutines/featureIntersection/safeCallOnTwoReceiversLong.kt
-coroutines/featureIntersection/suspendFunctionAsSupertypeIsCheckWithArity.kt
 coroutines/featureIntersection/suspendInlineSuspendFinally.kt
 coroutines/featureIntersection/suspendOperatorPlusAssign.kt
 coroutines/featureIntersection/tailrec/controlFlowIf.kt
@@ -352,8 +351,6 @@ coroutines/simpleException.kt
 coroutines/simpleWithDefaultValue.kt
 coroutines/stackUnwinding/rethrowInFinallyWithSuspension.kt
 coroutines/stopAfter.kt
-coroutines/suspendConversion/intersectionTypeToSubtypeConversion.kt
-coroutines/suspendConversion/subtypeOfFunctionalTypeToSuspendConversion.kt
 coroutines/suspendConversion/suspendConversionBetweenFunInterfaces.kt
 coroutines/suspendFunctionAsCoroutine/handleException.kt
 coroutines/suspendFunctionAsCoroutine/ifExpressionInsideCoroutine_1_3.kt
@@ -363,9 +360,6 @@ coroutines/suspendFunctionAsCoroutine/superCall.kt
 coroutines/suspendFunctionAsCoroutine/superCallAbstractClass.kt
 coroutines/suspendFunctionAsCoroutine/superCallInterface.kt
 coroutines/suspendFunctionAsCoroutine/superCallOverload.kt
-coroutines/suspendFunctionAsSupertype.kt
-coroutines/suspendFunctionAsSupertypeCall.kt
-coroutines/suspendFunctionAsSupertypeWithInlinedFunInKlib.kt
 coroutines/suspendFunctionTypeCall/manyParametersNoCapture.kt
 coroutines/suspensionInsideSafeCallWithElvis.kt
 coroutines/tailCallOptimizations/crossinline.kt
@@ -465,7 +459,6 @@ fullValueClasses/inapplicableTypes.kt
 funInterface/equality/localFunctionReferences.kt
 funInterface/funInterfaceInheritance.kt
 funInterface/funInterfaceWithSuspendMethod.kt
-funInterface/intersectionTypeToFunInterfaceConversion.kt
 funInterface/kt41670.kt
 funInterface/kt49384.kt
 funInterface/kt77685-sam.kt

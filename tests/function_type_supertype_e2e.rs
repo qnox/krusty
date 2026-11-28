@@ -137,21 +137,9 @@ fn a_suspend_function_supertype_matches_kotlinc() {
         .unwrap_or_else(|diff| panic!("{diff}"));
 }
 
-/// One program, run on the JVM and on Native.
-const SUSPEND_SUPERTYPE_BRIDGE: &str = "import kotlin.coroutines.*\n\
-class Probe : suspend (Int) -> String {\n\
-override suspend fun invoke(p1: Int): String = if (p1 == 7) \"OK\" else \"fail\"\n\
-}\n\
-object Done : Continuation<String> {\n\
-override val context: CoroutineContext get() = throw UnsupportedOperationException()\n\
-override fun resumeWith(result: Result<String>) {}\n\
-}\n\
-fun box(): String {\n\
-val erased: Any = Probe()\n\
-@Suppress(\"UNCHECKED_CAST\")\n\
-val physical = erased as (Int, Continuation<String>) -> Any?\n\
-return physical(7, Done) as String\n\
-}\n";
+/// One program, run on the JVM and on Native, and by every box lane.
+const SUSPEND_SUPERTYPE_BRIDGE: &str =
+    include_str!("box_regressions/SuspendFunctionSupertypeErasedBridge.kt");
 
 /// The erased `invoke(Object, Object)` a caller reaches through `Function2` delegates to the
 /// suspend override with the object cast back to a `Continuation`.
