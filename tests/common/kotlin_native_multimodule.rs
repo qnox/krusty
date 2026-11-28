@@ -84,6 +84,10 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
     let native_root = kotlin_native_root()?;
     let compiler = native_root.join("bin/kotlinc-native");
     let (modules, compiler_arguments) = native_module_sources(source);
+    // The libraries a case's directives add (the atomicfu runtime for `// WITH_ATOMICFU`), which
+    // every module compiles against, as kotlinc's own box tests pass them.
+    let case_libraries = krusty::toolchain::klib_libraries_for(source, CompilationTarget::Native)
+        .unwrap_or_else(|reason| panic!("{reason}"));
     let units = krusty::conformance::module_units(&modules);
     assert!(
         !units.is_empty(),
@@ -103,8 +107,8 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         let (source_paths, runner_path) =
             write_native_module_sources(&unit_root, &unit.files, final_unit);
 
-        let mut libraries = Vec::new();
-        let mut seen_libraries = HashSet::default();
+        let mut libraries = case_libraries.clone();
+        let mut seen_libraries = libraries.iter().cloned().collect::<HashSet<_>>();
         for dependency in &unit.deps {
             let dependency = built.get(dependency).unwrap_or_else(|| {
                 panic!(
