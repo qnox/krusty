@@ -13,7 +13,7 @@ plugins:
 product: jvm/amper-plugin
 settings:
   kotlin:
-    version: 2.4.21
+    version: {kotlin}
 --- tools/direct/plugin.yaml
 tasks:
   declare:
@@ -41,6 +41,6 @@ plugins:
   direct: enabled
 settings:
   kotlin:
-    version: 2.4.21
+    version: {kotlin}
 --- app/generated-src/kotlin/A.kt
 class A

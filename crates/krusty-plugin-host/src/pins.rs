@@ -244,9 +244,11 @@ mod tests {
     #[test]
     fn a_kotlin_version_matches_only_exactly() {
         let pins = Pins::builtin(&Platform::current());
-        assert!(pins.compiler_classpath("2.4.21").is_some());
-        assert!(pins.compiler_classpath("2.4.21-RC").is_none());
-        assert!(pins.compiler_classpath("2.4").is_none());
+        let release = krusty_core::kotlin_version::environment_release().to_string();
+        assert!(pins.compiler_classpath(&release).is_some());
+        assert!(pins.compiler_classpath(&format!("{release}-RC")).is_none());
+        let minor = release.rsplit_once('.').unwrap().0;
+        assert!(pins.compiler_classpath(minor).is_none());
     }
 
     #[test]

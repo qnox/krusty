@@ -14,7 +14,10 @@
 
 mod support;
 
-use std::path::{Path, PathBuf};
+#[path = "support/repository.rs"]
+mod repository;
+
+use std::path::PathBuf;
 use std::process::Command;
 
 use support::kotlin::{self, Invocation, Resolving};
@@ -37,18 +40,6 @@ struct Inputs {
 }
 
 /// The files below `directory`, by `/`-separated path.
-fn files_below(directory: &Path, prefix: &str, files: &mut Files) {
-    for entry in std::fs::read_dir(directory).unwrap() {
-        let entry = entry.unwrap();
-        let name = format!("{prefix}{}", entry.file_name().to_string_lossy());
-        if entry.file_type().unwrap().is_dir() {
-            files_below(&entry.path(), &format!("{name}/"), files);
-        } else {
-            files.push((name, std::fs::read_to_string(entry.path()).unwrap()));
-        }
-    }
-}
-
 /// What krusty-toolchain does for a case, laid out as the oracle lays out `kotlin`'s run, in a
 /// directory named after `run`: the tests run at once, each in its own directories.
 fn krusty_toolchain(run: &str, inputs: &Inputs) -> Output {
@@ -103,12 +94,7 @@ fn refusal(actual: &Output) -> Option<Vec<ExpectedDiagnostic>> {
 #[test]
 fn every_dependency_refusal_is_exact() {
     let cases = support::cases("dependencies");
-    let mut shared = Vec::new();
-    files_below(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/dependencies/repository"),
-        "",
-        &mut shared,
-    );
+    let shared = repository::shared();
     let mut failures = Vec::new();
     for case in &cases {
         let Some(KrustyExpected::Refusal(refused)) = &case.krusty else {
@@ -156,12 +142,7 @@ fn every_dependency_refusal_is_exact() {
 fn every_dependency_case_is_resolved_as_the_toolchain_resolves_it() {
     let cases = support::cases("dependencies");
     assert!(cases.len() >= 6, "the cases are missing");
-    let mut shared = Vec::new();
-    files_below(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/dependencies/repository"),
-        "",
-        &mut shared,
-    );
+    let shared = repository::shared();
     let inputs: Vec<Inputs> = cases
         .iter()
         .map(|case| {

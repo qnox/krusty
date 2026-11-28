@@ -26,13 +26,7 @@ const CALLER: &str = "import lib.pick\nfun box(): String = pick(\"OK\")\n";
 
 /// `source` compiled by krusty at language level 2.2, written to a classpath directory.
 fn library_at_language_2_2(source: (&str, &str)) -> PathBuf {
-    let settings = krusty::language_settings::LanguageSettings::for_release(
-        krusty::kotlin_version::environment_release(),
-        krusty::language_version::LanguageVersion::V2_2,
-        None,
-        &[],
-    )
-    .expect("2.2 language settings");
+    let settings = common::lane_language_settings(krusty::language_version::LanguageVersion::V2_2, &[]);
     let classes = common::compile_in_process_files_language_settings(
         &[source],
         &[common::stdlib_jar()],

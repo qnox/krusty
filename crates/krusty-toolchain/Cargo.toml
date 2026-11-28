@@ -28,4 +28,6 @@ path = "src/main.rs"
 libc = "0.2"
 
 [dev-dependencies]
+# The compile cases pin the Kotlin release the harness runs the lane under.
+krusty-core = { path = "../krusty-core" }
 krusty-test-support = { path = "../krusty-test-support" }

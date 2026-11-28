@@ -4,7 +4,6 @@
 
 use super::common;
 use krusty::compilation_target::CompilationTarget;
-use krusty::kotlin_version::KotlinVersion;
 use krusty::language_version::LanguageVersion;
 
 const FORBID: &str = "-XXLanguage:+ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects";
@@ -156,12 +155,8 @@ fn forbidden_anonymous_owner_failure_is_an_error() {
     );
 }
 
-fn diagnostics_for_release(source: &str, release: KotlinVersion) -> Vec<krusty::diag::Diagnostic> {
-    let features = krusty::features::LangFeatures::for_release(
-        release,
-        LanguageVersion::V2_4,
-        LanguageVersion::V2_4,
-    );
+fn diagnostics(source: &str) -> Vec<krusty::diag::Diagnostic> {
+    let features = common::lane_features(LanguageVersion::V2_4, LanguageVersion::V2_4);
     common::front_end_diagnostic_records_with_features_for(
         CompilationTarget::Jvm,
         source,
@@ -172,9 +167,9 @@ fn diagnostics_for_release(source: &str, release: KotlinVersion) -> Vec<krusty::
 }
 
 #[test]
-fn anonymous_owner_policy_is_owned_by_the_selected_release() {
+fn anonymous_owner_policy_is_owned_by_the_lane_release() {
     const SOURCE: &str = "fun make() = object { operator fun equals(other: Int) = true }\n";
-    let diagnostics = diagnostics_for_release(SOURCE, KotlinVersion::V2_4_21);
+    let diagnostics = diagnostics(SOURCE);
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     let diagnostic = &diagnostics[0];
     assert_eq!(diagnostic.span, krusty::diag::Span::new(22, 30));

@@ -12,19 +12,19 @@ repositories:
 settings:
   kotlin:
     serialization: enabled
-    version: 2.4.21
+    version: {kotlin}
 --- app/src/Model.kt
 @kotlinx.serialization.Serializable
 class Model(val name: String)
---- m2/org/jetbrains/kotlin/kotlin-serialization-compiler-plugin-embeddable/2.4.21/kotlin-serialization-compiler-plugin-embeddable-2.4.21.pom
+--- m2/org/jetbrains/kotlin/kotlin-serialization-compiler-plugin-embeddable/{kotlin}/kotlin-serialization-compiler-plugin-embeddable-{kotlin}.pom
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0">
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.jetbrains.kotlin</groupId>
   <artifactId>kotlin-serialization-compiler-plugin-embeddable</artifactId>
-  <version>2.4.21</version>
+  <version>{kotlin}</version>
 </project>
---- m2/org/jetbrains/kotlin/kotlin-serialization-compiler-plugin-embeddable/2.4.21/kotlin-serialization-compiler-plugin-embeddable-2.4.21.jar
+--- m2/org/jetbrains/kotlin/kotlin-serialization-compiler-plugin-embeddable/{kotlin}/kotlin-serialization-compiler-plugin-embeddable-{kotlin}.jar
 --- m2/org/jetbrains/kotlinx/kotlinx-serialization-core/1.11.0/kotlinx-serialization-core-1.11.0.pom
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0">
@@ -126,11 +126,11 @@ class Model(val name: String)
 --- krusty-argv
 -Xjdk-release=25
 -jdk-home=<directory>/jdk
--classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar:<directory>/home/.m2/repository/org/jetbrains/kotlinx/kotlinx-serialization-core-jvm/1.11.0/kotlinx-serialization-core-jvm-1.11.0.jar
+-classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/{kotlin}/kotlin-stdlib-{kotlin}.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar:<directory>/home/.m2/repository/org/jetbrains/kotlinx/kotlinx-serialization-core-jvm/1.11.0/kotlinx-serialization-core-jvm-1.11.0.jar
 -no-stdlib
 -module-name=app
--Xplugin=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-serialization-compiler-plugin-embeddable/2.4.21/kotlin-serialization-compiler-plugin-embeddable-2.4.21.jar
--Xkotlin-reference-version=2.4.21
+-Xplugin=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-serialization-compiler-plugin-embeddable/{kotlin}/kotlin-serialization-compiler-plugin-embeddable-{kotlin}.jar
+-Xkotlin-reference-version={kotlin}
 -d
 <directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
 <directory>/project/app/src/Model.kt
