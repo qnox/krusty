@@ -6953,13 +6953,11 @@ compiler/testData/diagnostics/testsWithStdLib/errorsInUnreachable.kt
 compiler/testData/diagnostics/testsWithStdLib/evaluate/charCodeExpType.kt
 compiler/testData/diagnostics/testsWithStdLib/experimental/annotation.kt
 compiler/testData/diagnostics/testsWithStdLib/experimental/constVal.kt
-compiler/testData/diagnostics/testsWithStdLib/experimental/constructorCheck.kt
 compiler/testData/diagnostics/testsWithStdLib/experimental/deeplyNestedClass.kt
 compiler/testData/diagnostics/testsWithStdLib/experimental/delegatedConstructorCalls.kt
 compiler/testData/diagnostics/testsWithStdLib/experimental/diffrentModules.kt
 compiler/testData/diagnostics/testsWithStdLib/experimental/enumCompanion.kt
 compiler/testData/diagnostics/testsWithStdLib/experimental/enumConstructor.kt
-compiler/testData/diagnostics/testsWithStdLib/experimental/enumConstructorStrictCheck.kt
 compiler/testData/diagnostics/testsWithStdLib/experimental/enumEntries.kt
 compiler/testData/diagnostics/testsWithStdLib/experimental/errors.kt
 compiler/testData/diagnostics/testsWithStdLib/experimental/experimentalSetter.kt
