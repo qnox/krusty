@@ -320,8 +320,10 @@ mod operator_declarations;
 mod operator_of_declarations;
 mod opt_in_usage;
 mod primitive_reference;
+mod synthetic_property_references;
 use operator_calls::{
-    range_operator, OperatorOperand, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess,
+    builtin_inc_dec_result, builtin_unary_result, is_builtin_operator_method, range_operator,
+    OperatorOperand, ResolvedInRangeComparison, SelectedBuiltinOperatorAccess,
 };
 mod declaration_publication;
 mod declaring_receivers;
@@ -1176,57 +1178,6 @@ fn fun_body_expr(body: &FunBody) -> Option<ExprId> {
         FunBody::Expr(expression) | FunBody::Block(expression) => Some(*expression),
         FunBody::None => None,
     }
-}
-
-/// Best-effort type of a simple literal initializer (for an unannotated top-level property).
-/// Names of Kotlin's primitive operator/bitwise/conversion-overloadable methods. An explicit call
-/// of one of these on a primitive receiver binds to the builtin operator, not a user extension.
-fn is_builtin_operator_method(name: &str) -> bool {
-    matches!(
-        name,
-        "plus"
-            | "minus"
-            | "times"
-            | "div"
-            | "rem"
-            | "inc"
-            | "dec"
-            | "unaryPlus"
-            | "unaryMinus"
-            | "and"
-            | "or"
-            | "xor"
-            | "inv"
-            | "shl"
-            | "shr"
-            | "ushr"
-            | "compareTo"
-            | "rangeTo"
-    )
-}
-
-fn builtin_unary_result(
-    platform: &dyn SemanticPlatform,
-    operand: Ty,
-    operator: UnOp,
-) -> Option<Ty> {
-    let operand = operand
-        .platform_lower_bound()
-        .unboxed_primitive()
-        .or_else(|| platform.boxed_primitive(operand))
-        .unwrap_or(operand);
-    match operator {
-        UnOp::Neg | UnOp::Plus if operand.is_numeric() => Some(match operand {
-            Ty::Byte | Ty::Short => Ty::Int,
-            _ => operand,
-        }),
-        UnOp::Not if operand == Ty::Boolean => Some(Ty::Boolean),
-        UnOp::Neg | UnOp::Not | UnOp::Plus => None,
-    }
-}
-
-fn builtin_inc_dec_result(operand: Ty) -> Option<Ty> {
-    operand.is_numeric_or_char().then_some(operand)
 }
 
 /// An EXTENSION property reference asserts no type arguments yet. Its value type is written in terms
@@ -23603,6 +23554,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         expected: None,
         callable_reference_literal_constraints: HashMap::default(),
         active_callable_reference: None,
+        active_reference_rejects_functions: false,
         reference_type_variable_inputs: HashMap::default(),
         active_postponed_callable_reference_recheck: None,
         completed_failed_postponed_callable_rechecks: crate::fx_hash::HashSet::default(),
@@ -25605,6 +25557,8 @@ struct Checker<'a> {
     /// during that one reference's selection and is discarded with the bounded checker.
     callable_reference_literal_constraints: HashMap<ExprId, HashMap<String, Vec<CallArgKind>>>,
     active_callable_reference: Option<ExprId>,
+    /// No function reference of the active reference's shape is a subtype of its expected type.
+    active_reference_rejects_functions: bool,
     /// Per callable-reference argument, the inputs its selected parameter declares as call type
     /// variables, as `reference_type_variable_inputs` records them.
     reference_type_variable_inputs:
@@ -28347,6 +28301,9 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
+        if self.rejects_synthetic_property_reference(expression, &property) {
+            return Some(Ty::Error);
+        }
         if !self.property_reference_exposes_setter(&property, receiver) {
             property.setter = None;
         }
@@ -28482,28 +28439,28 @@ impl<'a> Checker<'a> {
             Some(TyKind::Fun(function)) => Some(function),
             _ => None,
         };
-        if let Some(property) =
-            self.select_callable_property_ref(candidates.property.as_ref(), &[], expected)
-        {
+        let (declared, synthetic) = synthetic_property_references::by_level(
+            self.select_callable_property_ref(candidates.property.as_ref(), &[], expected),
+        );
+        if let Some(property) = declared {
             return Some(BoundCallableRefSelection::Property(Box::new(property)));
         }
-        if let Some(expected) = expected_function {
-            if let Some((member, argument_mapping, type_arguments)) =
-                self.select_adapted_instance_ref(&candidates.overloads, expected)
-            {
-                return Some(BoundCallableRefSelection::AdaptedMember {
-                    member: Box::new(member),
-                    argument_mapping,
-                    type_arguments,
-                    expected,
-                });
-            }
-            return None;
-        }
-        candidates
-            .method
-            .clone()
-            .map(|member| BoundCallableRefSelection::Member(Box::new(member)))
+        let member = match expected_function {
+            _ if self.active_reference_rejects_functions => None,
+            Some(expected) => self
+                .select_adapted_instance_ref(&candidates.overloads, expected)
+                .map(|(member, argument_mapping, type_arguments)| {
+                    BoundCallableRefSelection::AdaptedMember {
+                        member: Box::new(member),
+                        argument_mapping,
+                        type_arguments,
+                        expected,
+                    }
+                }),
+            None => (candidates.method.clone())
+                .map(|member| BoundCallableRefSelection::Member(Box::new(member))),
+        };
+        member.or_else(|| synthetic.map(|p| BoundCallableRefSelection::Property(Box::new(p))))
     }
 
     fn record_bound_callable_ref(
@@ -44700,7 +44657,13 @@ impl<'a> Checker<'a> {
             }
         });
         let previous_callable_reference = self.active_callable_reference.replace(e);
+        let rejects_functions = self.rejects_function_reference(expected, selection_expected);
+        let previous_rejects_functions = std::mem::replace(
+            &mut self.active_reference_rejects_functions,
+            rejects_functions,
+        );
         let nominal = self.callable_ref_function_type(scope, e, selection_expected, receiver, name);
+        self.active_reference_rejects_functions = previous_rejects_functions;
         self.active_callable_reference = previous_callable_reference;
         let misfit = self.misfit_callable_references.remove(&e);
         self.publish_callable_reference_constraints(e);
@@ -45213,11 +45176,13 @@ impl<'a> Checker<'a> {
                 &receiver_candidates,
                 Some(receiver_ty),
             );
-            if let Some(property) = self.select_callable_property_ref(
-                receiver_candidates.property.as_ref(),
-                &[receiver_ty],
-                expected,
-            ) {
+            let (declared, synthetic) =
+                synthetic_property_references::by_level(self.select_callable_property_ref(
+                    receiver_candidates.property.as_ref(),
+                    &[receiver_ty],
+                    expected,
+                ));
+            if let Some(property) = declared {
                 return self.record_callable_property_ref(
                     expression,
                     CallableReferenceBinding::Unbound,
@@ -45226,7 +45191,10 @@ impl<'a> Checker<'a> {
                     expected,
                 );
             }
-            if let Some(TyKind::Fun(expected)) = expected.map(|ty| ty.kind()) {
+            let expected_member_function = expected
+                .filter(|_| !self.active_reference_rejects_functions)
+                .map(|ty| ty.kind());
+            if let Some(TyKind::Fun(expected)) = expected_member_function {
                 let source = self.fed_source();
                 if let Some((selected, argument_mapping, type_arguments)) =
                     callable_reference_selection::select_adapted_instance_candidate(
@@ -45284,6 +45252,16 @@ impl<'a> Checker<'a> {
                         return Some(ty);
                     }
                 }
+            }
+            if let Some(property) = synthetic {
+                let unbound = CallableReferenceBinding::Unbound;
+                return self.record_callable_property_ref(
+                    expression,
+                    unbound,
+                    receiver_ty,
+                    property,
+                    expected,
+                );
             }
             let extension_candidates = if extension_receiver_ty == receiver_ty {
                 receiver_candidates.clone()

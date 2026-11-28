@@ -12,6 +12,8 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.explicit_context_arguments = features.has("ExplicitContextArguments");
     file.language.callable_references_to_contextual =
         features.has("CallableReferencesToContextual");
+    file.language.references_to_synthetic_java_properties =
+        features.has("ReferencesToSyntheticJavaProperties");
     file.context_sensitive_resolution_using_expected_type =
         features.has("ContextSensitiveResolutionUsingExpectedType");
     file.allow_protected_super_companion_property_access =

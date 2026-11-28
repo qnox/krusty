@@ -9,4 +9,7 @@ pub struct FileLanguagePolicy {
     /// `+CallableReferencesToContextual`: a reference to a declaration with context parameters
     /// selects those arguments from the reference site and exposes only the value parameters.
     pub callable_references_to_contextual: bool,
+    /// `+ReferencesToSyntheticJavaProperties`: a callable reference may select a property derived
+    /// from a Java getter. Without it kotlinc reports the selected reference as unsupported.
+    pub references_to_synthetic_java_properties: bool,
 }

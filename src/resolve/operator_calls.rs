@@ -1229,3 +1229,53 @@ fn selects_generic_element_contains(selected: &Option<SelectedOperator>) -> bool
         })
     })
 }
+
+/// Names of Kotlin's primitive operator/bitwise/conversion-overloadable methods. An explicit call
+/// of one of these on a primitive receiver binds to the builtin operator, not a user extension.
+pub(super) fn is_builtin_operator_method(name: &str) -> bool {
+    matches!(
+        name,
+        "plus"
+            | "minus"
+            | "times"
+            | "div"
+            | "rem"
+            | "inc"
+            | "dec"
+            | "unaryPlus"
+            | "unaryMinus"
+            | "and"
+            | "or"
+            | "xor"
+            | "inv"
+            | "shl"
+            | "shr"
+            | "ushr"
+            | "compareTo"
+            | "rangeTo"
+    )
+}
+
+pub(super) fn builtin_unary_result(
+    platform: &dyn SemanticPlatform,
+    operand: Ty,
+    operator: UnOp,
+) -> Option<Ty> {
+    let operand = operand
+        .platform_lower_bound()
+        .unboxed_primitive()
+        .or_else(|| platform.boxed_primitive(operand))
+        .unwrap_or(operand);
+    match operator {
+        UnOp::Neg | UnOp::Plus if operand.is_numeric() => Some(match operand {
+            Ty::Byte | Ty::Short => Ty::Int,
+            _ => operand,
+        }),
+        UnOp::Not if operand == Ty::Boolean => Some(Ty::Boolean),
+        UnOp::Neg | UnOp::Not | UnOp::Plus => None,
+    }
+}
+
+pub(super) fn builtin_inc_dec_result(operand: Ty) -> Option<Ty> {
+    operand.is_numeric_or_char().then_some(operand)
+}
