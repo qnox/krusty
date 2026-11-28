@@ -126,9 +126,15 @@ impl<'a> RegenerationSite<'a> {
         }
         let declaration = &ir.functions[function as usize];
         let name = &declaration.name;
-        // Another file's inline function, compiled here for its callers, is declared there.
+        // Another file's inline function, compiled here for its callers, is declared there. A
+        // declared function's JVM name may differ from its Kotlin name (an `internal` member's
+        // module suffix, a value-class mangling, `@JvmName`), so its declaration, not the
+        // spelling of its name, says it is one. A lambda's body is written in a function but is
+        // not that function.
         let declared = (ir.function_position(function).decl_line.is_some()
-            && ir.fn_source_names.get(&function) == Some(name))
+            && ir.fn_source_names.contains_key(&function)
+            && !ir.lambda_origins.contains_key(&function)
+            && !ir.local_function_spans.contains_key(&function))
             || ir.foreign_inline_templates.contains(&function);
         let suspend_lambda_body = declaration
             .dispatch_receiver
@@ -178,8 +184,12 @@ impl<'a> RegenerationSite<'a> {
             return None;
         };
         // Copies of a class-realized lambda's body are named after the method it implements.
+        // A declared function's copies are named after its Kotlin name, not the module-suffixed
+        // JVM name its method carries (`P$merged$$inlined$sortedBy$1` in `merged$main`).
         let numbered_under = if owner.is_some() {
             method.clone()
+        } else if declared && !suspend_lambda_body && !class_lambda_body {
+            ir.fn_source_names.get(&function).unwrap_or(name).clone()
         } else {
             name.clone()
         };
