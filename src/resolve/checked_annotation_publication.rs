@@ -846,13 +846,26 @@ impl Checker<'_> {
         if let Some(owner) = owner.filter(|_| class.is_annotation()) {
             self.fold_annotation_element_defaults(scope, class, owner);
         }
+        // An entry's applications fold under its own lexical policies, and only the ones Pass 1
+        // bound, as every sibling member's.
         for entry in &class.enum_entries {
-            self.check_non_property_annotation_applications_in_declaration_scope(
-                scope,
-                &entry.annotations,
-                &entry.annotation_args,
-                "enum entry",
-            );
+            let bound = self.bound_annotation_spans(&entry.annotations);
+            if bound.is_empty() {
+                continue;
+            }
+            let policy_depth =
+                self.push_declaration_policies(scope, &entry.annotations, &entry.annotation_args);
+            for (annotation, arguments) in entry.annotations.iter().zip(&entry.annotation_args) {
+                if bound.contains(&annotation.span) {
+                    self.check_non_property_annotation_application(
+                        scope,
+                        annotation,
+                        arguments,
+                        AnnotationHostKind::EnumEntry,
+                    );
+                }
+            }
+            self.active_lexical_policies.truncate(policy_depth);
         }
         for method in &class.methods {
             if function_annotations(method).any(|annotation| self.has_bound_annotation(annotation))
