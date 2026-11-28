@@ -477,16 +477,6 @@ ranges/contains/inExtensionRange.kt
 ranges/contains/inRangeWithCustomContains.kt
 ranges/forInCharSequenceWithCustomIterator.kt
 ranges/kt47492.kt
-ranges/stepped/unsigned/expression/until/illegalStepNegative.kt
-ranges/stepped/unsigned/expression/until/illegalStepNonConst.kt
-ranges/stepped/unsigned/expression/until/illegalStepThenLegalStep.kt
-ranges/stepped/unsigned/expression/until/illegalStepZero.kt
-ranges/stepped/unsigned/expression/until/legalStepThenIllegalStep.kt
-ranges/stepped/unsigned/literal/until/illegalStepNegative.kt
-ranges/stepped/unsigned/literal/until/illegalStepNonConst.kt
-ranges/stepped/unsigned/literal/until/illegalStepThenLegalStep.kt
-ranges/stepped/unsigned/literal/until/illegalStepZero.kt
-ranges/stepped/unsigned/literal/until/legalStepThenIllegalStep.kt
 reflection/classLiterals/annotationClassLiteral.kt
 reflection/classes/qualifiedNameOfStandardClasses.kt
 reflection/classes/qualifiedNameOfStandardClassesOther.kt
