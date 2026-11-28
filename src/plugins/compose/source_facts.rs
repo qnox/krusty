@@ -2176,10 +2176,17 @@ impl BodyScope<'_> {
             .iter()
             .map(
                 |&capture| match (&ir.exprs[capture as usize], memoization) {
-                    (
-                        &IrExpr::GetValue(index),
-                        Memoization::Remembered { caller } | Memoization::Instance { caller },
-                    ) => capture_kind(ir, caller, index),
+                    // A composable caller's local is refused: kotlinc's state of it is not pinned.
+                    (&IrExpr::GetValue(index), Memoization::Remembered { caller }) => {
+                        if (index as usize) < ir.functions[caller as usize].params.len() {
+                            CaptureKind::Parameter
+                        } else {
+                            CaptureKind::Opaque
+                        }
+                    }
+                    (&IrExpr::GetValue(index), Memoization::Instance { caller }) => {
+                        capture_kind(ir, caller, index)
+                    }
                     _ => CaptureKind::Parameter,
                 },
             )
