@@ -2,7 +2,8 @@
 // unconstrained `T`), and its inliner hands each inlined lambda parameter over as the `Object`
 // `invoke` takes. Each use casts the value back to the call-site type. The optimizer removes the
 // casts of values whose class it knows exactly, so they stay for `this` and for a subclass instance.
-// An empty one-line lambda keeps the `nop` of its closing brace on a line of its own.
+// An empty one-line lambda keeps the `nop` of its closing brace on a line of its own. A nullable
+// smart cast (`a is String?`) crosses the same erased boundary uncast.
 open class C(val tag: String) {
     var touched = 0
 
@@ -31,6 +32,10 @@ fun widened(d: D): C = d.apply<C> { touch() }
 
 fun widenedLet(d: D): C = d.let<C, C> { it }
 
+fun nullableAlso(a: CharSequence?): Any? = if (a is String?) a.also { } else null
+
+fun nullableLet(a: Any?): Any? = if (a is String?) a.let { it } else null
+
 fun box(): String {
     val c = C("c")
     if (c.applied() !== c || c.alsoTouched() !== c || c.touched != 2) return "FAIL: touched ${c.touched}"
@@ -40,5 +45,7 @@ fun box(): String {
     val d = D("d")
     if (widened(d) !== d || d.touched != 1) return "FAIL: widened"
     if (widenedLet(d).tag != "d") return "FAIL: widenedLet"
+    if (nullableAlso("n") != "n" || nullableAlso(null) != null) return "FAIL: nullableAlso"
+    if (nullableLet("l") != "l" || nullableLet(null) != null) return "FAIL: nullableLet"
     return "OK"
 }
