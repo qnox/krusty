@@ -15,9 +15,9 @@ use super::type_checks::{is_runtime_constructed, ThrowableOperands};
 use super::*;
 use krusty::types::TypeName;
 
-mod collection_members;
 #[cfg(test)]
 mod layout_tests;
+mod map_members;
 mod walking;
 pub(super) use walking::WalkMembers;
 
@@ -62,9 +62,7 @@ pub(super) mod ktype {
     /// the note on `KType`. Absent when it binds none.
     pub const REFERENCE_CONTEXT_OFFSETS: u32 = 176;
     pub const REFERENCE_CONTEXT_COUNT: u32 = 184;
-    /// The `List` members of a class of the program implementing it; see the note on `KType`.
-    pub const LIST_MEMBERS: u32 = 192;
-    pub const SIZE: usize = 200;
+    pub const SIZE: usize = 192;
 }
 
 const CLASS_NAMES_MEMBER: u32 = 1;
@@ -736,7 +734,6 @@ impl<'a> FileLowering<'a> {
             (ktype::QUALIFIED_NAME, qualified_name_data),
             (ktype::SIMPLE_NAME, simple_name_data),
             (ktype::MAP_MEMBERS, walk.map_members),
-            (ktype::LIST_MEMBERS, walk.list_members),
         ] {
             let Some(data) = data else {
                 continue;

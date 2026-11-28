@@ -137,11 +137,6 @@ typedef struct KType {
        0, for a reference binding none. */
     const uint32_t *reference_context_offsets;
     uint32_t reference_context_count;
-    /* On a class of the PROGRAM that implements `kotlin.collections.List`: the members the
-       runtime's list entry points answer, through typed virtual thunks, for an object they did
-       not make -- a library body's local class such as an array's `asList()` view, laid out in a
-       unit the call site never sees. NULL for every other type. Appended, like the fields above. */
-    const struct KListMembers *list_members;
 } KType;
 
 /* The read-only members of `Map` a program class answers, each a thunk with the fixed signature
@@ -158,18 +153,6 @@ typedef struct KMapMembers {
     struct KObject *(*entries)(struct KObject *self);
 } KMapMembers;
 
-/* The members of `List` a program class answers, each a thunk with the fixed signature written
-   here that dispatches to the class's override virtually. An element crosses as a reference, as
-   `List` declares it; `indexOf`, `lastIndexOf` and `contains` answer the special bridge's neutral
-   result for an argument the override cannot take. A member the class does not override itself
-   is NULL, and the runtime reports it by name. */
-typedef struct KListMembers {
-    struct KObject *(*get)(struct KObject *self, kt_int index);
-    kt_int (*index_of)(struct KObject *self, struct KObject *element);
-    kt_int (*last_index_of)(struct KObject *self, struct KObject *element);
-    kt_boolean (*contains)(struct KObject *self, struct KObject *element);
-} KListMembers;
-
 /* The compiler writes each descriptor field at a fixed offset (`ktype` in
    `codegen/lower/objects.rs`); these pin the C layout to the same numbers. */
 _Static_assert(offsetof(KType, class_names) == 148, "KType.class_names moved");
@@ -178,10 +161,8 @@ _Static_assert(offsetof(KType, itable) == 160, "KType.itable moved");
 _Static_assert(offsetof(KType, map_members) == 168, "KType.map_members moved");
 _Static_assert(offsetof(KType, reference_context_offsets) == 176, "KType.reference_context_offsets moved");
 _Static_assert(offsetof(KType, reference_context_count) == 184, "KType.reference_context_count moved");
-_Static_assert(offsetof(KType, list_members) == 192, "KType.list_members moved");
-_Static_assert(sizeof(KType) == 200, "KType changed size");
+_Static_assert(sizeof(KType) == 192, "KType changed size");
 _Static_assert(offsetof(KMapMembers, entries) == 56, "KMapMembers.entries moved");
-_Static_assert(offsetof(KListMembers, contains) == 24, "KListMembers.contains moved");
 
 /* What a descriptor publishes about its class's names, in `KType.class_names`.
 
@@ -510,6 +491,11 @@ kt_boolean kt_list_is_empty(KRef list);
 /* `Collection.size`: a list's, a set's or a map view's, decided by the descriptor. */
 kt_int kt_collection_size(KRef collection);
 kt_int kt_collection_size_or_default(KRef iterable, kt_int fallback);
+/* Whether `value` is a collection this runtime made -- a list, a view of one, a list's iterator, a
+   map, a set or a view of a map -- rather than an object of a class of the program, whichever unit laid that
+   class out. A call through a collection interface asks this first: the runtime's entry point
+   answers for what the runtime made, and the interface's own dispatch for everything else. */
+kt_boolean kt_is_runtime_collection(KRef value);
 kt_boolean kt_collection_is_empty(KRef collection);
 kt_boolean kt_collection_contains_all(KRef self, KRef elements);
 /* `MutableCollection`'s members over a growable list or a set (or a map view, which removes and

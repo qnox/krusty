@@ -688,6 +688,26 @@ impl BodyLowering<'_, '_, '_> {
                         {
                             return realized;
                         }
+                        // A collection interface member on an object any unit may have made:
+                        // the runtime's own collections answer through its entry point, and
+                        // every other object through the member's interface stub.
+                        if let Some(realized) = self.collection_interface_member(
+                            *target,
+                            signature,
+                            super::implementor_dispatch::InterfaceMemberCall {
+                                receiver,
+                                args,
+                                ret: *ret,
+                                physical: &realization.physical_params,
+                            },
+                            realization
+                                .owner_is_interface
+                                .then(|| realization.member_slot_identity())
+                                .flatten()
+                                .map(|identity| (identity, params.as_slice())),
+                        ) {
+                            return realized;
+                        }
                         if let Some(realized) =
                             self.iteration_member(signature, receiver, args, *ret)
                         {

@@ -21,8 +21,6 @@ pub(in super::super) struct WalkMembers {
     pub(in super::super) collection_size: Option<FuncId>,
     /// The table of `Map` member thunks of a class implementing `kotlin.collections.Map`.
     pub(in super::super) map_members: Option<DataId>,
-    /// The table of `List` member thunks of a class implementing `kotlin.collections.List`.
-    pub(in super::super) list_members: Option<DataId>,
 }
 
 /// The same, as the SLOTS the declaration pass reads out of the override edges, before the thunks
@@ -129,10 +127,7 @@ impl FileLowering<'_> {
             members.char_at = Some(thunk);
         }
         members.collection_size = self.define_collection_size(class, base)?;
-        members.map_members =
-            self.define_collection_members(class, base, collection_members::MemberTable::Map)?;
-        members.list_members =
-            self.define_collection_members(class, base, collection_members::MemberTable::List)?;
+        members.map_members = self.define_map_members(class, base)?;
         Ok(members)
     }
 
