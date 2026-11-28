@@ -23,6 +23,7 @@ mod context_clause;
 mod debug_lines;
 mod declaration_bodies;
 mod declaration_modifiers;
+mod declaration_names;
 mod declaration_stream;
 mod destructuring;
 mod enum_entries;
@@ -3804,19 +3805,6 @@ impl<'a> Parser<'a> {
             .assignment_target_spans
             .insert(statement.0, target);
         statement
-    }
-
-    fn ident_or_error(&mut self, what: &str) -> String {
-        self.declaration_name_span = self.tok().span;
-        if self.at(TokenKind::Ident) {
-            let n = self.text().to_string();
-            self.bump();
-            n
-        } else {
-            self.diags
-                .error(self.tok().span, format!("expected {what}"));
-            "<error>".to_string()
-        }
     }
 }
 

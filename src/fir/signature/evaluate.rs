@@ -5,7 +5,9 @@ use crate::integer_constant::IntegerConstant;
 use crate::types::TyKind;
 
 mod declaration_publication;
+mod implicit_it;
 mod postponed_arguments;
+use implicit_it::ImplicitItDecision;
 
 /// How many nested expression nodes the evaluation descends between checks of the remaining
 /// stack. Checking before the first node and then every 64 nested nodes keeps the largest
@@ -326,6 +328,9 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 // `it` is deliberately omitted here; it only becomes a parameter when a
                 // functional expectation supplies that parameter.
                 if implicit_it {
+                    let read = graph.operands(parameters)[0];
+                    let decision = ImplicitItDecision::without_own(read, result, graph);
+                    record_implicit_it(read, decision, graph, memo);
                     let result =
                         evaluate_expression(semantics, result, graph, demand, memo, computing)?;
                     let ty = semantics.make_contextual_function_type(
@@ -402,6 +407,22 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             for (index, parameter) in graph.operands(parameters).iter().copied().enumerate() {
                 let expected_value = expected_values.get(index).copied();
                 let actual = match graph.expr(parameter) {
+                    Some(SigExpr::ImplicitIt { .. }) => {
+                        let decision = match expected_value {
+                            Some(value) => {
+                                ImplicitItDecision::Own(ResolvedTy::new(value).map_err(|_| {
+                                    semantics.missing_signature_diagnostic(contextual_declaration)
+                                })?)
+                            }
+                            None => ImplicitItDecision::without_own(parameter, result, graph),
+                        };
+                        let own = matches!(decision, ImplicitItDecision::Own(_));
+                        let recorded = record_implicit_it(parameter, decision, graph, memo);
+                        match recorded {
+                            Some(ty) if own => ty,
+                            _ => continue,
+                        }
+                    }
                     Some(SigExpr::ContextualParameter(declaration)) => {
                         let Some(expected_value) = expected_value else {
                             continue;
@@ -1332,6 +1353,36 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             }
         }
 
+        /// Record the `it` an arrow-less literal's reads name. Returns the recorded type.
+        fn record_implicit_it(
+            read: SigExprId,
+            decision: ImplicitItDecision,
+            graph: &SignatureGraph,
+            memo: &mut HashMap<SigExprId, ResolvedTy>,
+        ) -> Option<ResolvedTy> {
+            let Some(SigExpr::ImplicitIt {
+                parameter,
+                enclosing,
+            }) = graph.expr(read)
+            else {
+                return None;
+            };
+            memo.remove(&read);
+            memo.remove(&parameter);
+            let recorded = match (decision, enclosing) {
+                (ImplicitItDecision::Own(own), _) => Some(own),
+                // The enclosing literal is evaluated first and recorded its own decision; when
+                // that literal has no `it` either, this read names none.
+                (ImplicitItDecision::Enclosing, Some(enclosing)) => memo.get(&enclosing).copied(),
+                (ImplicitItDecision::Enclosing | ImplicitItDecision::Unread, _) => None,
+            };
+            if let Some(ty) = recorded {
+                memo.insert(parameter, ty);
+                memo.insert(read, ty);
+            }
+            recorded
+        }
+
         fn evaluate_expression<S: SignatureSemantics>(
             semantics: &S,
             expression: SigExprId,
@@ -1777,6 +1828,11 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                             suspend,
                         )
                     }
+                    // The literal's evaluation records which `it` this read names; an
+                    // undecided read has no type yet.
+                    SigExpr::ImplicitIt { parameter, .. } => {
+                        evaluate_expression(semantics, parameter, graph, demand, memo, computing)
+                    }
                     SigExpr::ContextualParameter(declaration)
                     | SigExpr::ContextualReceiver(declaration) => {
                         Err(semantics.missing_signature_diagnostic(declaration))
@@ -1786,6 +1842,14 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                             .operands(parameters)
                             .iter()
                             .find_map(|parameter| match graph.expr(*parameter) {
+                                Some(SigExpr::ImplicitIt { parameter, .. }) => {
+                                    match graph.expr(parameter) {
+                                        Some(SigExpr::ContextualParameter(declaration)) => {
+                                            Some(declaration)
+                                        }
+                                        _ => None,
+                                    }
+                                }
                                 Some(SigExpr::ContextualParameter(declaration)) => {
                                     Some(declaration)
                                 }

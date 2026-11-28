@@ -3159,7 +3159,6 @@ compiler/testData/diagnostics/tests/inference/regressions/kt2179.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt2200.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt2283.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt2286.kt
-compiler/testData/diagnostics/tests/inference/regressions/kt2324.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt2407.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt2445.kt
 compiler/testData/diagnostics/tests/inference/regressions/kt2459.kt
@@ -4663,7 +4662,6 @@ compiler/testData/diagnostics/tests/platformTypes/genericVarianceViolation/smart
 compiler/testData/diagnostics/tests/platformTypes/genericVarianceViolation/strangeVariance.kt
 compiler/testData/diagnostics/tests/platformTypes/genericVarianceViolation/valueFromJava.kt
 compiler/testData/diagnostics/tests/platformTypes/getParentOfType.kt
-compiler/testData/diagnostics/tests/platformTypes/intVsIntegerAmbiguity.kt
 compiler/testData/diagnostics/tests/platformTypes/javaMappedCtors.kt
 compiler/testData/diagnostics/tests/platformTypes/mappingWithWrongNullability.kt
 compiler/testData/diagnostics/tests/platformTypes/mappingWithWrongNullabilityLegacy.kt
@@ -5158,7 +5156,6 @@ compiler/testData/diagnostics/tests/resolve/priority/kt10219.kt
 compiler/testData/diagnostics/tests/resolve/priority/kt9965.kt
 compiler/testData/diagnostics/tests/resolve/priority/memberVsLocalExt.kt
 compiler/testData/diagnostics/tests/resolve/priority/samConstructorVsFunction.kt
-compiler/testData/diagnostics/tests/resolve/priority/staticVsImplicitReceiverMember.kt
 compiler/testData/diagnostics/tests/resolve/priority/synthesizedMembersVsExtension.kt
 compiler/testData/diagnostics/tests/resolve/priority/synthesizedMembersVsExtensionOld.kt
 compiler/testData/diagnostics/tests/resolve/privateConstructorVsInapplicableTopLevel.kt
@@ -6733,7 +6730,6 @@ compiler/testData/diagnostics/testsWithStdLib/coroutines/returnLabelForBuiltInSu
 compiler/testData/diagnostics/testsWithStdLib/coroutines/suspendConflictsWithNoSuspend.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/suspendCoroutineOrReturn.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/suspendExternalFunctions.kt
-compiler/testData/diagnostics/testsWithStdLib/coroutines/suspendFunctionType/inference2.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/suspendFunctionType/inline.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/suspendFunctionType/invoke.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/suspendFunctionType/lambdaInOverriddenValInitializer.kt

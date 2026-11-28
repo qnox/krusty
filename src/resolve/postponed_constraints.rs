@@ -52,6 +52,10 @@ pub(super) struct PostponedCallConstraints {
     /// as the callee's type variable cannot answer member lookup yet; the finalized recheck either
     /// resolves the expression or emits the error from its concrete receiver.
     pub(super) deferred_member_errors: Vec<(ExprId, Span, String)>,
+    /// Formals an earlier lambda was analyzed with as still-open inputs (kotlinc's PCLA). What
+    /// that body constrains them to stays postponed with the call rather than fixing the inputs
+    /// of the lambdas after it.
+    builder_inputs: crate::fx_hash::HashSet<crate::types::TyParamName>,
 }
 
 impl PostponedCallConstraints {
@@ -869,12 +873,12 @@ impl Checker<'_> {
     /// `selector = { it }` solving `R = String` types `printer: (R, R) -> String` as
     /// `(String, String) -> String`; leaving `R` open would type the body against a variable that
     /// is already known. A solution that still mentions one of the call's own formals is not proper
-    /// yet and stays open.
+    /// yet and stays open, and so does a formal an earlier lambda already took as an open input.
     pub(super) fn fix_postponed_lambda_inputs(
         &self,
         formals: &[crate::types::TyParamName],
         inputs: &[Ty],
-        constraints: &PostponedCallConstraints,
+        constraints: &mut PostponedCallConstraints,
         bindings: &mut crate::symbol_resolver::GSigBinds,
     ) {
         for formal in formals {
@@ -888,7 +892,9 @@ impl Checker<'_> {
             let Some(solution) = self
                 .postponed_solution(constraints, formal)
                 .filter(|solution| !ty_mentions_param(*solution, formals))
+                .filter(|_| !constraints.builder_inputs.contains(formal))
             else {
+                constraints.builder_inputs.insert(*formal);
                 continue;
             };
             crate::trace_compiler!(
@@ -896,6 +902,91 @@ impl Checker<'_> {
                 "fixed lambda input formal={formal} solution={solution:?}",
             );
             bindings.insert(crate::types::TyParamName::new(formal), solution);
+        }
+    }
+
+    /// The parameter a lambda argument's callee declares for it: a packed vararg lambda is typed
+    /// by the array's element.
+    pub(super) fn declared_lambda_parameter(
+        &self,
+        signature: &Signature,
+        parameter: usize,
+        argument: ExprId,
+    ) -> Option<Ty> {
+        let declared = *signature.generic_sig.as_ref()?.params.get(parameter)?;
+        if signature.vararg_index == Some(parameter) && !self.file.is_spread_arg(argument) {
+            return Some(declared.array_read_elem().unwrap_or(declared));
+        }
+        Some(declared)
+    }
+
+    /// [`Self::fix_postponed_lambda_inputs`] for a lambda argument whose callee declares
+    /// `declared`: its inputs are that function type's parameters.
+    pub(super) fn fix_declared_lambda_inputs(
+        &self,
+        signature: &Signature,
+        argument: ExprId,
+        declared: Option<Ty>,
+        constraints: &mut PostponedCallConstraints,
+        bindings: &mut crate::symbol_resolver::GSigBinds,
+    ) {
+        let (Some(generic), Expr::Lambda { .. }) =
+            (signature.generic_sig.as_ref(), self.file.expr(argument))
+        else {
+            return;
+        };
+        if let Some(TyKind::Fun(function)) = declared.map(|ty| ty.non_null().kind()) {
+            self.fix_postponed_lambda_inputs(
+                &generic.formals,
+                &function.params,
+                constraints,
+                bindings,
+            );
+        }
+    }
+
+    /// Constrain the call's open `formals` by a checked lambda's result against the result its
+    /// callee declares, so the lambdas after it see what it solved.
+    pub(super) fn constrain_declared_lambda_result(
+        &self,
+        constraints: &mut PostponedCallConstraints,
+        argument: ExprId,
+        call_site: crate::types::CallSiteIdentity,
+        formals: &[crate::types::TyParamName],
+        declared: Option<Ty>,
+        checked: Ty,
+    ) {
+        if let Some(declared) = declared {
+            let checked = crate::types::ty_declared_at_call(checked, call_site);
+            constraints.constrain_function_result(
+                &self.fed_source(),
+                argument,
+                formals,
+                declared,
+                checked,
+            );
+        }
+    }
+
+    /// Publish an ordinary argument passed through a bare callable type variable so arguments that
+    /// follow it see the same shared call constraint. A structured parameter is left to ordinary
+    /// overload inference; only a bare variable gives this argument a complete, non-contextualized
+    /// value type at this point.
+    pub(super) fn publish_uncontextualized_argument_binding(
+        formals: &[crate::types::TyParamName],
+        parameter: Option<Ty>,
+        actual: Ty,
+        bindings: &mut crate::symbol_resolver::GSigBinds,
+    ) {
+        let Some(TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) =
+            parameter.map(|ty| ty.non_null().kind())
+        else {
+            return;
+        };
+        if formals.contains(&formal) {
+            bindings
+                .entry(crate::types::TyParamName::new(&formal))
+                .or_insert(actual);
         }
     }
 
