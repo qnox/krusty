@@ -4,6 +4,10 @@ import kotlinx.atomicfu.AtomicInt
 import kotlinx.atomicfu.AtomicRef
 import kotlinx.atomicfu.atomic
 
+interface Handle {
+    fun id(): Int
+}
+
 class Counter {
     private val total = atomic(0)
     private val last = atomic<String?>(null)
@@ -13,6 +17,16 @@ class Counter {
     fun next(): Int = total.incrementAndGet()
 
     fun rename(next: String): String? = last.exchange(next)
+}
+
+class Holder {
+    private val _handle = atomic<Handle?>(null)
+
+    var handle: Handle?
+        get() = _handle.value
+        set(value) {
+            _handle.value = value
+        }
 }
 
 internal inline fun AtomicInt.advance(delta: Int): Int {

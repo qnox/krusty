@@ -404,7 +404,7 @@ impl<'a> BodyLowering<'a> {
         let reference_ty = self.ty(self.arena.expr(reference), "atomic field reference")?;
         let held = matches!(
             self.arena.expr(reference).kind,
-            KlibIrExprKind::RichPropertyReference { .. }
+            KlibIrExprKind::RichPropertyReference { .. } | KlibIrExprKind::PropertyReference { .. }
         );
         let reference = if held {
             self.field_designation(self.arena.expr(reference), reference_ty)?
@@ -429,9 +429,19 @@ impl<'a> BodyLowering<'a> {
                 ))
             }
         };
+        // Each operand is a value of the intrinsic's parameter, the field's storage type: a value
+        // of a subtype, as atomicfu stores a reference into its `Any?` field, crosses into it.
         let operands = operands
             .into_iter()
-            .map(|operand| self.operand(operand, operand_ty))
+            .map(|operand| {
+                let lowered = self.operand(operand, operand_ty)?;
+                Ok(if self.lowered_type(lowered) == operand_ty {
+                    lowered
+                } else {
+                    let coerced = self.coercion(lowered, operand_ty);
+                    self.typed(coerced, operand_ty)
+                })
+            })
             .collect::<Lowered<Vec<_>>>()?;
         let through = self.ir.add_expr(IrExpr::Checked(Box::new(
             IrCheckedOperation::AtomicFieldThrough {
@@ -447,20 +457,72 @@ impl<'a> BodyLowering<'a> {
         Ok(through)
     }
 
+    /// `value`, of the type `actual`, as a value of `expected` when it is what an atomic access of
+    /// a reference atomic returns: atomicfu stores such an atomic in an `Any?` field and hands
+    /// the value an access returns, cast to that `Any?` at most, to the atomic's declared type
+    /// without a cast of its own. kotlinc's backends read the reference as it is; the value
+    /// crosses with the coercion a generic declaration's boundary places.
+    pub(super) fn atomic_reference_read(
+        &mut self,
+        value: ExprId,
+        actual: Ty,
+        expected: Ty,
+    ) -> Option<ExprId> {
+        if actual != Ty::nullable(Ty::obj("kotlin/Any")) || !expected.is_reference() {
+            return None;
+        }
+        let mut read = value;
+        loop {
+            match self.ir.expr(read) {
+                IrExpr::Checked(operation)
+                    if matches!(
+                        **operation,
+                        IrCheckedOperation::AtomicFieldThrough { .. }
+                            | IrCheckedOperation::AtomicField { .. }
+                    ) =>
+                {
+                    break;
+                }
+                IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::Cast,
+                    arg,
+                    type_operand,
+                } if *type_operand == actual => read = *arg,
+                _ => return None,
+            }
+        }
+        let coerced = self.coercion(value, expected);
+        Some(self.typed(coerced, expected))
+    }
+
     /// The field a property reference to a property of this body's class designates, on the
     /// one receiver the reference binds: the only use a library body makes of such a reference
-    /// is as the receiver of an atomic access, directly or as a lambda's result.
+    /// is as the receiver of an atomic access, directly or as a lambda's result. A producer
+    /// without rich callable references in KLIBs serializes the reference as a plain property
+    /// reference whose access binds the receiver; one with them as a rich reference with its
+    /// bound values.
     pub(super) fn field_designation(&mut self, reference: &KlibIrExpr, ty: Ty) -> Lowered<ExprId> {
-        let KlibIrExprKind::RichPropertyReference {
-            bound_values,
-            reflection_target: Some(property),
-            setter: Some(_),
-            ..
-        } = &reference.kind
-        else {
-            return unsupported("a property reference");
+        let (property, bound) = match &reference.kind {
+            KlibIrExprKind::RichPropertyReference {
+                bound_values,
+                reflection_target: Some(property),
+                setter: Some(_),
+                ..
+            } => (property, bound_values.clone()),
+            KlibIrExprKind::PropertyReference {
+                access,
+                setter: Some(_),
+                ..
+            } => (
+                &access.symbol,
+                super::calls::arguments(access)
+                    .into_iter()
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap_or_default(),
+            ),
+            _ => return unsupported("a property reference"),
         };
-        let &[bound] = bound_values.as_slice() else {
+        let &[bound] = bound.as_slice() else {
             return unsupported(
                 "an atomic access through a property reference without one bound receiver",
             );
