@@ -1,5 +1,4 @@
-// KOTLINC_VERSION: [2.5.0,)
-// LANGUAGE: +CompanionBlocks +CompanionExtensions
+// LANGUAGE: +CompanionBlocksAndExtensions
 // A companion extension property is associated with its classifier, not called on a receiver
 // value: files before and after the declaring one read and write it with no receiver operand,
 // beside an ordinary extension property of the same classifier.
