@@ -23,7 +23,70 @@ impl Checker<'_> {
         seen
     }
 
-    pub(super) fn when_sealed_missing_branches(
+    /// The branches an `else`-less subject `when` lacks, by the first rule that recognizes its
+    /// subject: a type check covering the whole subject type, a sealed hierarchy, an enum, or
+    /// `Boolean`. `None` when no rule applies; an empty list when the branches are exhaustive.
+    pub(super) fn when_missing_branches(
+        &self,
+        scope: &CheckerScope<'_>,
+        subject_expression: Option<ExprId>,
+        subject_ty: Option<Ty>,
+        arms: &[WhenArm],
+    ) -> Option<Vec<String>> {
+        self.when_type_check_missing_branches(subject_ty, arms)
+            .or_else(|| {
+                self.when_sealed_missing_branches(scope, subject_expression, subject_ty, arms)
+            })
+            .or_else(|| {
+                self.when_enum_missing_branches(scope, subject_expression, subject_ty, arms)
+            })
+            .or_else(|| {
+                self.when_boolean_missing_branches(scope, subject_expression, subject_ty, arms)
+            })
+    }
+
+    /// A subject `when` whose unguarded `is T` branch accepts every value of the subject's type is
+    /// exhaustive: `when (x: Any) { …; is Any -> … }`. The subject's `null` is accepted by `is T?`
+    /// or by a `null` branch.
+    fn when_type_check_missing_branches(
+        &self,
+        subject_ty: Option<Ty>,
+        arms: &[WhenArm],
+    ) -> Option<Vec<String>> {
+        let subject = subject_ty?;
+        let context = crate::assignable::TyCtx::new();
+        let mut covers_null = !subject.is_nullable();
+        let mut covers_values = false;
+        for condition in arms
+            .iter()
+            .filter(|arm| arm.guard.is_none())
+            .flat_map(|arm| &arm.conditions)
+        {
+            let condition = condition.expression();
+            match self.file.expr(condition) {
+                Expr::Is {
+                    ty, negated: false, ..
+                } => {
+                    let Some(resolved) = self
+                        .resolved_type_tys
+                        .get(&(ty.span.lo, ty.span.hi))
+                        .copied()
+                    else {
+                        continue;
+                    };
+                    if crate::assignable::is_subtype(&context, self, subject.non_null(), resolved) {
+                        covers_values = true;
+                        covers_null |= resolved.is_nullable();
+                    }
+                }
+                Expr::NullLit => covers_null = true,
+                _ => {}
+            }
+        }
+        (covers_values && covers_null).then(Vec::new)
+    }
+
+    fn when_sealed_missing_branches(
         &self,
         scope: &CheckerScope<'_>,
         subject_expression: Option<ExprId>,
@@ -48,6 +111,10 @@ impl Checker<'_> {
         let descendants = self.sealed_descendants(&subclasses);
 
         let mut covered = crate::fx_hash::HashSet::default();
+        // An enum class under a sealed subject is a leaf covered either by `is E` or by naming every
+        // one of its entries.
+        let mut covered_entries: crate::fx_hash::HashSet<(TypeName, String)> =
+            crate::fx_hash::HashSet::default();
         let mut covers_null = false;
         if let Some(path) = subject_expression.and_then(|subject| self.expr_access_path(subject)) {
             for exclusion in self.lookup_flow_exclusions(scope, &path) {
@@ -59,6 +126,11 @@ impl Checker<'_> {
                         covered.insert(classifier);
                     }
                     FlowExclusion::Null => covers_null = true,
+                    FlowExclusion::EnumEntry { classifier, name }
+                        if descendants.contains(&classifier) =>
+                    {
+                        covered_entries.insert((classifier, name));
+                    }
                     FlowExclusion::Boolean(_) | FlowExclusion::EnumEntry { .. } => {}
                     FlowExclusion::Classifier(_) | FlowExclusion::Singleton(_) => {}
                 }
@@ -70,6 +142,14 @@ impl Checker<'_> {
             .flat_map(|arm| &arm.conditions)
         {
             let condition = condition.expression();
+            if let Some(entry) = self
+                .resolved_enum_entries
+                .get(&condition)
+                .filter(|entry| descendants.contains(&entry.classifier))
+            {
+                covered_entries.insert((entry.classifier, entry.name.clone()));
+                continue;
+            }
             match self.file.expr(condition) {
                 Expr::Is {
                     ty, negated: false, ..
@@ -111,10 +191,20 @@ impl Checker<'_> {
             checker: &Checker<'_>,
             subclass: TypeName,
             covered: &crate::fx_hash::HashSet<TypeName>,
+            covered_entries: &crate::fx_hash::HashSet<(TypeName, String)>,
             depth: u32,
             out: &mut Vec<TypeName>,
         ) {
             if covered.contains(&subclass) {
+                return;
+            }
+            if checker.resolved_type_name(subclass).is_some_and(|shape| {
+                !shape.enum_entries.is_empty()
+                    && shape
+                        .enum_entries
+                        .iter()
+                        .all(|entry| covered_entries.contains(&(subclass, entry.clone())))
+            }) {
                 return;
             }
             let nested: Vec<TypeName> = (depth < 16)
@@ -127,12 +217,19 @@ impl Checker<'_> {
                 return;
             }
             for child in nested {
-                uncovered_leaves(checker, child, covered, depth + 1, out);
+                uncovered_leaves(checker, child, covered, covered_entries, depth + 1, out);
             }
         }
         let mut uncovered = Vec::new();
         for subclass in subclasses {
-            uncovered_leaves(self, subclass, &covered, 0, &mut uncovered);
+            uncovered_leaves(
+                self,
+                subclass,
+                &covered,
+                &covered_entries,
+                0,
+                &mut uncovered,
+            );
         }
         uncovered.sort_by(|left, right| left.path_cmp(*right));
         uncovered.dedup();
@@ -156,7 +253,7 @@ impl Checker<'_> {
         Some(missing)
     }
 
-    pub(super) fn when_enum_missing_branches(
+    fn when_enum_missing_branches(
         &self,
         scope: &CheckerScope<'_>,
         subject_expression: Option<ExprId>,
@@ -213,7 +310,7 @@ impl Checker<'_> {
         Some(missing)
     }
 
-    pub(super) fn when_boolean_missing_branches(
+    fn when_boolean_missing_branches(
         &self,
         scope: &CheckerScope<'_>,
         subject_expression: Option<ExprId>,

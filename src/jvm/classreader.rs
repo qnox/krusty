@@ -311,6 +311,9 @@ pub struct ClassInfo {
     /// constant names). Empty when none is declared.
     pub java_targets: Vec<String>,
     pub inner_classes: Vec<InnerClassRef>,
+    /// The `PermittedSubclasses` attribute: the direct subclasses a Java `sealed` class or interface
+    /// permits, in declaration order. Empty for a class that is not sealed.
+    pub permitted_subclasses: TypeNameList,
     /// For an annotation type: the default each element declares, in method order.
     pub annotation_element_defaults: Vec<(Box<str>, AnnotationElementDefault)>,
     /// An inner class's packed `@Metadata`, kept until [`Self::within_outer`] decodes it in its
@@ -1220,6 +1223,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         kotlin_targets: attrs.kotlin_targets,
         java_targets: attrs.java_targets,
         inner_classes: attrs.inner_classes,
+        permitted_subclasses: attrs.permitted_subclasses.into(),
         annotation_element_defaults,
         inner_metadata,
     })
@@ -1245,6 +1249,7 @@ struct ClassAttrs {
     kotlin_targets: Vec<String>,
     java_targets: Vec<String>,
     inner_classes: Vec<InnerClassRef>,
+    permitted_subclasses: Vec<String>,
 }
 
 /// Parse class-level attributes: `RuntimeVisibleAnnotations` → @kotlin.Metadata `d1`/`d2` and (for an
@@ -1301,6 +1306,16 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
                     name: (simple_name != 0).then(|| utf8(simple_name).to_string()),
                     access,
                 });
+            }
+            continue;
+        }
+        if name == "PermittedSubclasses" {
+            let Ok(count) = attr.u2() else { continue };
+            for _ in 0..count {
+                let Ok(index) = attr.u2() else { break };
+                if let Some(C::Class(name_index)) = cp.get(index as usize) {
+                    out.permitted_subclasses.push(utf8(*name_index).to_string());
+                }
             }
             continue;
         }
@@ -2186,6 +2201,33 @@ mod tests {
         assert_eq!(ci.methods.len(), 1);
         assert_eq!(ci.methods[0].name, "add");
         assert_eq!(ci.methods[0].descriptor, "(II)I");
+    }
+
+    #[test]
+    fn reads_the_permitted_subclasses_of_a_sealed_class_in_order() {
+        let mut cw = ClassWriter::new("demo/Base", "java/lang/Object");
+        cw.set_permitted_subclasses(vec!["demo/B".to_string(), "demo/A".to_string()]);
+        let ci = parse_class(&cw.finish()).unwrap();
+        assert_eq!(
+            ci.permitted_subclasses
+                .iter()
+                .map(TypeName::render)
+                .collect::<Vec<_>>(),
+            ["demo/B", "demo/A"]
+        );
+        let plain =
+            parse_class(&ClassWriter::new("demo/Plain", "java/lang/Object").finish()).unwrap();
+        assert!(plain.permitted_subclasses.is_empty());
+    }
+
+    #[test]
+    fn a_java_enum_with_constant_bodies_publishes_no_sealed_subclasses() {
+        let mut cw = ClassWriter::new("demo/E", "java/lang/Enum");
+        cw.set_access(super::ACC_ENUM | 0x0001 | 0x0020);
+        cw.set_permitted_subclasses(vec!["demo/E$1".to_string(), "demo/E$2".to_string()]);
+        let ci = parse_class(&cw.finish()).unwrap();
+        assert_eq!(ci.permitted_subclasses.len(), 2);
+        assert!(crate::jvm::metadata::class_sealed_subclasses(&ci).is_empty());
     }
 
     #[test]

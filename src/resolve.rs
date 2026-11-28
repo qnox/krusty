@@ -44504,9 +44504,7 @@ impl<'a> Checker<'a> {
             let missing = if has_else {
                 None
             } else {
-                self.when_sealed_missing_branches(scope, subject, subj_ty, &arms)
-                    .or_else(|| self.when_enum_missing_branches(scope, subject, subj_ty, &arms))
-                    .or_else(|| self.when_boolean_missing_branches(scope, subject, subj_ty, &arms))
+                self.when_missing_branches(scope, subject, subj_ty, &arms)
             };
             let exhaustive =
                 has_else || missing.as_ref().is_some_and(|branches| branches.is_empty());

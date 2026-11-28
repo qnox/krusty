@@ -3876,7 +3876,6 @@ compiler/testData/diagnostics/tests/jvm/multifileClasses/jvmSynthetic.kt
 compiler/testData/diagnostics/tests/jvm/multipleBigArityFunsImplemented.kt
 compiler/testData/diagnostics/tests/jvm/nothingToOverrideWithRawParameter.kt
 compiler/testData/diagnostics/tests/jvm/rawTypes/simple.kt
-compiler/testData/diagnostics/tests/jvm/sealed/sealedClassesAndInterfaces.kt
 compiler/testData/diagnostics/tests/jvm/sealed/sealedInheritorInDifferentModule.kt
 compiler/testData/diagnostics/tests/jvm/signatureConflictHiddenByTypeParameter.kt
 compiler/testData/diagnostics/tests/jvm/suspensionPointInMonitor.kt
@@ -5326,7 +5325,6 @@ compiler/testData/diagnostics/tests/sealed/WhenOnEmptySealed.kt
 compiler/testData/diagnostics/tests/sealed/inheritorInDifferentModule.kt
 compiler/testData/diagnostics/tests/sealed/interfaces/inheritorInDifferentModule.kt
 compiler/testData/diagnostics/tests/sealed/interfaces/sealedFunInterface.kt
-compiler/testData/diagnostics/tests/sealed/interfaces/simpleSealedInterface.kt
 compiler/testData/diagnostics/tests/sealed/interfaces/triangleHierarchy.kt
 compiler/testData/diagnostics/tests/sealed/nonExhaustiveByNegation.kt
 compiler/testData/diagnostics/tests/sealed/privateSealedConstructors_error.kt

@@ -2359,7 +2359,7 @@ impl JvmLibraries {
                 alias_target: None,
                 own_type_parameter_count,
                 type_parameters,
-                sealed_subclasses: metadata::class_sealed_subclasses(&ci).into(),
+                sealed_subclasses: metadata::class_sealed_subclasses(&ci),
                 enum_entries,
                 enum_entries_accessor,
                 named_parameter_lists,
