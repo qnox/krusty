@@ -26,7 +26,6 @@ annotations/instances/multimoduleTypeParams.kt
 annotations/instances/nested.kt
 annotations/instances/repeatableInstantiation.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
-annotations/instances/unsignedAndBooleanArrays.kt
 annotations/instances/varargInAnnotationParameterInstantiation.kt
 annotations/parameters.kt
 annotations/recursiveAnnotationWithVarargAndDefaultValue.kt
@@ -129,7 +128,6 @@ bridges/delegationComplex.kt
 bridges/delegationComplexWithList.kt
 bridges/fakeCovariantOverride.kt
 bridges/fakeGenericCovariantOverride.kt
-bridges/fakeGenericCovariantOverrideWithDelegation.kt
 bridges/fakeOverride/abstractFakeOverride.kt
 bridges/fakeOverride/fakeOverrideAbstractAndConcreteDeclarations.kt
 bridges/fakeOverride/fakeOverrideInheritsBridgeFromFakeOverride.kt
@@ -222,7 +220,6 @@ callableReference/adaptedReferences/varargWithDefaultValue.kt
 callableReference/arrayConstructor.kt
 callableReference/arrayConstructorArgument.kt
 callableReference/arrayOf.kt
-callableReference/arrayOfNulls.kt
 callableReference/bound/arrayConstructorArgument.kt
 callableReference/bound/arrayGetIntrinsic.kt
 callableReference/bound/boundPrimitiveAndReferenceReceiverSharedClassSplit.kt
@@ -355,16 +352,13 @@ casts/unitAsSafeAny.kt
 checkcastOptimization/kt19246.kt
 classDelegation/generic.kt
 classDelegation/method.kt
-classDelegation/withBridge.kt
 classLiteral/bound/primitives.kt
 classLiteral/bound/sideEffect.kt
 classes/comanionObjectFieldVsClassField.kt
 classes/defaultObjectSameNamesAsInOuter.kt
-classes/delegation4.kt
 classes/delegationGenericArg.kt
 classes/delegationGenericArgUpperBound.kt
 classes/delegationGenericLongArg.kt
-classes/delegationMethodsWithArgs.kt
 classes/inheritSetAndHashSet.kt
 classes/initializerBlockResetToDefault.kt
 classes/kt1120.kt
@@ -375,9 +369,7 @@ classes/kt2390.kt
 classes/kt2417.kt
 classes/kt2477.kt
 classes/kt2566_2.kt
-classes/kt285.kt
 classes/kt343.kt
-classes/kt3546.kt
 classes/kt471.kt
 classes/kt496.kt
 classes/kt500.kt
@@ -1189,7 +1181,6 @@ coroutines/withReceiver.kt
 cycles/cycle_for.kt
 dataClasses/components/kt49812.kt
 dataClasses/copy/kt3033.kt
-dataClasses/dataClassWithManyFields.kt
 dataClasses/dnnInPropertyType.kt
 dataClasses/propertyOfDnnType.kt
 dataClasses/toString/arrayParams.kt
@@ -1200,23 +1191,18 @@ defaultArguments/captureInTailrec.kt
 defaultArguments/constructor/anonymousObjectAsDefaultParam.kt
 defaultArguments/constructor/doubleDefArgs1InnerClass.kt
 defaultArguments/constructor/enumWithTwoDoubleDefArgs.kt
-defaultArguments/constructor/innerClass32Args.kt
 defaultArguments/constructor/kt3060.kt
 defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
 defaultArguments/function/defaultLambdaInline.kt
-defaultArguments/function/extensionFunctionManyArgs.kt
 defaultArguments/function/extentionFunctionDouble.kt
 defaultArguments/function/extentionFunctionDoubleTwoArgs.kt
 defaultArguments/function/funInTrait.kt
 defaultArguments/function/funInTraitChain.kt
 defaultArguments/function/innerExtentionFunctionDouble.kt
 defaultArguments/function/innerExtentionFunctionDoubleTwoArgs.kt
-defaultArguments/function/innerExtentionFunctionManyArgs.kt
 defaultArguments/function/kt15971.kt
 defaultArguments/function/kt15971_2.kt
 defaultArguments/function/kt15971_3.kt
-defaultArguments/function/memberFunctionManyArgs.kt
-defaultArguments/function/topLevelManyArgs.kt
 defaultArguments/implementedByFake.kt
 defaultArguments/implementedByFake2.kt
 defaultArguments/implementedByFake3.kt
@@ -1295,8 +1281,6 @@ delegation/delegatedAnonymousObject_noParametersOnDelegate.kt
 delegation/delegatedAnonymousObject_someParametersOnDelegate.kt
 delegation/delegationByCompanionToNothing.kt
 delegation/delegationByIfExpr.kt
-delegation/delegationByInh.kt
-delegation/delegationChain.kt
 delegation/delegationComplex.kt
 delegation/delegationExtFun1.kt
 delegation/delegationExtFun2.kt
@@ -1313,7 +1297,6 @@ delegation/ifWithCallableReferenceInLazy.kt
 delegation/kt30102_comparable.kt
 delegation/kt44199.kt
 delegation/smartCastedDelegation.kt
-delegation/withDefaultsMultipleFilesOrder.kt
 destructuringDeclInLambdaParam/extensionComponents.kt
 destructuringDeclInLambdaParam/stdlibUsages.kt
 destructuringDeclInLambdaParam/withIndexed.kt
@@ -2667,6 +2650,8 @@ regressions/LambdaResultIntersectionArgument.kt
 regressions/LocalIntersectionArgument.kt
 regressions/LocalIntersectionListOf.kt
 regressions/NestedLambdaResultRejectsMismatchedParameter.kt
+regressions/NullFunctionValueStartCoroutine.kt
+regressions/NullFunctionValueSuspendConversion.kt
 regressions/NullableFunctionValueSuspendConversion.kt
 regressions/NullableScalarNotNullAssert.kt
 regressions/ReceiverLifetimeContrast.kt
@@ -2674,6 +2659,7 @@ regressions/SpacedTypeAnnotationParenthesizedFunctionType.kt
 regressions/StartCoroutineOfSuspendFunction.kt
 regressions/StartCoroutineOfSuspendLambda.kt
 regressions/StrictEqualsGeneratedBound.kt
+regressions/SuspendFunctionTypesOfSeveralArities.kt
 regressions/ValueClassReferenceArray.kt
 regressions/WidenedLiteralCallArgumentKeepsItsCandidate.kt
 regressions/anonymousInterfaceDelegateOperands.kt
@@ -2701,8 +2687,8 @@ regressions/closureWriteConformingSmartCast.kt
 regressions/closureWriteConformingSmartCastStringBuilder.kt
 regressions/collectionLiteralForTypeVariableBuiltFromOtherBound.kt
 regressions/collectionLiteralIndexedStoreFactory.kt
-regressions/collectionSizeInInlineBody.kt
 regressions/commonSupertypeContravariant.kt
+regressions/companionAssociatedPropertyCompoundAssignment.kt
 regressions/companionBlockClassInitialization.kt
 regressions/companionBlockFunctionValueClassResult.kt
 regressions/companionBlockProgramOrder.kt
@@ -2764,6 +2750,7 @@ regressions/functionClassInvokeProtocol.kt
 regressions/functionLiteralAsLastExpressionInBlock.kt
 regressions/functionReferenceNames.kt
 regressions/functionTypeMemberInvoke.kt
+regressions/functionTypesAcrossModules.kt
 regressions/functionValueCalls.kt
 regressions/functionValueStrings.kt
 regressions/generatedValueClassMembers.kt
@@ -2852,7 +2839,7 @@ regressions/memberExtensionLambdaResultsJoin.kt
 regressions/memberExtensionNullableReceiverOverload.kt
 regressions/memberExtensionRecursiveOpenBound.kt
 regressions/memberLocalFunctions.kt
-regressions/moduleDelegationForwarderSlots.kt
+regressions/moduleDelegationSuspendForwarderSlots.kt
 regressions/multimodule/boundExtensionReferences.kt
 regressions/multimodule/companionBlockAndValueClassLibrary.kt
 regressions/multimodule/crossinlineObjectInitializer.kt
@@ -3096,8 +3083,6 @@ strictEquals/simple.kt
 strictEquals/typealiasInBound.kt
 strings/charSequenceGet.kt
 strings/charSequenceSubSequence.kt
-strings/concatDynamicWithConstants.kt
-strings/concatDynamicWithSpecialSymbols.kt
 strings/kt3571.kt
 strings/rawStringsWithManyQuotes.kt
 strings/trimOptimization.kt
