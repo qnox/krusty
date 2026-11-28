@@ -425,6 +425,50 @@ fn a_call_site_passes_every_parameter_and_constant_mask_words() {
 }
 
 #[test]
+fn the_entry_of_a_suspend_function_is_a_suspend_function() {
+    let mut ir = IrFile::default();
+    let parameter = ir.add_expr(IrExpr::GetValue(0));
+    let returned = ir.add_expr(IrExpr::Return(Some(parameter)));
+    let function = declare(
+        &mut ir,
+        "pause",
+        vec![Ty::Int],
+        Ty::Int,
+        Some(returned),
+        None,
+    );
+    ir.suspend_funs.push(function);
+    let default = int(&mut ir, 3);
+    with_defaults(&mut ir, function, vec![Some(default)]);
+    let call = ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::LocalWithDefaults {
+            function,
+            defaults: Box::new([0]),
+        }),
+        dispatch_receiver: None,
+        args: Vec::new(),
+    });
+    let caller = declare(&mut ir, "caller", Vec::new(), Ty::Int, Some(call), None);
+    ir.suspend_funs.push(caller);
+
+    realize(
+        &mut ir,
+        &mut CheckedBackendCallables::default(),
+        |_| false,
+        |_| false,
+        &[],
+    );
+
+    let entry = ir.default_entries[&function];
+    assert_eq!(body(&ir, caller), format!("fun{entry}(absent Int, 1)"));
+    assert_eq!(
+        body(&ir, entry),
+        format!("{{ {}; return fun{function}($0) }}", fill(1, 1, 0, "3"))
+    );
+    assert_eq!(ir.suspend_funs, vec![function, caller, entry]);
+}
+
+#[test]
 fn a_member_entry_takes_the_receiver_and_dispatches_through_the_method() {
     let mut ir = IrFile::default();
     let read = ir.add_expr(IrExpr::GetValue(1));

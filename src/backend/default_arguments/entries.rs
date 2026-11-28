@@ -274,8 +274,6 @@ fn overrides(ir: &IrFile, declaration: FunId, provider: CallableId) -> bool {
 fn forward(ir: &IrFile, declaration: FunId, form: Option<StaticForm>) -> Option<Forward> {
     if ir.inline_only_fns.contains(&declaration)
         || ir.foreign_inline_templates.contains(&declaration)
-        // An entry is not a suspend function, so it cannot call one.
-        || ir.suspend_funs.contains(&declaration)
         || !declares_defaults(ir, declaration)
     {
         return None;
@@ -398,6 +396,11 @@ fn build(
             ),
             ty,
         );
+    }
+    // The entry of a suspend function is itself one, as kotlinc's suspend `$default` is: it
+    // forwards its caller's continuation to the declaration it calls.
+    if ir.suspend_funs.contains(&declaration) {
+        ir.suspend_funs.push(entry);
     }
     // Compiler-generated: no source declaration of its own, and no public name.
     ir.synthetic_methods.insert(entry);
