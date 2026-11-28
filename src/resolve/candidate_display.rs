@@ -31,13 +31,12 @@ impl Checker<'_> {
     pub(super) fn ambiguous_candidates_message<'f>(
         name: &str,
         candidates: impl IntoIterator<Item = &'f crate::libraries::FunctionInfo>,
-    ) -> String {
-        let mut message = "overload resolution ambiguity between candidates:".to_string();
-        for candidate in candidates {
-            message.push('\n');
-            message.push_str(&Self::callable_candidate_display(name, candidate));
-        }
-        message
+    ) -> crate::diag::NamedMessage {
+        crate::diagnostic_wording::overload_resolution_ambiguity(
+            candidates
+                .into_iter()
+                .map(|candidate| Self::callable_candidate_display(name, candidate)),
+        )
     }
 
     pub(super) fn callable_candidate_display(
@@ -309,20 +308,17 @@ pub(super) fn ambiguous_classifier_message<
 >(
     candidates: &[crate::symbol_resolver::ScopedClassifier],
     shape: impl Fn(TypeName) -> Option<Shape>,
-) -> String {
-    let mut message = "overload resolution ambiguity between candidates:".to_string();
-    for candidate in candidates {
-        let display = match &candidate.alias {
-            Some(alias) => Some(type_alias_display(alias)),
-            None => shape(candidate.classifier)
-                .map(|shape| classifier_access_display_from_shape(candidate.classifier, &shape)),
-        };
-        if let Some(display) = display {
-            message.push('\n');
-            message.push_str(&display);
-        }
-    }
-    message
+) -> crate::diag::NamedMessage {
+    crate::diagnostic_wording::overload_resolution_ambiguity(candidates.iter().filter_map(
+        |candidate| {
+            match &candidate.alias {
+                Some(alias) => Some(type_alias_display(alias)),
+                None => shape(candidate.classifier).map(|shape| {
+                    classifier_access_display_from_shape(candidate.classifier, &shape)
+                }),
+            }
+        },
+    ))
 }
 
 /// kotlinc's wording for `expected` type arguments: `no type arguments expected`.

@@ -127,6 +127,22 @@ pub fn uninitialized_variable(name: &str) -> NamedMessage {
     }
 }
 
+/// `OVERLOAD_RESOLUTION_AMBIGUITY`: equally specific candidates, each rendered on its own line in
+/// candidate order.
+pub fn overload_resolution_ambiguity<S: AsRef<str>>(
+    candidates: impl IntoIterator<Item = S>,
+) -> NamedMessage {
+    let mut message = String::from("Overload resolution ambiguity between candidates:");
+    for candidate in candidates {
+        message.push('\n');
+        message.push_str(candidate.as_ref());
+    }
+    NamedMessage {
+        name: names::OVERLOAD_RESOLUTION_AMBIGUITY,
+        message,
+    }
+}
+
 /// `UNSAFE_CALL`: a member that exists only on the non-null type, called on a nullable receiver.
 pub fn unsafe_call(receiver: &str) -> NamedMessage {
     NamedMessage {

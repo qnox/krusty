@@ -682,14 +682,13 @@ impl Checker<'_> {
                     self.record_top_level_function_ref(expression, name, selected, ty)
                 }
                 _ => {
-                    let mut message =
-                        "overload resolution ambiguity between candidates:".to_string();
-                    for candidate in &functions {
-                        message.push('\n');
-                        message.push_str(&Self::associated_candidate_display(name, candidate));
-                    }
+                    let message = crate::diagnostic_wording::overload_resolution_ambiguity(
+                        functions
+                            .iter()
+                            .map(|candidate| Self::associated_candidate_display(name, candidate)),
+                    );
                     self.diags
-                        .error(self.member_name_span(expression, name), message);
+                        .report_error(self.member_name_span(expression, name), message);
                     Ty::Error
                 }
             });

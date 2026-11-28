@@ -186,12 +186,10 @@ impl Checker<'_> {
             self.record_enum_entry(expression, owner, &name.clone());
             return Some(Ty::obj_name(owner));
         }
-        let mut message = "overload resolution ambiguity between candidates:".to_string();
-        for value in &values {
-            message.push('\n');
-            message.push_str(&self.scoped_value_display(value));
-        }
-        self.diags.error(self.span(expression), message);
+        let message = crate::diagnostic_wording::overload_resolution_ambiguity(
+            values.iter().map(|value| self.scoped_value_display(value)),
+        );
+        self.diags.report_error(self.span(expression), message);
         Some(Ty::Error)
     }
 

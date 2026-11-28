@@ -70,7 +70,7 @@ impl ProductionSignatureDiagnostic {
             .iter()
             .map(|candidate| with_published_result(candidate, published))
             .collect::<Vec<_>>();
-        crate::resolve::Checker::ambiguous_candidates_message(&named.spelling, &candidates)
+        crate::resolve::Checker::ambiguous_candidates_message(&named.spelling, &candidates).message
     }
 }
 

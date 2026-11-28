@@ -1612,7 +1612,7 @@ impl Checker<'_> {
         ) {
             InvokeResolution::Selected(ret) => Some(ret),
             InvokeResolution::Ambiguous(candidates) => {
-                self.diags.error(
+                self.diags.report_error(
                     span,
                     self.ambiguous_member_candidates_message(CALLABLE_INVOKE_OPERATOR, &candidates),
                 );

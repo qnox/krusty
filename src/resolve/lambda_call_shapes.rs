@@ -1297,12 +1297,9 @@ impl Checker<'_> {
             Expr::Call { args, .. } => args.clone(),
             _ => Vec::new(),
         };
-        let mut message = "overload resolution ambiguity between candidates:".to_string();
-        for candidate in candidates {
-            message.push('\n');
-            message.push_str(&Self::callable_candidate_display(name, candidate));
-        }
-        self.diags.error(self.call_callee_name_span(call), message);
+        let message = Self::ambiguous_candidates_message(name, candidates);
+        self.diags
+            .report_error(self.call_callee_name_span(call), message);
         self.report_unshaped_lambda_diagnostics(scope, &args, Some(name));
     }
 
