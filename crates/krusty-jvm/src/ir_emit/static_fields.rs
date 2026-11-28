@@ -619,6 +619,7 @@ pub(super) fn declare(
         // order. The interface keeps a separate copy of each public or internal const.
         .filter(|(_, property)| !(property.is_const && companion_of_interface(ir, c)))
         .map(|(index, property)| (index as u32, property))
+        .filter(|&(index, _)| !ir.static_leads_owner_declarations(index))
         .collect();
     owner_statics.sort_by_key(|(index, property)| (property.line, property.source_order, *index));
     // On a named object, generated storage (a `$cachedSerializer$delegate`) follows every declared
@@ -656,6 +657,24 @@ pub(super) fn declare(
     }
     for (static_index, s) in generated {
         declare_static(ir, c, signature_formatter, cw, static_index, s);
+    }
+}
+
+/// Declare the statics generated as the first declarations of class `c`: their fields lead the
+/// field table, ahead of the companion's and the instance fields, in the order they were made.
+pub(super) fn declare_leading(
+    ir: &IrFile,
+    c: &IrClass,
+    fq_name: &str,
+    signature_formatter: &JvmSignatureFormatter<'_>,
+    cw: &mut ClassWriter,
+) {
+    for (index, s) in ir.statics.iter().enumerate() {
+        let index = index as u32;
+        if s.owner_matches(fq_name) && ir.static_leads_owner_declarations(index) {
+            declare_static(ir, c, signature_formatter, cw, index, s);
+            cw.lead_last_late_field();
+        }
     }
 }
 
@@ -959,7 +978,13 @@ pub(super) fn emit_class_static_initializer(
         .collect();
     // Generated statics (no source position) initialize after the declared ones, whatever order
     // the passes created them in.
-    clinit_statics.sort_by_key(|&(_, s, _)| s.source_order == u32::MAX);
+    // A static generated as the class's first declaration initializes before all of them.
+    clinit_statics.sort_by_key(|&(index, s, _)| {
+        (
+            !ir.static_leads_owner_declarations(index),
+            s.source_order == u32::MAX,
+        )
+    });
     if c.companion_class.is_some()
         || !clinit_statics.is_empty()
         || delegated_property_array::exists(env, c.fq_name)
@@ -1096,9 +1121,14 @@ pub(super) fn class_initializer_steps<'ir>(
         .and_then(|companion| ir.class_id_by_name(companion))
         .and_then(|companion| ir.class_source_order(companion));
     let mut steps = Vec::with_capacity(statics.len() + 2);
+    // A static generated as the class's first declaration initializes before the companion.
+    let (leading, statics): (Vec<_>, Vec<_>) = statics
+        .iter()
+        .partition(|&&(index, _, _)| ir.static_leads_owner_declarations(index));
+    steps.extend(leading.into_iter().map(store));
     let Some(companion_order) = companion_order else {
         steps.push(ClassInitializerStep::ConstructCompanion);
-        steps.extend(statics.iter().map(store));
+        steps.extend(statics.into_iter().map(store));
         steps.push(ClassInitializerStep::CompanionBody);
         return steps;
     };
@@ -1106,7 +1136,8 @@ pub(super) fn class_initializer_steps<'ir>(
         |&(index, _, _): &(u32, &krusty::ir::IrStatic, krusty::ir::ExprId)| {
             ir.is_jvm_companion_hoisted_static(index)
         };
-    let (companion, own): (Vec<_>, Vec<_>) = statics.iter().partition(|s| declared_by_companion(s));
+    let (companion, own): (Vec<_>, Vec<_>) =
+        statics.into_iter().partition(|s| declared_by_companion(s));
     let (before, after): (Vec<_>, Vec<_>) = own
         .into_iter()
         .partition(|&&(_, s, _)| s.source_order < companion_order);

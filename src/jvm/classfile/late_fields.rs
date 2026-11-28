@@ -111,6 +111,14 @@ impl ClassWriter {
         ));
     }
 
+    /// Move the field declared last to the head of the field table, after the leading fields
+    /// declared before it: a static generated as its class's first declaration.
+    pub fn lead_last_late_field(&mut self) {
+        if let Some(field) = self.late_fields.last_mut() {
+            field.placement = LateFieldPlacement::Leading;
+        }
+    }
+
     /// Realize the deferred fields that lead the field table now: they intern before the
     /// annotations of the eagerly declared fields after them, which the emitter attaches before
     /// `finish` (a class's `$$delegatedProperties` and `Companion` ahead of its instance fields).

@@ -2075,8 +2075,8 @@ fn emit_class(
         fq_name,
         ir.class_signature(&fq_name)
     );
-    // (The class `Signature` was set with the writer; interface refs were added with the header,
-    // before the pool seeding.)
+    // (The class `Signature` and interface refs came with the writer and header, pre-seeding.)
+    static_fields::declare_leading(ir, c, &fq_name, &signature_formatter, &mut cw);
     // A class with a `companion object`: its `public static final Companion` field LEADS the field
     // table (kotlinc's order), before the instance fields and any hoisted statics — but its pool
     // entries intern LATE (the `<clinit>` body's `putstatic` introduces them; the field visit dedups).

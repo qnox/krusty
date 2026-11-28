@@ -361,3 +361,107 @@ fn a_runtime_type_annotation_is_refused_at_its_property() {
          krusty: 1 error(s)\n"
     );
 }
+
+const TAGGED: &str = r#"package demo
+
+import android.os.Parcelable
+import kotlinx.parcelize.Parcelize
+
+@Parcelize
+class Tagged(val label: String, val count: Int) : Parcelable
+"#;
+
+/// The `-Xplugin` jar as a plugin release ships it: the registrar of the real Parcelize plugin and
+/// the release its manifest declares, which is all krusty reads of a plugin it implements natively.
+fn parcelize_plugin_of_release(dir: &std::path::Path, release: &str) -> String {
+    use std::io::Write;
+    let jar = dir.join(format!("parcelize-compiler-{release}.jar"));
+    let mut archive = zip::ZipWriter::new(std::fs::File::create(&jar).expect("create the jar"));
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    archive
+        .start_file("META-INF/MANIFEST.MF", options)
+        .expect("start the manifest");
+    write!(
+        archive,
+        "Manifest-Version: 1.0\nImplementation-Version: {release}\n"
+    )
+    .expect("write the manifest");
+    archive
+        .start_file(
+            "META-INF/services/org.jetbrains.kotlin.compiler.plugin.CompilerPluginRegistrar",
+            options,
+        )
+        .expect("start the service file");
+    archive
+        .write_all(b"org.jetbrains.kotlin.parcelize.ParcelizeComponentRegistrar\n")
+        .expect("write the service file");
+    archive.finish().expect("finish the jar");
+    format!("-Xplugin={}", jar.display())
+}
+
+/// The names of a class file's fields, in declaration order.
+fn field_names(class: &[u8]) -> Vec<String> {
+    fn u16_at(bytes: &[u8], at: usize) -> usize {
+        u16::from_be_bytes([bytes[at], bytes[at + 1]]) as usize
+    }
+    let count = u16_at(class, 8);
+    let mut utf8 = std::collections::HashMap::new();
+    let (mut at, mut index) = (10, 1);
+    while index < count {
+        let tag = class[at];
+        let size = match tag {
+            1 => {
+                let length = u16_at(class, at + 1);
+                utf8.insert(
+                    index,
+                    String::from_utf8_lossy(&class[at + 3..at + 3 + length]).into_owned(),
+                );
+                3 + length
+            }
+            3 | 4 | 9 | 10 | 11 | 12 | 17 | 18 => 5,
+            5 | 6 => 9,
+            7 | 8 | 16 | 19 | 20 => 3,
+            15 => 4,
+            other => panic!("unknown constant pool tag {other}"),
+        };
+        at += size;
+        index += if matches!(tag, 5 | 6) { 2 } else { 1 };
+    }
+    at += 6;
+    at += 2 + 2 * u16_at(class, at);
+    let mut fields = Vec::new();
+    let field_count = u16_at(class, at);
+    at += 2;
+    for _ in 0..field_count {
+        fields.push(utf8[&u16_at(class, at + 2)].clone());
+        let attributes = u16_at(class, at + 6);
+        at += 8;
+        for _ in 0..attributes {
+            at += 6 + u32::from_be_bytes([
+                class[at + 2],
+                class[at + 3],
+                class[at + 4],
+                class[at + 5],
+            ]) as usize;
+        }
+    }
+    fields
+}
+
+/// The 2.5 plugin inserts `CREATOR` at the head of the parcelized class's declarations, so its
+/// field leads the field table; the 2.4 plugin appends it after the class's own fields.
+#[test]
+fn creator_leads_the_field_table_from_the_2_5_plugin_and_trails_it_before() {
+    let fixture = PluginFixture::new("parcelize-creator-placement");
+    let sources = [("Tagged.kt", TAGGED)];
+    let classpath = android_classpath();
+    let scratch = common::scratch_dir().expect("a scratch directory");
+    let fields = |unit: &str, release: &str| {
+        let switches = [parcelize_plugin_of_release(&scratch, release)];
+        let out = fixture.krusty(unit, &sources, &classpath, &switches);
+        field_names(&std::fs::read(out.join("demo/Tagged.class")).expect("Tagged.class"))
+    };
+    assert_eq!(fields("from-2-5", "2.5.0"), ["CREATOR", "label", "count"]);
+    assert_eq!(fields("from-2-4", "2.4.21"), ["label", "count", "CREATOR"]);
+}

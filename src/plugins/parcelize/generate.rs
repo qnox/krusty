@@ -18,13 +18,36 @@ use crate::ir::{
     IrParameterCheck, IrParameterIdentity, IrStatic, IrStaticAccessors, IrTypeOp,
 };
 use crate::plugins::runtime_declarations::BoundRuntimeFunction;
+use crate::plugins::PluginRelease;
 use crate::types::{Ty, TypeName, Visibility};
 
 use super::facts::{ParcelizeFileFacts, ParcelizedClass, GENERATED_BODY};
 use super::serializers::{ParcelContext, ParcelTarget};
 
+/// Where kotlinc's `ParcelizeIrTransformer` adds the `CREATOR` field to the parcelized class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CreatorPlacement {
+    /// Appended after every declaration: its field follows the class's own, and it is
+    /// initialized after the companion object.
+    Last,
+    /// Inserted before every declaration, so that it is initialized before the companion object
+    /// and its blocks: its field leads the field table.
+    First,
+}
+
+impl CreatorPlacement {
+    /// The placement of the plugin in `release`; `None` is the newest release.
+    pub(super) fn of_release(release: Option<PluginRelease>) -> Self {
+        if release.is_some_and(|release| release < PluginRelease::V2_5_0) {
+            CreatorPlacement::Last
+        } else {
+            CreatorPlacement::First
+        }
+    }
+}
+
 /// Complete every parcelized class of the file.
-pub(super) fn complete(ir: &mut IrFile, facts: &ParcelizeFileFacts) {
+pub(super) fn complete(ir: &mut IrFile, facts: &ParcelizeFileFacts, placement: CreatorPlacement) {
     // A property may name another parcelized class of the file, so every class's `CREATOR` slot
     // and `writeToParcel` method are known before any body reads them.
     let targets = facts
@@ -35,7 +58,7 @@ pub(super) fn complete(ir: &mut IrFile, facts: &ParcelizeFileFacts) {
     for class in &facts.classes {
         describe_contents(ir, class);
         write_to_parcel(ir, facts, class, &targets);
-        creator(ir, facts, class, &targets);
+        creator(ir, facts, class, &targets, placement);
     }
 }
 
@@ -156,6 +179,7 @@ fn creator(
     facts: &ParcelizeFileFacts,
     class: &ParcelizedClass,
     targets: &[ParcelTarget],
+    placement: CreatorPlacement,
 ) {
     let parcelized = ir.classes[class.class as usize].fq_name_id();
     let parcelized_ty = Ty::obj_name(parcelized);
@@ -256,6 +280,9 @@ fn creator(
         .expect("every parcelized class has a reserved CREATOR slot")
         .creator;
     ir.statics[slot as usize].init = Some(init);
+    if placement == CreatorPlacement::First {
+        ir.place_static_before_owner_declarations(slot);
+    }
 }
 
 /// `createFromParcel(parcel)`: the primary constructor called with each property read back.
@@ -397,4 +424,23 @@ fn complete_body(ir: &mut IrFile, function: FunId, body: ExprId) {
         stmts: Vec::new(),
         value: None,
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CreatorPlacement;
+    use crate::plugins::PluginRelease;
+
+    #[test]
+    fn the_plugin_from_2_5_makes_creator_the_first_declaration() {
+        assert_eq!(
+            CreatorPlacement::of_release(Some(PluginRelease::V2_4_21)),
+            CreatorPlacement::Last
+        );
+        assert_eq!(
+            CreatorPlacement::of_release(Some(PluginRelease::V2_5_0)),
+            CreatorPlacement::First
+        );
+        assert_eq!(CreatorPlacement::of_release(None), CreatorPlacement::First);
+    }
 }
