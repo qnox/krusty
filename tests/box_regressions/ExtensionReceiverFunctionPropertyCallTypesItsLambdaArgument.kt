@@ -3,7 +3,8 @@
 // function the call can apply to is the nearer callable; one it cannot apply to leaves the property's
 // invoke as the candidate of that receiver. A `with` receiver, or a member extension's extension
 // receiver, is nearer than the dispatch receiver, so its property types the lambda over the class's
-// same-named one.
+// same-named one. With no nearer property, the class's own property types a call's arguments, a
+// lambda or not, over a same-named top-level function.
 
 class Subscribers(val subscribe: (String, Int.(String) -> String) -> String)
 
@@ -31,6 +32,14 @@ class Numbers(val subscribe: (String, (Int) -> String) -> String) {
     fun viaWith(texts: Texts): String = with(texts) { subscribe("w") { it.length.toString() + it } }
 }
 
+class Box<T>(val content: T? = null)
+
+fun reference(count: Int): String = "top-level $count"
+
+class Holder(val reference: (Box<String>) -> String) {
+    fun call(): String = reference(Box())
+}
+
 fun box(): String {
     val subscribers = Subscribers { name, block -> name + block(7, "a") }
     if (subscribers.content { "$this$it" } != "content7a") return "content: ${subscribers.content { "$this$it" }}"
@@ -44,5 +53,7 @@ fun box(): String {
     if (nearer != "2tu") return "nearer: $nearer"
     val with = Numbers { text, block -> block(text.length) }.viaWith(texts)
     if (with != "2wu") return "with: $with"
+    val held = Holder { box -> "held ${box.content ?: "empty"}" }.call()
+    if (held != "held empty") return "held: $held"
     return "OK"
 }

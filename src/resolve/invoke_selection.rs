@@ -140,6 +140,25 @@ impl Checker<'_> {
             .then_some(selection))
     }
 
+    /// Whether a receiver nearer than the dispatch receiver `owner` has a property `name` whose
+    /// value claims a call: that receiver's level outranks the dispatch property's.
+    pub(super) fn nearer_receiver_property_claims_call(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        owner: (usize, usize),
+    ) -> bool {
+        self.implicit_receivers(scope)
+            .into_iter()
+            .take_while(|receiver| receiver.identity != owner)
+            .any(|receiver| {
+                !matches!(
+                    self.implicit_callable_property(scope, receiver.ty, name),
+                    Ok(None)
+                )
+            })
+    }
+
     pub(super) fn invoke_operator_candidates(
         &self,
         receiver_ty: Ty,

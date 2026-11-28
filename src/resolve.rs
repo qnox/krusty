@@ -10723,11 +10723,16 @@ impl<'a> Checker<'a> {
                 // A function-valued property on an implicit receiver is itself a complete call
                 // candidate. Its semantic function shape must reach argument typing before the
                 // general top-level/member probe: `reference(Inner())` can be the only evidence for
-                // `Inner`'s type arguments. The receiver sweep above selected it at its own level,
-                // in the receiver order final selection follows, dispatch receivers included; this
-                // only exposes its value-parameter expectations and performs no second lookup.
-                let receiver_function_argument_types =
-                    implicit_property_function.and_then(|semantic| {
+                // `Inner`'s type arguments. The receiver sweep above selected it at its own level; a
+                // dispatch property no nearer receiver's property outranks claims the call lexically.
+                let receiver_function_argument_types = implicit_property_function
+                    .or_else(|| {
+                        let (semantic, origin) = self.local_callable_type(scope, &fname)?;
+                        (lexical_value_claims_call
+                            && matches!(origin, ReceiverFnValueOrigin::DispatchProperty { .. }))
+                        .then_some(semantic)
+                    })
+                    .and_then(|semantic| {
                         self.function_value_argument_expectations(
                             scope,
                             semantic,
@@ -30693,10 +30698,11 @@ impl<'a> Checker<'a> {
     /// Whether the selected lexical VALUE contributes an invoke candidate. Callable references
     /// retain their exact function shape beside their nominal `KProperty`/`KFunction` type, so the
     /// binding record is authoritative; ordinary callable objects still derive capability from
-    /// their semantic type and `operator fun invoke`. A dispatch property is its receiver's rung.
+    /// their semantic type and `operator fun invoke`. A dispatch property yields to a nearer one.
     fn local_value_claims_call(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
         self.lookup(scope, name).is_some_and(|local| {
-            !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. })
+            !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { receiver_identity, .. }
+                if self.nearer_receiver_property_claims_call(scope, name, receiver_identity))
                 && (self.local_callable_type(scope, name).is_some()
                     || self.value_type_claims_call(scope, local.ty))
         })
