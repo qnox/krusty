@@ -429,3 +429,13 @@ fn wasm_official_dependency_lambda_over_file_private_class_runs() {
         "DependencyLambdaOverFilePrivateClass",
     );
 }
+
+/// An official producer's body reads and writes a property a class private to its file inherits:
+/// the accessors link to the inherited property's.
+#[test]
+fn wasm_official_dependency_file_private_class_inherited_property_runs() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyFilePrivateClassInheritedProperty.kt"),
+        "DependencyFilePrivateClassInheritedProperty",
+    );
+}
