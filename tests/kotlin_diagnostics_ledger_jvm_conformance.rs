@@ -292,6 +292,9 @@ fn worker_ledger(root: &Path, jdks: &BoxJdkRoots, file: &Path) -> String {
     match compiled {
         Ok(Ok(_) | Err(CompileFailure::Rejected { .. })) => {}
         Ok(Err(CompileFailure::Harness(reason))) => return format!("F\t{reason}"),
+        Ok(Err(CompileFailure::CommandLineRefused(refusals))) => {
+            return format!("F\tcommand line refused: {}", refusals.join("; "))
+        }
         Err(panic) => return format!("F\tpanicked: {}", panic_message(&panic)),
     }
     let text = diagnostic_markers::parse(&source).text;
