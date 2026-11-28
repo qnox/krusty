@@ -76,7 +76,6 @@ callableReference/function/genericCallableReferenceWithReifiedTypeParam.kt
 callableReference/function/kt32462.kt
 callableReference/function/local/enumExtendsTrait.kt
 callableReference/function/sortListOfStrings.kt
-callableReference/kt52270.kt
 callableReference/property/accessorForPropertyWithPrivateSetter.kt
 casts/functions/asFunKBig.kt
 casts/functions/reifiedAsFunKBig.kt
@@ -101,7 +100,6 @@ collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collections/clashWithInternalMapMethod.kt
 collections/inheritFromAbstractMutableListInt.kt
-companionBlocksAndExtensions/callableReferences_block.kt
 companionBlocksAndExtensions/initializersBlocksAndEnum.kt
 companionBlocksAndExtensions/initializersBlocksAndEnumTriggeredByBlock.kt
 companionBlocksAndExtensions/initializersEnumImplementingInterface.kt

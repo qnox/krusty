@@ -47,6 +47,9 @@ mod private_inline_members;
 #[path = "klib_closure_frames_e2e/file_private_inherited_members.rs"]
 mod file_private_inherited_members;
 
+#[path = "klib_closure_frames_e2e/interface_static_members.rs"]
+mod interface_static_members;
+
 #[path = "klib_closure_frames_e2e/suspend_function_bodies.rs"]
 mod suspend_function_bodies;
 

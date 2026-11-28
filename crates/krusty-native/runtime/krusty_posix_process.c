@@ -244,6 +244,15 @@ int clock_gettime(int clock, void *time) {
     return (int)kt_posix_result(kt_syscall(KT_SYS_CLOCK_GETTIME, clock, (long)time, 0, 0, 0, 0));
 }
 
+/* `kotlin.system.getTimeNanos`, which the Native standard library declares `external` with
+   `@GCUnsafeCall("Kotlin_system_getSteadyTimeNanos")`: Kotlin/Native reads the steady clock,
+   which on Linux is `CLOCK_MONOTONIC`. */
+kt_long Kotlin_system_getSteadyTimeNanos(void) {
+    long now[2] = {0, 0};
+    kt_syscall(KT_SYS_CLOCK_GETTIME, 1 /* CLOCK_MONOTONIC */, (long)now, 0, 0, 0, 0);
+    return (kt_long)now[0] * 1000000000 + now[1];
+}
+
 long time(long *into) {
     long now[2];
     kt_syscall(KT_SYS_CLOCK_GETTIME, 0 /* CLOCK_REALTIME */, (long)now, 0, 0, 0, 0);

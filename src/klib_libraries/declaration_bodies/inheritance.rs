@@ -481,12 +481,12 @@ fn declaring_member(declaration: &KlibDeclarationSignature) -> Option<&KlibPubli
     (member.declaration().segments().len() > 1).then_some(member)
 }
 
-/// The functions a class member declares: itself, or a property's accessors.
+/// The instance functions a class member declares: itself, or a property's accessors.
 fn member_functions<'a>(
     arena: &'a KlibIrArena,
     member: &KlibIrMember,
 ) -> Vec<&'a crate::metadata::klib_ir::tree::KlibIrFunction> {
-    match member {
+    let functions = match member {
         KlibIrMember::Function(function) => vec![arena.function(*function)],
         KlibIrMember::Property(property) => [property.getter, property.setter]
             .into_iter()
@@ -494,7 +494,14 @@ fn member_functions<'a>(
             .map(|function| arena.function(function))
             .collect(),
         _ => Vec::new(),
-    }
+    };
+    // A member without a dispatch receiver is static: a companion-block member such as
+    // `Sequence.of`, or an enum's `values`. kotlinc's fake-override builder inherits only members
+    // an instance dispatches on, so no subclass inherits or implements a static one.
+    functions
+        .into_iter()
+        .filter(|function| function.constructor || function.dispatch_receiver.is_some())
+        .collect()
 }
 
 /// `declaration` as the same member of `class`.
