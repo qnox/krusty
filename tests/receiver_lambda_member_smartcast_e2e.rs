@@ -60,7 +60,7 @@ fn assert_exact_rejection(
         (
             1,
             format!(
-                "{krusty_path}:{line}:60: error: {krusty_message}\n{source_line}\n{}^^^^^\nkrusty: 1 error(s)\n",
+                "{krusty_path}:{line}:60: error: {krusty_message}\n{source_line}\n{}^^^^^\n",
                 " ".repeat(59),
             )
             .as_str(),

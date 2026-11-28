@@ -923,8 +923,7 @@ fn a_library_composable_default_is_unavailable_without_the_compose_plugin() {
         format!(
             "{}:3:15: error: default-argument realization is unavailable for 'Sized'.\n\
              fun plain() {{ Sized() }}\n\
-             {}{}\n\
-             krusty: 1 error(s)\n",
+             {}{}\n",
             probe.shown(),
             " ".repeat(14),
             "^".repeat(5)
@@ -1105,7 +1104,7 @@ fn assert_atomicfu_rejects(name: &str, declarations: &str, error: &str, width: u
     assert_eq!(
         compiled.stderr,
         format!(
-            "info: {partial}\n{}:{error}; compile this module with kotlinc\n{}\nkrusty: 1 error(s)\n",
+            "info: {partial}\n{}:{error}; compile this module with kotlinc\n{}\n",
             probe.shown(),
             refusal_excerpt(&source, error, width)
         )
@@ -1148,7 +1147,7 @@ fn assert_compose_library_call_rejects(
     assert_eq!(
         compiled.stderr,
         format!(
-            "info: {partial}\n{}:{error}; compile this module with kotlinc\n{}\nkrusty: 1 error(s)\n",
+            "info: {partial}\n{}:{error}; compile this module with kotlinc\n{}\n",
             probe.shown(),
             refusal_excerpt(&source, error, width)
         )
@@ -1188,8 +1187,7 @@ fn a_library_composable_lambda_parameter_aligns_with_its_method() {
              {file}:5:1: error: krusty's Compose compiler plugin does not support a composable call \
              outside the statements of a composable body yet; compile this module with kotlinc\n\
              ReusableContent(1) {{ }}\n\
-             {}\n\
-             krusty: 2 error(s)\n",
+             {}\n",
             " ".repeat(12),
             "^".repeat(14),
             "^".repeat(22)
@@ -1230,7 +1228,7 @@ fn forwarding_a_composable_lambda_parameter_to_a_producer_library_is_declined() 
         format!(
             "info: {partial}\n{}:5:1: error: krusty's Compose compiler plugin does not support a \
              composable lambda parameter passed to a library composable yet; compile this module \
-             with kotlinc\nFrame(content)\n{}\nkrusty: 1 error(s)\n",
+             with kotlinc\nFrame(content)\n{}\n",
             probe.shown(),
             "^".repeat(14)
         )
@@ -1418,13 +1416,7 @@ fn assert_inline_library_call_rejects_all(
             )
         })
         .collect();
-    assert_eq!(
-        compiled.stderr,
-        format!(
-            "info: {partial}\n{reported}krusty: {} error(s)\n",
-            errors.len()
-        )
-    );
+    assert_eq!(compiled.stderr, format!("info: {partial}\n{reported}"));
     assert_eq!(compiled.code, Some(3));
     assert_eq!(compiled.classes, Vec::<String>::new());
 }
@@ -1578,7 +1570,7 @@ fn assert_compose_rejects(
     assert_eq!(
         compiled.stderr,
         format!(
-            "info: {partial}\n{}:{error}; compile this module with kotlinc\n{}\nkrusty: 1 error(s)\n",
+            "info: {partial}\n{}:{error}; compile this module with kotlinc\n{}\n",
             probe.shown(),
             refusal_excerpt(&source, error, width)
         )

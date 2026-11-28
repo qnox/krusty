@@ -128,11 +128,9 @@ fn a_failed_compilation_reports_its_warnings_under_report_all_warnings() {
             .output()
             .expect("run krusty");
         assert_eq!(result.status.code(), Some(1), "{}", case.tag);
-        let mut expected = case.diagnostics.clone();
-        expected.push("krusty: 1 error(s)".to_string());
         assert_eq!(
             diagnostic_ledger(&result.stderr),
-            expected,
+            case.diagnostics,
             "{}: krusty diagnostics",
             case.tag
         );

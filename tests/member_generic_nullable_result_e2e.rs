@@ -193,7 +193,7 @@ class Probe {{\n\
             1,
             format!(
                 "{krusty_path}:6:50: error: return type mismatch: expected 'Status', actual \
-                 'Status?'.\n    fun pick(present: Boolean): Status? = wrap {{ source(present) }}\n{}{}\nkrusty: 1 error(s)\n",
+                 'Status?'.\n    fun pick(present: Boolean): Status? = wrap {{ source(present) }}\n{}{}\n",
                 " ".repeat(49),
                 "^".repeat(15)
             )

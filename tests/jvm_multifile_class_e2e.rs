@@ -109,12 +109,7 @@ fn assert_rejected_like_kotlinc(sources: &[(&str, &str)], errors: &[&str]) {
             String::from_utf8_lossy(&krusty.stderr).into_owned(),
             published,
         ),
-        (
-            Some(1),
-            String::new(),
-            format!("{rendered}krusty: {} error(s)\n", errors.len()),
-            0,
-        )
+        (Some(1), String::new(), rendered, 0,)
     );
 }
 
