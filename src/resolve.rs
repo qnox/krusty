@@ -32788,8 +32788,9 @@ impl<'a> Checker<'a> {
                         self.null_branch_narrowings(scope, operand, &mut out, declined);
                     }
                 } else if matches!(op, BinOp::Eq | BinOp::RefEq) != for_else {
-                    // `x?.p == v` holds only when every `?.` held, as long as `v` cannot be null:
-                    // the safe-call chain's receivers are non-null where the equality is known.
+                    // `x == v` holds only when `x` equals a value that cannot be null, so `x` is
+                    // non-null where the equality is known; for a safe-call chain (`x?.p == v`) that
+                    // proves every `?.` receiver non-null.
                     let never_null = |expression: ExprId| {
                         self.expr_types
                             .get(expression.0 as usize)
@@ -32799,13 +32800,11 @@ impl<'a> Checker<'a> {
                                     && !ty.upper_bound_admits_null()
                             })
                     };
-                    let safe_call = match (self.file.expr(lhs), self.file.expr(rhs)) {
-                        (Expr::SafeCall { .. }, _) if never_null(rhs) => Some(lhs),
-                        (_, Expr::SafeCall { .. }) if never_null(lhs) => Some(rhs),
-                        _ => None,
-                    };
-                    if let Some(safe_call) = safe_call {
-                        self.null_check_narrowings(scope, safe_call, &mut out, declined);
+                    if never_null(rhs) {
+                        self.null_check_narrowings(scope, lhs, &mut out, declined);
+                    }
+                    if never_null(lhs) {
+                        self.null_check_narrowings(scope, rhs, &mut out, declined);
                     }
                     // When equality is known to hold, the compiler-known bound on either selected
                     // `equals` receiver proves the opposite stable operand has that classifier.
