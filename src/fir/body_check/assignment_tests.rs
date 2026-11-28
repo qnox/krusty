@@ -1,8 +1,9 @@
 use super::test_support::{
-    checked_function_body, checked_function_body_with_platform, jvm_stdlib_semantics,
-    root_expression,
+    checked_function_body, checked_function_body_with_features,
+    checked_function_body_with_platform, jvm_stdlib_semantics, root_expression,
 };
 use super::*;
+use crate::features::LangFeatures;
 use crate::types::TyKind;
 
 fn first_statement_call(body: &FirBody) -> &FirCall {
@@ -52,7 +53,13 @@ fn nullable_narrow_integer_constant_expression_retains_numeric_conversion() {
 
 #[test]
 fn unnamed_local_evaluates_its_initializer_without_allocating_storage() {
-    let (body, _) = checked_function_body("fun call() {}\nfun use() { val _ = call() }\n", "use");
+    let mut features = LangFeatures::new();
+    features.enable("UnnamedLocalVariables");
+    let (body, _) = checked_function_body_with_features(
+        "fun call() {}\nfun use() { val _ = call() }\n",
+        "use",
+        &features,
+    );
     let FirExprKind::Block { statements, .. } = &body
         .expr(root_expression(&body))
         .expect("function block")

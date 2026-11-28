@@ -185,6 +185,9 @@ pub struct Options {
     /// `-Xexplicit-api=strict|warning|disable`: kotlinc's explicit API mode, applied to the
     /// language settings once they are built.
     pub explicit_api: Option<String>,
+    /// `-Xreturn-value-checker=default|check|full|disable`: kotlinc's return value checker mode,
+    /// applied to the language settings once they are built.
+    pub return_value_checker: Option<String>,
     /// `-XXexplicit-return-types=strict|warning|disable`: only the return-type checks of explicit
     /// API mode.
     pub explicit_return_types: Option<String>,
@@ -261,6 +264,7 @@ impl Default for Options {
             plugins: PluginConfig::default(),
             explicit_api: None,
             explicit_return_types: None,
+            return_value_checker: None,
             assertions: None,
             inline_string_concat: false,
             inline_scopes_numbers: false,
@@ -684,6 +688,9 @@ impl Options {
     pub(super) fn install_language_settings(&mut self, mut settings: LanguageSettings) {
         if let Some(mode) = &self.explicit_api {
             settings.features.apply_explicit_api_mode(mode);
+        }
+        if let Some(mode) = &self.return_value_checker {
+            settings.features.apply_return_value_checker_mode(mode);
         }
         if let Some(mode) = &self.explicit_return_types {
             settings.features.apply_explicit_return_types_mode(mode);
@@ -1972,6 +1979,48 @@ mod tests {
             [
                 "unknown value for parameter -Xexplicit-api: 'bogus'. Value should be one of \
               {disable, strict, warning}"
+            ]
+        );
+    }
+
+    /// `-Xreturn-value-checker` selects kotlinc's mode; `default`, which leaves the language
+    /// version to decide, exists only in the releases that have it, and anything else is refused
+    /// with kotlinc's wording.
+    #[test]
+    fn return_value_checker_takes_kotlincs_modes() {
+        for mode in ["check", "full", "disable"] {
+            let options = parse_args(&[&format!("-Xreturn-value-checker={mode}"), "f.kt"]);
+            assert_eq!(options.errors, Vec::<String>::new(), "{mode}");
+            assert_eq!(options.return_value_checker.as_deref(), Some(mode));
+        }
+        for release in KotlinVersion::supported() {
+            let options = parse_args(&[
+                &format!("-Xkotlin-reference-version={release}"),
+                "-Xreturn-value-checker=default",
+                "f.kt",
+            ]);
+            if krusty::kotlin_version::Quirks::of_release(release)
+                .has(krusty::kotlin_version::Quirk::ReturnValueCheckerHasNoDefaultMode)
+            {
+                assert_eq!(
+                    options.errors,
+                    [
+                        "unknown value for parameter -Xreturn-value-checker: 'default'. Value \
+                         should be one of {disable, check, full}"
+                    ],
+                    "{release}"
+                );
+                assert_eq!(options.return_value_checker, None, "{release}");
+            } else {
+                assert_eq!(options.errors, Vec::<String>::new(), "{release}");
+                assert_eq!(options.return_value_checker.as_deref(), Some("default"));
+            }
+        }
+        assert_eq!(
+            parse_args(&["-Xreturn-value-checker=bogus", "f.kt"]).errors,
+            [
+                "unknown value for parameter -Xreturn-value-checker: 'bogus'. Value should be \
+                 one of {disable, check, full}"
             ]
         );
     }

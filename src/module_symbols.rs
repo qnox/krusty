@@ -1024,6 +1024,7 @@ fn fn_info(
     let declared_params = Some(params.clone().into_boxed_slice());
     let call_sig = sig.call_sig();
     let callable = LibraryCallable {
+        return_value_status: None,
         deprecation: None,
         annotations: sig.annotations.clone(),
         external_identity: None,
@@ -1162,6 +1163,7 @@ fn source_callable(
 ) -> LibraryCallable {
     let declared_params = Some(params.clone().into_boxed_slice());
     LibraryCallable {
+        return_value_status: None,
         deprecation: None,
         external_identity: None,
         annotations: Vec::new(),

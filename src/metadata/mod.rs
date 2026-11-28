@@ -37,6 +37,13 @@ pub use type_encoder::MetadataTypeLookups;
 pub use type_encoder::{ClassifierApplication, ClassifierApplications, InnerClassifier};
 pub mod version_requirements;
 
+/// `ProtoBuf.Constructor.flags` bits a writer sets beyond visibility.
+pub(crate) mod constructor_flags {
+    /// Low bit of the 2-bit `ReturnValueStatus` field (bits 6-7), which follows
+    /// `hasNonStableParameterNames` (bit 5).
+    pub const RETURN_VALUE_STATUS_SHIFT: u32 = 6;
+}
+
 /// Canonical `ProtoBuf.Property.flags` layout shared by metadata readers and writers. Property flags
 /// include the declaration's two-bit MEMBER_KIND after MODALITY, so property-specific bits must not be
 /// copied from the shorter Function/Class prefix. Keeping the raw schema facts here prevents the JVM

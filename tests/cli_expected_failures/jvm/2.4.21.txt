@@ -79,9 +79,7 @@ diagnosticTests/classAndTraitClash.args
 diagnosticTests/conflictingJvmDeclarationsK2.args
 diagnosticTests/conflictingOverloads.args
 diagnosticTests/conflictingProjection.args
-diagnosticTests/crv/checker.args
 diagnosticTests/crv/contracts.args
-diagnosticTests/crv/full.args
 diagnosticTests/diagnosticsOrder.args
 diagnosticTests/fileClassAndMultifileClassClash.args
 diagnosticTests/fileClassClashMultipleFiles.args

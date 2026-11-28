@@ -380,6 +380,7 @@ fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, action: Exp
         ctor_open_lines: _,
         secondary_ctor_lines: _,
         ctor_visibilities: _,
+        ctor_return_value_statuses: _,
         declared_class_statics: _,
         prop_decl_lines: _,
         function_positions: _,

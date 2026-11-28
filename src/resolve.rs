@@ -251,6 +251,7 @@ mod function_value_conversions;
 mod generic_argument_bounds;
 mod generic_call_bindings;
 mod if_expression;
+mod ignorability_annotations;
 mod implicit_receiver_calls;
 mod implicit_rungs;
 mod imported_singleton_members;
@@ -358,6 +359,7 @@ mod receiver_function_values;
 use receiver_function_values::ImplicitReceiverFunctionInvoke;
 pub use receiver_function_values::ReceiverFunctionPropertyCallee;
 mod dsl_markers;
+mod lambda_exit_checks;
 mod package_qualifier_forms;
 mod package_qualifier_type_arguments;
 mod receiver_tower;
@@ -365,6 +367,8 @@ mod receiver_uses;
 mod reflection_locals;
 mod reified_type_arguments;
 mod resolved_type_occurrences;
+mod return_value_status;
+mod return_value_usage;
 mod safe_call_flow;
 mod safe_index;
 mod sam_argument_fit;
@@ -14711,46 +14715,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Check one value leaving a labelled lambda against that lambda's result position. A fixed
-    /// expectation both contextualizes generic inference and validates the produced value at the
-    /// return expression itself; after that boundary the contribution has the expected type, so a
-    /// diagnosed mismatch cannot cascade into an unrelated aggregate lambda-result error.
-    fn check_lambda_return_value(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-        lambda: ExprId,
-    ) -> Ty {
-        let Some(expected) = self.lambda_returns.expected_type(lambda) else {
-            return self.expr(scope, expression);
-        };
-        let returned = self.expr_expected(scope, expression, expected);
-        let actual =
-            self.recorded_expression_type_for_expected(scope, expression, returned, expected);
-        self.narrow_platform_value(expected, expression, PlatformNarrowing::Declaration);
-        self.expect_assignable(expected, actual, self.span(expression), "return");
-        if returned == Ty::Error {
-            Ty::Error
-        } else {
-            expected
-        }
-    }
-
-    /// Validate a valueless exit at the resolved lambda boundary. A fixed `Unit` or `Unit?` result
-    /// preserves Kotlin's implicit Unit value (and nullable widening); ordinary assignability to a
-    /// wider type such as `Any` does not turn the source construct into a value-returning exit. Open
-    /// results retain `Unit` as an inference contribution, which is what permits a bare exit to make
-    /// an otherwise-generic lambda `Unit`.
-    fn check_lambda_valueless_return(&mut self, lambda: ExprId, span: Span) -> Ty {
-        let Some(expected) = self.lambda_returns.expected_type(lambda) else {
-            return Ty::Unit;
-        };
-        if expected != Ty::Error && expected.non_null() != Ty::Unit {
-            self.report_assignability_error(expected, Ty::Unit, span, "return");
-        }
-        expected
-    }
-
     /// Type-check a local function declaration (`fun` inside a function body). Non-capturing local
     /// functions are lifted to private static methods; captures become leading parameters.
     fn check_local_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, stmt_id: StmtId) {
@@ -23656,6 +23620,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         stmt_return_targets: HashMap::default(),
         expr_return_targets: HashMap::default(),
         discarded_exprs: crate::fx_hash::HashSet::default(),
+        return_value_suppressed: crate::fx_hash::HashSet::default(),
         narrowed_read_base: HashMap::default(),
         declined_read_targets: HashMap::default(),
         silent_error_exprs: crate::fx_hash::HashSet::default(),
@@ -25758,6 +25723,7 @@ struct Checker<'a> {
     stmt_return_targets: HashMap<StmtId, ReturnTarget>,
     expr_return_targets: HashMap<ExprId, ReturnTarget>,
     discarded_exprs: crate::fx_hash::HashSet<ExprId>,
+    return_value_suppressed: crate::fx_hash::HashSet<ExprId>,
     /// Declared type of a local read whose type a narrowing shadow replaced (a `t = null` write
     /// narrows the flow type to `Nothing?`). kotlinc still resolves a member against the DECLARED
     /// type before rejecting the access on the narrowed nullable receiver, so the nullable-receiver
@@ -39112,6 +39078,7 @@ impl<'a> Checker<'a> {
             self.expr_inner(scope, e, expected, value_required)
         });
         expression_finalization::finalize(self, scope, e, t);
+        self.finish_return_value_check(e, t);
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();
         self.expr_depth -= 1;

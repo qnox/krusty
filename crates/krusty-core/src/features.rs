@@ -16,12 +16,32 @@ pub mod deprecation_cycle_messages;
 const LANGUAGE_DIRECTIVE: &str = "// LANGUAGE:";
 const ASSERTIONS_MODE_DIRECTIVE: &str = "// ASSERTIONS_MODE:";
 const EXPLICIT_API_MODE_DIRECTIVE: &str = "// EXPLICIT_API_MODE:";
+const RETURN_VALUE_CHECKER_MODE_DIRECTIVE: &str = "// RETURN_VALUE_CHECKER_MODE:";
 const OPT_IN_DIRECTIVE: &str = "// OPT_IN:";
+const RETURN_VALUE_CHECKER_DISABLED: &str = "ReturnValueCheckerModeDisabled";
+const RETURN_VALUE_CHECKER_CHECK: &str = "ReturnValueCheckerModeCheck";
+const RETURN_VALUE_CHECKER_FULL: &str = "ReturnValueCheckerModeFull";
+
+/// kotlinc's `ReturnValueCheckerMode`: how much of the program the unused return value checker
+/// holds to account.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ReturnValueCheckerMode {
+    /// No declaration is checked, and the ignorability annotations are rejected before the
+    /// checker became stable.
+    #[default]
+    Disabled,
+    /// Only declarations marked `@MustUseReturnValues`, and declarations a library recorded as
+    /// such, are checked.
+    Checker,
+    /// Every declaration is checked unless it is marked `@IgnorableReturnValue`.
+    Full,
+}
 /// Every line prefix [`LangFeatures::apply_source_directives`] reads.
-const SOURCE_DIRECTIVES: [&str; 4] = [
+const SOURCE_DIRECTIVES: [&str; 5] = [
     LANGUAGE_DIRECTIVE,
     ASSERTIONS_MODE_DIRECTIVE,
     EXPLICIT_API_MODE_DIRECTIVE,
+    RETURN_VALUE_CHECKER_MODE_DIRECTIVE,
     OPT_IN_DIRECTIVE,
 ];
 mod deprecation_migrations;
@@ -457,6 +477,16 @@ impl LangFeatures {
             if let Some(rest) = l.strip_prefix(EXPLICIT_API_MODE_DIRECTIVE) {
                 self.apply_explicit_api_mode(&rest.trim().to_ascii_lowercase());
             }
+            // `// RETURN_VALUE_CHECKER_MODE: FULL|CHECKER|DISABLED` — the test infrastructure's
+            // spelling of `-Xreturn-value-checker`, which names kotlinc's enum constants.
+            if let Some(rest) = l.strip_prefix(RETURN_VALUE_CHECKER_MODE_DIRECTIVE) {
+                match rest.trim() {
+                    "FULL" => self.apply_return_value_checker_mode("full"),
+                    "CHECKER" => self.apply_return_value_checker_mode("check"),
+                    "DISABLED" => self.apply_return_value_checker_mode("disable"),
+                    _ => false,
+                };
+            }
             // `// OPT_IN: a.B, c.D` — the test infrastructure's spelling of `-opt-in` per marker.
             if let Some(rest) = l.strip_prefix(OPT_IN_DIRECTIVE) {
                 for marker in rest.split([' ', ',', '\t']).filter(|s| !s.is_empty()) {
@@ -478,6 +508,52 @@ impl LangFeatures {
             _ => return false,
         }
         true
+    }
+
+    /// Select kotlinc's return value checker mode (`-Xreturn-value-checker`), an analysis mode
+    /// rather than a language feature. `default` clears an explicit choice, so the language
+    /// version decides (see [`Self::return_value_checker_mode`]). Returns `false` for any other
+    /// spelling.
+    pub fn apply_return_value_checker_mode(&mut self, mode: &str) -> bool {
+        const MODES: [&str; 3] = [
+            RETURN_VALUE_CHECKER_DISABLED,
+            RETURN_VALUE_CHECKER_CHECK,
+            RETURN_VALUE_CHECKER_FULL,
+        ];
+        let selected = match mode {
+            "default" => None,
+            "disable" => Some(RETURN_VALUE_CHECKER_DISABLED),
+            "check" => Some(RETURN_VALUE_CHECKER_CHECK),
+            "full" => Some(RETURN_VALUE_CHECKER_FULL),
+            _ => return false,
+        };
+        for name in MODES {
+            self.disable(name);
+        }
+        if let Some(name) = selected {
+            self.enable(name);
+            // kotlinc enables the feature `val _ = …` needs with any mode that checks.
+            if name != RETURN_VALUE_CHECKER_DISABLED {
+                self.enable("UnnamedLocalVariables");
+            }
+        }
+        true
+    }
+
+    /// The return value checker mode in effect: the one `-Xreturn-value-checker` selected, else
+    /// `check` from the release that made the checker stable and `disable` before it.
+    pub fn return_value_checker_mode(&self) -> ReturnValueCheckerMode {
+        if self.has(RETURN_VALUE_CHECKER_FULL) {
+            ReturnValueCheckerMode::Full
+        } else if self.has(RETURN_VALUE_CHECKER_CHECK) {
+            ReturnValueCheckerMode::Checker
+        } else if self.has(RETURN_VALUE_CHECKER_DISABLED) {
+            ReturnValueCheckerMode::Disabled
+        } else if self.has("ReturnValueCheckerIsStable") {
+            ReturnValueCheckerMode::Checker
+        } else {
+            ReturnValueCheckerMode::Disabled
+        }
     }
 
     /// Select kotlinc's explicit return types mode (`-XXexplicit-return-types`: `strict`,
@@ -538,6 +614,22 @@ impl LangFeatures {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_return_value_checker_directive_selects_the_checker_mode() {
+        for (spelling, mode) in [
+            ("FULL", ReturnValueCheckerMode::Full),
+            ("CHECKER", ReturnValueCheckerMode::Checker),
+            ("DISABLED", ReturnValueCheckerMode::Disabled),
+        ] {
+            let features = LangFeatures::new()
+                .for_source(&format!(
+                    "// RETURN_VALUE_CHECKER_MODE: {spelling}\nfun f() {{}}\n"
+                ))
+                .into_owned();
+            assert_eq!(features.return_value_checker_mode(), mode, "{spelling}");
+        }
+    }
 
     #[test]
     fn a_source_without_directives_borrows_the_module_features() {

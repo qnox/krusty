@@ -154,7 +154,14 @@ impl Parser<'_> {
             return statement;
         }
 
+        let unnamed = self.at(TokenKind::Ident) && self.text() == "_" && !self.escaped_ident();
         let name = self.ident_or_error("variable name");
+        if unnamed && !self.unnamed_local_variables {
+            self.file
+                .destructuring
+                .ungated_unnamed_locals
+                .push(self.declaration_name_span);
+        }
         let ty = if self.eat(TokenKind::Colon) {
             Some(self.parse_type())
         } else {

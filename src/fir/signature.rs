@@ -13,12 +13,14 @@ use super::header::{
 };
 use super::{DefaultArgumentStore, InlineBodyStore, ResolvedCallableHeader};
 use super::{ResolvedInterfaceDelegation, ResolvedParameterIdentity};
+use demand_resolution::resolve_signature;
 
 mod arena_ranges;
 mod call_arguments;
 mod call_result_constraints;
 mod cycle_decision;
 mod declaration_type_sites;
+mod demand_resolution;
 mod expressions;
 mod local_type_aliases;
 mod postponed_argument_transaction;
@@ -1303,75 +1305,6 @@ impl SignatureSolver {
     }
 }
 
-fn resolve_signature(
-    graph: &SignatureGraph,
-    states: &mut HashMap<DeclarationId, SignatureState>,
-    computing: &mut Vec<DeclarationId>,
-    declaration: DeclarationId,
-    evaluator: &impl SignatureConstraintEvaluator,
-) -> Result<ResolvedSignature, DiagnosticId> {
-    match states.get(&declaration) {
-        Some(SignatureState::Resolved(signature)) => return Ok(signature.clone()),
-        Some(SignatureState::Failed(diagnostic)) => return Err(*diagnostic),
-        // Re-entry is not a decision: a declaration still being computed has no known type. A
-        // caller that merely probes it may move on; one that commits to it decides the cycle in
-        // `decide_cycle` below.
-        Some(SignatureState::Computing) => return Err(DiagnosticId::in_progress(declaration)),
-        Some(SignatureState::Uncomputed) | None => {}
-    }
-
-    let Some(constraint) = graph.constraint(declaration) else {
-        crate::trace_compiler!(
-            "fir",
-            "signature solve: {declaration:?} has no extracted constraint",
-        );
-        let diagnostic = evaluator.missing_signature_diagnostic(declaration);
-        states.insert(declaration, SignatureState::Failed(diagnostic));
-        return Err(diagnostic);
-    };
-    states.insert(declaration, SignatureState::Computing);
-    computing.push(declaration);
-    let evaluated = evaluator.evaluate(declaration, constraint.result, graph, &mut |dependency| {
-        resolve_signature(graph, states, computing, dependency, evaluator)
-    });
-    let evaluated = evaluated.map_err(|failure| match failure.in_progress_declaration() {
-        Some(target) => {
-            cycle_decision::decide_cycle(states, computing, declaration, target, evaluator)
-        }
-        None => failure,
-    });
-    let popped = computing.pop();
-    debug_assert_eq!(popped, Some(declaration));
-
-    // A committed re-entry already marked this declaration as a cycle member. Never overwrite that
-    // diagnostic with a value computed on top of the recursive failure.
-    if let Some(SignatureState::Failed(diagnostic)) = states.get(&declaration) {
-        return Err(*diagnostic);
-    }
-    match evaluated {
-        Ok(signature) => {
-            crate::trace_compiler!(
-                "fir",
-                "signature resolved declaration={declaration:?} parameters={:?} result={:?}",
-                signature.parameters,
-                signature.result,
-            );
-            states.insert(declaration, SignatureState::Resolved(signature.clone()));
-            Ok(signature)
-        }
-        Err(diagnostic) => {
-            crate::trace_compiler!(
-                "fir",
-                "signature evaluation failed for {declaration:?} (constraint result {:?} = {:?})",
-                constraint.result,
-                graph.expr(constraint.result),
-            );
-            states.insert(declaration, SignatureState::Failed(diagnostic));
-            Err(diagnostic)
-        }
-    }
-}
-
 #[derive(Debug, Default, PartialEq)]
 pub struct ResolvedModuleIndex {
     declarations: DeclarationIds,
@@ -1478,7 +1411,7 @@ pub struct ResolvedModuleIndex {
         HashMap<DeclarationId, Box<[super::ResolvedFunctionSlotFamily]>>,
     /// Non-default return-value statuses of module declarations, derived from the frozen edges.
     pub(super) callable_inherited_statuses: HashMap<CallableId, super::InheritedCallableStatus>,
-    pub(super) property_return_value_statuses: HashMap<PropertyId, crate::types::ReturnValueStatus>,
+    pub(super) return_value: super::return_value_facts::ReturnValueFacts,
     /// Callables with a function-typed value parameter or extension receiver (checker-classified).
     pub(super) function_typed_parameter_callables: crate::fx_hash::HashSet<CallableId>,
     type_aliases: HashMap<DeclarationId, ResolvedTypeAliasHeader>,
@@ -2507,7 +2440,7 @@ impl ResolvedModuleIndex {
             && self.callable_inherited_statuses.is_empty()
             && self.override_relations.is_empty()
             && self.dependency_superclasses.is_empty()
-            && self.property_return_value_statuses.is_empty()
+            && self.return_value.is_empty()
             && self.function_typed_parameter_callables.is_empty()
             && self.properties.is_empty()
             && self.declaration_type_parameter_counts.is_empty()
@@ -2740,6 +2673,11 @@ impl ResolvedModuleIndex {
 
     pub fn property(&self, property: PropertyId) -> Option<ResolvedPropertyHeader> {
         self.properties.get(&property).copied()
+    }
+
+    /// Every published property, in no particular order.
+    pub(crate) fn property_headers(&self) -> impl Iterator<Item = ResolvedPropertyHeader> + '_ {
+        self.properties.values().copied()
     }
 
     pub fn property_for_declaration(&self, declaration: DeclarationId) -> Option<PropertyId> {

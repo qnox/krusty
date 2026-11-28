@@ -210,6 +210,7 @@ impl JvmLibraries {
                 })
                 .flatten();
             let mut callable = LibraryCallable {
+                return_value_status: Some(mf.return_value_status),
                 annotations: mf.annotations.clone(),
                 inline,
                 suspend: mf.is_suspend(),

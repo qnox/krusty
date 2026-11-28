@@ -338,6 +338,7 @@ pub(super) fn declare_deserialization_constructor(
             // Public on an inheritable class, whose subclass's constructor in another module calls
             // it, as its `write$Self` is.
             metadata_visibility: Some(visibility),
+            return_value_status: Default::default(),
             generated_debug: crate::ir::IrGeneratedDeclarationDebug::declaration_line(
                 owner_start_line,
             ),

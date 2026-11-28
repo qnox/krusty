@@ -969,9 +969,8 @@ verbatim; krusty's gate parses them with `krusty_cli::cli::parse`, the executabl
 line, and compiles with the language settings and JVM backend that command line selects. Backend
 applicability depends only on the corpus target and source universe. A targeted case whose selected
 configuration krusty cannot compile remains applicable and fails with the refusal; it never moves
-to the not-applicable inventory. `RETURN_VALUE_CHECKER_MODE` is a reference-oracle setup detail:
-its `-Xreturn-value-checker` argument reaches only the reference compile
-(`reference_only_kotlinc_arguments`) because the checker does not change runtime `box()` behavior.
+to the not-applicable inventory. `RETURN_VALUE_CHECKER_MODE` selects `-Xreturn-value-checker`,
+which both compilers receive.
 Historical API levels which kotlinc's public command line cannot express fail closed until the
 differential harness can install that typed configuration on both compilers.
 

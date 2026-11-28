@@ -837,6 +837,7 @@ fn declare_type_serializer_constructor(
         params,
         declared_spellings: Default::default(),
         metadata_visibility: Some(crate::types::Visibility::Public),
+        return_value_status: Default::default(),
         generated_debug: crate::ir::IrGeneratedDeclarationDebug::None,
         defaults: vec![],
         delegate_prelude: Vec::new(),

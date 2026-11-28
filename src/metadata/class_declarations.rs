@@ -24,7 +24,7 @@ use crate::metadata::declaration_flags::{
 use crate::metadata::local_classifiers;
 use crate::metadata::member_order::{self, MemberRanges};
 use crate::metadata::MetadataAnnotations;
-use crate::types::{Ty, TyKind, TypeName, Visibility};
+use crate::types::{ReturnValueStatus, Ty, TyKind, TypeName, Visibility};
 
 /// Which declaration a property record describes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1147,6 +1147,10 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
                 _ if c.is_singleton() || c.is_enum => Visibility::Private,
                 declared => declared.unwrap_or(Visibility::Public),
             },
+            ir.ctor_return_value_statuses
+                .get(&c.fq_name_id())
+                .copied()
+                .unwrap_or_default(),
         ),
         type_params: c.type_params.clone(),
         type_param_bounds: ir
@@ -1774,20 +1778,25 @@ fn secondary_constructor(
         param_spellings: constructor.declared_spellings.params.clone(),
         param_defaults: constructor.defaults.iter().map(Option::is_some).collect(),
         vararg_index: constructor.vararg_index,
-        flags: secondary_constructor_flags(visibility),
+        flags: secondary_constructor_flags(visibility, constructor.return_value_status),
         annotations: MetadataAnnotations::of(&constructor.annotations),
     })
 }
 
-/// `Constructor.flags` of a primary constructor: its visibility alone.
-fn primary_constructor_flags(visibility: Visibility) -> u64 {
-    declaration_visibility_bits(visibility) << 1
+/// `Constructor.flags` of a primary constructor: its visibility and return-value status.
+fn primary_constructor_flags(visibility: Visibility, status: ReturnValueStatus) -> u64 {
+    (declaration_visibility_bits(visibility) << 1) | return_value_status_bits(status)
+}
+
+/// The `ReturnValueStatus` field of `Constructor.flags`.
+fn return_value_status_bits(status: ReturnValueStatus) -> u64 {
+    status.metadata_value() << crate::metadata::constructor_flags::RETURN_VALUE_STATUS_SHIFT
 }
 
 /// `Constructor.flags` of a secondary constructor: `IS_SECONDARY` and its visibility.
-fn secondary_constructor_flags(visibility: Visibility) -> u64 {
+fn secondary_constructor_flags(visibility: Visibility, status: ReturnValueStatus) -> u64 {
     const IS_SECONDARY: u64 = 16;
-    IS_SECONDARY | (declaration_visibility_bits(visibility) << 1)
+    IS_SECONDARY | (declaration_visibility_bits(visibility) << 1) | return_value_status_bits(status)
 }
 
 #[cfg(test)]
@@ -1824,6 +1833,7 @@ mod tests {
                 ("value".to_string(), Ty::obj("kotlin/String")),
             ],
             metadata_visibility,
+            return_value_status: Default::default(),
             generated_debug: crate::ir::IrGeneratedDeclarationDebug::None,
             vararg_index: Some(1),
             defaults: vec![Some(0), None],
@@ -1976,18 +1986,42 @@ mod tests {
 
     #[test]
     fn secondary_constructor_flags_encode_exact_semantic_visibility() {
-        assert_eq!(secondary_constructor_flags(Visibility::Internal), 16);
-        assert_eq!(secondary_constructor_flags(Visibility::Private), 18);
-        assert_eq!(secondary_constructor_flags(Visibility::Protected), 20);
-        assert_eq!(secondary_constructor_flags(Visibility::Public), 22);
+        assert_eq!(
+            secondary_constructor_flags(Visibility::Internal, Default::default()),
+            16
+        );
+        assert_eq!(
+            secondary_constructor_flags(Visibility::Private, Default::default()),
+            18
+        );
+        assert_eq!(
+            secondary_constructor_flags(Visibility::Protected, Default::default()),
+            20
+        );
+        assert_eq!(
+            secondary_constructor_flags(Visibility::Public, Default::default()),
+            22
+        );
     }
 
     #[test]
     fn primary_constructor_flags_encode_exact_semantic_visibility() {
-        assert_eq!(primary_constructor_flags(Visibility::Internal), 0);
-        assert_eq!(primary_constructor_flags(Visibility::Private), 2);
-        assert_eq!(primary_constructor_flags(Visibility::Protected), 4);
-        assert_eq!(primary_constructor_flags(Visibility::Public), 6);
+        assert_eq!(
+            primary_constructor_flags(Visibility::Internal, Default::default()),
+            0
+        );
+        assert_eq!(
+            primary_constructor_flags(Visibility::Private, Default::default()),
+            2
+        );
+        assert_eq!(
+            primary_constructor_flags(Visibility::Protected, Default::default()),
+            4
+        );
+        assert_eq!(
+            primary_constructor_flags(Visibility::Public, Default::default()),
+            6
+        );
     }
 
     fn generated_function(ir: &mut IrFile, body: bool) -> u32 {

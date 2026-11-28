@@ -705,6 +705,7 @@ impl<'a> StreamedModuleSymbols<'a> {
     ) -> LibraryCallable {
         let declared_params = Some(parameters.clone().into_boxed_slice());
         LibraryCallable {
+            return_value_status: None,
             deprecation: None,
             external_identity: None,
             annotations: Vec::new(),

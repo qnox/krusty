@@ -118,6 +118,7 @@ pub(super) fn build(
         declared_spellings: Default::default(),
         named_params: Vec::new(),
         metadata_visibility: None,
+        return_value_status: Default::default(),
         generated_debug: Default::default(),
         vararg_index: None,
         delegate_prelude: prelude,

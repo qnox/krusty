@@ -395,14 +395,23 @@ impl ResolvedModuleIndex {
             .filter_map(|(&callable, status)| status.semantic_role.map(|role| (callable, role)))
     }
 
+    /// The return value checker mode the module's callable statuses were resolved under.
+    pub fn return_value_checker_mode(&self) -> crate::features::ReturnValueCheckerMode {
+        self.return_value.mode()
+    }
+
+    pub(crate) fn publish_return_value_checker_mode(
+        &mut self,
+        mode: crate::features::ReturnValueCheckerMode,
+    ) {
+        self.return_value.publish_mode(mode);
+    }
+
     pub fn property_return_value_status(
         &self,
         property: PropertyId,
     ) -> crate::types::ReturnValueStatus {
-        self.property_return_value_statuses
-            .get(&property)
-            .copied()
-            .unwrap_or_default()
+        self.return_value.property(property)
     }
 
     pub(crate) fn publish_callable_inherited_status(
@@ -420,18 +429,28 @@ impl ResolvedModuleIndex {
         }
     }
 
+    /// The status of a constructor, named by its declaration, or by its classifier for an
+    /// implicit primary constructor.
+    pub fn constructor_return_value_status(
+        &self,
+        constructor: DeclarationId,
+    ) -> crate::types::ReturnValueStatus {
+        self.return_value.constructor(constructor)
+    }
+
+    pub(crate) fn publish_constructor_return_value_status(
+        &mut self,
+        constructor: DeclarationId,
+        status: crate::types::ReturnValueStatus,
+    ) {
+        self.return_value.publish_constructor(constructor, status);
+    }
+
     pub(crate) fn publish_property_return_value_status(
         &mut self,
         property: PropertyId,
         status: crate::types::ReturnValueStatus,
     ) {
-        if status != crate::types::ReturnValueStatus::Unspecified {
-            assert!(
-                self.property_return_value_statuses
-                    .insert(property, status)
-                    .is_none(),
-                "a property may publish its return-value status only once"
-            );
-        }
+        self.return_value.publish_property(property, status);
     }
 }

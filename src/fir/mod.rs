@@ -37,6 +37,7 @@ mod module_symbols;
 mod overrides;
 mod parameters;
 mod retained_bodies;
+mod return_value_facts;
 mod signature;
 mod signature_extract;
 mod signature_source;

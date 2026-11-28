@@ -40,6 +40,13 @@ impl ResolvedModuleIndex {
             .map_or(&[], |facts| &facts.policies[..])
     }
 
+    /// The checked file-annotation applications of `source`, in source order.
+    pub(crate) fn file_applied_annotations(&self, source: SourceFileId) -> &[ResolvedAnnotation] {
+        self.file_annotations
+            .get(&source)
+            .map_or(&[], |facts| &facts.applications[..])
+    }
+
     /// Every source's checked file-annotation applications, for sources that declare any.
     pub(crate) fn file_annotation_applications(
         &self,

@@ -466,6 +466,7 @@ impl JvmLibraries {
                 )
                 .flatten();
             let mut callable = LibraryCallable {
+                return_value_status: None,
                 declaration_owner: Some(SemanticCallableOwner::Package(pkg)),
                 annotations: meta.annotations.clone(),
                 inline: inline_kind,
@@ -759,6 +760,7 @@ impl JvmLibraries {
             let ret = metadata_return_info(function.ret_class, function.ret_nullable())
                 .apply(physical_ret);
             let callable = LibraryCallable {
+                return_value_status: Some(function.return_value_status),
                 annotations: function.annotations.clone(),
                 suspend: function.is_suspend(),
                 inline: function_inline,
@@ -855,6 +857,7 @@ impl JvmLibraries {
                             physical: Ty,
                             inline: InlineKind| {
                 LibraryCallable {
+                    return_value_status: None,
                     inline,
                     singleton_dispatch: Some(Box::new(singleton)),
                     physical_name: (source_name != jvm_name).then(|| jvm_name.to_string()),

@@ -65,6 +65,9 @@ pub struct FnMeta {
     pub infix: bool,
     /// `tailrec fun` — sets `Function.flags` `IS_TAILREC` (bit 11).
     pub tailrec: bool,
+    /// Whether a caller must use the result (`Function.flags` bits 16-17), as kotlinc records the
+    /// status its checker resolved for the declaration.
+    pub return_value_status: crate::types::ReturnValueStatus,
     /// Companion-associated (`companion fun C.name`) — sets `Function.flags` bit 18.
     pub companion: bool,
     /// Declared type parameters in order `(name, reified)` — emitted as the `Function.type_parameter`
@@ -129,6 +132,7 @@ impl FnMeta {
             operator: false,
             infix: false,
             tailrec: false,
+            return_value_status: crate::types::ReturnValueStatus::Unspecified,
             companion: false,
             type_params: Vec::new(),
             semantic_type_params: Vec::new(),
@@ -567,6 +571,8 @@ fn function_pb(
         | (u64::from(f.inline) << 10)
         | (u64::from(f.infix) << 9)
         | (u64::from(f.operator) << 8)
+        | (f.return_value_status.metadata_value()
+            << crate::metadata::function_flags::RETURN_VALUE_STATUS_SHIFT)
         | if f.companion {
             crate::metadata::function_flags::IS_STATIC
         } else {

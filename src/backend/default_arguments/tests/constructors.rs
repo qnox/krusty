@@ -69,6 +69,7 @@ fn secondary(
         declared_spellings: Default::default(),
         named_params: Vec::new(),
         metadata_visibility: Some(crate::types::Visibility::Public),
+        return_value_status: Default::default(),
         generated_debug: Default::default(),
         vararg_index: None,
         defaults,

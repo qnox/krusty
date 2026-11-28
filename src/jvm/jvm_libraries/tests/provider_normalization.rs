@@ -190,6 +190,7 @@ fn a_dependency_closed_range_lookalike_keeps_its_body() {
         operator: true,
         infix: false,
         tailrec: false,
+        return_value_status: Default::default(),
         companion: false,
         type_params: Vec::new(),
         semantic_type_params: Vec::new(),

@@ -2408,6 +2408,10 @@ pub struct IrFile {
     /// absent = public, or private for a singleton, whose constructor only a generated singleton
     /// records as public. It sets `@Metadata` `Constructor.flags` and the JVM access.
     pub ctor_visibilities: crate::fx_hash::HashMap<TypeName, crate::types::Visibility>,
+    /// The checker's return-value status of each class's PRIMARY constructor; absent = unspecified.
+    /// It sets `@Metadata` `Constructor.flags`.
+    pub ctor_return_value_statuses:
+        crate::fx_hash::HashMap<TypeName, crate::types::ReturnValueStatus>,
     /// Declaring class to indices in `statics` for class properties whose JVM field is static.
     pub declared_class_statics: crate::fx_hash::HashMap<TypeName, Vec<u32>>,
     /// (class internal name, property name) → 1-based source line of a BODY property's declaration.

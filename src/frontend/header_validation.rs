@@ -82,6 +82,15 @@ pub(super) fn validate_after_parsing(file: &File, parser_error: bool, diags: &mu
             "the feature \"name based destructuring\" is only available since language version 2.5",
         );
     }
+    for span in file.destructuring.ungated_unnamed_locals.iter().copied() {
+        diags.error(
+            span,
+            "the feature \"unnamed local variables\" is experimental and should be enabled \
+             explicitly. This can be done by supplying the compiler argument \
+             '-XXLanguage:+UnnamedLocalVariables', but note that no stability guarantees are \
+             provided.",
+        );
+    }
     for span in file.destructuring.ungated_short_form_spans.iter().copied() {
         diags.error(
             span,
