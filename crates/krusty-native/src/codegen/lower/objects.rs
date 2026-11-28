@@ -13,7 +13,6 @@
 use super::super::super::captures;
 use super::type_checks::{is_runtime_constructed, ThrowableOperands};
 use super::*;
-use krusty::backend::class_statics::ClassActivationStep;
 use krusty::types::TypeName;
 
 #[cfg(test)]
@@ -2411,68 +2410,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let func_ref = self.func_ref(constructor);
         self.emit_call(func_ref, &arguments)?;
         self.constructed(object, class)
-    }
-
-    /// Initialize `class` the way `new` does, before any constructor argument runs.
-    ///
-    /// A superclass's companion runs before the subclass's. The singleton getter is the
-    /// typed initializer and publishes the instance before the companion constructor, so a
-    /// companion that constructs its holder does not re-enter. An enum's companion stays
-    /// with the enum initializer.
-    pub(super) fn activate_class(&mut self, class: ClassId) -> Result<(), Unsupported> {
-        let mut chain = vec![class];
-        loop {
-            let parent = self
-                .file
-                .model
-                .layout(*chain.last().expect("non-empty"))
-                .superclass;
-            let Some(parent) = parent else {
-                break;
-            };
-            chain.push(parent);
-        }
-        self.activate_laid_out_superclass(*chain.last().expect("non-empty"))?;
-        if self.terminated {
-            return Ok(());
-        }
-        for &owner in chain.iter().rev() {
-            for step in self.file.class_statics.plan.activation_steps(owner) {
-                match step {
-                    ClassActivationStep::OwnStatics(class) => self.initialize_own_statics(class)?,
-                    ClassActivationStep::Companion(class) => self.initialize_companion(class)?,
-                }
-                if self.terminated {
-                    return Ok(());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Initialize the companion object of `class`, when it has one: through its singleton
-    /// getter. An enum's companion stays with the enum initializer.
-    fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
-        let getter = {
-            let ir = self.file.ir;
-            let classes = &self.file.classes;
-            let declaration = &ir.classes[class as usize];
-            if model::is_enum(declaration) {
-                None
-            } else {
-                declaration
-                    .companion_class
-                    .and_then(|companion| ir.class_id_by_name(companion))
-                    .and_then(|companion| classes[companion as usize].singleton)
-                    .map(|(_, getter)| getter)
-            }
-        };
-        let Some(getter) = getter else {
-            return Ok(());
-        };
-        let func_ref = self.func_ref(getter);
-        self.emit_call(func_ref, &[])?;
-        Ok(())
     }
 
     pub(super) fn method_call(
