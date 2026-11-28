@@ -54,24 +54,22 @@ impl BodyLowering<'_, '_, '_> {
         }
     }
 
-    /// Whether `target` reads the address a pointer class wraps: its `value` property at the type
-    /// the class's value declaration gives it, or `CPointer.rawValue`, which is that address as a
-    /// `NativePtr`. A pointer is that address, so the read is the pointer itself.
+    /// Whether `target` reads the address a pointer class wraps: a property an address class
+    /// declares whose declared type is itself an address class — `NativePtr`'s and `CPointer`'s
+    /// stored address, or `CPointer.rawValue`, which is that address as a `NativePtr`. Every
+    /// address class is the one machine word, so such a read is the receiver itself, at the type
+    /// the declaration states.
     pub(super) fn is_address_value_read(&self, target: krusty::fir::ExternalPropertyId) -> bool {
-        let Some(property) = self.file.callables.property(target) else {
-            return false;
-        };
-        if !krusty::backend::address_carriers::is_address_class(property.owner) {
-            return false;
-        }
-        match &*property.name {
-            "value" => self.file.values.underlying(property.owner) == Some(property.result),
-            "rawValue" => {
-                property.result
-                    == Ty::obj_name(krusty::types::type_name("kotlin/native/internal/NativePtr"))
-            }
-            _ => false,
-        }
+        self.file
+            .callables
+            .property(target)
+            .is_some_and(|property| {
+                krusty::backend::address_carriers::is_address_class(property.owner)
+                    && property
+                        .result
+                        .nominal_classifier()
+                        .is_some_and(krusty::backend::address_carriers::is_address_class)
+            })
     }
 
     /// The address a pointer is, read through the property that exposes it.

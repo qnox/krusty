@@ -47,7 +47,7 @@ impl BodyLowering<'_, '_, '_> {
         lhs: u32,
         rhs: u32,
     ) -> Result<Option<Value>, Unsupported> {
-        if let Some(equal) = self.unboxed_value_equality(op, lhs, rhs)? {
+        if let Some(equal) = self.value_class_equality(op, lhs, rhs)? {
             return Ok(equal);
         }
         let against_null = matches!(self.file.ir.expr(lhs), IrExpr::Const(IrConst::Null))
@@ -78,64 +78,49 @@ impl BodyLowering<'_, '_, '_> {
         }))
     }
 
-    /// `==` of two unboxed operands of one value class that declares no `equals` of its own and
-    /// wraps an integral scalar: the classes' default equality is that of their values, so it is
-    /// the comparison of the values, and neither side is boxed to ask it. `Ok(None)` leaves the
-    /// comparison to the general path; `Ok(Some(None))` is a terminated body.
-    fn unboxed_value_equality(
+    /// `==` of two non-null occurrences of one value class that declares no `equals` of its own:
+    /// Kotlin's is the class's generated `equals`, which compares the values by THEIR type's
+    /// `equals` — so `NaN` equals itself and the two zeroes differ, as they do in a box. Each
+    /// operand is coerced to the class first, which opens one an erased result carried as a box,
+    /// and neither is boxed to ask. A class that declares its own `equals` answers by it, through
+    /// its box on the general path. `Ok(None)` leaves the comparison to that path;
+    /// `Ok(Some(None))` is a terminated body.
+    fn value_class_equality(
         &mut self,
         op: IrBinOp,
         lhs: u32,
         rhs: u32,
     ) -> Result<Option<Option<Value>>, Unsupported> {
-        let (Some(left), Some(right)) = (self.checked_type(lhs), self.checked_type(rhs)) else {
+        let unboxed = |ty: Option<Ty>| {
+            ty.filter(|ty| !ty.is_nullable())
+                .and_then(|ty| self.file.values.unboxed(ty))
+        };
+        let (Some(left), Some(right)) = (
+            unboxed(self.checked_type(lhs)),
+            unboxed(self.checked_type(rhs)),
+        ) else {
             return Ok(None);
         };
-        let Some(class) = self.file.values.unboxed(left) else {
-            return Ok(None);
-        };
-        if left.is_nullable()
-            || right.is_nullable()
-            || self.file.values.unboxed(right) != Some(class)
-        {
+        if left != right || self.declares_its_own_equals(left) {
             return Ok(None);
         }
-        let Some(underlying) = self.file.values.underlying(class).filter(|ty| {
-            matches!(
-                *ty,
-                Ty::Int | Ty::Long | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean
-            )
-        }) else {
-            return Ok(None);
+        let class = Ty::obj_name(left);
+        let Some(lhs) = self.coerce(lhs, class)? else {
+            return Ok(Some(None));
         };
-        let generated = self
-            .file
-            .ir
-            .data_class_member(class, krusty::ir::IrDataClassMemberRole::Equals);
-        let declares_equals = self.file.ir.class_id_by_name(class).is_none_or(|id| {
-            self.file.ir.classes[id as usize]
-                .methods
-                .iter()
-                .any(|&method| {
-                    let function = &self.file.ir.functions[method as usize];
-                    &*function.name == "equals"
-                        && function.params.len() == 1
-                        && Some(method) != generated
-                })
-        });
-        if declares_equals {
-            return Ok(None);
-        }
-        let (Some(left), Some(right)) =
-            (self.coerce(lhs, underlying)?, self.coerce(rhs, underlying)?)
-        else {
+        let Some(rhs) = self.coerce(rhs, class)? else {
             return Ok(Some(None));
         };
         if self.terminated {
             return Ok(Some(None));
         }
-        let condition = comparison(op, false).expect("equality");
-        Ok(Some(Some(self.builder.ins().icmp(condition, left, right))))
+        let equal = self.values_equal(lhs, rhs, class)?;
+        Ok(Some(Some(if op == IrBinOp::Ne {
+            let one = self.builder.ins().iconst(types::I8, 1);
+            self.builder.ins().bxor(equal, one)
+        } else {
+            equal
+        })))
     }
 
     fn primitive_equality(
@@ -447,34 +432,8 @@ impl BodyLowering<'_, '_, '_> {
         let rhs_scalar = rhs_checked.and_then(scalar_bound);
 
         if matches!(op, IrBinOp::Eq | IrBinOp::Ne) {
-            // Two occurrences of one value class, both carried as the value: Kotlin's `==` on
-            // them is the class's `equals`, which compares the values by THEIR type's `equals` —
-            // so `NaN` equals itself and the two zeroes differ, as they do in a box.
-            let unboxed = |ty: Option<Ty>| {
-                ty.filter(|ty| !ty.is_nullable())
-                    .and_then(|ty| self.file.values.unboxed(ty))
-            };
-            if let (Some(left), Some(right)) = (unboxed(lhs_checked), unboxed(rhs_checked)) {
-                // A class that declares its own `equals` answers by it, through its box below.
-                if left == right && !self.declares_its_own_equals(left) {
-                    let class = Ty::obj_name(left);
-                    let Some(lhs) = self.coerce(lhs, class)? else {
-                        return Ok(None);
-                    };
-                    let Some(rhs) = self.coerce(rhs, class)? else {
-                        return Ok(None);
-                    };
-                    if self.terminated {
-                        return Ok(None);
-                    }
-                    let equal = self.values_equal(lhs, rhs, class)?;
-                    return Ok(Some(if op == IrBinOp::Ne {
-                        let one = self.builder.ins().iconst(types::I8, 1);
-                        self.builder.ins().bxor(equal, one)
-                    } else {
-                        equal
-                    }));
-                }
+            if let Some(equal) = self.value_class_equality(op, lhs, rhs)? {
+                return Ok(equal);
             }
             let against_null = matches!(self.file.ir.expr(lhs), IrExpr::Const(IrConst::Null))
                 || matches!(self.file.ir.expr(rhs), IrExpr::Const(IrConst::Null));
