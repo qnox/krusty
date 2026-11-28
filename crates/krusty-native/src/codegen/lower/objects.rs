@@ -2437,7 +2437,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(());
         }
         for &owner in chain.iter().rev() {
-            for step in self.file.class_statics.activation_steps(owner) {
+            for step in self.file.class_statics.plan.activation_steps(owner) {
                 match step {
                     ClassActivationStep::OwnStatics(class) => self.initialize_own_statics(class)?,
                     ClassActivationStep::Companion(class) => self.initialize_companion(class)?,

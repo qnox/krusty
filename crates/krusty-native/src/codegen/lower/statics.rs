@@ -81,19 +81,15 @@ impl<'a> FileLowering<'a> {
         let symbol = self.statics_init_symbol();
         let id = self.declare_local_function(&symbol, &[], Ty::Unit)?;
         let signature = self.signature_of(&[], Ty::Unit)?;
+        // A deferred static belongs to its class: the class initializer roots and initializes it,
+        // and another file can reach that initializer without ever running this one.
         let declarations: Vec<(DataId, Ty, Option<u32>)> = self
             .ir
             .statics
             .iter()
             .enumerate()
-            .map(|(index, declaration)| {
-                // A deferred static is still rooted here, at program start, but its class runs
-                // its initializer.
-                let init = declaration
-                    .init
-                    .filter(|_| !self.class_statics.is_deferred(index as u32));
-                (self.statics[index], declaration.ty, init)
-            })
+            .filter(|(index, _)| !self.class_statics.plan.is_deferred(*index as u32))
+            .map(|(index, declaration)| (self.statics[index], declaration.ty, declaration.init))
             .collect();
 
         self.emit_function(id, signature, Ty::Unit, &symbol, &mut |body, _| {
