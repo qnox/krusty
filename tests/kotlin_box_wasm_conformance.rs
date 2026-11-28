@@ -865,6 +865,8 @@ fun box(): String {
 
 #[test]
 fn wasm_lowers_the_library_body_of_pow_over_unsigned_locals() {
+    // PLATFORM-SPECIFIC: pin that Wasm lowers fdlibm's library body of `pow`; Native declares it
+    // `external` libm and the JVM calls `Math.pow`.
     // `pow` reaches fdlibm's `__ieee754_pow`, whose locals have no initializer and whose bit tests
     // compare unsigned values: the library body lowers with the unsigned storage getter, the
     // unsigned comparison, and a deferred unsigned local starting at its carrier's zero.
