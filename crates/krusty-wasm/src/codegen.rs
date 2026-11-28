@@ -84,6 +84,9 @@ pub struct WasmModule {
     /// through its entry or a call that follows it, so starting with every initializer is the same
     /// order the JVM's lazy facade initialization observes for a program declared in one file.
     initializers: Vec<u32>,
+    /// The module whose code first used each classifier, which a later redeclaration must not
+    /// replace (see `krusty::backend::classifier_redeclarations`).
+    classifier_uses: krusty::backend::classifier_redeclarations::ClassifierUses,
 }
 
 struct Started {
@@ -252,6 +255,14 @@ impl Backend for WasmBackend {
             parameters == krusty::backend::MainEntryParameters::Arguments
         }) {
             decline(state, "a `main` that takes its arguments".to_string());
+            return Vec::new();
+        }
+        if let Err(redeclared) =
+            state
+                .classifier_uses
+                .enter_file(file.module_name, &file.ir, &file.classifiers)
+        {
+            decline(state, redeclared.construct());
             return Vec::new();
         }
         krusty::backend::construction_entries::publish_constructors(

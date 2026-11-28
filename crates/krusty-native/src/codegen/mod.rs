@@ -158,6 +158,9 @@ pub struct CodegenModule {
         krusty::backend::instance_links::InstanceEntry,
         String,
     >,
+    /// The module whose code first used each classifier, which a later redeclaration must not
+    /// replace (see `krusty::backend::classifier_redeclarations`).
+    classifier_uses: krusty::backend::classifier_redeclarations::ClassifierUses,
     next_dependency_symbol: usize,
     next_dependency_support_object: usize,
     next_disambiguated_source_object: usize,
@@ -281,6 +284,18 @@ impl Backend for CraneliftBackend {
                 state.dependency_support_stem(file.stems)
             }
         };
+        if let Err(redeclared) =
+            state
+                .classifier_uses
+                .enter_file(file.module_name, &file.ir, &file.classifiers)
+        {
+            report_decline(
+                &lower::Unsupported::from(redeclared.construct()),
+                &file,
+                diags,
+            );
+            return Vec::new();
+        }
         krusty::backend::construction_entries::publish_constructors(
             &mut file.ir,
             (file.module_name, file.classifiers.module()),
@@ -483,8 +498,10 @@ impl Backend for CraneliftBackend {
                 },
             );
         }
+        state.instances.enter_module(file.module_name);
         let instances = match krusty::backend::instance_links::link_entries(
             &file.dependency_exports,
+            &file.classifiers,
             &mut state.instances,
             || {
                 let symbol = format!("kt_klib_instance_{}", state.next_dependency_symbol);
@@ -493,11 +510,8 @@ impl Backend for CraneliftBackend {
             },
         ) {
             Ok(instances) => instances,
-            Err(error) => {
-                diags.error(
-                    krusty::diag::Span::new(0, 0),
-                    format!("internal error: {error}"),
-                );
+            Err(conflict) => {
+                report_decline(&lower::Unsupported::from(conflict), &file, diags);
                 return Vec::new();
             }
         };
@@ -530,27 +544,35 @@ impl Backend for CraneliftBackend {
                 }
             }
         }
-        let mut instance_reads = krusty::backend::instance_links::link_reads(
+        let mut next_symbol = || {
+            let symbol = format!("kt_klib_instance_{}", state.next_dependency_symbol);
+            state.next_dependency_symbol += 1;
+            symbol
+        };
+        let instance_reads = krusty::backend::instance_links::link_reads(
             &file.ir,
             file.classifiers.module(),
+            &file.classifiers,
             &mut state.instances,
-            || {
-                let symbol = format!("kt_klib_instance_{}", state.next_dependency_symbol);
-                state.next_dependency_symbol += 1;
-                symbol
-            },
-        );
-        instance_reads.extend(krusty::backend::instance_links::link_constructor_reads(
-            &file.ir,
-            file.module_name,
-            file.classifiers.module(),
-            &mut state.instances,
-            || {
-                let symbol = format!("kt_klib_instance_{}", state.next_dependency_symbol);
-                state.next_dependency_symbol += 1;
-                symbol
-            },
-        ));
+            &mut next_symbol,
+        )
+        .and_then(|mut reads| {
+            reads.extend(krusty::backend::instance_links::link_constructor_reads(
+                &file.ir,
+                file.module_name,
+                file.classifiers.module(),
+                &mut state.instances,
+                &mut next_symbol,
+            )?);
+            Ok(reads)
+        });
+        let instance_reads = match instance_reads {
+            Ok(reads) => reads,
+            Err(conflict) => {
+                report_decline(&lower::Unsupported::from(conflict), &file, diags);
+                return Vec::new();
+            }
+        };
         let mut dependency_interface_numbers = std::mem::take(
             state
                 .dependency_interface_numbers

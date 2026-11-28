@@ -198,7 +198,8 @@ pub(super) fn lower_file(
         let results = carrier(function.ret)?.into_iter().collect::<Vec<_>>();
         signatures.push(Some(module.func_type(params, results)));
     }
-    let instance_entries = callable_registry.link_instances(dependency_exports, module)?;
+    let instance_entries =
+        callable_registry.link_instances(dependency_exports, classifiers, module)?;
     let indices = callable_registry.declare_file(ir, module, &instance_entries)?;
     let reference_file =
         runtime

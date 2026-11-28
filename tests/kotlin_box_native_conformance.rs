@@ -356,6 +356,31 @@ fn native_library_object_values_preserve_identity() {
 }
 
 #[test]
+fn native_platform_module_class_replaces_the_common_module_class_it_redeclares() {
+    let source = include_str!("box_regressions/multimodule/platformRedeclaresCommonClass.kt");
+    let stem = "platformRedeclaresCommonClass";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole classpath-substitution module graph");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass, "{stem}");
+}
+
+#[test]
+fn native_declines_a_redeclaration_of_a_class_the_common_module_code_already_uses() {
+    let source = include_str!("fixtures/platform_redeclaration/LibraryUsesRedeclaredClass.kt");
+    let stem = "LibraryUsesRedeclaredClass";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("kotlinc links the common module's code to the redeclarations too");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Declined(
+            "redeclaring the class `Single` that code compiled into the module `lib-platform` already uses"
+                .to_owned()
+        ),
+        "{stem}"
+    );
+}
+
+#[test]
 fn native_library_generic_any_override_uses_the_canonical_vtable_slot() {
     let source = include_str!("box_regressions/multimodule/libraryGenericAnyOverride.kt");
     super::box_reference_classes::checked_box(source, "libraryGenericAnyOverride")

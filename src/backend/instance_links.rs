@@ -10,15 +10,19 @@
 //! (`super::BackendModuleFacts::declares_instance`) and one table of links
 //! ([`super::module_links::ModuleLinks`]): whichever of the reading and the declaring file is
 //! lowered first allocates the link, and the other finds it. The table serves every module of a
-//! program, so a library's instance links the same way.
+//! program, so a library's instance links the same way. A module that redeclares a classifier of
+//! an earlier module of its chain realizes entries of its own, which every later module reads
+//! (see [`super::module_links`]).
 
 use crate::fir::DeclarationId;
 use crate::fx_hash::HashMap;
 use crate::ir::{FunId, IrExpr, IrFile};
 use crate::types::TypeName;
 
-use super::module_links::ModuleLinks;
-use super::{BackendModuleFacts, DependencyExportSignatures, EnumConstant};
+use super::module_links::{LinkConflict, ModuleLinks};
+use super::{
+    BackendClassifierSource, BackendModuleFacts, DependencyExportSignatures, EnumConstant,
+};
 
 /// An instance another file reads through its declaring file's entry.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -66,12 +70,47 @@ impl InstanceEntry {
             | Self::TypeTest(_) => None,
         }
     }
+
+    /// The classifier the instance belongs to, which a module may redeclare: `None` for a
+    /// constructor's, whose module-qualified declaration no other module shares.
+    fn redeclarable_classifier(&self) -> Option<TypeName> {
+        match self {
+            Self::Object(classifier)
+            | Self::TypeTest(classifier)
+            | Self::EnumMember { classifier, .. } => Some(*classifier),
+            Self::EnumConstant(constant) => Some(constant.classifier),
+            Self::Constructor { .. } | Self::ConstructorDefaults { .. } => None,
+        }
+    }
+
+    /// The dependency module whose declaration of the instance the current module's redeclares
+    /// (see [`super::module_links`]).
+    fn redeclared_owner(&self, classifiers: &dyn BackendClassifierSource) -> Option<String> {
+        self.redeclarable_classifier()
+            .and_then(|classifier| classifiers.redeclared_dependency_module(classifier))
+    }
+}
+
+/// The construct a target declines for a link `conflict`, phrased for its capability diagnostic.
+fn conflict_message(conflict: LinkConflict) -> &'static str {
+    match conflict {
+        LinkConflict::DefinedTwice => {
+            "one instance entry realized by two files, or by two modules neither of which \
+             redeclares the other's"
+        }
+        // `super::classifier_redeclarations` declines a redeclaration of a classifier earlier code
+        // uses before its links are defined, so this one only guards the table.
+        LinkConflict::ReplacedAfterRead => {
+            "a redeclaration replacing an instance entry a file already read"
+        }
+    }
 }
 
 /// Define the link of every instance entry this file realized, each by its instance: the link a
 /// read in an earlier file reserved, or a fresh one from `allocate`.
 pub fn link_entries<V: Clone>(
     exports: &DependencyExportSignatures,
+    classifiers: &dyn BackendClassifierSource,
     links: &mut ModuleLinks<InstanceEntry, V>,
     mut allocate: impl FnMut() -> V,
 ) -> Result<Vec<(FunId, V)>, &'static str> {
@@ -80,9 +119,13 @@ pub fn link_entries<V: Clone>(
         .iter()
         .map(|(instance, entry)| {
             links
-                .define(instance.clone(), &mut allocate)
+                .define(
+                    instance.clone(),
+                    instance.redeclared_owner(classifiers).as_deref(),
+                    &mut allocate,
+                )
                 .map(|link| (*entry, link))
-                .map_err(|_| "two files realize one instance entry")
+                .map_err(conflict_message)
         })
         .collect()
 }
@@ -95,9 +138,10 @@ pub fn link_entries<V: Clone>(
 pub fn link_reads<V: Clone>(
     ir: &IrFile,
     module: &BackendModuleFacts,
+    classifiers: &dyn BackendClassifierSource,
     links: &mut ModuleLinks<InstanceEntry, V>,
     mut allocate: impl FnMut() -> V,
-) -> HashMap<InstanceEntry, V> {
+) -> Result<HashMap<InstanceEntry, V>, &'static str> {
     let mut reads = HashMap::default();
     for expression in crate::ir::emitted_body_roots(ir)
         .into_iter()
@@ -129,11 +173,19 @@ pub fn link_reads<V: Clone>(
             continue;
         }
         let declared = module.declares_instance(&instance);
-        if let Some(link) = links.read(instance.clone(), declared, &mut allocate) {
+        if let Some(link) = links
+            .read(
+                instance.clone(),
+                declared,
+                instance.redeclared_owner(classifiers).as_deref(),
+                &mut allocate,
+            )
+            .map_err(conflict_message)?
+        {
             reads.insert(instance, link);
         }
     }
-    reads
+    Ok(reads)
 }
 
 /// The link of each constructor of another file's class that `ir` builds an instance through,
@@ -147,7 +199,7 @@ pub fn link_constructor_reads<V: Clone>(
     module: &BackendModuleFacts,
     links: &mut ModuleLinks<InstanceEntry, V>,
     mut allocate: impl FnMut() -> V,
-) -> HashMap<InstanceEntry, V> {
+) -> Result<HashMap<InstanceEntry, V>, &'static str> {
     let mut reads = HashMap::default();
     for expression in crate::ir::emitted_body_roots(ir)
         .into_iter()
@@ -183,11 +235,15 @@ pub fn link_constructor_reads<V: Clone>(
             continue;
         }
         let declared = module.declares_instance(&instance);
-        if let Some(link) = links.read(instance.clone(), declared, &mut allocate) {
+        // A constructor's identity is module-qualified, so no module redeclares another's.
+        if let Some(link) = links
+            .read(instance.clone(), declared, None, &mut allocate)
+            .map_err(conflict_message)?
+        {
             reads.insert(instance, link);
         }
     }
-    reads
+    Ok(reads)
 }
 
 /// The link of each type test against another file's class that `ir` emits: an `is` or `!is`
@@ -196,9 +252,10 @@ pub fn link_constructor_reads<V: Clone>(
 pub fn link_type_test_reads<V: Clone>(
     ir: &IrFile,
     module: &BackendModuleFacts,
+    classifiers: &dyn BackendClassifierSource,
     links: &mut ModuleLinks<InstanceEntry, V>,
     mut allocate: impl FnMut() -> V,
-) -> HashMap<InstanceEntry, V> {
+) -> Result<HashMap<InstanceEntry, V>, &'static str> {
     let mut reads = HashMap::default();
     for expression in crate::ir::emitted_body_roots(ir)
         .into_iter()
@@ -223,9 +280,17 @@ pub fn link_type_test_reads<V: Clone>(
             continue;
         }
         let declared = module.declares_instance(&instance);
-        if let Some(link) = links.read(instance.clone(), declared, &mut allocate) {
+        if let Some(link) = links
+            .read(
+                instance.clone(),
+                declared,
+                instance.redeclared_owner(classifiers).as_deref(),
+                &mut allocate,
+            )
+            .map_err(conflict_message)?
+        {
             reads.insert(instance, link);
         }
     }
-    reads
+    Ok(reads)
 }
