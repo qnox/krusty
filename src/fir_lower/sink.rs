@@ -14,7 +14,7 @@ use super::{
     finish_callable_body,
     generics::{
         attach_callable_generic_facts, attach_classifier_generic_facts,
-        classifier_own_type_parameters,
+        classifier_own_type_parameters, record_foreign_classifier_self_type,
     },
     initialization::{accept_non_callable_body, finalize_enum_entries},
     interface_delegation::{
@@ -666,6 +666,9 @@ impl<'a> CommonIrBodySink<'a> {
         // Its declaration line belongs to a source unit that is not active here; a body compiled
         // from it still names its receiver, parameters and locals.
         self.ir.fn_debug_locals.insert(function);
+        if let Some(owner) = index.enclosing_classifier(declaration) {
+            record_foreign_classifier_self_type(index, owner, self.ir);
+        }
         // A member template's body may describe its classifiers' type parameters at run time.
         let mut classifier = index.enclosing_classifier(declaration);
         while let Some(header) = classifier {

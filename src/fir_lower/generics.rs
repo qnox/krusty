@@ -203,6 +203,37 @@ fn classifier_type_parameter_layout(
     (layout, own_count)
 }
 
+/// A classifier applied to its own and its enclosing classifiers' type parameters
+/// (`Outer<A>.Inner<B>`): the type its members' dispatch receiver has.
+fn applied_self_type(classifier: crate::types::TypeName, parameters: &[IrTypeParameter]) -> Ty {
+    Ty::obj_args_name(
+        classifier,
+        &parameters
+            .iter()
+            .map(IrTypeParameter::ty)
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Record the self type of a classifier another source declares, whose member this file lowers
+/// as an inline template: its members' bodies receive it.
+pub(super) fn record_foreign_classifier_self_type(
+    index: &ResolvedModuleIndex,
+    header: &ResolvedClassifierHeader,
+    ir: &mut IrFile,
+) {
+    let (layout, _) = classifier_type_parameter_layout(index, header.declaration);
+    let parameters = layout
+        .iter()
+        .copied()
+        .map(|parameter| type_parameter(index, parameter))
+        .collect::<Vec<_>>();
+    ir.record_declared_class_self_type(
+        header.classifier,
+        applied_self_type(header.classifier, &parameters),
+    );
+}
+
 pub(super) fn attach_classifier_generic_facts(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,
@@ -219,13 +250,7 @@ pub(super) fn attach_classifier_generic_facts(
     let (own_parameters, captured_parameters) = parameters.split_at(own_count);
     ir.record_declared_class_self_type(
         header.classifier,
-        Ty::obj_args_name(
-            header.classifier,
-            &parameters
-                .iter()
-                .map(IrTypeParameter::ty)
-                .collect::<Vec<_>>(),
-        ),
+        applied_self_type(header.classifier, &parameters),
     );
     class.type_params = own_parameters
         .iter()

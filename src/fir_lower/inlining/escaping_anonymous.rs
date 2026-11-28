@@ -402,8 +402,10 @@ fn specialized_class(
         .map(crate::ir::IrSiteClassName::anonymous_object);
     copy.enclosure = expansion.site.caller.or(copy.enclosure);
     copy.methods = cloned_methods.clone();
+    // The copy's declared types are the template's, applied to this call's type arguments.
+    let applied = |ty: Ty| ty_subst_keep_unbound(ty, expansion.bindings);
     for supertype in &mut copy.supertypes {
-        *supertype = ty_subst_keep_unbound(*supertype, expansion.bindings);
+        *supertype = applied(*supertype);
     }
     // Metadata describes the copied declaration and retains its original capture identities.
     // The applied hierarchy above is the copy's current semantic view; a target realizes that
@@ -411,6 +413,14 @@ fn specialized_class(
     if let Some(signature) = ir.class_signature_name(internal).cloned() {
         ir.insert_class_signature_name(placeholder, signature);
     }
+    // So is its self type, like its supertypes above.
+    let template_self = ir
+        .declared_class_self_type(class_name)
+        .ok_or_else(|| malformed(class_name))?;
+    ir.record_declared_class_self_type(
+        placeholder,
+        Ty::obj_args_name(placeholder, applied(template_self).type_args()),
+    );
 
     // The copy is the class regenerated for this call: the inline function's parameters are bound
     // to its arguments. A capture of one still holds a `crossinline` parameter only when the call

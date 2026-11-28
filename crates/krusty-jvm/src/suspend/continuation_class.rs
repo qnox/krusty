@@ -68,13 +68,30 @@ pub(super) fn build_continuation_class(
     layout: &SpillLayout,
     suspended_result_returns: &mut SuspendedResultReturns,
     owner: ContinuationOwner<'_>,
-) -> ClassId {
+) -> Option<ClassId> {
     let ContinuationOwner {
         function: outer_fid,
         receiver,
         static_owner,
         params,
     } = owner;
+    // The receiver is the member's class applied to its own and its enclosing classes' type
+    // parameters (`Outer<A>.Inner<B>`), which is what its `this$0` field and the constructor sign.
+    // The member has a body here, so its class is compiled here and records its self type.
+    let receiver = match receiver {
+        Some(owner) => {
+            let Some(self_type) = ir.declared_class_self_type(owner) else {
+                krusty::trace_compiler!(
+                    "suspend",
+                    "continuation of fid={outer_fid}: class {} records no self type",
+                    owner.render()
+                );
+                return None;
+            };
+            Some((owner, self_type))
+        }
+        None => None,
+    };
     let class_id = ir.classes.len() as ClassId;
     let layout_fields = layout.fields();
     // result(0), label(1), spill slots(2..), and — for a member — the captured receiver `this$0` last.
@@ -116,7 +133,7 @@ pub(super) fn build_continuation_class(
     // correct placeholders, exactly as kotlinc passes `iconst_0`/`aconst_null`.
     let mut reentry_args: Vec<ExprId> = params.iter().map(|t| zero_value(ir, t)).collect();
     reentry_args.push(this_as_cont);
-    let call_outer = match (receiver, static_owner) {
+    let call_outer = match (receiver.map(|(owner, _)| owner), static_owner) {
         (None, Some(owner)) => ir.add_expr(IrExpr::Call {
             callee: Box::new(Callee::ClassStatic {
                 owner,
@@ -245,8 +262,7 @@ pub(super) fn build_continuation_class(
     let mut ctor_args: Vec<IrCtorArg> = Vec::new();
     let mut pre_super_param_fields = Vec::new();
     let mut arg_idx = 1u32; // value-index of the next ctor argument (`this` is 0)
-    if let Some(owner) = receiver {
-        let recv_ty = Ty::obj_name(owner);
+    if let Some((_, recv_ty)) = receiver {
         let receiver_field = fields.len() as u32;
         fields.push(
             krusty::ir::IrField::new("this$0".to_string(), recv_ty)
@@ -385,5 +401,5 @@ pub(super) fn build_continuation_class(
             );
         }
     }
-    class
+    Some(class)
 }

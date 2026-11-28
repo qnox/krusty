@@ -1226,8 +1226,7 @@ fn build_state_machine(
             layout.add_list(&scope.values);
         }
     }
-
-    let cont_id = build_continuation_class(
+    let Some(cont_id) = build_continuation_class(
         ir,
         &cont_internal,
         &layout,
@@ -1238,8 +1237,9 @@ fn build_state_machine(
             static_owner,
             params: &real_params,
         },
-    );
-
+    ) else {
+        return false;
+    };
     // A `suspendCoroutineUninterceptedOrReturn { c -> … }` block inside this body reads its
     // continuation parameter: bind it to the machine WRAPPER (`cont_v`) so `c.resume(v)`
     // re-enters THIS machine at the resume label (kotlinc's protocol; the raw incoming
