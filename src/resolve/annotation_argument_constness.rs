@@ -40,23 +40,27 @@ impl Checker<'_> {
             self.annotation_argument_diagnostics(argument, &mut diagnostics);
         }
         for (expression, kind) in &diagnostics {
-            let message = match kind {
-                NonConstantArgument::NotConst => {
-                    "annotation argument must be a compile-time constant."
-                }
-                NonConstantArgument::NotEnumConstant => {
-                    "enum annotation argument must be an enum constant."
-                }
-                NonConstantArgument::NotKClassLiteral => {
-                    "annotation argument must be class literal (T::class)."
-                }
-                NonConstantArgument::NonConstVal => {
-                    "only 'const val' can be used in constant expressions."
-                }
+            let (name, message) = match kind {
+                NonConstantArgument::NotConst => (
+                    crate::diag::names::ANNOTATION_ARGUMENT_MUST_BE_CONST,
+                    "Annotation argument must be a compile-time constant.",
+                ),
+                NonConstantArgument::NotEnumConstant => (
+                    crate::diag::names::ANNOTATION_ARGUMENT_MUST_BE_ENUM_CONST,
+                    "Enum annotation argument must be an enum constant.",
+                ),
+                NonConstantArgument::NotKClassLiteral => (
+                    crate::diag::names::ANNOTATION_ARGUMENT_MUST_BE_KCLASS_LITERAL,
+                    "Annotation argument must be class literal (T::class).",
+                ),
+                NonConstantArgument::NonConstVal => (
+                    crate::diag::names::NON_CONST_VAL_USED_IN_CONSTANT_EXPRESSION,
+                    "Only 'const val' can be used in constant expressions.",
+                ),
                 NonConstantArgument::ResolutionError => continue,
             };
             self.diags
-                .error(self.span(*expression), message.to_string());
+                .error_named(self.span(*expression), name, message);
         }
         !diagnostics.is_empty()
     }

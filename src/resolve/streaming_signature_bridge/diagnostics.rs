@@ -310,11 +310,7 @@ impl ProductionSignatureSemantics<'_> {
                 scope.owner,
                 file,
                 Span::new(span.lo.saturating_sub(1), span.hi),
-                format!(
-                    "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable \
-                     receiver of type '{}'.",
-                    receiver.source_name()
-                ),
+                crate::diagnostic_wording::unsafe_call(&receiver.source_name()),
             ),
             _ => self.record_unresolved_member(scope, origin, receiver, spelling),
         }

@@ -224,7 +224,7 @@ impl Checker<'_> {
                 );
             }
             ExplicitPropertyWrite::ReadOnlyMember(_) => {
-                self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
+                self.report_val_reassignment(target_span);
             }
             ExplicitPropertyWrite::MemberExtension(property) => {
                 self.write_member_extension_property(scope, &site, *property);
@@ -291,7 +291,7 @@ impl Checker<'_> {
         let deferred_constructor_write = !is_var
             && self.is_deferred_constructor_property_write(scope, site.receiver, site.name, owner);
         if !is_var && !deferred_constructor_write {
-            self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
+            self.report_val_reassignment(target_span);
         } else if let Some(visibility) = setter_visibility {
             if visibility != Visibility::Public {
                 self.reject_if_inaccessible(visibility, site.name, owner, target_span);
@@ -361,7 +361,7 @@ impl Checker<'_> {
             }
         }
         if !property.is_var {
-            self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
+            self.report_val_reassignment(target_span);
         }
         self.expect_assignable(
             property.ty,
@@ -401,7 +401,7 @@ impl Checker<'_> {
             }
         }
         if property.setter.is_none() {
-            self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
+            self.report_val_reassignment(target_span);
         }
         self.expect_assignable(
             property.ty,

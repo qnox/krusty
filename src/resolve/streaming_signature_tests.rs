@@ -6275,7 +6275,7 @@ fun conditional(r: Runtime?, flag: Boolean) = run {
                 None,
                 crate::diag::Severity::Error,
                 crate::diag::DiagnosticKind::Compiler,
-                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Runtime?'.",
+                "Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Runtime?'.",
                 None,
             ),
         ],
