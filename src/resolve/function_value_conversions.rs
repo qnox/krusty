@@ -47,7 +47,7 @@ impl Checker<'_> {
         } else {
             crate::kotlin_version::Quirk::NullFunctionValueConvertsToAdapter
         };
-        !self.file.reference.quirks().has(converts)
+        !self.file.language.reference.quirks().has(converts)
     }
 
     /// Commit the type of a selected call's argument. Reaching this seam means the call has
@@ -224,6 +224,7 @@ impl Checker<'_> {
             && nominal.upper_bound_admits_null()
             && self
                 .file
+                .language
                 .reference
                 .quirks()
                 .has(crate::kotlin_version::Quirk::TypeParameterFunctionValueSkipsSuspendConversion)
