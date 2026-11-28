@@ -13,6 +13,11 @@ fn assert_like_kotlinc(sources: &[(&str, &str)]) {
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
 
+// PLATFORM-SPECIFIC: the defect is the JVM module suffix of an `internal` member's method name
+// (`merged$main`), which no other backend writes, and the assertion is on JVM class files. The
+// program itself runs on the KLIB lanes only once they inline the stdlib's crossinline `sortedBy`
+// ("a dependency callable whose target code was not emitted"), the gap the corpus cases
+// `basics/k42000_1.kt` and `inference/integerLiteralTypeInLamdaReturnType.kt` are listed for.
 const INTERNAL_MEMBER: &str = r#"class P(val name: String, val xs: Set<Int>) {
     internal fun merged(other: P): List<Int> = (xs + other.xs).sortedBy { it }
 
