@@ -246,6 +246,30 @@ static kt_boolean kt_is_runtime_list(KRef value) {
     return kt_is_read_only_list(value) || kt_is_mutable_list(value) || kt_is_sub_list(value);
 }
 
+/* The members of a list the PROGRAM made -- an object of a class implementing `List` that is none
+   of the runtime's own -- or NULL for a runtime list. Its elements are its class's to answer,
+   through the members its descriptor publishes (`KType.list_members`); this runtime cannot read
+   them out of the object. */
+static const KListMembers *kt_program_list(KRef value) {
+    return value == NULL || kt_is_runtime_list(value) ? NULL : value->header.type->list_members;
+}
+
+/* The member of a program's list asked for, which its class did not override itself (it inherits
+   it from a library base laid out elsewhere): fails loudly, naming it, rather than reading the
+   object as one of the runtime's lists. */
+static void kt_fail_program_list(const char *member, size_t member_length, KRef value) {
+    static const char before[] = "krusty: the program's list ";
+    static const char middle[] = " publishes no `";
+    static const char after[] = "` member this runtime can call\n";
+    kt_sys_write(2, before, sizeof(before) - 1);
+    kt_sys_write(2, value->header.type->name, value->header.type->name_length);
+    kt_sys_write(2, middle, sizeof(middle) - 1);
+    kt_sys_write(2, member, member_length);
+    kt_sys_fail(after, sizeof(after) - 1);
+}
+
+#define KT_FAIL_PROGRAM_LIST(member, value) kt_fail_program_list(member, sizeof(member) - 1, value)
+
 /* A list a write may reach: a growable list, or a view of one. */
 static kt_boolean kt_is_writable_list(KRef value) {
     return kt_is_mutable_list(value) || (kt_is_sub_list(value) && ((const KSubList *)value)->writable);
@@ -350,6 +374,9 @@ KRef kt_list_single(KRef value) {
 /* Both list shapes answer here; see the note on `KMutableList` for why they share the entry point
    rather than each having its own. A growable list's array is capacity, so its SIZE is the field. */
 kt_int kt_list_size(KRef list) {
+    if (kt_program_list(list) != NULL) {
+        return kt_collection_size(list);
+    }
     if (kt_is_sub_list(list)) {
         const KSubList *view = (const KSubList *)list;
         return kt_sub_list_is_stale(view) ? 0 : view->size;
@@ -387,6 +414,13 @@ kt_int kt_collection_size_or_default(KRef iterable, kt_int fallback) {
 kt_boolean kt_collection_is_empty(KRef collection) { return kt_collection_size(collection) == 0; }
 
 KRef kt_list_get(KRef list, kt_int index) {
+    const KListMembers *program = kt_program_list(list);
+    if (program != NULL) {
+        if (program->get == NULL) {
+            KT_FAIL_PROGRAM_LIST("get", list);
+        }
+        return program->get(list, index);
+    }
     if (kt_is_sub_list(list)) {
         const KSubList *view = (const KSubList *)list;
         if (kt_sub_list_is_stale(view)) {
@@ -507,6 +541,13 @@ static kt_boolean kt_counter_overflowed(uint32_t value, KCounter counts) {
 }
 
 kt_int kt_list_index_of(KRef list, KRef value) {
+    const KListMembers *program = kt_program_list(list);
+    if (program != NULL) {
+        if (program->index_of == NULL) {
+            KT_FAIL_PROGRAM_LIST("indexOf", list);
+        }
+        return program->index_of(list, value);
+    }
     kt_int length = kt_list_size(list);
     for (kt_int i = 0; i < length; i++) {
         kt_boolean equal = kt_equals(kt_list_get(list, i), value);
@@ -523,6 +564,13 @@ kt_int kt_list_index_of(KRef list, KRef value) {
 }
 
 kt_int kt_list_last_index_of(KRef list, KRef value) {
+    const KListMembers *program = kt_program_list(list);
+    if (program != NULL) {
+        if (program->last_index_of == NULL) {
+            KT_FAIL_PROGRAM_LIST("lastIndexOf", list);
+        }
+        return program->last_index_of(list, value);
+    }
     for (kt_int i = kt_list_size(list) - 1; i >= 0; i--) {
         kt_boolean equal = kt_equals(kt_list_get(list, i), value);
         if (kt_raised()) {
@@ -535,7 +583,16 @@ kt_int kt_list_last_index_of(KRef list, KRef value) {
     return -1;
 }
 
-kt_boolean kt_list_contains(KRef list, KRef value) { return kt_list_index_of(list, value) >= 0; }
+kt_boolean kt_list_contains(KRef list, KRef value) {
+    const KListMembers *program = kt_program_list(list);
+    if (program != NULL) {
+        if (program->contains == NULL) {
+            KT_FAIL_PROGRAM_LIST("contains", list);
+        }
+        return program->contains(list, value);
+    }
+    return kt_list_index_of(list, value) >= 0;
+}
 
 KRef kt_mutable_list_new(void) {
     KMutableList *list = (KMutableList *)kt_gc_allocate(&kt_type_mutable_list, sizeof(KMutableList));
