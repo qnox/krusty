@@ -473,6 +473,16 @@ const COUNTED_LOOPS: krusty::backend::counted_loops::CountedLoopPolicy =
         until_steps: krusty::backend::counted_loops::UntilSteps::Built,
     };
 
+/// `Unit`'s value is the runtime's own, as a source reference of it is. Every enum constant is
+/// laid out with the runtime's `kotlin.Enum` base, so its members are too.
+fn represents_dependency_classifier(classifier: krusty::backend::DependencyClassifier) -> bool {
+    classifier == krusty::types::wk::string()
+        || classifier == krusty::types::wk::kotlin_enum()
+        || classifier == krusty::types::wk::unit()
+        || lower::is_string_builder(classifier)
+        || lower::runtime_lays_out(classifier)
+}
+
 #[cfg(test)]
 mod tests {
     mod companion_declarations;
@@ -1333,14 +1343,4 @@ mod tests {
             }
         }
     }
-}
-
-/// `Unit`'s value is the runtime's own, as a source reference of it is. Every enum constant is
-/// laid out with the runtime's `kotlin.Enum` base, so its members are too.
-fn represents_dependency_classifier(classifier: krusty::backend::DependencyClassifier) -> bool {
-    classifier == krusty::types::wk::string()
-        || classifier == krusty::types::wk::kotlin_enum()
-        || classifier == krusty::types::wk::unit()
-        || lower::is_string_builder(classifier)
-        || lower::runtime_lays_out(classifier)
 }
