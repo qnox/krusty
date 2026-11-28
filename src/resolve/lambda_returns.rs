@@ -603,11 +603,15 @@ impl Checker<'_> {
         result_constraint: LambdaResultConstraint,
     ) -> Ty {
         if coerce_return_to_unit {
+            let result = super::conditional_branch::branch_value_expression(self.file, body);
+            let inserted = self.unit_coerced_tails.insert(result);
             let tail = self.expr_statement(scope, body);
+            if inserted {
+                self.unit_coerced_tails.remove(&result);
+            }
             // kotlinc still relates a tail that is itself a call-owned variable to the `Unit` result, so
             // `build { get() }` constrains the builder variable although the value is discarded.
             if tail.ty_param_name().is_some() && self.postponed_call_mentions(tail) {
-                let result = super::conditional_branch::branch_value_expression(self.file, body);
                 self.expect_assignable(Ty::Unit, tail, self.span(result), "return");
             }
             return match tail {

@@ -450,3 +450,27 @@ fn builder_variables_without_evidence_and_a_mismatched_anonymous_body_are_reject
     assert_eq!(common::compiler_errors(&result.reference_stderr).len(), 5);
     common::expect_identical_rejection(&result, "builder variables without evidence");
 }
+
+/// A lambda coerced to `Unit` checks its last expression against `Unit`, so a call whose result is
+/// its own open formal infers it, and a context argument supplied by a builder lambda's receiver
+/// constrains the builder variable as an extension receiver does.
+#[test]
+fn a_unit_coerced_tail_and_a_context_argument_constrain_open_variables() {
+    common::assert_accepted_like_kotlinc(
+        "fun coerceToUnit(f: () -> Unit) {}\n\
+         class Inv<T>\n\
+         fun <K> builder(block: Inv<K>.() -> Unit): K = TODO()\n\
+         fun <K> make(): K = TODO()\n\
+         fun tail() { coerceToUnit { builder {} } }\n\
+         fun block() { coerceToUnit { val x = 1; make() } }\n\
+         interface Either<out A, out B>\n\
+         interface Raise<in E>\n\
+         fun <E, A> either(block: Raise<E>.() -> A): Either<E, A> = TODO()\n\
+         context(_: Raise<String>)\n\
+         fun findUser(): String = TODO()\n\
+         context(_: Raise<String>)\n\
+         val prop: String get() = TODO()\n\
+         fun function() { either { findUser() } }\n\
+         fun property() { either { prop } }\n",
+    );
+}

@@ -23656,6 +23656,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         stmt_return_targets: HashMap::default(),
         expr_return_targets: HashMap::default(),
         discarded_exprs: crate::fx_hash::HashSet::default(),
+        unit_coerced_tails: crate::fx_hash::HashSet::default(),
         narrowed_read_base: HashMap::default(),
         declined_read_targets: HashMap::default(),
         silent_error_exprs: crate::fx_hash::HashSet::default(),
@@ -25758,6 +25759,8 @@ struct Checker<'a> {
     stmt_return_targets: HashMap<StmtId, ReturnTarget>,
     expr_return_targets: HashMap<ExprId, ReturnTarget>,
     discarded_exprs: crate::fx_hash::HashSet<ExprId>,
+    /// The last expressions of lambda bodies coerced to `Unit`, which kotlinc checks against it.
+    unit_coerced_tails: crate::fx_hash::HashSet<ExprId>,
     /// Declared type of a local read whose type a narrowing shadow replaced (a `t = null` write
     /// narrows the flow type to `Nothing?`). kotlinc still resolves a member against the DECLARED
     /// type before rejecting the access on the narrowed nullable receiver, so the nullable-receiver
@@ -29801,6 +29804,12 @@ impl<'a> Checker<'a> {
         if !implicit.is_empty() {
             self.mark_context_extension_receiver_used(scope, call, &implicit);
         }
+        let context_count = selected.context_count.min(selected.callable.params.len());
+        self.constrain_postponed_context_arguments(
+            self.call_callee_name_span(call),
+            &selected.callable.params[..context_count],
+            &shape.context_actual_types,
+        );
         self.mark_top_level_call(call, &selected, ret, shape.context_sources);
         ret
     }
@@ -39053,6 +39062,17 @@ impl<'a> Checker<'a> {
     fn expr_statement(&mut self, scope: &CheckerScope<'_>, e: ExprId) -> Ty {
         self.discarded_exprs.insert(e);
         let ty = self.expr_with_context(scope, e, false);
+        // kotlinc checks the last expression of a lambda coerced to `Unit` against `Unit`, so a
+        // call whose result is its own open formal infers it (`coerceToUnit { builder {} }`)
+        // unless the formal's bound excludes `Unit` (`T : Number` stays uninferred).
+        if self.unit_coerced_tails.contains(&e)
+            && self.unbound_call_result_signature(e).is_some()
+            && ty
+                .ty_param_bound()
+                .is_some_and(|bound| self.receiver_is_assignable(Ty::Unit, bound))
+        {
+            return self.expr_expected(scope, e, Ty::Unit);
+        }
         if !self.joined_branch_values.contains(&e)
             && self.report_unbound_call_result_type_parameter(scope, e)
         {
@@ -43152,6 +43172,7 @@ impl<'a> Checker<'a> {
                             {
                                 self.silent_error_exprs.insert(e);
                             }
+                            self.constrain_postponed_property_context(self.span(e), &property);
                             self.expr_lowers
                                 .insert(e, ExprLowering::TopLevelPropertyGet(property));
                             ty
