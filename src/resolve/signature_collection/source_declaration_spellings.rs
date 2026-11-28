@@ -53,6 +53,7 @@ pub(in crate::resolve) fn collect_stable_visibility_suppressions(
             suppressions.invisible_reference |= application.invisible_reference;
             suppressions.invisible_member |= application.invisible_member;
             suppressions.optional_declaration_usage |= application.optional_declaration_usage;
+            suppressions.module_export |= application.module_export;
         }
         if suppressions.has_any() {
             table

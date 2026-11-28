@@ -450,15 +450,18 @@ impl Checker<'_> {
         }
         if !scope.tparam_contains(&syntax.name) {
             if let Some(internal) = resolved.non_null().kotlin_class_internal() {
-                if !syntax.is_import() && !self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
-                    if let Some(access) = self.inaccessible_classifier_reference(internal) {
+                if !syntax.is_import() {
+                    if let Some(denial) = self
+                        .inaccessible_classifier_reference(internal)
+                        .filter(|denial| !self.suppresses_diagnostic(denial.suppression_name()))
+                    {
                         self.diags.error_with_identity(
                             syntax.span,
                             DiagnosticIdentity::ClassifierAccess {
                                 reference: syntax.span,
                                 classifier: internal,
                             },
-                            inaccessible_classifier_message(&syntax.name, access),
+                            inaccessible_classifier_message(&syntax.name, &denial),
                         );
                     }
                 }
