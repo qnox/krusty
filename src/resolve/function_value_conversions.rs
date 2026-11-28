@@ -47,7 +47,7 @@ impl Checker<'_> {
         } else {
             crate::kotlin_version::Quirk::NullFunctionValueConvertsToAdapter
         };
-        !self.file.reference.quirks().has(converts)
+        !self.file.reference.has(converts)
     }
 
     /// Commit the type of a selected call's argument. Reaching this seam means the call has

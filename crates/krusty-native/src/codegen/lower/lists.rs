@@ -30,13 +30,15 @@ use krusty::types::CollectionKind;
 /// Whether a list's `addAll` makes room before it reads its argument, as kotlinc-native's library
 /// does ([`krusty::kotlin_version::Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument`]), or
 /// reads the argument first, under `-Xfix-kotlinc-defects`.
-fn add_all_grows_first(quirks: krusty::kotlin_version::Quirks) -> bool {
-    quirks.has(krusty::kotlin_version::Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument)
+fn add_all_grows_first(profile: krusty::kotlin_version::ReferenceProfile) -> bool {
+    profile.has(krusty::kotlin_version::Quirk::ArrayListAddAllGrowsBeforeReadingItsArgument)
 }
 
 /// The runtime's `MutableCollection.addAll`, read as [`add_all_grows_first`] says.
-pub(super) fn collection_add_all_symbol(quirks: krusty::kotlin_version::Quirks) -> &'static str {
-    if add_all_grows_first(quirks) {
+pub(super) fn collection_add_all_symbol(
+    profile: krusty::kotlin_version::ReferenceProfile,
+) -> &'static str {
+    if add_all_grows_first(profile) {
         "kt_mutable_collection_add_all"
     } else {
         "kt_mutable_collection_add_all_reading_first"
@@ -44,8 +46,8 @@ pub(super) fn collection_add_all_symbol(quirks: krusty::kotlin_version::Quirks) 
 }
 
 /// The runtime's `list += elements`, read as [`add_all_grows_first`] says.
-fn list_add_all_symbol(quirks: krusty::kotlin_version::Quirks) -> &'static str {
-    if add_all_grows_first(quirks) {
+fn list_add_all_symbol(profile: krusty::kotlin_version::ReferenceProfile) -> &'static str {
+    if add_all_grows_first(profile) {
         "kt_mutable_list_add_all"
     } else {
         "kt_mutable_list_add_all_reading_first"
@@ -203,7 +205,7 @@ pub(super) fn indexed_value_getter_ty(name: &str) -> Ty {
 /// realizations differ where it counts: the index one takes an `Int` and the element one takes the
 /// erased reference, whatever `E` was substituted to.
 fn list_symbol(
-    quirks: krusty::kotlin_version::Quirks,
+    profile: krusty::kotlin_version::ReferenceProfile,
     declaration: classifier_shapes::CollectionDeclaration,
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
     physical: &[Ty],
@@ -293,7 +295,7 @@ fn list_symbol(
         ),
         ("clear", [], Ty::Unit) if mutates => ("kt_mutable_list_clear", vec![any()], Ty::Unit),
         ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
-            collection_add_all_symbol(quirks),
+            collection_add_all_symbol(profile),
             vec![any(), any()],
             Ty::Boolean,
         ),
@@ -355,9 +357,9 @@ pub(super) fn collection_runtime_member(
                 .map(classifier_shapes::CollectionDeclaration::Implementation)
         })?;
     if list {
-        list_symbol(file.ir.reference.quirks(), declaration, signature, physical)
+        list_symbol(file.ir.reference, declaration, signature, physical)
     } else {
-        collection_symbol(file.ir.reference.quirks(), declaration, signature)
+        collection_symbol(file.ir.reference, declaration, signature)
     }
 }
 
@@ -365,7 +367,7 @@ pub(super) fn collection_runtime_member(
 /// typed by no narrower collection. Which collection stands behind it is the descriptor's to say,
 /// so each entry point asks it rather than reading one shape's header.
 fn collection_symbol(
-    quirks: krusty::kotlin_version::Quirks,
+    profile: krusty::kotlin_version::ReferenceProfile,
     declaration: classifier_shapes::CollectionDeclaration,
     signature: super::super::super::intrinsics::FunctionSignature<'_>,
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
@@ -394,7 +396,7 @@ fn collection_symbol(
             Ty::Boolean,
         ),
         ("addAll", [elements], Ty::Boolean) if mutates && elements.is_reference() => (
-            collection_add_all_symbol(quirks),
+            collection_add_all_symbol(profile),
             vec![any(), any()],
             Ty::Boolean,
         ),
@@ -718,13 +720,13 @@ impl BodyLowering<'_, '_, '_> {
         );
         let (symbol, _, _) = if is_list(self.file, ty) {
             list_symbol(
-                self.file.ir.reference.quirks(),
+                self.file.ir.reference,
                 declaration,
                 signature,
                 &getter.physical_params,
             )?
         } else {
-            collection_symbol(self.file.ir.reference.quirks(), declaration, signature)?
+            collection_symbol(self.file.ir.reference, declaration, signature)?
         };
         matches!(symbol, "kt_list_size" | "kt_collection_size").then(|| property.name.to_string())
     }
@@ -1082,7 +1084,7 @@ impl BodyLowering<'_, '_, '_> {
                     && !self.file.implements_collection_of(receiver_ty) =>
             {
                 (
-                    list_add_all_symbol(self.file.ir.reference.quirks()),
+                    list_add_all_symbol(self.file.ir.reference),
                     vec![any(), any()],
                     Ty::Unit,
                     args,
@@ -1310,8 +1312,8 @@ impl BodyLowering<'_, '_, '_> {
 mod tests {
     use super::*;
 
-    fn quirks() -> krusty::kotlin_version::Quirks {
-        krusty::kotlin_version::ReferenceProfile::default().quirks()
+    fn profile() -> krusty::kotlin_version::ReferenceProfile {
+        krusty::kotlin_version::ReferenceProfile::default()
     }
 
     fn signature<'a>(
@@ -1340,21 +1342,21 @@ mod tests {
         let element = Ty::ty_param("E", any());
         let list = face(CollectionKind::List, false);
         assert!(list_symbol(
-            quirks(),
+            profile(),
             list,
             signature("kotlin/collections/List", "get", &[Ty::Int], element),
             &[Ty::Int],
         )
         .is_some());
         assert!(list_symbol(
-            quirks(),
+            profile(),
             list,
             signature("kotlin/collections/List", "get", &[Ty::String], element),
             &[Ty::String],
         )
         .is_none());
         assert!(list_symbol(
-            quirks(),
+            profile(),
             list,
             signature(
                 "kotlin/collections/List",
@@ -1366,7 +1368,7 @@ mod tests {
         )
         .is_none());
         assert!(list_symbol(
-            quirks(),
+            profile(),
             face(CollectionKind::Set, false),
             signature("kotlin/collections/List", "get", &[Ty::Int], element),
             &[Ty::Int],
@@ -1392,24 +1394,24 @@ mod tests {
         let array_list =
             CollectionDeclaration::Implementation(StandardCollectionImplementation::List);
 
-        assert!(list_symbol(quirks(), face(CollectionKind::List, false), size, &[]).is_some());
-        assert!(list_symbol(quirks(), face(CollectionKind::List, true), size, &[]).is_none());
-        assert!(list_symbol(quirks(), face(CollectionKind::List, true), clear, &[]).is_some());
-        assert!(list_symbol(quirks(), face(CollectionKind::List, false), clear, &[]).is_none());
-        assert!(list_symbol(quirks(), face(CollectionKind::List, false), add, &[any()]).is_none());
-        assert!(list_symbol(quirks(), array_list, size, &[]).is_some());
-        assert!(list_symbol(quirks(), array_list, clear, &[]).is_some());
+        assert!(list_symbol(profile(), face(CollectionKind::List, false), size, &[]).is_some());
+        assert!(list_symbol(profile(), face(CollectionKind::List, true), size, &[]).is_none());
+        assert!(list_symbol(profile(), face(CollectionKind::List, true), clear, &[]).is_some());
+        assert!(list_symbol(profile(), face(CollectionKind::List, false), clear, &[]).is_none());
+        assert!(list_symbol(profile(), face(CollectionKind::List, false), add, &[any()]).is_none());
+        assert!(list_symbol(profile(), array_list, size, &[]).is_some());
+        assert!(list_symbol(profile(), array_list, clear, &[]).is_some());
 
         let collection = face(CollectionKind::Collection, false);
         let mutable_collection = face(CollectionKind::Collection, true);
-        assert!(collection_symbol(quirks(), collection, size).is_some());
-        assert!(collection_symbol(quirks(), mutable_collection, size).is_none());
-        assert!(collection_symbol(quirks(), mutable_collection, clear).is_some());
-        assert!(collection_symbol(quirks(), collection, clear).is_none());
-        assert!(collection_symbol(quirks(), collection, add).is_none());
+        assert!(collection_symbol(profile(), collection, size).is_some());
+        assert!(collection_symbol(profile(), mutable_collection, size).is_none());
+        assert!(collection_symbol(profile(), mutable_collection, clear).is_some());
+        assert!(collection_symbol(profile(), collection, clear).is_none());
+        assert!(collection_symbol(profile(), collection, add).is_none());
         // `Collection` is the only declaration a `Collection`-typed receiver can select.
-        assert!(collection_symbol(quirks(), face(CollectionKind::List, false), size).is_none());
-        assert!(collection_symbol(quirks(), array_list, size).is_none());
+        assert!(collection_symbol(profile(), face(CollectionKind::List, false), size).is_none());
+        assert!(collection_symbol(profile(), array_list, size).is_none());
     }
 
     /// `listIterator` is a query of a list, and the steps back are `ListIterator`'s own: an
@@ -1434,10 +1436,10 @@ mod tests {
             &by_text_params,
             iterator,
         );
-        assert!(list_symbol(quirks(), list, first, &[]).is_some());
-        assert!(list_symbol(quirks(), list, at, &[Ty::Int]).is_some());
-        assert!(list_symbol(quirks(), list, by_text, &[Ty::String]).is_none());
-        assert!(list_symbol(quirks(), face(CollectionKind::Set, false), at, &[Ty::Int]).is_none());
+        assert!(list_symbol(profile(), list, first, &[]).is_some());
+        assert!(list_symbol(profile(), list, at, &[Ty::Int]).is_some());
+        assert!(list_symbol(profile(), list, by_text, &[Ty::String]).is_none());
+        assert!(list_symbol(profile(), face(CollectionKind::Set, false), at, &[Ty::Int]).is_none());
 
         let steps = face(CollectionKind::ListIterator, false);
         let previous = signature("kotlin/collections/ListIterator", "previous", &[], element);

@@ -2804,7 +2804,6 @@ impl SignatureConstraintExtractor {
     fn not_null_operator(file: &File, value: SigExprId) -> SigExpr {
         if file
             .reference
-            .quirks()
             .has(crate::kotlin_version::Quirk::NotNullOperatorDropsIntersectionApproximation)
         {
             SigExpr::NonNullable(value)

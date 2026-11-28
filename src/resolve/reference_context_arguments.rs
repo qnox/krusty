@@ -38,7 +38,7 @@ impl Checker<'_> {
                 ret: expected_ret,
                 bound_contexts,
                 type_variable_inputs: self.active_reference_type_variable_inputs(),
-                quirks: self.file.reference.quirks(),
+                profile: self.file.reference,
             },
             |actual, bound| self.generic_bound_admits(actual, bound),
         )

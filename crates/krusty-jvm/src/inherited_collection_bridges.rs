@@ -626,7 +626,6 @@ fn member_bridges(
     if specialized_name != specification.physical_name
         && !ir
             .reference
-            .quirks()
             .has(krusty::kotlin_version::Quirk::JavaRenamedBuiltinEntryOverridesJavaMember)
         && inherits_method(
             classpath,

@@ -54,9 +54,10 @@ fn expected(element: bool) -> String {
 
 #[test]
 fn a_type_variable_input_binds_the_vararg_as_the_reference_release_does() {
-    let element =
-        krusty::kotlin_version::Quirks::of_release(krusty::kotlin_version::environment_release())
-            .has(Quirk::VarargReferenceTakesTypeVariableInputAsElement);
+    let element = krusty::kotlin_version::ReferenceProfile::of_release(
+        krusty::kotlin_version::environment_release(),
+    )
+    .has(Quirk::VarargReferenceTakesTypeVariableInputAsElement);
     let source = source();
     let reference = common::kotlinc_box_result(&source);
     assert_eq!(reference, expected(element), "kotlinc");

@@ -26,7 +26,7 @@ impl Checker<'_> {
             // The non-null LHS constrains an otherwise underdetermined generic fallback:
             // `map[key] ?: emptyList()` must infer the element type from `map[key]`, just as the
             // same generic call is retyped from an enclosing callable parameter elsewhere.
-            let mut lt = lt0.not_null_operator_result(self.file.reference.quirks());
+            let mut lt = lt0.not_null_operator_result(self.file.reference);
             // The right operand runs only when the left is null, so a cast or assignment it proves
             // must not become a fact of the value that took the left operand.
             let rhs_scope = scope.child(ScopeKind::Block);
@@ -46,7 +46,7 @@ impl Checker<'_> {
             let lt0 = self.rebind_conditional_branch(lhs, rhs_evidence, lt0, fixed, |c, exp| {
                 c.expr_expected(scope, lhs, exp)
             });
-            lt = lt0.not_null_operator_result(self.file.reference.quirks());
+            lt = lt0.not_null_operator_result(self.file.reference);
             let lhs_evidence = self.branch_sibling_type(lhs, lt);
             let rt = self.rebind_conditional_branch(rhs, lhs_evidence, rt, fixed, |c, exp| {
                 c.expr_expected(&rhs_scope, rhs, exp)

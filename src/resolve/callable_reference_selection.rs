@@ -329,14 +329,14 @@ pub(super) struct ReferenceExpectation<'a> {
     /// Which of `params` the enclosing call declares as one of its own type variables.
     pub(super) type_variable_inputs: TypeVariableInputs,
     /// The reproduced kotlinc profile of the compilation the reference is checked in.
-    pub(super) quirks: crate::kotlin_version::Quirks,
+    pub(super) profile: crate::kotlin_version::ReferenceProfile,
 }
 
 /// The symbols a reference is selected among and the reproduced kotlinc profile it is selected under.
 #[derive(Clone, Copy)]
 pub(super) struct ReferenceSource<'a> {
     pub(super) source: &'a dyn SymbolSource,
-    pub(super) quirks: crate::kotlin_version::Quirks,
+    pub(super) profile: crate::kotlin_version::ReferenceProfile,
 }
 
 impl<'a> ReferenceSource<'a> {
@@ -346,7 +346,7 @@ impl<'a> ReferenceSource<'a> {
     ) -> Self {
         Self {
             source,
-            quirks: reference.quirks(),
+            profile: reference,
         }
     }
 }
@@ -421,14 +421,15 @@ impl From<&'static crate::types::FnSig> for InstanceReferenceExpectation {
 ///
 /// [`Quirk::VarargReferenceTakesTypeVariableInputAsElement`]: crate::kotlin_version::Quirk::VarargReferenceTakesTypeVariableInputAsElement
 fn input_supplies_whole_vararg(
-    quirks: crate::kotlin_version::Quirks,
+    profile: crate::kotlin_version::ReferenceProfile,
     inputs: TypeVariableInputs,
     index: usize,
     actual: Ty,
     declared: Ty,
 ) -> bool {
     !(inputs.has(index)
-        && quirks.has(crate::kotlin_version::Quirk::VarargReferenceTakesTypeVariableInputAsElement))
+        && profile
+            .has(crate::kotlin_version::Quirk::VarargReferenceTakesTypeVariableInputAsElement))
         && same_array_classifier(actual, declared)
 }
 
@@ -442,14 +443,14 @@ fn input_supplies_whole_vararg(
 ///
 /// [`Quirk::VarargReferenceTakesTypeVariableInputAsElement`]: crate::kotlin_version::Quirk::VarargReferenceTakesTypeVariableInputAsElement
 fn element_input_mapped_whole(
-    quirks: crate::kotlin_version::Quirks,
+    profile: crate::kotlin_version::ReferenceProfile,
     inputs: TypeVariableInputs,
     index: usize,
     actual: Ty,
     declared: Ty,
 ) -> bool {
     inputs.has(index)
-        && quirks.has(crate::kotlin_version::Quirk::VarargReferenceTakesTypeVariableInputAsElement)
+        && profile.has(crate::kotlin_version::Quirk::VarargReferenceTakesTypeVariableInputAsElement)
         && actual.non_null().is_array()
         && declared
             .array_read_elem()
@@ -469,7 +470,7 @@ pub(super) fn specialize_generic_signature(
         ret: expected_ret,
         bound_contexts,
         type_variable_inputs,
-        quirks,
+        profile,
     } = expectation;
     let mut bindings = crate::symbol_resolver::GSigBinds::default();
     let mut element_mapped_whole = false;
@@ -494,10 +495,10 @@ pub(super) fn specialize_generic_signature(
             ))
         });
         let whole_vararg = last_vararg_input.is_some_and(|(index, actual, declared)| {
-            input_supplies_whole_vararg(quirks, type_variable_inputs, index, actual, declared)
+            input_supplies_whole_vararg(profile, type_variable_inputs, index, actual, declared)
         });
         element_mapped_whole = last_vararg_input.is_some_and(|(index, actual, declared)| {
-            element_input_mapped_whole(quirks, type_variable_inputs, index, actual, declared)
+            element_input_mapped_whole(profile, type_variable_inputs, index, actual, declared)
         });
         let actuals = expected
             .iter()
@@ -646,7 +647,7 @@ pub(super) fn specialize_candidate(
             ret: expected_ret,
             bound_contexts,
             type_variable_inputs: TypeVariableInputs::NONE,
-            quirks: reference.quirks,
+            profile: reference.profile,
         },
         is_assignable,
     )
@@ -1008,7 +1009,7 @@ pub(super) fn parameter_plan(
 /// candidate whose own inferred signature may currently be under computation.
 fn select_adapted_bound_instance_candidate(
     source: &dyn SymbolSource,
-    quirks: crate::kotlin_version::Quirks,
+    profile: crate::kotlin_version::ReferenceProfile,
     overloads: &[FunctionInfo],
     bind_contexts: bool,
     expected: InstanceReferenceExpectation,
@@ -1042,7 +1043,7 @@ fn select_adapted_bound_instance_candidate(
                     ret: Some(expected.ret),
                     bound_contexts,
                     type_variable_inputs,
-                    quirks,
+                    profile,
                 },
                 &mut is_assignable,
             )
@@ -1156,7 +1157,7 @@ pub(super) fn select_adapted_instance_candidate(
     };
     let (selected, mut plan, type_arguments) = select_adapted_bound_instance_candidate(
         reference.source,
-        reference.quirks,
+        reference.profile,
         overloads,
         bind_contexts,
         InstanceReferenceExpectation {
@@ -1265,7 +1266,7 @@ pub(super) fn shift_plan_values_from(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kotlin_version::{Quirk, Quirks};
+    use crate::kotlin_version::{Quirk, ReferenceProfile};
 
     fn formal(name: &str) -> Ty {
         Ty::ty_param(name, Ty::nullable(Ty::obj("kotlin/Any")))
@@ -1299,7 +1300,8 @@ mod tests {
     #[test]
     fn a_type_variable_input_takes_the_whole_vararg_only_without_the_quirk() {
         let quirk = Quirk::VarargReferenceTakesTypeVariableInputAsElement;
-        let with = Quirks::NONE.with(quirk, true);
+        let with = ReferenceProfile::default().with_quirk(quirk, true);
+        let without = with.with_quirk(quirk, false);
         let actual = Ty::array(Ty::String);
         let declared = Ty::array(Ty::out_projection(formal("ref:E")));
         let from_variable = TypeVariableInputs(1);
@@ -1311,16 +1313,16 @@ mod tests {
             declared
         ));
         assert!(input_supplies_whole_vararg(
-            Quirks::NONE,
+            without,
             from_variable,
             0,
             actual,
             declared
         ));
         // A concrete input takes the whole array either way.
-        for quirks in [with, Quirks::NONE] {
+        for profile in [with, without] {
             assert!(input_supplies_whole_vararg(
-                quirks,
+                profile,
                 TypeVariableInputs::NONE,
                 0,
                 actual,
@@ -1332,12 +1334,13 @@ mod tests {
     #[test]
     fn an_array_type_variable_input_maps_whole_onto_a_type_variable_element_under_the_quirk() {
         let quirk = Quirk::VarargReferenceTakesTypeVariableInputAsElement;
-        let with = Quirks::NONE.with(quirk, true);
+        let with = ReferenceProfile::default().with_quirk(quirk, true);
+        let without = with.with_quirk(quirk, false);
         let element = formal("ref:E");
         let vararg_of = |element| Ty::array(Ty::out_projection(element));
         let from_variable = TypeVariableInputs(1);
-        let mapped = |quirks, inputs, actual, declared| {
-            element_input_mapped_whole(quirks, inputs, 0, actual, declared)
+        let mapped = |profile, inputs, actual, declared| {
+            element_input_mapped_whole(profile, inputs, 0, actual, declared)
         };
         let strings = Ty::array(Ty::String);
         let ints = Ty::obj("kotlin/IntArray");
@@ -1353,12 +1356,7 @@ mod tests {
         }
         // Not without the quirk, for a concrete input, a non-array input, or an element that only
         // mentions the type variable or names none.
-        assert!(!mapped(
-            Quirks::NONE,
-            from_variable,
-            strings,
-            vararg_of(element)
-        ));
+        assert!(!mapped(without, from_variable, strings, vararg_of(element)));
         assert!(!mapped(
             with,
             TypeVariableInputs::NONE,

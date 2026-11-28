@@ -627,11 +627,12 @@ impl Ty {
     }
 
     /// The type of a not-null operator (`!!`, the left of `?:`, the receiver of `?.`) applied to a
-    /// value of this type, in the release `quirks` describes. It differs from smart-casting the
+    /// value of this type, under the reproduced `profile`. It differs from smart-casting the
     /// value to non-null only for a nullable intersection fixed below an upper type, whose operator
     /// result keeps that upper type from 2.5.
-    pub fn not_null_operator_result(self, quirks: crate::kotlin_version::Quirks) -> Ty {
-        if quirks.has(crate::kotlin_version::Quirk::NotNullOperatorDropsIntersectionApproximation) {
+    pub fn not_null_operator_result(self, profile: crate::kotlin_version::ReferenceProfile) -> Ty {
+        if profile.has(crate::kotlin_version::Quirk::NotNullOperatorDropsIntersectionApproximation)
+        {
             self.definitely_non_null()
         } else {
             self.non_null_keeping_intersection_bound()

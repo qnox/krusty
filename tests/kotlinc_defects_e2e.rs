@@ -20,7 +20,7 @@
 use std::path::Path;
 
 use krusty::compilation_target::CompilationTarget;
-use krusty::kotlin_version::{Quirk, Quirks};
+use krusty::kotlin_version::{Quirk, ReferenceProfile};
 
 use super::common;
 
@@ -227,7 +227,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
 
 /// Every defect, with what the reference release gives for its program.
 fn defects() -> Vec<(Quirk, Defect, Outcome)> {
-    let release = Quirks::of_release(krusty::kotlin_version::environment_release());
+    let release = ReferenceProfile::of_release(krusty::kotlin_version::environment_release());
     Quirk::ALL
         .iter()
         .filter_map(|&quirk| {

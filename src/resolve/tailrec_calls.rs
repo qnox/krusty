@@ -21,7 +21,7 @@
 
 use super::*;
 use crate::fir::DeclarationFlags;
-use crate::kotlin_version::{Quirk, Quirks};
+use crate::kotlin_version::{Quirk, ReferenceProfile};
 
 /// How a `tailrec` function is identified by the calls that select it.
 #[derive(Clone, Copy)]
@@ -83,7 +83,7 @@ struct Walk<'a, 'c> {
     function: &'a FunDecl,
     target: TailrecTarget,
     owner: Option<OwnerClass>,
-    quirks: Quirks,
+    profile: ReferenceProfile,
     calls: Vec<RecursiveCall>,
 }
 
@@ -130,13 +130,13 @@ impl Checker<'_> {
         body: ExprId,
         modifier: Span,
     ) {
-        let quirks = self.file.reference.quirks();
+        let profile = self.file.reference;
         let mut walk = Walk {
             checker: self,
             function,
             target,
             owner,
-            quirks,
+            profile,
             calls: Vec::new(),
         };
         walk.expression(
@@ -236,7 +236,7 @@ impl Walk<'_, '_> {
             }
             Expr::Elvis { lhs, rhs } => {
                 let left_is_tail = position.tail
-                    && self.quirks.has(Quirk::TailrecElvisLeftOperandIsTail)
+                    && self.profile.has(Quirk::TailrecElvisLeftOperandIsTail)
                     && !self.checker.ret_ty.is_nullable();
                 self.expression(
                     *lhs,
@@ -436,7 +436,7 @@ impl Walk<'_, '_> {
 
     /// `return Unit` reads like a bare `return` where kotlinc builds no instruction for the object.
     fn is_bare_unit(&self, expression: ExprId) -> bool {
-        !self.quirks.has(Quirk::TailrecUnitObjectReturnFollowsCall)
+        !self.profile.has(Quirk::TailrecUnitObjectReturnFollowsCall)
             && self.is_unit_object(expression)
     }
 
@@ -513,7 +513,11 @@ impl Walk<'_, '_> {
         let file = self.checker.file;
         let dotless = matches!(file.expr(call), Expr::Binary { .. } | Expr::Unary { .. })
             || file.infix_calls.contains(&call.0);
-        if !dotless || self.quirks.has(Quirk::TailrecDotlessCallReportedAtOperator) {
+        if !dotless
+            || self
+                .profile
+                .has(Quirk::TailrecDotlessCallReportedAtOperator)
+        {
             return self.checker.call_callee_name_span(call);
         }
         let leading = match file.expr(call) {
