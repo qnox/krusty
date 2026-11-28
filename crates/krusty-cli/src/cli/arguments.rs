@@ -532,6 +532,8 @@ pub(super) fn finish_language_settings(
     }
     // A level kotlinc declares but no longer accepts is a different refusal from one it never
     // heard of; it is reported only when every given level parses, and the language level first.
+    // An unrelated argument error reported before the levels does not drop the refusal.
+    let errors_before_levels = opts.errors.len();
     let mut retired = None;
     let mut level = |text: Option<String>, what: &str, language: bool| match text {
         Some(text) => match LanguageVersion::parse_supported_for(&text, reference_version) {
@@ -568,7 +570,7 @@ pub(super) fn finish_language_settings(
     };
     let language_level = level(parsed.language_version.take(), "language", true);
     let api_version = level(parsed.api_version.take(), "API", false);
-    if let Some(retired) = retired.filter(|_| opts.errors.is_empty()) {
+    if let Some(retired) = retired.filter(|_| opts.errors.len() == errors_before_levels) {
         opts.errors.push(retired);
     }
     let language_version =
