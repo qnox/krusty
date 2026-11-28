@@ -562,7 +562,7 @@ fn realize_adapter_reference(
             reflected_function,
             invoke_renamed: false,
         });
-        let class = ir.add_class(class);
+        let class = ir.add_generated_class(class);
         if own_invoke {
             realize_own_invoke(
                 ir,

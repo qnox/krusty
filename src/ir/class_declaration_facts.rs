@@ -45,6 +45,30 @@ impl IrFile {
         );
     }
 
+    /// Add a class the backend generates, such as a suspend lambda's. It declares no type
+    /// parameters of its own, so its self type is the bare class.
+    pub fn add_generated_class(&mut self, class: IrClass) -> super::ClassId {
+        assert!(
+            class.type_params.is_empty(),
+            "a generated class declares no type parameters"
+        );
+        self.record_declared_class_self_type(class.fq_name, Ty::obj_name(class.fq_name));
+        self.add_class(class)
+    }
+
+    /// Carry each recorded self application through a classifier rename: a local classifier
+    /// realized under its physical name keeps the self type its declaration checked.
+    pub(super) fn rename_declared_class_self_types(
+        &mut self,
+        rename: impl Fn(TypeName) -> TypeName,
+        retype: impl Fn(Ty) -> Ty,
+    ) {
+        self.declared_class_self_types = std::mem::take(&mut self.declared_class_self_types)
+            .into_iter()
+            .map(|(classifier, self_type)| (rename(classifier), retype(self_type)))
+            .collect();
+    }
+
     /// A lowering checkpoint retains immutable declaration facts, including owners whose class
     /// storage has not been materialized in this file yet.
     pub(crate) fn declared_class_self_type_owners(&self) -> crate::fx_hash::HashSet<TypeName> {

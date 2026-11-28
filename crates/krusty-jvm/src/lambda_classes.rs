@@ -1403,7 +1403,7 @@ fn declare_class(
         sam,
         sam_reference,
     });
-    ir.add_class(class)
+    ir.add_generated_class(class)
 }
 
 /// A temporary identity for a specialized lambda class. `;` cannot occur in a JVM internal name,

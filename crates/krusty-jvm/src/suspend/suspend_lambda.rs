@@ -551,7 +551,7 @@ fn declare_class(
     let completion = ir.add_expr(IrExpr::GetValue(captures.len() as u32 + 1));
     class.super_args = vec![arity, completion];
     class.super_ctor_params = vec![Ty::Int, continuation_ty()];
-    ir.add_class(class)
+    ir.add_generated_class(class)
 }
 
 fn constructor_argument(ty: Ty) -> IrCtorArg {

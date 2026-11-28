@@ -1335,6 +1335,10 @@ impl super::IrFile {
             remap_class(class, names);
         }
         remap_keyed(&mut self.class_declarations, names);
+        self.rename_declared_class_self_types(
+            |class| remapped_name(class, names),
+            |value| ty(value, names),
+        );
         for record in self.class_declarations.values_mut().flatten() {
             record.rename_classifiers(&RecordRenaming(names));
         }

@@ -423,7 +423,7 @@ fn declare_wrapper(
         provenance: krusty::ir::IrCtorParameterProvenance::Value,
         capture_identity: None,
     });
-    let class_id = ir.add_class(class);
+    let class_id = ir.add_generated_class(class);
     let method = forwarding_method(ir, class_id, name, target, function_arity, suspend_adapted);
     let class = &mut ir.classes[class_id as usize];
     class.methods.push(method);
