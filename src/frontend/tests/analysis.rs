@@ -482,8 +482,8 @@ fn standalone_analysis_preserves_parse_and_signature_failure_results() {
             .collect::<Vec<_>>(),
         [
             "expected extension function name",
-            "expected '('",
-            "expected ')'",
+            "syntax error: Expecting '('.",
+            "syntax error: Expecting ')'.",
         ]
     );
     assert!(symbols.is_none());

@@ -207,7 +207,6 @@ sourcesCommonChecks/nonExistingSourcePathK2.args
 sourcesCommonChecks/nonexistentPathInModule.args
 sourcesCommonChecks/nonexistentScript.args
 sourcesCommonChecks/withNonKotlinFile.args
-syntaxError_lt.args
 syntaxError_psi.args
 syntheticAccessorForPropertiesSignatureClash.args
 syntheticAccessorPropertyAndFunSignatureClash.args

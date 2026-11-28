@@ -984,8 +984,22 @@ impl<'a> Parser<'a> {
         if self.eat(k) {
             true
         } else {
+            // kotlinc reports the expectation as an empty error element, which sits right after
+            // the last token consumed (before any whitespace or comment), when nothing is left to
+            // skip: at the end of the file, and at a brace, which its recovery never consumes.
+            // Otherwise the error wraps the unexpected token.
+            let at = match self.kind() {
+                TokenKind::Eof | TokenKind::LBrace | TokenKind::RBrace => {
+                    self.i.checked_sub(1).map(|previous| {
+                        let end = self.syntactic_ident_span(self.t[previous]).hi;
+                        Span::new(end, end)
+                    })
+                }
+                _ => None,
+            }
+            .unwrap_or_else(|| self.tok().span);
             self.diags
-                .error(self.tok().span, format!("expected {what}"));
+                .error(at, format!("syntax error: Expecting {what}."));
             false
         }
     }
@@ -6353,6 +6367,57 @@ typealias Box<@Marker T> = List<T>
         file.validate_integrity(source).expect("valid AST");
     }
 
+    fn parse_messages(source: &str) -> Vec<(String, u32, u32)> {
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let _ = parse(source, &tokens, &mut diagnostics);
+        diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| {
+                (
+                    diagnostic.msg.clone(),
+                    diagnostic.span.lo,
+                    diagnostic.span.hi,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_missing_closing_brace_is_reported_right_after_the_last_token() {
+        // kotlinc reports an empty error element after `{`, before the line break: 1:10.
+        assert_eq!(
+            parse_messages("fun a() {\n"),
+            [("syntax error: Expecting '}'.".to_string(), 9, 9)]
+        );
+        assert_eq!(
+            parse_messages("fun a() {  // open\n\n"),
+            [("syntax error: Expecting '}'.".to_string(), 9, 9)]
+        );
+    }
+
+    #[test]
+    fn a_missing_closing_paren_before_a_brace_is_reported_after_the_last_token() {
+        assert_eq!(
+            parse_messages("fun f() { g(1 }"),
+            [("syntax error: Expecting ')'.".to_string(), 13, 13)]
+        );
+    }
+
+    #[test]
+    fn a_missing_brace_after_an_escaped_identifier_is_reported_after_its_closing_backtick() {
+        // `x` occupies bytes 10..13 including both backticks; the empty error sits at 13.
+        assert_eq!(
+            parse_messages("fun f() { `x`"),
+            [("syntax error: Expecting '}'.".to_string(), 13, 13)]
+        );
+        assert_eq!(
+            parse_messages("fun f() { g(`x` }"),
+            [("syntax error: Expecting ')'.".to_string(), 15, 15)]
+        );
+    }
+
     #[test]
     fn malformed_nested_typealias_reports_the_complete_exact_diagnostic() {
         let source = "class Broken { typealias Alias List<Int> }";
@@ -6360,7 +6425,7 @@ typealias Box<@Marker T> = List<T>
         let tokens = lex(source, &mut diagnostics);
         let _ = parse(source, &tokens, &mut diagnostics);
         assert_eq!(diagnostics.diags.len(), 1);
-        assert_eq!(diagnostics.diags[0].msg, "expected '='");
+        assert_eq!(diagnostics.diags[0].msg, "syntax error: Expecting '='.");
         assert_eq!(
             &source[diagnostics.diags[0].span.lo as usize..diagnostics.diags[0].span.hi as usize],
             "List"
