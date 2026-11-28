@@ -442,9 +442,6 @@ impl Body<'_> {
         if target.requires_object_dispatch {
             return Err("a functional interface whose method is a `kotlin.Any` member".into());
         }
-        if !target.default_methods.is_empty() {
-            return Err("a functional interface with default members".into());
-        }
         if target.method_target == krusty::ir::IrSamMethod::FunctionTypeInvoke {
             return Err("a functional interface implementing a function type's `invoke`".into());
         }
@@ -501,6 +498,65 @@ impl Body<'_> {
             }
             implemented.push(member);
         }
+        for frame in &target.default_methods {
+            // The body of an interface default of this module implements its member for the
+            // object, as it does for a class inheriting it.
+            let Some(krusty::ir::IrSamMethod::Module(callable)) = frame.method else {
+                return Err("a functional interface inheriting a dependency's default".into());
+            };
+            let (member, params, result) = self.sam_member(callable)?;
+            if implemented.contains(&member)
+                || self.runtime.objects.interfaces.implements(record, member)
+            {
+                continue;
+            }
+            let function = self
+                .calls
+                .module(callable)
+                .ok_or("an interface default with no emitted body")?;
+            self.runtime
+                .objects
+                .interfaces
+                .implement(record, member, function)?;
+            implemented.push(member);
+            // An ancestor member the default redeclares at other carriers has a slot of its own,
+            // which a bridge at the ancestor's signature fills, as kotlinc's does.
+            let default = (params.as_slice(), result);
+            let mut ancestors = Vec::new();
+            for edge in self.ir.function_overrides.values().flatten() {
+                if edge.implementation
+                    != krusty::fir::ResolvedFunctionOverrideTarget::Module(callable)
+                    || !edge.overridden_is_interface
+                {
+                    continue;
+                }
+                if let krusty::fir::ResolvedFunctionOverrideTarget::Module(overridden) =
+                    edge.overridden
+                {
+                    ancestors.push(overridden);
+                }
+            }
+            for overridden in ancestors {
+                let (ancestor, ancestor_params, ancestor_result) = self.sam_member(overridden)?;
+                if (ancestor_params.as_slice(), ancestor_result) == default
+                    || implemented.contains(&ancestor)
+                    || self.runtime.objects.interfaces.implements(record, ancestor)
+                {
+                    continue;
+                }
+                let bridge = self.sam_default_bridge(
+                    function,
+                    ancestor,
+                    (&ancestor_params, ancestor_result),
+                    default,
+                )?;
+                self.runtime
+                    .objects
+                    .interfaces
+                    .implement(record, ancestor, bridge)?;
+                implemented.push(ancestor);
+            }
+        }
         let interfaces = &mut self.runtime.objects.interfaces;
         let hierarchy = self
             .ir
@@ -552,6 +608,64 @@ impl Body<'_> {
                 Ok((member.member, member.library))
             }
             _ => Err("a SAM alias without a supported checked method identity".into()),
+        }
+    }
+
+    /// A function taking `ancestor`'s receiver and parameters that calls the interface default
+    /// `function`, which takes `default`'s, and answers `ancestor`'s result: each operand and the
+    /// result cross between the two carriers a generic ancestor's and its redeclaration's types
+    /// give them.
+    fn sam_default_bridge(
+        &mut self,
+        function: u32,
+        member: crate::interface_dispatch::MemberRef,
+        ancestor: (&[Ty], Ty),
+        default: (&[Ty], Ty),
+    ) -> Result<u32, Unsupported> {
+        if ancestor.0.len() != default.0.len() {
+            return Err(
+                "an ancestor member of a different parameter count than its default".into(),
+            );
+        }
+        let mut code = Code::default();
+        let mut locals = Vec::new();
+        code.local_get(0);
+        let first = ancestor.0.len() as u32 + 1;
+        for (index, (&from, &to)) in ancestor.0.iter().zip(default.0).enumerate() {
+            code.local_get(index as u32 + 1);
+            self.bridge_value(&mut code, &mut locals, first, from, to)?;
+        }
+        code.call(function);
+        self.bridge_value(&mut code, &mut locals, first, default.1, ancestor.1)?;
+        let ty = self.runtime.objects.interfaces.ty(member);
+        let thunk = self.module.declare();
+        self.module.define(thunk, Function { ty, locals, code });
+        Ok(thunk)
+    }
+
+    /// Convert the `from` value on top of `code`'s stack to the carrier of `to`: nothing when they
+    /// are carried alike, a box when only `from` is a scalar, and an unbox or cast otherwise.
+    fn bridge_value(
+        &mut self,
+        code: &mut Code,
+        locals: &mut Vec<ValType>,
+        first: u32,
+        from: Ty,
+        to: Ty,
+    ) -> Result<(), Unsupported> {
+        let (source, target) = (carrier(from)?, carrier(to)?);
+        match (source, target) {
+            (left, right) if left == right => Ok(()),
+            (Some(ValType::Ref { .. }), Some(ValType::Ref { .. })) => {
+                self.unpack_argument(code, to)
+            }
+            (_, Some(ValType::Ref { .. })) | (None, None) => {
+                self.pack_result(code, locals, first, from)
+            }
+            (Some(ValType::Ref { .. }), _) => self.unpack_argument(code, to),
+            _ => {
+                Err("an ancestor member whose carriers differ from its default's by scalars".into())
+            }
         }
     }
 

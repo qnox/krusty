@@ -2922,7 +2922,10 @@ fn emit_interface_class(
             crate::parameter_names::function_locals(ir, fid, &physical_params),
         )
         .expect("an access bridge carries exact declaration parameter identities");
-        access_bridges::emit_jd_access_bridge(
+        // kotlinc declares the bridge with the member's Kotlin result and unboxes the result an
+        // override of a generic member is declared with on the JVM.
+        let physical_ret = jvm_declared_ty(&env.override_results.physical_result(ir, fid));
+        access_bridges::emit_specialized_jd_access_bridge(
             &mut cw,
             c.fq_name,
             static_accessors::class_declaration_line(c),
@@ -2930,12 +2933,18 @@ fn emit_interface_class(
                 name: &f.name,
                 param_tys: &physical_params,
                 parameter_names: &parameter_names,
-                ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
+                ret: jvm_declared_ty(&f.ret),
                 varargs: method_access::varargs_access(ir, fid),
                 // A split interface member's declaration is the trampoline; `suspend_funs` stays
                 // with the coroutine transformer's `$suspendImpl` carrier. The copied declared
                 // signature is the exact fact this bridge needs, never the CPS descriptor.
                 suspend: ir.suspend_declared_sigs.contains_key(&fid),
+            },
+            inherited_member_target::InheritedMemberTarget {
+                params: &physical_params,
+                ret: physical_ret,
+                value_class_params: &[],
+                value_class_ret: None,
             },
         );
     }
