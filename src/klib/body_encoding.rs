@@ -5,10 +5,12 @@
 //! operation's kind owns.
 
 use super::body_tree::{
-    BodyExprId, BodyKind, BodyStatement, BodyVariable, CallTarget, FunctionBody, ValueRef,
+    BodyCatch, BodyExprId, BodyKind, BodyLambda, BodyLoop, BodyStatement, BodyVariable, CallTarget,
+    FunctionBody, JumpKind, ValueRef,
 };
 use super::ir_tables::{
     lattice, symbol, IrTables, CLASS_SYMBOL, CONSTRUCTOR_SYMBOL, FIELD_SYMBOL, FUNCTION_SYMBOL,
+    VALUE_PARAMETER_SYMBOL,
 };
 use crate::fx_hash::HashMap;
 use crate::ir::IrConst;
@@ -16,6 +18,8 @@ use crate::metadata::protobuf::Pb;
 use crate::types::Ty;
 
 const VARIABLE_SYMBOL: u64 = 8;
+/// A local function's flags: `local` visibility, `final` modality.
+const LOCAL_FUNCTION_FLAGS: u64 = 5 << 1;
 
 /// Writes the bodies of one function into `tables`.
 pub(super) struct BodyEncoder<'t> {
@@ -27,6 +31,11 @@ pub(super) struct BodyEncoder<'t> {
     /// Each type parameter in scope with its symbol.
     pub(super) type_parameters: &'t [(Ty, u64)],
     locals: HashMap<u32, u64>,
+    /// The file-wide id of each of the body's loops.
+    loops: HashMap<u32, u32>,
+    /// The symbol of each lambda's local function, and of each of its value parameters.
+    lambdas: HashMap<u32, u64>,
+    lambda_parameters: HashMap<(u32, u32), u64>,
     temporaries: u32,
 }
 
@@ -43,20 +52,28 @@ impl<'t> BodyEncoder<'t> {
             parameters,
             type_parameters,
             locals: HashMap::default(),
+            loops: HashMap::default(),
+            lambdas: HashMap::default(),
+            lambda_parameters: HashMap::default(),
             temporaries: 0,
         }
     }
 
     /// The block body `body`, as an entry of the body table.
     pub(super) fn block_body(&mut self, body: &FunctionBody) -> u32 {
+        self.statements_body(body, &body.statements)
+    }
+
+    /// A block body of `statements`, as an entry of the body table.
+    fn statements_body(&mut self, body: &FunctionBody, statements: &[BodyStatement]) -> u32 {
         let mut block = Pb::new();
-        for statement in &body.statements {
+        for statement in statements {
             let statement = self.statement(body, statement);
             block.repeated_message(1, &statement);
         }
-        let mut body = Pb::new();
-        body.field_message(4, &block);
-        self.tables.body(body.canonical().into_bytes())
+        let mut encoded = Pb::new();
+        encoded.field_message(4, &block);
+        self.tables.body(encoded.canonical().into_bytes())
     }
 
     /// The expression `expression` of `body`, as an entry of the body table.
@@ -91,12 +108,13 @@ impl<'t> BodyEncoder<'t> {
             .map(|initializer| self.expression(body, *initializer));
         // The initializer runs before the variable is in scope, so it is encoded first.
         self.locals.insert(variable.local, declared);
-        let (name, origin) = match &variable.name {
-            Some(name) => (name.clone(), "DEFINED"),
+        let origin = variable.origin;
+        let name = match &variable.name {
+            Some(name) => name.clone(),
             None => {
                 let name = format!("tmp{}", self.temporaries);
                 self.temporaries += 1;
-                (name, "IR_TEMPORARY_VARIABLE")
+                name
             }
         };
         let mut base = Pb::new();
@@ -262,6 +280,88 @@ impl<'t> BodyEncoder<'t> {
                 }
                 29
             }
+            BodyKind::Loop(found) => {
+                let encoded = self.loop_(body, found);
+                operation.field_message(1, &encoded);
+                if found.post_test {
+                    25
+                } else {
+                    24
+                }
+            }
+            BodyKind::Jump { kind, loop_id } => {
+                operation.field_varint(1, u64::from(self.loops[loop_id]));
+                match kind {
+                    JumpKind::Break => 22,
+                    JumpKind::Continue => 23,
+                }
+            }
+            BodyKind::Vararg { element, elements } => {
+                let element = self.ty(*element);
+                operation.field_varint(1, u64::from(element));
+                for (value, spread) in elements {
+                    let value = self.expression(body, *value);
+                    let mut encoded = Pb::new();
+                    if *spread {
+                        let mut spread = Pb::new();
+                        spread.field_message(1, &value);
+                        encoded.field_message(2, &spread);
+                    } else {
+                        encoded.field_message(1, &value);
+                    }
+                    operation.repeated_message(2, &encoded);
+                }
+                32
+            }
+            BodyKind::Lambda(lambda) => {
+                let overridden = self.tables.public_signature(&lambda.overridden);
+                if let Some(target) = &lambda.reflection_target {
+                    let signature = match target {
+                        CallTarget::Public(signature) => self.tables.public_signature(signature),
+                        CallTarget::Accessor(signature) => {
+                            self.tables.accessor_signature(signature)
+                        }
+                    };
+                    operation.field_varint(2, symbol(signature, FUNCTION_SYMBOL));
+                }
+                operation.field_varint(3, symbol(overridden, FUNCTION_SYMBOL));
+                let invoke = self.local_function(body, lambda);
+                operation.field_message(4, &invoke);
+                if let Some(origin) = lambda.origin {
+                    operation.field_varint(6, u64::from(self.tables.string(origin)));
+                }
+                41
+            }
+            BodyKind::LambdaReturn { lambda, value } => {
+                operation.field_varint(1, self.lambdas[lambda]);
+                let value = self.expression(body, *value);
+                operation.field_message(2, &value);
+                12
+            }
+            BodyKind::Throw(value) => {
+                let value = self.expression(body, *value);
+                operation.field_message(1, &value);
+                30
+            }
+            BodyKind::Try {
+                body: result,
+                catches,
+                finally,
+            } => {
+                let result = self.expression(body, *result);
+                operation.field_message(1, &result);
+                for catch in catches {
+                    let catch = self.catch(body, catch);
+                    let mut statement = Pb::new();
+                    statement.field_message(6, &catch);
+                    operation.repeated_message(2, &statement);
+                }
+                if let Some(finally) = finally {
+                    let finally = self.expression(body, *finally);
+                    operation.field_message(3, &finally);
+                }
+                31
+            }
         };
         (field, operation)
     }
@@ -312,6 +412,68 @@ impl<'t> BodyEncoder<'t> {
         access
     }
 
+    /// `IrLoop`: its id, condition, body and origin. The condition is encoded after the body, whose
+    /// variables a `do`-`while` condition reads.
+    fn loop_(&mut self, body: &FunctionBody, found: &BodyLoop) -> Pb {
+        let id = self.tables.loop_id();
+        self.loops.insert(found.id, id);
+        let loop_body = self.expression(body, found.body);
+        let condition = self.expression(body, found.condition);
+        let mut encoded = Pb::new();
+        encoded.field_varint(1, u64::from(id));
+        encoded.field_message(2, &condition);
+        encoded.field_message(4, &loop_body);
+        encoded.field_varint(5, u64::from(self.tables.string(found.origin)));
+        encoded
+    }
+
+    /// The local function a lambda invokes: `IrFunction`, a local final function whose body
+    /// returns to it.
+    fn local_function(&mut self, body: &FunctionBody, lambda: &BodyLambda) -> Pb {
+        let function = symbol(self.tables.local_signature(), FUNCTION_SYMBOL);
+        self.lambdas.insert(lambda.id, function);
+        let mut base = Pb::new();
+        base.field_varint(1, function);
+        base.field_varint(
+            2,
+            u64::from(self.tables.string("LOCAL_FUNCTION_FOR_LAMBDA")),
+        );
+        base.field_varint(4, LOCAL_FUNCTION_FLAGS);
+        let result = self.ty(lambda.result);
+        let name = self.tables.string(&lambda.name);
+        let mut function_base = Pb::new();
+        function_base.field_message(1, &base);
+        function_base.field_varint(2, lattice(name, result));
+        for (index, (name, ty)) in (0u32..).zip(&lambda.parameters) {
+            let parameter = symbol(self.tables.local_signature(), VALUE_PARAMETER_SYMBOL);
+            self.lambda_parameters.insert((lambda.id, index), parameter);
+            let mut base = Pb::new();
+            base.field_varint(1, parameter);
+            base.field_varint(2, u64::from(self.tables.string("DEFINED")));
+            let ty = self.ty(*ty);
+            let name = self.tables.string(name);
+            let mut encoded = Pb::new();
+            encoded.field_message(1, &base);
+            encoded.field_varint(2, lattice(name, ty));
+            function_base.repeated_message(6, &encoded);
+        }
+        let entry = self.statements_body(body, &lambda.statements);
+        function_base.field_varint(7, u64::from(entry));
+        let mut encoded = Pb::new();
+        encoded.field_message(1, &function_base);
+        encoded
+    }
+
+    /// `IrCatch`: the parameter, declared before the result that reads it.
+    fn catch(&mut self, body: &FunctionBody, catch: &BodyCatch) -> Pb {
+        let parameter = self.variable(body, &catch.parameter);
+        let result = self.expression(body, catch.result);
+        let mut encoded = Pb::new();
+        encoded.field_message(1, &parameter);
+        encoded.field_message(2, &result);
+        encoded
+    }
+
     fn constant(&mut self, constant: &IrConst, encoded: &mut Pb) {
         match constant {
             IrConst::Null => encoded.field_varint(1, 0),
@@ -335,6 +497,7 @@ impl<'t> BodyEncoder<'t> {
         match value {
             ValueRef::Parameter(slot) => self.parameters[slot as usize],
             ValueRef::Local(local) => self.locals[&local],
+            ValueRef::LambdaParameter { lambda, index } => self.lambda_parameters[&(lambda, index)],
         }
     }
 

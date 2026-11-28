@@ -929,6 +929,9 @@ pub enum FirExprKind {
     ArrayLiteral {
         array_type: ResolvedTy,
         elements: Box<[FirArrayElement]>,
+        /// Whether the array is a vararg factory's argument (`arrayOf(…)`, `intArrayOf(…)`), which
+        /// kotlinc replaces the call by, rather than `emptyArray()`, a call of its own.
+        vararg_factory: bool,
     },
     /// A checker-selected sized array construction. `initializer`, when present, is the already
     /// checked `(Int) -> element_type` function value. Common lowering may synthesize allocation

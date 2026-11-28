@@ -22,6 +22,14 @@ use crate::types::{Ty, TyKind};
 
 use super::inline_ir::DeclarationSignatures;
 
+mod arrays;
+mod closures;
+mod loops;
+
+use arrays::array_member;
+pub(in crate::klib) use closures::function_type_class;
+use loops::{EnclosingLoop, RangeLoop};
+
 /// What a body's nodes are translated against: the file, the identities its calls name, and the
 /// declaring function's own parameters.
 pub(super) struct BodyScope<'a> {
@@ -77,6 +85,11 @@ impl FunctionBody {
 pub(super) enum ValueRef {
     Parameter(u32),
     Local(u32),
+    /// A value parameter of the lambda with this body-local id.
+    LambdaParameter {
+        lambda: u32,
+        index: u32,
+    },
 }
 
 /// The callee a call names by exact signature.
@@ -127,6 +140,21 @@ pub(super) enum BodyKind {
         origin: Option<&'static str>,
     },
     StringConcat(Vec<BodyExprId>),
+    /// `while` or `do`-`while`, `IrWhile`/`IrDoWhileLoop`.
+    Loop(Box<BodyLoop>),
+    /// `break` out of, or `continue` of, the loop with this body-local id.
+    Jump {
+        kind: JumpKind,
+        loop_id: u32,
+    },
+    Throw(BodyExprId),
+    /// A lambda or callable reference, `IrRichFunctionReference`.
+    Lambda(Box<BodyLambda>),
+    /// `return` from the lambda with this body-local id.
+    LambdaReturn {
+        lambda: u32,
+        value: BodyExprId,
+    },
     /// `CONSTRUCTOR_CALL`: a new instance of the constructed class, `type_arguments` holding the
     /// class's type arguments and then the constructor's own `constructor_type_arguments`.
     ConstructorCall {
@@ -155,6 +183,59 @@ pub(super) enum BodyKind {
         receiver: Option<BodyExprId>,
         value: BodyExprId,
     },
+    /// `IrVararg`: the elements a call passes to a `vararg` parameter, each listed or spread.
+    Vararg {
+        element: Ty,
+        elements: Vec<(BodyExprId, bool)>,
+    },
+    Try {
+        body: BodyExprId,
+        catches: Vec<BodyCatch>,
+        finally: Option<BodyExprId>,
+    },
+}
+
+/// A loop of a body, numbered within the body as Kotlin IR numbers the loops its jumps target.
+/// Common IR names a loop by a lowering label rather than the source one, and Kotlin IR targets a
+/// jump by the loop's id, so the optional source label is not written.
+#[derive(Clone, Debug)]
+pub(super) struct BodyLoop {
+    pub(super) id: u32,
+    pub(super) post_test: bool,
+    pub(super) condition: BodyExprId,
+    pub(super) body: BodyExprId,
+    pub(super) origin: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum JumpKind {
+    Break,
+    Continue,
+}
+
+/// A lambda as Kotlin IR records it: a function value whose `invoke` is a local function that
+/// reads the values it captures where they are declared.
+#[derive(Clone, Debug)]
+pub(super) struct BodyLambda {
+    pub(super) id: u32,
+    /// The local function's name: `<anonymous>` for a lambda, the referenced function's for a
+    /// callable reference.
+    pub(super) name: String,
+    pub(super) parameters: Vec<(String, Ty)>,
+    pub(super) result: Ty,
+    pub(super) statements: Vec<BodyStatement>,
+    /// The function class's `invoke` the local function implements.
+    pub(super) overridden: KlibPublicIdSignature,
+    /// The function a callable reference names.
+    pub(super) reflection_target: Option<CallTarget>,
+    pub(super) origin: Option<&'static str>,
+}
+
+/// One `catch (parameter) result` clause of a `try`.
+#[derive(Clone, Debug)]
+pub(super) struct BodyCatch {
+    pub(super) parameter: BodyVariable,
+    pub(super) result: BodyExprId,
 }
 
 #[derive(Clone, Debug)]
@@ -172,6 +253,9 @@ pub(super) struct BodyVariable {
     pub(super) ty: Ty,
     pub(super) mutable: bool,
     pub(super) initializer: Option<BodyExprId>,
+    /// Kotlin's declaration origin: `DEFINED` for a source variable, `IR_TEMPORARY_VARIABLE` for a
+    /// compiler temporary, `CATCH_PARAMETER` for a caught exception.
+    pub(super) origin: &'static str,
 }
 
 /// The block body of a function, or `None` when a node is not translated yet.
@@ -192,12 +276,7 @@ pub(super) fn function_body(scope: &BodyScope<'_>, body: ExprId) -> Option<Funct
     let IrExpr::Block { stmts, value: None } = scope.ir.expr(block) else {
         return None;
     };
-    let mut translation = Translation {
-        scope,
-        body: FunctionBody::default(),
-        locals: HashMap::default(),
-        assigned: assigned_locals(scope.ir, block),
-    };
+    let mut translation = Translation::new(scope, assigned_locals(scope.ir, block));
     let statements = stmts
         .iter()
         .map(|statement| translation.statement(*statement))
@@ -213,12 +292,7 @@ pub(super) fn expression_body(
     scope: &BodyScope<'_>,
     expression: ExprId,
 ) -> Option<(FunctionBody, BodyExprId)> {
-    let mut translation = Translation {
-        scope,
-        body: FunctionBody::default(),
-        locals: HashMap::default(),
-        assigned: assigned_locals(scope.ir, expression),
-    };
+    let mut translation = Translation::new(scope, assigned_locals(scope.ir, expression));
     let root = translation.expr(expression)?;
     Some((translation.body, root))
 }
@@ -232,12 +306,7 @@ pub(super) fn constructor_body(
     arguments: &[ExprId],
     initialized: Option<crate::types::TypeName>,
 ) -> Option<FunctionBody> {
-    let mut translation = Translation {
-        scope,
-        body: FunctionBody::default(),
-        locals: HashMap::default(),
-        assigned: HashSet::default(),
-    };
+    let mut translation = Translation::new(scope, HashSet::default());
     let arguments = arguments
         .iter()
         .map(|argument| translation.expr(*argument))
@@ -275,9 +344,53 @@ fn assigned_locals(ir: &IrFile, root: ExprId) -> HashSet<u32> {
 struct Translation<'s, 'a> {
     scope: &'s BodyScope<'a>,
     body: FunctionBody,
-    /// The declared type of each local variable the body declared so far.
-    locals: HashMap<u32, Ty>,
+    /// The common-IR function whose body is being translated: the declaring function, or a
+    /// lambda's implementation inside it.
+    frame: Frame,
+    next_loop: u32,
+    /// Local variables are numbered across the whole body, lambdas included, so a lambda's slot
+    /// never names a variable of the function around it.
+    next_local: u32,
+    next_lambda: u32,
+}
+
+/// The values one common-IR function body reads by slot.
+struct Frame {
+    /// What each physical parameter slot reads, with its declared type.
+    parameters: Vec<(ValueRef, Ty)>,
+    /// The body-wide id and declared type of each local slot declared so far.
+    locals: HashMap<u32, (u32, Ty)>,
+    /// Every local slot a `SET_VAR` writes, which Kotlin declares `var`.
     assigned: HashSet<u32>,
+    /// The loops enclosing the node being translated, innermost last.
+    loops: Vec<EnclosingLoop>,
+    /// The lambda whose body this is, which its `return`s leave; `None` for the declaring
+    /// function.
+    lambda: Option<u32>,
+}
+
+impl<'s, 'a> Translation<'s, 'a> {
+    /// A translation of a declaration's own body, which reads its parameters by slot and declares
+    /// `var` each local slot in `assigned`.
+    fn new(scope: &'s BodyScope<'a>, assigned: HashSet<u32>) -> Self {
+        Translation {
+            scope,
+            body: FunctionBody::default(),
+            frame: Frame {
+                parameters: (0u32..)
+                    .zip(scope.parameters)
+                    .map(|(slot, ty)| (ValueRef::Parameter(slot), *ty))
+                    .collect(),
+                locals: HashMap::default(),
+                assigned,
+                loops: Vec::new(),
+                lambda: None,
+            },
+            next_loop: 0,
+            next_local: 0,
+            next_lambda: 0,
+        }
+    }
 }
 
 impl Translation<'_, '_> {
@@ -289,28 +402,41 @@ impl Translation<'_, '_> {
             named,
         } = self.scope.ir.expr(statement)
         {
-            if usize::try_from(*index).ok()? < self.scope.parameters.len()
-                || self.locals.contains_key(index)
-                || !self.supported(*ty)
-            {
+            if !self.supported(*ty) {
                 return None;
             }
             let initializer = match init {
                 Some(init) => Some(self.expr(*init)?),
                 None => None,
             };
+            // A variable a closure writes holds the box common IR records as its initializer;
+            // Kotlin IR declares it of the box's type.
+            let ty = match (init, initializer) {
+                (Some(init), Some(initializer))
+                    if matches!(self.scope.ir.expr(*init), IrExpr::RefNew { .. }) =>
+                {
+                    self.ty(initializer)
+                }
+                _ => *ty,
+            };
             let name = if *named {
                 Some(self.scope.ir.value_names.get(&statement)?.clone())
             } else {
                 None
             };
-            self.locals.insert(*index, *ty);
+            let mutable = self.frame.assigned.contains(index);
+            let local = self.declare(*index, ty)?;
             return Some(BodyStatement::Variable(BodyVariable {
-                local: *index,
+                local,
                 name,
-                ty: *ty,
-                mutable: self.assigned.contains(index),
+                ty,
+                mutable,
                 initializer,
+                origin: if *named {
+                    "DEFINED"
+                } else {
+                    "IR_TEMPORARY_VARIABLE"
+                },
             }));
         }
         self.expr(statement).map(BodyStatement::Expression)
@@ -335,19 +461,24 @@ impl Translation<'_, '_> {
                 self.push(ty, BodyKind::GetValue(value))
             }
             IrExpr::SetValue { var, value } => {
-                let declared = *self.locals.get(var)?;
+                let (local, declared) = *self.frame.locals.get(var)?;
                 let value = self.expr(*value)?;
                 if self.ty(value) != declared && self.ty(value) != Ty::Nothing {
                     return None;
                 }
-                self.push(Ty::Unit, BodyKind::SetValue { local: *var, value })
+                self.push(Ty::Unit, BodyKind::SetValue { local, value })
             }
             IrExpr::Return(value) => {
                 let value = match value {
                     Some(value) => self.expr(*value)?,
                     None => self.unit_value(),
                 };
-                self.push(Ty::Nothing, BodyKind::Return(value))
+                match self.frame.lambda {
+                    Some(lambda) => {
+                        self.push(Ty::Nothing, BodyKind::LambdaReturn { lambda, value })
+                    }
+                    None => self.push(Ty::Nothing, BodyKind::Return(value)),
+                }
             }
             IrExpr::Block { stmts, value } => {
                 let mut statements = stmts
@@ -444,14 +575,165 @@ impl Translation<'_, '_> {
                 ..
             } if defaults.is_empty() => self.construction(expression, *internal, args),
             IrExpr::UnitInstance => Some(self.unit_value()),
+            IrExpr::While {
+                cond,
+                body,
+                update,
+                post_test,
+                label,
+            } => self.while_loop(*cond, *body, *update, *post_test, label.as_deref()),
+            IrExpr::Break { label } => self.jump(JumpKind::Break, label.as_deref()),
+            IrExpr::Continue { label } => self.jump(JumpKind::Continue, label.as_deref()),
+            IrExpr::Throw { operand } => self.throw(*operand),
+            IrExpr::Lambda {
+                impl_fn,
+                arity,
+                captures,
+                sam: None,
+                inline_body: _,
+            } => self.lambda(expression, *impl_fn, *arity, captures),
+            IrExpr::CallableReference(reference) => self.callable_reference(reference),
+            IrExpr::InvokeFunction {
+                func,
+                args,
+                params,
+                ret,
+            } => self.invoke_function(*func, args, params, *ret),
+            IrExpr::RefNew {
+                elem,
+                init: Some(init),
+            } => self.shared_box(*elem, *init),
+            IrExpr::RefGet { holder, elem } => self.shared_read(*holder, *elem),
+            IrExpr::RefSet {
+                holder,
+                elem,
+                value,
+            } => self.shared_write(*holder, *elem, *value),
+            // Kotlin IR types a call that never returns `Nothing`; common IR records that the
+            // target must not fall through after it.
+            IrExpr::BottomValue {
+                producer,
+                completion: crate::ir::IrBottomValueCompletion::Diverge,
+            } => {
+                let producer = self.expr(*producer)?;
+                (self.ty(producer) == Ty::Nothing).then_some(producer)
+            }
+            IrExpr::New {
+                internal: _,
+                args,
+                ctor_params: _,
+                declared_params: _,
+                ctor_desc: None,
+                external_target: Some(target),
+                defaults,
+                default_prefix_count: 0,
+            } if defaults.is_empty() => self.constructor_call(expression, *target, args),
+            IrExpr::NewArray { array_type, size } => self.new_array(*array_type, *size),
+            IrExpr::Vararg {
+                array_type,
+                spreads,
+                elements,
+            } => self.array_factory(*array_type, spreads, elements),
+            IrExpr::Try {
+                body,
+                catches,
+                finally,
+                result,
+            } => self.try_expression(*body, catches, *finally, *result),
             _ => None,
         }
     }
 
+    /// A body-wide id for a new local variable.
+    fn fresh_local(&mut self) -> u32 {
+        let local = self.next_local;
+        self.next_local += 1;
+        local
+    }
+
+    /// Declares the common-IR local `slot` of the current frame, answering its body-wide id.
+    fn declare(&mut self, slot: u32, ty: Ty) -> Option<u32> {
+        if usize::try_from(slot).ok()? < self.frame.parameters.len()
+            || self.frame.locals.contains_key(&slot)
+        {
+            return None;
+        }
+        let local = self.fresh_local();
+        self.frame.locals.insert(slot, (local, ty));
+        Some(local)
+    }
+
+    fn throw(&mut self, operand: ExprId) -> Option<BodyExprId> {
+        let operand = self.expr(operand)?;
+        if !self.supported(self.ty(operand)) {
+            return None;
+        }
+        self.push(Ty::Nothing, BodyKind::Throw(operand))
+    }
+
+    /// `try`, its `catch` clauses with their parameters in scope, and its `finally` block.
+    fn try_expression(
+        &mut self,
+        body: ExprId,
+        catches: &[crate::ir::IrCatch],
+        finally: Option<ExprId>,
+        result: Ty,
+    ) -> Option<BodyExprId> {
+        if !self.supported(result) {
+            return None;
+        }
+        let body = self.expr(body)?;
+        let mut clauses = Vec::with_capacity(catches.len());
+        for catch in catches {
+            if !self.supported(catch.ty) {
+                return None;
+            }
+            let local = self.declare(catch.var, catch.ty)?;
+            let parameter = BodyVariable {
+                local,
+                name: Some(catch.binding_name()?.to_owned()),
+                ty: catch.ty,
+                mutable: false,
+                initializer: None,
+                origin: "CATCH_PARAMETER",
+            };
+            let result = self.expr(catch.body)?;
+            clauses.push(BodyCatch { parameter, result });
+        }
+        let finally = match finally {
+            Some(finally) => Some(self.expr(finally)?),
+            None => None,
+        };
+        self.push(
+            result,
+            BodyKind::Try {
+                body,
+                catches: clauses,
+                finally,
+            },
+        )
+    }
+
+    /// The type of a common-IR operand not translated yet: its logical type, or a value's declared
+    /// one.
+    fn operand_type(&self, expression: ExprId) -> Option<Ty> {
+        let ir = self.scope.ir;
+        match ir.logical_type(expression) {
+            Some(ty) => Some(ty),
+            None => match ir.expr(expression) {
+                IrExpr::GetValue(slot) => Some(self.value(*slot)?.1),
+                _ => None,
+            },
+        }
+    }
+
     fn value(&self, slot: u32) -> Option<(ValueRef, Ty)> {
-        match self.scope.parameters.get(usize::try_from(slot).ok()?) {
-            Some(ty) => Some((ValueRef::Parameter(slot), *ty)),
-            None => Some((ValueRef::Local(slot), *self.locals.get(&slot)?)),
+        match self.frame.parameters.get(usize::try_from(slot).ok()?) {
+            Some(parameter) => Some(*parameter),
+            None => {
+                let (local, ty) = *self.frame.locals.get(&slot)?;
+                Some((ValueRef::Local(local), ty))
+            }
         }
     }
 
@@ -737,17 +1019,48 @@ impl Translation<'_, '_> {
                 let other = ir.logical_type(*other)?;
                 (member_signature(*operand, "compareTo", Some(other))?, *ret)
             }
+            Callee::Intrinsic {
+                operation:
+                    operation @ (IrIntrinsic::ArrayGet | IrIntrinsic::ArraySet | IrIntrinsic::ArraySize),
+                ret,
+            } => {
+                let array = self.operand_type(dispatch_receiver?)?;
+                (array_member(array, *operation)?, *ret)
+            }
             _ => return None,
+        };
+        let vararg = match callee {
+            Callee::Local(function) => ir
+                .declared_parameters(*function)
+                .vararg
+                .map(|vararg| vararg.index),
+            Callee::External { target, .. } => {
+                self.scope
+                    .callables
+                    .callable(*target)?
+                    .klib_body_vararg_index
+            }
+            _ => None,
         };
         let ty = ir.logical_type(expression).unwrap_or(ty);
         if !self.supported(ty) {
             return None;
         }
-        let arguments = dispatch_receiver
-            .into_iter()
-            .chain(args.iter().copied())
-            .map(|argument| self.expr(argument))
-            .collect::<Option<Vec<_>>>()?;
+        let mut arguments = Vec::with_capacity(args.len() + 1);
+        if let Some(receiver) = dispatch_receiver {
+            arguments.push(self.expr(receiver)?);
+        }
+        for (index, argument) in args.iter().enumerate() {
+            let argument = match ir.expr(*argument) {
+                IrExpr::Vararg {
+                    array_type,
+                    spreads,
+                    elements,
+                } if vararg == Some(index) => self.vararg(*array_type, spreads, elements)?,
+                _ => self.expr(*argument)?,
+            };
+            arguments.push(argument);
+        }
         let target = match (local, dispatch_receiver) {
             (true, Some(_)) => self.received_on(target, arguments.first().copied())?,
             _ => target,
@@ -789,12 +1102,65 @@ impl Translation<'_, '_> {
         })
     }
 
+    /// A library class's constructor call, its class type arguments those of the built type.
+    fn constructor_call(
+        &mut self,
+        expression: ExprId,
+        target: crate::fir::ExternalCallableId,
+        args: &[ExprId],
+    ) -> Option<BodyExprId> {
+        let fact = self.scope.callables.callable(target)?;
+        if generic(fact) || fact.params.len() != args.len() || fact.klib_body_vararg_index.is_some()
+        {
+            return None;
+        }
+        let target = call_target(fact)?;
+        let ty = self.scope.ir.logical_type(expression)?;
+        let TyKind::Obj(_, type_arguments) = ty.kind() else {
+            return None;
+        };
+        if !self.supported(ty) {
+            return None;
+        }
+        let arguments = args
+            .iter()
+            .map(|argument| self.expr(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        self.push(
+            ty,
+            BodyKind::ConstructorCall {
+                target,
+                constructor_type_arguments: 0,
+                type_arguments: type_arguments.to_vec(),
+                arguments,
+                origin: None,
+            },
+        )
+    }
+
     fn checked(
         &mut self,
         expression: ExprId,
         operation: &IrCheckedOperation,
     ) -> Option<BodyExprId> {
         match operation {
+            IrCheckedOperation::RangeLoop {
+                variable,
+                variable_name,
+                counter,
+                source,
+                unsigned_compare: None,
+                body,
+                label,
+                with_index: None,
+            } => self.range_loop(RangeLoop {
+                variable: *variable,
+                variable_name: variable_name.as_deref(),
+                counter: *counter,
+                source,
+                body: *body,
+                label,
+            }),
             IrCheckedOperation::PropertyRead {
                 target,
                 dispatch_receiver,
@@ -1107,11 +1473,13 @@ pub(super) fn supported_type(ty: Ty, parameters: &[IrTypeParameter]) -> bool {
         | TyKind::StarProjection(_)
         | TyKind::RawProjection(_) => false,
         TyKind::TyParam(..) => parameters.iter().any(|parameter| parameter.ty() == ty),
+        TyKind::Fun(_) => {
+            function_type_class(ty).is_some_and(|class| supported_type(class, parameters))
+        }
         TyKind::Null
         | TyKind::Error
         | TyKind::Pending
         | TyKind::Var(..)
-        | TyKind::Fun(_)
         | TyKind::DefinitelyNotNull(_)
         | TyKind::PlatformNullable(_)
         | TyKind::MutabilityFlexible(_)
