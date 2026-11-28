@@ -361,7 +361,11 @@ pub(super) fn prepared_inline_header(
             identities.len()
         )));
     }
-    if function.context_parameters.len() != selected.context_count() {
+    // Kotlin 2.4 declares every parameter of a prepared copy a regular one, in the declaration's
+    // order: its context parameters lead the serialized list either way.
+    if !function.context_parameters.is_empty()
+        && function.context_parameters.len() != selected.context_count()
+    {
         return Err(mismatch(format!(
             "{} serialized context parameters, {} selected",
             function.context_parameters.len(),

@@ -485,8 +485,11 @@ fn prepared_property(
         || !property.type_params.is_empty()
         || !property.annotations.is_empty()
         || property.needs_access_bridge
-        || property.visibility != Visibility::Public
-        || property.setter_visibility != Visibility::Public
+        || !matches!(
+            property.visibility,
+            Visibility::Public | Visibility::Private
+        )
+        || property.setter_visibility != property.visibility
         || !matches!(property.origin, crate::ir::IrPropertyOrigin::Declaration)
     {
         return None;
@@ -522,10 +525,14 @@ fn prepared_property(
         } else {
             crate::backend::ExportedPropertyAccessor::Getter(id)
         };
-        let (_, identity) = exports
+        let Some((_, identity)) = exports
             .property_accessors()
             .iter()
-            .find(|(exported, _)| *exported == operation)?;
+            .find(|(exported, _)| *exported == operation)
+        else {
+            // A private property's accessor is declared by this file and exported by none.
+            return scope.declarations.private_accessor(operation).cloned();
+        };
         match &identity.declaration {
             KlibDeclarationSignature::Accessor(signature) => Some(signature.clone()),
             _ => None,
@@ -538,7 +545,8 @@ fn prepared_property(
     if !supported_type(ty, &[]) {
         return None;
     }
-    let (overridden_getters, overridden_setters) = overridden_accessors(ir, class, id, facts)?;
+    let (overridden_getters, overridden_setters) =
+        overridden_accessors(ir, class, id, scope.declarations, facts)?;
     let modality = match modifiers.modality {
         crate::ir::IrPropertyModality::Final => 0,
         crate::ir::IrPropertyModality::Open => 1,
@@ -574,7 +582,7 @@ fn prepared_property(
         file_name: file_name.to_owned(),
         flags: accessor_flags,
         inline_only: false,
-        inline: false,
+        prepared: None,
         dispatch_receiver: Some(self_type),
         parameters,
         context_count: 0,
@@ -613,6 +621,7 @@ fn prepared_property(
                 name: "<set-?>".to_owned(),
                 ty,
                 default_null: false,
+                vararg_element: None,
             }],
             Ty::Unit,
             overridden_setters,
@@ -645,6 +654,7 @@ fn overridden_accessors(
     ir: &IrFile,
     class: &IrClass,
     property: crate::fir::PropertyId,
+    declarations: &DeclarationSignatures,
     facts: &BodyFacts<'_>,
 ) -> Option<(Vec<CallTarget>, Vec<CallTarget>)> {
     let mut getters = Vec::new();
@@ -661,7 +671,7 @@ fn overridden_accessors(
         let accessor = |setter: bool| -> Option<KlibAccessorIdSignature> {
             let target = match edge.overridden {
                 ResolvedPropertyOverrideTarget::Module(overridden) => {
-                    property_accessor(ir, facts.exports, overridden, setter)?
+                    property_accessor(ir, facts.exports, declarations, overridden, setter)?
                 }
                 // An external edge names the overridden getter; its setter is not named yet.
                 ResolvedPropertyOverrideTarget::External(getter) => {

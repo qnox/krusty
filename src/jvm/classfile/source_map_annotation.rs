@@ -11,6 +11,7 @@
 //! string array: one element, or, for a map longer than one `CONSTANT_Utf8` entry holds, the parts
 //! kotlinc's `splitStringConstant` cuts it into.
 
+use super::line_numbers::interleave_dropped_lines;
 use super::{u2, ClassWriter, ConstPool};
 use crate::jvm::string_constant::text_entry_parts;
 
@@ -51,7 +52,8 @@ impl ClassWriter {
     }
 
     /// The lines of each method that has a map of its own, in the order its table lists them
-    /// before the bytecode rewrites run: the order kotlinc's copier reads them in.
+    /// before the bytecode rewrites run, with the inlined lines of code emission dropped as dead:
+    /// the order kotlinc's copier reads them in.
     pub(super) fn written_method_lines(&self) -> Vec<Option<Vec<u16>>> {
         self.methods
             .iter()
@@ -59,7 +61,7 @@ impl ClassWriter {
                 method
                     .source_map
                     .as_ref()
-                    .map(|_| method.lnt.iter().map(|&(_, line)| line).collect())
+                    .map(|_| interleave_dropped_lines(&method.lnt, &method.dropped_lines))
             })
             .collect()
     }

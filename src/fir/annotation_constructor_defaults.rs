@@ -93,6 +93,7 @@ impl Folder<'_> {
             FirExprKind::ArrayLiteral {
                 array_type,
                 elements,
+                ..
             } => self.array(body, array_type, &elements),
             FirExprKind::AnnotationArray(elements) => {
                 self.array_elements(body, expression.ty, &elements, &[])

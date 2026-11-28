@@ -14,6 +14,7 @@
 
 use std::borrow::Cow;
 
+use super::line_numbers::interleave_dropped_lines;
 use super::local_variables::LocalEntryPlacement;
 use super::{ClassWriter, CodeBuilder};
 use crate::jvm::inliner::{inline_scopes, InlineScopes};
@@ -132,11 +133,11 @@ impl ClassWriter {
         let mut class = self.source_map.clone();
         for method in earlier {
             if let Some(map) = &method.source_map {
-                let lines: Vec<u16> = method.lnt.iter().map(|&(_, line)| line).collect();
+                let lines = interleave_dropped_lines(&method.lnt, &method.dropped_lines);
                 class.copied_lines(map, &lines, &[]);
             }
         }
-        let written: Vec<u16> = code.line_marks().iter().map(|&(_, line)| line).collect();
+        let written = code.copier_lines();
         let queries: Vec<u16> = calls.iter().map(|&(_, line)| line).collect();
         let mapped = class.copied_lines(map, &written, &queries);
         let mut entries = entries.into_owned();
