@@ -10776,13 +10776,43 @@ impl<'a> Checker<'a> {
                 let ordinary_this_member_lambda_shape = ordinary_this_member_lambda_shape
                     .filter(|_| this_member_shaping.is_none())
                     .map(|(_, shape)| shape);
-                let this_member_ext_lambda_plan =
-                    this_member_shaping.as_ref().and_then(|shaping| {
+                // A bare name that no function answers may still name a PROPERTY on an implicit
+                // receiver whose value has an `invoke` operator. That invoke is planned exactly as
+                // for an explicit receiver, so its parameter types shape the lambdas.
+                let implicit_property_invoke_plan = (implicit_member_lambda_enabled
+                    && source_member_depth.is_none()
+                    && this_member_shaping.is_none()
+                    && toplevel_lambda_shape.is_none())
+                .then(|| {
+                    let partial = this_member_partial.clone().unwrap_or_default();
+                    self.implicit_member_receiver_types(scope)
+                        .into_iter()
+                        .find_map(|receiver| {
+                            self.plan_property_invoke(
+                                scope,
+                                call,
+                                receiver,
+                                &fname,
+                                invoke_selection::InvokeArguments {
+                                    expressions: args,
+                                    partial_types: &partial,
+                                },
+                                CallResultConstraint::direct(expected),
+                            )
+                        })
+                })
+                .flatten();
+                let this_member_ext_lambda_plan = this_member_shaping
+                    .as_ref()
+                    .and_then(|shaping| {
                         shaping
                             .extension
                             .as_ref()
                             .filter(|shape| shape.param_types.is_some())
-                    });
+                    })
+                    .or(implicit_property_invoke_plan
+                        .as_ref()
+                        .map(|plan| &plan.invoke.lambda_shape));
                 // A receiver whose extension shapes the call supplies the call's selected lambda
                 // shape; its provider expectations stand only where no extension answers.
                 let implicit_provider_member_lambda_pts = this_member_shaping
