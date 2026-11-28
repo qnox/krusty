@@ -1,7 +1,8 @@
 //! Persistent JVM box execution and durable evidence for failed requests.
 
 use super::{
-    dir_classes, java_home, sweep_stale_temp_dirs, BoxRunner, ProfGuard, RunnerPool, BOX_RUNNER_SRC,
+    dir_classes, java_home, runtime_jdk::home_for_classes, sweep_stale_temp_dirs, BoxRunner,
+    ProfGuard, RunnerPool, BOX_RUNNER_SRC,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -62,6 +63,9 @@ pub fn run_box(
         std::borrow::Cow::Owned(request_classes)
     };
     let classes: &[(String, Vec<u8>)] = &classes;
+    // A class file newer than the selected JDK loads runs on the oldest provisioned JDK that loads it.
+    let runtime_java = format!("{}/bin/java", home_for_classes(&java_home, classes));
+    let key = format!("{runtime_java}\n{cp}");
     let pool = POOL.get_or_init(|| {
         sweep_stale_temp_dirs();
         Mutex::new(RunnerPool::new())
@@ -73,11 +77,13 @@ pub fn run_box(
     // leaves behind a persistent JVM for the rest of the process.
     let get_runner = || -> Option<Arc<BoxRunner>> {
         let mut map = pool.lock().unwrap();
-        let needs_runner = map.get(&cp).is_none_or(|r| !r.alive.load(Ordering::SeqCst));
+        let needs_runner = map
+            .get(&key)
+            .is_none_or(|r| !r.alive.load(Ordering::SeqCst));
         if needs_runner {
-            map.insert(cp.clone(), Arc::new(BoxRunner::new(&java, &cp)?));
+            map.insert(key.clone(), Arc::new(BoxRunner::new(&runtime_java, &cp)?));
         }
-        map.get(&cp)
+        map.get(&key)
     };
 
     let runner = get_runner()?;
@@ -101,10 +107,10 @@ pub fn run_box(
                 let mut map = pool.lock().unwrap();
                 if map
                     .runners
-                    .get(&cp)
+                    .get(&key)
                     .is_some_and(|r| Arc::ptr_eq(r, &runner))
                 {
-                    map.remove(&cp);
+                    map.remove(&key);
                 }
             }
             let fresh = get_runner()?;

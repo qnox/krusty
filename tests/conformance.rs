@@ -11,8 +11,7 @@ static DHAT_ALLOC: krusty::dhat::Alloc = krusty::dhat::Alloc;
 mod failure_evidence;
 
 mod common;
-#[path = "common/jdk_homes.rs"]
-mod jdk_homes;
+use common::jdk_homes;
 
 #[path = "common/asm_text.rs"]
 mod asm_text;

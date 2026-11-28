@@ -12,9 +12,12 @@ pub(crate) mod kotlinc_server;
 pub mod language_directives;
 pub(crate) mod reference_diagnostics;
 pub use reference_diagnostics::*;
+pub mod jdk_homes;
 mod metadata_diff;
 pub mod native_backend;
+pub use jdk_homes::java_home;
 pub(crate) mod producing_jdk;
+pub mod runtime_jdk;
 pub(crate) mod server_pool;
 pub use kotlinc_lib::kotlinc_lib_out;
 pub use kotlinc_server::{kotlin_compiler_jar, kotlinc_compile};
@@ -1123,25 +1126,6 @@ class TestClassLoader extends ClassLoader {
     }
 }
 "#;
-
-/// The JDK home the runner JVMs, javac, and the reference kotlinc server run on:
-/// `KRUSTY_REF_JAVA_HOME`, else `JAVA_HOME`. `None` when neither names a home.
-pub fn selected_java_home() -> Option<String> {
-    std::env::var("KRUSTY_REF_JAVA_HOME")
-        .or_else(|_| std::env::var("JAVA_HOME"))
-        .ok()
-        .filter(|v| !v.is_empty())
-}
-
-/// [`selected_java_home`], which every JVM-backed test requires.
-pub fn java_home() -> String {
-    selected_java_home().unwrap_or_else(|| {
-        panic!(
-            "JAVA_HOME is not set, so no JVM-backed test in this suite can run.\n\
-             There is no fallback to /usr/libexec/java_home — set it explicitly to a JDK 21+ home."
-        )
-    })
-}
 
 /// Parse a millisecond deadline from the environment variable `name`, read as `raw`.
 ///
