@@ -218,6 +218,29 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: true,
     }
+    /// A function reference class's constructor numbers its bound receiver parameter
+    /// (`receiver0`). From 2.5 kotlinc passes at most one bound receiver and names it `receiver`.
+    FunctionReferenceNumbersBoundReceiver {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
+    /// A class's static state initializes with its `companion object` first: the companion is
+    /// constructed, then every `companion { }` block property of the class is stored, then the
+    /// companion's initializer body runs. From 2.5 kotlinc initializes in program order: the block
+    /// properties written before the `companion object`, the companion, then the ones after it.
+    ClassStaticsInitializeBeforeCompanionBody {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
+    /// `-jvm-target` accepts `1.8` and `9` through `26`; `27` and `28` are unknown targets. From
+    /// 2.5 kotlinc also accepts `27` and `28`.
+    JvmTargetsEndAt26 {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
     /// A not-null operator (`!!`, the left of `?:`, the receiver of `?.`) applied to a nullable
     /// intersection fixed below an upper type (`pick(a, b)!!` with `S : Base`) narrows it to a new
     /// intersection that publishes `Any`. From 2.5 kotlinc keeps the upper type, so the result still

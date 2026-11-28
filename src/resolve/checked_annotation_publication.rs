@@ -163,7 +163,7 @@ pub(crate) fn publish_checked_declaration_annotations(
                 owner,
                 class,
                 &info,
-                file.property_annotation_default_target_mode,
+                file.language.property_annotation_default_target_mode,
                 &mut constructor_properties,
             );
             if let Some(defaults) = info.annotation_element_defaults(internal) {

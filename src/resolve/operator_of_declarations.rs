@@ -48,7 +48,7 @@ impl Checker<'_> {
         result: Ty,
         declaration: Option<DeclarationId>,
     ) {
-        if !self.file.collection_literals_enabled
+        if !self.file.language.collection_literals_enabled
             || !function.is_operator()
             || function.name != "of"
             || result == Ty::Error

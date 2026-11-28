@@ -311,10 +311,12 @@ impl Checker<'_> {
                         }
                         return;
                     }
-                    if self.file.custom_equals_in_value_classes && facts.typed_value_class_equals {
+                    if self.file.language.custom_equals_in_value_classes
+                        && facts.typed_value_class_equals
+                    {
                         return;
                     }
-                    let message = if self.file.custom_equals_in_value_classes {
+                    let message = if self.file.language.custom_equals_in_value_classes {
                         facts.value_class_equals_hint.as_deref().map_or_else(
                             || {
                                 "'operator' modifier is not applicable to function: must override \
@@ -338,8 +340,12 @@ impl Checker<'_> {
                         self.report_deprecation_error(
                             operator,
                             self.file
+                                .language
                                 .forbid_operator_equals_in_enum_entries_and_anonymous_objects,
-                            self.file.inapplicable_operator_modifier_warning.as_deref(),
+                            self.file
+                                .language
+                                .inapplicable_operator_modifier_warning
+                                .as_deref(),
                             DeprecationNames {
                                 error: crate::diag::names::INAPPLICABLE_OPERATOR_MODIFIER,
                                 warning: crate::diag::names::INAPPLICABLE_OPERATOR_MODIFIER_WARNING,

@@ -7,94 +7,129 @@ use crate::features::LangFeatures;
 /// declaration-unit reparsing must project the feature set through this one operation; otherwise a
 /// Pass-2 unit can resolve the same source under different language rules than Pass 1.
 pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
-    file.reference = features.reference();
+    file.language.reference = features.reference();
     file.assertions = features.assertions();
-    file.explicit_context_arguments = features.has("ExplicitContextArguments");
+    file.language.explicit_context_arguments = features.has("ExplicitContextArguments");
     file.language.callable_references_to_contextual =
         features.has("CallableReferencesToContextual");
-    file.context_sensitive_resolution_using_expected_type =
+    file.language
+        .context_sensitive_resolution_using_expected_type =
         features.has("ContextSensitiveResolutionUsingExpectedType");
-    file.allow_protected_super_companion_property_access =
+    file.language
+        .allow_protected_super_companion_property_access =
         features.has("AllowAccessToProtectedFieldFromSuperCompanion");
-    file.bare_array_class_literal = features.has("BareArrayClassLiteral");
-    file.forbid_array_of_nothing_in_lhs_of_class_literal =
+    file.language.bare_array_class_literal = features.has("BareArrayClassLiteral");
+    file.language
+        .forbid_array_of_nothing_in_lhs_of_class_literal =
         features.has("ForbidArrayOfNothingInLhsOfClassLiteral");
-    file.enum_entries_enabled = features.has("EnumEntries");
-    file.collection_literals_enabled = features.has("CollectionLiterals");
-    file.prioritized_enum_entries = features.has("PrioritizedEnumEntries");
-    file.implicit_signed_to_unsigned_integer_conversion =
+    file.language.enum_entries_enabled = features.has("EnumEntries");
+    file.language.collection_literals_enabled = features.has("CollectionLiterals");
+    file.language.prioritized_enum_entries = features.has("PrioritizedEnumEntries");
+    file.language.implicit_signed_to_unsigned_integer_conversion =
         features.has("ImplicitSignedToUnsignedIntegerConversion");
-    file.data_copy_respects_ctor_visibility =
+    file.language.data_copy_respects_ctor_visibility =
         features.has("DataClassCopyRespectsConstructorVisibility");
-    file.property_annotation_default_target_mode =
+    file.language.property_annotation_default_target_mode =
         if features.has("PropertyParamAnnotationDefaultTargetMode") {
             crate::types::PropertyAnnotationDefaultTargetMode::ParamProperty
         } else {
             crate::types::PropertyAnnotationDefaultTargetMode::FirstOnly
         };
-    file.unit_conversions_on_arbitrary_expressions =
+    file.language.unit_conversions_on_arbitrary_expressions =
         features.has("UnitConversionsOnArbitraryExpressions");
-    file.eager_lambda_analysis = features.has("EagerLambdaAnalysis");
-    file.allow_eager_supertype_accessibility_checks =
+    file.language.eager_lambda_analysis = features.has("EagerLambdaAnalysis");
+    file.language.allow_eager_supertype_accessibility_checks =
         features.has("AllowEagerSupertypeAccessibilityChecks");
-    file.lambda_implementation_uses_inferred_result =
+    file.language.sam_constructor_missing_dependency = features
+        .table()
+        .get("ForbidSamConstructorCallsWithMissingDependencySupertype")
+        .map(|_| features.has("ForbidSamConstructorCallsWithMissingDependencySupertype"));
+    file.language.lambda_implementation_uses_inferred_result =
         features.language_version() < crate::language_version::LanguageVersion::V2_4;
-    file.full_value_classes = features.has("FullValueClasses");
-    file.smart_cast_value_class_components =
+    file.language.full_value_classes = features.has("FullValueClasses");
+    file.language.explicit_inline_value_classes = features.has("ExplicitInlineValueClassesSyntax");
+    file.language.smart_cast_value_class_components =
         features.has("AllowSmartCastsOnValueClassUnderlyingProperties");
-    file.forbid_value_class_recursion_via_type_parameters =
+    file.language
+        .forbid_value_class_recursion_via_type_parameters =
         features.has("ForbidValueClassRecursionViaTypeParameters");
-    file.value_class_recursion_via_type_parameters_warning = features.deprecation_warning_message(
+    file.language
+        .value_class_recursion_via_type_parameters_warning = features.deprecation_warning_message(
         "ForbidValueClassRecursionViaTypeParameters",
         "Value class cannot be recursive.",
     );
-    file.deprecation_migrations = crate::features::DeprecationMigrations::from_features(features);
-    file.check_opt_in_on_pure_enum_entries = features.has("CheckOptInOnPureEnumEntries");
-    file.forbid_operator_equals_in_enum_entries_and_anonymous_objects =
+    file.language.deprecation_migrations =
+        crate::features::DeprecationMigrations::from_features(features);
+    file.language.check_opt_in_on_pure_enum_entries = features.has("CheckOptInOnPureEnumEntries");
+    file.language
+        .forbid_operator_equals_in_enum_entries_and_anonymous_objects =
         features.has("ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects");
-    file.inapplicable_operator_modifier_warning = features.deprecation_warning_message(
+    file.language.inapplicable_operator_modifier_warning = features.deprecation_warning_message(
         "ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects",
         "'operator' modifier is not applicable to function: must override 'equals()' in Any.",
     );
-    file.custom_equals_in_value_classes = features.has("CustomEqualsInValueClasses");
-    file.normalize_nan_in_const_context = features.has("NormalizeNaNValuesInConstContext");
-    file.intrinsic_const_evaluation = features.has("IntrinsicConstEvaluation");
-    file.forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds =
+    file.language.custom_equals_in_value_classes = features.has("CustomEqualsInValueClasses");
+    file.language.normalize_nan_in_const_context = features.has("NormalizeNaNValuesInConstContext");
+    file.language.no_when_branch_matched_with_subject =
+        features.has("NoWhenBranchMatchedExceptionWithMessage");
+    file.language.intrinsic_const_evaluation = features.has("IntrinsicConstEvaluation");
+    // kotlinc binds the generated structural `equals` under `StrictEquals` from the release that
+    // introduced strict equality for structural classes; 2.4 leaves it unbound.
+    file.language.structural_equality_bound = features.has("StrictEquals")
+        && features
+            .table()
+            .get("StrictEqualsForStructuralClasses")
+            .is_some();
+    file.language.interface_companion_block_members_are_static =
+        features.table().get("CompanionBlocks").is_some();
+    file.language
+        .forbid_upper_bounds_violation_on_type_operator_and_parameter_bounds =
         features.has("ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds");
-    file.forbid_useless_type_arguments = features.has("ForbidUselessTypeArgumentsIn25");
-    file.useless_type_arguments_warning_format =
-        features.deprecation_warning_format("ForbidUselessTypeArgumentsIn25");
-    file.forbid_package_qualifier_forms =
+    // 2.5.0-RC renamed the feature and moved its since-version from 2.5 to 2.6. A release
+    // declares one spelling; the bit is that spelling.
+    let useless_type_arguments = [
+        "ForbidUselessTypeArgumentsIn26",
+        "ForbidUselessTypeArgumentsIn25",
+    ]
+    .into_iter()
+    .find(|name| features.table().get(name).is_some())
+    .unwrap_or("ForbidUselessTypeArgumentsIn25");
+    file.language.forbid_useless_type_arguments = features.has(useless_type_arguments);
+    file.language.useless_type_arguments_warning_format =
+        features.deprecation_warning_format(useless_type_arguments);
+    file.language.forbid_package_qualifier_forms =
         features.has("ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier");
-    file.parenthesized_package_qualifier_warning = features.deprecation_warning_message(
+    file.language.parenthesized_package_qualifier_warning = features.deprecation_warning_message(
         "ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier",
         crate::features::deprecation_cycle_messages::PARENTHESIZED_PACKAGE_QUALIFIER,
     );
-    file.package_qualifier_type_arguments_warning = features.deprecation_warning_message(
+    file.language.package_qualifier_type_arguments_warning = features.deprecation_warning_message(
         "ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier",
         crate::features::deprecation_cycle_messages::PACKAGE_QUALIFIER_TYPE_ARGUMENTS,
     );
-    file.type_arguments_not_allowed_warning = features.deprecation_warning_message(
-        "ForbidUselessTypeArgumentsIn25",
+    file.language.type_arguments_not_allowed_warning = features.deprecation_warning_message(
+        useless_type_arguments,
         "Type arguments are not allowed when static member is accessed.",
     );
-    file.explicit_type_arguments_in_property_access_warning = features.deprecation_warning_message(
-        "ForbidUselessTypeArgumentsIn25",
+    file.language
+        .explicit_type_arguments_in_property_access_warning = features.deprecation_warning_message(
+        useless_type_arguments,
         "Object access cannot have explicit type arguments.",
     );
-    file.error_about_data_class_copy_visibility_change =
+    file.language.error_about_data_class_copy_visibility_change =
         features.has("ErrorAboutDataClassCopyVisibilityChange");
-    file.data_class_copy_visibility_change_warning = features.deprecation_warning_message(
+    file.language.data_class_copy_visibility_change_warning = features.deprecation_warning_message(
         "ErrorAboutDataClassCopyVisibilityChange",
         crate::features::deprecation_cycle_messages::DATA_CLASS_COPY_VISIBILITY,
     );
-    file.data_class_invisible_copy_usage_warning = features.deprecation_warning_message(
+    file.language.data_class_invisible_copy_usage_warning = features.deprecation_warning_message(
         "ErrorAboutDataClassCopyVisibilityChange",
         crate::features::deprecation_cycle_messages::DATA_CLASS_INVISIBLE_COPY_USAGE,
     );
-    file.report_type_variance_conflicts_in_dnn_and_flexible =
+    file.language
+        .report_type_variance_conflicts_in_dnn_and_flexible =
         features.has("ReportTypeVarianceConflictsInDnnAndFlexible");
-    file.reified_type_arguments = crate::features::ReifiedTypeArgumentFeatures {
+    file.language.reified_type_arguments = crate::features::ReifiedTypeArgumentFeatures {
         report_in_dnn_and_flexible: features.has("ReportReificationProblemsInDnnAndFlexible"),
         report_in_dnn_and_flexible_warning_format: features
             .deprecation_warning_format("ReportReificationProblemsInDnnAndFlexible"),
@@ -103,8 +138,8 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
             .deprecation_warning_format("ProhibitIntersectionReifiedTypeParameter"),
         nullable_nothing: features.has("NullableNothingInReifiedPosition"),
     };
-    file.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
-    file.opted_in_markers = features.opted_in().map(str::to_string).collect();
+    file.language.recursive_type_of = features.has("JvmSupportRecursiveTypeOf");
+    file.language.opted_in_markers = features.opted_in().map(str::to_string).collect();
 }
 
 #[cfg(test)]
@@ -133,7 +168,8 @@ mod tests {
              language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-390.",
         );
         let dynamic_warning = |file: &File| {
-            file.useless_type_arguments_warning_format
+            file.language
+                .useless_type_arguments_warning_format
                 .as_ref()
                 .map(|format| {
                     format.message("One type argument expected for 'typealias Box<T> = String'.")
@@ -145,53 +181,69 @@ mod tests {
                 .to_string(),
         );
 
-        assert_eq!(old.value_class_recursion_via_type_parameters_warning, None);
-        assert_eq!(old.parenthesized_package_qualifier_warning, None);
-        assert_eq!(patch.package_qualifier_type_arguments_warning, None);
         assert_eq!(
-            current.parenthesized_package_qualifier_warning.as_deref(),
+            old.language
+                .value_class_recursion_via_type_parameters_warning,
+            None
+        );
+        assert_eq!(old.language.parenthesized_package_qualifier_warning, None);
+        assert_eq!(
+            patch.language.package_qualifier_type_arguments_warning,
+            None
+        );
+        assert_eq!(
+            current
+                .language
+                .parenthesized_package_qualifier_warning
+                .as_deref(),
             Some(
                 "Wrapping package qualifiers in parentheses is not allowed. This will become an \
                  error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-396."
             )
         );
         assert_eq!(
-            current.package_qualifier_type_arguments_warning.as_deref(),
+            current
+                .language
+                .package_qualifier_type_arguments_warning
+                .as_deref(),
             Some(
                 "Type arguments are not allowed for packages. This will become an error in \
                  language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-396."
             )
         );
-        assert_eq!(old.inapplicable_operator_modifier_warning, None);
+        assert_eq!(old.language.inapplicable_operator_modifier_warning, None);
         assert_eq!(
-            old.data_class_copy_visibility_change_warning.as_deref(),
+            old.language.data_class_copy_visibility_change_warning.as_deref(),
             Some(
                 "Non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.\n\nThe generated 'copy()' will change its visibility in future releases.\n\nTo suppress the warning do one of the following:\n- Annotate the data class with the '@ConsistentCopyVisibility' annotation.\n- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.\n- Annotate the data class with the '@ExposedCopyVisibility' annotation \n  (Discouraged, but can be used to keep binary compatibility).\n\nTo learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.\n\nThis will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914."
             )
         );
         assert_eq!(
-            old.data_class_invisible_copy_usage_warning.as_deref(),
+            old.language.data_class_invisible_copy_usage_warning.as_deref(),
             Some(
                 "This 'copy()' exposes the non-public primary constructor of a 'data class'. See the appropriate 'data class' documentation or contact the 'data class' author for migration guidance. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914."
             )
         );
         assert_eq!(
-            old.type_arguments_not_allowed_warning.as_deref(),
+            old.language.type_arguments_not_allowed_warning.as_deref(),
             type_arguments_not_allowed_warning
         );
         assert_eq!(
-            old.explicit_type_arguments_in_property_access_warning
+            old.language
+                .explicit_type_arguments_in_property_access_warning
                 .as_deref(),
             property_access_warning
         );
         assert_eq!(dynamic_warning(&old), expected_dynamic_warning);
         assert_eq!(
-            patch.type_arguments_not_allowed_warning.as_deref(),
+            patch.language.type_arguments_not_allowed_warning.as_deref(),
             type_arguments_not_allowed_warning
         );
         assert_eq!(dynamic_warning(&patch), expected_dynamic_warning);
         assert_eq!(
-            current.value_class_recursion_via_type_parameters_warning,
+            current
+                .language
+                .value_class_recursion_via_type_parameters_warning,
             Some(
                 "Value class cannot be recursive. This will become an error in language version \
                  2.5. See https://youtrack.jetbrains.com/issue/KT-85848."
@@ -199,7 +251,7 @@ mod tests {
             )
         );
         assert_eq!(
-            current.inapplicable_operator_modifier_warning,
+            current.language.inapplicable_operator_modifier_warning,
             Some(
                 "'operator' modifier is not applicable to function: must override 'equals()' in \
                  Any. This will become an error in language version 2.5. See \
@@ -208,15 +260,94 @@ mod tests {
             )
         );
         assert_eq!(
-            current.type_arguments_not_allowed_warning.as_deref(),
+            current
+                .language
+                .type_arguments_not_allowed_warning
+                .as_deref(),
             type_arguments_not_allowed_warning
         );
         assert_eq!(
             current
+                .language
                 .explicit_type_arguments_in_property_access_warning
                 .as_deref(),
             property_access_warning
         );
         assert_eq!(dynamic_warning(&current), expected_dynamic_warning);
+    }
+
+    #[test]
+    fn rc_postpones_useless_type_arguments_under_the_renamed_feature() {
+        let mut before = File::default();
+        apply_file_features(
+            &mut before,
+            &LangFeatures::for_release(
+                KotlinVersion::V2_5_0_RC2,
+                LanguageVersion::V2_4,
+                LanguageVersion::V2_4,
+            ),
+        );
+        assert!(!before.language.forbid_useless_type_arguments);
+        assert_eq!(
+            before
+                .language
+                .type_arguments_not_allowed_warning
+                .as_deref(),
+            Some(
+                "Type arguments are not allowed when static member is accessed. This will become \
+                 an error in language version 2.6. See \
+                 https://youtrack.jetbrains.com/issue/KTLC-390."
+            )
+        );
+
+        let mut at_since = File::default();
+        apply_file_features(
+            &mut at_since,
+            &LangFeatures::for_release(
+                KotlinVersion::V2_5_0_RC2,
+                LanguageVersion::V2_6,
+                LanguageVersion::V2_6,
+            ),
+        );
+        assert!(at_since.language.forbid_useless_type_arguments);
+    }
+
+    #[test]
+    fn sam_constructor_missing_dependency_follows_the_release_that_introduced_it() {
+        let mut before = File::default();
+        apply_file_features(
+            &mut before,
+            &LangFeatures::for_release(
+                KotlinVersion::V2_4_21,
+                LanguageVersion::V2_4,
+                LanguageVersion::V2_4,
+            ),
+        );
+        assert_eq!(before.language.sam_constructor_missing_dependency, None);
+
+        let mut rc = File::default();
+        apply_file_features(
+            &mut rc,
+            &LangFeatures::for_release(
+                KotlinVersion::V2_5_0_RC2,
+                LanguageVersion::V2_5,
+                LanguageVersion::V2_5,
+            ),
+        );
+        assert_eq!(rc.language.sam_constructor_missing_dependency, Some(false));
+
+        let mut at_since = File::default();
+        apply_file_features(
+            &mut at_since,
+            &LangFeatures::for_release(
+                KotlinVersion::V2_5_0_RC2,
+                LanguageVersion::V2_6,
+                LanguageVersion::V2_6,
+            ),
+        );
+        assert_eq!(
+            at_since.language.sam_constructor_missing_dependency,
+            Some(true)
+        );
     }
 }

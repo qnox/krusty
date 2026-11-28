@@ -1388,6 +1388,10 @@ pub enum FirExprKind {
         /// `else` result must be deeply exhaustive too; without one, the resolver typed it by its
         /// branches only when it proved it exhaustive.
         deeply_exhaustive: bool,
+        /// The function an exhaustive subject `when` without an `else` passes its subject to when no
+        /// branch matches (`+NoWhenBranchMatchedExceptionWithMessage`). `None` keeps the plain
+        /// `NoWhenBranchMatchedException()` failure, and a `when` that is not exhaustive has none.
+        subject_failure: Option<FirRuntimeFunction>,
     },
     Block {
         statements: Box<[FirStatementId]>,

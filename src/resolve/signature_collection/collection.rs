@@ -1264,7 +1264,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             .is_some_and(|name| name == type_name("kotlin/jvm/JvmInline"))
                     });
                     let copy_annotations = DataCopyAnnotations::of(&table, i as u32, c);
-                    let respects_ctor_visibility = file.data_copy_respects_ctor_visibility;
+                    let respects_ctor_visibility = file.language.data_copy_respects_ctor_visibility;
                     copy_annotations.check(classifier_is_data, respects_ctor_visibility, diags);
                     let value_representation = c.value_class_keyword(file).map(|keyword| {
                         ValueClassDeclaration {
@@ -1276,7 +1276,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         }
                         .representation(
                             target,
-                            file.full_value_classes,
+                            file.language.full_value_classes,
                             diags,
                         )
                     });
@@ -2736,82 +2736,22 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 .push(signature);
                         }
                     }
-                    // Kotlin's generated object overrides are ordinary declarations with a written
-                    // member's stable identity and callable shape; common IR owns their bodies.
                     // An abstract or sealed value class does not declare the trio. Advertising a
                     // final `toString` there would hide the final subclass's own members.
                     if classifier_is_data
                         || ((full_value || unboxed_value_class)
                             && classifier_flags.has(ClassFlags::FINAL))
                     {
-                        for (name, params, ret) in [
-                            ("toString", Vec::new(), Ty::String),
-                            ("hashCode", Vec::new(), Ty::Int),
-                            (
-                                "equals",
-                                vec![Ty::nullable(Ty::obj("kotlin/Any"))],
-                                Ty::Boolean,
-                            ),
-                        ] {
-                            let already_declared = methods.get(name).is_some_and(|overloads| {
-                                overloads.iter().any(|signature| {
-                                    signature.is_override()
-                                        && signature.params.len() == params.len()
-                                })
-                            });
-                            if already_declared {
-                                continue;
-                            }
-                            if !declared_callable_order
-                                .iter()
-                                .any(|declared| declared == name)
-                            {
-                                declared_callable_order.push(name.to_string());
-                            }
-                            let parameter_count = params.len();
-                            methods.entry(name.into()).or_default().push(Signature {
-                                params,
-                                ret,
-                                generic_sig: None,
-                                projected_return_hazard: false,
-                                flags: SigFlags::default()
-                                    .with_is_operator(name == "equals")
-                                    .with_is_override(true)
-                                    .with_is_final(true),
-                                annotations: Vec::new(),
-                                equality_bound: None,
-                                vararg_index: None,
-                                required: parameter_count,
-                                param_defaults: vec![false; parameter_count].into(),
-                                exact_params: vec![false; parameter_count].into(),
-                                no_infer_params: vec![false; parameter_count].into(),
-                                implicit_integer_coercion: vec![false; parameter_count].into(),
-                                param_default_values: vec![None; parameter_count],
-                                param_names: if name == "equals" {
-                                    vec!["other".into()]
-                                } else {
-                                    Vec::new()
-                                },
-                                parameter_identities: Vec::new(),
-                                lambda_param_types: vec![Vec::new(); parameter_count],
-                                lambda_recv: vec![false; parameter_count].into(),
-                                inline_modifiers: Vec::new(),
-                                visibility: Visibility::Public,
-                                context_count: 0,
-                                source_decl: None,
-                                stable_declaration: compact_generated_member_declaration(
-                                    compact_headers,
-                                    compact_classifier.map(|stub| stub.id),
-                                    name,
-                                ),
-                                source_file: None,
-                                source_member: None,
-                                source_receiver: None,
-                                package: TypeName::ROOT,
-                                contract: None,
-                                plugin_expression: None,
-                            });
-                        }
+                        publish_generated_any_overrides(
+                            &mut methods,
+                            &mut declared_callable_order,
+                            &GeneratedAnyOverrides {
+                                owner: internal,
+                                equality_bound: file.language.structural_equality_bound,
+                                compact_headers,
+                                compact_owner: compact_classifier.map(|stub| stub.id),
+                            },
+                        );
                     }
                     // Only a `data class` synthesizes componentN/copy. A `data object` has no
                     // destructurable constructor state and Kotlin deliberately declares neither;

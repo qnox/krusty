@@ -584,7 +584,7 @@ impl Checker<'_> {
         let resolver = self.resolver();
         let mut bound = Vec::new();
         let mut unresolved = Vec::new();
-        for spelling in &self.file.opted_in_markers {
+        for spelling in &self.file.language.opted_in_markers {
             match resolver.fully_qualified_classifier(spelling) {
                 Some(marker) => bound.push(marker),
                 None => unresolved.push(spelling.clone()),
@@ -596,7 +596,7 @@ impl Checker<'_> {
     /// kotlinc accepts `kotlin.ExperimentalCollectionLiteralsApi` wherever `+CollectionLiterals` is
     /// enabled: the feature's own stdlib factories carry that marker.
     fn accepted_by_enabled_feature(&self, marker: TypeName) -> bool {
-        self.file.collection_literals_enabled
+        self.file.language.collection_literals_enabled
             && marker == type_name("kotlin/ExperimentalCollectionLiteralsApi")
     }
 
@@ -611,7 +611,7 @@ impl Checker<'_> {
     ) {
         let mut requirements = Vec::new();
         self.add_declaration_requirements(constructor, &[], &mut requirements);
-        if !explicit_call && !self.file.check_opt_in_on_pure_enum_entries {
+        if !explicit_call && !self.file.language.check_opt_in_on_pure_enum_entries {
             for requirement in &mut requirements {
                 requirement.warning = true;
             }

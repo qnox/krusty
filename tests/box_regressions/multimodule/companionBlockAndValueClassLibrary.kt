@@ -1,7 +1,7 @@
 // KOTLINC_VERSION: [2.4.20,)
 // Earlier JVM reference compilers fail on the consumer module's call of a library
 // companion-block function ("Fake override should have at least one overridden descriptor").
-// LANGUAGE: +CompanionBlocksAndExtensions
+// LANGUAGE: +CompanionBlocks
 // A library whose sources need the case's language features and source placeholders: every
 // reference compiles each module under the `// LANGUAGE:` features the case names, with
 // `OPTIONAL_JVM_INLINE_ANNOTATION` expanded for its backend.

@@ -1283,7 +1283,10 @@ impl SignatureConstraintExtractor {
         scope: SignatureScopeId,
         origin: &mut impl FnMut(crate::diag::Span) -> OriginId,
     ) -> Result<SigExprId, ExpressionForm> {
-        if !file.context_sensitive_resolution_using_expected_type {
+        if !file
+            .language
+            .context_sensitive_resolution_using_expected_type
+        {
             return Ok(self.compact_type(ty, scope, origin));
         }
         let expected = self.expression(file, operand, scope, origin)?;
@@ -2803,6 +2806,7 @@ impl SignatureConstraintExtractor {
     /// [`Quirk::NotNullOperatorDropsIntersectionApproximation`]: crate::kotlin_version::Quirk::NotNullOperatorDropsIntersectionApproximation
     fn not_null_operator(file: &File, value: SigExprId) -> SigExpr {
         if file
+            .language
             .reference
             .quirks()
             .has(crate::kotlin_version::Quirk::NotNullOperatorDropsIntersectionApproximation)

@@ -11,7 +11,8 @@
 //! compilation reproduces with its defects mode, and travels with the compilation's language
 //! features. Several compilations with different profiles can therefore run in one process,
 //! concurrently. A driver chooses the release (a flag, [`REFERENCE_VERSION_VARIABLE`], or the newest
-//! manifest entry) and builds the profile once.
+//! stable manifest entry) and builds the profile once. A pre-release stays supported, but it is not
+//! the default.
 //!
 //! A compilation reproduces its release's defects too, unless it asks krusty to fix them
 //! (`-Xfix-kotlinc-defects`, [`KotlincDefects::Fix`]).
@@ -54,6 +55,12 @@ impl KotlinVersion {
     pub const V2_4_10: Self = Self::new(2, 4, 10);
     pub const V2_4_20: Self = Self::new(2, 4, 20);
     pub const V2_4_21: Self = Self::new(2, 4, 21);
+    pub const V2_5_0_RC2: Self = Self {
+        major: 2,
+        minor: 5,
+        patch: 0,
+        pre: PreRelease::Rc(2),
+    };
 
     /// Whether this is a pre-release (`-BetaN`, `-RC`, `-RCN`) rather than a stable release.
     pub const fn is_pre_release(self) -> bool {
@@ -357,6 +364,13 @@ pub fn configured_target() -> Result<KotlinVersion, String> {
     }
 }
 
+/// Whether a class's static state initializes in program order around its `companion object`, as
+/// kotlinc does from 2.5, rather than with every block property before the companion's body
+/// ([`Quirk::ClassStaticsInitializeBeforeCompanionBody`]).
+pub fn class_statics_in_program_order(quirks: Quirks) -> bool {
+    !quirks.has(Quirk::ClassStaticsInitializeBeforeCompanionBody)
+}
+
 /// [`configured_target`], failing loudly on an invalid environment. Reference-toolchain locators and
 /// conformance harnesses, which select a provisioned kotlinc by the environment's release, use this;
 /// a compilation never does: it carries its own [`ReferenceProfile`].
@@ -407,6 +421,7 @@ mod tests {
         assert!(version("2.5.0-Beta2") < version("2.5.0-RC"));
         assert!(version("2.5.0-RC") < version("2.5.0-RC2"));
         assert!(version("2.5.0-RC2") < version("2.5.0"));
+        assert_eq!(version("2.5.0-RC2"), KotlinVersion::V2_5_0_RC2);
         assert!(version("2.5.0-RC").is_pre_release());
         assert!(!version("2.5.0").is_pre_release());
         assert_eq!(version("2.5.0-RC").to_string(), "2.5.0-RC");
@@ -442,8 +457,10 @@ mod tests {
         let supported = KotlinVersion::supported();
         assert!(supported.contains(&KotlinVersion::V2_4_10));
         assert!(supported.contains(&KotlinVersion::V2_4_20));
+        assert!(supported.contains(&KotlinVersion::V2_5_0_RC2));
         assert!(!supported.contains(&KotlinVersion::parse("2.5.0-Beta2").unwrap()));
-        assert_eq!(KotlinVersion::newest(), *supported.last().unwrap());
+        assert_eq!(supported.last().copied(), Some(KotlinVersion::V2_5_0_RC2));
+        assert_eq!(KotlinVersion::newest(), KotlinVersion::V2_4_21);
         assert_eq!(
             manifest_versions("# c\n2.4.0 a\n\n2.4.10 b # note\n"),
             [KotlinVersion::V2_4_0, KotlinVersion::V2_4_10]
@@ -484,12 +501,17 @@ mod tests {
     }
 
     #[test]
-    fn the_environment_selects_the_target_and_defaults_to_the_newest() {
+    fn the_environment_selects_the_target_and_defaults_to_the_newest_stable() {
         assert_eq!(
             target_from(Some("2.4.10".into())),
             Ok(KotlinVersion::V2_4_10)
         );
+        assert_eq!(target_from(None), Ok(KotlinVersion::V2_4_21));
         assert_eq!(target_from(None), Ok(KotlinVersion::newest()));
+        assert_eq!(
+            target_from(Some("2.5.0-RC2".into())),
+            Ok(KotlinVersion::V2_5_0_RC2)
+        );
         assert!(target_from(Some(String::new())).is_err());
         assert!(target_from(Some("2.4.99".into())).is_err());
         assert!(target_from(Some("2.5.0-Beta2".into())).is_err());

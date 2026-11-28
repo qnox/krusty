@@ -255,7 +255,7 @@ impl Checker<'_> {
                     self.diags.report_error(
                         self.assignment_member_name_span(s, name),
                         super::diagnostic_selection::unresolved_member_message(
-                            self.file.reference,
+                            self.file.language.reference,
                             name,
                             rt,
                             hidden_deprecated,

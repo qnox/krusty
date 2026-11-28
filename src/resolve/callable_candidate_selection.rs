@@ -65,7 +65,7 @@ impl Checker<'_> {
                     return None;
                 }
                 let explicitly_named = |parameter: usize| {
-                    self.file.explicit_context_arguments
+                    self.file.language.explicit_context_arguments
                         && call_sig
                             .param_names
                             .get(parameter)

@@ -370,12 +370,15 @@ pub(super) fn emit_default_static_accessor(
     // `()Ljava/util/List<Ljava/lang/String;>;` and `setXs(List)` as `(Ljava/util/List<…>;)V`.
     let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
     let declared = ir.static_accessor_annotations(static_index);
+    let storage_class = companion_blocks::storage_class(ir, static_index, owner);
+    let access = companion_blocks::default_accessor_access(ir, static_index);
     if accessor == StaticAccessor::Setter {
         emit_default_static_setter(
             cw,
-            owner,
+            &storage_class,
             s,
             ir.static_field_jvm_name(static_index),
+            access,
             DefaultSetterHeader {
                 name: &accessor_signature.name,
                 descriptor: &accessor_signature.descriptor,
@@ -411,7 +414,7 @@ pub(super) fn emit_default_static_accessor(
     if getter_line != 0 {
         g.mark_line(getter_line);
     }
-    let fref = cw.fieldref(owner, field_name, &desc);
+    let fref = cw.fieldref(&storage_class, field_name, &desc);
     g.getstatic(fref, slot_words(jt) as i32);
     // kotlinc emits no guard in the getter of a property another class probes with
     // `isInitialized`: that getter returns the raw field.
@@ -445,7 +448,7 @@ pub(super) fn emit_default_static_accessor(
     emit_return(jt, &mut g);
     g.link();
     cw.add_method_sig(
-        0x0019 | super::method_access::annotated_method_modifiers(annotations),
+        access | super::method_access::annotated_method_modifiers(annotations),
         &accessor_signature.name,
         &accessor_signature.descriptor,
         &g,
@@ -501,9 +504,10 @@ struct DefaultSetterHeader<'a> {
 /// A static property's compiler-default `setX`; see [`emit_default_static_accessor`].
 fn emit_default_static_setter(
     cw: &mut ClassWriter,
-    owner: &str,
+    storage_class: &str,
     s: &krusty::ir::IrStatic,
     field_name: &str,
+    access: u16,
     header: DefaultSetterHeader<'_>,
     checks_parameter: bool,
 ) {
@@ -553,7 +557,7 @@ fn emit_default_static_setter(
         st.mark_line(setter_line);
     }
     load(jt, 0, &mut st);
-    let fref = cw.fieldref(owner, field_name, &field_descriptor);
+    let fref = cw.fieldref(storage_class, field_name, &field_descriptor);
     st.putstatic(fref, slot_words(jt) as i32);
     let setter_end = if s.is_lateinit && s.line != 0 && s.accessor_lines.declaration_end > s.line {
         s.accessor_lines.declaration_end
@@ -570,7 +574,7 @@ fn emit_default_static_setter(
     st.ensure_locals(words);
     st.link();
     cw.add_method_sig(
-        0x0019 | super::method_access::annotated_method_modifiers(annotations),
+        access | super::method_access::annotated_method_modifiers(annotations),
         name,
         descriptor,
         &st,
@@ -664,12 +668,8 @@ fn declare_static(
     static_index: u32,
     s: &krusty::ir::IrStatic,
 ) {
-    let desc = ir_type_desc(&s.ty);
     // A `private const val`/`private val` on an object/companion keeps its declared visibility
     // (kotlinc: PRIVATE static final; const reads are inlined so no cross-class getstatic needs it).
-    // A `var` is reassignable, so it must NOT carry ACC_FINAL — a `putstatic` on a final field
-    // outside `<clinit>` is an IllegalAccessError.
-    let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
     // A HOISTED companion property's field is PRIVATE regardless of the property's declared
     // visibility (kotlinc: every access goes through the accessors/bridges, never the field) —
     // EXCEPT under `@JvmField`, where the field IS the property's whole JVM surface and takes the
@@ -678,16 +678,51 @@ fn declare_static(
     let hoisted = ir.is_jvm_companion_hoisted_static(static_index);
     let jvm_field = ir.is_jvm_field_static(static_index);
     let block_storage = companion_blocks::storage_is_private(ir, static_index);
-    let lateinit_visibility = hoisted_lateinit_field_visibility(ir, static_index);
-    let acc = if let Some(visibility) = lateinit_visibility {
-        0x0008 | static_visibility_access(visibility) | final_flag
+    let visibility = if let Some(visibility) = hoisted_lateinit_field_visibility(ir, static_index) {
+        static_visibility_access(visibility)
     } else if jvm_field {
-        0x0008 | static_visibility_access(s.visibility) | final_flag
+        static_visibility_access(s.visibility)
     } else if s.visibility.is_private() || hoisted || block_storage {
-        0x000A | final_flag // PRIVATE | STATIC [| FINAL]
+        krusty::jvm::classfile::ACC_PRIVATE
     } else {
-        0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
-    } | annotated_field_modifiers(ir.static_declaration_annotations(static_index));
+        krusty::jvm::classfile::ACC_PUBLIC
+    };
+    declare_static_field(ir, c, signature_formatter, cw, static_index, visibility);
+}
+
+/// Declare the storage of one of interface `interface`'s `companion { … }` block properties on
+/// its synthetic private-fields class. The field is package-private, so the interface's accessors
+/// reach it, and otherwise carries every fact the property's own field would: its modifiers,
+/// generic signature, nullability and FIELD-targeted annotations.
+pub(super) fn declare_interface_block_static(
+    ir: &IrFile,
+    interface: &IrClass,
+    signature_formatter: &JvmSignatureFormatter<'_>,
+    cw: &mut ClassWriter,
+    static_index: u32,
+) {
+    declare_static_field(ir, interface, signature_formatter, cw, static_index, 0);
+}
+
+/// Declare static `static_index`, owned by `c`, as a field with the JVM `visibility` access bits.
+fn declare_static_field(
+    ir: &IrFile,
+    c: &IrClass,
+    signature_formatter: &JvmSignatureFormatter<'_>,
+    cw: &mut ClassWriter,
+    static_index: u32,
+    visibility: u16,
+) {
+    let s = &ir.statics[static_index as usize];
+    let desc = ir_type_desc(&s.ty);
+    let hoisted = ir.is_jvm_companion_hoisted_static(static_index);
+    // A `var` is reassignable, so it must NOT carry ACC_FINAL — a `putstatic` on a final field
+    // outside `<clinit>` is an IllegalAccessError.
+    let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
+    let acc = krusty::jvm::classfile::ACC_STATIC
+        | visibility
+        | final_flag
+        | annotated_field_modifiers(ir.static_declaration_annotations(static_index));
     // `ConstantValue` is only meaningful on a FINAL field (JVMS 4.7.2 ignores it otherwise), and a
     // `var` is initialized by the `<clinit>` store anyway. A HOISTED companion property never
     // folds either — kotlinc initializes it in `<clinit>` (only `const val` gets the attribute).
@@ -976,29 +1011,43 @@ pub(super) fn emit_class_static_initializer(
         } else {
             Vec::new()
         };
-        emit_companion_init(e.cw, &mut clinit, fq_name, c);
         // The `Companion` construction itself has no entry. Each store opens on its initializer's
         // line and keeps the lines its value marks inside itself, as a file facade's do.
         // A generated static that ends the initializer returns on its declaration's last line.
         let mut closing_line = None;
-        for &(static_index, s, _) in &clinit_statics {
-            let Some(init) = stored_clinit_initializer(ir, s) else {
-                continue;
-            };
-            let first = clinit.line_marks().len();
-            e.emit_clinit_static_store(fq_name, static_index, init, &mut clinit);
-            let marks = clinit.line_marks()[first..]
-                .iter()
-                .map(|&(pc, line)| (pc, u32::from(line)));
-            clinit_lines.extend(marks);
-            clinit_lines.dedup();
-            closing_line = (s.source_order == u32::MAX)
-                .then_some(s.accessor_lines.declaration_end)
-                .filter(|&end| end != 0);
-        }
-        if let Some(body) = companion_initializer {
-            e.emit_companion_clinit_body(c, fq_name, body, &mut clinit, &mut clinit_lines);
-            closing_line = None;
+        for step in class_initializer_steps(ir, c, &clinit_statics) {
+            match step {
+                ClassInitializerStep::Store(static_index, s) => {
+                    let Some(init) = stored_clinit_initializer(ir, s) else {
+                        continue;
+                    };
+                    let first = clinit.line_marks().len();
+                    e.emit_clinit_static_store(fq_name, static_index, init, &mut clinit);
+                    let marks = clinit.line_marks()[first..]
+                        .iter()
+                        .map(|&(pc, line)| (pc, u32::from(line)));
+                    clinit_lines.extend(marks);
+                    clinit_lines.dedup();
+                    closing_line = (s.source_order == u32::MAX)
+                        .then_some(s.accessor_lines.declaration_end)
+                        .filter(|&end| end != 0);
+                }
+                ClassInitializerStep::ConstructCompanion => {
+                    emit_companion_init(e.cw, &mut clinit, fq_name, c);
+                }
+                ClassInitializerStep::CompanionBody => {
+                    if let Some(body) = companion_initializer {
+                        e.emit_companion_clinit_body(
+                            c,
+                            fq_name,
+                            body,
+                            &mut clinit,
+                            &mut clinit_lines,
+                        );
+                        closing_line = None;
+                    }
+                }
+            }
         }
         if let Some(end) =
             closing_line.filter(|&end| clinit_lines.last().is_some_and(|&(_, last)| last != end))
@@ -1013,6 +1062,60 @@ pub(super) fn emit_class_static_initializer(
             e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
         }
     }
+}
+
+/// One step of a class's `<clinit>`.
+pub(super) enum ClassInitializerStep<'ir> {
+    /// Store a class-owned static's initializer.
+    Store(u32, &'ir krusty::ir::IrStatic),
+    /// Construct the `Companion` instance and store it.
+    ConstructCompanion,
+    /// Run the companion's initializer body, if it has one.
+    CompanionBody,
+}
+
+/// The steps of a class's `<clinit>`: the `Companion`'s construction and initialization among the
+/// stores of the class's own statics.
+///
+/// kotlinc 2.5 initializes a class's static state in program order: a `companion { … }` block
+/// property written before the `companion object` is stored before the companion is constructed,
+/// and one written after it is stored after the companion's whole initialization. Earlier releases
+/// construct the companion first and store every class-owned static before the companion's
+/// initializer body.
+pub(super) fn class_initializer_steps<'ir>(
+    ir: &IrFile,
+    c: &IrClass,
+    statics: &[(u32, &'ir krusty::ir::IrStatic, krusty::ir::ExprId)],
+) -> Vec<ClassInitializerStep<'ir>> {
+    let store = |&(index, s, _): &(u32, &'ir krusty::ir::IrStatic, krusty::ir::ExprId)| {
+        ClassInitializerStep::Store(index, s)
+    };
+    let companion_order = c
+        .companion_class
+        .filter(|_| krusty::kotlin_version::class_statics_in_program_order(ir.reference.quirks()))
+        .and_then(|companion| ir.class_id_by_name(companion))
+        .and_then(|companion| ir.class_source_order(companion));
+    let mut steps = Vec::with_capacity(statics.len() + 2);
+    let Some(companion_order) = companion_order else {
+        steps.push(ClassInitializerStep::ConstructCompanion);
+        steps.extend(statics.iter().map(store));
+        steps.push(ClassInitializerStep::CompanionBody);
+        return steps;
+    };
+    let declared_by_companion =
+        |&(index, _, _): &(u32, &krusty::ir::IrStatic, krusty::ir::ExprId)| {
+            ir.is_jvm_companion_hoisted_static(index)
+        };
+    let (companion, own): (Vec<_>, Vec<_>) = statics.iter().partition(|s| declared_by_companion(s));
+    let (before, after): (Vec<_>, Vec<_>) = own
+        .into_iter()
+        .partition(|&&(_, s, _)| s.source_order < companion_order);
+    steps.extend(before.into_iter().map(store));
+    steps.push(ClassInitializerStep::ConstructCompanion);
+    steps.extend(companion.into_iter().map(store));
+    steps.push(ClassInitializerStep::CompanionBody);
+    steps.extend(after.into_iter().map(store));
+    steps
 }
 
 impl<'a> Emitter<'a> {
@@ -1190,7 +1293,10 @@ impl Emitter<'_> {
             // A `companion { … }` block property is read like a top-level one, with its
             // class in the facade's place: another class calls its public getter.
             if !emitted_by_owner && companion_blocks::getter_owned(self.ir, i) {
-                let m = self.cw.methodref(
+                let m = companion_blocks::accessor_methodref(
+                    self.ir,
+                    self.cw,
+                    i,
                     &owner_name,
                     &self.ir.jvm_static_getter_name(i),
                     &format!("(){}", type_descriptor(jt)),
@@ -1210,14 +1316,17 @@ impl Emitter<'_> {
                 })
             {
                 let fref = self.cw.fieldref(
-                    &owner_name,
+                    &companion_blocks::storage_class(self.ir, i, &owner_name),
                     self.ir.static_field_jvm_name(i),
                     &type_descriptor(jt),
                 );
                 code.getstatic(fref, slot_words(jt) as i32);
             } else {
-                let m = self.cw.methodref(
-                    &owner_name,
+                let m = static_accessors::static_methodref(
+                    self.cw,
+                    self.ir,
+                    &facade,
+                    StaticOwner::Class(owner),
                     &format!("access${}$cp", property_getter_name(&name)),
                     &format!("(){}", type_descriptor(jt)),
                 );
@@ -1408,9 +1517,14 @@ impl Emitter<'_> {
             let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));
             if !emitted_by_owner && companion_blocks::setter_owned(self.ir, index) {
                 let setter = self.ir.jvm_static_setter_name(index);
-                let m =
-                    self.cw
-                        .methodref(&owner_name, &setter, &format!("({})V", type_descriptor(jt)));
+                let m = companion_blocks::accessor_methodref(
+                    self.ir,
+                    self.cw,
+                    index,
+                    &owner_name,
+                    &setter,
+                    &format!("({})V", type_descriptor(jt)),
+                );
                 code.invokestatic(m, slot_words(jt) as i32, 0);
             } else if emitted_by_owner
                 || !self.ir.is_jvm_companion_hoisted_static(index)
@@ -1420,14 +1534,17 @@ impl Emitter<'_> {
                     == Some(krusty::types::Visibility::Protected)
             {
                 let fref = self.cw.fieldref(
-                    &owner_name,
+                    &companion_blocks::storage_class(self.ir, index, &owner_name),
                     self.ir.static_field_jvm_name(index),
                     &type_descriptor(jt),
                 );
                 code.putstatic(fref, slot_words(jt) as i32);
             } else {
-                let m = self.cw.methodref(
-                    &owner_name,
+                let m = static_accessors::static_methodref(
+                    self.cw,
+                    self.ir,
+                    &facade,
+                    StaticOwner::Class(owner),
                     &format!("access${}$cp", property_setter_name(&name)),
                     &format!("({})V", type_descriptor(jt)),
                 );
@@ -1533,7 +1650,9 @@ pub(super) fn declare_interface_statics(ir: &IrFile, c: &IrClass, cw: &mut Class
     // after that alias store, before `@Metadata`. A hoisted `@JvmField` property is visited later
     // because kotlinc places it after both.
     for (static_index, property) in ir.statics.iter().enumerate().filter(|(index, property)| {
-        property.owner_matches(&fq_name) && !ir.is_jvm_field_static(*index as u32)
+        property.owner_matches(&fq_name)
+            && !ir.is_jvm_field_static(*index as u32)
+            && !companion_blocks::in_interface_storage_class(ir, *index as u32)
     }) {
         let descriptor = ir_type_desc(&property.ty);
         let value = property.init.and_then(|init| constant_value(ir, init));
@@ -1544,7 +1663,16 @@ pub(super) fn declare_interface_statics(ir: &IrFile, c: &IrClass, cw: &mut Class
                 "Lorg/jetbrains/annotations/NotNull;"
             }
         });
-        cw.add_field_late(0x0019, &property.name, &descriptor, value, nullability);
+        // An interface field is public, static, and final. A companion-block property still
+        // publishes its accessor; this field is what that accessor reads, under the same
+        // physical name. A private field is not a legal interface member. Companion constants
+        // keep the name this visit already published.
+        let name = if ir.companion_blocks.is_storage(static_index as u32) {
+            ir.static_field_jvm_name(static_index as u32)
+        } else {
+            property.name.as_str()
+        };
+        cw.add_field_late(0x0019, name, &descriptor, value, nullability);
         deprecate_moved_interface_field(ir, c, static_index, cw);
     }
 

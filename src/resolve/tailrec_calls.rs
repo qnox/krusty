@@ -130,7 +130,7 @@ impl Checker<'_> {
         body: ExprId,
         modifier: Span,
     ) {
-        let quirks = self.file.reference.quirks();
+        let quirks = self.file.language.reference.quirks();
         let mut walk = Walk {
             checker: self,
             function,

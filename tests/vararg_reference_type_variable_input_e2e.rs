@@ -5,37 +5,44 @@
 //! array-shaped input.
 //!
 //! The program is the shared box regression, whose `box()` only asserts that the cases agree on
-//! one binding. This test runs it with every input and assertion kept and also returns its `describe()`, pinning which
-//! binding the reference release chooses.
+//! one binding. A nullable input (`f: (T?) -> Int`) is applicable only under the element binding,
+//! so the original combined program is retained in `varargReferenceTypeVariableInputBefore25.kt`
+//! for those releases, alongside the isolated nullable control. These tests run each whole program
+//! and also return its `describe()`, pinning which binding the reference release chooses.
 
 use krusty::kotlin_version::Quirk;
 
 use super::common;
 
 const PORTABLE: &str = include_str!("box_regressions/varargReferenceTypeVariableInput.kt");
+const BEFORE_25: &str = include_str!("box_regressions/varargReferenceTypeVariableInputBefore25.kt");
 
 /// The shared program with its `box()` renamed `portableBox()`, and a `box()` that answers
 /// `portableBox()`'s result followed by `describe()`.
-fn source() -> String {
+fn source(program: &str) -> String {
     let portable = "fun box(): String {";
     assert_eq!(
-        PORTABLE.matches(portable).count(),
+        program.matches(portable).count(),
         1,
         "one box() in the fixture"
     );
-    let renamed = PORTABLE.replacen(portable, "fun portableBox(): String {", 1);
+    let renamed = program.replacen(portable, "fun portableBox(): String {", 1);
     format!("{renamed}\nfun box(): String = portableBox() + \";\" + describe()\n")
 }
 
 /// `box()`'s answer followed by every case's value, where `element` means an input from a call
 /// type variable binds one element.
-fn expected(element: bool) -> String {
+fn expected(element: bool, nullable: bool) -> String {
     let (count, first) = if element { (1, true) } else { (2, false) };
-    let cases = [
+    let mut cases = vec![
         format!("top={count}"),
         format!("explicit={count}"),
         format!("let={count}"),
-        format!("nullable={count}"),
+    ];
+    if nullable {
+        cases.push(format!("nullable={count}"));
+    }
+    cases.extend([
         format!("result={first}"),
         format!("list={count}"),
         format!("member={count}"),
@@ -47,19 +54,36 @@ fn expected(element: bool) -> String {
         "concreteVararg=2".to_string(),
         "primitive=3".to_string(),
         "declared=2".to_string(),
-    ]
-    .join(",");
+    ]);
+    let cases = cases.join(",");
     format!("OK;{cases}")
 }
 
 #[test]
 fn a_type_variable_input_binds_the_vararg_as_the_reference_release_does() {
+    assert_reference_binding(PORTABLE, false);
+}
+
+#[test]
+fn the_original_nullable_and_nonnullable_inputs_keep_the_reference_binding_together() {
+    if !krusty::conformance::kotlinc_release_applicable(
+        BEFORE_25,
+        krusty::kotlin_version::environment_release(),
+    )
+    .expect("the shared fixture declares a valid release range")
+    {
+        return;
+    }
+    assert_reference_binding(BEFORE_25, true);
+}
+
+fn assert_reference_binding(program: &str, nullable: bool) {
     let element =
         krusty::kotlin_version::Quirks::of_release(krusty::kotlin_version::environment_release())
             .has(Quirk::VarargReferenceTakesTypeVariableInputAsElement);
-    let source = source();
+    let source = source(program);
     let reference = common::kotlinc_box_result(&source);
-    assert_eq!(reference, expected(element), "kotlinc");
+    assert_eq!(reference, expected(element, nullable), "kotlinc");
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let krusty = common::compile_and_run_box(

@@ -20,7 +20,7 @@ impl Checker<'_> {
             self.file_index,
             self.access_context_class_names(),
         )
-        .with_eager_lambda_results(self.file.eager_lambda_analysis)
+        .with_eager_lambda_results(self.file.language.eager_lambda_analysis)
         .with_visibility_suppression(self.visibility_access_suppressed())
         .with_callable_access(self)
     }

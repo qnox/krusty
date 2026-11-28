@@ -272,13 +272,23 @@ impl Default for Options {
     }
 }
 
-/// The newest `-jvm-target` kotlinc accepts; every release this build supports agrees on it.
-const NEWEST_JVM_TARGET: u16 = 26;
+/// The newest `-jvm-target` the reference release accepts.
+fn newest_jvm_target(release: KotlinVersion) -> u16 {
+    if krusty::kotlin_version::Quirks::of_release(release)
+        .has(krusty::kotlin_version::Quirk::JvmTargetsEndAt26)
+    {
+        26
+    } else {
+        28
+    }
+}
 
-/// Map a kotlinc `-jvm-target` value to the class-file major version it produces, or to kotlinc's
-/// own error for a value it refuses: `1.6` is named as no longer supported, and anything else
-/// outside `1.8` and `9..=26` (including the bare `6`, `7` and `8`) is an unknown target.
-pub fn jvm_target_to_major(v: &str) -> Result<u16, String> {
+/// Map a kotlinc `-jvm-target` value to the class-file major version it produces under the
+/// reference `release`, or to kotlinc's own error for a value it refuses: `1.6` is named as no
+/// longer supported, and anything else outside `1.8` and `9` up to [`newest_jvm_target`]
+/// (including the bare `6`, `7` and `8`) is an unknown target.
+pub fn jvm_target_to_major(v: &str, release: KotlinVersion) -> Result<u16, String> {
+    let newest = newest_jvm_target(release);
     match v {
         "1.8" => Ok(52),
         "1.6" => Err(
@@ -288,10 +298,10 @@ pub fn jvm_target_to_major(v: &str) -> Result<u16, String> {
         _ => v
             .parse::<u16>()
             .ok()
-            .filter(|&n| (9..=NEWEST_JVM_TARGET).contains(&n) && n.to_string() == v)
+            .filter(|&n| (9..=newest).contains(&n) && n.to_string() == v)
             .map(|n| n + 44)
             .ok_or_else(|| {
-                let supported = (9..=NEWEST_JVM_TARGET)
+                let supported = (9..=newest)
                     .map(|n| n.to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -481,7 +491,7 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
         })
         .collect();
     finish_warning_policy(&mut opts, &parsed);
-    finish_jvm_target(&mut opts, &parsed);
+    finish_jvm_target(&mut opts, &parsed, reference_version);
     finish_language_settings(&mut opts, parsed, catalog, &tokenized.explicit, lifecycle);
     // kotlinc reports a repeated source root after the configuration warnings.
     opts.warnings.append(&mut duplicate_roots);
@@ -688,10 +698,24 @@ impl Options {
         for marker in &self.opt_in {
             settings.features.opt_in(marker);
         }
+        // From 2.5 kotlinc models `-Xuse-inline-scopes-numbers` as the `JvmInlineScopesNumbers`
+        // language feature, which its JVM backend configuration reads; the feature's state, set by
+        // the argument or `-XXLanguage`, is then the setting. Earlier releases keep the argument.
+        if settings
+            .features
+            .table()
+            .get(INLINE_SCOPES_NUMBERS_FEATURE)
+            .is_some()
+        {
+            self.inline_scopes_numbers = settings.features.has(INLINE_SCOPES_NUMBERS_FEATURE);
+        }
         settings.features = settings.features.with_defects(self.kotlinc_defects);
         self.language_settings = settings;
     }
 }
+
+/// kotlinc's language feature for inline scope numbering, where its release has one.
+const INLINE_SCOPES_NUMBERS_FEATURE: &str = "JvmInlineScopesNumbers";
 
 /// Something wrong with a user-supplied `-cp` entry, found before analysis opens it.
 ///
@@ -849,23 +873,54 @@ mod tests {
         parse(args.iter().map(|s| s.to_string()))
     }
 
-    /// `-progressive` accepts a release whose progressive features are all modeled, and turns
-    /// them on; every supported release's are.
+    /// `-progressive` turns on every progressive feature krusty models. A feature it would turn
+    /// on that no phase implements refuses the command line, the same way `-XXLanguage:+…` and
+    /// an `@Enables` argument refuse that name. There is no list of features that are accepted
+    /// unimplemented.
     #[test]
     fn progressive_turns_on_every_modeled_progressive_feature() {
+        use krusty::features::LangFeatures;
+
         for release in KotlinVersion::supported() {
-            let release = release.to_string();
+            let label = release.to_string();
             let o = parse_args(&[
-                &format!("-Xkotlin-reference-version={release}"),
+                &format!("-Xkotlin-reference-version={label}"),
                 "-progressive",
                 "f.kt",
             ]);
-            assert_eq!(o.errors, Vec::<String>::new(), "kotlinc {release}");
+            let language = LanguageVersion::default_for(release);
+            let before = LangFeatures::for_release(release, language, language);
+            let mut refusal = None;
+            for feature in before.table().progressive() {
+                if before.has(&feature.name) {
+                    continue;
+                }
+                if LangFeatures::models(&feature.name) {
+                    assert!(
+                        o.language_settings.features.has(&feature.name),
+                        "kotlinc {label} {}",
+                        feature.name
+                    );
+                } else if refusal.is_none() {
+                    refusal = Some(feature.name.as_str());
+                }
+            }
+            match refusal {
+                None => assert_eq!(o.errors, Vec::<String>::new(), "kotlinc {label}"),
+                Some(feature) => assert_eq!(
+                    o.errors,
+                    [format!(
+                        "krusty does not implement the language feature '{feature}' selected by \
+                         '-progressive'"
+                    )],
+                    "kotlinc {label}"
+                ),
+            }
             assert!(
                 o.language_settings
                     .features
                     .has("ReportTypeVarianceConflictsInDnnAndFlexible"),
-                "kotlinc {release}"
+                "kotlinc {label}"
             );
         }
         let o = parse_args(&["-Xkotlin-reference-version=2.4.20", "-progressive", "f.kt"]);
@@ -919,6 +974,25 @@ mod tests {
         assert!(parsed.inline_scopes_numbers);
         assert_eq!(parsed.ignored, Vec::<String>::new());
         assert!(!parse_args(&["x.kt"]).inline_scopes_numbers);
+    }
+
+    /// kotlinc 2.5 reads inline scope numbering from the `JvmInlineScopesNumbers` feature that
+    /// `-Xuse-inline-scopes-numbers` enables, so either spelling selects it and neither is refused.
+    #[test]
+    fn inline_scopes_numbers_follow_the_language_feature_where_the_release_has_one() {
+        for arguments in [
+            &["-Xuse-inline-scopes-numbers"][..],
+            &["-XXLanguage:+JvmInlineScopesNumbers"][..],
+        ] {
+            let mut command = vec!["-Xkotlin-reference-version=2.5.0-RC2"];
+            command.extend_from_slice(arguments);
+            command.push("x.kt");
+            let parsed = parse_args(&command);
+            assert_eq!(parsed.refusals, Vec::<String>::new(), "{arguments:?}");
+            assert!(parsed.inline_scopes_numbers, "{arguments:?}");
+        }
+        let parsed = parse_args(&["-Xkotlin-reference-version=2.5.0-RC2", "x.kt"]);
+        assert!(!parsed.inline_scopes_numbers);
     }
 
     /// Every assertion flag must reach `Options`, not fall through to `ignored`: a missing match arm
@@ -1379,12 +1453,12 @@ mod tests {
         let o = parse_args(&[
             "-include-runtime",
             "-api-version",
-            "2.0",
+            "2.4",
             "-Xsomething",
             "f.kt",
         ]);
         assert_eq!(o.sources, vec!["f.kt".to_string()]);
-        assert_eq!(o.language_settings.api_version, LanguageVersion::V2_0);
+        assert_eq!(o.language_settings.api_version, LanguageVersion::V2_4);
         assert_eq!(o.ignored, Vec::<String>::new());
         assert_eq!(
             o.errors,
@@ -1463,18 +1537,31 @@ mod tests {
         assert!(stamp.errors.is_empty(), "{:?}", stamp.errors);
         assert!(stamp.ignored.is_empty(), "{:?}", stamp.ignored);
 
-        for experimental in [LanguageVersion::V2_5, LanguageVersion::V2_6] {
+        let compiler = krusty::kotlin_version::environment_release();
+        let policy = krusty::features::LanguageVersionPolicy::for_release(compiler)
+            .unwrap_or_else(|| panic!("{compiler} has no language policy"));
+        for &experimental in policy.supported() {
+            if policy.language(experimental).unwrap().stable {
+                continue;
+            }
             let parsed = parse_args(&["-language-version", &experimental.to_string(), "f.kt"]);
-            assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+            assert!(
+                parsed.errors.is_empty(),
+                "{experimental}: {:?}",
+                parsed.errors
+            );
             assert_eq!(parsed.language_settings.language_version, experimental);
             assert_eq!(parsed.language_settings.api_version, experimental);
-            assert_eq!(parsed.warnings.len(), 1);
+            assert_eq!(parsed.warnings.len(), 1, "{experimental}");
         }
 
-        let supported = "2.0 (deprecated), 2.1 (deprecated), 2.2, 2.3, 2.4, 2.5 (experimental), 2.6 (experimental)";
+        let supported = LanguageVersion::supported_text_for(compiler);
         for bad in [
             "banana", "2", "2.4.0", "2.x", "-2.2", "+2.2", "0.0", "2.7", "999.1", "",
         ] {
+            if LanguageVersion::parse_supported_for(bad, compiler).is_some() {
+                continue;
+            }
             let language = parse_args(&["-language-version", bad, "f.kt"]);
             assert_eq!(
                 language.errors,
@@ -2073,10 +2160,30 @@ mod tests {
 
     #[test]
     fn jvm_target_sets_class_major_version() {
-        assert_eq!(jvm_target_to_major("1.8"), Ok(52));
-        assert_eq!(jvm_target_to_major("9"), Ok(53));
-        assert_eq!(jvm_target_to_major("21"), Ok(65));
-        assert_eq!(jvm_target_to_major("26"), Ok(70));
+        let stable = KotlinVersion::new(2, 4, 21);
+        assert_eq!(jvm_target_to_major("1.8", stable), Ok(52));
+        assert_eq!(jvm_target_to_major("9", stable), Ok(53));
+        assert_eq!(jvm_target_to_major("21", stable), Ok(65));
+        assert_eq!(jvm_target_to_major("26", stable), Ok(70));
+        assert_eq!(
+            jvm_target_to_major("27", stable),
+            Err(
+                "unknown JVM target version: 27\nSupported versions: 1.8, 9, 10, 11, 12, 13, \
+                 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26"
+                    .to_string()
+            )
+        );
+        // kotlinc 2.5 accepts targets 27 and 28, and lists them among the supported versions.
+        let next = KotlinVersion::new(2, 5, 0);
+        assert_eq!(jvm_target_to_major("28", next), Ok(72));
+        assert_eq!(
+            jvm_target_to_major("29", next),
+            Err(
+                "unknown JVM target version: 29\nSupported versions: 1.8, 9, 10, 11, 12, 13, \
+                 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28"
+                    .to_string()
+            )
+        );
 
         // The parsed option carries the mapped major.
         let o = parse_args(&["-jvm-target", "25", "f.kt"]);

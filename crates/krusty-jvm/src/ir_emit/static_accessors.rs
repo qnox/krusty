@@ -1883,9 +1883,15 @@ impl Accessor<'_> {
         );
     }
 
+    /// The field the bridge reads or writes: on its owner, or for an interface's stored block
+    /// property, on the interface's storage class.
     fn field(&self, index: u32, ty: Ty, cw: &mut ClassWriter) -> u16 {
         cw.fieldref(
-            &self.owner.internal_name(self.facade),
+            &super::companion_blocks::storage_class(
+                self.ir,
+                index,
+                &self.owner.internal_name(self.facade),
+            ),
             self.ir.static_field_jvm_name(index),
             &type_descriptor(ty),
         )

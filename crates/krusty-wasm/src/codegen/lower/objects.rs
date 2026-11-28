@@ -7,6 +7,7 @@
 //! `$Object` for its table. The frontend proved the value is of the class; the cast is what tells
 //! the validator.
 
+use krusty::backend::class_statics::ClassActivationStep;
 use krusty::backend::class_tables::module_slots::PlanKey;
 use krusty::backend::class_tables::{function_key, local_property_target, AnyMember, SlotKey};
 use krusty::backend::interface_identity::member_identity;
@@ -1151,6 +1152,7 @@ impl Body<'_> {
                 if !storage.direct_read {
                     return Err("a top-level property read that requires an accessor".to_string());
                 }
+                self.initialize_storage_owner(target)?;
                 self.code.global_get(storage.global);
                 // A `lateinit` property's storage is read through its guard, as a read of the
                 // storage in its own file is, unless it is the raw read `isInitialized` makes.
@@ -1245,6 +1247,7 @@ impl Body<'_> {
                     return Err("a top-level property write that requires an accessor".to_string());
                 }
                 self.value(value, storage.ty)?;
+                self.initialize_storage_owner(target)?;
                 self.code.global_set(storage.global);
                 return Ok(());
             }
@@ -1439,8 +1442,13 @@ impl Body<'_> {
             .referenced_module_properties
             .get(&target)
             .ok_or_else(|| "a cross-file property with no module record".to_string())?;
-        if reference.owner.is_some()
-            || reference.extension_receiver.is_some()
+        // A `companion { }` block property is a static of its owner: its recorded owner and
+        // receiver coordinate name that class, which its storage takes no receiver for.
+        let block = matches!(
+            reference.placement,
+            krusty::ir::IrStaticPlacement::CompanionBlock { .. }
+        );
+        if (!block && (reference.owner.is_some() || reference.extension_receiver.is_some()))
             || !reference.context_parameters.is_empty()
         {
             return Err("a cross-file property storage with a receiver".to_string());
@@ -1805,6 +1813,7 @@ pub(super) fn define_class_functions(
                 class: id,
                 ordinal: 0,
             };
+            body.enter_constructor(id);
             body.primary_constructor(id)?;
             let lowered = body.finish();
             let carriers = constructor_carriers(module, ir, id, &parameters)?;
@@ -1829,6 +1838,7 @@ pub(super) fn define_class_functions(
                 class: id,
                 ordinal: ordinal as u32 + 1,
             };
+            body.enter_constructor(id);
             body.secondary_constructor(id, ordinal)?;
             let lowered = body.finish();
             let carriers = constructor_carriers(module, ir, id, &parameters)?;
@@ -2557,7 +2567,7 @@ impl Body<'_> {
     /// through the singleton getter, which publishes the instance before the companion
     /// constructor, so a companion that constructs its holder does not re-enter. `initializing`
     /// is a class whose initialization is already in progress, so activation skips it.
-    fn activate_class(
+    pub(super) fn activate_class(
         &mut self,
         class: ClassId,
         initializing: Option<ClassId>,
@@ -2576,8 +2586,14 @@ impl Body<'_> {
         }
         self.activate_laid_out(*chain.last().expect("non-empty"))?;
         for &owner in chain.iter().rev() {
-            if Some(owner) != initializing {
-                self.initialize_companion(owner)?;
+            for step in self.class_initializers.plan().activation_steps(owner) {
+                match step {
+                    ClassActivationStep::OwnStatics(class) => self.initialize_own_statics(class),
+                    ClassActivationStep::Companion(class) if Some(class) != initializing => {
+                        self.initialize_companion(class)?;
+                    }
+                    ClassActivationStep::Companion(_) => {}
+                }
             }
         }
         Ok(())
@@ -2611,7 +2627,7 @@ impl Body<'_> {
 
     /// Run the companion's typed initializer when this class has one. The getter's result is
     /// unused: construction needs the initialization, not the instance.
-    fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
+    pub(super) fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
         let declaration = &self.ir.classes[class as usize];
         if declaration.is_enum || declaration.is_enum_entry {
             return Ok(());

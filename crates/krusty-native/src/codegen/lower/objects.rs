@@ -13,6 +13,7 @@
 use super::super::super::captures;
 use super::type_checks::{is_runtime_constructed, ThrowableOperands};
 use super::*;
+use krusty::backend::class_statics::ClassActivationStep;
 use krusty::types::TypeName;
 
 #[cfg(test)]
@@ -1274,6 +1275,7 @@ impl<'a> FileLowering<'a> {
                 ordinal: ordinal as u32 + 1,
             };
             body.record_semantic_slots(&semantic_slots);
+            body.enter_constructor(class)?;
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 body.bind_parameter(slot as u32, *value, *ty)?;
             }
@@ -1804,6 +1806,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(id, signature, Ty::Unit, &name, &mut |body, params| {
             body.scope = krusty::ir::IrEnclosure::Constructor { class, ordinal: 0 };
             body.record_semantic_slots(&semantic_slots);
+            body.enter_constructor(class)?;
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 body.bind_parameter(slot as u32, *value, *ty)?;
             }
@@ -2434,29 +2437,41 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(());
         }
         for &owner in chain.iter().rev() {
-            let getter = {
-                let ir = self.file.ir;
-                let classes = &self.file.classes;
-                let declaration = &ir.classes[owner as usize];
-                if model::is_enum(declaration) {
-                    None
-                } else {
-                    declaration
-                        .companion_class
-                        .and_then(|companion| ir.class_id_by_name(companion))
-                        .and_then(|companion| classes[companion as usize].singleton)
-                        .map(|(_, getter)| getter)
+            for step in self.file.class_statics.activation_steps(owner) {
+                match step {
+                    ClassActivationStep::OwnStatics(class) => self.initialize_own_statics(class)?,
+                    ClassActivationStep::Companion(class) => self.initialize_companion(class)?,
                 }
-            };
-            let Some(getter) = getter else {
-                continue;
-            };
-            let func_ref = self.func_ref(getter);
-            self.emit_call(func_ref, &[])?;
-            if self.terminated {
-                return Ok(());
+                if self.terminated {
+                    return Ok(());
+                }
             }
         }
+        Ok(())
+    }
+
+    /// Initialize the companion object of `class`, when it has one: through its singleton
+    /// getter. An enum's companion stays with the enum initializer.
+    pub(super) fn initialize_companion(&mut self, class: ClassId) -> Result<(), Unsupported> {
+        let getter = {
+            let ir = self.file.ir;
+            let classes = &self.file.classes;
+            let declaration = &ir.classes[class as usize];
+            if model::is_enum(declaration) {
+                None
+            } else {
+                declaration
+                    .companion_class
+                    .and_then(|companion| ir.class_id_by_name(companion))
+                    .and_then(|companion| classes[companion as usize].singleton)
+                    .map(|(_, getter)| getter)
+            }
+        };
+        let Some(getter) = getter else {
+            return Ok(());
+        };
+        let func_ref = self.func_ref(getter);
+        self.emit_call(func_ref, &[])?;
         Ok(())
     }
 

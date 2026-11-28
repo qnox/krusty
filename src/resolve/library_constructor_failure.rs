@@ -282,7 +282,7 @@ impl Checker<'_> {
                         RejectedFunctionArgumentDiagnostic::Reference(declaration) => {
                             self.diags.error(
                                 declaration.span,
-                                declaration.into_message(self.file.reference),
+                                declaration.into_message(self.file.language.reference),
                             );
                         }
                     }

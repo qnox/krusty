@@ -1545,6 +1545,7 @@ impl BodyFirChecker<'_> {
             let value = self.expression(*argument)?;
             if !self
                 .file
+                .language
                 .reference
                 .quirks()
                 .has(crate::kotlin_version::Quirk::ContextArgumentEvaluatedBeforeExtensionReceiver)

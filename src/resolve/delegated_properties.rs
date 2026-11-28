@@ -1198,7 +1198,7 @@ impl Checker<'_> {
         let property = query.property;
         let value = query.value;
         let candidates = families
-            .diagnostic_candidates(self.file.reference, name, &mut |candidate| {
+            .diagnostic_candidates(self.file.language.reference, name, &mut |candidate| {
                 Ok(match candidate {
                     DelegateConventionCandidate::Function(function) => function.callable.ret,
                     DelegateConventionCandidate::MemberExtension(candidate)
@@ -1738,7 +1738,7 @@ impl Checker<'_> {
                     self,
                     &receivers,
                     MemberExtensionProbes {
-                        explicit_context_arguments: self.file.explicit_context_arguments,
+                        explicit_context_arguments: self.file.language.explicit_context_arguments,
                         deferred_type_variables: &self.active_postponed_type_variables(),
                         select_context_arguments: &|parameters| {
                             self.select_context_arguments_with_types(scope, parameters)

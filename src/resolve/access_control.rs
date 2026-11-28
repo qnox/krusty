@@ -172,6 +172,7 @@ impl crate::symbol_resolver::CallableAccessSite for Checker<'_> {
     fn invisible_candidates_share_one_level(&self) -> bool {
         !self
             .file
+            .language
             .reference
             .quirks()
             .has(crate::kotlin_version::Quirk::InvisibleCandidatesKeepScopeLevels)
@@ -487,7 +488,10 @@ impl<'a> Checker<'a> {
             return true;
         }
         if visibility != Visibility::Protected
-            || !self.file.allow_protected_super_companion_property_access
+            || !self
+                .file
+                .language
+                .allow_protected_super_companion_property_access
             || receiver.non_null().obj_internal() != Some(owner)
         {
             return false;

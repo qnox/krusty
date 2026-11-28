@@ -592,7 +592,7 @@ impl Checker<'_> {
                             constructor_parameter,
                             has_backing_field,
                         },
-                        self.file.property_annotation_default_target_mode,
+                        self.file.language.property_annotation_default_target_mode,
                         annotation.property_site,
                     ));
                 }
@@ -722,7 +722,7 @@ impl Checker<'_> {
                         constructor_parameter,
                         has_backing_field,
                     },
-                    self.file.property_annotation_default_target_mode,
+                    self.file.language.property_annotation_default_target_mode,
                     None,
                 );
                 if sites.is_empty() && !self.suppresses_diagnostic("WRONG_ANNOTATION_TARGET") {

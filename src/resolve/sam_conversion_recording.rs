@@ -330,7 +330,7 @@ impl Checker<'_> {
         if convertible {
             let nominal = self.expr_types[argument.0 as usize];
             if let Some(conversion) = self.sam_conversion_record(scope, argument, nominal, sam) {
-                self.resolved_sam_conversions.insert(argument, conversion);
+                self.note_sam_conversion(argument, conversion);
             }
         }
     }
@@ -404,7 +404,7 @@ impl Checker<'_> {
                 if let Some(conversion) =
                     self.sam_conversion_record(scope, argument, nominal, signature.clone())
                 {
-                    self.resolved_sam_conversions.insert(argument, conversion);
+                    self.note_sam_conversion(argument, conversion);
                 }
             }
         }

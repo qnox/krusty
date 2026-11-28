@@ -136,7 +136,12 @@ impl Checker<'_> {
         {
             crate::diagnostic_wording::unresolved_reference(name)
         } else {
-            unresolved_member_message(self.file.reference, name, receiver_ty, hidden_deprecated)
+            unresolved_member_message(
+                self.file.language.reference,
+                name,
+                receiver_ty,
+                hidden_deprecated,
+            )
         }
     }
 }

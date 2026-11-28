@@ -1,5 +1,5 @@
 // FILE: C.kt
-// LANGUAGE: +CompanionBlocksAndExtensions
+// LANGUAGE: +CompanionBlocks
 OPTIONAL_JVM_INLINE_ANNOTATION
 value class W(val value: Int)
 class C {
@@ -8,5 +8,5 @@ class C {
     }
 }
 // FILE: Main.kt
-// LANGUAGE: +CompanionBlocksAndExtensions
+// LANGUAGE: +CompanionBlocks
 fun box(): String = if (C.makes().value == 1) "OK" else "fail"
