@@ -154,22 +154,6 @@ new_byte_identity_keys_removed() {
   done <<<"$added"
 }
 
-# A plugin corpus's byte-identity row arrives with the case it describes: a case the base did not
-# include yet may be listed in the change that includes it. A case the base already included only
-# leaves the list. Prints the added keys that remain charged.
-new_plugin_byte_keys_removed() {
-  local lane=$1 release=$2 added=$3 included_lane included_from key
-  included_lane="${lane%/byte_non_identical/*}/included/${lane##*/}"
-  included_from=$(reads "$base" "$included_lane" "$release")
-  while IFS= read -r key; do
-    [ -n "$key" ] || continue
-    if [ -n "$included_from" ] &&
-      entries "$base:$included_lane/$included_from.txt" | grep -Fx -- "$key" >/dev/null; then
-      printf '%s\n' "$key"
-    fi
-  done <<<"$added"
-}
-
 added_total=0
 removed_total=0
 while read -r lane; do
@@ -202,11 +186,6 @@ while read -r lane; do
     if [ "$lane" = tests/box_byte_non_identical/jvm ] && [ -n "$added" ]; then
       added=$(new_byte_identity_keys_removed "$release" "$added")
     fi
-    case "$lane" in
-      src/plugins/*/boxes/byte_non_identical/*)
-        [ -z "$added" ] || added=$(new_plugin_byte_keys_removed "$lane" "$release" "$added")
-        ;;
-    esac
     [ -n "$added" ] || continue
     count=$(wc -l <<<"$added" | tr -d '[:space:]')
     manifest="$lane/$release.txt"

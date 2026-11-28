@@ -24,7 +24,9 @@ use rayon::prelude::*;
 
 use super::box_jvm_compile::compile_box_case;
 use super::box_ratchet::{self, Outcome};
-use super::kotlin_box_ir_jvm_conformance::krusty_classes_matching_reference;
+use super::kotlin_box_ir_jvm_conformance::{
+    krusty_classes_against_reference, krusty_classes_matching_reference,
+};
 use super::{box_reference_classes, common};
 
 const INCLUDED: &str = "included";
@@ -164,8 +166,11 @@ fn run_box_case(case: &Case, prepared: &str, stubs: &[PathBuf]) -> CaseResult {
     };
     match common::run_box(&compiled.flat, &box_class, &classpath).as_deref() {
         Some("OK") => {
+            // The case just compiled and passed, so failing to compile it again is a harness
+            // fault, never a byte difference.
             let identical =
-                krusty_classes_matching_reference(prepared, &case.stem, &classpath, &reference)
+                krusty_classes_against_reference(prepared, &case.stem, &classpath, &reference)
+                    .unwrap_or_else(|failure| panic!("{}: {failure}", case.key))
                     .is_ok();
             Ok((Outcome::Pass, identical))
         }

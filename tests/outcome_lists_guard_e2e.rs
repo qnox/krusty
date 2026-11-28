@@ -908,7 +908,7 @@ fn a_byte_identity_row_for_an_already_included_plugin_case_fails() {
 }
 
 #[test]
-fn a_byte_identity_row_arrives_with_the_plugin_case_it_describes() {
+fn a_byte_identity_row_for_a_newly_included_plugin_case_fails() {
     let repo = Repo::new("plugin-byte-row-with-case");
     repo.write(INCLUDED, "a/one.kt\n");
     repo.write(PLUGIN_BYTE_NON_IDENTICAL, "a/one.kt\n");
@@ -919,8 +919,13 @@ fn a_byte_identity_row_arrives_with_the_plugin_case_it_describes() {
 
     let output = repo.check(&base, &head);
 
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert_eq!(output.stderr, b"");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        format!(
+            "outcome-lists: {PLUGIN_BYTE_NON_IDENTICAL} gains 1 entry:\n    b/two.kt\n{BYTE_ROWS_ONLY_SHRINK}"
+        )
+    );
 }
 
 #[test]

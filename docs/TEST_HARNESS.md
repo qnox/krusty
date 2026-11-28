@@ -476,9 +476,9 @@ by adding its descriptor to `DESCRIPTORS` in `src/conformance/plugin_corpus.rs`.
 A `check = classes` corpus passes a case only when its classes are byte-identical to the reference
 compiler's, so its `included` list is its byte-identity ratchet. A `check = box` corpus passes on
 `box()`, so it also keeps `byte_non_identical/jvm/<version>.txt` beside its descriptor: the included
-cases whose classes differ from the reference compiler's. The list is exact in both directions, only
-shrinks for cases the base already included (`scripts/check-outcome-lists.sh`), and a case may be
-listed in the change that includes it.
+cases whose classes differ from the reference compiler's. The list is exact in both directions and
+only shrinks (`scripts/check-outcome-lists.sh`): a case joins `included` byte-identical, or not at
+all.
 
 A descriptor that names a `directive` and an `upstream` directory is run by
 `plugin_box_corpus::plugin_box_corpora_match_their_inventories` in the conformance binary, one path
