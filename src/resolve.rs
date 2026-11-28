@@ -11093,7 +11093,7 @@ impl<'a> Checker<'a> {
                             self.fix_postponed_lambda_inputs(
                                 &selected_lambda_formals,
                                 inputs,
-                                &postponed_constraints,
+                                &mut postponed_constraints,
                                 &mut known_generic_bindings,
                             );
                         }
@@ -11537,6 +11537,14 @@ impl<'a> Checker<'a> {
                         // is inlined into the caller, so it may capture a mutable local (like the stdlib
                         // `repeat`/`forEach`). This also covers zero-parameter lambdas (`() -> Unit`),
                         // whose `lambda_param_types[i]` is empty.
+                        let declared_parameter = self.declared_lambda_parameter(sig, pi, a);
+                        self.fix_declared_lambda_inputs(
+                            sig,
+                            a,
+                            declared_parameter,
+                            &mut postponed_constraints,
+                            &mut known_generic_bindings,
+                        );
                         let semantic_parameter = sig
                             .generic_sig
                             .as_ref()
@@ -11603,23 +11611,18 @@ impl<'a> Checker<'a> {
                                 );
                             let open_callee_result =
                                 sig.generic_sig.as_ref().is_some_and(|generic| {
-                                    let declared =
-                                        generic.params.get(pi).copied().map(|parameter| {
-                                            if sig.vararg_index == Some(pi) {
-                                                parameter.array_read_elem().unwrap_or(parameter)
-                                            } else {
-                                                parameter
-                                            }
-                                        });
-                                    declared.and_then(Ty::fun_ret).is_some_and(|result| {
-                                        generic.formals.iter().any(|formal| {
-                                            !known_generic_bindings.contains_key(formal.as_str())
-                                                && ty_mentions_param(
-                                                    result,
-                                                    std::slice::from_ref(formal),
-                                                )
+                                    declared_parameter
+                                        .and_then(Ty::fun_ret)
+                                        .is_some_and(|result| {
+                                            generic.formals.iter().any(|formal| {
+                                                !known_generic_bindings
+                                                    .contains_key(formal.as_str())
+                                                    && ty_mentions_param(
+                                                        result,
+                                                        std::slice::from_ref(formal),
+                                                    )
+                                            })
                                         })
-                                    })
                                 });
                             // A caller's `<T>` is fixed; a surrounding generic call's symbolic
                             // result (`getResult(...): B1`) remains postponed with that call.
@@ -11658,12 +11661,21 @@ impl<'a> Checker<'a> {
                                     inferred.lower,
                                     inferred.upper,
                                 );
-                                self.merge_postponed_function_argument(
+                                let checked = self.merge_postponed_function_argument(
                                     a,
                                     checked,
                                     &mut postponed_constraints,
                                     inferred,
-                                )
+                                );
+                                self.constrain_declared_lambda_result(
+                                    &mut postponed_constraints,
+                                    a,
+                                    call_site,
+                                    &postponed_formals,
+                                    declared_parameter,
+                                    checked,
+                                );
+                                checked
                             } else {
                                 checked
                             };
@@ -39696,28 +39708,6 @@ impl<'a> Checker<'a> {
                     .any(|formal| ty_mentions_param(*input, std::slice::from_ref(*formal)))
             })
         })
-    }
-
-    /// Publish an ordinary argument passed through a bare callable type variable so arguments that
-    /// follow it see the same shared call constraint. A structured parameter is left to ordinary
-    /// overload inference; only a bare variable gives this argument a complete, non-contextualized
-    /// value type at this point.
-    fn publish_uncontextualized_argument_binding(
-        formals: &[crate::types::TyParamName],
-        parameter: Option<Ty>,
-        actual: Ty,
-        bindings: &mut crate::symbol_resolver::GSigBinds,
-    ) {
-        let Some(TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) =
-            parameter.map(|ty| ty.non_null().kind())
-        else {
-            return;
-        };
-        if formals.contains(&formal) {
-            bindings
-                .entry(crate::types::TyParamName::new(&formal))
-                .or_insert(actual);
-        }
     }
 
     /// The member family `receiver.name(...)` selects from: the receiver's member overloads, joined
