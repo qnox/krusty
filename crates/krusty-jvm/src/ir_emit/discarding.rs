@@ -146,6 +146,7 @@ impl Emitter<'_> {
                     op: krusty::ir::IrTypeOp::ImplicitCoercion,
                     arg,
                     type_operand,
+                    ..
                 } if *type_operand == krusty::types::Ty::Unit && !self.diverges(*arg) => {
                     // A carried inline result is already on the stack at the landing. Reading it
                     // consumes that resident value and does not change the tracked height, so the

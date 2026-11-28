@@ -111,11 +111,9 @@ impl BodyLowering<'_> {
         if receiver == value_ty {
             return (value, value_ty);
         }
-        let cast = self.ir.add_expr(IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::Cast,
-            arg: value,
-            type_operand: receiver,
-        });
+        let cast = self
+            .ir
+            .add_expr(IrExpr::type_op(crate::ir::IrTypeOp::Cast, value, receiver));
         (cast, receiver)
     }
 

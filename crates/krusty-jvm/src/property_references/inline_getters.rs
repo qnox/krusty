@@ -137,11 +137,8 @@ pub(super) fn realize_own_get(
                     dispatch_receiver: Some(held),
                     args: vec![position],
                 });
-                ir.exprs[current as usize] = IrExpr::TypeOp {
-                    op: krusty::ir::IrTypeOp::ImplicitCoercion,
-                    arg: element,
-                    type_operand: context_ty,
-                };
+                ir.exprs[current as usize] =
+                    IrExpr::type_op(krusty::ir::IrTypeOp::ImplicitCoercion, element, context_ty);
             }
         }
     }
@@ -151,11 +148,8 @@ pub(super) fn realize_own_get(
                 receiver_ty.expect("an unbound reference's adapter takes its receiver");
             for &current in &receiver_reads {
                 let read = ir.add_expr(IrExpr::GetValue(1));
-                ir.exprs[current as usize] = IrExpr::TypeOp {
-                    op: krusty::ir::IrTypeOp::ImplicitCoercion,
-                    arg: read,
-                    type_operand: receiver_ty,
-                };
+                ir.exprs[current as usize] =
+                    IrExpr::type_op(krusty::ir::IrTypeOp::ImplicitCoercion, read, receiver_ty);
             }
             vec![any]
         }
@@ -178,11 +172,8 @@ pub(super) fn realize_own_get(
                     class,
                     index: u32::try_from(field).expect("a reference carrier has few fields"),
                 });
-                ir.exprs[current as usize] = IrExpr::TypeOp {
-                    op: krusty::ir::IrTypeOp::ImplicitCoercion,
-                    arg: read,
-                    type_operand: receiver_ty,
-                };
+                ir.exprs[current as usize] =
+                    IrExpr::type_op(krusty::ir::IrTypeOp::ImplicitCoercion, read, receiver_ty);
             }
             Vec::new()
         }
@@ -193,11 +184,11 @@ pub(super) fn realize_own_get(
         let IrExpr::Return(Some(value)) = ir.exprs[current as usize] else {
             continue;
         };
-        let boxed = ir.add_expr(IrExpr::TypeOp {
-            op: krusty::ir::IrTypeOp::ImplicitCoercion,
-            arg: value,
-            type_operand: any,
-        });
+        let boxed = ir.add_expr(IrExpr::type_op(
+            krusty::ir::IrTypeOp::ImplicitCoercion,
+            value,
+            any,
+        ));
         ir.exprs[current as usize] = IrExpr::Return(Some(boxed));
     }
     // kotlinc attributes the body to the reference's line until the splice's own lines begin:

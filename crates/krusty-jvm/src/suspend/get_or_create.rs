@@ -18,11 +18,7 @@ pub(super) fn build_get_or_create(
     let k = |ir: &mut IrFile, expression: IrExpr| ir.add_expr(expression);
     let cast = |ir: &mut IrFile| {
         let completion = ir.add_expr(IrExpr::GetValue(completion_idx));
-        ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
-            arg: completion,
-            type_operand: *cont_ty,
-        })
+        ir.add_expr(IrExpr::type_op(IrTypeOp::Cast, completion, *cont_ty))
     };
     let label_of = |ir: &mut IrFile, receiver: ExprId| {
         ir.add_expr(IrExpr::GetField {
@@ -80,11 +76,7 @@ pub(super) fn build_get_or_create(
     let completion = k(ir, IrExpr::GetValue(completion_idx));
     let is_instance = k(
         ir,
-        IrExpr::TypeOp {
-            op: IrTypeOp::InstanceOf,
-            arg: completion,
-            type_operand: *cont_ty,
-        },
+        IrExpr::type_op(IrTypeOp::InstanceOf, completion, *cont_ty),
     );
     // Cast once inside the `instanceof` branch; every subsequent read uses this binding.
     let reused = max_value_index(ir) + 1;

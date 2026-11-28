@@ -1691,8 +1691,7 @@ impl<'a> Body<'a> {
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
-                type_operand,
-            } if type_operand.non_null().is_array()
+                type_operand, .. } if type_operand.non_null().is_array()
                 || self.class_structure(type_operand)?.is_some()
                 || self.interface_of_type(type_operand).is_some()
                 || self.library_interface_of_type(type_operand).is_some() =>
@@ -1703,30 +1702,26 @@ impl<'a> Body<'a> {
             IrExpr::TypeOp {
                 op: IrTypeOp::Cast | IrTypeOp::CastNonNull,
                 arg,
-                type_operand,
-            } if self.is_primitive_cast(arg, type_operand) => {
+                type_operand, .. } if self.is_primitive_cast(arg, type_operand) => {
                 self.checked_primitive_cast(arg, type_operand)?
             }
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
-                type_operand,
-            } if matches!(type_operand.non_null().kind(), TyKind::Fun(_)) => {
+                type_operand, .. } if matches!(type_operand.non_null().kind(), TyKind::Fun(_)) => {
                 self.function_cast(arg, type_operand, op == IrTypeOp::CastNonNull)?
             }
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf | IrTypeOp::SafeCast),
                 arg,
-                type_operand,
-            } => self.type_test(id, op, arg, type_operand)?,
+                type_operand, .. } => self.type_test(id, op, arg, type_operand)?,
             // A cast to a non-null type is the cast to its nullable form, then a null check: `as
             // String` on an `Any` reads the reference as the runtime's string and throws the
             // Kotlin NPE on `null`, as a cast to a class or an interface does.
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::ImplicitCoercion | IrTypeOp::Cast | IrTypeOp::CastNonNull),
                 arg,
-                type_operand,
-            } => {
+                type_operand, .. } => {
                 let source = self.carrier_of(arg)?;
                 // The checker widens a mixed operator's operand to the type the selected operator
                 // takes (`Int.plus(Long)` reads its receiver as a `Long`); only the instruction is
@@ -2862,11 +2857,11 @@ mod tests {
             dispatch_receiver: None,
             args: Vec::new(),
         });
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: krusty::ir::IrTypeOp::ImplicitCoercion,
-            arg: call,
-            type_operand: Ty::String,
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(
+            krusty::ir::IrTypeOp::ImplicitCoercion,
+            call,
+            Ty::String,
+        ));
         ir.call_declared_ret.insert(call, formal);
         ir.set_logical_type(coercion, Ty::String);
         assert_eq!(ir.checked_type(call), None);

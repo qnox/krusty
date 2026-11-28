@@ -580,6 +580,7 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
             op,
             arg,
             type_operand,
+            ..
         } => format!(
             "{}{op:?}<{}>({})",
             if ir.written_casts.contains(&expression) {

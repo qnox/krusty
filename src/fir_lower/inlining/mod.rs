@@ -1262,6 +1262,7 @@ impl BodyLowering<'_> {
             op: crate::ir::IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } = self.ir.expr(operand).clone()
         else {
             return operand;
@@ -1270,11 +1271,11 @@ impl BodyLowering<'_> {
         if specialized == type_operand {
             return operand;
         }
-        let expression = self.ir.add_expr(IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::ImplicitCoercion,
+        let expression = self.ir.add_expr(IrExpr::type_op(
+            crate::ir::IrTypeOp::ImplicitCoercion,
             arg,
-            type_operand: specialized,
-        });
+            specialized,
+        ));
         self.ir.set_logical_type(expression, specialized);
         expression
     }

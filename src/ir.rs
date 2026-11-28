@@ -441,7 +441,8 @@ pub enum IrExpr {
     When {
         branches: Vec<(Option<ExprId>, ExprId)>,
     },
-    /// `IrTypeOperatorCall` — `is`/`!is`/`as`/`as?`/implicit casts/coercions.
+    /// `IrTypeOperatorCall` — `is`/`!is`/`as`/`as?`/implicit casts/coercions. Build with
+    /// [`IrExpr::type_op`]; a pattern names the fields it reads and ends in `..`.
     TypeOp {
         op: IrTypeOp,
         arg: ExprId,

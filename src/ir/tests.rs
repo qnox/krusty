@@ -123,11 +123,11 @@ fn expr_diverges_by_handles_branches_and_custom_leaves() {
         stmts: vec![second],
         value: Some(unreachable_value),
     });
-    let coerced_divergent_block = f.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: divergent_value_block,
-        type_operand: Ty::Nothing,
-    });
+    let coerced_divergent_block = f.add_expr(IrExpr::type_op(
+        IrTypeOp::ImplicitCoercion,
+        divergent_value_block,
+        Ty::Nothing,
+    ));
 
     assert!(f.expr_diverges_by(exhaustive, &|_, _| false));
     assert!(!f.expr_diverges_by(non_exhaustive, &|_, _| false));

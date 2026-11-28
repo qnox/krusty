@@ -245,11 +245,7 @@ fn creator(
         defaults: Box::new([]),
         default_prefix_count: 0,
     });
-    let init = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: instance,
-        type_operand: creator_ty,
-    });
+    let init = ir.add_expr(IrExpr::type_op(IrTypeOp::Cast, instance, creator_ty));
     let slot = targets
         .iter()
         .find(|target| target.name == parcelized)

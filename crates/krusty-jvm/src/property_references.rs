@@ -528,11 +528,11 @@ fn synthesize_delegated(
     ));
     let (args, ctor_desc) = match bound {
         Some(receiver) => {
-            let receiver = ir.add_expr(IrExpr::TypeOp {
-                op: krusty::ir::IrTypeOp::ImplicitCoercion,
-                arg: receiver,
-                type_operand: Ty::nullable(Ty::obj("kotlin/Any")),
-            });
+            let receiver = ir.add_expr(IrExpr::type_op(
+                krusty::ir::IrTypeOp::ImplicitCoercion,
+                receiver,
+                Ty::nullable(Ty::obj("kotlin/Any")),
+            ));
             (
                 vec![receiver, owner, name, signature, flags],
                 "(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V",
@@ -1300,11 +1300,11 @@ fn carrier_expression(
         let elements = contexts
             .iter()
             .map(|&argument| {
-                ir.add_expr(IrExpr::TypeOp {
-                    op: krusty::ir::IrTypeOp::ImplicitCoercion,
-                    arg: argument,
-                    type_operand: any,
-                })
+                ir.add_expr(IrExpr::type_op(
+                    krusty::ir::IrTypeOp::ImplicitCoercion,
+                    argument,
+                    any,
+                ))
             })
             .collect::<Vec<_>>();
         ir.add_expr(IrExpr::Vararg {

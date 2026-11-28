@@ -314,11 +314,11 @@ pub(crate) fn lower_body_with_context(
             // class implements the parameter interface remains a singleton read followed by an
             // ordinary conversion to the parameter type.
             let value = if source != target {
-                let converted = lowering.ir.add_expr(IrExpr::TypeOp {
-                    op: IrTypeOp::ImplicitCoercion,
-                    arg: value,
-                    type_operand: target,
-                });
+                let converted = lowering.ir.add_expr(IrExpr::type_op(
+                    IrTypeOp::ImplicitCoercion,
+                    value,
+                    target,
+                ));
                 lowering.ir.set_logical_type(converted, target);
                 converted
             } else {

@@ -46,6 +46,7 @@ fn null_assertion_publishes_its_bottom_completion() {
         op: IrTypeOp::ImplicitCoercion,
         arg,
         type_operand: Ty::Nothing,
+        ..
     } = ir.expr(*producer)
     else {
         panic!("null assertion must retain its checked Nothing conversion")

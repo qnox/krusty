@@ -481,6 +481,7 @@ impl Emitter<'_> {
                 op: krusty::ir::IrTypeOp::ImplicitCoercion,
                 arg,
                 type_operand,
+                ..
             } if tail.is_owned()
                 && self.erases_copied_frame_result(block)
                 && self.transformed_result(expression).is_none() =>
@@ -512,6 +513,7 @@ impl Emitter<'_> {
             op: krusty::ir::IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } = *self.ir.expr(value)
         else {
             return None;

@@ -494,6 +494,7 @@ fn a_null_proven_type_parameter_field_is_a_value_of_its_non_null_bound() {
         op: IrTypeOp::ImplicitCoercion,
         arg,
         type_operand,
+        ..
     } = *ir.expr(result)
     else {
         panic!("the smart cast of the proven read: {:?}", ir.expr(result))

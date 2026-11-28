@@ -255,11 +255,10 @@ impl BodyLowering<'_> {
         } = indices;
         let receiver = self.expression_with_conversion(receiver.value, receiver.conversion)?;
         let receiver = match view {
-            Some(view) => self.ir.add_expr(IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::Cast,
-                arg: receiver,
-                type_operand: *view,
-            }),
+            Some(view) => {
+                self.ir
+                    .add_expr(IrExpr::type_op(crate::ir::IrTypeOp::Cast, receiver, *view))
+            }
             None => receiver,
         };
         self.member_property_read_on(size, receiver)
@@ -282,11 +281,11 @@ impl BodyLowering<'_> {
         let value = if iterable_ty == Some(progression.ty) {
             value
         } else {
-            self.ir.add_expr(IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::Cast,
-                arg: value,
-                type_operand: progression.ty,
-            })
+            self.ir.add_expr(IrExpr::type_op(
+                crate::ir::IrTypeOp::Cast,
+                value,
+                progression.ty,
+            ))
         };
         let (setup, value) =
             if matches!(self.ir.expr(value), IrExpr::GetValue(_) | IrExpr::Const(_)) {

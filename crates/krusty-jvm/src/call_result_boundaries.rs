@@ -124,6 +124,7 @@ pub(super) fn realize_call_result_boundaries(ir: &mut IrFile) {
                 op: IrTypeOp::ImplicitCoercion,
                 arg,
                 type_operand,
+                ..
             } => Some((coercion, *arg, *type_operand)),
             _ => None,
         })
@@ -160,11 +161,13 @@ fn test_erased_result_directly(ir: &mut IrFile) {
                     op: IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf | IrTypeOp::SafeCast,
                     arg,
                     type_operand,
+                    ..
                 } if type_operand.is_reference() => (*arg, false),
                 IrExpr::TypeOp {
                     op: IrTypeOp::Cast | IrTypeOp::CastNonNull,
                     arg,
                     type_operand,
+                    ..
                 } if type_operand.is_reference() => (*arg, true),
                 IrExpr::Variable {
                     init: Some(init), ..
@@ -220,6 +223,7 @@ fn erased_reference_operand(ir: &IrFile, coercion: ExprId) -> Option<(ExprId, Ty
         op: IrTypeOp::ImplicitCoercion,
         arg: produced,
         type_operand: substituted,
+        ..
     } = ir.exprs.get(coercion as usize)?
     else {
         return None;
@@ -249,6 +253,7 @@ fn fold_nullable_widenings(ir: &mut IrFile, boundaries: &[(ExprId, ExprId, Ty, T
             op: IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
+            ..
         } = expression
         {
             if let Some(&(slot, primitive)) = carriers.get(arg) {
@@ -273,6 +278,7 @@ fn fold_asserted_number_unbox(ir: &mut IrFile) {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: assertion,
                 type_operand: primitive,
+                ..
             } = &ir.exprs[index]
             else {
                 return None;
@@ -296,6 +302,7 @@ fn fold_asserted_number_unbox(ir: &mut IrFile) {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: produced,
                 type_operand: nullable,
+                ..
             } = &ir.exprs[inner as usize]
             else {
                 return None;
@@ -341,6 +348,7 @@ fn check_enhanced_result_before_unbox(ir: &mut IrFile) {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: produced,
                 type_operand: primitive,
+                ..
             } = &ir.exprs[coercion as usize]
             else {
                 return None;
@@ -401,11 +409,11 @@ mod tests {
             })
         });
         for (index, assertion) in assertions.into_iter().enumerate() {
-            let coercion = ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: assertion,
-                type_operand: Ty::String,
-            });
+            let coercion = ir.add_expr(IrExpr::type_op(
+                IrTypeOp::ImplicitCoercion,
+                assertion,
+                Ty::String,
+            ));
             if index == 0 {
                 ir.declaration_result_coercions.insert(coercion);
             }
@@ -435,11 +443,11 @@ mod tests {
             operand: region,
             check: NullCheck::Source,
         });
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: assertion,
-            type_operand: Ty::String,
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            assertion,
+            Ty::String,
+        ));
         ir.declaration_result_coercions.insert(coercion);
         realize_call_result_boundaries(&mut ir);
         assert!(!ir.physical_type(assertion).is_some());
@@ -455,19 +463,15 @@ mod tests {
     ) -> (IrFile, ExprId, ExprId, ExprId) {
         let (mut ir, call) = producer();
         let produced = operand(&mut ir, call);
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: produced,
-            type_operand: Ty::obj("kotlin/CharSequence"),
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            produced,
+            Ty::obj("kotlin/CharSequence"),
+        ));
         if marked {
             ir.declaration_result_coercions.insert(coercion);
         }
-        let test = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::InstanceOf,
-            arg: coercion,
-            type_operand: Ty::String,
-        });
+        let test = ir.add_expr(IrExpr::type_op(IrTypeOp::InstanceOf, coercion, Ty::String));
         realize_call_result_boundaries(&mut ir);
         (ir, call, coercion, test)
     }
@@ -489,16 +493,12 @@ mod tests {
     fn an_unmarked_coercion_keeps_its_semantic_conversion() {
         let (mut ir, call) = producer();
         ir.set_physical_type(call, Ty::obj("kotlin/Any"));
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: call,
-            type_operand: Ty::obj("kotlin/CharSequence"),
-        });
-        let test = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::InstanceOf,
-            arg: coercion,
-            type_operand: Ty::String,
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            call,
+            Ty::obj("kotlin/CharSequence"),
+        ));
+        let test = ir.add_expr(IrExpr::type_op(IrTypeOp::InstanceOf, coercion, Ty::String));
         realize_call_result_boundaries(&mut ir);
         assert_eq!(tested_operand(&ir, test), coercion);
     }

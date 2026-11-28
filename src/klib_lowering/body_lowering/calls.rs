@@ -263,11 +263,11 @@ impl BodyLowering<'_> {
                     "an array factory is called with a dispatch receiver",
                 ))
             }
-            CommonPrimitive::Conversion => self.ir.add_expr(IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::ImplicitCoercion,
-                arg: receiver,
-                type_operand: primitive.ret,
-            }),
+            CommonPrimitive::Conversion => self.ir.add_expr(IrExpr::type_op(
+                crate::ir::IrTypeOp::ImplicitCoercion,
+                receiver,
+                primitive.ret,
+            )),
             // The character at the index, as checked FIR lowers a source `String.get` call.
             CommonPrimitive::StringGet => {
                 let &[index] = operands.args.as_slice() else {
@@ -451,11 +451,11 @@ impl BodyLowering<'_> {
             ));
         };
         let receiver = self.operand(receiver, from)?;
-        Ok(self.ir.add_expr(IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::ImplicitCoercion,
-            arg: receiver,
-            type_operand: to,
-        }))
+        Ok(self.ir.add_expr(IrExpr::type_op(
+            crate::ir::IrTypeOp::ImplicitCoercion,
+            receiver,
+            to,
+        )))
     }
 
     /// A primitive relation over two operands of one primitive type. On `Float` and `Double` that
@@ -1152,11 +1152,11 @@ impl BodyLowering<'_> {
         let read = self.ir.add_expr(IrExpr::GetValue(slot));
         let matches = self.ir.instance_check(false, read, coroutine);
         let read = self.ir.add_expr(IrExpr::GetValue(slot));
-        let receiver = self.ir.add_expr(IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::CastNonNull,
-            arg: read,
-            type_operand: coroutine,
-        });
+        let receiver = self.ir.add_expr(IrExpr::type_op(
+            crate::ir::IrTypeOp::CastNonNull,
+            read,
+            coroutine,
+        ));
         let receiver = self.typed(receiver, coroutine);
         let intercepted_type = linked.ret;
         let intercepted = self.linked_call_with_operands(

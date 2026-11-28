@@ -216,25 +216,25 @@ fn ulong_backend_ir_uses_one_node_carrier() {
     );
 
     let max = ir.add_expr(IrExpr::Const(IrConst::ULong(u64::MAX)));
-    let as_int = ir.add_expr(IrExpr::TypeOp {
-        op: krusty::ir::IrTypeOp::ImplicitCoercion,
-        arg: max,
-        type_operand: Ty::Int,
-    });
+    let as_int = ir.add_expr(IrExpr::type_op(
+        krusty::ir::IrTypeOp::ImplicitCoercion,
+        max,
+        Ty::Int,
+    ));
     add_ir_function(&mut ir, "ulongToInt", as_int, Ty::Int);
     let wrapped = ir.add_expr(IrExpr::Const(IrConst::ULong(0x1_0000_0001)));
-    let as_uint = ir.add_expr(IrExpr::TypeOp {
-        op: krusty::ir::IrTypeOp::ImplicitCoercion,
-        arg: wrapped,
-        type_operand: Ty::UInt,
-    });
+    let as_uint = ir.add_expr(IrExpr::type_op(
+        krusty::ir::IrTypeOp::ImplicitCoercion,
+        wrapped,
+        Ty::UInt,
+    ));
     add_ir_function(&mut ir, "ulongToUInt", as_uint, Ty::UInt);
     let high = ir.add_expr(IrExpr::Const(IrConst::ULong(0x8000_0000_0000_0000)));
-    let as_long = ir.add_expr(IrExpr::TypeOp {
-        op: krusty::ir::IrTypeOp::ImplicitCoercion,
-        arg: high,
-        type_operand: Ty::Long,
-    });
+    let as_long = ir.add_expr(IrExpr::type_op(
+        krusty::ir::IrTypeOp::ImplicitCoercion,
+        high,
+        Ty::Long,
+    ));
     let zero = ir.add_expr(IrExpr::Const(IrConst::Long(0)));
     let long_is_negative = ir.add_expr(IrExpr::PrimitiveBinOp {
         op: IrBinOp::Lt,
@@ -248,25 +248,25 @@ fn ulong_backend_ir_uses_one_node_carrier() {
         Ty::Boolean,
     );
     let code_point = ir.add_expr(IrExpr::Const(IrConst::ULong(65)));
-    let as_char = ir.add_expr(IrExpr::TypeOp {
-        op: krusty::ir::IrTypeOp::ImplicitCoercion,
-        arg: code_point,
-        type_operand: Ty::Char,
-    });
+    let as_char = ir.add_expr(IrExpr::type_op(
+        krusty::ir::IrTypeOp::ImplicitCoercion,
+        code_point,
+        Ty::Char,
+    ));
     add_ir_function(&mut ir, "ulongToChar", as_char, Ty::Char);
     let not_exact_in_float = ir.add_expr(IrExpr::Const(IrConst::ULong(16_777_217)));
-    let as_float = ir.add_expr(IrExpr::TypeOp {
-        op: krusty::ir::IrTypeOp::ImplicitCoercion,
-        arg: not_exact_in_float,
-        type_operand: Ty::Float,
-    });
+    let as_float = ir.add_expr(IrExpr::type_op(
+        krusty::ir::IrTypeOp::ImplicitCoercion,
+        not_exact_in_float,
+        Ty::Float,
+    ));
     add_ir_function(&mut ir, "ulongToFloat", as_float, Ty::Float);
     let five = ir.add_expr(IrExpr::Const(IrConst::Long(5)));
-    let as_ulong = ir.add_expr(IrExpr::TypeOp {
-        op: krusty::ir::IrTypeOp::ImplicitCoercion,
-        arg: five,
-        type_operand: Ty::ULong,
-    });
+    let as_ulong = ir.add_expr(IrExpr::type_op(
+        krusty::ir::IrTypeOp::ImplicitCoercion,
+        five,
+        Ty::ULong,
+    ));
     add_ir_function(&mut ir, "longToULong", as_ulong, Ty::ULong);
 
     let mut js = krusty::js::emit_file(&ir);

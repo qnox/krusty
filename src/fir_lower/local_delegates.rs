@@ -165,11 +165,9 @@ impl BodyLowering<'_> {
         let mut body =
             self.local_delegate_call(declaration, call, delegate, dispatch, arguments, line)?;
         if result != Ty::Unit && call.result.get() != result {
-            body = self.ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: body,
-                type_operand: result,
-            });
+            body = self
+                .ir
+                .add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, body, result));
         }
         let mut parameters = Vec::new();
         let mut identities = Vec::new();

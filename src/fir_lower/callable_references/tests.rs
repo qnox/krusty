@@ -703,6 +703,7 @@ fn a_local_reference_coerces_substituted_arguments_to_declared_slots() {
                 op: IrTypeOp::ImplicitCoercion,
                 arg,
                 type_operand,
+                ..
             } => Some((*arg, *type_operand)),
             _ => None,
         })

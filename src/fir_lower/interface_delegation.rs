@@ -676,11 +676,11 @@ fn delegated_call(
                 .map(|(ordinal, (declared, semantic))| {
                     let value = ir.add_expr(IrExpr::GetValue(ordinal as u32 + 1));
                     if *semantic != declared.get() {
-                        ir.add_expr(IrExpr::TypeOp {
-                            op: IrTypeOp::ImplicitCoercion,
-                            arg: value,
-                            type_operand: declared.get(),
-                        })
+                        ir.add_expr(IrExpr::type_op(
+                            IrTypeOp::ImplicitCoercion,
+                            value,
+                            declared.get(),
+                        ))
                     } else {
                         value
                     }
@@ -775,11 +775,11 @@ fn delegated_call(
     }
     Ok(if physical_result != call.result.get() {
         // The declaration's result read at the forwarder's substitution, as at a source call.
-        let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg: expression,
-            type_operand: call.result.get(),
-        });
+        let coercion = ir.add_expr(IrExpr::type_op(
+            IrTypeOp::ImplicitCoercion,
+            expression,
+            call.result.get(),
+        ));
         ir.declaration_result_coercions.insert(coercion);
         coercion
     } else {

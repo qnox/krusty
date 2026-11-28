@@ -657,11 +657,11 @@ mod tests {
 
         ir.record_inline_copy_owner(frame, 1, None, krusty::fir::SourceFileId::from_raw(1));
         assert!(enters_nested_copied_lambda_frame(&ir, wrapper, wrapper));
-        let coerced = ir.add_expr(IrExpr::TypeOp {
-            op: krusty::ir::IrTypeOp::ImplicitCoercion,
-            arg: wrapper,
-            type_operand: krusty::types::Ty::Unit,
-        });
+        let coerced = ir.add_expr(IrExpr::type_op(
+            krusty::ir::IrTypeOp::ImplicitCoercion,
+            wrapper,
+            krusty::types::Ty::Unit,
+        ));
         assert!(enters_nested_copied_lambda_frame(&ir, wrapper, coerced));
 
         let effect = ir.add_expr(IrExpr::UnitInstance);

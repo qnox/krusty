@@ -91,12 +91,10 @@ pub(super) fn bind_value_when_to_fresh_local(
     // A result coercion belongs on each selected branch, after its suspension resumes.
     let (when_expr, branch_wrap) = match ir.exprs[expression as usize].clone() {
         IrExpr::When { .. } => (expression, None),
-        IrExpr::TypeOp {
-            op,
-            arg,
-            type_operand,
-        } if matches!(ir.exprs[arg as usize], IrExpr::When { .. }) => {
-            (arg, Some(ValueBranchWrap::TypeOp(op, type_operand)))
+        operation @ IrExpr::TypeOp { arg, .. }
+            if matches!(ir.exprs[arg as usize], IrExpr::When { .. }) =>
+        {
+            (arg, Some(ValueBranchWrap::TypeOp(operation)))
         }
         _ => return None,
     };
@@ -155,11 +153,7 @@ pub(super) fn value_when(ir: &IrFile, expression: ExprId) -> Option<ExprId> {
 pub(super) fn normalize_value_when(ir: &mut IrFile, expression: ExprId) -> Option<ExprId> {
     match ir.exprs[expression as usize].clone() {
         IrExpr::When { .. } => Some(expression),
-        IrExpr::TypeOp {
-            op,
-            arg,
-            type_operand,
-        } => {
+        operation @ IrExpr::TypeOp { arg, .. } => {
             let IrExpr::When { branches } = ir.exprs[arg as usize].clone() else {
                 return None;
             };
@@ -167,11 +161,7 @@ pub(super) fn normalize_value_when(ir: &mut IrFile, expression: ExprId) -> Optio
                 .into_iter()
                 .map(|(condition, body)| {
                     let body = if let Some((stmts, value)) = value_block(ir, body) {
-                        let value = ir.add_expr(IrExpr::TypeOp {
-                            op,
-                            arg: value,
-                            type_operand,
-                        });
+                        let value = ir.add_expr(operation.clone().with_arg(value));
                         ir.add_expr(IrExpr::Block {
                             stmts,
                             value: Some(value),
@@ -179,11 +169,7 @@ pub(super) fn normalize_value_when(ir: &mut IrFile, expression: ExprId) -> Optio
                     } else if matches!(ir.exprs[body as usize], IrExpr::Block { value: None, .. }) {
                         body
                     } else {
-                        ir.add_expr(IrExpr::TypeOp {
-                            op,
-                            arg: body,
-                            type_operand,
-                        })
+                        ir.add_expr(operation.clone().with_arg(body))
                     };
                     (condition, body)
                 })

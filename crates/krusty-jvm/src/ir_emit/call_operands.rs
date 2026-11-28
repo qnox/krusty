@@ -196,6 +196,7 @@ impl Emitter<'_> {
                     op: krusty::ir::IrTypeOp::ImplicitCoercion,
                     arg,
                     type_operand,
+                    ..
                 } if target.is_jvm_scalar()
                     && type_operand.is_reference()
                     && self.value_ty(*arg).is_jvm_scalar() =>

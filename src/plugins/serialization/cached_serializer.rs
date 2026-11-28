@@ -180,11 +180,11 @@ pub(super) fn add_companion_cached_serializer(
         dispatch_receiver: Some(acc_call),
         args: vec![],
     });
-    let cast = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: get_value,
-        type_operand: Ty::obj("kotlinx/serialization/KSerializer"),
-    });
+    let cast = ir.add_expr(IrExpr::type_op(
+        IrTypeOp::Cast,
+        get_value,
+        Ty::obj("kotlinx/serialization/KSerializer"),
+    ));
     let sret = ir.add_expr(IrExpr::Return(Some(cast)));
     let cached_body = ir.add_expr(IrExpr::Block {
         stmts: vec![sret],
@@ -315,11 +315,11 @@ pub(super) fn add_polymorphic_serializer(
         polymorphic_serializer(ir, class_name, annotations)
     };
     // kotlinc narrows the initializer's value to the `KSerializer` it returns.
-    let serializer = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: serializer,
-        type_operand: class_ty(super::KSERIALIZER_FQ),
-    });
+    let serializer = ir.add_expr(IrExpr::type_op(
+        IrTypeOp::Cast,
+        serializer,
+        class_ty(super::KSERIALIZER_FQ),
+    ));
     // kotlinc generates the cached serializer after the deserialization constructor, beside the
     // child-serializer cache, so the JVM emits both of its class members with that cache.
     for function in add_companion_cached_serializer(ir, class_id, class_name, serializer) {
@@ -348,11 +348,11 @@ pub(super) fn add_generic_polymorphic_serializer_accessor(
     let serial_info_unsupported = super::annotations::class_has_serial_info(ctx, ir, class_id);
     let annotations = serial_info_annotations(ir, class_name, serial_info_unsupported);
     let serializer = polymorphic_serializer(ir, class_name, annotations);
-    let serializer = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: serializer,
-        type_operand: class_ty(super::KSERIALIZER_FQ),
-    });
+    let serializer = ir.add_expr(IrExpr::type_op(
+        IrTypeOp::Cast,
+        serializer,
+        class_ty(super::KSERIALIZER_FQ),
+    ));
     let ret = ir.add_expr(IrExpr::Return(Some(serializer)));
     let body = ir.add_expr(IrExpr::Block {
         stmts: vec![ret],
@@ -495,11 +495,11 @@ pub(super) fn add_object_serializer(
         dispatch_receiver: Some(read),
         args: vec![],
     });
-    let cast = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: get_value,
-        type_operand: Ty::obj("kotlinx/serialization/KSerializer"),
-    });
+    let cast = ir.add_expr(IrExpr::type_op(
+        IrTypeOp::Cast,
+        get_value,
+        Ty::obj("kotlinx/serialization/KSerializer"),
+    ));
     let cached_ret = ir.add_expr(IrExpr::Return(Some(cast)));
     let cached_body = ir.add_expr(IrExpr::Block {
         stmts: vec![cached_ret],
@@ -558,11 +558,11 @@ pub(super) fn add_object_serializer(
     let serial_info_unsupported = super::annotations::class_has_serial_info(ctx, ir, class_id);
     let serializer = object_serializer(ir, object, name, serial_info_unsupported);
     // kotlinc narrows the initializer's value to the `KSerializer` it returns.
-    let serializer = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: serializer,
-        type_operand: class_ty(super::KSERIALIZER_FQ),
-    });
+    let serializer = ir.add_expr(IrExpr::type_op(
+        IrTypeOp::Cast,
+        serializer,
+        class_ty(super::KSERIALIZER_FQ),
+    ));
     add_cached_serializer_delegate(ir, class_id, object, serializer);
     // An object's delegate is generated storage with no declaration of its own; kotlinc emits it
     // `ACC_SYNTHETIC` (an enum's is an ordinary private field).

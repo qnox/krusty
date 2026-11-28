@@ -210,11 +210,11 @@ fn type_parameter_serializer(ir: &mut IrFile, subclass: TypeName, bound: Ty) -> 
     };
     let annotations = serial_info_annotations(ir, subclass, false);
     let polymorphic = polymorphic_serializer(ir, classifier, annotations);
-    ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: polymorphic,
-        type_operand: class_ty(super::KSERIALIZER_FQ),
-    })
+    ir.add_expr(IrExpr::type_op(
+        IrTypeOp::Cast,
+        polymorphic,
+        class_ty(super::KSERIALIZER_FQ),
+    ))
 }
 
 fn local_class(ir: &IrFile, classifier: TypeName) -> Option<ClassId> {

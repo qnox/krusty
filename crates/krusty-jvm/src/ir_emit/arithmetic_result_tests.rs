@@ -11,11 +11,7 @@ use krusty::types::Ty;
 fn mixed_sum(recorded: bool) -> IrFile {
     let mut ir = IrFile::default();
     let int = ir.add_expr(IrExpr::GetValue(0));
-    let widened = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: int,
-        type_operand: Ty::Long,
-    });
+    let widened = ir.add_expr(IrExpr::type_op(IrTypeOp::ImplicitCoercion, int, Ty::Long));
     let long = ir.add_expr(IrExpr::GetValue(1));
     let sum = if recorded {
         ir.add_arithmetic(IrBinOp::Add, widened, long, Ty::Long)
