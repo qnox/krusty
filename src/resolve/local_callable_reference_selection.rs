@@ -16,6 +16,14 @@ pub(super) struct AdaptedLocalReferenceShape {
     pub(super) bound_contexts: usize,
 }
 
+/// A local function specialized against a contextual callable shape: its parameters and result,
+/// and the call shape its reference adaptation is planned over.
+pub(super) struct SpecializedLocalReference {
+    pub(super) params: Vec<Ty>,
+    pub(super) ret: Ty,
+    pub(super) call_sig: CallSig,
+}
+
 impl Checker<'_> {
     /// Semantic callable shape of a local function reference. The lifted method signature keeps
     /// erased JVM parameter/return types in `params`/`ret`; source generic types live in
@@ -53,16 +61,21 @@ impl Checker<'_> {
         expected_params: &[Ty],
         expected_ret: Ty,
         bound_contexts: usize,
-    ) -> Option<(Vec<Ty>, Ty)> {
-        let Some(generic) = signature.generic_sig.as_ref() else {
-            return Some(Self::local_function_reference_shape(signature, receiver));
-        };
-        let call_sig = CallSig {
+    ) -> Option<SpecializedLocalReference> {
+        let mut call_sig = CallSig {
             param_defaults: signature.param_defaults,
             required: signature.required,
             vararg: signature.vararg(),
             vararg_index: signature.vararg_index,
             ..CallSig::default()
+        };
+        let Some(generic) = signature.generic_sig.as_ref() else {
+            let (params, ret) = Self::local_function_reference_shape(signature, receiver);
+            return Some(SpecializedLocalReference {
+                params,
+                ret,
+                call_sig,
+            });
         };
         let source = self.fed_source();
         let specialized = callable_reference_selection::specialize_generic_signature(
@@ -80,7 +93,12 @@ impl Checker<'_> {
             |actual, bound| self.generic_bound_admits(actual, bound),
         )
         .ok()?;
-        Some((specialized.params, specialized.ret))
+        call_sig.vararg_element_mapped_whole = specialized.vararg_element_mapped_whole;
+        Some(SpecializedLocalReference {
+            params: specialized.params,
+            ret: specialized.ret,
+            call_sig,
+        })
     }
 
     /// How many leading context parameters a reference to a local function fills from its own
@@ -104,20 +122,17 @@ impl Checker<'_> {
         expected: &crate::types::FnSig,
     ) -> Option<AdaptedLocalReferenceShape> {
         let bound_contexts = self.local_reference_bound_contexts(signature);
-        let (params, ret) = self.contextual_local_function_reference_shape(
+        let SpecializedLocalReference {
+            params,
+            ret,
+            call_sig,
+        } = self.contextual_local_function_reference_shape(
             signature,
             None,
             &expected.params,
             expected.ret,
             bound_contexts,
         )?;
-        let call_sig = CallSig {
-            param_defaults: signature.param_defaults,
-            required: signature.required,
-            vararg: signature.vararg(),
-            vararg_index: signature.vararg_index,
-            ..CallSig::default()
-        };
         let plan = extension_reference_selection::checked_parameter_plan(
             &params,
             &call_sig,

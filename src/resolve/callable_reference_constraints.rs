@@ -32,13 +32,10 @@ impl Checker<'_> {
                 AdaptedRefArgument::Vararg {
                     values,
                     whole_array,
+                    ..
                 } => (
                     values.as_slice(),
-                    if *whole_array {
-                        parameter
-                    } else {
-                        parameter.array_read_elem().unwrap_or(parameter)
-                    },
+                    super::callable_reference_selection::vararg_input_type(parameter, *whole_array),
                 ),
                 AdaptedRefArgument::Context | AdaptedRefArgument::Default => continue,
             };

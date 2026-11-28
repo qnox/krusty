@@ -863,6 +863,13 @@ pub enum FirAdaptedReferenceArgument {
     Vararg {
         values: Box<[u32]>,
         whole_array: bool,
+        /// The checker's record that kotlinc mapped the single collected input as the whole array
+        /// before binding the vararg's element type to it (KT-90169). The input is still
+        /// collected, but the reference reports no vararg conversion.
+        mapped_whole: bool,
+        /// The declaration's vararg parameter type under the reference's specialization, which a
+        /// collected vararg is built as.
+        array_type: ResolvedTy,
     },
 }
 
@@ -874,6 +881,23 @@ pub struct FirReferenceAdaptation {
     pub parameter_types: Box<[ResolvedTy]>,
     pub result_type: ResolvedTy,
     pub suspend_conversion: bool,
+}
+
+impl FirReferenceAdaptation {
+    /// Whether the reference reports a vararg conversion: it collects inputs into a vararg that
+    /// kotlinc's argument mapping did not take as the whole array.
+    pub fn vararg_conversion(&self) -> bool {
+        self.arguments.iter().any(|argument| {
+            matches!(
+                argument,
+                FirAdaptedReferenceArgument::Vararg {
+                    whole_array: false,
+                    mapped_whole: false,
+                    ..
+                }
+            )
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -184,6 +184,7 @@ impl BodyLowering<'_> {
                         FirAdaptedReferenceArgument::Vararg {
                             values,
                             whole_array,
+                            ..
                         } => {
                             let mut elements = Vec::with_capacity(values.len());
                             for source in values.iter().copied() {

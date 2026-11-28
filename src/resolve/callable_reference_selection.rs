@@ -15,6 +15,14 @@ pub enum AdaptedRefArgument {
     Vararg {
         values: Vec<usize>,
         whole_array: bool,
+        /// The single collected input is one kotlinc mapped as the whole array
+        /// ([`CallSig::vararg_element_mapped_whole`]), so the reference reports no vararg
+        /// conversion although it collects the input.
+        mapped_whole: bool,
+        /// The declaration's vararg parameter type after the reference's specialization, which
+        /// a collected vararg is built as (`Array<out String>` for `vararg xs: E` with `E :=
+        /// String`).
+        array: Ty,
     },
 }
 
@@ -25,6 +33,16 @@ pub(super) struct AdaptedReferenceSpecificity<'a> {
     pub(super) parameters: &'a [Ty],
     pub(super) plan: &'a [AdaptedRefArgument],
     pub(super) is_vararg: bool,
+}
+
+/// The type each input mapped onto a vararg of type `declared` must supply: the whole array, or
+/// one element read from it.
+pub(super) fn vararg_input_type(declared: Ty, whole_array: bool) -> Ty {
+    if whole_array {
+        declared
+    } else {
+        declared.array_read_elem().unwrap_or(declared)
+    }
 }
 
 /// Select the undominated adapted declarations, independently of where a provider found them.
@@ -111,6 +129,7 @@ fn adaptation_specificity_shape(params: &[Ty], plan: &[AdaptedRefArgument]) -> V
             AdaptedRefArgument::Vararg {
                 values,
                 whole_array: true,
+                ..
             } => {
                 if !values.is_empty() {
                     shape.push(declared);
@@ -136,6 +155,8 @@ pub(super) struct SpecializedGenericCallableReference {
     pub(super) receiver: Option<Ty>,
     pub(super) params: Vec<Ty>,
     pub(super) ret: Ty,
+    /// [`CallSig::vararg_element_mapped_whole`] of the specialized declaration.
+    pub(super) vararg_element_mapped_whole: bool,
     /// Final arguments in declaration-formal order. Selection owns inference; checked FIR merely
     /// publishes these bindings and lowering consumes them without reconstructing specialization
     /// from the adapted function shape.
@@ -411,6 +432,30 @@ fn input_supplies_whole_vararg(
         && same_array_classifier(actual, declared)
 }
 
+/// Whether kotlinc maps the expected input at `index` onto a vararg `declared` as its whole array
+/// before [`Quirk::VarargReferenceTakesTypeVariableInputAsElement`] (KT-90169) binds the vararg's
+/// element type to that input. kotlinc's mapping takes any array, primitive arrays included, whole
+/// when the vararg's element is the declaration's own type variable (`vararg xs: E` or `E?`); the
+/// adapter still collects the input as one element, but reflection reports no vararg conversion.
+/// An element that only mentions a type variable (`vararg xs: Array<E>`) or names none is mapped
+/// element-wise, as on later releases.
+///
+/// [`Quirk::VarargReferenceTakesTypeVariableInputAsElement`]: crate::kotlin_version::Quirk::VarargReferenceTakesTypeVariableInputAsElement
+fn element_input_mapped_whole(
+    quirks: crate::kotlin_version::Quirks,
+    inputs: TypeVariableInputs,
+    index: usize,
+    actual: Ty,
+    declared: Ty,
+) -> bool {
+    inputs.has(index)
+        && quirks.has(crate::kotlin_version::Quirk::VarargReferenceTakesTypeVariableInputAsElement)
+        && actual.non_null().is_array()
+        && declared
+            .array_read_elem()
+            .is_some_and(|element| matches!(element.non_null().kind(), TyKind::TyParam(..)))
+}
+
 pub(super) fn specialize_generic_signature(
     source: &dyn SymbolSource,
     generic: &crate::libraries::GenericSig,
@@ -427,6 +472,7 @@ pub(super) fn specialize_generic_signature(
         quirks,
     } = expectation;
     let mut bindings = crate::symbol_resolver::GSigBinds::default();
+    let mut element_mapped_whole = false;
     if let (Some(declared), Some(actual)) = (generic.receiver, extension_receiver) {
         let mut inferred = crate::symbol_resolver::GSigBinds::default();
         crate::symbol_resolver::unify_ty_from_symbols(source, declared, actual, &mut inferred);
@@ -436,24 +482,22 @@ pub(super) fn specialize_generic_signature(
         let vararg = call_sig.vararg_index;
         // A whole array is the vararg's single input. When it is the last expected input, any
         // parameters after the vararg take their defaults (`vararg xs: E, k: Int = 0`).
-        let whole_vararg = vararg.is_some_and(|index| {
-            index
-                .checked_sub(bound_contexts)
-                .is_some_and(|expected_index| {
-                    expected.len() == expected_index + 1
-                        && expected
-                            .get(expected_index)
-                            .zip(generic.params.get(index))
-                            .is_some_and(|(&actual, &declared)| {
-                                input_supplies_whole_vararg(
-                                    quirks,
-                                    type_variable_inputs,
-                                    expected_index,
-                                    actual,
-                                    declared,
-                                )
-                            })
-                })
+        let last_vararg_input = vararg.and_then(|index| {
+            let expected_index = index.checked_sub(bound_contexts)?;
+            if expected.len() != expected_index + 1 {
+                return None;
+            }
+            Some((
+                expected_index,
+                *expected.get(expected_index)?,
+                *generic.params.get(index)?,
+            ))
+        });
+        let whole_vararg = last_vararg_input.is_some_and(|(index, actual, declared)| {
+            input_supplies_whole_vararg(quirks, type_variable_inputs, index, actual, declared)
+        });
+        element_mapped_whole = last_vararg_input.is_some_and(|(index, actual, declared)| {
+            element_input_mapped_whole(quirks, type_variable_inputs, index, actual, declared)
         });
         let actuals = expected
             .iter()
@@ -535,6 +579,7 @@ pub(super) fn specialize_generic_signature(
     Ok(SpecializedGenericCallableReference {
         receiver: specialized_receiver,
         params: values,
+        vararg_element_mapped_whole: element_mapped_whole,
         ret: crate::symbol_resolver::specialize_signature_output_type(
             source,
             generic.ret,
@@ -578,6 +623,7 @@ pub(super) fn specialize_candidate_with_type_arguments(
         specialized.params
     };
     function.callable.ret = specialized.ret;
+    function.call_sig.vararg_element_mapped_whole = specialized.vararg_element_mapped_whole;
     function.generic_sig = None;
     Ok(type_arguments)
 }
@@ -687,12 +733,9 @@ pub(super) fn inputs_agree_with_result(
             AdaptedRefArgument::Vararg {
                 values,
                 whole_array,
+                ..
             } => {
-                let declared = if *whole_array {
-                    declared
-                } else {
-                    declared.array_read_elem().unwrap_or(declared)
-                };
+                let declared = vararg_input_type(declared, *whole_array);
                 values.iter().all(|value| {
                     expected
                         .params
@@ -738,14 +781,9 @@ pub(super) fn realize_expected_shape(
             AdaptedRefArgument::Vararg {
                 values,
                 whole_array,
+                ..
             } => {
-                let parameter = if *whole_array {
-                    target_parameter
-                } else {
-                    target_parameter
-                        .array_read_elem()
-                        .unwrap_or(target_parameter)
-                };
+                let parameter = vararg_input_type(target_parameter, *whole_array);
                 for value in values {
                     if let Some(expected_parameter) = parameters.get_mut(*value) {
                         *expected_parameter = specialize_occurrence(*expected_parameter, parameter);
@@ -838,6 +876,8 @@ pub(super) fn parameter_plan(
                 out.push(AdaptedRefArgument::Vararg {
                     values: vec![value],
                     whole_array: true,
+                    mapped_whole: false,
+                    array,
                 });
                 if map_from(
                     params,
@@ -863,6 +903,10 @@ pub(super) fn parameter_plan(
                 out.push(AdaptedRefArgument::Vararg {
                     values: (value..value + count).collect(),
                     whole_array: false,
+                    mapped_whole: call_sig.vararg_element_mapped_whole
+                        && count == 1
+                        && value + 1 == expected_params.len(),
+                    array,
                 });
                 if map_from(
                     params,
@@ -883,6 +927,8 @@ pub(super) fn parameter_plan(
                 out.push(AdaptedRefArgument::Vararg {
                     values: Vec::new(),
                     whole_array: false,
+                    mapped_whole: false,
+                    array,
                 });
             }
             if map_from(
@@ -1281,6 +1327,52 @@ mod tests {
                 declared
             ));
         }
+    }
+
+    #[test]
+    fn an_array_type_variable_input_maps_whole_onto_a_type_variable_element_under_the_quirk() {
+        let quirk = Quirk::VarargReferenceTakesTypeVariableInputAsElement;
+        let with = Quirks::NONE.with(quirk, true);
+        let element = formal("ref:E");
+        let vararg_of = |element| Ty::array(Ty::out_projection(element));
+        let from_variable = TypeVariableInputs(1);
+        let mapped = |quirks, inputs, actual, declared| {
+            element_input_mapped_whole(quirks, inputs, 0, actual, declared)
+        };
+        let strings = Ty::array(Ty::String);
+        let ints = Ty::obj("kotlin/IntArray");
+        // Any array, primitive arrays and a nullable input included, against `E` or `E?`.
+        for actual in [strings, ints, Ty::nullable(strings)] {
+            assert!(mapped(with, from_variable, actual, vararg_of(element)));
+            assert!(mapped(
+                with,
+                from_variable,
+                actual,
+                vararg_of(Ty::nullable(element))
+            ));
+        }
+        // Not without the quirk, for a concrete input, a non-array input, or an element that only
+        // mentions the type variable or names none.
+        assert!(!mapped(
+            Quirks::NONE,
+            from_variable,
+            strings,
+            vararg_of(element)
+        ));
+        assert!(!mapped(
+            with,
+            TypeVariableInputs::NONE,
+            strings,
+            vararg_of(element)
+        ));
+        assert!(!mapped(with, from_variable, Ty::String, vararg_of(element)));
+        assert!(!mapped(
+            with,
+            from_variable,
+            strings,
+            vararg_of(Ty::array(element))
+        ));
+        assert!(!mapped(with, from_variable, strings, vararg_of(strings)));
     }
 
     #[test]

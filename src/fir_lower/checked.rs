@@ -467,6 +467,7 @@ impl BodyLowering<'_> {
                     crate::fir::FirAdaptedReferenceArgument::Vararg {
                         values,
                         whole_array,
+                        ..
                     } => {
                         let array_type = signature_parameters[parameter as usize];
                         let element_type = if *whole_array {

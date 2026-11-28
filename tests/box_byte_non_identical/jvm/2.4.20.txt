@@ -2123,7 +2123,6 @@ regressions/functionLiteralAsLastExpressionInBlock.kt
 regressions/functionTypeMemberInvoke.kt
 regressions/generatedValueClassMembers.kt
 regressions/genericExtensionPropertyLosesToConcrete.kt
-regressions/genericVarargReferenceArrayKinds.kt
 regressions/hashCodeNPE.kt
 regressions/immediateFunctionLiteralOperands.kt
 regressions/immediateLambdaEscapingOperands.kt
@@ -2279,7 +2278,6 @@ regressions/valueClassMemberCallBoundaries.kt
 regressions/valueClassNullableNestedToString.kt
 regressions/valueClassWritableComputedProperty.kt
 regressions/valueClassWritablePropertyAcrossFiles.kt
-regressions/varargReferenceTypeVariableInput.kt
 regressions/wasmClassLiterals.kt
 regressions/wasmErasedAnyToString.kt
 reified/arraysReification/jaggedArray.kt
