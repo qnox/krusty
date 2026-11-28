@@ -1848,6 +1848,9 @@ pub struct File {
     /// `__`). Such a name is reserved: kotlinc reports its use once the reference resolves, so the
     /// checker consults this syntax fact rather than re-reading the spelling.
     pub unescaped_underscore_names: crate::fx_hash::HashSet<u32>,
+    /// Start offset of each name written as underscores only and without back-ticks where the parser
+    /// expected a name to declare. The checker reports such a declaration as reserved.
+    pub unescaped_underscore_declarations: crate::fx_hash::HashSet<u32>,
     /// The EXPLICIT label a lambda literal was written with (`list.forEach outer@{ … }`), keyed by the
     /// lambda's `ExprId.0`. A labelled lambda REPLACES the implicit label (the callee's name) a
     /// `return@name` inside it targets, so the splicer must register `outer`, not `forEach`. Absent ⇒

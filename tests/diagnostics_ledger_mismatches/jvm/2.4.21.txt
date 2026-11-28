@@ -4662,7 +4662,6 @@ compiler/testData/diagnostics/tests/platformTypes/genericVarianceViolation/smart
 compiler/testData/diagnostics/tests/platformTypes/genericVarianceViolation/strangeVariance.kt
 compiler/testData/diagnostics/tests/platformTypes/genericVarianceViolation/valueFromJava.kt
 compiler/testData/diagnostics/tests/platformTypes/getParentOfType.kt
-compiler/testData/diagnostics/tests/platformTypes/intVsIntegerAmbiguity.kt
 compiler/testData/diagnostics/tests/platformTypes/javaMappedCtors.kt
 compiler/testData/diagnostics/tests/platformTypes/mappingWithWrongNullability.kt
 compiler/testData/diagnostics/tests/platformTypes/mappingWithWrongNullabilityLegacy.kt
@@ -5157,7 +5156,6 @@ compiler/testData/diagnostics/tests/resolve/priority/kt10219.kt
 compiler/testData/diagnostics/tests/resolve/priority/kt9965.kt
 compiler/testData/diagnostics/tests/resolve/priority/memberVsLocalExt.kt
 compiler/testData/diagnostics/tests/resolve/priority/samConstructorVsFunction.kt
-compiler/testData/diagnostics/tests/resolve/priority/staticVsImplicitReceiverMember.kt
 compiler/testData/diagnostics/tests/resolve/priority/synthesizedMembersVsExtension.kt
 compiler/testData/diagnostics/tests/resolve/priority/synthesizedMembersVsExtensionOld.kt
 compiler/testData/diagnostics/tests/resolve/privateConstructorVsInapplicableTopLevel.kt
