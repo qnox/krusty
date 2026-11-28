@@ -40,9 +40,8 @@ use type_use_annotations::HeaderTypeUseAnnotationArena;
 pub(crate) use visibility_suppressions::HeaderVisibilitySuppressionApplication;
 use visibility_suppressions::HeaderVisibilitySuppressionArena;
 
-mod actualization;
+pub(super) mod actualization;
 
-pub(crate) use actualization::InheritedDependencyMember;
 pub use actualization::{
     actualization, actualized_declaration_pairs, matched_expect_declarations, Actualization,
     ActualizationTypeBindings, ActualizedDeclarationPair, UnactualizedMembers,

@@ -25,6 +25,9 @@ struct Args<'a> {
     /// of its own: `expect`/`actual` outside one is rejected at the modifier by both compilers,
     /// and this check must not pile a second sentence on top of that.
     multiplatform: bool,
+    /// Compare each message with the listing under its first line. The sentences kotlinc lists
+    /// there are asserted only by the tests that ask for them.
+    full_messages: bool,
 }
 
 /// Run both compilers over the files already written into `dir` and return both complete ledgers.
@@ -83,7 +86,54 @@ fn both_reports(
         "the compilers disagree on whether this source is rejected\nreference:\n{reference}\nkrusty:\n{krusty}"
     );
 
-    (common::reported(&reference), common::reported(&krusty))
+    if args.full_messages {
+        (complete(&reference), complete(&krusty))
+    } else {
+        (common::reported(&reference), common::reported(&krusty))
+    }
+}
+
+/// The ledger of `report` with each message in full. `common::reported` keeps only an error's
+/// first line; this diagnostic's substance is the listing under it, so the lines that follow an
+/// error up to the next report line are part of its message. The reference compiler's echo of the
+/// source line and its caret marker are rendering, not message, and are dropped.
+fn complete(report: &str) -> Vec<Reported> {
+    let mut ledger = common::reported(report);
+    let lines: Vec<&str> = report.lines().collect();
+    let starts = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(": error: "))
+        .map(|(at, _)| at)
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), ledger.len());
+    for (entry, start) in ledger.iter_mut().zip(&starts) {
+        let mut block: Vec<&str> = lines[start + 1..]
+            .iter()
+            .take_while(|line| {
+                !line.contains(": error: ")
+                    && !line.contains(": warning: ")
+                    && !line.starts_with("krusty:")
+            })
+            .copied()
+            .collect();
+        while block.last().is_some_and(|line| line.trim().is_empty()) {
+            block.pop();
+        }
+        let is_caret =
+            |line: &str| !line.trim().is_empty() && line.chars().all(|c| c == '^' || c == ' ');
+        if block.last().is_some_and(|line| is_caret(line)) {
+            block.truncate(block.len().saturating_sub(2));
+        }
+        while block.last().is_some_and(|line| line.trim().is_empty()) {
+            block.pop();
+        }
+        for line in block {
+            entry.rendered.push('\n');
+            entry.rendered.push_str(line);
+        }
+    }
+    ledger
 }
 
 /// Compile one single-file `source` with both compilers and return both complete ledgers.
@@ -98,6 +148,7 @@ fn both(source: &str, stem: &str) -> (Vec<Reported>, Vec<Reported>) {
             sources: std::slice::from_ref(&file),
             reference: &[],
             multiplatform: true,
+            full_messages: false,
         },
     )
 }
@@ -112,6 +163,24 @@ fn both_split(
     stem: &str,
     common: &[(&str, &str)],
     platform: &[(&str, &str)],
+) -> (Vec<Reported>, Vec<Reported>) {
+    split_reports(stem, common, platform, false)
+}
+
+/// `both_split`, comparing every message together with the listing under its first line.
+fn both_split_full(
+    stem: &str,
+    common: &[(&str, &str)],
+    platform: &[(&str, &str)],
+) -> (Vec<Reported>, Vec<Reported>) {
+    split_reports(stem, common, platform, true)
+}
+
+fn split_reports(
+    stem: &str,
+    common: &[(&str, &str)],
+    platform: &[(&str, &str)],
+    full_messages: bool,
 ) -> (Vec<Reported>, Vec<Reported>) {
     let dir = common::scratch_dir().expect("scratch dir");
     let write = |files: &[(&str, &str)]| {
@@ -142,6 +211,7 @@ fn both_split(
             sources: &sources,
             reference: &["-Xexpect-actual-classes", &common_sources],
             multiplatform: true,
+            full_messages,
         },
     )
 }
@@ -477,6 +547,7 @@ fn the_check_needs_the_multiplatform_feature() {
             sources: std::slice::from_ref(&file),
             reference: &[],
             multiplatform: false,
+            full_messages: false,
         },
     );
     assert_eq!(krusty, reference, "the complete ledgers must agree");
@@ -1938,6 +2009,125 @@ actual typealias Unsigned = UInt
         "alias_inline_member",
         &[("Common.kt", common_source)],
         &[("Platform.kt", platform)],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}
+
+/// The same listing when the alias target's candidates differ in the number of value parameters.
+#[test]
+fn an_actual_typealias_lists_candidates_with_another_parameter_count() {
+    let java = "\
+public class Target {
+    public int count(int a, int b) {
+        return 1;
+    }
+}
+";
+    let (reference, krusty) = both_split_full(
+        "alias_dependency_candidate_count",
+        &[(
+            "Common.kt",
+            "expect class Counter {\n    fun count(a: Int): Int\n}\n",
+        )],
+        &[
+            ("Target.java", java),
+            ("Platform.kt", "actual typealias Counter = Target\n"),
+        ],
+    );
+    assert_eq!(reference.len(), 1, "{reference:#?}");
+    assert_eq!(krusty, reference);
+}
+
+/// An `expect` function answered by a property of the target.
+#[test]
+fn an_actual_typealias_lists_a_property_that_answers_an_expect_function() {
+    let (reference, krusty) = both_split_full(
+        "alias_dependency_candidate_property",
+        &[(
+            "Common.kt",
+            "expect class Pattern {\n    fun pattern(): String\n}\n",
+        )],
+        &[("Platform.kt", "actual typealias Pattern = Regex\n")],
+    );
+    assert_eq!(reference.len(), 1, "{reference:#?}");
+    assert_eq!(krusty, reference);
+}
+
+/// An alias to a dependency class lists, beneath each `expect` member it owes, the target's
+/// same-named members that cannot implement it, grouped by why. The reference compiler names the
+/// declarations whose parameter types differ (a Java platform type keeps its `!`), the singular
+/// or plural header following their number, and an `expect` member with none lists nothing.
+#[test]
+fn an_actual_typealias_lists_the_dependency_members_that_are_incompatible() {
+    let common_source = "\
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
+
+@OptIn(ExperimentalAtomicApi::class)
+expect class Counter {
+    fun test(a: AtomicInt): AtomicInt
+    fun pair(a: Int): Int
+    fun none(a: Int): Int
+}
+";
+    let java = "\
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Target {
+    public AtomicInteger test(AtomicInteger i) {
+        return i;
+    }
+    public int pair(String s) {
+        return 1;
+    }
+    public int pair(Long l) {
+        return 1;
+    }
+}
+";
+    let (reference, krusty) = both_split_full(
+        "alias_dependency_candidates",
+        &[("Common.kt", common_source)],
+        &[
+            ("Target.java", java),
+            ("Platform.kt", "actual typealias Counter = Target\n"),
+        ],
+    );
+    assert_eq!(
+        reference.len(),
+        1,
+        "the reference compiler names the alias once: {reference:#?}"
+    );
+    assert_eq!(krusty, reference);
+}
+/// Java primitives discharge the `expect` members they implement: an alias to a JDK class or to a
+/// Java source class whose methods take and return `int` answers `Int` members, and the reference
+/// compiler reports nothing.
+#[test]
+fn an_actual_typealias_to_java_primitive_members_is_silent() {
+    let java = "\
+public class Target {
+    public int twice(int value) {
+        return value * 2;
+    }
+}
+";
+    let (reference, krusty) = both_split_full(
+        "alias_java_primitive_members",
+        &[(
+            "Common.kt",
+            "expect class Doubler {\n    fun twice(value: Int): Int\n}\n\
+             expect class Counter {\n    fun addAndGet(delta: Int): Int\n    fun get(): Int\n}\n",
+        )],
+        &[
+            ("Target.java", java),
+            (
+                "Platform.kt",
+                "actual typealias Doubler = Target\n\
+                 actual typealias Counter = java.util.concurrent.atomic.AtomicInteger\n",
+            ),
+        ],
     );
     assert_eq!(reference, Vec::new(), "the reference compiler is silent");
     assert_eq!(krusty, reference);

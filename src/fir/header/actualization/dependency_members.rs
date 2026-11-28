@@ -21,6 +21,9 @@ pub struct InheritedDependencyMember {
     pub(crate) name: String,
     /// The value parameters of a function; empty for a property.
     pub(crate) parameters: Box<[Ty]>,
+    /// The names of those parameters, as the declaring class wrote them. Empty when the provider
+    /// published none.
+    pub(crate) parameter_names: Box<[String]>,
     /// The declared result of a function, or the type of a property.
     pub(crate) result: Ty,
     /// A property declared `var`; always false for a function.
@@ -30,6 +33,127 @@ pub struct InheritedDependencyMember {
     pub(crate) operator: bool,
     pub(crate) infix: bool,
     pub(crate) inline: bool,
+    /// The record states the member completely: no receiver, context parameter, type parameter,
+    /// `vararg` or modifier it cannot carry. Only a plain member can implement an `expect` member,
+    /// and only a plain one can be rendered as a candidate that did not.
+    pub(crate) plain: bool,
+}
+
+/// Why a same-named member of the actual scope does not implement an `expect` member, as the
+/// reference compiler groups the candidates it lists.
+///
+/// Only the reasons measured against it are named; any other disagreement is `Unmeasured`, which
+/// the report refuses to render rather than guess a sentence for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IncompatibilityReason {
+    /// The same number of value parameters, at least one of a different type.
+    ParameterTypes,
+    ValueParameterCount,
+    /// An `expect` function answered by a property.
+    FunctionVersusProperty,
+    Unmeasured,
+}
+
+/// A member of the actual scope that shares an `expect` member's name and implements it by none of
+/// its facts.
+#[derive(Clone, Debug)]
+pub struct IncompatibleCandidate {
+    pub reason: IncompatibilityReason,
+    pub member: InheritedDependencyMember,
+}
+
+/// The members, in the order the hierarchy published them, that carry `expect`'s name but do not
+/// implement it, each with why.
+pub(super) fn incompatible_candidates<'a>(
+    headers: &StreamedHeaderModule,
+    bindings: &ActualizationTypeBindings,
+    actualized_aliases: &[(crate::types::TypeName, HeaderTypeId, SourceFileId)],
+    expect: &DeclarationStub,
+    name: &str,
+    members: impl Iterator<Item = &'a InheritedDependencyMember>,
+) -> Vec<IncompatibleCandidate> {
+    members
+        .filter(|member| {
+            let same_kind = if expect.kind == DeclarationKind::Constructor {
+                member.kind == DeclarationKind::Constructor
+            } else {
+                member.kind != DeclarationKind::Constructor && member.name == name
+            };
+            same_kind && !implements(headers, bindings, actualized_aliases, expect, name, member)
+        })
+        .map(|member| IncompatibleCandidate {
+            reason: reason(headers, bindings, actualized_aliases, expect, member),
+            member: member.clone(),
+        })
+        .collect()
+}
+
+fn reason(
+    headers: &StreamedHeaderModule,
+    bindings: &ActualizationTypeBindings,
+    actualized_aliases: &[(crate::types::TypeName, HeaderTypeId, SourceFileId)],
+    expect: &DeclarationStub,
+    member: &InheritedDependencyMember,
+) -> IncompatibilityReason {
+    use IncompatibilityReason::{
+        FunctionVersusProperty, ParameterTypes, Unmeasured, ValueParameterCount,
+    };
+    let parameters = match headers
+        .syntax
+        .declaration(expect.id)
+        .map(|value| value.kind)
+    {
+        Some(HeaderDeclarationKind::Callable {
+            receiver: None,
+            parameters,
+            type_parameters,
+            context_count: 0,
+            ..
+        }) if headers.syntax.type_parameters(type_parameters).is_empty() => {
+            headers.syntax.parameters(parameters)
+        }
+        Some(HeaderDeclarationKind::Constructor {
+            context_parameters,
+            parameters,
+        }) if headers.syntax.parameters(context_parameters).is_empty() => {
+            headers.syntax.parameters(parameters)
+        }
+        _ => return Unmeasured,
+    };
+    if !member.plain || carries_unprojected_modifier(expect) {
+        return Unmeasured;
+    }
+    match (expect.kind, member.kind) {
+        (DeclarationKind::Function, DeclarationKind::Property) => FunctionVersusProperty,
+        (DeclarationKind::Function, DeclarationKind::Function)
+        | (DeclarationKind::Constructor, DeclarationKind::Constructor) => {
+            if parameters.len() != member.parameters.len() {
+                return ValueParameterCount;
+            }
+            let compared = parameters
+                .iter()
+                .zip(&member.parameters)
+                .map(|(parameter, inherited)| {
+                    if parameter.flags.is_vararg() {
+                        return None;
+                    }
+                    compare_type(
+                        headers,
+                        bindings,
+                        actualized_aliases,
+                        expect.source,
+                        parameter.ty,
+                        *inherited,
+                    )
+                })
+                .collect::<Option<Vec<_>>>();
+            match compared {
+                Some(compared) if compared.contains(&false) => ParameterTypes,
+                _ => Unmeasured,
+            }
+        }
+        _ => Unmeasured,
+    }
 }
 
 /// The inherited members, of the one name `name`, that implement `expect`.
@@ -62,7 +186,8 @@ fn implements(
 ) -> bool {
     // A constructor is named by its class, not by a member name the record keeps.
     let named_alike = expect.kind == DeclarationKind::Constructor || member.name == name;
-    if member.kind != expect.kind
+    if !member.plain
+        || member.kind != expect.kind
         || !named_alike
         || carries_unprojected_modifier(expect)
         || !states_expected_modifiers(expect, member)
@@ -200,35 +325,51 @@ fn type_matches(
     expect: HeaderTypeId,
     inherited: Ty,
 ) -> bool {
-    let Some(ty) = headers.syntax.ty(expect) else {
-        return false;
-    };
+    compare_type(
+        headers,
+        bindings,
+        actualized_aliases,
+        source,
+        expect,
+        inherited,
+    ) == Some(true)
+}
+
+/// [`type_matches`], or `None` where the two types cannot be compared by classifier identity: a
+/// written type with arguments or an unbound spelling, or an inherited one that is not a plain
+/// class or builtin scalar.
+fn compare_type(
+    headers: &StreamedHeaderModule,
+    bindings: &ActualizationTypeBindings,
+    actualized_aliases: &[(crate::types::TypeName, HeaderTypeId, SourceFileId)],
+    source: SourceFileId,
+    expect: HeaderTypeId,
+    inherited: Ty,
+) -> Option<bool> {
+    let ty = headers.syntax.ty(expect)?;
     let HeaderTypeKind::Classifier { detail, .. } = ty.kind else {
-        return false;
+        return None;
     };
-    let Some(detail) = headers.syntax.classifier_type(detail) else {
-        return false;
-    };
-    if !headers.syntax.type_operands(detail.arguments).is_empty()
-        || ty.flags.definitely_non_null()
-        || ty.flags.nullable() != inherited.is_nullable()
+    let detail = headers.syntax.classifier_type(detail)?;
+    if !headers.syntax.type_operands(detail.arguments).is_empty() || ty.flags.definitely_non_null()
     {
-        return false;
+        return None;
     }
-    let Some(mut classifier) = bindings.type_classifier(source, expect) else {
-        return false;
-    };
+    let mut classifier = bindings.type_classifier(source, expect)?;
     let mut aliases = actualized_aliases
         .iter()
         .filter(|(name, _, _)| *name == classifier);
     if let (Some((_, target, alias_source)), None) = (aliases.next(), aliases.next()) {
-        let Some(target) = bindings.type_classifier(*alias_source, *target) else {
-            return false;
-        };
-        classifier = target;
+        classifier = bindings.type_classifier(*alias_source, *target)?;
     }
-    let TyKind::Obj(inherited, arguments) = inherited.non_null().kind() else {
-        return false;
+    let plain = |ty: Ty| {
+        ty.is_builtin_scalar()
+            || matches!(ty.kind(), TyKind::Obj(_, arguments) if arguments.is_empty())
     };
-    arguments.is_empty() && classifier == inherited
+    let expected = Ty::obj_name(classifier).canonical_semantic();
+    let inherited_class = inherited.non_null().canonical_semantic();
+    if !plain(expected) || !plain(inherited_class) {
+        return None;
+    }
+    Some(ty.flags.nullable() == inherited.is_nullable() && expected == inherited_class)
 }
