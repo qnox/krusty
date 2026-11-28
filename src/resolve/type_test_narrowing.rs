@@ -78,6 +78,20 @@ impl Checker<'_> {
                 }
                 None => false,
             };
+        // kotlinc's data flow carries only nullability from a cast back to its operand: a
+        // non-null test of `x as T` proves `x` non-null, never a `T` (`(a as Any) is B` leaves
+        // `a` an `A`), while `x as? T` is a test of `x` itself (`safe_cast_type_test`).
+        if matches!(
+            self.file.expr(operand),
+            Expr::As {
+                nullable: false,
+                ..
+            }
+        ) {
+            narrowed = stable_ty
+                .filter(|stable| !nullable && stable.is_nullable())
+                .map(Ty::non_null);
+        }
         if stable_ty.is_none() && !closure_stable {
             crate::trace_compiler!(
                 "smartcast",

@@ -2213,7 +2213,6 @@ regressions/primitiveTypeTests.kt
 regressions/propertyInitializedByFunctionOfSameName.kt
 regressions/propertyReferenceGetAndName.kt
 regressions/propertyReferenceIdentityAcrossModules.kt
-regressions/propertySmartCastKeepsDeclaredType.kt
 regressions/rangeEqualityThroughProgression.kt
 regressions/referenceArrayStoreEvaluatesValueBeforeBoundsCheck.kt
 regressions/runtimeArrayListInterfaceTests.kt

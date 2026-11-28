@@ -53,6 +53,8 @@ fn type_and_inference_errors_match_kotlinc_exactly() {
         // A nested call's input solution `Any` is evidence: `listOf(x as Any)` is `List<Any>`, not
         // a `List<String>` the parameter could complete it to.
         "fun f(xs: List<String>) {}\nfun g(x: Any) { f(listOf(x as Any)) }",
+        // A type test of a cast proves only that its operand is not null, never the tested type.
+        "open class A\nclass B : A() { val x = 1 }\nfun f(a: A): Int { if ((a as Any) is B) return a.x; return 0 }",
     ];
     assert_error_parity(&cases);
 }
