@@ -207,6 +207,22 @@ pub(super) fn function_body(scope: &BodyScope<'_>, body: ExprId) -> Option<Funct
     Some(body)
 }
 
+/// The single expression `expression`, such as a property's initializer, with the body that
+/// holds its nodes. `None` when a node is not translated yet.
+pub(super) fn expression_body(
+    scope: &BodyScope<'_>,
+    expression: ExprId,
+) -> Option<(FunctionBody, BodyExprId)> {
+    let mut translation = Translation {
+        scope,
+        body: FunctionBody::default(),
+        locals: HashMap::default(),
+        assigned: assigned_locals(scope.ir, expression),
+    };
+    let root = translation.expr(expression)?;
+    Some((translation.body, root))
+}
+
 /// A constructor's block body: its delegation to `target` with `arguments`, then, for a primary
 /// constructor, the run of `initialized`'s property initializers. `None` when an argument is not
 /// translated yet.
@@ -403,6 +419,21 @@ impl Translation<'_, '_> {
                 dispatch_receiver,
                 args,
             } => self.call(expression, callee, *dispatch_receiver, args),
+            // A virtual call of a member this file's class declares, with every argument given.
+            IrExpr::MethodCall {
+                class,
+                index,
+                receiver,
+                args,
+            } => {
+                let function = *ir
+                    .classes
+                    .get(*class as usize)?
+                    .methods
+                    .get(*index as usize)?;
+                let args = args.iter().copied().collect::<Option<Vec<_>>>()?;
+                self.call(expression, &Callee::Local(function), Some(*receiver), &args)
+            }
             IrExpr::Checked(operation) => self.checked(expression, operation),
             IrExpr::New {
                 internal,
@@ -654,8 +685,10 @@ impl Translation<'_, '_> {
         args: &[ExprId],
     ) -> Option<BodyExprId> {
         let ir = self.scope.ir;
+        let mut local = false;
         let (target, ty) = match callee {
             Callee::Local(function) => {
+                local = true;
                 // A call of a generic function passes its type arguments, which common IR does not
                 // record on a local call yet.
                 if ir
@@ -715,7 +748,45 @@ impl Translation<'_, '_> {
             .chain(args.iter().copied())
             .map(|argument| self.expr(argument))
             .collect::<Option<Vec<_>>>()?;
+        let target = match (local, dispatch_receiver) {
+            (true, Some(_)) => self.received_on(target, arguments.first().copied())?,
+            _ => target,
+        };
         self.push(ty, call(target, arguments, None))
+    }
+
+    /// The member `target` of this file's classes as `receiver`'s class names it. A member a
+    /// subclass inherits is called as that subclass's own (fake-override) member, which keeps the
+    /// declaration's member ids under the subclass's paths, as kotlinc writes it. `None` when the
+    /// receiver's class belongs to another module, whose identity this writer does not name.
+    fn received_on(&self, target: CallTarget, receiver: Option<BodyExprId>) -> Option<CallTarget> {
+        let Some(receiver) = receiver else {
+            return Some(target);
+        };
+        let TyKind::Obj(class, arguments) = self.ty(receiver).kind() else {
+            return None;
+        };
+        if !arguments.is_empty() {
+            return None;
+        }
+        let class = &self
+            .scope
+            .exports
+            .classifier(self.scope.ir.class_id_by_name(class)?)?
+            .signature;
+        let owner = match &target {
+            CallTarget::Public(signature) => signature,
+            CallTarget::Accessor(signature) => signature.property(),
+        };
+        let declared_here = owner.package() == class.package()
+            && owner.declaration().segments().split_last()?.1 == class.declaration().segments();
+        if declared_here {
+            return Some(target);
+        }
+        Some(match target {
+            CallTarget::Public(signature) => CallTarget::Public(signature.as_member_of(class)?),
+            CallTarget::Accessor(signature) => CallTarget::Accessor(signature.as_member_of(class)?),
+        })
     }
 
     fn checked(
@@ -740,6 +811,7 @@ impl Translation<'_, '_> {
                     .iter()
                     .map(|receiver| self.expr(*receiver))
                     .collect::<Option<Vec<_>>>()?;
+                let getter = self.received_on(getter, arguments.first().copied())?;
                 self.push(ty, call(getter, arguments, Some("GET_PROPERTY")))
             }
             IrCheckedOperation::PropertyWrite {
@@ -755,6 +827,7 @@ impl Translation<'_, '_> {
                     .iter()
                     .map(|receiver| self.expr(*receiver))
                     .collect::<Option<Vec<_>>>()?;
+                let setter = self.received_on(setter, arguments.first().copied())?;
                 arguments.push(self.expr(*value)?);
                 self.push(Ty::Unit, call(setter, arguments, Some("EQ")))
             }

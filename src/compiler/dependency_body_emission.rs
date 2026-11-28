@@ -357,14 +357,29 @@ pub(super) fn emit_dependencies<B: Backend>(
     let root_objects = root_objects
         .into_iter()
         .filter(|object| {
-            !support_state
-                .materialized_classes
-                .contains_key(&object.classifier)
+            // An object a source module of this program declares is that module's one instance,
+            // read through its exports rather than materialized again from its own KLIB.
+            !uses
+                .iter()
+                .any(|use_| use_.file.ir.class_id_by_name(object.classifier).is_some())
+                && !support_state
+                    .materialized_classes
+                    .contains_key(&object.classifier)
                 && !support_state
                     .materializing_classes
                     .contains_key(&object.classifier)
         })
         .collect::<Vec<_>>();
+    let mut dispatched_calls = HashSet::default();
+    for use_ in uses {
+        match emitted_roots::dispatched_source_calls(use_.file) {
+            Ok(calls) => dispatched_calls.extend(calls),
+            Err(error) => {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                return Vec::new();
+            }
+        }
+    }
     let mut artifacts = Vec::new();
     for (requires_intrinsic_link, mut roots) in [(true, roots), (false, ordinary)] {
         // Intrinsic support may have emitted an ordinary root transitively in the preceding unit.
@@ -416,6 +431,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             emitted_roots::ClosureRoots {
                 callables: &roots,
                 objects: root_objects,
+                dispatched_calls: &dispatched_calls,
             },
             &externals,
             &capabilities,

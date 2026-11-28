@@ -2055,6 +2055,26 @@ fn wasm_links_a_library_s_class_bodies_from_its_klib() {
     }
 }
 
+#[test]
+fn wasm_links_a_library_s_interfaces_abstract_classes_and_objects_from_its_klib() {
+    let source = include_str!("box_regressions/multimodule/libraryClassForms.kt");
+    let stem = "wasmLibraryClassForms";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the whole library class-forms program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name(),
+        );
+    }
+}
+
 /// The KLIB writer has no IR type for a function type yet, so a class storing one keeps its file
 /// metadata-only rather than reaching the type table with a type it cannot write.
 #[test]

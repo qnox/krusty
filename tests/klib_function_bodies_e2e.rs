@@ -18,6 +18,7 @@ use crate::common;
 
 const PROGRAM: &str = include_str!("box_regressions/multimodule/libraryTopLevelFunctionBodies.kt");
 const CLASS_PROGRAM: &str = include_str!("box_regressions/multimodule/libraryClassBodies.kt");
+const CLASS_FORMS_PROGRAM: &str = include_str!("box_regressions/multimodule/libraryClassForms.kt");
 
 /// The provisioned reference Kotlin/Native distribution, whose stdlib the library compiles against.
 /// A missing distribution fails the oracle rather than skipping it.
@@ -295,10 +296,27 @@ fn kotlinc_reads_krusty_written_function_bodies_as_it_writes_them() {
 /// The library's whole dump, with the one fact common IR does not record: whether a `this` a
 /// member body reads was written or implied, which kotlinc's `IMPLICIT_ARGUMENT` origin says.
 #[test]
+fn kotlinc_native_runs_a_program_against_krusty_written_class_forms() {
+    run_against_krusty_library(CLASS_FORMS_PROGRAM, "krusty-class-forms-official-consumer");
+}
+
+#[test]
 fn kotlinc_reads_krusty_written_class_bodies_as_it_writes_them() {
+    assert_kotlinc_dump(CLASS_PROGRAM, "krusty-class-bodies-dump");
+}
+
+#[test]
+fn kotlinc_reads_krusty_written_class_forms_as_it_writes_them() {
+    assert_kotlinc_dump(CLASS_FORMS_PROGRAM, "krusty-class-forms-dump");
+}
+
+/// `klib dump-ir` prints the same tree for the library module of `program` whether krusty or
+/// kotlinc-native wrote it. Common IR does not record which receivers the source left implicit,
+/// so kotlinc's `IMPLICIT_ARGUMENT` origin reads as no origin.
+fn assert_kotlinc_dump(program: &str, name: &str) {
     let native_root = kotlin_native_root();
-    let (library_source, _) = program_sources(CLASS_PROGRAM);
-    let work = scratch("krusty-class-bodies-dump");
+    let (library_source, _) = program_sources(program);
+    let work = scratch(name);
     let krusty_library = write_library(&work, &library_source);
     let kotlinc_library = kotlinc_library(&native_root, &work, &library_source);
     let krusty = dump_ir(&native_root, &krusty_library);
