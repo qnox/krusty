@@ -856,6 +856,13 @@ fn the_collector_reclaims_garbage_and_keeps_what_is_reachable() {
 
 /// A program that stands in for `GCInfoBuilder`: it defines the setters the library exports, which
 /// override the runtime's weak references, and has the runtime fill them after a collection.
+///
+/// PLATFORM-SPECIFIC: the GC info runtime exports exist only on Native. This program pins the
+/// runtime's side of the protocol only. The compiler's side (the bodyless `@GCUnsafeCall` member
+/// of the internal `GCInfoBuilder`, and its `@ExportForCppRuntime` setters) is reached only through
+/// `GC.lastGCInfo`, whose setters take the heap names as `NativePtr`; a Kotlin program reaching it
+/// compiles once `NativePtr` is a raw address. #4256 makes it one and adds that program,
+/// `native_the_last_collection_reports_its_pools_by_name` in `kotlin_box_native_conformance.rs`.
 const GC_INFO_PROGRAM: &str = r#"
 #include "krusty_rt.h"
 
