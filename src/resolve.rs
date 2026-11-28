@@ -10723,19 +10723,11 @@ impl<'a> Checker<'a> {
                 // A function-valued property on an implicit receiver is itself a complete call
                 // candidate. Its semantic function shape must reach argument typing before the
                 // general top-level/member probe: `reference(Inner())` can be the only evidence for
-                // `Inner`'s type arguments. The same selected dispatch-property identity is consumed
-                // below by `record_receiver_function_invoke`; this only exposes its already-known
-                // value-parameter expectations and performs no second lookup after selection. A
-                // property reached only through an implicit receiver (an extension function's) is
-                // the candidate the receiver-tower sweep above selected at its own level.
-                let receiver_function_argument_types = self
-                    .local_callable_type(scope, &fname)
-                    .and_then(|(semantic, origin)| {
-                        matches!(origin, ReceiverFnValueOrigin::DispatchProperty { .. })
-                            .then_some(semantic)
-                    })
-                    .or(implicit_property_function)
-                    .and_then(|semantic| {
+                // `Inner`'s type arguments. The receiver sweep above selected it at its own level,
+                // in the receiver order final selection follows, dispatch receivers included; this
+                // only exposes its value-parameter expectations and performs no second lookup.
+                let receiver_function_argument_types =
+                    implicit_property_function.and_then(|semantic| {
                         self.function_value_argument_expectations(
                             scope,
                             semantic,
@@ -30701,11 +30693,12 @@ impl<'a> Checker<'a> {
     /// Whether the selected lexical VALUE contributes an invoke candidate. Callable references
     /// retain their exact function shape beside their nominal `KProperty`/`KFunction` type, so the
     /// binding record is authoritative; ordinary callable objects still derive capability from
-    /// their semantic type and declared `operator fun invoke`.
+    /// their semantic type and `operator fun invoke`. A dispatch property is its receiver's rung.
     fn local_value_claims_call(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
         self.lookup(scope, name).is_some_and(|local| {
-            self.local_callable_type(scope, name).is_some()
-                || self.value_type_claims_call(scope, local.ty)
+            !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. })
+                && (self.local_callable_type(scope, name).is_some()
+                    || self.value_type_claims_call(scope, local.ty))
         })
     }
 
