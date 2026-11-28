@@ -773,30 +773,11 @@ impl Checker<'_> {
                 continue;
             }
 
-            let declared = self.file.lambda_param_types.get(&argument.0);
-            let roles = self.file.lambda_parameter_roles.get(&argument.0);
-            let spans = self.file.lambda_param_spans.get(&argument.0);
-            for (index, parameter) in params.iter().enumerate() {
-                let explicitly_typed = declared
-                    .and_then(|types| types.get(index))
-                    .is_some_and(Option::is_some);
-                let named = roles
-                    .and_then(|roles| roles.get(index))
-                    .is_none_or(|role| *role == LambdaParameterRole::Named);
-                if explicitly_typed || !named {
-                    continue;
-                }
-                let span = spans
-                    .and_then(|spans| spans.get(index))
-                    .copied()
-                    .unwrap_or_else(|| self.span(argument));
-                self.diags.error(
-                    span,
-                    format!(
-                        "cannot infer type for value parameter '{parameter}'. Specify it explicitly."
-                    ),
-                );
-            }
+            self.report_uninferrable_lambda_parameters(
+                argument,
+                true,
+                unshaped_lambdas::LambdaShapeCoverage::Standalone,
+            );
         }
     }
 

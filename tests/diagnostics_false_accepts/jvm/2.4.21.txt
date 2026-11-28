@@ -208,7 +208,6 @@ compiler/testData/diagnostics/tests/collectionLiterals/collectionLiteralsDisable
 compiler/testData/diagnostics/tests/collectionLiterals/collectionLiteralsDisabled/resolveToFunctionFromBuiltIns.kt
 compiler/testData/diagnostics/tests/collectionLiterals/deprecatedCompanionObject.kt
 compiler/testData/diagnostics/tests/collectionLiterals/emptyArrayAsSpreadInAnnotation.kt
-compiler/testData/diagnostics/tests/collectionLiterals/kt81777/withEnabledCL.kt
 compiler/testData/diagnostics/tests/collectionLiterals/kt82964.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/companionExtension.kt
 compiler/testData/diagnostics/tests/collectionLiterals/operatorOfChecks/contexts.kt
@@ -494,7 +493,6 @@ compiler/testData/diagnostics/tests/functionAsExpression/Common.kt
 compiler/testData/diagnostics/tests/functionAsExpression/InferenceParametersTypes.kt
 compiler/testData/diagnostics/tests/functionAsExpression/NonSuspendAnonFuncAsInitializerOfSuspendFunctionType.kt
 compiler/testData/diagnostics/tests/functionLiterals/assignmentOperationInLambda.kt
-compiler/testData/diagnostics/tests/functionLiterals/kt47493.kt
 compiler/testData/diagnostics/tests/functionLiterals/kt7383_starProjectedFunction.kt
 compiler/testData/diagnostics/tests/functionLiterals/return/LocalReturnExplicitLabelNoParens.kt
 compiler/testData/diagnostics/tests/functionLiterals/return/LocalReturnExplicitLabelParens.kt
@@ -552,7 +550,6 @@ compiler/testData/diagnostics/tests/inference/coerceFunctionLiteralToSuspend.kt
 compiler/testData/diagnostics/tests/inference/coercionToUnit/coercionToUnitWithNothingType.kt
 compiler/testData/diagnostics/tests/inference/coercionToUnit/coercionWithoutExpectedType.kt
 compiler/testData/diagnostics/tests/inference/completion/anonymousFunction.kt
-compiler/testData/diagnostics/tests/inference/completion/postponedArgumentsAnalysis/notInferableParameterOfAnonymousFunction.kt
 compiler/testData/diagnostics/tests/inference/constraints/constraintFromVariantTypeWithNestedProjection.kt
 compiler/testData/diagnostics/tests/inference/constraints/definitelyNotNullTypeInArguments.kt
 compiler/testData/diagnostics/tests/inference/constraints/definitelyNotNullTypeInArgumentsDisabled.kt
@@ -579,7 +576,6 @@ compiler/testData/diagnostics/tests/inference/nestedIfWithExpectedType.kt
 compiler/testData/diagnostics/tests/inference/noInferUnit.kt
 compiler/testData/diagnostics/tests/inference/noInformationForStarProjectionCase.kt
 compiler/testData/diagnostics/tests/inference/nothingType/implicitInferenceTToFlexibleNothing.kt
-compiler/testData/diagnostics/tests/inference/nothingType/kt34335.kt
 compiler/testData/diagnostics/tests/inference/nothingType/returnAsLastStatementInLambda.kt
 compiler/testData/diagnostics/tests/inference/nullableVsDnnVariationsDisabled.kt
 compiler/testData/diagnostics/tests/inference/pcla/assignmentOperatorAmbiguity.kt

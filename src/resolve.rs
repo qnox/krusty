@@ -273,6 +273,7 @@ mod lexical_value_invoke;
 use lexical_value_invoke::{DeferredInvokePeers, DeferredLexicalInvoke, LexicalInvokeSite};
 mod lambda_call_shapes;
 mod property_read_selection;
+mod unshaped_lambdas;
 use lambda_call_shapes::{
     ExplicitTypeArgumentBounds, ExplicitTypeArgumentProbe, UntypedLambdaCall,
 };
@@ -23651,6 +23652,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_method_rets: HashMap::default(),
         operator_of_overloads: Vec::new(),
         collection_literal_ambiguities: std::cell::RefCell::default(),
+        unshaped_lambdas: Default::default(),
         inferred_source_member_rets: HashMap::default(),
         inferred_stable_declaration_rets: HashMap::default(),
         inferred_declaration_publications: Default::default(),
@@ -24654,6 +24656,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     c.narrow_script_template_receivers();
     c.publish_member_declaring_receivers();
     c.report_operator_of_overloads();
+    c.report_unshaped_lambda_parameters();
     let (enhanced_values, contract_descriptions) =
         (c.enhanced_value_heads(), c.contract_description_calls());
     let builtin_implementations = match builtin_implementation::for_checked_unit(&c) {
@@ -24690,6 +24693,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         inferred_method_rets,
         operator_of_overloads: _,
         collection_literal_ambiguities: _,
+        unshaped_lambdas: _,
         inferred_source_member_rets,
         inferred_stable_declaration_rets,
         inferred_declaration_publications,
@@ -25703,6 +25707,7 @@ struct Checker<'a> {
     /// Collection literals passed for a type variable, with the literal-constructing bounds of
     /// that variable, published by the selection that won their call.
     collection_literal_ambiguities: std::cell::RefCell<HashMap<ExprId, Vec<Ty>>>,
+    unshaped_lambdas: unshaped_lambdas::UnshapedLambdas,
     inferred_source_member_rets: HashMap<crate::libraries::SourceMember, Ty>,
     inferred_stable_declaration_rets: HashMap<crate::fir::DeclarationId, Ty>,
     inferred_declaration_publications: declaration_publication::InferredDeclarationPublications,
@@ -29949,28 +29954,21 @@ impl<'a> Checker<'a> {
         explicit_type_argument_count: usize,
     ) -> Option<String> {
         let signature = selected.generic_sig.as_ref()?;
-        let context_count = selected.context_count.min(selected.callable.params.len());
-        let value_signature = selected.call_sig.suffix(context_count);
-        let argument_parameters = call_argument_parameter_indices(
-            args.len(),
-            signature.params.len().saturating_sub(context_count),
+        unshaped_lambdas::argument_signature_parameters(
+            selected,
+            args,
             argument_names,
             trailing_lambda,
-            &value_signature,
-        )?;
-        argument_parameters
-            .into_iter()
-            .zip(args.iter().copied())
-            .find_map(|(parameter, argument)| {
-                if !Self::null_only_type(self.expr_types[argument.0 as usize]) {
-                    return None;
-                }
-                Self::dnn_inference_formal_for_parameter(
-                    signature,
-                    context_count + parameter,
-                    |formal_index| formal_index < explicit_type_argument_count,
-                )
+        )?
+        .into_iter()
+        .find_map(|(parameter, argument)| {
+            if !Self::null_only_type(self.expr_types[argument.0 as usize]) {
+                return None;
+            }
+            Self::dnn_inference_formal_for_parameter(signature, parameter, |formal_index| {
+                formal_index < explicit_type_argument_count
             })
+        })
     }
 
     fn dnn_inference_formal_for_parameter(
@@ -41055,6 +41053,8 @@ impl<'a> Checker<'a> {
                 .get(&e.0)
                 .cloned()
                 .unwrap_or_default();
+            let uninferrable =
+                self.note_unshaped_lambda(e, unshaped_lambdas::LambdaShapeCoverage::Standalone);
             let bret = {
                 let lambda_scope = scope.child(ScopeKind::Function { receiver: None });
                 let scope = &lambda_scope;
@@ -41063,7 +41063,7 @@ impl<'a> Checker<'a> {
                         .get(i)
                         .and_then(|t| t.as_ref())
                         .map(|r| self.type_ref_ty(scope, r))
-                        .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                        .unwrap_or_else(|| unshaped_lambdas::untyped_ty(&uninferrable, i));
                     self.declare(scope, name, pty, false);
                     self.record_lexical_declaration(
                         scope,
@@ -41095,7 +41095,7 @@ impl<'a> Checker<'a> {
                         .get(i)
                         .and_then(|t| t.as_ref())
                         .map(|r| self.type_ref_ty(scope, r))
-                        .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+                        .unwrap_or_else(|| unshaped_lambdas::untyped_ty(&uninferrable, i))
                 })
                 .collect();
             let ret = self.lambda_ret_ty(scope, e, bret, unit_from_exits);
@@ -48166,6 +48166,10 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            let uninferrable = self.note_unshaped_lambda(
+                e,
+                unshaped_lambdas::LambdaShapeCoverage::Shaped(bind_types.len()),
+            );
             if let Some(receiver) = extension_receiver {
                 self.mark_receiver_lambda(e, receiver);
             }
@@ -48262,7 +48266,10 @@ impl<'a> Checker<'a> {
                     }
                 }
                 for (i, name) in bind_names.iter().enumerate() {
-                    let pty = bind_types.get(i).copied().unwrap_or(Ty::obj("kotlin/Any"));
+                    let pty = bind_types
+                        .get(i)
+                        .copied()
+                        .unwrap_or_else(|| unshaped_lambdas::untyped_ty(&uninferrable, i));
                     if i < named_context_count {
                         self.declare_context_parameter(scope, name, pty);
                     } else {
@@ -48316,7 +48323,7 @@ impl<'a> Checker<'a> {
                     bind_types
                         .get(i)
                         .copied()
-                        .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+                        .unwrap_or_else(|| unshaped_lambdas::untyped_ty(&uninferrable, i))
                 }));
             }
             let ret = self.lambda_result_type(
