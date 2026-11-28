@@ -138,7 +138,6 @@ compileKotlinAgainstKotlin/secondaryConstructors.kt
 compileKotlinAgainstKotlin/useDeserializedFunInterface.kt
 constants/comparisonFalse.kt
 constants/comparisonTrue.kt
-constants/float.kt
 contextParameters/explicitPassing.kt
 contextParameters/kt65953.kt
 contracts/kt39374.kt
@@ -335,9 +334,6 @@ fakeOverride/substitutionInLocal.kt
 fir/kt68806.kt
 fir/multipleDefaultsFalsePositiveDelegation.kt
 fir/sourceBinarySource.kt
-fp/atan2ZeroGuadrantsDouble.kt
-fp/powDouble.kt
-fp/powFloat.kt
 fullValueClasses/construction.kt
 funInterface/basicFunInterfaceConversionClash.kt
 funInterface/funInterfaceWithSuspendMethod.kt
