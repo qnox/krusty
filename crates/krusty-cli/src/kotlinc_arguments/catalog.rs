@@ -27,8 +27,7 @@ macro_rules! releases {
 }
 
 releases! {
-    V2_4_0 => "2.4.0",
-    V2_4_20 => "2.4.20",
+    V2_4_21 => "2.4.21",
 }
 
 /// The Kotlin type of an argument's field, which decides how kotlinc reads its value.
@@ -312,7 +311,7 @@ mod tests {
     /// Spot checks that the table carries the facts the parser relies on, read from the compiler.
     #[test]
     fn the_table_carries_names_aliases_types_and_lifecycle() {
-        let catalog = Catalog::for_version(KotlinVersion::V2_4_20).unwrap();
+        let catalog = Catalog::for_version(KotlinVersion::V2_4_21).unwrap();
         let classpath = catalog.lookup("-cp").unwrap();
         assert_eq!(classpath.name, "-classpath");
         assert_eq!(classpath.kind, ValueKind::String);
@@ -349,9 +348,5 @@ mod tests {
                 .legal_values(),
             vec!["only-syntax", "name-mismatch", "complete"]
         );
-
-        let older = Catalog::for_version(KotlinVersion::V2_4_0).unwrap();
-        assert!(older.lookup("-Xuse-k2").unwrap().obsolete);
-        assert!(older.lookup("-Xescaping-functions").is_none());
     }
 }

@@ -4,14 +4,20 @@
 
 use super::*;
 
-/// How kotlinc fails a compile whose malformed value krusty rejected too.
-const KOTLINC_EXPLICIT_API_FAILURE: [&str; 2] = [
-    "A failure occurred while executing org.jetbrains.kotlin.compilerRunner.btapi.BuildToolsApiCompilationWork",
-    " > Unknown -Xexplicit-api value: sideways",
-];
-const KOTLINC_API_VERSION_FAILURE: [&str; 2] = [
+/// How kotlinc fails a compile whose malformed value krusty rejected too: the build tools API
+/// reports the value's error on the compiler's log and fails the work generically.
+const KOTLINC_COMPILATION_FAILURE: [&str; 2] = [
     "A failure occurred while executing org.jetbrains.kotlin.compilerRunner.btapi.BuildToolsApiCompilationWork",
     " > Compilation error. See log for more details",
+];
+/// How kotlinc fails a compile whose API version it no longer supports on Gradle 9, where KGP
+/// reports the diagnostic as a Gradle problem that fails the work. Older Gradle fails it
+/// generically, as [`KOTLINC_COMPILATION_FAILURE`].
+const KOTLINC_UNSUPPORTED_API_VERSION_PROBLEM: [&str; 4] = [
+    "A failure occurred while executing org.jetbrains.kotlin.compilerRunner.btapi.BuildToolsApiCompilationWork",
+    " > Kotlin compiler: UNSUPPORTED_LANGUAGE_VERSION",
+    "     Kotlin compiler error",
+    "       API version 1.9 is no longer supported; use version 2.0 or greater instead.",
 ];
 
 /// Run every compiler-option scenario against the compiler-slice `fixture`, whose `compiler/util`
@@ -300,7 +306,7 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
         );
         assert_eq!(
             task_failure(&rendered, ":compiler:util:compileKotlin"),
-            KOTLINC_EXPLICIT_API_FAILURE,
+            KOTLINC_COMPILATION_FAILURE,
             "{case}: {rendered}",
         );
         assert!(!log.exists(), "krusty never compiles {case}");
@@ -314,7 +320,7 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
 
     // Gradle forwards standard version values without duplicating kotlinc's
     // release-specific version table in the plugin. The shared compiler settings boundary
-    // rejects values unavailable in the selected 2.4.10 compiler after seeing the exact
+    // rejects values unavailable in the selected compiler after seeing the exact
     // standard argument.
     {
         let (case, option, kind) = ("old-api-version", "-api-version", "API");
@@ -332,13 +338,22 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path) {
             format!(
                 "krusty rejects the command line\nkrusty: error: unknown {kind} version: 1.9\n\
                  Supported {kind} versions: 2.0 (deprecated), 2.1 (deprecated), 2.2, 2.3, 2.4, \
-                 2.5 (experimental)\n"
+                 2.5 (experimental), 2.6 (experimental)\n"
             ),
             "{case}: {rendered}",
         );
         assert_eq!(
             task_failure(&rendered, ":compiler:util:compileKotlin"),
-            KOTLINC_API_VERSION_FAILURE,
+            if gradle_version()
+                .split('.')
+                .next()
+                .and_then(|major| major.parse::<u32>().ok())
+                .is_some_and(|major| major >= 9)
+            {
+                &KOTLINC_UNSUPPORTED_API_VERSION_PROBLEM[..]
+            } else {
+                &KOTLINC_COMPILATION_FAILURE[..]
+            },
             "{case}: {rendered}",
         );
         assert!(!log.exists(), "krusty never compiles {case}");

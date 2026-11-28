@@ -1,94 +1,52 @@
-//! Diagnostic text and positions that differ between supported Kotlin reference versions.
+//! Diagnostic text that Kotlin reference releases have spelled differently.
 //!
-//! Every entry here is keyed by [`KotlinVersion`]: the reference compilers krusty reproduces do
-//! not all spell a diagnostic the same way, and a user comparing krusty with their own kotlinc
-//! must see that kotlinc's words. A call site asks this module rather than writing the text inline,
-//! so supporting the next reference version means adding one row here, not hunting for strings.
+//! A user comparing krusty with their own kotlinc must see that kotlinc's words. A call site asks
+//! this module rather than writing the text inline, so a reference release that rewords one of
+//! these diagnostics changes one function here, not strings across the resolver.
 //!
-//! Each function names the kotlinc diagnostic it renders and the version that changed it: its text
-//! (kotlinc's CLI rendering, the message template with its first letter lowered) or its [`Anchor`].
+//! Each function names the kotlinc diagnostic it renders: kotlinc's CLI rendering, the message
+//! template with its first letter lowered.
 
 use crate::diag::{names, NamedMessage};
-use crate::kotlin_version::{KotlinVersion, ReferenceProfile};
 
-/// `NO_ACTUAL_FOR_EXPECT`, from IR actualization (`IrActualizationErrors`). 2.4.20 quotes the
+/// `NO_ACTUAL_FOR_EXPECT`, from IR actualization (`IrActualizationErrors`): it quotes the
 /// declaration and the module and ends in a full stop.
-pub fn no_actual_for_expect(
-    reference: ReferenceProfile,
-    name: &str,
-    module_name: &str,
-    target: &str,
-) -> String {
-    if reference.at_least(KotlinVersion::V2_4_20) {
-        format!(
-            "the 'expect' declaration '{name}' has no 'actual' declaration in module \
-             '<{module_name}> for {target}'."
-        )
-    } else {
-        format!("expected {name} has no actual declaration in module <{module_name}> for {target}")
-    }
+pub fn no_actual_for_expect(name: &str, module_name: &str, target: &str) -> String {
+    format!(
+        "the 'expect' declaration '{name}' has no 'actual' declaration in module \
+         '<{module_name}> for {target}'."
+    )
 }
 
 /// `ACTUAL_WITHOUT_EXPECT`, with its platform-incompatibility suffix already rendered by the caller.
-pub fn actual_without_expect(reference: ReferenceProfile, rendered: &str) -> String {
-    if reference.at_least(KotlinVersion::V2_4_20) {
-        format!("'{rendered}' has no corresponding 'expect' declaration")
-    } else {
-        format!("'{rendered}' has no corresponding expected declaration")
-    }
+pub fn actual_without_expect(rendered: &str) -> String {
+    format!("'{rendered}' has no corresponding 'expect' declaration")
 }
 
 /// `NO_ACTUAL_CLASS_MEMBER_FOR_EXPECTED_CLASS`; `listing` starts with its own line break.
-pub fn no_actual_class_members(
-    reference: ReferenceProfile,
-    rendered: &str,
-    listing: &str,
-) -> String {
-    if reference.at_least(KotlinVersion::V2_4_20) {
-        format!("'{rendered}' has no corresponding members for 'expect' class members:{listing}")
-    } else {
-        format!("'{rendered}' has no corresponding members for expected class members:{listing}")
-    }
+pub fn no_actual_class_members(rendered: &str, listing: &str) -> String {
+    format!("'{rendered}' has no corresponding members for 'expect' class members:{listing}")
 }
 
 /// `EXPECTED_DECLARATION_WITH_BODY`.
-pub fn expected_declaration_with_body(reference: ReferenceProfile) -> &'static str {
-    if reference.at_least(KotlinVersion::V2_4_20) {
-        "'expect' declaration cannot have a body."
-    } else {
-        "expected declaration cannot have a body."
-    }
+pub fn expected_declaration_with_body() -> &'static str {
+    "'expect' declaration cannot have a body."
 }
 
 /// `EXPECTED_PROPERTY_INITIALIZER`.
-pub fn expected_property_initializer(reference: ReferenceProfile) -> &'static str {
-    if reference.at_least(KotlinVersion::V2_4_20) {
-        "'expect' property cannot have an initializer."
-    } else {
-        "expected property cannot have an initializer."
-    }
+pub fn expected_property_initializer() -> &'static str {
+    "'expect' property cannot have an initializer."
 }
 
 /// `EXPECTED_DELEGATED_PROPERTY`.
-pub fn expected_delegated_property(reference: ReferenceProfile) -> &'static str {
-    if reference.at_least(KotlinVersion::V2_4_20) {
-        "'expect' property cannot be delegated."
-    } else {
-        "expected property cannot be delegated."
-    }
+pub fn expected_delegated_property() -> &'static str {
+    "'expect' property cannot be delegated."
 }
 
-/// A selected callable reference rejected by its receiver constraint. From 2.4.20 the diagnostic
-/// names that candidate; older compilers use the unresolved-reference wrong-receiver heading.
-pub fn callable_reference_receiver_mismatch(
-    reference: ReferenceProfile,
-    candidate: &str,
-) -> String {
-    if reference.at_least(KotlinVersion::V2_4_20) {
-        format!("candidate '{candidate}' is inapplicable because of a receiver type mismatch.")
-    } else {
-        "unresolved reference. None of the following candidates is applicable because of a receiver type mismatch:".to_owned()
-    }
+/// A selected callable reference rejected by its receiver constraint: the diagnostic names that
+/// candidate.
+pub fn callable_reference_receiver_mismatch(candidate: &str) -> String {
+    format!("candidate '{candidate}' is inapplicable because of a receiver type mismatch.")
 }
 
 /// `UNRESOLVED_REFERENCE` for a name kotlinc resolves without a receiver type to report.
@@ -108,16 +66,12 @@ pub fn unresolved_import(segment: &str) -> NamedMessage {
     }
 }
 
-/// `UNRESOLVED_REFERENCE` for a name looked up on an explicit receiver expression. From 2.4.20
-/// kotlinc appends the receiver's type (`FOR_OPTIONAL_RECEIVER`) when it is a class-like type
-/// without errors; `receiver` is that rendered type, or `None` when kotlinc would omit it.
-pub fn unresolved_reference_on(
-    reference: ReferenceProfile,
-    name: &str,
-    receiver: Option<&str>,
-) -> NamedMessage {
+/// `UNRESOLVED_REFERENCE` for a name looked up on an explicit receiver expression. kotlinc appends
+/// the receiver's type (`FOR_OPTIONAL_RECEIVER`) when it is a class-like type without errors;
+/// `receiver` is that rendered type, or `None` when kotlinc would omit it.
+pub fn unresolved_reference_on(name: &str, receiver: Option<&str>) -> NamedMessage {
     let message = match receiver {
-        Some(receiver) if reference.at_least(KotlinVersion::V2_4_20) => {
+        Some(receiver) => {
             format!("Unresolved reference '{name}' on receiver of type '{receiver}'.")
         }
         _ => return unresolved_reference(name),
@@ -128,16 +82,14 @@ pub fn unresolved_reference_on(
     }
 }
 
-/// `UNRESOLVED_REFERENCE` for an operator convention looked up on a receiver. From 2.4.20
-/// kotlinc appends the receiver's type just as it does for an ordinary explicit-receiver lookup.
+/// `UNRESOLVED_REFERENCE` for an operator convention looked up on a receiver. kotlinc appends the receiver's type just as it does for an ordinary explicit-receiver lookup.
 pub fn unresolved_operator_reference_on(
-    reference: ReferenceProfile,
     name: &str,
     operator: &str,
     receiver: Option<&str>,
 ) -> NamedMessage {
     let message = match receiver {
-        Some(receiver) if reference.at_least(KotlinVersion::V2_4_20) => format!(
+        Some(receiver) => format!(
             "Unresolved reference '{name}' for operator '{operator}' on receiver of type \
              '{receiver}'."
         ),
@@ -147,32 +99,4 @@ pub fn unresolved_operator_reference_on(
         name: names::UNRESOLVED_REFERENCE,
         message,
     }
-}
-
-/// Where kotlinc anchors a diagnostic in the source, named after the positioning strategy it uses
-/// (`SourceElementPositioningStrategies`). A table row that moves a diagnostic between releases
-/// returns one of these, and the resolver computes the span from it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Anchor {
-    /// `VALUE_ARGUMENTS`: the call's argument list, at the argument the failure recovers to.
-    ValueArguments,
-    /// `REFERENCED_NAME_BY_QUALIFIED`: the callee's name, after any qualifier.
-    ReferencedNameByQualified,
-}
-
-/// `NO_VALUE_FOR_PARAMETER`: 2.4.20 moved it from the argument list to the callee's name.
-pub fn no_value_for_parameter_anchor(reference: ReferenceProfile) -> Anchor {
-    if reference.at_least(KotlinVersion::V2_4_20) {
-        Anchor::ReferencedNameByQualified
-    } else {
-        Anchor::ValueArguments
-    }
-}
-
-/// An inapplicable member call on a receiver that also has same-name extensions: 2.4.20 keeps
-/// climbing the tower past the member, so when the extensions are inapplicable too it reports
-/// NONE_APPLICABLE for the member and the extensions together, at the callee's name. Earlier
-/// releases stop at the member and report its own error.
-pub fn inapplicable_member_joins_extensions(reference: ReferenceProfile) -> bool {
-    reference.at_least(KotlinVersion::V2_4_20)
 }

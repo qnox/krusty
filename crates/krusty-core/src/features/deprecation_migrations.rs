@@ -63,14 +63,7 @@ mod tests {
 
     #[test]
     fn release_and_explicit_feature_select_one_compilation_local_policy() {
-        for release in [KotlinVersion::V2_4_0, KotlinVersion::V2_4_10] {
-            let migrations = DeprecationMigrations::from_features(&features(release));
-            let policy = migrations.policy(DeprecationMigration::OuterImportedClass);
-            assert!(!policy.completed, "{release}");
-            assert!(policy.warning_format.is_none(), "{release}");
-        }
-
-        let mut current = features(KotlinVersion::V2_4_20);
+        let mut current = features(KotlinVersion::V2_4_21);
         let migrations = DeprecationMigrations::from_features(&current);
         let policy = migrations.policy(DeprecationMigration::OuterImportedClass);
         assert!(!policy.completed);

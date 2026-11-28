@@ -278,12 +278,18 @@ fn atomicfu_plugins(
         .unwrap_or_else(|| panic!("cannot provision the atomicfu compiler plugin"));
     let mut config = PluginConfig::none();
     config.plugin_jars.push(jar.display().to_string());
+    let supported = krusty::kotlin_version::KotlinVersion::supported()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let reproduced_releases = supported.iter().map(String::as_str).collect::<Vec<_>>();
     let resolved = PluginRegistry::with_builtins().resolve(&Activation {
         config: &config,
         classpath: &[],
         module_name: "box",
         codegen_host: false,
         module_ir_host: false,
+        reproduced_releases: &reproduced_releases,
     });
     let errors = resolved
         .diagnostics

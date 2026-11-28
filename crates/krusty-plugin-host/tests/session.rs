@@ -1,4 +1,4 @@
-//! A compilation's session in the real host: kotlinc 2.4.20's JVM frontend and fir2ir over a
+//! A compilation's session in the real host: kotlinc 2.4.21's JVM frontend and fir2ir over a
 //! classpath, and declarations found in it by identity. Ignored by default because it downloads; CI
 //! runs it.
 
@@ -20,7 +20,7 @@ fn stdlib(runtime: &HostRuntime) -> PathBuf {
     runtime
         .compiler_classpath
         .iter()
-        .find(|jar| jar.ends_with("kotlin-stdlib-2.4.20.jar"))
+        .find(|jar| jar.ends_with("kotlin-stdlib-2.4.21.jar"))
         .unwrap()
         .clone()
 }
@@ -87,7 +87,7 @@ fn function(package: &str, name: &str, value_parameters: Vec<TypeIdentity>) -> C
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn declarations_on_the_classpath_resolve_by_their_exact_signature() {
     let (runtime, _) = runtime();
     let mut host = opened(&runtime, vec![stdlib(&runtime)]);
@@ -156,7 +156,7 @@ fn declarations_on_the_classpath_resolve_by_their_exact_signature() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn an_identity_that_names_no_declaration_fails_by_name() {
     let (runtime, _) = runtime();
     let mut host = opened(&runtime, vec![stdlib(&runtime)]);
@@ -187,7 +187,7 @@ fn inner_classes(runtime: &HostRuntime) -> PathBuf {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn an_inner_class_member_names_its_outer_class_type_parameter_by_that_class() {
     let (runtime, _) = runtime();
     let mut host = opened(&runtime, vec![stdlib(&runtime), inner_classes(&runtime)]);
@@ -263,7 +263,7 @@ fn duplicates(runtime: &HostRuntime) -> Vec<PathBuf> {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn an_identity_that_names_two_declarations_fails_by_name() {
     let (runtime, _) = runtime();
     let mut classpath = vec![stdlib(&runtime)];
@@ -279,7 +279,7 @@ fn an_identity_that_names_two_declarations_fails_by_name() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_session_kotlinc_refuses_fails_with_kotlincs_message() {
     let (runtime, env) = runtime();
     let mut host = start(&runtime, &env);
@@ -306,7 +306,7 @@ fn a_session_kotlinc_refuses_fails_with_kotlincs_message() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_closed_session_resolves_nothing() {
     let (runtime, _) = runtime();
     let mut host = opened(&runtime, vec![stdlib(&runtime)]);

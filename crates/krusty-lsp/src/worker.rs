@@ -1621,28 +1621,20 @@ mod tests {
 
     #[test]
     fn language_wire_preserves_the_selected_reference_release() {
-        let old = LanguageSettings::for_release(
-            KotlinVersion::V2_4_0,
-            LanguageVersion::V2_4,
-            Some(LanguageVersion::V2_4),
+        let selected = LanguageSettings::for_release(
+            KotlinVersion::V2_4_21,
+            LanguageVersion::V2_3,
+            Some(LanguageVersion::V2_2),
             &[],
         )
         .unwrap();
 
-        let wire = WireLanguage::of(&old);
-        assert_eq!(wire.reference_version, "2.4.0");
+        let wire = WireLanguage::of(&selected);
+        assert_eq!(wire.reference_version, "2.4.21");
         let carried = WireLanguage::settings(Some(&wire)).unwrap();
-        assert_eq!(carried.features.release(), KotlinVersion::V2_4_0);
-        assert_eq!(carried.language_version, LanguageVersion::V2_4);
-        assert_eq!(carried.api_version, LanguageVersion::V2_4);
-        assert!(
-            carried
-                .features
-                .table()
-                .get("ForbidValueClassRecursionViaTypeParameters")
-                .is_none(),
-            "the worker must not rebuild old-release semantics from its process-global target"
-        );
+        assert_eq!(carried.features.release(), KotlinVersion::V2_4_21);
+        assert_eq!(carried.language_version, LanguageVersion::V2_3);
+        assert_eq!(carried.api_version, LanguageVersion::V2_2);
     }
 
     #[test]

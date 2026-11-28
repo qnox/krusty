@@ -969,11 +969,11 @@ mod tests {
                 &format!("-Xkotlin-reference-version={version}"),
             ]))
         };
-        let unit = request("2.4.20").expect("must translate");
+        let unit = request("2.4.21").expect("must translate");
         let parsed = crate::cli::parse(unit.compiler_arguments());
         assert_eq!(
             parsed.kotlin_reference_version,
-            Some(KotlinVersion::V2_4_20)
+            Some(KotlinVersion::V2_4_21)
         );
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         let supported = KotlinVersion::supported()

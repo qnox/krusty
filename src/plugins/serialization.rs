@@ -57,7 +57,6 @@ use crate::plugins::{
 };
 use crate::types::{type_name, Ty, TyKind, TypeName};
 
-pub use super::PluginRelease;
 use crate::fx_hash::HashMap;
 use constructed_standard_serializers::constructed_standard_serializer;
 use declared_serializer::build_field_serializer_instance;
@@ -166,9 +165,6 @@ const DECODE_FROM_STRING_DESC: &str =
 pub struct SerializationPlugin {
     pub abi: SerializationAbi,
     pub module: String,
-    /// The compiler plugin jar's release, or `None` when no jar named one (an editor enabling every
-    /// native extension, `-P` without `-Xplugin`): the checkers then use the newest wording.
-    compiler_plugin: Option<PluginRelease>,
     /// What each serialized class's `$childSerializers` cache is, published by the pass that builds
     /// it and consumed by every reader. Keyed by the SERIALIZED class, not the `$serializer`.
     child_serializer_caches: Mutex<HashMap<TypeName, ChildSerializerCachePlan>>,
@@ -179,23 +175,8 @@ impl SerializationPlugin {
         Self {
             abi,
             module: module.into(),
-            compiler_plugin: None,
             child_serializer_caches: Mutex::new(HashMap::default()),
         }
-    }
-
-    /// Reproduce the compiler plugin of `release` (see [`PluginRelease`]).
-    pub fn with_compiler_plugin_release(mut self, release: Option<PluginRelease>) -> Self {
-        self.compiler_plugin = release;
-        self
-    }
-
-    /// Whether a generated `$serializer`'s type parameters carry the serialized class's bounds in
-    /// the backend, as the plugin of 2.4.21 and later copies them in IR. The frontend declaration,
-    /// and so the metadata, keeps them unbounded on every release.
-    fn serializer_type_parameters_are_bounded(&self) -> bool {
-        self.compiler_plugin
-            .is_none_or(|release| release >= PluginRelease::V2_4_21)
     }
 
     /// Fill `class_id`'s `write$Self`, and `serialize`, its `$serializer`'s delegation to it, when
@@ -1137,10 +1118,7 @@ impl IrPlugin for SerializationPlugin {
         ctx: &crate::plugins::FrontendClassCheckContext<'_>,
         diagnostics: &mut Vec<crate::plugins::FrontendPluginDiagnostic>,
     ) {
-        diagnostics.extend(transient_initializer::missing_initializers(
-            ctx,
-            self.compiler_plugin,
-        ));
+        diagnostics.extend(transient_initializer::missing_initializers(ctx));
     }
 
     fn declared_serializable_elements(
@@ -1155,7 +1133,7 @@ impl IrPlugin for SerializationPlugin {
         ctx: &crate::plugins::FrontendNamedClassContext<'_>,
         diagnostics: &mut Vec<crate::plugins::FrontendPluginDiagnostic>,
     ) -> Option<crate::plugins::FrontendNamedClassConstruction> {
-        custom_serializer_class::select_constructor(ctx, self.compiler_plugin, diagnostics)
+        custom_serializer_class::select_constructor(ctx, diagnostics)
     }
 
     fn plan_frontend_expressions(
@@ -1540,7 +1518,6 @@ impl IrPlugin for SerializationPlugin {
                             serialized_class: foo_id,
                             fields: &wire,
                             type_parameter_serializers,
-                            bounded_type_parameters: self.serializer_type_parameters_are_bounded(),
                             cache: self
                                 .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
                         }

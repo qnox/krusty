@@ -12,6 +12,9 @@ repositories:
   - mavenLocal
 dependencies:
   - ../lib
+settings:
+  kotlin:
+    version: 2.4.21
 --- app/src/main.kt
 fun main() = Unit
 --- lib/module.yaml
@@ -19,6 +22,9 @@ product: jvm/lib
 layout: maven-like
 repositories:
   - mavenLocal
+settings:
+  kotlin:
+    version: 2.4.21
 --- lib/src/main/kotlin/Lib.kt
 class Lib
 --- lib/src/main/java/lib/Helper.java

@@ -16,6 +16,9 @@ dependencies:
   - ../older
   - ../provisioned
   - ../vendor
+settings:
+  kotlin:
+    version: 2.4.21
 --- app/src/main.kt
 fun main() = Unit
 --- older/module.yaml
@@ -26,6 +29,8 @@ settings:
   jvm:
     jdk:
       version: 21
+  kotlin:
+    version: 2.4.21
 --- older/src/Older.kt
 class Older
 --- provisioned/module.yaml
@@ -36,6 +41,8 @@ settings:
   jvm:
     jdk:
       selectionMode: alwaysProvision
+  kotlin:
+    version: 2.4.21
 --- provisioned/src/Provisioned.kt
 class Provisioned
 --- vendor/module.yaml
@@ -47,6 +54,8 @@ settings:
     jdk:
       distributions:
         - temurin
+  kotlin:
+    version: 2.4.21
 --- vendor/src/Vendor.kt
 class Vendor
 --- krusty-refusal

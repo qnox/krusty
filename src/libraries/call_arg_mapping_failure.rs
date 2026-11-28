@@ -3,8 +3,6 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallArgMappingFailure {
     pub errors: Vec<CallArgMappingError>,
-    /// First positional argument rejected after named arguments.
-    pub recovery_argument: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

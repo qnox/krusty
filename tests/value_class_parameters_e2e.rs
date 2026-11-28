@@ -6,7 +6,6 @@
 
 use super::common::{self, CompilerOutcome};
 use krusty::compilation_target::CompilationTarget;
-use krusty::kotlin_version::KotlinVersion;
 
 const FORBID: &str = "-XXLanguage:+ForbidValueClassRecursionViaTypeParameters";
 
@@ -154,20 +153,6 @@ const VIA_TYPE_PARAMETERS: &str = "\
 /// front end is compared here, and the forbidden form below compares the complete compilation.
 #[test]
 fn recursion_through_type_parameters_matches_the_selected_release() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        assert_matches_kotlinc(
-            VIA_TYPE_PARAMETERS,
-            &[],
-            &[
-                "1:45: value class cannot be recursive.",
-                "2:45: value class cannot be recursive.",
-                "3:65: value class cannot be recursive.",
-                "5:46: value class cannot be recursive.",
-            ],
-            &[],
-        );
-        return;
-    }
     let warning = "value class cannot be recursive. This will become an error in language \
                    version 2.5. See https://youtrack.jetbrains.com/issue/KT-85848.";
     let expected = [
@@ -202,9 +187,6 @@ fn recursion_through_type_parameters_matches_the_selected_release() {
 
 #[test]
 fn recursion_warning_keeps_its_typed_policy_identity() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     const SOURCE: &str = "@JvmInline value class W<T : W<T>>(val x: T)\n";
     let diagnostics = common::front_end_diagnostic_records_for(
         CompilationTarget::Jvm,
@@ -233,9 +215,6 @@ fn recursion_warning_keeps_its_typed_policy_identity() {
 
 #[test]
 fn forbidden_recursion_through_type_parameters_is_an_error() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     assert_matches_kotlinc(
         VIA_TYPE_PARAMETERS,
         &[FORBID],
@@ -251,9 +230,6 @@ fn forbidden_recursion_through_type_parameters_is_an_error() {
 
 #[test]
 fn suppression_does_not_hide_forbidden_recursion() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     assert_matches_kotlinc(
         "@Suppress(\"VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING\")\n\
          @JvmInline value class T3<T : T3<T>>(val x: T)\n",
@@ -273,9 +249,6 @@ const SUPPRESSED: &str = "\
 /// The warning's name suppresses it on the parameter that holds it as well as on the class.
 #[test]
 fn recursion_warning_is_suppressed_on_the_parameter_and_the_class() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     let expected = [
         "4:45: warning: value class cannot be recursive. This will become an error \
                      in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-85848.",
@@ -313,9 +286,6 @@ const SUPPRESSED_PARAMETER_SITE: &str = "\
 /// covers the warning inside that parameter too.
 #[test]
 fn recursion_warning_is_suppressed_by_the_parameter_use_site() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     let expected = [
         "2:45: warning: value class cannot be recursive. This will become an error \
                      in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-85848.",
@@ -349,9 +319,6 @@ fn recursion_warning_is_suppressed_by_the_parameter_use_site() {
 /// underlying property as absence of value-class structure.
 #[test]
 fn native_full_value_representation_is_checked_for_recursion() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     let source = "// LANGUAGE: +FullValueClasses\n\
 value class V(val n: Int, val self: V)\n";
     let expected = CompilerOutcome {
@@ -392,9 +359,6 @@ value class V(val n: Int, val self: V)\n";
 /// representation, and stops at a nullable multi-field representation.
 #[test]
 fn native_full_value_recursion_respects_field_count_and_nullability() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     let source = "// LANGUAGE: +FullValueClasses\n\
 value class A(val n: Int, val b: B)\n\
 value class B(val n: Int, val a: A)\n\

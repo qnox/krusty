@@ -233,7 +233,6 @@ pub(super) fn report_members(
     incompatible: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     declarations: &ResolvedDeclarations<'_>,
     owner: Option<crate::fir::DeclarationId>,
-    reference: crate::features::ReferenceProfile,
     diags: &mut DiagSink,
 ) {
     let Some(class) = owner.and_then(|owner| declarations.classifier(owner)) else {
@@ -264,7 +263,7 @@ pub(super) fn report_members(
             ),
             Ok(Rendered::Unmatched(rendered)) => diags.error(
                 member.name,
-                crate::diagnostic_wording::actual_without_expect(reference, &rendered),
+                crate::diagnostic_wording::actual_without_expect(&rendered),
             ),
             Err(unreachable) => diags.error(
                 member.name,

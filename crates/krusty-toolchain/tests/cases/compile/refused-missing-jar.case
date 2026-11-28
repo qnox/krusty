@@ -12,6 +12,9 @@ repositories:
 dependencies:
   - org.example:present:1.0
   - org.example:absent-jar:1.0
+settings:
+  kotlin:
+    version: 2.4.21
 --- app/src/main.kt
 fun main() = Unit
 --- m2/org/example/present/1.0/present-1.0.pom

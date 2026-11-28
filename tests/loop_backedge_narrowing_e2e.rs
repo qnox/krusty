@@ -40,15 +40,10 @@ fn rejects_naming_the_declared_receiver(src: &str, context: &str) {
         1,
         "{context}: kotlinc must reject once: {expected:?}"
     );
-    let krusty_expected = krusty::diagnostic_wording::unresolved_reference_on(
-        krusty::kotlin_version::ReferenceProfile::of_release(
-            krusty::kotlin_version::environment_release(),
-        ),
-        "length",
-        Some("Any"),
-    )
-    .printed(krusty::diag::DiagnosticNames::Hidden)
-    .into_owned();
+    let krusty_expected =
+        krusty::diagnostic_wording::unresolved_reference_on("length", Some("Any"))
+            .printed(krusty::diag::DiagnosticNames::Hidden)
+            .into_owned();
     assert_eq!(
         diagnostics,
         [krusty_expected],

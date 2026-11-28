@@ -1475,7 +1475,6 @@ impl Checker<'_> {
             crate::symbol_resolver::site_tower_rank(
                 crate::symbol_resolver::callable_tower_rank(candidate),
                 self.candidate_visible(candidate, extension_receiver),
-                self,
             )
         };
         let nearest_available_rung = applicable

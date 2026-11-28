@@ -170,7 +170,7 @@ pub(super) fn function_locals(
     let identities = ir.function_parameter_identities(function)?;
     let anonymous = if anonymous_context_locals(ir, function) {
         let semantic_types = function_semantic_parameter_types(ir, function, identities, types);
-        disambiguated_anonymous_context_labels(ir.reference.quirks(), identities, &semantic_types)
+        disambiguated_anonymous_context_labels(identities, &semantic_types)
     } else {
         vec![None; identities.len()]
     };
@@ -223,8 +223,7 @@ pub(super) fn property_annotation_marker_locals(
 ) -> Option<Vec<Option<String>>> {
     let identities = ir.function_parameter_identities(function)?;
     let semantic_types = function_semantic_parameter_types(ir, function, identities, types);
-    let anonymous =
-        disambiguated_anonymous_context_labels(ir.reference.quirks(), identities, &semantic_types);
+    let anonymous = disambiguated_anonymous_context_labels(identities, &semantic_types);
     Some(
         identities
             .iter()
@@ -241,20 +240,13 @@ pub(super) fn property_annotation_marker_locals(
 }
 
 /// kotlinc names an anonymous context parameter by its generated label in the IR itself, so the
-/// label is also its local-variable name, unless the release leaves it unnamed there
-/// ([`krusty::kotlin_version::Quirk::AnonymousContextParameterIsNotLocal`]). A lambda literal's own context-function parameter
+/// label is also its local-variable name. A lambda literal's own context-function parameter
 /// stays unnamed in the method's `LocalVariableTable` at every version: the label is only the
 /// null-check message.
 fn anonymous_context_locals(ir: &IrFile, function: u32) -> bool {
-    anonymous_context_parameters_are_locals(ir.reference.quirks())
-        && ir
-            .lambda_origins
-            .get(&function)
-            .is_none_or(|origin| origin.form != IrLambdaForm::Literal)
-}
-
-fn anonymous_context_parameters_are_locals(quirks: krusty::kotlin_version::Quirks) -> bool {
-    !quirks.has(krusty::kotlin_version::Quirk::AnonymousContextParameterIsNotLocal)
+    ir.lambda_origins
+        .get(&function)
+        .is_none_or(|origin| origin.form != IrLambdaForm::Literal)
 }
 
 /// kotlinc's spelling of the extension receiver of a value class's interface entry. The entry is a
@@ -418,13 +410,11 @@ pub(super) fn method_parameter(
 }
 
 fn disambiguated_anonymous_context_labels(
-    quirks: krusty::kotlin_version::Quirks,
     identities: &[IrParameterIdentity],
     types: &[krusty::types::Ty],
 ) -> Vec<Option<String>> {
     assert_eq!(identities.len(), types.len());
     anonymous_context_labels::disambiguated(
-        quirks,
         identities
             .iter()
             .zip(types)
@@ -561,7 +551,6 @@ pub(super) fn constructor_identities(
 }
 
 fn constructor_anonymous_labels(
-    quirks: krusty::kotlin_version::Quirks,
     arguments: &[krusty::ir::IrCtorArg],
     identities: &[IrParameterIdentity],
 ) -> Vec<Option<String>> {
@@ -569,15 +558,14 @@ fn constructor_anonymous_labels(
         .iter()
         .map(|argument| argument.declared_ty.unwrap_or(argument.ty))
         .collect::<Vec<_>>();
-    disambiguated_anonymous_context_labels(quirks, identities, &semantic_types)
+    disambiguated_anonymous_context_labels(identities, &semantic_types)
 }
 
 pub(super) fn constructor_method_parameters(
-    quirks: krusty::kotlin_version::Quirks,
     arguments: &[krusty::ir::IrCtorArg],
 ) -> Vec<Option<String>> {
     let identities = constructor_identities(arguments);
-    let anonymous = constructor_anonymous_labels(quirks, arguments, &identities);
+    let anonymous = constructor_anonymous_labels(arguments, &identities);
     identities
         .iter()
         .enumerate()
@@ -598,12 +586,7 @@ pub(super) fn constructor_local_variables(
 ) -> Vec<Option<String>> {
     let arguments = &class.ctor_args;
     let identities = constructor_identities(arguments);
-    let quirks = ir.reference.quirks();
-    let anonymous = if anonymous_context_parameters_are_locals(quirks) {
-        constructor_anonymous_labels(quirks, arguments, &identities)
-    } else {
-        vec![None; identities.len()]
-    };
+    let anonymous = constructor_anonymous_labels(arguments, &identities);
     identities
         .iter()
         .zip(anonymous)
@@ -632,12 +615,9 @@ pub(super) fn constructor_local_variables(
         .collect()
 }
 
-pub(super) fn constructor_assertions(
-    quirks: krusty::kotlin_version::Quirks,
-    arguments: &[krusty::ir::IrCtorArg],
-) -> Vec<Option<String>> {
+pub(super) fn constructor_assertions(arguments: &[krusty::ir::IrCtorArg]) -> Vec<Option<String>> {
     let identities = constructor_identities(arguments);
-    let anonymous = constructor_anonymous_labels(quirks, arguments, &identities);
+    let anonymous = constructor_anonymous_labels(arguments, &identities);
     identities
         .iter()
         .enumerate()
@@ -652,8 +632,7 @@ pub(super) fn function_method_parameters(
 ) -> Option<Vec<Option<String>>> {
     let identities = ir.function_parameter_identities(function)?;
     let semantic_types = function_semantic_parameter_types(ir, function, identities, types);
-    let anonymous =
-        disambiguated_anonymous_context_labels(ir.reference.quirks(), identities, &semantic_types);
+    let anonymous = disambiguated_anonymous_context_labels(identities, &semantic_types);
     Some(
         identities
             .iter()
@@ -674,8 +653,7 @@ pub(super) fn function_assertions(
 ) -> Option<Vec<Option<String>>> {
     let identities = ir.function_parameter_identities(function)?;
     let semantic_types = function_semantic_parameter_types(ir, function, identities, types);
-    let anonymous =
-        disambiguated_anonymous_context_labels(ir.reference.quirks(), identities, &semantic_types);
+    let anonymous = disambiguated_anonymous_context_labels(identities, &semantic_types);
     // kotlinc replaces a function whose signature the value-class ABI mangles (or moves to a static
     // `-impl`) with a copy whose extension receiver is an ordinary parameter, named as the
     // receiver's local variable. Its guard then quotes that name rather than `<this>`. A lambda's
@@ -846,12 +824,11 @@ pub(super) fn resolved_local_variable(
 /// positional `pN` in this table only. The ordinal is the recorded identity, not a descriptor
 /// reconstruction, and it does not become a source or reflection name.
 pub(super) fn bridge_local_variables(
-    quirks: krusty::kotlin_version::Quirks,
     identities: &[krusty::fir::ResolvedParameterIdentity],
     semantic_types: &[krusty::types::Ty],
     function_name: &str,
 ) -> Vec<Option<String>> {
-    resolved_local_variables(quirks, identities, semantic_types, function_name)
+    resolved_local_variables(identities, semantic_types, function_name)
         .into_iter()
         .zip(identities)
         .map(|(name, identity)| {
@@ -868,7 +845,6 @@ pub(super) fn bridge_local_variables(
 /// Local-variable spellings for a provider-published parameter list. Anonymous context labels are
 /// derived from the declaration's semantic types, never from erased bridge descriptors.
 pub(super) fn resolved_local_variables(
-    quirks: krusty::kotlin_version::Quirks,
     identities: &[krusty::fir::ResolvedParameterIdentity],
     semantic_types: &[krusty::types::Ty],
     function_name: &str,
@@ -878,11 +854,7 @@ pub(super) fn resolved_local_variables(
         semantic_types.len(),
         "one semantic type per provider-published parameter identity"
     );
-    let anonymous = if anonymous_context_parameters_are_locals(quirks) {
-        resolved_anonymous_context_labels(quirks, identities, semantic_types)
-    } else {
-        vec![None; identities.len()]
-    };
+    let anonymous = resolved_anonymous_context_labels(identities, semantic_types);
     identities
         .iter()
         .zip(anonymous)
@@ -897,14 +869,13 @@ pub(super) fn resolved_local_variables(
 /// provider-published ordinal (`p0`, ...), and an extension receiver uses the accessor convention
 /// rather than the target method's `$this$<name>` spelling.
 pub(super) fn dependency_access_bridge_local_variables(
-    quirks: krusty::kotlin_version::Quirks,
     identities: &[krusty::fir::ResolvedParameterIdentity],
     semantic_types: &[krusty::types::Ty],
     physical_types: &[krusty::types::Ty],
     physical_plan: Option<&[krusty::libraries::PhysicalParameterSlot]>,
     function_name: &str,
 ) -> Vec<Option<String>> {
-    let source = resolved_local_variables(quirks, identities, semantic_types, function_name)
+    let source = resolved_local_variables(identities, semantic_types, function_name)
         .into_iter()
         .zip(identities)
         .map(|(name, identity)| match identity {
@@ -956,7 +927,6 @@ pub(super) fn unnamed_java_parameter(ordinal: usize) -> String {
 }
 
 fn resolved_anonymous_context_labels(
-    quirks: krusty::kotlin_version::Quirks,
     identities: &[krusty::fir::ResolvedParameterIdentity],
     semantic_types: &[krusty::types::Ty],
 ) -> Vec<Option<String>> {
@@ -973,16 +943,15 @@ fn resolved_anonymous_context_labels(
             ),
         })
         .collect::<Vec<_>>();
-    disambiguated_anonymous_context_labels(quirks, &projected, semantic_types)
+    disambiguated_anonymous_context_labels(&projected, semantic_types)
 }
 
 pub(super) fn resolved_method_parameters(
-    quirks: krusty::kotlin_version::Quirks,
     identities: &[krusty::fir::ResolvedParameterIdentity],
     semantic_types: &[krusty::types::Ty],
     function_name: &str,
 ) -> Vec<Option<String>> {
-    let anonymous = resolved_anonymous_context_labels(quirks, identities, semantic_types);
+    let anonymous = resolved_anonymous_context_labels(identities, semantic_types);
     identities
         .iter()
         .enumerate()
@@ -995,12 +964,11 @@ pub(super) fn resolved_method_parameters(
 }
 
 pub(super) fn resolved_assertions(
-    quirks: krusty::kotlin_version::Quirks,
     identities: &[krusty::fir::ResolvedParameterIdentity],
     semantic_types: &[krusty::types::Ty],
     function_name: &str,
 ) -> Vec<Option<String>> {
-    let anonymous = resolved_anonymous_context_labels(quirks, identities, semantic_types);
+    let anonymous = resolved_anonymous_context_labels(identities, semantic_types);
     identities
         .iter()
         .enumerate()
@@ -1107,11 +1075,7 @@ mod tests {
             declared_function,
             FnParamInfo::identities(vec![IrParameterIdentity::anonymous_context_parameter(0)]),
         );
-        let declared_local = if anonymous_context_parameters_are_locals(ir.reference.quirks()) {
-            Some("$context-Receiver".to_string())
-        } else {
-            None
-        };
+        let declared_local = Some("$context-Receiver".to_string());
         assert_eq!(
             function_locals(&declared, declared_function, &[receiver]),
             Some(vec![declared_local])
@@ -1330,9 +1294,7 @@ mod tests {
                 &[krusty::types::Ty::String, krusty::types::Ty::String],
             ),
             Some(vec![
-                anonymous_context_parameters_are_locals(ir.reference.quirks())
-                    .then(|| Some("$context-Wrapped".to_string()))
-                    .flatten(),
+                Some("$context-Wrapped".to_string()),
                 Some("value".to_string()),
             ])
         );
@@ -1346,7 +1308,6 @@ mod tests {
 
         assert_eq!(
             dependency_access_bridge_local_variables(
-                krusty::kotlin_version::ReferenceProfile::default().quirks(),
                 &[
                     ResolvedParameterIdentity::ExtensionReceiver,
                     ResolvedParameterIdentity::Source("named".into()),
@@ -1383,7 +1344,6 @@ mod tests {
 
         assert_eq!(
             bridge_local_variables(
-                krusty::kotlin_version::ReferenceProfile::default().quirks(),
                 &[
                     ResolvedParameterIdentity::Source("named".into()),
                     ResolvedParameterIdentity::Unnamed { ordinal: 1 },
@@ -1404,7 +1364,6 @@ mod tests {
     #[should_panic(expected = "one semantic type per provider-published parameter identity")]
     fn resolved_provider_parameter_names_reject_a_mismatched_semantic_arity() {
         resolved_local_variables(
-            krusty::kotlin_version::ReferenceProfile::default().quirks(),
             &[krusty::fir::ResolvedParameterIdentity::Source(
                 "value".into(),
             )],

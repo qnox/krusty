@@ -1,4 +1,4 @@
-//! The real host: kotlin-compiler-embeddable 2.4.20 from Maven Central in a JVM, loading the real
+//! The real host: kotlin-compiler-embeddable 2.4.21 from Maven Central in a JVM, loading the real
 //! power-assert plugin jar. Ignored by default because it downloads; CI runs it.
 
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ mod support;
 use support::{kotlinc, runtime, start};
 
 const POWER_ASSERT_SHA256: &str =
-    "ad1b0b93d2ebad6f02e1682cd3dd4f81c5f666902aa5a4d3e3069e1101ed0bfc";
+    "9dcb128f1129d10efcfd5f951f253894f01c1cfd543b390eec56d5d5f2d57b28";
 
 /// The power-assert jar, provisioned like any pinned jar (verified, cached and published by an
 /// atomic rename) and at most once per test process.
@@ -24,9 +24,9 @@ fn power_assert() -> String {
         let pin = ArtifactPin {
             group: "org.jetbrains.kotlin".into(),
             artifact: "kotlin-power-assert-compiler-plugin-embeddable".into(),
-            version: "2.4.20".into(),
+            version: "2.4.21".into(),
             sha256: POWER_ASSERT_SHA256.into(),
-            size: 420_766,
+            size: 420_767,
         };
         let jar = provision_artifact(
             &pin,
@@ -77,10 +77,10 @@ fn started(runtime: &HostRuntime, env: &Environment) -> (Result<(), HostError>, 
 }
 
 const COMPILING: &str =
-    "info: compiling krusty's plugin host for kotlinc 2.4.20, once; later builds reuse it\n";
+    "info: compiling krusty's plugin host for kotlinc 2.4.21, once; later builds reuse it\n";
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20 and power-assert"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21 and power-assert"]
 fn power_assert_loads_with_its_options_and_registers_its_extensions() {
     let (runtime, env) = runtime();
     let mut host = start(&runtime, &env);
@@ -108,7 +108,7 @@ fn power_assert_loads_with_its_options_and_registers_its_extensions() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20 and power-assert"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21 and power-assert"]
 fn an_option_the_plugin_does_not_declare_fails_with_kotlincs_message() {
     let (runtime, env) = runtime();
     let mut host = start(&runtime, &env);
@@ -132,7 +132,7 @@ fn an_option_the_plugin_does_not_declare_fails_with_kotlincs_message() {
 /// more of it on there; the host's protocol is not interrupted by it.
 #[cfg(unix)]
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn jvm_logging_on_stdout_does_not_reach_the_protocol() {
     let (mut runtime, env) = runtime();
     let scratch = ScratchCache::new("jvm-logging");
@@ -155,13 +155,13 @@ fn jvm_logging_on_stdout_does_not_reach_the_protocol() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_classpath_entry_that_declares_no_registrar_loads_no_plugin() {
     let (runtime, env) = runtime();
     let stdlib = runtime
         .compiler_classpath
         .iter()
-        .find(|jar| jar.ends_with("kotlin-stdlib-2.4.20.jar"))
+        .find(|jar| jar.ends_with("kotlin-stdlib-2.4.21.jar"))
         .unwrap()
         .to_string_lossy()
         .into_owned();
@@ -170,7 +170,7 @@ fn a_classpath_entry_that_declares_no_registrar_loads_no_plugin() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_plugin_classpath_entry_that_does_not_exist_is_refused() {
     let (runtime, env) = runtime();
     let missing = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
@@ -187,7 +187,7 @@ fn a_plugin_classpath_entry_that_does_not_exist_is_refused() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_plugin_classpath_entry_that_is_not_a_jar_is_refused() {
     let (runtime, env) = runtime();
     let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
@@ -206,7 +206,7 @@ fn a_plugin_classpath_entry_that_is_not_a_jar_is_refused() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_plugin_declaring_a_legacy_component_registrar_is_refused() {
     use std::io::Write;
     let (runtime, env) = runtime();
@@ -236,7 +236,7 @@ fn a_plugin_declaring_a_legacy_component_registrar_is_refused() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn the_adapter_is_compiled_once_and_then_reused_silently() {
     let (runtime, mut env) = runtime();
     let cache = ScratchCache::new("adapter");
@@ -246,7 +246,7 @@ fn the_adapter_is_compiled_once_and_then_reused_silently() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn an_adapter_built_against_other_pins_for_the_same_kotlin_version_is_not_reused() {
     let (runtime, mut env) = runtime();
     let cache = ScratchCache::new("repinned");
@@ -263,7 +263,7 @@ fn an_adapter_built_against_other_pins_for_the_same_kotlin_version_is_not_reused
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn an_altered_adapter_jar_is_rebuilt_rather_than_run() {
     let (runtime, mut env) = runtime();
     let cache = ScratchCache::new("altered");
@@ -302,25 +302,6 @@ fn parallel_tests_share_one_fetch_of_the_plugin_jar() {
         .filter(|name| name.to_string_lossy().contains(".partial-"))
         .collect();
     assert_eq!(leftovers, Vec::<std::ffi::OsString>::new());
-}
-
-#[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
-fn a_host_on_another_kotlin_version_than_the_build_is_refused() {
-    let (mut runtime, mut env) = runtime();
-    // The 2.4.20 classpath, presented as if the build were 2.4.21. Its adapter goes to a cache of
-    // its own, so no later build finds it under 2.4.21.
-    runtime.kotlin_version = "2.4.21".into();
-    let cache = ScratchCache::new("mislabeled");
-    env.cache_dir = cache.0.clone();
-    let error = Host::start(&runtime, &env, &mut Vec::new()).err();
-    assert_eq!(
-        error,
-        Some(HostError::KotlinVersion {
-            host: "2.4.20".into(),
-            build: "2.4.21".into()
-        })
-    );
 }
 
 /// The lifecycle fixture's classes (`tests/fixtures/Registrars.kt`), compiled once per test process
@@ -424,7 +405,7 @@ fn fixture_plugin(registrar: &str, plugin_id: &str, irs: u32) -> LoadedPlugin {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn registrars_share_one_storage_and_each_reports_what_it_added() {
     let (runtime, env) = runtime();
     let jar = fixture_jar("shared", &["fixture.First", "fixture.Second"]);
@@ -442,7 +423,7 @@ fn registrars_share_one_storage_and_each_reports_what_it_added() {
 
 #[test]
 #[cfg(target_os = "linux")]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn unloading_disposes_the_registrars_resources_and_closes_the_jars() {
     let (runtime, env) = runtime();
     let jar = fixture_jar("unload", &["fixture.First", "fixture.Second"]);
@@ -461,7 +442,7 @@ fn unloading_disposes_the_registrars_resources_and_closes_the_jars() {
 
 #[test]
 #[cfg(target_os = "linux")]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_failing_registrar_leaves_nothing_loaded_and_nothing_open() {
     let (runtime, env) = runtime();
     let jar = fixture_jar("failing", &["fixture.First", "fixture.Failing"]);
@@ -484,7 +465,7 @@ fn a_failing_registrar_leaves_nothing_loaded_and_nothing_open() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn loading_again_disposes_what_was_loaded_before() {
     let (runtime, env) = runtime();
     let jar = fixture_jar("reload", &["fixture.First"]);
@@ -500,7 +481,7 @@ fn loading_again_disposes_what_was_loaded_before() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn stopping_the_host_disposes_what_is_loaded() {
     let (runtime, env) = runtime();
     let jar = fixture_jar("stop", &["fixture.First", "fixture.Second"]);

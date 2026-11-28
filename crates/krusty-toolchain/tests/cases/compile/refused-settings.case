@@ -23,6 +23,7 @@ settings:
       - -Xcontext-parameters
     explicitApi: strict
     allOpen: enabled
+    version: 2.4.21
   springBoot:
     enabled: true
     applyBom: false
@@ -40,10 +41,14 @@ settings:
     ksp:
       processors:
         - ../processor
+    version: 2.4.21
 --- lib/src/Lib.kt
 class Lib
 --- processor/module.yaml
 product: jvm/lib
+settings:
+  kotlin:
+    version: 2.4.21
 --- processor/src/Processor.kt
 class Processor
 --- krusty-refusal
@@ -55,4 +60,4 @@ error	app/module.yaml:10:22: ERROR: module `app` sets `settings.kotlin.languageV
 error	app/module.yaml:12:7: ERROR: module `app` sets `settings.kotlin.freeCompilerArgs`, and krusty-toolchain does not implement compiling with it
 error	app/module.yaml:13:18: ERROR: module `app` sets `settings.kotlin.explicitApi`, and krusty-toolchain does not implement compiling with it
 error	app/module.yaml:14:14: ERROR: module `app` sets `settings.kotlin.allOpen.enabled`, and krusty-toolchain does not implement compiling with it
-error	app/module.yaml:16:14: ERROR: module `app` sets `settings.springBoot.enabled`, which the toolchain compiles with compiler plugins krusty-toolchain does not implement
+error	app/module.yaml:17:14: ERROR: module `app` sets `settings.springBoot.enabled`, which the toolchain compiles with compiler plugins krusty-toolchain does not implement

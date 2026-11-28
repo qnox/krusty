@@ -1,7 +1,6 @@
 //! Import-path deprecations and declaration-use positions migrating to errors in Kotlin 2.5.
 
 use super::common;
-use krusty::kotlin_version::KotlinVersion;
 use std::path::PathBuf;
 
 const DEPENDENCY: &str = r#"package lib
@@ -83,9 +82,6 @@ fn assert_matches_kotlinc(
 
 #[test]
 fn import_classifier_chain_reports_complete_order_and_count() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     let source = r#"import lib.A.B.X
 import lib.A.B.Companion.f
 import lib.A.C.Y
@@ -118,9 +114,6 @@ fun use() = f()
 
 #[test]
 fn source_import_reports_published_outer_but_not_imported_classifier_deprecation() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     assert_matches_kotlinc(
         &[
             (
@@ -138,9 +131,6 @@ fn source_import_reports_published_outer_but_not_imported_classifier_deprecation
 
 #[test]
 fn file_suppression_uses_published_policy_but_does_not_hide_migration_warning() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     assert_matches_kotlinc(
         &[(
             "Use.kt",
@@ -197,12 +187,7 @@ const ORDINARY_WARNINGS_IN_MIGRATING_POSITIONS: &[&str] = &[
 
 #[test]
 fn migrating_positions_follow_the_selected_releases_exact_diagnostics() {
-    let warnings: &[&str] =
-        if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-            &[]
-        } else {
-            MIGRATION_WARNINGS
-        };
+    let warnings: &[&str] = MIGRATION_WARNINGS;
     assert_matches_kotlinc(
         &[("Use.kt", MIGRATING_USES)],
         &[common::stdlib_jar(), dependency()],
@@ -214,12 +199,7 @@ fn migrating_positions_follow_the_selected_releases_exact_diagnostics() {
 
 #[test]
 fn warning_deprecations_follow_the_selected_releases_migration_checker() {
-    let warnings: &[&str] =
-        if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-            &[]
-        } else {
-            ORDINARY_WARNINGS_IN_MIGRATING_POSITIONS
-        };
+    let warnings: &[&str] = ORDINARY_WARNINGS_IN_MIGRATING_POSITIONS;
     assert_matches_kotlinc(
         &[("Use.kt", WARNING_MIGRATING_USES)],
         &[common::stdlib_jar(), dependency()],
@@ -233,9 +213,6 @@ fn warning_deprecations_follow_the_selected_releases_migration_checker() {
 /// override global warning policy without changing the source-level suppression contract.
 #[test]
 fn named_warning_policy_controls_deprecation_error_migration_period() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     struct Case {
         arguments: &'static [&'static str],
         errors: &'static [&'static str],
@@ -290,13 +267,7 @@ interface Factory {
 
 fun use() = Factory()
 "#;
-    let warnings: &[&str] = if krusty::kotlin_version::environment_release()
-        < KotlinVersion::V2_4_20
-    {
-        &[]
-    } else {
-        &["Use.kt:6:13: 'interface Factory : Any' is deprecated. deprecated owner. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-82456."]
-    };
+    let warnings: &[&str] = &["Use.kt:6:13: 'interface Factory : Any' is deprecated. deprecated owner. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-82456."];
     assert_matches_kotlinc(
         &[("Use.kt", source)],
         &[common::stdlib_jar()],
@@ -304,15 +275,13 @@ fun use() = Factory()
         &[],
         warnings,
     );
-    if krusty::kotlin_version::environment_release() >= KotlinVersion::V2_4_20 {
-        assert_matches_kotlinc(
-            &[("Use.kt", source)],
-            &[common::stdlib_jar()],
-            &[IMPLICIT_INVOKE],
-            &["Use.kt:6:13: 'interface Factory : Any' is deprecated. deprecated owner."],
-            &[],
-        );
-    }
+    assert_matches_kotlinc(
+        &[("Use.kt", source)],
+        &[common::stdlib_jar()],
+        &[IMPLICIT_INVOKE],
+        &["Use.kt:6:13: 'interface Factory : Any' is deprecated. deprecated owner."],
+        &[],
+    );
 }
 
 #[test]
@@ -344,17 +313,11 @@ fun use() {
     P += 1
 }
 "#;
-    let warnings: &[&str] = if krusty::kotlin_version::environment_release()
-        < KotlinVersion::V2_4_20
-    {
-        &[]
-    } else {
-        &[
-            "Use.kt:3:17: 'companion object Companion : Any' is deprecated. dep companion. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-408.",
-            "Use.kt:6:18: 'companion object Companion : Any' is deprecated. dep companion. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-408.",
-            "Use.kt:7:5: 'companion object Companion : Any' is deprecated. dep companion. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-408.",
-        ]
-    };
+    let warnings: &[&str] = &[
+        "Use.kt:3:17: 'companion object Companion : Any' is deprecated. dep companion. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-408.",
+        "Use.kt:6:18: 'companion object Companion : Any' is deprecated. dep companion. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-408.",
+        "Use.kt:7:5: 'companion object Companion : Any' is deprecated. dep companion. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-408.",
+    ];
     assert_matches_kotlinc(
         &[("Use.kt", source)],
         &[common::stdlib_jar(), dependency()],
@@ -362,19 +325,17 @@ fun use() {
         &[],
         warnings,
     );
-    if krusty::kotlin_version::environment_release() >= KotlinVersion::V2_4_20 {
-        assert_matches_kotlinc(
-            &[("Use.kt", source)],
-            &[common::stdlib_jar(), dependency()],
-            &[COMPANION],
-            &[
-                "Use.kt:3:17: 'companion object Companion : Any' is deprecated. dep companion.",
-                "Use.kt:6:18: 'companion object Companion : Any' is deprecated. dep companion.",
-                "Use.kt:7:5: 'companion object Companion : Any' is deprecated. dep companion.",
-            ],
-            &[],
-        );
-    }
+    assert_matches_kotlinc(
+        &[("Use.kt", source)],
+        &[common::stdlib_jar(), dependency()],
+        &[COMPANION],
+        &[
+            "Use.kt:3:17: 'companion object Companion : Any' is deprecated. dep companion.",
+            "Use.kt:6:18: 'companion object Companion : Any' is deprecated. dep companion.",
+            "Use.kt:7:5: 'companion object Companion : Any' is deprecated. dep companion.",
+        ],
+        &[],
+    );
 }
 
 #[test]
@@ -396,9 +357,6 @@ fun use() {
 
 #[test]
 fn completed_migrations_restore_declared_error_levels() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     assert_matches_kotlinc(
         &[("Use.kt", MIGRATING_USES)],
         &[common::stdlib_jar(), dependency()],
@@ -414,9 +372,6 @@ fn completed_migrations_restore_declared_error_levels() {
 
 #[test]
 fn qualified_companion_assignment_keeps_the_written_target_span() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     assert_matches_kotlinc(
         &[("Use.kt", "fun use() {\n    lib.P += 1\n}\n")],
         &[common::stdlib_jar(), dependency()],

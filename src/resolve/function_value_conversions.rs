@@ -77,16 +77,9 @@ impl Checker<'_> {
     }
 
     /// Whether a function type returning `expected` admits a value whose result is not `Unit`
-    /// through unit conversion. Some releases know the feature but convert no arbitrary value
-    /// ([`crate::kotlin_version::Quirk::UnitConversionRejectsNonUnitResult`]).
+    /// through unit conversion.
     pub(super) fn unit_conversion_admits_result(&self, expected: Ty) -> bool {
-        self.file.unit_conversions_on_arbitrary_expressions
-            && !self
-                .file
-                .reference
-                .quirks()
-                .has(crate::kotlin_version::Quirk::UnitConversionRejectsNonUnitResult)
-            && expected == Ty::Unit
+        self.file.unit_conversions_on_arbitrary_expressions && expected == Ty::Unit
     }
 
     /// Whether the function value `actual` fits a function-typed parameter `expected` whose
@@ -214,19 +207,6 @@ impl Checker<'_> {
         let unit_conversion = self.unit_conversion_admits_result(target.ret)
             && !matches!(self.file.expr(expression), Expr::CallableRef { .. });
         if !target.suspend && !unit_conversion {
-            return None;
-        }
-        // Some releases pass a type parameter with a nullable function bound to a suspend
-        // function type unconverted.
-        if target.suspend
-            && nominal.is_ty_param()
-            && nominal.upper_bound_admits_null()
-            && self
-                .file
-                .reference
-                .quirks()
-                .has(crate::kotlin_version::Quirk::TypeParameterFunctionValueSkipsSuspendConversion)
-        {
             return None;
         }
         self.expression_function_types(scope, expression, nominal)

@@ -818,6 +818,50 @@ fn an_included_inventory_for_a_newly_supported_release_is_exempt() {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
 }
 
+/// A release the head's manifest drops reads no inventory, so deleting its files is not a loss. The
+/// releases it keeps are still charged against what they read.
+#[test]
+fn inventories_of_a_release_the_manifest_drops_are_exempt() {
+    let repo = Repo::new("dropped-release");
+    repo.write("kotlin-versions", "2.4.20 a\n2.4.21 b\n");
+    repo.write(INCLUDED, "a/one.kt\nb/two.kt\n");
+    repo.write(LATER_INCLUDED, "a/one.kt\n");
+    repo.write(FAILURES, "a/one.kt\n");
+    repo.write(LATER_FAILURES, "a/one.kt\nb/two.kt\n");
+    let base = repo.commit();
+    repo.write("kotlin-versions", "2.4.21 b\n");
+    repo.git(&["rm", "-q", INCLUDED, FAILURES]);
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stderr, b"");
+}
+
+#[test]
+fn a_kept_release_is_charged_after_the_manifest_drops_its_predecessor() {
+    let repo = Repo::new("dropped-predecessor");
+    repo.write("kotlin-versions", "2.4.20 a\n2.4.21 b\n");
+    repo.write(INCLUDED, "a/one.kt\nb/two.kt\n");
+    let base = repo.commit();
+    repo.write("kotlin-versions", "2.4.21 b\n");
+    repo.git(&["mv", INCLUDED, LATER_INCLUDED]);
+    repo.write(LATER_INCLUDED, "a/one.kt\n");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        format!(
+            "outcome-lists: {LATER_INCLUDED} loses 1 entry:\n    b/two.kt\n\
+             outcome-lists: a plugin corpus's included cases only grow; fix the failing cases above instead of dropping them\n"
+        )
+    );
+}
+
 #[test]
 fn a_growing_plugin_not_applicable_inventory_still_fails() {
     let repo = Repo::new("plugin-not-applicable");

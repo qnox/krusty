@@ -84,15 +84,6 @@ pub fn collect_signatures_with_cp(
     )
 }
 
-/// The plugins as the reference compiler bundles them: one activated without a jar naming its own
-/// release follows the release this compilation is checked against.
-fn with_reference_release(
-    native_plugins: NativePlugins,
-    reference: crate::kotlin_version::ReferenceProfile,
-) -> NativePlugins {
-    native_plugins.with_reference_release(reference.release().to_string())
-}
-
 /// [`collect_signatures_with_cp`] with the native compiler plugins the compilation runs: they add
 /// their generated declarations (a `@Serializable` class's `serializer()`) to the collected table,
 /// which keeps the selection for every later phase.
@@ -108,7 +99,6 @@ pub(crate) fn collect_signatures_with_cp_and_plugins(
     // per-operand recursion over the body), so a deep expression recurses here BEFORE any wrapped
     // check runs — it needs the same grown stack segment (see [`crate::wide_stack`]).
     crate::wide_stack::on_wide_stack(move || {
-        let native_plugins = with_reference_release(native_plugins, reference);
         let host = native_plugins.host("main");
         let mut table =
             collect_signatures_with_cp_impl(files, libraries, &host, diags, None, None, target);
@@ -202,7 +192,6 @@ pub(crate) fn collect_signatures_with_cp_headers_and_local_contexts(
     diags: &mut DiagSink,
 ) -> SymbolTable {
     crate::wide_stack::on_wide_stack(move || {
-        let native_plugins = with_reference_release(native_plugins, reference);
         let host = native_plugins.host("main");
         let mut table = collect_signatures_with_cp_impl(
             files,

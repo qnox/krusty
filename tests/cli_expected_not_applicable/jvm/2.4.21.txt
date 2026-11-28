@@ -1,4 +1,4 @@
-# Kotlin 2.4.0 compiler/testData/cli/jvm cases the reference kotlinc itself does not reproduce outside
+# Kotlin 2.4.21 compiler/testData/cli/jvm cases the reference kotlinc itself does not reproduce outside
 # JetBrains' test environment, relative to that directory. Each group says why. The conformance job
 # runs kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case for
 # this release, which requires kotlinc to pass every other case and no listed one.

@@ -52,19 +52,16 @@ pub(super) fn emit_inherited_default_surface(
         let mut target_ret = jvm_declared_ty(&declared.physical_ret);
         let mut semantic_params = types.semantic_params;
         let mut local_variable_names = crate::parameter_names::resolved_local_variables(
-            ir.reference.quirks(),
             &default.parameter_identities,
             &semantic_params,
             &name,
         );
         let mut method_parameter_names = crate::parameter_names::resolved_method_parameters(
-            ir.reference.quirks(),
             &default.parameter_identities,
             &semantic_params,
             &name,
         );
         let mut assertion_names = crate::parameter_names::resolved_assertions(
-            ir.reference.quirks(),
             &default.parameter_identities,
             &semantic_params,
             &name,
@@ -241,19 +238,8 @@ pub(super) fn emit_inherited_default_surface(
                 erased,
                 signature: holder_signature.as_deref(),
                 // kotlinc gives an inherited member's holder forwarder no line: it has no source in
-                // this interface. Earlier releases map it to the interface's declaration line.
-                lines: if ir
-                    .reference
-                    .quirks()
-                    .has(krusty::kotlin_version::Quirk::InheritedHolderForwarderMapsInterfaceLine)
-                {
-                    ForwardLines {
-                        start: super::static_accessors::class_declaration_line(c),
-                        end: 0,
-                    }
-                } else {
-                    ForwardLines::default()
-                },
+                // this interface.
+                lines: ForwardLines::default(),
                 varargs,
                 target,
                 // An inherited member is not declared here; its holder copies none of its source.

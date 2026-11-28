@@ -38,8 +38,7 @@ macro_rules! releases {
 }
 
 releases! {
-    V2_4_0 => "2.4.0",
-    V2_4_20 => "2.4.20",
+    V2_4_21 => "2.4.21",
 }
 
 /// The vendored table text a supported release reads, for comparison with a fresh dump.
@@ -184,24 +183,19 @@ mod tests {
         assert!(SPELLINGS.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
-    /// Recorded from kotlinc 2.4.0 and 2.4.20: `OPERATOR_RENAMED_ON_IMPORT` became a warning, and
-    /// 2.4.20 removed `SYNCHRONIZED_ON_SUSPEND_WARNING`.
+    /// Recorded from kotlinc 2.4.21: `OPERATOR_RENAMED_ON_IMPORT` is a warning.
     #[test]
     fn a_release_reads_its_own_severity_and_names() {
         assert_eq!(
-            OPERATOR_RENAMED_ON_IMPORT.severity(KotlinVersion::V2_4_10),
+            OPERATOR_RENAMED_ON_IMPORT.severity(KotlinVersion::V2_4_21),
+            Some(DiagnosticSeverity::Warning)
+        );
+        assert_eq!(
+            UNRESOLVED_REFERENCE.severity(KotlinVersion::V2_4_21),
             Some(DiagnosticSeverity::Error)
         );
         assert_eq!(
-            OPERATOR_RENAMED_ON_IMPORT.severity(KotlinVersion::V2_4_20),
-            Some(DiagnosticSeverity::Warning)
-        );
-        assert_eq!(
-            SYNCHRONIZED_ON_SUSPEND_WARNING.severity(KotlinVersion::V2_4_10),
-            Some(DiagnosticSeverity::Warning)
-        );
-        assert_eq!(
-            SYNCHRONIZED_ON_SUSPEND_WARNING.severity(KotlinVersion::V2_4_20),
+            UNRESOLVED_REFERENCE.severity(KotlinVersion::new(2, 4, 20)),
             None
         );
     }

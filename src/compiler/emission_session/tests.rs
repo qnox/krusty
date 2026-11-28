@@ -72,7 +72,7 @@ fn metadata() -> KlibBackend {
     KlibBackend::new(
         KlibPlatform::Native,
         KlibStamp::new(
-            crate::kotlin_version::KotlinVersion::V2_4_20,
+            crate::kotlin_version::KotlinVersion::V2_4_21,
             crate::language_version::LanguageVersion::V2_4,
         ),
     )

@@ -605,7 +605,6 @@ struct UnmatchedExpectRoots<'a> {
     incompatible: &'a crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     symbols: &'a FrontendSymbols,
     module_name: &'a str,
-    reference: crate::features::ReferenceProfile,
     silent: bool,
 }
 
@@ -620,7 +619,6 @@ fn report_unmatched_expect_roots(
         incompatible,
         symbols,
         module_name,
-        reference,
         silent,
     } = context;
     let mut unmatched = headers
@@ -689,7 +687,7 @@ fn report_unmatched_expect_roots(
         diags.error_kind(
             range,
             crate::diag::DiagnosticKind::Actualization,
-            crate::diagnostic_wording::no_actual_for_expect(reference, name, module_name, target),
+            crate::diagnostic_wording::no_actual_for_expect(name, module_name, target),
         );
     }
 }
@@ -1679,7 +1677,6 @@ where
                 incompatible: &incompatible_expects,
                 symbols: &symbols,
                 module_name,
-                reference: project_features.reference(),
                 silent: expect_bodies_rejected,
             },
             &mut parse_errors,
@@ -1781,7 +1778,6 @@ where
                 &incompatible_members,
                 &symbols,
                 &pass1_headers,
-                project_features.reference(),
                 diags,
             );
             no_expect_for_actual::report_unactualized_members(
@@ -1790,7 +1786,6 @@ where
                 &expected_members,
                 &symbols,
                 &pass1_headers,
-                project_features.reference(),
                 diags,
             );
         }

@@ -509,7 +509,7 @@ fq_name: basics
 abi_version=2.4.0
 builtins_platform=NATIVE
 compilerOpts=-I.
-compiler_version=2.4.20
+compiler_version=2.4.21
 depends=stdlib
 exportForwardDeclarations=cnames.structs.opaque
 headers=basics.h

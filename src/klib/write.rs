@@ -48,19 +48,11 @@ impl KlibStamp {
     /// What `compiler` stamps on a library compiled at source-language level `language`.
     ///
     /// Read off `kotlinc-native -p library -Xmetadata-klib -language-version <language>`: the
-    /// language level itself, or `1.4.1` below language 2.3 on a release with
-    /// [`crate::kotlin_version::Quirk::KlibLegacyMetadataVersionBelowLanguage23`].
+    /// language level itself.
     pub fn new(compiler: KotlinVersion, language: LanguageVersion) -> Self {
-        let legacy_stamp = crate::kotlin_version::Quirks::of_release(compiler)
-            .has(crate::kotlin_version::Quirk::KlibLegacyMetadataVersionBelowLanguage23)
-            && language < LanguageVersion::V2_3;
         Self {
             compiler,
-            metadata_version: if legacy_stamp {
-                [1, 4, 1]
-            } else {
-                language.metadata_version()
-            },
+            metadata_version: language.metadata_version(),
         }
     }
 
@@ -99,7 +91,7 @@ impl KlibWriter {
     pub fn native_test_fixture(unique_name: &str) -> Self {
         Self::new(
             unique_name,
-            KlibStamp::new(KotlinVersion::V2_4_20, LanguageVersion::V2_4),
+            KlibStamp::new(KotlinVersion::V2_4_21, LanguageVersion::V2_4),
             KlibPlatform::Native,
         )
     }
@@ -331,7 +323,7 @@ mod tests {
     fn writer() -> KlibWriter {
         let mut writer = KlibWriter::new(
             "lib",
-            KlibStamp::new(KotlinVersion::V2_4_10, LanguageVersion::V2_4),
+            KlibStamp::new(KotlinVersion::V2_4_21, LanguageVersion::V2_4),
             KlibPlatform::Native,
         );
         writer.add_fragment("p.two", b"two-0".to_vec());
@@ -372,14 +364,14 @@ mod tests {
         String::from_utf8(writer.manifest_bytes()).expect("a UTF-8 manifest")
     }
 
-    /// `kotlinc-native 2.4.10 -p library -Xmetadata-klib -o lib`, byte for byte.
+    /// `kotlinc-native 2.4.21 -p library -Xmetadata-klib -o lib`, byte for byte.
     #[test]
     fn the_manifest_is_the_reference_metadata_library_manifest() {
         assert_eq!(
             manifest(&writer()),
             "abi_version=2.4.0\n\
              builtins_platform=NATIVE\n\
-             compiler_version=2.4.10\n\
+             compiler_version=2.4.21\n\
              ir_signature_versions=1,2\n\
              metadata_version=2.4.0\n\
              native_targets=\n\
@@ -389,7 +381,7 @@ mod tests {
 
     #[test]
     fn wasm_manifests_name_the_exact_target() {
-        let stamp = KlibStamp::new(KotlinVersion::V2_4_10, LanguageVersion::V2_4);
+        let stamp = KlibStamp::new(KotlinVersion::V2_4_21, LanguageVersion::V2_4);
         for (platform, target) in [
             (KlibPlatform::WasmJs, "wasm-js"),
             (KlibPlatform::WasmWasi, "wasm-wasi"),
@@ -400,7 +392,7 @@ mod tests {
                 format!(
                     "abi_version=2.4.0\n\
                      builtins_platform=WASM\n\
-                     compiler_version=2.4.10\n\
+                     compiler_version=2.4.21\n\
                      ir_signature_versions=1,2\n\
                      metadata_version=2.4.0\n\
                      unique_name=lib\n\
@@ -445,28 +437,16 @@ mod tests {
             .collect::<Vec<_>>();
         // Measured with kotlinc-native, recorded at the release where they change; a later release
         // writes the stamps of the newest record at or below it.
-        let recorded: &[(KotlinVersion, [&str; 5])] = &[
-            (
-                KotlinVersion::V2_4_0,
-                [
-                    "2.0: abi_version=2.4.0 metadata_version=1.4.1",
-                    "2.1: abi_version=2.4.0 metadata_version=1.4.1",
-                    "2.2: abi_version=2.4.0 metadata_version=1.4.1",
-                    "2.3: abi_version=2.4.0 metadata_version=2.3.0",
-                    "2.4: abi_version=2.4.0 metadata_version=2.4.0",
-                ],
-            ),
-            (
-                KotlinVersion::V2_4_20,
-                [
-                    "2.0: abi_version=2.4.0 metadata_version=2.0.0",
-                    "2.1: abi_version=2.4.0 metadata_version=2.1.0",
-                    "2.2: abi_version=2.4.0 metadata_version=2.2.0",
-                    "2.3: abi_version=2.4.0 metadata_version=2.3.0",
-                    "2.4: abi_version=2.4.0 metadata_version=2.4.0",
-                ],
-            ),
-        ];
+        let recorded: &[(KotlinVersion, [&str; 5])] = &[(
+            KotlinVersion::V2_4_21,
+            [
+                "2.0: abi_version=2.4.0 metadata_version=2.0.0",
+                "2.1: abi_version=2.4.0 metadata_version=2.1.0",
+                "2.2: abi_version=2.4.0 metadata_version=2.2.0",
+                "2.3: abi_version=2.4.0 metadata_version=2.3.0",
+                "2.4: abi_version=2.4.0 metadata_version=2.4.0",
+            ],
+        )];
         let expected = releases
             .iter()
             .flat_map(|&compiler| {
@@ -483,14 +463,14 @@ mod tests {
 
     #[test]
     fn a_selected_metadata_version_replaces_the_language_stamp() {
-        let stamp = KlibStamp::new(KotlinVersion::V2_4_20, LanguageVersion::V2_4)
+        let stamp = KlibStamp::new(KotlinVersion::V2_4_21, LanguageVersion::V2_4)
             .with_metadata_version([2, 3, 0]);
         let writer = KlibWriter::new("lib", stamp, KlibPlatform::Native);
         assert_eq!(
             manifest(&writer),
             "abi_version=2.4.0\n\
              builtins_platform=NATIVE\n\
-             compiler_version=2.4.20\n\
+             compiler_version=2.4.21\n\
              ir_signature_versions=1,2\n\
              metadata_version=2.3.0\n\
              native_targets=\n\
@@ -502,7 +482,7 @@ mod tests {
     fn manifest_properties_are_escaped_as_java_properties_store_writes_them() {
         let mut writer = KlibWriter::new(
             "lib",
-            KlibStamp::new(KotlinVersion::V2_4_20, LanguageVersion::V2_4),
+            KlibStamp::new(KotlinVersion::V2_4_21, LanguageVersion::V2_4),
             KlibPlatform::Native,
         );
         writer.set_property("compilerOpts", "-DByte=uByte -DX:1 #! \\é");
@@ -512,7 +492,7 @@ mod tests {
             "abi_version=2.4.0\n\
              builtins_platform=NATIVE\n\
              compilerOpts=-DByte\\=uByte -DX\\:1 \\#\\! \\\\\\u00E9\n\
-             compiler_version=2.4.20\n\
+             compiler_version=2.4.21\n\
              headers=\\ lead\n\
              ir_signature_versions=1,2\n\
              metadata_version=2.4.0\n\

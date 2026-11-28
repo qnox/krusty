@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn feature_settings_rebuild_the_same_settings() {
         let mut settings = LanguageSettings::for_release(
-            KotlinVersion::V2_4_20,
+            KotlinVersion::V2_4_21,
             LanguageVersion::V2_3,
             Some(LanguageVersion::V2_2),
             &[
@@ -140,13 +140,13 @@ mod tests {
         )
         .unwrap();
         let other = LangFeatures::for_release(
-            KotlinVersion::V2_4_20,
+            KotlinVersion::V2_4_21,
             LanguageVersion::V2_5,
             LanguageVersion::V2_5,
         );
         settings.features.extend(&other);
         let rebuilt = LanguageSettings::for_release(
-            KotlinVersion::V2_4_20,
+            KotlinVersion::V2_4_21,
             settings.language_version,
             Some(settings.api_version),
             &settings.feature_settings(),

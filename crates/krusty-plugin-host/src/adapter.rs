@@ -38,22 +38,13 @@ struct Compat {
 }
 
 /// Every supported Kotlin version is listed in exactly one.
-const COMPAT: [Compat; 2] = [
-    Compat {
-        versions: &["2.4.0", "2.4.10"],
-        sources: &[(
-            "IrFiles.kt",
-            include_str!("../adapter/compat/2.4.0/IrFiles.kt"),
-        )],
-    },
-    Compat {
-        versions: &["2.4.20", "2.4.21"],
-        sources: &[(
-            "IrFiles.kt",
-            include_str!("../adapter/compat/2.4.20/IrFiles.kt"),
-        )],
-    },
-];
+const COMPAT: [Compat; 1] = [Compat {
+    versions: &["2.4.21"],
+    sources: &[(
+        "IrFiles.kt",
+        include_str!("../adapter/compat/2.4.21/IrFiles.kt"),
+    )],
+}];
 
 /// Every source of the adapter for `kotlin_version`, or `None` when no compat set lists it.
 fn sources(kotlin_version: &str) -> Option<Vec<(&'static str, &'static str)>> {
@@ -250,6 +241,6 @@ mod tests {
 
     #[test]
     fn a_kotlin_version_no_compat_set_lists_has_no_adapter() {
-        assert_eq!(sources("2.4.20-RC"), None);
+        assert_eq!(sources("2.4.21-RC"), None);
     }
 }

@@ -311,46 +311,6 @@ fun use(c: C): Int = with(c) { "".hidden() }
     );
 }
 
-/// A legacy context receiver has no source parameter name. Its recorded semantic role renders the
-/// declaration as `context(String)`, never as the provider placeholder `context(_: String)`.
-#[test]
-fn an_inaccessible_legacy_context_member_extension_matches_kotlinc_exactly() {
-    // Kotlin 2.4.20 removed the legacy `context(Type)` source form. Older supported targets still
-    // exercise this declaration shape in their matrix lanes.
-    if krusty::kotlin_version::environment_release()
-        >= krusty::kotlin_version::KotlinVersion::V2_4_20
-    {
-        return;
-    }
-    let source = r#"// LANGUAGE: +ContextReceivers
-package demo
-
-class C {
-    context(String)
-    private fun String.hidden(x: Int = 1): Int = x
-}
-
-context(String)
-fun use(c: C): Int = with(c) { "".hidden() }
-"#;
-    let arguments = common::language_directives::kotlinc_args(source);
-    let diagnostics = common::compiler_diagnostics_with_reference_args(
-        &[("Main.kt", source)],
-        &[common::stdlib_jar()],
-        &arguments,
-    );
-    assert_exact_access_error(
-        &diagnostics,
-        common::CompilerError {
-            file: "Main.kt".to_string(),
-            line: 10,
-            column: 35,
-            message: "cannot access 'context(String) fun String.hidden(x: Int = ...): Int': it is private in 'demo.C'."
-                .to_string(),
-        },
-    );
-}
-
 /// A dependency suspend member extension retains a physical trailing `Continuation`, but source
 /// diagnostics render only its resolved source slots and its suspend modifier.
 #[test]

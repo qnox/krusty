@@ -525,8 +525,6 @@ pub(super) struct EmitEnv<'a> {
     /// The `@kotlin.Metadata` `mv` (`-language-version`, or [`DEFAULT_METADATA_VERSION`]) and
     /// pre-release flag this emission writes.
     metadata_stamp: krusty::jvm::classfile::MetadataStamp,
-    /// The kotlinc profile the compilation reproduces.
-    quirks: krusty::kotlin_version::Quirks,
 }
 
 use crate::override_results::boxes_sam_result;
@@ -2962,7 +2960,7 @@ fn emit_interface_class(
         });
         // A compiler-generated implementation class carries the minimal synthetic-class metadata
         // record. Kotlin reflection and downstream metadata readers rely on `k=3` to classify it.
-        let xi = synthetic_class_xi(env.quirks, SYNTHETIC_PUBLIC);
+        let xi = synthetic_class_xi(SYNTHETIC_PUBLIC);
         di.set_kotlin_metadata(3, opts.metadata_stamp(), xi, &[], &[]);
         extra.push((holder, env.run.finish_class(di)));
     }

@@ -280,8 +280,8 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
-    /// The host's greeting for protocol 6 and kotlinc 2.4.20, as `printf` octal escapes.
-    const HELLO: &str = r"\000\000\000\017\000\000\000\000\006\000\000\000\0062.4.20";
+    /// The host's greeting for protocol 6 and kotlinc 2.4.21, as `printf` octal escapes.
+    const HELLO: &str = r"\000\000\000\017\000\000\000\000\006\000\000\000\0062.4.21";
     const GRACE: Duration = Duration::from_millis(300);
 
     /// A host that writes its pid to `pid_file`, greets, then runs `then` in the same process.
@@ -291,7 +291,26 @@ mod tests {
             "echo $$ > '{}'; printf '{HELLO}'; {then}",
             pid_file.display()
         ));
-        Host::spawn(command, "2.4.20", GRACE).unwrap()
+        Host::spawn(command, "2.4.21", GRACE).unwrap()
+    }
+
+    #[test]
+    fn a_host_on_another_kotlin_version_than_the_build_is_refused() {
+        let pids = pid_file("other-version");
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(format!(
+            "echo $$ > '{}'; printf '{HELLO}'; exec sleep 600",
+            pids.display()
+        ));
+        let error = Host::spawn(command, "2.4.20", GRACE).err();
+        assert_eq!(
+            error,
+            Some(HostError::KotlinVersion {
+                host: "2.4.21".into(),
+                build: "2.4.20".into()
+            })
+        );
+        assert!(!exists(&pids));
     }
 
     fn pid_file(name: &str) -> PathBuf {

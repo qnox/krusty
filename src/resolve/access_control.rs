@@ -168,14 +168,6 @@ impl crate::symbol_resolver::CallableAccessSite for Checker<'_> {
     fn callable_visible(&self, candidate: &crate::libraries::FunctionInfo, receiver: Ty) -> bool {
         self.candidate_visible(candidate, Some(receiver))
     }
-
-    fn invisible_candidates_share_one_level(&self) -> bool {
-        !self
-            .file
-            .reference
-            .quirks()
-            .has(crate::kotlin_version::Quirk::InvisibleCandidatesKeepScopeLevels)
-    }
 }
 
 /// The checker's access site with its visibility suppression ignored.

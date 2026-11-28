@@ -1284,20 +1284,6 @@ impl<'a> SymbolResolver<'a> {
         }
         // kotlinc's visibility error is one applicability group across the tower: once no level
         // has a visible extension property, the invisible ones of every level compete together.
-        if self
-            .callable_access
-            .is_some_and(|site| !site.invisible_candidates_share_one_level())
-        {
-            for symbols in &levels {
-                let level = level_properties(symbols);
-                if let Some(property) =
-                    self.select_extension_property_from_callables(receiver, name, access, level)?
-                {
-                    return Ok(Some(property));
-                }
-            }
-            return Ok(None);
-        }
         let all = levels.iter().flat_map(|symbols| level_properties(symbols));
         self.select_extension_property_from_callables(receiver, name, access, all)
     }

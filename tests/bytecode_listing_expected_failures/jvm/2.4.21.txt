@@ -1,4 +1,4 @@
-# Kotlin 2.4.20 compiler/testData/codegen/bytecodeListing cases krusty does not reproduce yet,
+# Kotlin 2.4.21 compiler/testData/codegen/bytecodeListing cases krusty does not reproduce yet,
 # relative to that directory. Regenerate with KRUSTY_BLESS_BYTECODE_LISTING_EXPECTATIONS=1
 # on a full local run. The list only shrinks.
 accessorsForProtectedStaticJavaFieldInOtherPackage.kt

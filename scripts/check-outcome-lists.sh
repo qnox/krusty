@@ -5,7 +5,8 @@
 # false accepts, and uncovered KLIB implementations. A release records a manifest only where it differs from its predecessor's, and a
 # release with none reads the newest one below it, so what is compared is the manifest each release
 # READS: deleting a release's own file is an addition when the inherited one lists more. A release
-# the base did not support yet (a newly supported Kotlin version, or a new target) is exempt. Only
+# the base did not support yet (a newly supported Kotlin version, or a new target) is exempt, and so
+# is one the head's kotlin-versions manifest no longer supports: it reads no inventory at all. Only
 # the head's own changes count: it is compared with its merge base, so a branch that is behind a
 # base which has since dropped entries is not charged with them. The CLI not-applicable lists and the
 # diagnostics not-scored lists are not checked here: they record what the reference kotlinc cannot
@@ -161,8 +162,12 @@ while read -r lane; do
     *) grows=0 ;;
   esac
   base_releases=$(releases "$base" "$lane")
+  head_releases=$(releases "$head" "$lane")
   for release in $( { echo "$base_releases"; releases "$head" "$lane"; recorded "$head" "$lane"; } | sed '/^$/d' | order_versions); do
     grep -qx -- "$release" <<<"$base_releases" || continue
+    if git cat-file -e "$head:kotlin-versions" 2>/dev/null && ! grep -qx -- "$release" <<<"$head_releases"; then
+      continue
+    fi
     from=$(reads "$base" "$lane" "$release")
     [ -n "$from" ] || continue
     to=$(reads "$head" "$lane" "$release")

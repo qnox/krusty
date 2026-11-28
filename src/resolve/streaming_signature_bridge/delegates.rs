@@ -486,7 +486,7 @@ impl ProductionSignatureSemantics<'_> {
         Vec<crate::resolve::delegated_properties::DelegateConventionDiagnosticCandidate>,
         crate::fir::DiagnosticId,
     > {
-        families.diagnostic_candidates(self.table.reference, name, &mut |found| match found {
+        families.diagnostic_candidates(name, &mut |found| match found {
             crate::resolve::delegated_properties::DelegateConventionCandidate::Function(
                 function,
             ) => self.determined_candidate_result(function, demand),

@@ -1,4 +1,4 @@
-# Kotlin 2.4.0 parcelize box cases that be not-applicable on jvm, relative to
+# Kotlin 2.4.21 parcelize box cases that be not-applicable on jvm, relative to
 # the upstream corpus directory. Later releases with no file of their own read this one.
 # Regenerate with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local run.
 additionalAnnotationTrigger.kt
@@ -12,6 +12,8 @@ kt19747Deprecated.kt
 kt26221.kt
 listKinds.kt
 listSimplePersistent.kt
+listSimplePersistentBinderNullable.kt
+listSimplePersistentNullable.kt
 mapKinds.kt
 mapSimplePersistent.kt
 mppAdditionalAnnotations_k1.kt

@@ -9,7 +9,7 @@ version = providers.gradleProperty("krustyBuildToolsVersion").orElse("0.0.1").ge
 
 // The one Kotlin release this implementation stands in for: a build tool loads the Build Tools API
 // implementation that matches its configured Kotlin version, and krusty compiles as that release.
-val kotlinVersion = providers.gradleProperty("kotlinVersion").orElse("2.4.20")
+val kotlinVersion = providers.gradleProperty("kotlinVersion").orElse("2.4.21")
 
 repositories {
     mavenCentral()

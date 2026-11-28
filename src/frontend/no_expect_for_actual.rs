@@ -394,7 +394,6 @@ pub(super) fn report_unactualized_members(
     expected: &crate::fx_hash::HashMap<crate::fir::DeclarationId, String>,
     symbols: &SymbolTable,
     headers: &crate::fir::StreamedHeaderModule,
-    reference: crate::features::ReferenceProfile,
     diags: &mut DiagSink,
 ) {
     if owed.is_empty() {
@@ -432,7 +431,7 @@ pub(super) fn report_unactualized_members(
         match subject {
             Ok(rendered) => diags.error(
                 actual.name,
-                crate::diagnostic_wording::no_actual_class_members(reference, &rendered, &listing),
+                crate::diagnostic_wording::no_actual_class_members(&rendered, &listing),
             ),
             Err(unreachable) => diags.error(
                 actual.name,
@@ -448,7 +447,6 @@ pub(super) fn report(
     incompatible_members: &crate::fx_hash::HashSet<crate::fir::DeclarationId>,
     symbols: &SymbolTable,
     headers: &crate::fir::StreamedHeaderModule,
-    reference: crate::features::ReferenceProfile,
     diags: &mut DiagSink,
 ) {
     // Published once, and only looked up below: this pass never walks a resolved table itself, and
@@ -485,7 +483,7 @@ pub(super) fn report(
             Ok(None) => {}
             Ok(Some(rendered)) => diags.error(
                 actual.name,
-                crate::diagnostic_wording::actual_without_expect(reference, &rendered),
+                crate::diagnostic_wording::actual_without_expect(&rendered),
             ),
             Err(unreachable) => diags.error(
                 actual.name,
@@ -504,7 +502,6 @@ pub(super) fn report(
                 incompatible_members,
                 &declarations,
                 stable,
-                reference,
                 diags,
             );
         }

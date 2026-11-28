@@ -1,4 +1,4 @@
-# Kotlin 2.4.0 compose box cases that be not-applicable on jvm, relative to
+# Kotlin 2.4.21 compose box cases that be not-applicable on jvm, relative to
 # the upstream corpus directory. Later releases with no file of their own read this one.
 # Regenerate with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local run.
 annotatedParamInImmutable.kt

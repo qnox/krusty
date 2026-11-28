@@ -30,7 +30,6 @@ fn expression_lines(file: &crate::ast::File, span: Span) -> Option<FirExpression
         end: file.expr_end_lines.get(raw).copied().unwrap_or(0),
         start_offset: span.lo,
         positionless: false,
-        context_parameter_load: false,
     })
 }
 
@@ -63,9 +62,6 @@ pub struct FirExpressionDebugLines {
     /// kotlinc builds this expression without source offsets, so no line may begin at it: an
     /// implicit context argument, whose call's line is marked only at its dispatch.
     pub positionless: bool,
-    /// The positionless expression is a context parameter passed on as a context argument, which
-    /// releases that read it at its declaration's offsets mark with the declaration's line.
-    pub context_parameter_load: bool,
 }
 
 /// The same, for a STATEMENT. `target` is an assignment's lvalue line — where the member it writes
@@ -161,13 +157,10 @@ impl FirBody {
                         return Ok((file == source).then_some(span))
                     }
                     Some(Origin::Synthetic {
-                        kind: SyntheticOriginKind::ContextArgument,
+                        kind:
+                            SyntheticOriginKind::ContextArgument | SyntheticOriginKind::ScriptReceiver,
                         ..
-                    }) => return Err(true),
-                    Some(Origin::Synthetic {
-                        kind: SyntheticOriginKind::ScriptReceiver,
-                        ..
-                    }) => return Err(false),
+                    }) => return Err(()),
                     Some(Origin::Synthetic { cause, .. }) => current = cause,
                 }
             }
@@ -179,9 +172,8 @@ impl FirBody {
                 Ok(span) => span
                     .and_then(|span| expression_lines(file, span))
                     .unwrap_or_default(),
-                Err(context_parameter_load) => FirExpressionDebugLines {
+                Err(()) => FirExpressionDebugLines {
                     positionless: true,
-                    context_parameter_load,
                     ..FirExpressionDebugLines::default()
                 },
             })

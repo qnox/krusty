@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn a_case_without_the_directive_applies_to_every_release() {
         assert_eq!(
-            kotlinc_release_applicable("fun box() = \"OK\"\n", KotlinVersion::V2_4_0),
+            kotlinc_release_applicable("fun box() = \"OK\"\n", KotlinVersion::new(2, 4, 0)),
             Ok(true)
         );
     }
@@ -158,10 +158,10 @@ mod tests {
 
     #[test]
     fn an_upper_bound_admits_releases_before_it() {
-        assert!(applies("[2.4.0,2.5.0)", KotlinVersion::V2_4_0));
+        assert!(applies("[2.4.0,2.5.0)", KotlinVersion::new(2, 4, 0)));
         assert!(applies("[2.4.0,2.5.0)", KotlinVersion::V2_4_21));
         assert!(!applies("[2.4.0,2.5.0)", V2_5_0));
-        assert!(applies("(,2.4.20]", KotlinVersion::V2_4_20));
+        assert!(applies("(,2.4.20]", KotlinVersion::new(2, 4, 20)));
         assert!(!applies("(,2.4.20]", KotlinVersion::V2_4_21));
         assert!(applies("[2.5.0,2.5.0]", V2_5_0));
     }

@@ -2,7 +2,6 @@
 
 use crate::common::{self, CompilerOutcome};
 use krusty::compilation_target::CompilationTarget;
-use krusty::kotlin_version::KotlinVersion;
 
 /// An unresolved JVM annotation does not suppress Native's independent full-value parameter
 /// check. Both diagnostics, including the annotation's location and their order, match Native.
@@ -33,9 +32,6 @@ fn native_full_value_mutable_parameter_is_rejected_without_a_jvm_annotation() {
 }
 
 fn assert_native_parameter_errors(source: &str, errors: &[&str]) {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     let expected = CompilerOutcome {
         accepted: false,
         errors: errors.iter().map(|error| (*error).to_string()).collect(),

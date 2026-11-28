@@ -9,9 +9,6 @@ use super::*;
 /// module ownership, protected receivers); this resolver only consumes it when it ranks candidates.
 pub(crate) trait CallableAccessSite {
     fn callable_visible(&self, candidate: &FunctionInfo, receiver: Ty) -> bool;
-    /// Whether the invisible candidates compete as one visibility-error group across the tower
-    /// rather than scope level by scope level (`Quirk::InvisibleCandidatesKeepScopeLevels`).
-    fn invisible_candidates_share_one_level(&self) -> bool;
 }
 
 impl<'a> SymbolResolver<'a> {

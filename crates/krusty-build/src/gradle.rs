@@ -732,62 +732,30 @@ mod tests {
             .exists());
         assert!(module_metadata.is_file());
 
-        // A value-taking option introduced in 2.4.20 must consume its following token only under
-        // the grammar of 2.4.20 and later. Under 2.4.0/2.4.10, the same token is an unknown -X option and
-        // the following free -d remains visible to the plugin-owned destination check, which
-        // leaves the compile to kotlinc without asking krusty. Under 2.4.20 the option is one
-        // krusty does not implement, so the compile is left to kotlinc too. kotlinc itself runs
-        // only where it reads the option: before 2.4.20 the probe stops after the check.
+        // A value-taking option must consume its following token: the option is one krusty does
+        // not implement, so the compile is left to kotlinc, and the following free -d is the
+        // option's value rather than a destination the plugin-owned check refuses.
         clear_invocation_log(&log);
         clear_invocation_log(&fixture.probes);
-        let release = krusty::kotlin_version::KotlinVersion::parse(&kgp)
-            .unwrap_or_else(|| panic!("Kotlin Gradle plugin {kgp} is not a release version"));
-        let reads_option = release >= krusty::kotlin_version::KotlinVersion::V2_4_20;
-        let release_boundary = build()
+        let output = build()
             .property("krusty.negative", "release-specific-argument-boundary")
-            .tasks([if reads_option {
-                ":compiler:util:compileKotlin"
-            } else {
-                ":compiler:util:compileKotlinKrustyCheck"
-            }])
-            .run_output();
-        if reads_option {
-            let output = release_boundary
-                .unwrap_or_else(|error| panic!("release boundary probe failed: {error}"));
-            let check = single_invocation(&fixture.probes);
-            assert!(has_pair(&check, "-Xescaping-functions", "-d=forbidden"));
-            assert_left_to_kotlinc(
-                &output,
-                ":compiler:util:compileKotlin",
-                &["krusty does not implement the kotlinc argument '-Xescaping-functions=-d=forbidden'"
-                    .to_string()],
-            );
-            assert!(
-                !log.exists(),
-                "kotlinc, not krusty, compiles a refused argument"
-            );
-        } else {
-            let output = release_boundary
-                .unwrap_or_else(|error| panic!("{kgp}: release boundary probe failed: {error}"));
-            assert_left_to_kotlinc(
-                &output,
-                ":compiler:util:compileKotlin",
-                &["freeCompilerArg '-d=forbidden' conflicts with the plugin-owned destination; configure the structured Gradle input instead"
-                    .to_string()],
-            );
-            assert!(
-                !fixture.probes.exists(),
-                "{kgp}: the plugin refuses the free -d without asking krusty"
-            );
-            assert!(
-                !log.exists(),
-                "{kgp}: kotlinc, not krusty, compiles a refused argument"
-            );
-        }
+            .tasks([":compiler:util:compileKotlin"])
+            .run_output()
+            .unwrap_or_else(|error| panic!("release boundary probe failed: {error}"));
+        let check = single_invocation(&fixture.probes);
+        assert!(has_pair(&check, "-Xescaping-functions", "-d=forbidden"));
+        assert_left_to_kotlinc(
+            &output,
+            ":compiler:util:compileKotlin",
+            &["krusty does not implement the kotlinc argument '-Xescaping-functions=-d=forbidden'"
+                .to_string()],
+        );
+        assert!(
+            !log.exists(),
+            "kotlinc, not krusty, compiles a refused argument"
+        );
 
-        if kgp == "2.4.10" {
-            compiler_options::check(&fixture, &kotlin_classes);
-        }
+        compiler_options::check(&fixture, &kotlin_classes);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2098,7 +2066,7 @@ fun main() {
             let plugin_version =
                 std::env::var("KRUSTY_GRADLE_PLUGIN_VERSION").unwrap_or_else(|_| "0.0.1".into());
             let kgp =
-                std::env::var("KRUSTY_GRADLE_KGP_VERSION").unwrap_or_else(|_| "2.4.20".into());
+                std::env::var("KRUSTY_GRADLE_KGP_VERSION").unwrap_or_else(|_| "2.4.21".into());
             write(&root, &plugin_version, &kgp);
             // Every fixture's builds share one daemon, which loads each fixture's plugin
             // classpath (KGP, KSP, AGP) in turn. Gradle's default 384 MiB metaspace ran out in
@@ -2514,6 +2482,12 @@ exit "$status"
         std::fs::write(path, script).expect("write recording krusty");
     }
 
+    /// The Gradle release the integration builds run on: `KRUSTY_GRADLE_VERSION`, else the
+    /// older maintained line's latest patch.
+    pub(super) fn gradle_version() -> String {
+        std::env::var("KRUSTY_GRADLE_VERSION").unwrap_or_else(|_| "8.14.8".to_owned())
+    }
+
     fn ensure_gradle() -> PathBuf {
         if let Some(bin) = std::env::var_os("KRUSTY_GRADLE_BIN").map(PathBuf::from) {
             assert!(
@@ -2523,8 +2497,7 @@ exit "$status"
             );
             return bin;
         }
-        let version =
-            std::env::var("KRUSTY_GRADLE_VERSION").unwrap_or_else(|_| "8.14.8".to_owned());
+        let version = gradle_version();
         let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/cache");
         let bin = cache.join(format!("gradle-{version}/bin/gradle"));
         if bin.is_file() {

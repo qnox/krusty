@@ -15,6 +15,9 @@ repositories:
 dependencies:
   - ../lib
   - org.example:app-dep:1.0
+settings:
+  kotlin:
+    version: 2.4.21
 --- app/src/main.kt
 fun main() = println(greeting() + helper())
 --- app/src/extra/Helper.kt
@@ -25,6 +28,9 @@ not a source
 product: jvm/lib
 repositories:
   - mavenLocal
+settings:
+  kotlin:
+    version: 2.4.21
 --- lib/src/Greeting.kt
 fun greeting() = "hello"
 --- lib/resources/greeting.txt
@@ -53,20 +59,20 @@ hello
 --- krusty-argv
 -Xjdk-release=25
 -jdk-home=<directory>/jdk
--classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
 -no-stdlib
 -module-name=lib
--Xkotlin-reference-version=2.4.20
+-Xkotlin-reference-version=2.4.21
 -d
 <directory>/project/build/artifacts/CompiledJvmArtifact/libjvm/kotlin-output
 <directory>/project/lib/src/Greeting.kt
 ----
 -Xjdk-release=25
 -jdk-home=<directory>/jdk
--classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/libjvm/kotlin-output:<directory>/project/build/artifacts/CompiledJvmArtifact/libjvm/resources-output:<directory>/home/.m2/repository/org/example/app-dep/1.0/app-dep-1.0.jar:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/example/app-dep-child/2.0/app-dep-child-2.0.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/libjvm/kotlin-output:<directory>/project/build/artifacts/CompiledJvmArtifact/libjvm/resources-output:<directory>/home/.m2/repository/org/example/app-dep/1.0/app-dep-1.0.jar:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar:<directory>/home/.m2/repository/org/example/app-dep-child/2.0/app-dep-child-2.0.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
 -no-stdlib
 -module-name=app
--Xkotlin-reference-version=2.4.20
+-Xkotlin-reference-version=2.4.21
 -d
 <directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
 <directory>/project/app/src/extra/Helper.kt

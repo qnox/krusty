@@ -1,4 +1,4 @@
-//! Script template definitions in the real host: a template compiled by kotlinc 2.4.20, whose
+//! Script template definitions in the real host: a template compiled by kotlinc 2.4.21, whose
 //! compilation configuration the host reads as kotlinc's `-script-templates` does. Ignored by
 //! default because it downloads; CI runs it.
 
@@ -17,7 +17,7 @@ fn jar(runtime: &HostRuntime, name: &str) -> PathBuf {
         .find(|jar| {
             jar.file_name()
                 .and_then(|file| file.to_str())
-                .is_some_and(|file| file == format!("{name}-2.4.20.jar"))
+                .is_some_and(|file| file == format!("{name}-2.4.21.jar"))
         })
         .unwrap_or_else(|| panic!("the host runtime has {name}"))
         .clone()
@@ -82,7 +82,7 @@ object HostConfig : ScriptCompilationConfiguration({\n\
 })\n";
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_template_configuration_is_read_as_kotlinc_reads_it() {
     let (runtime, env) = runtime();
     let classpath = compiled_template(&runtime, "host", HOST_TEMPLATE);
@@ -128,7 +128,7 @@ object OptionsConfig : ScriptCompilationConfiguration({\n\
 })\n";
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn keys_the_reader_does_not_read_are_named() {
     let (runtime, env) = runtime();
     let classpath = compiled_template(&runtime, "options", OPTIONS_TEMPLATE);
@@ -150,7 +150,7 @@ fn keys_the_reader_does_not_read_are_named() {
 }
 
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.20"]
+#[ignore = "downloads kotlin-compiler-embeddable 2.4.21"]
 fn a_template_that_is_not_on_the_classpath_is_refused_by_name() {
     let (runtime, env) = runtime();
     let classpath = compiled_template(&runtime, "missing", HOST_TEMPLATE);

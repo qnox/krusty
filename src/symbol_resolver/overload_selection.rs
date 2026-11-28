@@ -122,14 +122,9 @@ pub(crate) fn callable_tower_rank(overload: &FunctionInfo) -> OverloadTowerRank 
 /// The [`OverloadTowerRank`] of a candidate as the access site sees it. kotlinc's visibility error
 /// is one applicability group across the tower: once no visible candidate applies, the invisible
 /// ones of every scope level compete together, by tier and receiver distance, then specificity.
-/// A visible candidate keeps its scope level, as an invisible one does in the releases with
-/// `Quirk::InvisibleCandidatesKeepScopeLevels`.
-pub(crate) fn site_tower_rank(
-    rank: OverloadTowerRank,
-    visible: bool,
-    site: &dyn super::CallableAccessSite,
-) -> OverloadTowerRank {
-    if visible || !site.invisible_candidates_share_one_level() {
+/// A visible candidate keeps its scope level.
+pub(crate) fn site_tower_rank(rank: OverloadTowerRank, visible: bool) -> OverloadTowerRank {
+    if visible {
         rank
     } else {
         (rank.0, (0, 0), rank.2)
@@ -621,7 +616,7 @@ fn ranked_receiver_candidates<'f>(
     // (`fn_in_scope`) would wrongly drop those, so trust the query.
     let pre_scoped = ext.fn_scope.is_some();
     let site_rank = |rank, overload: &FunctionInfo| match ext.callable_access {
-        Some(site) => site_tower_rank(rank, site.callable_visible(overload, recv), site),
+        Some(site) => site_tower_rank(rank, site.callable_visible(overload, recv)),
         None => rank,
     };
     let mut ranked: Vec<ReceiverRankedOverload<'f>> = Vec::new();

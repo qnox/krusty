@@ -335,9 +335,11 @@ impl ProductionSignatureSemantics<'_> {
             Ok(hidden) => hidden,
             Err(diagnostic) => return diagnostic,
         };
-        let report = self
-            .table
-            .unresolved_member_message(spelling, receiver, hidden_deprecated);
+        let report = crate::resolve::diagnostic_selection::unresolved_member_message(
+            spelling,
+            receiver,
+            hidden_deprecated,
+        );
         self.record_source_finding(scope.owner, origin, report.message, Some(report.name), None)
     }
 }

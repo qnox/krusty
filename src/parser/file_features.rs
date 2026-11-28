@@ -118,12 +118,8 @@ mod tests {
         let settings = |release| {
             LangFeatures::for_release(release, LanguageVersion::V2_4, LanguageVersion::V2_4)
         };
-        let mut old = File::default();
-        apply_file_features(&mut old, &settings(KotlinVersion::V2_4_0));
-        let mut patch = File::default();
-        apply_file_features(&mut patch, &settings(KotlinVersion::V2_4_10));
         let mut current = File::default();
-        apply_file_features(&mut current, &settings(KotlinVersion::V2_4_20));
+        apply_file_features(&mut current, &settings(KotlinVersion::V2_4_21));
         let type_arguments_not_allowed_warning = Some(
             "Type arguments are not allowed when static member is accessed. This will become an \
              error in language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-390.",
@@ -145,9 +141,6 @@ mod tests {
                 .to_string(),
         );
 
-        assert_eq!(old.value_class_recursion_via_type_parameters_warning, None);
-        assert_eq!(old.parenthesized_package_qualifier_warning, None);
-        assert_eq!(patch.package_qualifier_type_arguments_warning, None);
         assert_eq!(
             current.parenthesized_package_qualifier_warning.as_deref(),
             Some(
@@ -162,34 +155,18 @@ mod tests {
                  language version 2.5. See https://youtrack.jetbrains.com/issue/KTLC-396."
             )
         );
-        assert_eq!(old.inapplicable_operator_modifier_warning, None);
         assert_eq!(
-            old.data_class_copy_visibility_change_warning.as_deref(),
+            current.data_class_copy_visibility_change_warning.as_deref(),
             Some(
                 "Non-public primary constructor is exposed via the generated 'copy()' method of the 'data' class.\n\nThe generated 'copy()' will change its visibility in future releases.\n\nTo suppress the warning do one of the following:\n- Annotate the data class with the '@ConsistentCopyVisibility' annotation.\n- Use the '-Xconsistent-data-class-copy-visibility' compiler flag.\n- Annotate the data class with the '@ExposedCopyVisibility' annotation \n  (Discouraged, but can be used to keep binary compatibility).\n\nTo learn more, see the documentation of the '@ConsistentCopyVisibility' and '@ExposedCopyVisibility' annotations.\n\nThis will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914."
             )
         );
         assert_eq!(
-            old.data_class_invisible_copy_usage_warning.as_deref(),
+            current.data_class_invisible_copy_usage_warning.as_deref(),
             Some(
                 "This 'copy()' exposes the non-public primary constructor of a 'data class'. See the appropriate 'data class' documentation or contact the 'data class' author for migration guidance. This will become an error in language version 2.5. See https://youtrack.jetbrains.com/issue/KT-11914."
             )
         );
-        assert_eq!(
-            old.type_arguments_not_allowed_warning.as_deref(),
-            type_arguments_not_allowed_warning
-        );
-        assert_eq!(
-            old.explicit_type_arguments_in_property_access_warning
-                .as_deref(),
-            property_access_warning
-        );
-        assert_eq!(dynamic_warning(&old), expected_dynamic_warning);
-        assert_eq!(
-            patch.type_arguments_not_allowed_warning.as_deref(),
-            type_arguments_not_allowed_warning
-        );
-        assert_eq!(dynamic_warning(&patch), expected_dynamic_warning);
         assert_eq!(
             current.value_class_recursion_via_type_parameters_warning,
             Some(

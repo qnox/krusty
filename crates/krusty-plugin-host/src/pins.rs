@@ -128,7 +128,7 @@ impl Pins {
     }
 
     /// The compiler classpath pinned for exactly `kotlin_version`. A version is an exact identity:
-    /// `2.4.20-RC` is not `2.4.20`, and neither stands in for the other.
+    /// `2.4.21-RC` is not `2.4.21`, and neither stands in for the other.
     pub fn compiler_classpath(&self, kotlin_version: &str) -> Option<&[ArtifactPin]> {
         self.compilers
             .iter()
@@ -244,8 +244,8 @@ mod tests {
     #[test]
     fn a_kotlin_version_matches_only_exactly() {
         let pins = Pins::builtin(&Platform::current());
-        assert!(pins.compiler_classpath("2.4.20").is_some());
-        assert!(pins.compiler_classpath("2.4.20-RC").is_none());
+        assert!(pins.compiler_classpath("2.4.21").is_some());
+        assert!(pins.compiler_classpath("2.4.21-RC").is_none());
         assert!(pins.compiler_classpath("2.4").is_none());
     }
 

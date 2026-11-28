@@ -1492,7 +1492,7 @@ fq_name: layouts
 abi_version=2.4.0
 builtins_platform=NATIVE
 compilerOpts=-I. -DBIG_DEFINED\=1
-compiler_version=2.4.20
+compiler_version=2.4.21
 depends=stdlib
 excludedFunctions=excluded_one
 exportForwardDeclarations=cnames.structs.opaque_s
