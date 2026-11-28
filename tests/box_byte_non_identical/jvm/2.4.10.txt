@@ -188,7 +188,6 @@ callableReference/adaptedReferences/varargViewedAsPrimitiveArray.kt
 callableReference/adaptedReferences/varargWithDefaultValue.kt
 callableReference/arrayConstructor.kt
 callableReference/arrayConstructorArgument.kt
-callableReference/arrayOfNulls.kt
 callableReference/bound/arrayConstructorArgument.kt
 callableReference/bound/arrayGetIntrinsic.kt
 callableReference/bound/captureVarInPropertyInit.kt
@@ -407,7 +406,6 @@ contextParameters/typealiasOnTypeWithContext.kt
 contextParameters/unaryOperators.kt
 contextParameters/useFromAnotherModuleSuspending.kt
 contracts/contractOnContextParameter.kt
-contracts/kt39374.kt
 contracts/kt45236.kt
 contracts/kt47300.kt
 contracts/listAppend.kt
@@ -842,7 +840,6 @@ coroutines/varargCallFromSuspend.kt
 coroutines/withReceiver.kt
 cycles/cycle_for.kt
 dataClasses/components/kt49812.kt
-dataClasses/dataClassWithManyFields.kt
 dataClasses/propertyOfDnnType.kt
 dataClasses/toString/arrayParams.kt
 dataClasses/toString/unitComponent.kt
@@ -851,13 +848,8 @@ deadCodeElimination/intersectingVariableRange.kt
 defaultArguments/captureInTailrec.kt
 defaultArguments/complexInheritance.kt
 defaultArguments/constructor/anonymousObjectAsDefaultParam.kt
-defaultArguments/constructor/innerClass32Args.kt
 defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
 defaultArguments/function/defaultLambdaInline.kt
-defaultArguments/function/extensionFunctionManyArgs.kt
-defaultArguments/function/innerExtentionFunctionManyArgs.kt
-defaultArguments/function/memberFunctionManyArgs.kt
-defaultArguments/function/topLevelManyArgs.kt
 defaultArguments/implementedByFake.kt
 defaultArguments/implementedByFake2.kt
 defaultArguments/implementedByFake3.kt
@@ -2130,7 +2122,6 @@ regressions/captureStorageDefaultMetadata.kt
 regressions/closureWriteConformingSmartCast.kt
 regressions/closureWriteConformingSmartCastStringBuilder.kt
 regressions/collectionLiteralForTypeVariableBuiltFromOtherBound.kt
-regressions/collectionSizeInInlineBody.kt
 regressions/commonSupertypeContravariant.kt
 regressions/companionBlockFunctionValueClassResult.kt
 regressions/conditionalArgumentBranchView.kt
@@ -2411,8 +2402,6 @@ specialBuiltins/removeSetInt.kt
 statics/incInClassObject.kt
 strings/charSequenceGet.kt
 strings/charSequenceSubSequence.kt
-strings/concatDynamicWithConstants.kt
-strings/concatDynamicWithSpecialSymbols.kt
 strings/kt3571.kt
 strings/rawStringsWithManyQuotes.kt
 strings/trimOptimization.kt
@@ -2435,7 +2424,6 @@ super/superConstructor/objectExtendsInner.kt
 super/superConstructor/objectExtendsLocalInner.kt
 super/unqualifiedSuperWithDeeperHierarchies.kt
 suspendConversion/chainedFunSuspendConversionForSimpleExpression.kt
-suspendConversion/conversionOfInterfaceInheritingFunctionN.kt
 suspendConversion/suspendAndFunConversionInDisabledMode.kt
 suspendConversion/suspendConversionWithFunInterfaces.kt
 syntheticAccessors/functionsWithDefaultValues/extensionFunction.kt

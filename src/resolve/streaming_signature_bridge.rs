@@ -1806,61 +1806,6 @@ impl ProductionSignatureSemantics<'_> {
         .map_err(|_| Self::failure())
     }
 
-    fn apply_demanded_source_callable(
-        &self,
-        source: (u32, u32),
-        receiver: Option<Ty>,
-        signature: &crate::fir::ResolvedSignature,
-        arguments: &[Ty],
-        argument_kinds: Option<&[crate::symbol_resolver::CallArgKind]>,
-        explicit_type_arguments: &[Ty],
-        expected: Option<Ty>,
-    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let declaration = DeclId(source.1);
-        let Some(callable) = self
-            .table
-            .funs
-            .values()
-            .flatten()
-            .chain(
-                self.table
-                    .ext_funs
-                    .values()
-                    .flat_map(HashMap::values)
-                    .flatten(),
-            )
-            .find(|callable| {
-                callable.source_file == Some(source.0) && callable.source_decl == Some(declaration)
-            })
-        else {
-            crate::trace_compiler!(
-                "signature",
-                "demanded source callable missing source={source:?}",
-            );
-            return Err(Self::failure());
-        };
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, source.0);
-        let semantic_source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
-        let result = demanded_source_call::demanded_source_result(
-            &semantic_source,
-            callable,
-            signature,
-            receiver,
-            arguments,
-            argument_kinds,
-            explicit_type_arguments,
-            expected,
-        );
-        crate::trace_compiler!(
-            "signature",
-            "apply demanded source callable source={source:?} expected={expected:?} arguments={arguments:?} result={result:?}",
-        );
-        crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure())
-    }
-
     fn apply_demanded_source_property(
         &self,
         source: (u32, u32),

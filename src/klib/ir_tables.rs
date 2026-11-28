@@ -5,7 +5,7 @@
 //! declarations or expressions a component holds; the component writers ([`super::inline_ir`]) own
 //! that and call into these tables for identities and encodings.
 
-use crate::metadata::id_signature::KlibPublicIdSignature;
+use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::protobuf::Pb;
 use crate::types::{Ty, TyKind, TypeName};
 
@@ -109,6 +109,30 @@ impl IrTables {
         let mut encoded = Pb::new();
         encoded.field_message(1, &common);
         self.signature(encoded.canonical().into_bytes())
+    }
+
+    /// A property accessor's identity: its property's public signature, its own name, and its
+    /// member hash.
+    pub(super) fn accessor_signature(&mut self, signature: &KlibAccessorIdSignature) -> u32 {
+        let property = self.public_signature(signature.property());
+        let name = self.string(signature.name());
+        let mut accessor = Pb::new();
+        accessor.field_varint(1, u64::from(property));
+        accessor.field_varint(2, u64::from(name));
+        accessor.field_varint(3, signature.member_id());
+        if signature.mask() != 0 {
+            accessor.field_varint(4, signature.mask());
+        }
+        let mut encoded = Pb::new();
+        encoded.field_message(3, &accessor);
+        self.signature(encoded.canonical().into_bytes())
+    }
+
+    /// Append one body-table entry and answer its index.
+    pub(super) fn body(&mut self, bytes: Vec<u8>) -> u32 {
+        let index = u32::try_from(self.bodies.len()).expect("body table fits u32");
+        self.bodies.push(bytes);
+        index
     }
 
     pub(super) fn file_signature(&mut self) -> u32 {

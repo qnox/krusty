@@ -305,7 +305,7 @@ export KRUSTY_KLIB_REFERENCE_CACHE="${KRUSTY_KLIB_REFERENCE_CACHE:-$PWD/target/c
 
 diagnostics=0
 [ "${KRUSTY_SMOKE_DIAGNOSTICS:-}" = 1 ] && diagnostics=1
-if [ -n "$(affected 'tests/diagnostics_false_accepts/**' 'tests/diagnostics_not_scored/**' 'tests/kotlin_diagnostics_jvm_conformance.rs')" ]; then
+if [ -n "$(affected 'tests/diagnostics_false_accepts/**' 'tests/diagnostics_not_scored/**' 'tests/kotlin_diagnostics_jvm_conformance.rs' 'tests/diagnostics_ledger_mismatches/**' 'tests/kotlin_diagnostics_ledger_jvm_conformance.rs' 'tests/diagnostic_markers.rs')" ]; then
   diagnostics=1
 fi
 

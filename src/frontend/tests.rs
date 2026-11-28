@@ -104,7 +104,11 @@ fn settled_conversions_take_sequence_positions_and_number_per_callable() {
         "unsettled, the lambda is first in its sequence"
     );
 
-    let settled = settle_generated_class_names(&file, &values.iter().copied().collect());
+    let resolved = super::ResolvedNamingFacts {
+        converted: values.iter().copied().collect(),
+        contract_descriptions: Default::default(),
+    };
+    let settled = settle_generated_class_names(&file, resolved);
 
     let named = |ordinal| crate::ast::LocalClassNameProvenance {
         lexical_owner: None,

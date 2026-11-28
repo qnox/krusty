@@ -6,6 +6,13 @@ use crate::types::{stored_value_ty, Ty, TyKind};
 
 use super::BodyLowering;
 
+/// A converted function value: the value the conversion yields, and the callable reference to its
+/// adapter, which compiles to the class the checker named.
+pub(super) struct ConvertedFunctionValue {
+    pub(super) value: ExprId,
+    pub(super) reference: ExprId,
+}
+
 impl BodyLowering<'_> {
     /// Realize the conversion of an already-materialized function value to the suspend and/or
     /// `Unit`-returning function type `to` as a callable reference bound to that value. Its adapter
@@ -17,10 +24,12 @@ impl BodyLowering<'_> {
         from: ResolvedTy,
         to: ResolvedTy,
         ordinal: u32,
+        keeps_null: bool,
         value: ExprId,
-    ) -> Option<ExprId> {
+    ) -> Option<ConvertedFunctionValue> {
+        let (from, to) = (from.get(), to.get());
         let (TyKind::Fun(source), TyKind::Fun(target)) =
-            (from.get().non_null().kind(), to.get().non_null().kind())
+            (from.non_null().kind(), to.non_null().kind())
         else {
             return None;
         };
@@ -28,15 +37,76 @@ impl BodyLowering<'_> {
         if (source.suspend && !target.suspend) || source.params.len() != target.params.len() {
             return None;
         }
+        if !keeps_null {
+            let reference = self.function_value_adapter(from, to, ordinal, value);
+            return Some(ConvertedFunctionValue {
+                value: reference,
+                reference,
+            });
+        }
+        // A `null` value stays `null`; only a present one is converted:
+        // `if (value != null) adapter(value) else null`. A read of a stable binding is its own
+        // snapshot; any other value is held in a temporary.
+        let stable = self.stable_value_read(value);
+        let (stored, slot) = match stable {
+            Some(slot) => (None, slot),
+            None => {
+                let (stored, temporary) = self.value_temporary(value, from);
+                (Some(stored), temporary)
+            }
+        };
+        let tested = match stable {
+            Some(_) => value,
+            None => self.checked_value_read(slot, false),
+        };
+        let read = self.checked_value_read(slot, stable.is_some());
+        let present = self.ir.add_expr(IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg: read,
+            type_operand: from.non_null(),
+        });
+        let reference =
+            self.function_value_adapter(from.non_null(), to.non_null(), ordinal, present);
+        let null = self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
+        let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: crate::ir::IrBinOp::Ne,
+            lhs: tested,
+            rhs: null,
+        });
+        let absent = self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
+        let guarded = self.ir.add_expr(IrExpr::When {
+            branches: vec![(Some(condition), reference), (None, absent)],
+        });
+        self.ir.whens.exhaustive.insert(guarded, to);
+        self.ir.set_logical_type(guarded, to);
+        let value = match stored {
+            Some(stored) => self.ir.add_expr(IrExpr::Block {
+                stmts: vec![stored],
+                value: Some(guarded),
+            }),
+            None => guarded,
+        };
+        Some(ConvertedFunctionValue { value, reference })
+    }
+
+    /// The callable reference to a generated adapter that converts `value`, of function type
+    /// `from`, to the function type `to` that has the same parameters.
+    fn function_value_adapter(&mut self, from: Ty, to: Ty, ordinal: u32, value: ExprId) -> ExprId {
+        let (TyKind::Fun(source), TyKind::Fun(target)) =
+            (from.non_null().kind(), to.non_null().kind())
+        else {
+            unreachable!("a function-value conversion converts between function types");
+        };
 
         // A nullable value is invoked through a safe call on it, so a `null` value converts to an
-        // adapter that yields `null` (`Unit` for a `Unit` target) instead of invoking it.
+        // adapter that yields `null` (`Unit` for a `Unit` target) instead of invoking it. Only a
+        // conversion that does not keep `null` converts a nullable value.
         let enclosing_temporary = self.next_temporary;
-        let guard = from.get().is_nullable().then(|| {
+        let guard = from.is_nullable().then(|| {
             self.next_temporary = u32::try_from(target.params.len() + 1)
                 .expect("too many converted-function parameters");
             let value = self.ir.add_expr(IrExpr::GetValue(0));
-            self.value_temporary(value, from.get())
+            self.value_temporary(value, from)
         });
         let callee = match guard {
             Some((_, temporary)) => {
@@ -44,7 +114,7 @@ impl BodyLowering<'_> {
                 self.ir.add_expr(IrExpr::TypeOp {
                     op: crate::ir::IrTypeOp::ImplicitCoercion,
                     arg: read,
-                    type_operand: from.get().non_null(),
+                    type_operand: from.non_null(),
                 })
             }
             None => self.ir.add_expr(IrExpr::GetValue(0)),
@@ -99,7 +169,7 @@ impl BodyLowering<'_> {
             .ir
             .callable_reference_adapter_body(invoke, erased_result, adapter_result);
         let mut parameters = Vec::with_capacity(target.params.len() + 1);
-        parameters.push(from.get());
+        parameters.push(from);
         parameters.extend(target.params.iter().copied());
         let adapter = self.ir.add_fun(IrFunction {
             name: format!(
@@ -122,22 +192,20 @@ impl BodyLowering<'_> {
         // The converted value is the adapter's bound receiver, ahead of its own parameters.
         self.ir.lambda_own_params_from.insert(adapter, 1);
         self.attach_generated_static_to_lexical_class(adapter);
-        Some(
-            self.ir
-                .add_expr(IrExpr::CallableReference(Box::new(IrCallableReference {
-                    target: IrCallableReferenceTarget::FunctionValueConversion { ordinal },
-                    adapter,
-                    captures: Vec::new(),
-                    bound_receiver: Some(value),
-                    bound_contexts: 0,
-                    function_type: to.get(),
-                    declaration_parameters: parameters.into_boxed_slice(),
-                    declaration_result: target.ret,
-                    declaration_suspend: target.suspend,
-                    adaptation: None,
-                    reflection_owner: None,
-                }))),
-        )
+        self.ir
+            .add_expr(IrExpr::CallableReference(Box::new(IrCallableReference {
+                target: IrCallableReferenceTarget::FunctionValueConversion { ordinal },
+                adapter,
+                captures: Vec::new(),
+                bound_receiver: Some(value),
+                bound_contexts: 0,
+                function_type: to,
+                declaration_parameters: parameters.into_boxed_slice(),
+                declaration_result: target.ret,
+                declaration_suspend: target.suspend,
+                adaptation: None,
+                reflection_owner: None,
+            })))
     }
 
     /// `value?.invoke(...)` over the temporary `variable` declares, yielding `result`: `null` when

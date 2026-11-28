@@ -335,6 +335,10 @@ impl KlibBackend {
             ir,
             &format!("{simple_stem}.kt"),
             &package_exports.declarations,
+            &super::inline_ir::BodyFacts {
+                callables: &file.callables,
+                builtins: super::inline_ir::builtin_operators(),
+            },
         );
         // Ordinary IR is an all-or-nothing module channel. The narrow writer currently owns one
         // exact file component, so publish it only for a single-source module whose every metadata

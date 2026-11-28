@@ -16,7 +16,7 @@ use crate::types::Ty;
 /// declaration has annotations (which lowering does not read: a local's annotations change nothing
 /// checked FIR lowering emits), then `var`, `const` and `lateinit`.
 const HAS_ANNOTATIONS: u64 = 1;
-const IS_VAR: u64 = 1 << 1;
+pub(crate) const IS_VAR: u64 = 1 << 1;
 const IS_CONST: u64 = 1 << 2;
 const IS_LATEINIT: u64 = 1 << 3;
 
