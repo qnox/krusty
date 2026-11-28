@@ -1050,6 +1050,7 @@ KRef kt_hash_map_new(void);
 KRef kt_hash_set_new(void);
 KRef kt_hash_map_with_capacity(kt_int capacity);
 KRef kt_hash_set_with_capacity(kt_int capacity);
+KRef kt_hash_set_copy_of(KRef elements);
 /* `emptyMap()` and `emptySet()`, and so `mapOf()` and `setOf()`: the one read-only `EmptyMap` and
    `EmptySet`, the same object on every call. Neither is a `MutableMap` or `MutableSet`, so no
    member that writes is ever handed one. */

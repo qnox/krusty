@@ -817,6 +817,26 @@ KRef kt_hash_set_with_capacity(kt_int capacity) {
     return kt_map_with_capacity(&kt_type_hash_set, capacity);
 }
 
+/* `HashSet(elements)`: Kotlin/Native's is `HashSet(elements.size)` followed by `addAll(elements)`,
+   so the new set's capacity -- and with it the order it iterates in -- is the collection's size.
+   The elements are read once now, and the set owns its own storage. */
+KRef kt_hash_set_copy_of(KRef elements) {
+    kt_int size = kt_collection_size(elements);
+    if (kt_map_raised()) {
+        return NULL;
+    }
+    KRef set = kt_map_shaped(&kt_type_hash_set, size);
+    KRef iterator = kt_iterable_iterator(elements);
+    while (!kt_map_raised() && kt_iterator_has_next(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        if (kt_map_raised()) {
+            return NULL;
+        }
+        (void)kt_set_add(set, element);
+    }
+    return kt_map_raised() ? NULL : set;
+}
+
 /* ---- iteration ------------------------------------------------------------------------------
 
    `HashMap.Itr`: `hasNext` is whether the index is below the map's length; `next` first checks

@@ -368,6 +368,12 @@ fn native_library_generic_any_override_uses_the_canonical_vtable_slot() {
 }
 
 #[test]
+fn native_a_hash_set_copies_the_collection_it_is_given() {
+    let source = include_str!("box_regressions/hashSetCopyConstructor.kt");
+    expect_native_klib_box(source, "nativeHashSetCopyConstructor");
+}
+
+#[test]
 fn native_a_not_null_member_delegate_holds_what_was_written_to_it() {
     let source = include_str!("box_regressions/notNullDelegateMember.kt");
     expect_native_klib_box(source, "nativeNotNullDelegateMember");
