@@ -450,6 +450,30 @@ fun f(): String = a
             ],
             errors: 1,
         },
+        // Checker errors that kotlinc reports under their own names.
+        Case {
+            file: "Checks.kt",
+            source: "\
+annotation class A(val x: Int)
+var n = 1
+@A(n) fun a() {}
+fun b(s: String?) = s.length
+inline fun c(f: () -> Unit) { val g = f; g() }
+class In<in T>(val t: T)
+fun d() { val v = 1; v = 2 }
+fun e(s: String?) = s.trim()
+",
+            arguments: &[],
+            diagnostics: &[
+                "Checks.kt:3:4: error: [ANNOTATION_ARGUMENT_MUST_BE_CONST] Annotation argument must be a compile-time constant.",
+                "Checks.kt:4:22: error: [UNSAFE_CALL] Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.",
+                "Checks.kt:5:39: error: [USAGE_IS_NOT_INLINABLE] Illegal usage of inline parameter 'f: () -> Unit'. Add 'noinline' modifier to the parameter declaration.",
+                "Checks.kt:6:23: error: [TYPE_VARIANCE_CONFLICT_ERROR] Type parameter 'T' is declared as 'in' but occurs in 'out' position in type 'T (of class In<in T>)'.",
+                "Checks.kt:7:22: error: [VAL_REASSIGNMENT] 'val' cannot be reassigned.",
+                "Checks.kt:8:22: error: [UNSAFE_CALL] Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.",
+            ],
+            errors: 6,
+        },
         Case {
             file: "Forbidden.kt",
             source: "\

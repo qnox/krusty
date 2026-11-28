@@ -533,7 +533,7 @@ impl Checker<'_> {
                     {
                         return;
                     }
-                    self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
+                    self.report_val_reassignment(target_span);
                 }
                 let value_ty = self.expr_expected(scope, value, property.property.ty);
                 self.expect_assignable(

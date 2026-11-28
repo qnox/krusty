@@ -1029,7 +1029,7 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert_eq!(
             diagnostics[0].msg,
-            "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'."
+            "Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'."
         );
         assert_eq!(
             &source[diagnostics[0].span.lo as usize..diagnostics[0].span.hi as usize],

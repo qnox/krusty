@@ -4839,12 +4839,9 @@ impl<'a> Checker<'a> {
                     let nullable_member_span =
                         Span::new(diagnostic_span.lo.saturating_sub(1), diagnostic_span.hi);
                     let receiver = self.diagnostic_type_name(rt, &[rt]);
-                    self.diags.error(
+                    self.diags.report_error(
                         nullable_member_span,
-                        format!(
-                            "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '{}'.",
-                            receiver
-                        ),
+                        crate::diagnostic_wording::unsafe_call(&receiver),
                     );
                 }
                 return Ty::Error;
@@ -13940,7 +13937,7 @@ impl<'a> Checker<'a> {
         match found {
             Some((storage_ty, is_var, nominal_read_ty)) => {
                 if !is_var {
-                    self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
+                    self.report_val_reassignment(target_span);
                 }
                 let read_ty = if local.is_some() {
                     self.local_narrowing(scope, &name)
@@ -14090,10 +14087,7 @@ impl<'a> Checker<'a> {
         if let Some((receiver, owner, ty, enum_entry_property)) = deferred_property {
             self.expect_assignable(ty, vt, self.value_diagnostic_span(value, vt), "assignment");
             if enum_entry_property.is_some() && scoped.is_some_and(|local| !local.is_var) {
-                self.report_val_reassignment(
-                    self.assignment_target_span(s),
-                    "'val' cannot be reassigned.",
-                );
+                self.report_val_reassignment(self.assignment_target_span(s));
                 return;
             }
             if let Some(ReceiverFnValueOrigin::DispatchProperty {
@@ -14158,7 +14152,7 @@ impl<'a> Checker<'a> {
             match local {
                 Some((lty, is_var)) => {
                     if !is_var {
-                        self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
+                        self.report_val_reassignment(target_span);
                     }
                     self.expect_assignable(
                         lty,
@@ -14249,10 +14243,7 @@ impl<'a> Checker<'a> {
                                 }
                             }
                             if !resolution.is_var {
-                                self.report_val_reassignment(
-                                    target_span,
-                                    "'val' cannot be reassigned.",
-                                );
+                                self.report_val_reassignment(target_span);
                             }
                             self.expect_assignable(
                                 resolution.property_ty,
@@ -14267,10 +14258,7 @@ impl<'a> Checker<'a> {
                         }
                         PropertyWriteSelection::Receiverless(property) => {
                             if property.property.setter.is_none() {
-                                self.report_val_reassignment(
-                                    target_span,
-                                    "'val' cannot be reassigned.",
-                                );
+                                self.report_val_reassignment(target_span);
                             }
                             self.expect_assignable(
                                 property.property.ty,
@@ -14282,10 +14270,7 @@ impl<'a> Checker<'a> {
                                 .insert(s, StmtLowering::TopLevelPropertySet(property));
                         }
                         PropertyWriteSelection::ClassifierProperty(property) => {
-                            self.report_val_reassignment(
-                                target_span,
-                                "'val' cannot be reassigned.",
-                            );
+                            self.report_val_reassignment(target_span);
                             self.expect_assignable(
                                 property.ty,
                                 vt,
@@ -14429,10 +14414,7 @@ impl<'a> Checker<'a> {
                     return;
                 }
                 let Some(setter) = property.setter.as_ref() else {
-                    self.report_val_reassignment(
-                        self.assignment_target_span(s),
-                        "'val' cannot be reassigned.",
-                    );
+                    self.report_val_reassignment(self.assignment_target_span(s));
                     return;
                 };
                 let value_ty = self.expr_expected(scope, value, property.ty);
@@ -14564,7 +14546,7 @@ impl<'a> Checker<'a> {
                 && self.is_deferred_constructor_property_write(scope, receiver, &name, owner);
             if property.setter.is_none() && !deferred_constructor_write {
                 if !self.try_overloaded_assignment(scope, s, property.ty, value) {
-                    self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
+                    self.report_val_reassignment(target_span);
                 }
                 return;
             }
@@ -22235,13 +22217,13 @@ fun use() {
                 .map(|diagnostic| diagnostic.msg.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'C?'.",
-                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.",
-                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.",
-                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.",
-                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Holder?'.",
-                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '(() -> Int)?'.",
-                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Any?'.",
+                "Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'C?'.",
+                "Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.",
+                "Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.",
+                "Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'.",
+                "Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Holder?'.",
+                "Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '(() -> Int)?'.",
+                "Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'Any?'.",
             ]
         );
         for diagnostic in &diagnostics.diags {
@@ -22280,7 +22262,7 @@ fun use() {
         assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
         assert_eq!(
             diagnostics.diags[0].msg,
-            "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'."
+            "Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'String?'."
         );
         assert_eq!(
             &source[diagnostics.diags[0].span.lo as usize..diagnostics.diags[0].span.hi as usize],
@@ -29239,12 +29221,9 @@ impl<'a> Checker<'a> {
 
     fn report_nullable_receiver_call(&mut self, call: ExprId, receiver: Ty) {
         let receiver = self.diagnostic_type_name(receiver, &[receiver]);
-        self.diags.error(
+        self.diags.report_error(
             self.nullable_receiver_call_span(call),
-            format!(
-                "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '{}'.",
-                receiver
-            ),
+            crate::diagnostic_wording::unsafe_call(&receiver),
         );
     }
 
@@ -41848,10 +41827,7 @@ impl<'a> Checker<'a> {
                 {
                     Some((storage_ty, is_var)) => {
                         if !is_var {
-                            self.report_val_reassignment(
-                                self.span(target),
-                                "'val' cannot be reassigned.",
-                            );
+                            self.report_val_reassignment(self.span(target));
                         }
                         let selected = self.select_inc_dec(
                             scope,

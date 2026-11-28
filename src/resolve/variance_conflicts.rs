@@ -567,11 +567,12 @@ impl Checker<'_> {
             let containing =
                 self.diagnostic_type_name(self.displayed_type(occurrence.ty, &origin), &[]);
             for conflict in conflicts {
-                let diagnostic = if conflict.abbreviated {
-                    "TYPE_VARIANCE_CONFLICT_IN_EXPANDED_TYPE"
+                let name = if conflict.abbreviated {
+                    crate::diag::names::TYPE_VARIANCE_CONFLICT_IN_EXPANDED_TYPE
                 } else {
-                    "TYPE_VARIANCE_CONFLICT_ERROR"
+                    crate::diag::names::TYPE_VARIANCE_CONFLICT_ERROR
                 };
+                let diagnostic = name.as_str();
                 if self.suppresses_diagnostic(diagnostic) {
                     continue;
                 }
@@ -580,10 +581,11 @@ impl Checker<'_> {
                 } else {
                     "type"
                 };
-                self.diags.error(
+                self.diags.error_named(
                     conflict.span,
+                    name,
                     format!(
-                        "type parameter '{}' is declared as '{}' but occurs in '{}' position in \
+                        "Type parameter '{}' is declared as '{}' but occurs in '{}' position in \
                          {kind} '{containing}'.",
                         crate::types::type_parameter_source_name(conflict.parameter),
                         declared_word(conflict.declared),

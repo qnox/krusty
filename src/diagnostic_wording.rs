@@ -109,6 +109,17 @@ pub fn argument_type_mismatch(actual: &str, expected: &str) -> NamedMessage {
     }
 }
 
+/// `UNSAFE_CALL`: a member that exists only on the non-null type, called on a nullable receiver.
+pub fn unsafe_call(receiver: &str) -> NamedMessage {
+    NamedMessage {
+        name: names::UNSAFE_CALL,
+        message: format!(
+            "Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver \
+             of type '{receiver}'."
+        ),
+    }
+}
+
 /// `UNRESOLVED_IMPORT`: an import path segment that names nothing. kotlinc renders it as it renders
 /// `UNRESOLVED_REFERENCE`.
 pub fn unresolved_import(segment: &str) -> NamedMessage {

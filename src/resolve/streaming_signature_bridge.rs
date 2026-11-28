@@ -776,9 +776,9 @@ impl ProductionSignatureSemantics<'_> {
         declaration: crate::fir::DeclarationId,
         source: crate::fir::SourceFileId,
         span: Span,
-        message: String,
+        finding: impl Into<crate::diag::Finding>,
     ) -> crate::fir::DiagnosticId {
-        self.record_source_finding_at(declaration, (source.raw(), span), message.into(), None)
+        self.record_source_finding_at(declaration, (source.raw(), span), finding.into(), None)
     }
 
     /// A finding reported on every exit, once per `identity`.
