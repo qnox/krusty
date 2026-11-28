@@ -80,6 +80,7 @@ use argument_parameter_mapping::{
     named_whole_array_varargs,
 };
 mod call_site_publication;
+mod constructor_delegation_cycles;
 mod constructor_references;
 mod implicit_source_member_lambda;
 mod null_check_narrowing;
@@ -2014,35 +2015,6 @@ struct LibraryConstructorOptions<'a> {
     /// What a selection that ran over a wider candidate family (the receiver member level of
     /// `outer.Inner(args)`, or the shared bare-call selector) already decided.
     selected: ConstructorPreselection<'a>,
-}
-
-fn constructor_delegation_cycles(edges: &[Option<usize>]) -> Vec<Vec<usize>> {
-    let mut state = vec![0u8; edges.len()];
-    let mut cycles = Vec::new();
-    for start in 0..edges.len() {
-        if state[start] != 0 {
-            continue;
-        }
-        let mut path = Vec::new();
-        let mut current = Some(start);
-        while let Some(node) = current.filter(|&node| node < edges.len()) {
-            if state[node] != 0 {
-                if state[node] == 1 {
-                    if let Some(offset) = path.iter().position(|&candidate| candidate == node) {
-                        cycles.push(path[offset..].to_vec());
-                    }
-                }
-                break;
-            }
-            state[node] = 1;
-            path.push(node);
-            current = edges[node];
-        }
-        for node in path {
-            state[node] = 2;
-        }
-    }
-    cycles
 }
 
 pub type DestructureComponentTarget = Box<ResolvedCall>;
@@ -31379,33 +31351,6 @@ impl<'a> Checker<'a> {
         self.record_whole_array_delegation_arguments(arguments, &selected);
         self.resolved_ctor_delegations
             .insert((class, secondary), selected);
-    }
-
-    fn validate_ctor_delegation_graph(&mut self, class: DeclId, declaration: &ClassDecl) {
-        let edges = declaration
-            .secondary_ctors
-            .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                self.resolved_ctor_delegations
-                    .get(&(class, index))
-                    .and_then(|resolved| match &resolved.target {
-                        ResolvedCtorDelegationTarget::ThisSecondary { index, .. } => Some(*index),
-                        _ => None,
-                    })
-            })
-            .collect::<Vec<_>>();
-        for cycle in constructor_delegation_cycles(&edges) {
-            if let Some(&index) = cycle.first() {
-                self.diags.error(
-                    declaration.secondary_ctors[index].span,
-                    "constructor delegation cycle".to_string(),
-                );
-            }
-            for index in cycle {
-                self.resolved_ctor_delegations.remove(&(class, index));
-            }
-        }
     }
 
     /// A MODULE class declared in THIS file's package, by source name (`Wrapper`, or the dotted
