@@ -59,8 +59,11 @@ fn assert_exact_rejection(
         (result.krusty_code, result.krusty_stderr.as_str()),
         (
             1,
-            format!("{krusty_path}:{line}:60: error: {krusty_message}\nkrusty: 1 error(s)\n")
-                .as_str(),
+            format!(
+                "{krusty_path}:{line}:60: error: {krusty_message}\n{source_line}\n{}^^^^^\nkrusty: 1 error(s)\n",
+                " ".repeat(59),
+            )
+            .as_str(),
         ),
         "exact krusty diagnostic",
     );

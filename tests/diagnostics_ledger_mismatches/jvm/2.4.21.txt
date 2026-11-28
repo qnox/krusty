@@ -5838,16 +5838,9 @@ compiler/testData/diagnostics/tests/syntheticExtensions/samAdapters/Simple.kt
 compiler/testData/diagnostics/tests/syntheticExtensions/samAdapters/overloadResolution.kt
 compiler/testData/diagnostics/tests/syntheticExtensions/samAdapters/overloadResolutionStatic.kt
 compiler/testData/diagnostics/tests/syntheticSet.kt
-compiler/testData/diagnostics/tests/tailRecBasic.kt
-compiler/testData/diagnostics/tests/tailRecInNestedScopes.kt
-compiler/testData/diagnostics/tests/tailRecInTry.kt
 compiler/testData/diagnostics/tests/tailRecOnVirtualMemberError.kt
-compiler/testData/diagnostics/tests/tailRecOverridden.kt
-compiler/testData/diagnostics/tests/tailRecShortCircuit.kt
 compiler/testData/diagnostics/tests/tailRecSingleton.kt
 compiler/testData/diagnostics/tests/tailRecWithDispatchReceiver.kt
-compiler/testData/diagnostics/tests/tailRecWithExtensionReceiver.kt
-compiler/testData/diagnostics/tests/tailRecursionComplex.kt
 compiler/testData/diagnostics/tests/tailrec.kt
 compiler/testData/diagnostics/tests/targetedBuiltIns/backwardCompatibility/basic.kt
 compiler/testData/diagnostics/tests/targetedBuiltIns/backwardCompatibility/delegation.kt

@@ -65,6 +65,27 @@ fn folded(file: &str) -> PathBuf {
     folded
 }
 
+/// How a diagnostic names a source file, as kotlinc prints it: a file under the working directory
+/// is written relative to it, anything else keeps its (folded) spelling.
+pub fn diagnostic_path(file: &str) -> String {
+    let path = Path::new(file);
+    if !path.is_absolute() {
+        return file.to_string();
+    }
+    let folded = folded(file);
+    let Ok(cwd) = std::env::current_dir() else {
+        return file.to_string();
+    };
+    match folded.strip_prefix(folded_dir(&cwd)) {
+        Ok(relative) if !relative.as_os_str().is_empty() => relative.to_string_lossy().into_owned(),
+        _ => file.to_string(),
+    }
+}
+
+fn folded_dir(dir: &Path) -> PathBuf {
+    folded(&dir.to_string_lossy())
+}
+
 /// The file a spelling names, as kotlinc compares source files: the absolute path with `.` and
 /// `..` folded lexically, so one file has one identity however it is spelled.
 fn identity(file: &str) -> PathBuf {
@@ -190,5 +211,14 @@ mod tests {
                 message: "Duplicate source root: src/G.kt".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn a_file_under_the_working_directory_is_named_relative_to_it() {
+        let cwd = std::env::current_dir().unwrap();
+        let inside = cwd.join("a").join("..").join("b").join("F.kt");
+        assert_eq!(diagnostic_path(&inside.to_string_lossy()), "b/F.kt");
+        assert_eq!(diagnostic_path("rel/F.kt"), "rel/F.kt");
+        assert_eq!(diagnostic_path("/elsewhere/F.kt"), "/elsewhere/F.kt");
     }
 }

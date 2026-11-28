@@ -59,7 +59,7 @@ fn strict_explicit_return_types_report_like_kotlinc() {
     let reference = common::rendered_error_blocks(&result.reference_stderr, true);
     assert_eq!(reference.len(), 15, "{}", result.reference_stderr);
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         reference
     );
     assert_eq!(common::compiler_warnings(&result.krusty_stderr), []);
@@ -95,7 +95,7 @@ fn matching_explicit_api_and_return_types_modes_report_like_kotlinc() {
     let reference = common::rendered_error_blocks(&result.reference_stderr, true);
     assert_eq!(reference.len(), 44, "{}", result.reference_stderr);
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         reference
     );
 }

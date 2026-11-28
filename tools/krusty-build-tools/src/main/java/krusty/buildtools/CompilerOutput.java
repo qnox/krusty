@@ -23,12 +23,14 @@ import org.jetbrains.kotlin.buildtools.api.KotlinLogger;
  * located diagnostic and {@code severity: message} for an unlocated one. Its own lines start with
  * {@code krusty: } ({@code krusty: error: } for an error) and its success line with {@code ok: }.
  * Any other line continues the previous message (multi-line messages), or is plain output when
- * nothing precedes it.
+ * nothing precedes it. The source line and caret marker krusty prints after a located message are
+ * dropped: the caller's renderer receives the line through the {@link SourceLocation} instead.
  */
 final class CompilerOutput {
     private static final Pattern LOCATED =
         Pattern.compile("^(.+?):(\\d+):(\\d+): (error|warning|info): (.*)$");
     private static final Pattern UNLOCATED = Pattern.compile("^(error|warning|info): (.*)$");
+    private static final Pattern CARET = Pattern.compile("^\\s*\\^+$");
     private static final String KRUSTY_ERROR = "krusty: error: ";
     private static final String KRUSTY = "krusty: ";
     private static final String SUCCESS = "ok: ";
@@ -55,7 +57,7 @@ final class CompilerOutput {
             messages.add(new Message(
                 severity(located.group(4)),
                 new StringBuilder(located.group(5)),
-                located.group(1),
+                absolute(located.group(1)),
                 Integer.parseInt(located.group(2)),
                 Integer.parseInt(located.group(3)),
                 true));
@@ -85,6 +87,14 @@ final class CompilerOutput {
         }
     }
 
+    /**
+     * krusty prints a path under its working directory relative to it, as kotlinc does. It runs in
+     * this process's working directory, so the caller gets the absolute path, as from kotlinc.
+     */
+    private static String absolute(String path) {
+        return Path.of(path).toAbsolutePath().toString();
+    }
+
     private static Message diagnostic(Severity severity, String text) {
         return new Message(severity, new StringBuilder(text), null, 0, 0, true);
     }
@@ -101,9 +111,10 @@ final class CompilerOutput {
     void report(KotlinLogger logger) {
         for (Message message : messages) {
             SourceLocation location = message.location();
+            String body = withoutExcerpt(message.text.toString(), location);
             String text = renderer != null && message.diagnostic
-                ? renderer.render(message.severity, message.text.toString(), location)
-                : plain(message, location);
+                ? renderer.render(message.severity, body, location)
+                : plain(body, location);
             switch (message.severity) {
                 case ERROR -> logger.error(text, null);
                 case WARNING -> logger.warn(text, null);
@@ -113,11 +124,27 @@ final class CompilerOutput {
         }
     }
 
-    private static String plain(Message message, SourceLocation location) {
+    private static String plain(String body, SourceLocation location) {
         if (location == null) {
-            return message.text.toString();
+            return body;
         }
-        return location.getPath() + ":" + location.getLine() + ":" + location.getColumn() + ": " + message.text;
+        return location.getPath() + ":" + location.getLine() + ":" + location.getColumn() + ": " + body;
+    }
+
+    /** The message without the trailing source line and caret marker krusty prints for a located diagnostic. */
+    private static String withoutExcerpt(String text, SourceLocation location) {
+        if (location == null || location.getLineContent() == null || location.getLineContent().isEmpty()) {
+            return text;
+        }
+        int caret = text.lastIndexOf('\n');
+        if (caret < 0 || !CARET.matcher(text.substring(caret + 1)).matches()) {
+            return text;
+        }
+        int source = text.lastIndexOf('\n', caret - 1);
+        if (source < 0 || !text.substring(source + 1, caret).equals(location.getLineContent())) {
+            return text;
+        }
+        return text.substring(0, source);
     }
 
     private static Severity severity(String text) {

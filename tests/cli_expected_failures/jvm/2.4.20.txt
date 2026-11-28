@@ -52,7 +52,6 @@ abiStabilityIncorrectValue.args
 annotatedParameterWithoutName.args
 annotationDefaultTargetFirstOnly.args
 annotationDefaultTargetFirstOnlyWarn.args
-annotationDefaultTargetParamProperty.args
 annotationDefaultTargetWithOptInFirstOnly.args
 annotationDefaultTargetWithOptInParamProperty.args
 annotationDefaultTargetWithSuppressedOptInFirstOnly.args
@@ -111,7 +110,6 @@ diagnosticTests/wrongAnnotationArgumentInCtor.args
 errorSuppressionWarning.args
 experimentalCheckers.args
 explicitContextArguments.args
-explicitReturnTypesEnabled.args
 expression1.args
 extraArgCommonChecks/extraArgumentEmpty.args
 extraArgCommonChecks/extraArgumentInvalidValue.args

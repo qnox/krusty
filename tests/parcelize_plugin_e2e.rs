@@ -316,9 +316,13 @@ fn unsupported_parcelized_classes_are_refused() {
         ),
         "<fixture>/main/src/Tags.kt:7:1: error: krusty's Parcelize compiler plugin does not \
          support a property of this type yet; compile this module with kotlinc\n\
+         class Tags(val tags: List<String>) : Parcelable\n\
+         ^\n\
          <fixture>/main/src/Tags.kt:10:1: error: krusty's Parcelize compiler plugin does not \
          support a parcelized object, enum, interface or value class yet; compile this module \
          with kotlinc\n\
+         object Single : Parcelable\n\
+         ^\n\
          krusty: 2 error(s)\n"
     );
 }
@@ -352,6 +356,8 @@ fn a_runtime_type_annotation_is_refused_at_its_property() {
         "<fixture>/main/src/Raw.kt:10:5: error: krusty's Parcelize compiler plugin does not \
          support a property type with a Parcelize annotation yet; compile this module with \
          kotlinc\n\
+         \x20   val tag: @RawValue String,\n\
+         \x20   ^^^^^^^^^^^^^^^^^^^^^^^^^\n\
          krusty: 1 error(s)\n"
     );
 }
