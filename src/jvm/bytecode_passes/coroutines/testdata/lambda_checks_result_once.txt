@@ -1,0 +1,46 @@
+0: invokestatic kotlin/coroutines/intrinsics/IntrinsicsKt.getCOROUTINE_SUSPENDED()Ljava/lang/Object;
+1: astore 3
+2: aload 1
+3: invokestatic kotlin/ResultKt.throwOnFailure(Ljava/lang/Object;)V
+4: aload 0
+5: getfield AKt$g$1.label:I
+6: tableswitch 0..1 [@7, @23] default @31
+7: iconst_1
+8: istore 2
+9: aload 0
+10: checkcast kotlin/coroutines/Continuation
+11: aload 0
+12: iload 2
+13: putfield AKt$g$1.I$0:I
+14: aload 0
+15: iconst_1
+16: putfield AKt$g$1.label:I
+17: invokestatic AKt.leaf(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+18: dup
+19: aload 3
+20: if_acmpne @27
+21: aload 3
+22: areturn
+23: aload 0
+24: getfield AKt$g$1.I$0:I
+25: istore 2
+26: aload 1
+27: pop
+28: iload 2
+29: invokestatic kotlin/coroutines/jvm/internal/Boxing.boxInt(I)Ljava/lang/Integer;
+30: areturn
+31: new java/lang/IllegalStateException
+32: dup
+33: ldc "call to 'resume' before 'invoke' with coroutine"
+34: invokespecial java/lang/IllegalStateException.<init>(Ljava/lang/String;)V
+35: athrow
+line 8: 1
+line 9: 7
+line 10: 9
+line 8: 21
+line 11: 27
+line 8: 31
+local a I 9..23 slot 2
+local this LAKt$g$1; 0..36 slot 0
+local $result Ljava/lang/Object; 0..36 slot 1
+local a I 26..31 slot 2

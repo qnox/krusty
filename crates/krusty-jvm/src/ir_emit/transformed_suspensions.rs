@@ -562,8 +562,17 @@ pub(super) fn request_transform(
                 .lambda
                 .as_ref()
                 .map(|lambda| lambda.declared_spill_fields.clone()),
+            lambda_checks_unprotected_result_once: lambda_checks_unprotected_result_once(ir),
         },
     );
+}
+
+/// Whether the reference release checks a suspend lambda's resumption result once
+/// ([`krusty::kotlin_version::Quirk::SuspendLambdaChecksResultInEveryState`]).
+pub(in crate::ir_emit) fn lambda_checks_unprotected_result_once(ir: &IrFile) -> bool {
+    !ir.reference
+        .quirks()
+        .has(krusty::kotlin_version::Quirk::SuspendLambdaChecksResultInEveryState)
 }
 
 /// The class a member function's continuation captures as `this$0`, by internal name: a member's

@@ -468,7 +468,6 @@ compileKotlinAgainstKotlin/coroutinesBinary.kt
 compileKotlinAgainstKotlin/doublyNestedClass.kt
 compileKotlinAgainstKotlin/inlineClasses/inlineClassFromBinaryDependencies.kt
 compileKotlinAgainstKotlin/inlineClasses/inlineClassInlineProperty.kt
-compileKotlinAgainstKotlin/inlineClasses/oldMangling/useOldMangling.kt
 compileKotlinAgainstKotlin/inlineClasses/privateCompanionObjectValInDifferentModule.kt
 compileKotlinAgainstKotlin/inlineClasses/privateConstructorWithPrivateFieldUsingTypeTable.kt
 compileKotlinAgainstKotlin/inlineClasses/suspendFunWithDefaultMangling.kt
@@ -729,7 +728,6 @@ coroutines/featureIntersection/callableReference/bound/emptyLHS.kt
 coroutines/featureIntersection/callableReference/function/adapted.kt
 coroutines/featureIntersection/callableReference/function/genericCallableReferencesWithNullableTypes.kt
 coroutines/featureIntersection/callableReference/function/local/equalsHashCode.kt
-coroutines/featureIntersection/callableReference/lambdaParameterUsed.kt
 coroutines/featureIntersection/callableReference/longArgs.kt
 coroutines/featureIntersection/delegate.kt
 coroutines/featureIntersection/destructuringInLambdas.kt
@@ -769,7 +767,6 @@ coroutines/functionReference_invokeAsFunction.kt
 coroutines/functionReference_lambdaAsSuspendLambda.kt
 coroutines/functionReference_simple.kt
 coroutines/generate.kt
-coroutines/generatedCodeMarkers/simple.kt
 coroutines/handleException.kt
 coroutines/handleResultCallEmptyBody.kt
 coroutines/handleResultNonUnitExpression.kt
@@ -780,8 +777,6 @@ coroutines/infiniteLoopInNextMeaningful.kt
 coroutines/inlineCallWithReturns.kt
 coroutines/inlineClasses/direct/boxReturnValueOfSuspendFunctionReference.kt
 coroutines/inlineClasses/direct/boxReturnValueOfSuspendLambda.kt
-coroutines/inlineClasses/direct/boxTypeParameterOfSuperType.kt
-coroutines/inlineClasses/direct/boxTypeParameterOfSuperTypeResult.kt
 coroutines/inlineClasses/direct/boxUnboxInsideCoroutine.kt
 coroutines/inlineClasses/direct/boxUnboxInsideCoroutine_Any.kt
 coroutines/inlineClasses/direct/boxUnboxInsideCoroutine_InlineAny.kt
@@ -805,9 +800,6 @@ coroutines/inlineClasses/direct/covariantOverrideSuspendFunWithNullableInlineCla
 coroutines/inlineClasses/direct/covariantOverrideSuspendFunWithNullableInlineClass_NullableInt_null.kt
 coroutines/inlineClasses/direct/covariantOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/direct/covariantOverrideSuspendFun_Int.kt
-coroutines/inlineClasses/direct/createMangling.kt
-coroutines/inlineClasses/direct/createOverride.kt
-coroutines/inlineClasses/direct/defaultStub.kt
 coroutines/inlineClasses/direct/genericOverrideSuspendFun.kt
 coroutines/inlineClasses/direct/genericOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/direct/genericOverrideSuspendFun_Any_NullableInlineClassUpperBound.kt
@@ -817,7 +809,6 @@ coroutines/inlineClasses/direct/genericOverrideSuspendFun_NullableAny_null.kt
 coroutines/inlineClasses/direct/genericOverrideSuspendFun_NullableInt.kt
 coroutines/inlineClasses/direct/genericOverrideSuspendFun_NullableInt_null.kt
 coroutines/inlineClasses/direct/interfaceDelegateWithInlineClass.kt
-coroutines/inlineClasses/direct/invokeOperator.kt
 coroutines/inlineClasses/direct/overrideSuspendFun.kt
 coroutines/inlineClasses/direct/overrideSuspendFun_Any.kt
 coroutines/inlineClasses/direct/overrideSuspendFun_Any_itf.kt
@@ -856,7 +847,6 @@ coroutines/inlineClasses/resume/covariantOverrideSuspendFunWithNullableInlineCla
 coroutines/inlineClasses/resume/covariantOverrideSuspendFunWithNullableInlineClass_NullableInt_null.kt
 coroutines/inlineClasses/resume/covariantOverrideSuspendFun_Any.kt
 coroutines/inlineClasses/resume/covariantOverrideSuspendFun_Int.kt
-coroutines/inlineClasses/resume/createMangling.kt
 coroutines/inlineClasses/resume/createOverride.kt
 coroutines/inlineClasses/resume/defaultStub.kt
 coroutines/inlineClasses/resume/genericOverrideSuspendFun.kt
@@ -941,7 +931,6 @@ coroutines/intrinsicSemantics/coroutineContextReceiver.kt
 coroutines/intrinsicSemantics/coroutineContextReceiverNotIntrinsic.kt
 coroutines/intrinsicSemantics/intercepted.kt
 coroutines/intrinsicSemantics/releaseIntercepted.kt
-coroutines/intrinsicSemantics/resultExceptionOrNullInLambda.kt
 coroutines/intrinsicSemantics/startCoroutine.kt
 coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturn.kt
 coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturnInterception.kt
@@ -961,11 +950,8 @@ coroutines/kt30858.kt
 coroutines/kt35967.kt
 coroutines/kt41394.kt
 coroutines/kt42028.kt
-coroutines/kt42554.kt
-coroutines/kt44221.kt
 coroutines/kt44710.kt
 coroutines/kt44781.kt
-coroutines/kt45377.kt
 coroutines/kt46813.kt
 coroutines/kt49168.kt
 coroutines/kt49317.kt
@@ -1138,7 +1124,6 @@ coroutines/varSpilling/kt79276.kt
 coroutines/varSpilling/kt83372.kt
 coroutines/varSpilling/kt85203.kt
 coroutines/varSpilling/kt85203_2.kt
-coroutines/varSpilling/lvtWithInlineOnly.kt
 coroutines/varSpilling/nullSpilling.kt
 coroutines/varSpilling/refinedIntTypesAnalysis.kt
 coroutines/varSpilling/safeCallElvis.kt
@@ -1573,7 +1558,6 @@ increment/memberExtOnLong.kt
 increment/mutableListElement.kt
 increment/nullable.kt
 increment/postfixIncrementOnClass.kt
-inference/builderInferenceLeakingVariable.kt
 inference/capturedSelfInsideIntersection.kt
 inference/capturedSelfInsideIntersection2.kt
 inference/capturedSelfInsideIntersection3.kt
@@ -1582,12 +1566,9 @@ inference/capturedTypeWhenSubject.kt
 inference/capturedTypesSubstitutionIntoAbbreviation.kt
 inference/coercionToUnitWithLastLambdaExpression.kt
 inference/coerctionToUnitForLastExpressionWithStarProjection.kt
-inference/eagerLambdaAnalysisSuspendAndNotSuspend.kt
-inference/eagerLambdaAnalysisSuspendAndSam.kt
 inference/earlierReifiedFix.kt
 inference/earlierReifiedFixFlexible.kt
 inference/kt10822.kt
-inference/kt35684.kt
 inference/kt38664.kt
 inference/kt49838.kt
 inference/lastExpressionOfLambdaWithNothingConstraint.kt
@@ -1626,10 +1607,8 @@ inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/Functi
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/FunctionWithReceiverToUnit.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/GenericLocalClassWithLeakingTypeParameter.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/NullableNothing.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/SuspendingFunction.kt
 inference/pcla/pclaRootIsTrySyntheticCall.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
-inference/pcla/specialCallsWithCallableReferencesDontRewriteAtSlice.kt
 inference/pcla/specialCallsWithLambdas.kt
 inference/pcla/substituteStubTypeIntoCR.kt
 inference/pcla/substituteStubTypeIntolambdaParameterDescriptor.kt
@@ -1638,7 +1617,6 @@ inference/plusAssignInsideLambda.kt
 inference/safeCastWithElvis.kt
 inference/selfBoundedVariableFromFunctionTypeBeforeElvisThrow.kt
 inference/sumOfOverloads.kt
-inference/suspendExtensionRecevierFromConstraint.kt
 inference/tryCatchAtAssignmentWithSmartCast.kt
 inference/varargInConstructor.kt
 inference/whenAtAssignmentWithSmartCast.kt
@@ -2608,8 +2586,6 @@ regressions/NullableFunctionValueSuspendConversion.kt
 regressions/NullableScalarNotNullAssert.kt
 regressions/ReceiverLifetimeContrast.kt
 regressions/SpacedTypeAnnotationParenthesizedFunctionType.kt
-regressions/StartCoroutineOfSuspendFunction.kt
-regressions/StartCoroutineOfSuspendLambda.kt
 regressions/StrictEqualsGeneratedBound.kt
 regressions/SuspendFunctionTypesOfSeveralArities.kt
 regressions/ValueClassReferenceArray.kt
@@ -2617,7 +2593,6 @@ regressions/WidenedLiteralCallArgumentKeepsItsCandidate.kt
 regressions/anonymousInterfaceDelegateOperands.kt
 regressions/anyCastToPrimitive.kt
 regressions/anyMembersOfLibraryDeclarations.kt
-regressions/applyReceiverSingleStore.kt
 regressions/arrayElementWriteOrder.kt
 regressions/arrayFactoriesAreOrdinaryCalls.kt
 regressions/arrayFactoryReferences.kt
@@ -2734,7 +2709,6 @@ regressions/inlinePropertyReferenceIdentity.kt
 regressions/inlineSameModuleNoinlineSuspendValues.kt
 regressions/inlinedLibraryErrorInsideTry.kt
 regressions/integerLiteralNullableExpected.kt
-regressions/interceptedContinuation.kt
 regressions/interfaceDelegateCaptureLifetimes.kt
 regressions/interfaceDelegationForwardsHiddenDeprecatedMembers.kt
 regressions/interfacePrivateCompanionBlockFirstUse.kt
@@ -2783,7 +2757,6 @@ regressions/memberExtensionLambdaResultsJoin.kt
 regressions/memberExtensionNullableReceiverOverload.kt
 regressions/memberExtensionRecursiveOpenBound.kt
 regressions/memberLocalFunctions.kt
-regressions/moduleDelegationSuspendForwarderSlots.kt
 regressions/multimodule/boundExtensionReferences.kt
 regressions/multimodule/companionBlockAndValueClassLibrary.kt
 regressions/multimodule/crossinlineObjectInitializer.kt
@@ -2875,21 +2848,14 @@ regressions/sourceExceptionSubclasses.kt
 regressions/sourceKCallableNameAcrossFiles.kt
 regressions/sourceKPropertyName.kt
 regressions/starImportOfCompanionBlock.kt
-regressions/suspendCallsInConditions.kt
 regressions/suspendCoroutineResultInTypedLocal.kt
 regressions/suspendCoroutineUnitKeepsSuspension.kt
-regressions/suspendLambdaCompletions.kt
 regressions/suspendLambdaInlinedObjectCrossinline.kt
 regressions/suspendLambdaLabeledReturn.kt
-regressions/suspendLambdaNestedLambdaParameters.kt
 regressions/suspendLambdaRangeBesideLibraryEnumEntries.kt
 regressions/suspendLambdaRetainedInlineObject.kt
 regressions/suspendLambdaRetainedInlineObjectCaptures.kt
-regressions/suspendLambdaValues.kt
 regressions/suspendReferenceResumesSharedLocals.kt
-regressions/suspendResultErasedConsumers.kt
-regressions/suspendResultMapBackedRepository.kt
-regressions/suspendResultNotNullAssertion.kt
 regressions/suspendStateMachineResumesLocalsAndFailure.kt
 regressions/topLevelDefaultWhenMapping.kt
 regressions/unitLambdaLabeledReturn.kt
@@ -2908,10 +2874,8 @@ regressions/valueClassArrayToString.kt
 regressions/valueClassBoxDispatchAcrossSupportUnits.kt
 regressions/valueClassCompanionBlockAcrossFiles.kt
 regressions/valueClassCompanionBlockMembers.kt
-regressions/valueClassDiscardedSuspendCarrierRead.kt
 regressions/valueClassMemberCallBoundaries.kt
 regressions/valueClassNullableNestedToString.kt
-regressions/valueClassReusedAcrossSupportUnits.kt
 regressions/valueClassWritableComputedProperty.kt
 regressions/valueClassWritablePropertyAcrossFiles.kt
 regressions/varargReferenceTypeVariableInput.kt
@@ -3039,18 +3003,13 @@ super/kt3492TraitProperty.kt
 super/superConstructor/kt18356_2.kt
 super/superConstructor/objectExtendsInner.kt
 super/superConstructor/objectExtendsLocalInner.kt
-suspendConversion/basicSuspendConversion.kt
-suspendConversion/basicSuspendConversionDefault.kt
 suspendConversion/chainedFunSuspendConversionForSimpleExpression.kt
 suspendConversion/conversionOfInterfaceInheritingFunctionN.kt
-suspendConversion/overloadResolutionBySuspendModifier.kt
-suspendConversion/severalConversionsInOneCall.kt
 suspendConversion/suspendAndFunConversionInDisabledMode.kt
 suspendConversion/suspendConversionNullableArgumentStaysNull.kt
 suspendConversion/suspendConversionNullableCCE.kt
 suspendConversion/suspendConversionNullableNpe.kt
 suspendConversion/suspendConversionNullableNpe2.kt
-suspendConversion/suspendConversionOnVarargElements.kt
 suspendConversion/suspendConversionWithFunInterfaces.kt
 syntheticAccessors/accessorForGenericConstructor.kt
 syntheticAccessors/accessorForPrivatePropertyReference.kt
@@ -3108,7 +3067,6 @@ typeMapping/nullableNothing.kt
 typealias/abbreviationWithCapturedType.kt
 typealias/callTypeAliasWithInnerRhsInStaticScope.kt
 typealias/importNestedTypealiasFromAnotherModule.kt
-typealias/incorrectTypeOfTypealiasForSuspendFTMM.kt
 typealias/localTypeAliases.kt
 typealias/nestedTypeAliasesAndStaticScope.kt
 typealias/nestedTypeAliasesAndTypeArguments.kt

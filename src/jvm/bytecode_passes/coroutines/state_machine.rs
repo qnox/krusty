@@ -32,12 +32,16 @@ fn jump(op: u8, target: LabelId) -> Node {
 
 /// Where the machine keeps its state: the class declaring `label`, `result` and the spill fields
 /// (a named function's continuation class, or the suspend lambda itself), the line its own code is
-/// attributed to, and the slots of the continuation and of the resumption result.
+/// attributed to, the slots of the continuation and of the resumption result, and whether the
+/// resumption result is checked once before the `tableswitch` (`shouldHoistThrowOnFailure`)
+/// rather than at the start of every state.
+#[derive(Clone, Copy)]
 pub(crate) struct Machine<'a> {
     pub state_class: &'a str,
     pub line_number: u16,
     pub continuation_index: u16,
     pub data_index: u16,
+    pub checks_result_once: bool,
 }
 
 impl Machine<'_> {
@@ -184,6 +188,7 @@ pub(crate) fn split_try_catch_blocks(method: &mut EditableMethod, point: &mut Su
         let stop = method.label_index(block.end);
         if start < begin && begin < stop {
             debug_assert!(start < end && end < stop);
+            point.has_enclosing_try_catch = true;
             blocks.push(TryCatchBlock {
                 end: first,
                 ..block.clone()
@@ -300,7 +305,9 @@ pub(crate) fn transform_call_and_return_state_label(
     method.insns.remove(nop);
 
     let mut nodes = vec![op(NOP)];
-    nodes.extend(machine.throw_on_failure());
+    if !machine.checks_result_once {
+        nodes.extend(machine.throw_on_failure());
+    }
     nodes.push(var(ALOAD, machine.data_index));
     for id in &point.unbox_inline_class {
         nodes.push(method.insns.node(*id).clone());
@@ -357,6 +364,11 @@ pub(crate) fn generate_tableswitch(
             start: switch_label,
         },
         var(ASTORE, suspend_marker_var),
+    ];
+    if machine.checks_result_once {
+        nodes.extend(machine.throw_on_failure());
+    }
+    nodes.extend([
         var(ALOAD, machine.continuation_index),
         machine.label_field(GETFIELD),
         Node::Insn(Insn::TableSwitch {
@@ -366,8 +378,10 @@ pub(crate) fn generate_tableswitch(
             labels,
         }),
         Node::Label(first_state),
-    ];
-    nodes.extend(machine.throw_on_failure());
+    ]);
+    if !machine.checks_result_once {
+        nodes.extend(machine.throw_on_failure());
+    }
     method.insns.insert_before(coroutine_start, nodes);
 
     let last = method.insns.last();

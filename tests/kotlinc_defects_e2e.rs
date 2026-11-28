@@ -272,7 +272,8 @@ fn defect(quirk: Quirk) -> Option<Defect> {
         | Quirk::FunctionReferenceNumbersBoundReceiver
         | Quirk::TailrecDotlessCallReportedAtOperator
         | Quirk::TailrecUnitObjectReturnFollowsCall
-        | Quirk::TailrecElvisLeftOperandIsTail => None,
+        | Quirk::TailrecElvisLeftOperandIsTail
+        | Quirk::SuspendLambdaChecksResultInEveryState => None,
     }
 }
 

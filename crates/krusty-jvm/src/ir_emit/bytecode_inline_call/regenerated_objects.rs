@@ -438,6 +438,8 @@ impl AnonymousObjects for CallObjects<'_> {
                     source: CallSiteSource {
                         file: self.source_file.as_deref().unwrap_or_default(),
                         line: self.call_line,
+                        lambda_checks_unprotected_result_once:
+                            crate::ir_emit::transformed_suspensions::lambda_checks_unprotected_result_once(self.ir),
                     },
                 },
                 calling_class: &self.owner,

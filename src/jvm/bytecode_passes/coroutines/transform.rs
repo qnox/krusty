@@ -267,6 +267,10 @@ pub(super) struct MachineSpec<'a> {
     /// `getLastParameterIndex`: the parameters up to this slot span the whole method again.
     pub last_parameter_slot: u16,
     pub declared_spill_fields: &'a [DeclaredSpillFields<'a>],
+    /// Whether the reference release checks the resumption result once, before the
+    /// `tableswitch`, when no suspension point lies inside a protected range: a suspend lambda's
+    /// machine from 2.5, never a named function's.
+    pub checks_unprotected_result_once: bool,
 }
 
 /// The second half of `performTransformations`, from `splitTryCatchBlocksContainingSuspensionPoint`
@@ -278,10 +282,15 @@ pub(super) fn build_state_machine(
     coroutine_start: NodeId,
 ) -> Result<StateMachine, CoroutineError> {
     let owner = spec.owner;
-    let machine = &spec.machine;
     for point in &mut points {
         split_try_catch_blocks(&mut method, point);
     }
+    // `shouldHoistThrowOnFailure`.
+    let machine = &Machine {
+        checks_result_once: spec.checks_unprotected_result_once
+            && points.iter().all(|point| !point.has_enclosing_try_catch),
+        ..spec.machine
+    };
     process_uninitialized_stores(&mut method)?;
 
     let mut layout = StateMachineLayout::default();
@@ -403,6 +412,7 @@ pub(crate) fn transform_named_function(
         ))?,
         continuation_index,
         data_index,
+        checks_result_once: false,
     };
     prepare_prelude(&mut method, &machine, function);
 
@@ -413,6 +423,7 @@ pub(crate) fn transform_named_function(
         completion_slot: Some(completion),
         last_parameter_slot: completion,
         declared_spill_fields: &[],
+        checks_unprotected_result_once: false,
     };
     let machine = build_state_machine(method, points, &spec, coroutine_start)?;
     Ok(Transformed::StateMachine(Box::new(machine)))

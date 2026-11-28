@@ -24,6 +24,9 @@ pub(crate) struct SuspensionPoint {
     /// The inline-class unboxing between `mark(8)` and `mark(9)` right after the point, which the
     /// resume path repeats on the boxed result.
     pub unbox_inline_class: Vec<NodeId>,
+    /// Whether a protected range contains the point (`hasEnclosingTryCatch`), set by
+    /// `splitTryCatchBlocksContainingSuspensionPoint`.
+    pub has_enclosing_try_catch: bool,
 }
 
 impl SuspensionPoint {
@@ -35,6 +38,7 @@ impl SuspensionPoint {
             state_label: method.method.new_label(),
             try_catch_continuation: None,
             unbox_inline_class,
+            has_enclosing_try_catch: false,
         }
     }
 

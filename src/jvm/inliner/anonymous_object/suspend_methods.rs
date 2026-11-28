@@ -161,6 +161,9 @@ pub struct CallSiteSource<'a> {
     pub file: &'a str,
     /// The call's line as kotlinc's IR reports it to the transformer: zero-based.
     pub line: Option<u16>,
+    /// Whether the compiling release checks a regenerated suspend lambda's resumption result
+    /// once, before the `tableswitch`, when no suspension point lies inside a protected range.
+    pub lambda_checks_unprotected_result_once: bool,
 }
 
 /// What a copied suspend method's state machine adds to its continuation: the spill fields and
@@ -232,6 +235,7 @@ pub(super) fn transform_lambda(
         source_file: source.file,
         line_number,
         declared_spill_fields: &declared_spill_fields,
+        checks_unprotected_result_once: source.lambda_checks_unprotected_result_once,
     };
     let machine = transform_suspend_lambda(body, &lambda).map_err(RegenerationError::Coroutine)?;
     Ok((

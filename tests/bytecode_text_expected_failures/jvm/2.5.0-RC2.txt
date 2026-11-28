@@ -22,15 +22,9 @@ constants/floatingPoints.kt
 constants/inlineUnsignedIntConstant.kt
 constructors/localPrimaryDefaults.kt
 coroutines/crossinlineSuspendContinuation_1_3.kt
-coroutines/kt78885.kt
 coroutines/nonLocalReturn.kt
 coroutines/stateMachine/kt25893.kt
 coroutines/stateMachine/withTypeParameter.kt
-coroutines/throwOnFailureSuspendLambda.kt
-coroutines/throwOnFailureSuspendLambdaFinallySuspensionOnly.kt
-coroutines/throwOnFailureSuspendLambdaInCatch.kt
-coroutines/throwOnFailureSuspendLambdaTryCatchOutside.kt
-coroutines/throwOnFailureSuspendLambdaTryFinallyOutside.kt
 deadCodeElimination/unusedPrimitiveAndObjectEquals.kt
 defaultArguments/noAnonymousObjectRegenerationInDefaultStub.kt
 enum/enumEntriesIntrinsicForJava.kt

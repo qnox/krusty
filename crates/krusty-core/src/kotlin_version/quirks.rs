@@ -272,6 +272,15 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: false,
     }
+    /// A suspend lambda's state machine checks the resumption result (`throwOnFailure`) at the
+    /// start of every state. From 2.5 kotlinc checks it once, before the `tableswitch`, unless a
+    /// suspension point lies inside a protected range; a named suspend function still checks it
+    /// in every state.
+    SuspendLambdaChecksResultInEveryState {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
     /// The Kotlin/Native and Kotlin/Wasm standard library's `ArrayList.addAll` makes room for the
     /// new elements before it reads the argument, so a range of the list being appended to is
     /// invalidated first: `list.addAll(list.subList(0, 2))` raises
