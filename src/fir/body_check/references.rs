@@ -1478,18 +1478,27 @@ impl BodyFirChecker<'_> {
                 AdaptedRefArgument::Vararg {
                     values,
                     whole_array,
-                } => values
-                    .into_iter()
-                    .map(|value| {
-                        u32::try_from(value).map_err(|_| {
-                            self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                    mapped_whole,
+                    array,
+                } => {
+                    let array_type = ResolvedTy::new(array).map_err(|error| {
+                        self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
+                    })?;
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            u32::try_from(value).map_err(|_| {
+                                self.failure(span, BodyCheckFailureKind::UnsupportedCallShape)
+                            })
                         })
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(|values| FirAdaptedReferenceArgument::Vararg {
-                        values: values.into_boxed_slice(),
-                        whole_array,
-                    }),
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|values| FirAdaptedReferenceArgument::Vararg {
+                            values: values.into_boxed_slice(),
+                            whole_array,
+                            mapped_whole,
+                            array_type,
+                        })
+                }
             })
             .collect::<Result<Vec<_>, _>>()?
             .into_boxed_slice();

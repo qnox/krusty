@@ -119,6 +119,23 @@ pub(crate) fn callable_tower_rank(overload: &FunctionInfo) -> OverloadTowerRank 
     }
 }
 
+/// The [`OverloadTowerRank`] of a candidate as the access site sees it. kotlinc's visibility error
+/// is one applicability group across the tower: once no visible candidate applies, the invisible
+/// ones of every scope level compete together, by tier and receiver distance, then specificity.
+/// A visible candidate keeps its scope level, as an invisible one does in the releases with
+/// `Quirk::InvisibleCandidatesKeepScopeLevels`.
+pub(crate) fn site_tower_rank(
+    rank: OverloadTowerRank,
+    visible: bool,
+    site: &dyn super::CallableAccessSite,
+) -> OverloadTowerRank {
+    if visible || !site.invisible_candidates_share_one_level() {
+        rank
+    } else {
+        (rank.0, (0, 0), rank.2)
+    }
+}
+
 /// The [`OverloadTowerRank`] of an extension candidate at `receiver_rank` from its receiver.
 pub(crate) fn extension_tower_rank(
     receiver_rank: u32,
@@ -458,9 +475,9 @@ pub(super) struct ExtCtx<'a> {
     pub(super) type_variables: &'a [crate::types::TyParamName],
     /// `+EagerLambdaAnalysis`: a lambda's checked result decides applicability.
     pub(super) eager_lambda_results: bool,
-    /// The use site's member visibility, when the caller has a site. Selection ranks a
+    /// The use site's callable visibility, when the caller has a site. Selection ranks a
     /// visibility error below every resolved candidate with it.
-    pub(super) member_access: Option<&'a dyn super::MemberAccessSite>,
+    pub(super) callable_access: Option<&'a dyn super::CallableAccessSite>,
 }
 
 /// One receiver call the overload selector answers: the receiver, the callee spelling, the
@@ -603,6 +620,10 @@ fn ranked_receiver_candidates<'f>(
     // `UArraysKt` → `kotlin/collections/unsigned/`). Re-deriving scope from the JVM owner
     // (`fn_in_scope`) would wrongly drop those, so trust the query.
     let pre_scoped = ext.fn_scope.is_some();
+    let site_rank = |rank, overload: &FunctionInfo| match ext.callable_access {
+        Some(site) => site_tower_rank(rank, site.callable_visible(overload, recv), site),
+        None => rank,
+    };
     let mut ranked: Vec<ReceiverRankedOverload<'f>> = Vec::new();
     if matches!(
         mode,
@@ -620,7 +641,11 @@ fn ranked_receiver_candidates<'f>(
             )
             .into_iter()
             .map(|(rank, receiver, overload)| {
-                (extension_tower_rank(rank, overload), receiver, overload)
+                (
+                    site_rank(extension_tower_rank(rank, overload), overload),
+                    receiver,
+                    overload,
+                )
             }),
         );
     }
@@ -634,7 +659,7 @@ fn ranked_receiver_candidates<'f>(
                 .iter()
                 .copied()
                 .filter(|o| o.kind == FnKind::Member)
-                .map(|o| (callable_tower_rank(o), recv, o)),
+                .map(|o| (site_rank(callable_tower_rank(o), o), recv, o)),
         );
     }
     ranked.sort_by_key(|(rank, _, _)| *rank);
@@ -642,8 +667,9 @@ fn ranked_receiver_candidates<'f>(
 }
 
 /// Kotlin ranks a visibility error below every resolved candidate, whatever tier either one sits
-/// on: a member the site cannot see is selected only when no accessible candidate applies, and its
-/// access error is then what the caller reports. An applicable extension therefore takes `b + 1`
+/// on: a member, extension, or top-level function the site cannot see is selected only when no
+/// accessible candidate applies, and its access error is then what the caller reports, or what a
+/// `@Suppress` of the visibility errors silences. An applicable extension therefore takes `b + 1`
 /// from an inaccessible `B.plus`, and an accessible overload takes the call from a more specific
 /// inaccessible one. The candidates the site can see, to be tried first, or `None` when the site
 /// restricts nothing in `overloads`.
@@ -652,13 +678,11 @@ fn site_accessible_overloads<'f>(
     recv: Ty,
     overloads: &[&'f FunctionInfo],
 ) -> Option<Vec<&'f FunctionInfo>> {
-    let site = ext.member_access?;
+    let site = ext.callable_access?;
     let accessible = overloads
         .iter()
         .copied()
-        .filter(|overload| {
-            overload.kind != FnKind::Member || site.member_accessible(overload, recv)
-        })
+        .filter(|overload| site.callable_visible(overload, recv))
         .collect::<Vec<_>>();
     (accessible.len() != overloads.len()).then_some(accessible)
 }

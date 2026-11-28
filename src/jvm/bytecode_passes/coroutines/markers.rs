@@ -72,6 +72,69 @@ pub(crate) fn int_constant_insn(value: i32) -> Insn {
     }
 }
 
+/// A suspend inline function that returns a type parameter carries `mark(BeforeSuspendGenericCall)`
+/// where a `Unit`-returning one carries `mark(BeforeSuspendUnitCall)`. At a call that binds the
+/// type parameter to `Unit` the body is a unit suspend call, which lets a tail call return
+/// without a state machine (`suspend fun f() = suspendCoroutine<Unit> { … }`).
+///
+/// Only the suspension point that is the body's own result is bound: the one whose closing marker
+/// is followed directly by the return, or by the end of an inlined body whose returns
+/// the inliner already turned into jumps. A generic point nested in the body, such as one in a
+/// `Unit`-returning function, has a result of its own that is not the call's.
+pub fn bind_generic_suspend_call_to_unit(nodes: &mut [Node]) {
+    let is_after = |at: usize| {
+        at > 0
+            && is_suspend_inline_marker(&nodes[at])
+            && int_constant(&nodes[at - 1]) == Some(SuspendMarker::AfterSuspend as i32)
+    };
+    let Some(close) = (1..nodes.len()).rev().find(|&at| is_after(at)) else {
+        return;
+    };
+    let returns_at_once = nodes[close + 1..]
+        .iter()
+        .find(|node| {
+            !matches!(node, Node::Label(_) | Node::Line { .. })
+                && !matches!(node, Node::Insn(Insn::Op(NOP)))
+                && !matches!(node, Node::Insn(Insn::Jump { op: GOTO, .. }))
+        })
+        .is_none_or(|node| matches!(node, Node::Insn(Insn::Op(ARETURN))));
+    if !returns_at_once {
+        return;
+    }
+    // The opening marker that pairs with `close`, skipping the pairs nested inside it.
+    let marker_id = |at: usize| {
+        if at > 0 && is_suspend_inline_marker(&nodes[at]) {
+            int_constant(&nodes[at - 1])
+        } else {
+            None
+        }
+    };
+    let mut nested = 0usize;
+    let mut open = None;
+    for at in (1..close).rev() {
+        match marker_id(at) {
+            Some(id) if id == SuspendMarker::AfterSuspend as i32 => nested += 1,
+            Some(id) if id == SuspendMarker::BeforeSuspend as i32 => {
+                if nested == 0 {
+                    open = Some(at);
+                    break;
+                }
+                nested -= 1;
+            }
+            _ => {}
+        }
+    }
+    // Its kind marker follows it directly.
+    let generic = open.map(|open| open + 2).filter(|&at| {
+        at < nodes.len() && marker_id(at) == Some(SuspendMarker::BeforeSuspendGenericCall as i32)
+    });
+    if let Some(generic) = generic {
+        nodes[generic - 1] = Node::Insn(int_constant_insn(
+            SuspendMarker::BeforeSuspendUnitCall as i32,
+        ));
+    }
+}
+
 /// ASM's `intConstant` extension: the int an instruction pushes, if it is a constant push.
 pub(crate) fn int_constant(node: &Node) -> Option<i32> {
     match node {
@@ -195,8 +258,102 @@ pub(crate) fn is_fake_local_variable_for_inline(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_suspend_inline_marker, mark, SuspendMarker};
+    use super::{
+        bind_generic_suspend_call_to_unit, int_constant, is_suspend_inline_marker, mark,
+        SuspendMarker,
+    };
     use crate::jvm::method_node::{Insn, Node};
+
+    #[test]
+    fn only_the_generic_marker_of_the_closing_point_binds() {
+        let mut nodes = mark(SuspendMarker::BeforeSuspend);
+        nodes.extend(mark(SuspendMarker::BeforeSuspendGenericCall));
+        nodes.extend(mark(SuspendMarker::BeforeSuspend));
+        nodes.extend(mark(SuspendMarker::BeforeSuspendGenericCall));
+        nodes.extend(mark(SuspendMarker::AfterSuspend));
+        nodes.extend(mark(SuspendMarker::AfterSuspend));
+        nodes.push(Node::Insn(Insn::Op(
+            crate::jvm::bytecode_passes::opcodes::ARETURN,
+        )));
+        bind_generic_suspend_call_to_unit(&mut nodes);
+        let ids = nodes.iter().filter_map(int_constant).collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                SuspendMarker::BeforeSuspend as i32,
+                SuspendMarker::BeforeSuspendUnitCall as i32,
+                SuspendMarker::BeforeSuspend as i32,
+                SuspendMarker::BeforeSuspendGenericCall as i32,
+                SuspendMarker::AfterSuspend as i32,
+                SuspendMarker::AfterSuspend as i32,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tail_point_after_an_earlier_generic_point_binds_only_the_tail() {
+        let mut nodes = mark(SuspendMarker::BeforeSuspend);
+        nodes.extend(mark(SuspendMarker::BeforeSuspendGenericCall));
+        nodes.extend(mark(SuspendMarker::AfterSuspend));
+        nodes.push(Node::Insn(Insn::Op(
+            crate::jvm::bytecode_passes::opcodes::POP,
+        )));
+        nodes.extend(mark(SuspendMarker::BeforeSuspend));
+        nodes.extend(mark(SuspendMarker::BeforeSuspendGenericCall));
+        nodes.extend(mark(SuspendMarker::AfterSuspend));
+        nodes.push(Node::Insn(Insn::Op(
+            crate::jvm::bytecode_passes::opcodes::ARETURN,
+        )));
+        bind_generic_suspend_call_to_unit(&mut nodes);
+        let ids = nodes.iter().filter_map(int_constant).collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                SuspendMarker::BeforeSuspend as i32,
+                SuspendMarker::BeforeSuspendGenericCall as i32,
+                SuspendMarker::AfterSuspend as i32,
+                SuspendMarker::BeforeSuspend as i32,
+                SuspendMarker::BeforeSuspendUnitCall as i32,
+                SuspendMarker::AfterSuspend as i32,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_nested_generic_suspend_marker_is_left_alone() {
+        let mut nodes = mark(SuspendMarker::BeforeSuspend);
+        nodes.extend(mark(SuspendMarker::BeforeSuspendGenericCall));
+        nodes.extend(mark(SuspendMarker::AfterSuspend));
+        nodes.push(Node::Insn(Insn::Op(
+            crate::jvm::bytecode_passes::opcodes::POP,
+        )));
+        nodes.push(Node::Insn(Insn::Op(
+            crate::jvm::bytecode_passes::opcodes::ARETURN,
+        )));
+        let before = nodes.clone();
+        bind_generic_suspend_call_to_unit(&mut nodes);
+        assert_eq!(nodes, before);
+    }
+
+    #[test]
+    fn a_generic_suspend_marker_binds_to_the_unit_call_marker() {
+        let mut nodes = mark(SuspendMarker::BeforeSuspend);
+        nodes.extend(mark(SuspendMarker::BeforeSuspendGenericCall));
+        nodes.extend(mark(SuspendMarker::AfterSuspend));
+        nodes.push(Node::Insn(Insn::Op(
+            crate::jvm::bytecode_passes::opcodes::ARETURN,
+        )));
+        bind_generic_suspend_call_to_unit(&mut nodes);
+        let ids = nodes.iter().filter_map(int_constant).collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                SuspendMarker::BeforeSuspend as i32,
+                SuspendMarker::BeforeSuspendUnitCall as i32,
+                SuspendMarker::AfterSuspend as i32,
+            ]
+        );
+    }
 
     #[test]
     fn suspend_marker_requires_the_exact_invocation_shape() {

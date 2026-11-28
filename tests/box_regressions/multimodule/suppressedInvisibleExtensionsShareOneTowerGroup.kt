@@ -1,0 +1,34 @@
+// KOTLINC_VERSION: [2.4.20,)
+// MODULE: lib
+// FILE: Explicit.kt
+// From 2.4.20, kotlinc's suppressed visibility errors share one applicability group across the
+// tower: once nothing visible applies, the most specific invisible extension wins, so the
+// star-imported `String` extensions take the calls from the explicitly imported `Any` ones.
+package explicit
+
+internal fun Any.tag() = "explicit"
+
+internal val Any.mark get() = "explicit"
+
+// FILE: Star.kt
+package star
+
+internal fun String.tag() = "star"
+
+internal val String.mark get() = "star"
+
+// MODULE: main(lib)
+// FILE: Main.kt
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+
+import explicit.mark
+import explicit.tag
+import star.*
+
+fun box(): String {
+    val tag = "x".tag()
+    if (tag != "star") return "tag: $tag"
+    val mark = "x".mark
+    if (mark != "star") return "mark: $mark"
+    return "OK"
+}

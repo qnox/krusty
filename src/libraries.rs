@@ -1154,6 +1154,14 @@ pub struct CallSig {
     /// True if a logical param is `vararg` (callers pack values into its array).
     pub vararg: bool,
     pub vararg_index: Option<usize>,
+    /// A callable-reference specialization's reading of the vararg, never published by a provider:
+    /// kotlinc mapped the reference's last input onto the vararg as its whole array, and then bound
+    /// the vararg's element type to that input
+    /// ([`Quirk::VarargReferenceTakesTypeVariableInputAsElement`], KT-90169). The adapter still
+    /// collects the input as one element, but the reference reports no vararg conversion.
+    ///
+    /// [`Quirk::VarargReferenceTakesTypeVariableInputAsElement`]: crate::kotlin_version::Quirk::VarargReferenceTakesTypeVariableInputAsElement
+    pub vararg_element_mapped_whole: bool,
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]

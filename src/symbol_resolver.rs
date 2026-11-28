@@ -15,7 +15,7 @@ use crate::libraries::{
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TyKind, TyParamName, TypeName, Visibility};
 mod access_site;
-pub(crate) use access_site::MemberAccessSite;
+pub(crate) use access_site::CallableAccessSite;
 mod argument_compatibility;
 mod call_argument;
 mod callable_shapes;
@@ -130,8 +130,8 @@ use member_specialization::{
 #[cfg(test)]
 use overload_selection::fun_return_compatible;
 pub(crate) use overload_selection::{
-    best_by_args, extension_tower_rank, hides_members, CandidateSelectionWithTies,
-    ReceiverFunctionSelection, SelectedReceiverFunction,
+    best_by_args, callable_tower_rank, extension_tower_rank, hides_members, site_tower_rank,
+    CandidateSelectionWithTies, ReceiverFunctionSelection, SelectedReceiverFunction,
 };
 use overload_selection::{
     generic_bounds_admit, generic_bounds_admit_slots, indexed_call_shape, integer_literal_overload,
@@ -141,9 +141,7 @@ use overload_selection::{
     unique_most_specific_with_conflicts_and_ties, ExtCtx, IndexedConvention, OverloadCall,
     SelectionMode,
 };
-use property_candidates::{
-    retain_most_specific_properties, source_property_visible, specialize_property,
-};
+use property_candidates::source_property_visible;
 pub(crate) use receiver_mro::{function_shape_matches, ReceiverMro};
 pub(crate) use resolved_symbol::ErrorReceiverSelection;
 pub use resolved_symbol::{
@@ -797,8 +795,8 @@ pub struct SymbolResolver<'a> {
     type_variables: &'a [TyParamName],
     /// `+EagerLambdaAnalysis` in the calling file: a lambda's checked result decides applicability.
     eager_lambda_results: bool,
-    /// The access site's member visibility ([`MemberAccessSite`]), when the caller has a site.
-    member_access: Option<&'a dyn MemberAccessSite>,
+    /// The access site's callable visibility ([`CallableAccessSite`]), when the caller has a site.
+    callable_access: Option<&'a dyn CallableAccessSite>,
 }
 
 /// Which accessor a property selection will execute. Provider-normalized candidate availability
@@ -1001,7 +999,7 @@ impl<'a> SymbolResolver<'a> {
             source: &self.src,
             type_variables: self.type_variables,
             eager_lambda_results: self.eager_lambda_results,
-            member_access: self.member_access,
+            callable_access: self.callable_access,
         }
     }
 
@@ -1262,73 +1260,37 @@ impl<'a> SymbolResolver<'a> {
         name: &str,
         access: PropertyAccess,
     ) -> Result<Option<PropertyInfo>, AmbiguousExtensionProperty> {
-        for symbols in self.symbol_levels_in_scope(name) {
-            match self.select_extension_property_from_callables(
-                receiver,
-                name,
-                access,
-                level_properties(&symbols),
-            )? {
-                Some(property) => return Ok(Some(property)),
-                None => continue,
+        let levels = self.symbol_levels_in_scope(name);
+        for symbols in &levels {
+            let visible = level_properties(symbols)
+                .filter(|property| source_property_visible(self.lib, property));
+            if let Some(property) =
+                self.select_extension_property_from_callables(receiver, name, access, visible)?
+            {
+                return Ok(Some(property));
             }
         }
-        Ok(None)
-    }
-
-    fn select_extension_property_from_callables<'p>(
-        &self,
-        receiver: Ty,
-        name: &str,
-        access: PropertyAccess,
-        properties: impl IntoIterator<Item = &'p PropertyInfo>,
-    ) -> Result<Option<PropertyInfo>, AmbiguousExtensionProperty> {
-        let mut properties = properties.into_iter().peekable();
-        if properties.peek().is_none() {
+        if !self.visibility_suppressed {
             return Ok(None);
         }
-        let receiver_mro = self.receiver_mro(receiver);
-        let mut candidates = properties
-            .filter(|property| property.kind == PropKind::Extension)
-            .filter(|property| match access {
-                PropertyAccess::Read => property.readable(),
-                PropertyAccess::Write => property.write_selectable(),
-            })
-            .filter(|property| self.property_visible(property))
-            .filter(|property| {
-                generic_bounds_admit(
-                    &self.src,
-                    property.getter.generic_sig.as_deref(),
-                    receiver,
-                    &[],
-                    &[],
-                )
-            })
-            .filter_map(|property| {
-                let declared = property.receiver?;
-                let rank = receiver_mro.rank(&self.src, declared);
-                crate::trace_compiler!(
-                    "resolve",
-                    "extension property candidate name={name} receiver={receiver:?} declared={declared:?} setter={} source={:?} rank={rank:?}",
-                    property.setter.is_some(),
-                    property.source_key,
-                );
-                rank.map(|rank| (rank, property.clone()))
-            })
-            .collect::<Vec<_>>();
-        let Some(nearest) = candidates.iter().map(|(rank, _)| *rank).min() else {
+        // kotlinc's visibility error is one applicability group across the tower: once no level
+        // has a visible extension property, the invisible ones of every level compete together.
+        if self
+            .callable_access
+            .is_some_and(|site| !site.invisible_candidates_share_one_level())
+        {
+            for symbols in &levels {
+                let level = level_properties(symbols);
+                if let Some(property) =
+                    self.select_extension_property_from_callables(receiver, name, access, level)?
+                {
+                    return Ok(Some(property));
+                }
+            }
             return Ok(None);
-        };
-        candidates.retain(|(rank, _)| *rank == nearest);
-        retain_most_specific_properties(&self.src, &mut candidates);
-        match candidates.as_mut_slice() {
-            [(_, property)] => Ok(Some(specialize_property(
-                &self.src,
-                property.clone(),
-                receiver,
-            ))),
-            _ => Err(AmbiguousExtensionProperty),
         }
+        let all = levels.iter().flat_map(|symbols| level_properties(symbols));
+        self.select_extension_property_from_callables(receiver, name, access, all)
     }
 
     /// Classify one interned type identity. The type-side counterpart of [`resolve_symbol`].
@@ -3101,7 +3063,7 @@ fn select_instance_info(
             source,
             type_variables: &[],
             eager_lambda_results: false,
-            member_access: None,
+            callable_access: None,
         },
     )
 }

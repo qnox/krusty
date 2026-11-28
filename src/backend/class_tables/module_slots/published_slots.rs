@@ -2,6 +2,7 @@
 
 use super::super::super::interface_identity::{member_identity, property_member_identity};
 use super::super::super::CheckedBackendCallables;
+use super::super::{FunctionInvoke, ANY_SLOTS};
 use super::*;
 
 /// Ty-free producer evidence. Unknown consumer declarations retain their physical inherited slots.
@@ -9,6 +10,8 @@ use super::*;
 pub struct PublishedClassSlots {
     pub count: u32,
     pub declarations: HashMap<Vec<u8>, u32>,
+    /// The function types the class implements, by the slot of each one's bridge.
+    pub function_invokes: Vec<FunctionInvoke>,
 }
 
 pub(super) fn bind(
@@ -74,7 +77,7 @@ fn table(
     declarations: &CheckedBackendCallables,
     physical: &PublishedClassSlots,
 ) -> Result<PlannedTable, Unsupported> {
-    if physical.count < FUNCTION_SLOT + 1 {
+    if physical.count < ANY_SLOTS {
         return Err("a published class table missing its common prefix".into());
     }
     let mut entries = (0..physical.count)
@@ -186,6 +189,7 @@ fn table(
         dependency: true,
         entries,
         slots,
+        function_invokes: physical.function_invokes.clone(),
     })
 }
 
@@ -197,9 +201,6 @@ mod tests {
     impl Representation for Exact {
         fn same(&self, a: Ty, b: Ty) -> bool {
             a == b
-        }
-        fn is_reference(&self, _: Ty) -> bool {
-            true
         }
         fn owns_base(&self, _: TypeName) -> bool {
             false
@@ -225,6 +226,7 @@ mod tests {
         let physical = PublishedClassSlots {
             count: 9,
             declarations: HashMap::default(),
+            function_invokes: Vec::new(),
         };
         let planned = table(
             &[&imported_class()],
@@ -234,7 +236,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(planned.entries.len(), 9);
-        for slot in FUNCTION_SLOT..9 {
+        for slot in ANY_SLOTS..9 {
             assert!(
                 matches!(planned.entries[slot as usize], PlannedSlot::Inherited { slot: actual } if actual == slot)
             );
@@ -245,8 +247,9 @@ mod tests {
     #[test]
     fn incomplete_physical_prefix_is_rejected() {
         let physical = PublishedClassSlots {
-            count: FUNCTION_SLOT,
+            count: ANY_SLOTS - 1,
             declarations: HashMap::default(),
+            function_invokes: Vec::new(),
         };
         assert!(table(
             &[&imported_class()],
@@ -270,6 +273,7 @@ mod tests {
         let physical = PublishedClassSlots {
             count: 9,
             declarations: HashMap::default(),
+            function_invokes: Vec::new(),
         };
         assert!(table(
             &[&class],

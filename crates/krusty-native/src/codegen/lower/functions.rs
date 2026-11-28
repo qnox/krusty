@@ -24,10 +24,6 @@ use super::super::super::captures::carried_parameters;
 use super::super::ReferenceDeclaration;
 use super::*;
 
-/// The vtable slot a function value's body occupies: right after `kotlin.Any`'s three, so a
-/// function value answers `equals`/`hashCode`/`toString` like any other object.
-const INVOKE_SLOT: u32 = 3;
-
 /// A declaration marker is shared only within the scope that authenticates its identity.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) enum ReferenceIdentity {
@@ -492,6 +488,7 @@ impl<'a> FileLowering<'a> {
                     let SamTables {
                         mut vtable,
                         itable,
+                        function_invokes,
                         interfaces,
                         kotlin_name,
                     } = self.sam_table(target, &base, impl_fn, &storage)?;
@@ -517,6 +514,7 @@ impl<'a> FileLowering<'a> {
                             reference_offsets: &references,
                             vtable: &vtable,
                             itable: &itable,
+                            function_invokes: &function_invokes,
                             instantiable: true,
                             superclass: any_type,
                             interfaces: &interfaces,
@@ -555,7 +553,6 @@ impl<'a> FileLowering<'a> {
                         }
                         None => None,
                     };
-                    vtable.push(thunk);
                     // A REFERENCE answers `KCallable.name` too, and a program reaches it through
                     // a variable rather than through the written reference — so the answer is a
                     // member of the object rather than a constant folded at the site. It takes
@@ -567,6 +564,7 @@ impl<'a> FileLowering<'a> {
                     if let Some(declared) = self.reference_declaration_name(index as u32) {
                         let name =
                             self.declare_local_function(&format!("{base}_name"), &[any()], any())?;
+                        vtable.push(thunk);
                         vtable.push(thunk);
                         vtable.push(name);
                         self.define_reference_name(name, &base, &declared)?;
@@ -605,6 +603,7 @@ impl<'a> FileLowering<'a> {
                             reference_offsets: &references,
                             vtable: &vtable,
                             itable: &[],
+                            function_invokes: &[(arity, thunk)],
                             instantiable: true,
                             superclass: any_type,
                             interfaces: &markers,
@@ -693,7 +692,8 @@ impl<'a> FileLowering<'a> {
                 return Err("a functional interface declared outside this file".into());
             }
             krusty::ir::IrSamMethod::FunctionTypeInvoke => {
-                (None, model::Dispatch::Class(model::FUNCTION_SLOT))
+                let operands = target.declared_parameters.len();
+                (None, model::Dispatch::Function(operands))
             }
         };
 
@@ -717,7 +717,12 @@ impl<'a> FileLowering<'a> {
         let layout = self.model.layout(interface).clone();
         let mut vtable = self.table_functions(&layout.vtable, None)?;
         let itable_template = layout.itable;
+        let mut function_invokes = Vec::new();
         let sam_number = match entry {
+            model::Dispatch::Function(operands) => {
+                function_invokes.push((operands, thunk));
+                None
+            }
             model::Dispatch::Class(slot) => {
                 let slot = slot as usize;
                 if slot >= vtable.len() {
@@ -782,7 +787,7 @@ impl<'a> FileLowering<'a> {
                 &vec![any(); arity],
                 any(),
             )?;
-            vtable[model::FUNCTION_SLOT as usize] = boxed;
+            function_invokes.push((arity, boxed));
         }
 
         let mut interfaces: Vec<DataId> = Vec::new();
@@ -798,6 +803,7 @@ impl<'a> FileLowering<'a> {
         Ok(SamTables {
             vtable,
             itable,
+            function_invokes,
             interfaces,
             kotlin_name,
         })
@@ -1000,6 +1006,7 @@ impl<'a> FileLowering<'a> {
                 reference_offsets: &references,
                 vtable: &vtable,
                 itable: &[],
+                function_invokes: &[],
                 instantiable: true,
                 superclass: any_type,
                 interfaces: &[],
@@ -1100,9 +1107,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             };
             arguments.push(value);
         }
-        let result = self.dispatch(
+        let result = self.dispatch_through(
             function,
-            INVOKE_SLOT,
+            model::Dispatch::Function(arguments.len()),
             &vec![any(); arguments.len()],
             any(),
             &arguments,
@@ -1155,9 +1162,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         arguments: &[Value],
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        let result = self.dispatch(
+        let result = self.dispatch_through(
             function,
-            INVOKE_SLOT,
+            model::Dispatch::Function(arguments.len()),
             &vec![any(); arguments.len()],
             any(),
             arguments,
@@ -1244,6 +1251,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 struct SamTables {
     vtable: Vec<FuncId>,
     itable: Vec<FuncId>,
+    function_invokes: Vec<(usize, FuncId)>,
     interfaces: Vec<DataId>,
     kotlin_name: String,
 }

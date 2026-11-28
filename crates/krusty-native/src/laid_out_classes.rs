@@ -295,6 +295,7 @@ impl LaidOutClasses {
                     Some(Ok(planned)) => planned.slots.clone(),
                     _ => HashMap::default(),
                 },
+                function_invokes: layout.slots.function_invokes.clone(),
             };
             // A member of another module's interface the class implements with a member of its
             // own stands at that member's slot, which a subclass's table answers for itself.
@@ -562,6 +563,7 @@ mod descriptor_tests {
             slots: krusty::backend::class_tables::module_slots::PublishedClassSlots {
                 count: 3,
                 declarations: HashMap::default(),
+                function_invokes: Vec::new(),
             },
             interfaces: Vec::new(),
             interface_entries: HashMap::default(),

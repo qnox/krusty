@@ -3046,35 +3046,6 @@ pub(crate) fn lower_value_classes(
                             .collect()
                     }
                 }
-                // A semantic sibling-source default call still carries only supplied arguments.
-                // Adapt each one against the provider declaration parameter that remains after
-                // removing omitted ordinals; JVM placeholders are created only after this pass.
-                IrExpr::Call {
-                    callee: call_callee,
-                    args,
-                    ..
-                } if let Callee::ModuleWithDefaults {
-                    target,
-                    default_provider,
-                    defaults,
-                    ..
-                } = &**call_callee =>
-                {
-                    args.iter()
-                        .zip(default_calls::supplied_provider_parameters(
-                            ir,
-                            *target,
-                            *default_provider,
-                            defaults,
-                        ))
-                        .map(|(argument, parameter)| {
-                            (
-                                repr_ctx.through_erased_generic_coercion(*argument).0,
-                                parameter,
-                            )
-                        })
-                        .collect()
-                }
                 // A sibling-source call has already crossed from its stable `Module` identity into
                 // the JVM `CrossFile` realization. Its retained finalized declaration signature is
                 // still the authoritative representation boundary: a concrete value class selected

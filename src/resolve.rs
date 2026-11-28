@@ -270,6 +270,7 @@ mod intersection_inference;
 mod intersection_receiver_selection;
 mod invoke_selection;
 mod lexical_value_invoke;
+mod unnarrowed_member_receiver;
 use lexical_value_invoke::{DeferredInvokePeers, DeferredLexicalInvoke, LexicalInvokeSite};
 mod lambda_call_shapes;
 mod property_read_selection;
@@ -1437,6 +1438,9 @@ pub struct TypeInfo {
     /// and ordinary stable-local smart casts. FIR publishes the selected target view as a checked
     /// conversion; lowering never reconstructs flow facts from the source condition.
     pub(crate) selected_value_smartcasts: HashMap<ExprId, Ty>,
+    /// Member accesses (an assignment by its receiver) that dispatch on their smart-cast receiver's
+    /// unnarrowed type, with that type; FIR drops the cast. See `unnarrowed_member_receiver`.
+    pub(crate) unnarrowed_dispatch_calls: HashMap<ExprId, Ty>,
     /// Context-selected conversion of a folded integer constant expression to its declaration or
     /// argument target. The expression itself may still be an `Int` operator tree; checked FIR
     /// carries this boundary explicitly so lowering never repeats constant-expression inference.
@@ -10301,8 +10305,9 @@ impl<'a> Checker<'a> {
                     self.postponed_context_sensitive_name(scope, argument)
                         .is_some()
                 });
-                let toplevel_partial: Option<Vec<Option<Ty>>> = if !self
-                    .lexical_value_declares(scope, &fname)
+                let lexical_value_claims_call =
+                    self.lexical_value_claims_call_with_arguments(scope, &fname, args);
+                let toplevel_partial: Option<Vec<Option<Ty>>> = if !lexical_value_claims_call
                     && (has_lambda_argument
                         || has_callable_ref_argument
                         || has_function_value_argument
@@ -10649,7 +10654,7 @@ impl<'a> Checker<'a> {
                 let top_level_sam = if (has_lambda_argument
                     || has_callable_ref_argument
                     || has_function_value_argument)
-                    && !self.lexical_value_declares(scope, &fname)
+                    && !lexical_value_claims_call
                 {
                     self.top_level_sam_selection(
                         scope,
@@ -10676,7 +10681,7 @@ impl<'a> Checker<'a> {
                     && top_level_functions
                         .top_level()
                         .any(|o| o.flags.inline.can_inline());
-                let toplevel_must_inline = !self.lexical_value_declares(scope, &fname)
+                let toplevel_must_inline = !lexical_value_claims_call
                     && !self.module_declares(&fname)
                     && known_sig.is_none()
                     && args
@@ -10708,10 +10713,8 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                let implicit_member_lambda_enabled = !self
-                    .lexical_value_claims_call_with_arguments(scope, &fname, args)
-                    && known_sig.is_none()
-                    && has_lambda_argument;
+                let implicit_member_lambda_enabled =
+                    !lexical_value_claims_call && known_sig.is_none() && has_lambda_argument;
                 let ordinary_this_member_lambda_shape = implicit_member_lambda_enabled
                     .then(|| {
                         self.implicit_source_member_lambda_shape(
@@ -10857,21 +10860,21 @@ impl<'a> Checker<'a> {
                     boxes_captures: selected_lambda_boxes_captures,
                     inline: selected_shape_inline,
                 } = lambda_call_shapes::SelectedLambdaInputs::of(selected_lambda_shape);
-                let constructor_expectations: Option<ConstructionExpectations> = if !self
-                    .lexical_value_declares(scope, &fname)
-                    && self.resolver().top_level_candidates(&fname).is_empty()
-                {
-                    bare_constructor_classifier.and_then(|internal| {
-                        self.construction_argument_expectations(
-                            internal,
-                            args.len(),
-                            arg_names.as_deref(),
-                            self.file.call_has_trailing_lambda.contains(&call.0),
-                        )
-                    })
-                } else {
-                    None
-                };
+                let constructor_expectations: Option<ConstructionExpectations> =
+                    if !lexical_value_claims_call
+                        && self.resolver().top_level_candidates(&fname).is_empty()
+                    {
+                        bare_constructor_classifier.and_then(|internal| {
+                            self.construction_argument_expectations(
+                                internal,
+                                args.len(),
+                                arg_names.as_deref(),
+                                self.file.call_has_trailing_lambda.contains(&call.0),
+                            )
+                        })
+                    } else {
+                        None
+                    };
                 let constructor_result_context_admitted = constructor_expectations
                     .as_ref()
                     .zip(bare_constructor_classifier)
@@ -10886,7 +10889,7 @@ impl<'a> Checker<'a> {
                 // the rule. Ordinary functions and extensions keep their established eager fallback
                 // (notably zero-parameter lambdas whose empty parameter vector is a real shape).
                 let defer_unshaped_constructor_lambdas = has_lambda_argument
-                    && !self.lexical_value_declares(scope, &fname)
+                    && !lexical_value_claims_call
                     && self.resolver().top_level_candidates(&fname).is_empty()
                     && bare_constructor_classifier
                         .and_then(|internal| self.resolved_type_name(internal))
@@ -13800,6 +13803,10 @@ impl<'a> Checker<'a> {
             },
         );
         self.local_properties.record(flow_identity, is_var);
+        if stable_reference_val {
+            self.local_properties
+                .record_initializer_narrowing(flow_identity, bind);
+        }
         if deferred {
             self.local_initialization.declare_deferred(s, flow_identity);
         }
@@ -14491,7 +14498,13 @@ impl<'a> Checker<'a> {
         if inferred_intersection.len() > 1 {
             receiver_ty = Ty::intersection(&inferred_intersection);
         }
-        if let Some(projected) = self
+        // A write has no access expression of its own: its receiver keys the decision.
+        let access = (receiver, receiver);
+        if let Some(declared) =
+            self.unnarrowed_explicit_property_receiver(scope, access, receiver_ty, &name, true)
+        {
+            receiver_ty = declared;
+        } else if let Some(projected) = self
             .flow_intersection_property_receiver(scope, receiver, &name, true)
             .or_else(|| self.type_parameter_member_receiver(scope, receiver_ty, &name))
         {
@@ -21252,7 +21265,7 @@ fun use() {
             } if member.name == "exists"
                 && matches!(
                     argument_mapping.as_slice(),
-                    [AdaptedRefArgument::Value(0), AdaptedRefArgument::Vararg { values, whole_array: false }]
+                    [AdaptedRefArgument::Value(0), AdaptedRefArgument::Vararg { values, whole_array: false, .. }]
                         if values.is_empty()
                 )
         )));
@@ -23649,6 +23662,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         selected_generic_calls: HashMap::default(),
         inferred_expression_intersections: HashMap::default(),
         selected_value_smartcasts: HashMap::default(),
+        unnarrowed_dispatch_calls: Default::default(),
         selected_numeric_conversions: HashMap::default(),
         deferred_constructor_failures: HashMap::default(),
         selected_function_value_conversions: HashMap::default(),
@@ -24674,6 +24688,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         equality_bound_parameters,
         selected_generic_calls,
         selected_value_smartcasts,
+        unnarrowed_dispatch_calls,
         selected_numeric_conversions,
         selected_function_value_conversions,
         narrowed_this_member,
@@ -24992,6 +25007,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         checked_local_supertypes,
         selected_generic_calls,
         selected_value_smartcasts,
+        unnarrowed_dispatch_calls,
         selected_numeric_conversions,
         selected_function_value_conversions,
         generated_class_names,
@@ -25396,7 +25412,6 @@ struct LambdaCheckMode {
 }
 
 type InnerOwnerTypeParameter = (String, String, Ty, Vec<Ty>);
-type StableReceiverCallableKey = (Ty, String, Vec<TypeName>);
 type DemandReject<'a> = &'a dyn Fn(&str, Span) -> bool;
 type FlowNarrowing = (NarrowPath, Ty);
 type DeclinedFlowNarrowing = (String, Ty);
@@ -25485,10 +25500,11 @@ struct Checker<'a> {
     /// instead of reporting an unresolved reference.
     member_bound_retries: crate::fx_hash::HashSet<(Ty, String)>,
     /// Immutable provider/member queries reused while checking one Pass-2 source unit. The key
-    /// includes lexical class access because visibility can change across nested classifier bodies.
+    /// includes lexical class access and visibility suppression, which change across declarations.
     /// Pass-1 and legacy mutable-symbol checks bypass this cache entirely.
-    stable_receiver_callable_cache:
-        std::cell::RefCell<HashMap<StableReceiverCallableKey, crate::libraries::Callables>>,
+    stable_receiver_callable_cache: std::cell::RefCell<
+        HashMap<checker_symbol_queries::StableReceiverCallableKey, crate::libraries::Callables>,
+    >,
     /// Complete function supertypes of an applied classifier. This is immutable after the Pass-1
     /// declaration index is finalized and is queried for nearly every call argument, including
     /// ordinary primitives whose answer is the same empty set each time.
@@ -25755,6 +25771,7 @@ struct Checker<'a> {
     inferred_expression_intersections:
         HashMap<ExprId, intersection_inference::InferredIntersection>,
     selected_value_smartcasts: HashMap<ExprId, Ty>,
+    unnarrowed_dispatch_calls: HashMap<ExprId, Ty>,
     selected_numeric_conversions: HashMap<ExprId, Ty>,
     /// A qualified call's inapplicable nested-constructor rung, kept while its later rungs select.
     deferred_constructor_failures:
@@ -27924,10 +27941,9 @@ impl<'a> Checker<'a> {
                 }
                 let direct_prefix = plan.iter().enumerate().all(|(target, argument)| match argument {
                     AdaptedRefArgument::Value(value) => *value == target,
-                    AdaptedRefArgument::Vararg {
-                        values,
-                        whole_array: true,
-                    } => values.as_slice() == [target],
+                    AdaptedRefArgument::Vararg { values, whole_array: true, .. } => {
+                        values.as_slice() == [target]
+                    }
                     AdaptedRefArgument::Context
                     | AdaptedRefArgument::Default
                     | AdaptedRefArgument::Vararg {
@@ -27938,7 +27954,7 @@ impl<'a> Checker<'a> {
                 let vararg_collect = vararg.and_then(|index| {
                     (index + 1 == declared
                         && plan.get(index).is_some_and(|argument| {
-                            matches!(argument, AdaptedRefArgument::Vararg { values, whole_array: false }
+                            matches!(argument, AdaptedRefArgument::Vararg { values, whole_array: false, .. }
                                 if !values.is_empty())
                         })
                         && plan[..index].iter().enumerate().all(|(target, argument)| {
@@ -27952,10 +27968,9 @@ impl<'a> Checker<'a> {
                     } else {
                         match argument {
                             AdaptedRefArgument::Default => true,
-                            AdaptedRefArgument::Vararg {
-                                values,
-                                whole_array: false,
-                            } => values.is_empty(),
+                            AdaptedRefArgument::Vararg { values, whole_array: false, .. } => {
+                                values.is_empty()
+                            }
                             _ => false,
                         }
                     }
@@ -42617,7 +42632,7 @@ impl<'a> Checker<'a> {
             )
         }) {
             for receiver in self.implicit_receivers_before_value_binding(scope, &n) {
-                let receiver = self.implicit_intersection_property_view(receiver, &n);
+                let receiver = self.implicit_property_receiver_view(receiver, &n);
                 if let Some(ty) =
                     self.try_member_read(scope, receiver.ty, &n, self.span(e), Some(e))
                 {
@@ -42722,7 +42737,7 @@ impl<'a> Checker<'a> {
                                 continue;
                             }
                             implicit_rungs::ImplicitRung::Receiver(receiver) => {
-                                self.implicit_intersection_property_view(receiver, &n)
+                                self.implicit_property_receiver_view(receiver, &n)
                             }
                         };
                         if let Some(selected_ty) =
@@ -42909,7 +42924,7 @@ impl<'a> Checker<'a> {
                             continue;
                         }
                         implicit_rungs::ImplicitRung::Receiver(receiver) => {
-                            self.implicit_intersection_property_view(receiver, &n)
+                            self.implicit_property_receiver_view(receiver, &n)
                         }
                     };
                     if context_receiver_priority::is_context_parameter_receiver(
@@ -43783,7 +43798,11 @@ impl<'a> Checker<'a> {
             if inferred_intersection.len() > 1 {
                 rt = Ty::intersection(&inferred_intersection);
             }
-            if let Some(projected) = self
+            if let Some(declared) =
+                self.unnarrowed_explicit_property_receiver(scope, (e, receiver), rt, &name, false)
+            {
+                rt = declared;
+            } else if let Some(projected) = self
                 .flow_intersection_property_receiver(scope, receiver, &name, false)
                 .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
             {
@@ -44768,13 +44787,7 @@ impl<'a> Checker<'a> {
         }
         let mut inner_alias_receiver_mismatch = None;
         let selected = (|| {
-            let receiver_ty = receiver_ty.unboxed_primitive().unwrap_or_else(|| {
-                if internal.matches("kotlin/String") {
-                    Ty::String
-                } else {
-                    receiver_ty
-                }
-            });
+            let receiver_ty = callable_reference_lhs::unbound_ref_receiver_ty(receiver_ty);
             if receiver_ty == Ty::Error {
                 return None;
             }
@@ -49264,8 +49277,7 @@ impl<'a> Checker<'a> {
         let InheritedNestedClassifier::Found(internal) = self.select_classifier(scope, name) else {
             return None;
         };
-        self.resolver()
-            .inaccessible_classifier_access(internal)
+        self.inaccessible_classifier_reference(internal)
             .map(|access| (internal, access))
     }
 
@@ -49277,7 +49289,7 @@ impl<'a> Checker<'a> {
         if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
             return false;
         }
-        let Some(access) = self.resolver().inaccessible_classifier_access(internal) else {
+        let Some(access) = self.inaccessible_classifier_reference(internal) else {
             return false;
         };
         crate::trace_compiler!(
@@ -49368,7 +49380,7 @@ impl<'a> Checker<'a> {
         classifier: TypeName,
         selected: &SelectedCallable,
     ) {
-        if self.resolver().inaccessible_classifier_access(classifier)
+        if self.inaccessible_classifier_reference(classifier)
             == Some(crate::libraries::ClassifierAccess::PackagePrivate)
         {
             let display = self
