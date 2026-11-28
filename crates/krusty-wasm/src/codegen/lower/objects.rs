@@ -1639,7 +1639,11 @@ impl Body<'_> {
 
     /// Replace the reference on the stack with whether it is an instance of the reference type
     /// `tested` — or null, when `nullable`.
-    fn reference_type_test(&mut self, tested: Ty, nullable: bool) -> Result<(), Unsupported> {
+    pub(super) fn reference_type_test(
+        &mut self,
+        tested: Ty,
+        nullable: bool,
+    ) -> Result<(), Unsupported> {
         if let Some(arity) = self.function_arity(tested) {
             self.function_type_test(arity, nullable, self.is_suspend_function_type(tested));
             return Ok(());
@@ -1650,6 +1654,12 @@ impl Body<'_> {
             }
             TyKind::Obj(name, _) if name == krusty::types::wk::any() => {
                 self.code.ref_test(nullable, HeapType::Eq);
+            }
+            // A `KClass` is the runtime's class token: the one object a class literal evaluates
+            // to, so the test is its structure's.
+            TyKind::Obj(name, _) if name == krusty::types::wk::kclass() => {
+                let token = self.runtime.class_tokens.structure;
+                self.code.ref_test(nullable, HeapType::Concrete(token));
             }
             TyKind::Obj(name, _)
                 if self

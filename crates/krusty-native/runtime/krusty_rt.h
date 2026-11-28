@@ -1234,6 +1234,7 @@ KRef kt_class_literal(const KType *type);
    fails loudly and names itself. */
 KRef kt_class_simple_name(KRef self);
 KRef kt_class_qualified_name(KRef self);
+kt_boolean kt_class_is_instance(KRef self, KRef value);
 
 /* `typeOf<T>()`: a `kotlin.reflect.KType`. Each is a static object the generator emits whole
    (see `krusty_rt.c` for its layout) wearing `kt_type_ktype_impl`, which names the `KType` marker

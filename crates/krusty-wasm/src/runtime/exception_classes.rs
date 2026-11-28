@@ -36,6 +36,8 @@ impl Runtime {
             if let Some(names) = published_classifier(source, class) {
                 self.objects.type_infos.name(module, class, &names);
             }
+            self.class_tokens
+                .register_struct_test(module, info, structure);
             init.ref_null(HeapType::Concrete(self.objects.itable))
                 .global_get(info)
                 .struct_new(self.objects.any_table);

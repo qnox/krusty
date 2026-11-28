@@ -115,6 +115,10 @@ pub enum CompilerIntrinsic {
     /// The authenticated platform-stdlib `KClass.simpleName` or `qualifiedName` getter. A
     /// target that builds its own class tokens answers it from the token's reflection names.
     ClassName(ClassNameKind),
+    /// The authenticated platform-stdlib `KClass.isInstance(value: Any?): Boolean`. A target that
+    /// builds its own class tokens answers it as the type test `value is X` makes against the
+    /// token's class.
+    ClassIsInstance,
     /// Reinterpret one scalar's bits as the equal-width floating or integral scalar selected by
     /// the authenticated declaration. Checked FIR/IR records both semantic endpoint types.
     ReinterpretBits,

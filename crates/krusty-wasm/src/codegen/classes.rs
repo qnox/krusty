@@ -1122,6 +1122,11 @@ pub(super) fn declare(
                 class.fq_name,
                 &krusty::backend::class_names::declared_class(ir, id),
             );
+            // The class of a value is the one its table's record names, so `x::class` of an
+            // instance answers `isInstance` with the test of that class's struct.
+            runtime
+                .class_tokens
+                .register_struct_test(module, info, ancestors[0]);
             let mut init = Code::default();
             for (slot, function) in functions_here.iter().enumerate() {
                 if slot as u32 == ITABLE_FIELD {

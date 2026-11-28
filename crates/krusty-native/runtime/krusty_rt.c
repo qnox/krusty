@@ -1825,6 +1825,15 @@ static const KType *kt_class_described(KRef self) {
     return described;
 }
 
+/* `isInstance`: whether `value` is an instance of the class `self` stands for, the test an `is`
+   makes against the class's descriptor. `null` is an instance of no class. */
+kt_boolean kt_class_is_instance(KRef self, KRef value) {
+    if (value == NULL) {
+        return 0;
+    }
+    return kt_is_instance(value, kt_class_described(self));
+}
+
 /* `qualifiedName`: the name the descriptor publishes, which for a nested class is joined with
    dots (`pkg.Outer.Inner`), and `null` for a local class or an anonymous object, as in Kotlin. */
 KRef kt_class_qualified_name(KRef self) {
