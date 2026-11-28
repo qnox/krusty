@@ -21,6 +21,7 @@ pub(super) fn emit_func_ref_class(
     let fr = c.func_ref.as_ref().unwrap();
     let physical_arity = u8::try_from(fr.param_tys.len())
         .expect("JVM function-reference arity must fit its runtime carrier");
+    let bound_receiver = bound_receiver_parameter(ir);
     // Structural adapters name their exact common-IR target. Derive the physical JVM parameters
     // from that declaration so sparse representation facts (notably shared mutable-capture cells)
     // cannot disagree between the helper descriptor and the reference carrier's invoke call.
@@ -275,7 +276,7 @@ pub(super) fn emit_func_ref_class(
                 parameters.push(("boundContextArguments", "[Ljava/lang/Object;"));
             }
             if fr.bound {
-                parameters.push(("receiver0", "Ljava/lang/Object;"));
+                parameters.push((bound_receiver, "Ljava/lang/Object;"));
             }
             function_reference_invoke::reference_constructor_locals(&mut cw, &fq, &parameters)
         });
@@ -334,7 +335,7 @@ pub(super) fn emit_func_ref_class(
         ctor.ret_void();
         let mut parameters = vec![("boundContextArguments", "[Ljava/lang/Object;")];
         if fr.bound {
-            parameters.push(("receiver0", "Ljava/lang/Object;"));
+            parameters.push((bound_receiver, "Ljava/lang/Object;"));
         }
         let locals =
             function_reference_invoke::reference_constructor_locals(&mut cw, &fq, &parameters);
@@ -366,7 +367,7 @@ pub(super) fn emit_func_ref_class(
         let locals = function_reference_invoke::reference_constructor_locals(
             &mut cw,
             &fq,
-            &[("receiver0", "Ljava/lang/Object;")],
+            &[(bound_receiver, "Ljava/lang/Object;")],
         );
         // The ctor's access mirrors the class's: a PUBLIC synthetic is constructed from other
         // packages by spliced code.
@@ -707,6 +708,19 @@ pub(super) fn emit_func_ref_class(
 /// `FunctionReferenceLowering` does: a primitive's `TYPE` for a member of a signed scalar
 /// classifier, and the compiler's own `Intrinsics.Kotlin` symbol (a final nested class to kotlinc,
 /// whatever the class file says) for a package builtin; otherwise the owner's mapped class.
+/// The name kotlinc gives a function reference constructor's bound receiver parameter.
+fn bound_receiver_parameter(ir: &IrFile) -> &'static str {
+    if ir
+        .reference
+        .quirks()
+        .has(krusty::kotlin_version::Quirk::FunctionReferenceNumbersBoundReceiver)
+    {
+        "receiver0"
+    } else {
+        "receiver"
+    }
+}
+
 fn push_reflection_owner(
     code: &mut CodeBuilder,
     cw: &mut ClassWriter,

@@ -218,6 +218,13 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: true,
     }
+    /// A function reference class's constructor numbers its bound receiver parameter
+    /// (`receiver0`). From 2.5 kotlinc passes at most one bound receiver and names it `receiver`.
+    FunctionReferenceNumbersBoundReceiver {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
     /// A class's static state initializes with its `companion object` first: the companion is
     /// constructed, then every `companion { }` block property of the class is stored, then the
     /// companion's initializer body runs. From 2.5 kotlinc initializes in program order: the block

@@ -269,6 +269,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
         | Quirk::NotNullOperatorDropsIntersectionApproximation
         | Quirk::InvisibleCandidatesKeepScopeLevels
         | Quirk::JvmTargetsEndAt26
+        | Quirk::FunctionReferenceNumbersBoundReceiver
         | Quirk::TailrecDotlessCallReportedAtOperator
         | Quirk::TailrecUnitObjectReturnFollowsCall
         | Quirk::TailrecElvisLeftOperandIsTail => None,
