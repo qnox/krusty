@@ -940,6 +940,11 @@ fn compose_captured_lambdas_in_plain_functions_are_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_lambdas_in_member_functions_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("lambdasInMemberFunctions");
+}
+
+#[test]
 fn compose_layout_calls_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("layoutCalls");
 }

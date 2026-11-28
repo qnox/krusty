@@ -608,6 +608,7 @@ refusal: true,
             package: &package,
             file_name: source.file_name,
             within: None,
+            class: None,
         };
         scope.register_lambdas(
             ir,
@@ -775,6 +776,7 @@ refusal: true,
             package: &package,
             file_name: source.file_name,
             within: None,
+            class: None,
         };
         scope.register_lambdas(
             ir,
@@ -791,6 +793,77 @@ refusal: true,
             rejections,
             &mut composable_lambdas,
         );
+    }
+    // A member of a top-level class that is not composable passes composable lambdas as a function
+    // of the file does (an activity's `onCreate` calls `setContent { Screen() }`).
+    for class in &ir.classes {
+        let simple = class.fq_name.nested_segment_ref();
+        if !class.is_source_declared
+            || class.is_local_class
+            || class.is_anonymous_object
+            || class.fq_name.nested_owner().is_some()
+        {
+            continue;
+        }
+        for &function in &class.methods {
+            if composable_functions.contains(&function) {
+                continue;
+            }
+            let declared = &ir.functions[function as usize];
+            let direct = function_body(ir, function)
+                .map(|body| body.statements)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|&statement| matches!(ir.exprs[statement as usize], IrExpr::Call { .. }))
+                .collect::<Vec<_>>();
+            let lambda_arguments = lambda_arguments(ir, source, &direct, composable);
+            if lambda_arguments.is_empty() {
+                continue;
+            }
+            answered_lambdas.extend(lambda_arguments.iter().map(|argument| argument.lambda));
+            let name = ir
+                .fn_source_names
+                .get(&function)
+                .cloned()
+                .unwrap_or_else(|| declared.name.clone());
+            let signature = format!(
+                "{name}({}){}",
+                declared
+                    .params
+                    .iter()
+                    .map(|&ty| simple_type_name(ty))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                simple_type_name(declared.ret)
+            );
+            let qualified = if package.is_empty() {
+                format!("{simple}.{name}")
+            } else {
+                format!("{package}.{simple}.{name}")
+            };
+            let path = KeyPath {
+                signature: &signature,
+                package: &package,
+                file_name: source.file_name,
+                within: None,
+                class: Some(simple),
+            };
+            scope.register_lambdas(
+                ir,
+                LambdaOwner {
+                    path: &path,
+                    qualified: &qualified,
+                    caller: function,
+                    caller_parameters: declared.params.len() as u32,
+                    direct: &direct,
+                    arguments: &lambda_arguments,
+                    composable: false,
+                },
+                &mut direct_calls,
+                rejections,
+                &mut composable_lambdas,
+            );
+        }
     }
     // A lambda passed to a rejected function constrains nothing the file still compiles.
     let constrained = targets
@@ -2106,8 +2179,8 @@ impl BodyScope<'_> {
                     (
                         &IrExpr::GetValue(index),
                         Memoization::Remembered { caller } | Memoization::Instance { caller },
-                    ) => index as usize >= ir.functions[caller as usize].params.len(),
-                    _ => false,
+                    ) => capture_kind(ir, caller, index),
+                    _ => CaptureKind::Parameter,
                 },
             )
             .collect::<Vec<_>>();
@@ -2185,6 +2258,7 @@ impl BodyScope<'_> {
             package: "",
             file_name: "",
             within: Some(&path),
+            class: None,
         };
         self.register_lambdas(
             ir,
@@ -2487,7 +2561,18 @@ enum CallValues<'a> {
     Parameters(u32),
     /// A lambda's captures, each flagged when it captures a local variable, not a parameter, and
     /// the number of values it is itself called with, which follow them.
-    Captures(&'a [bool], u32),
+    Captures(&'a [CaptureKind], u32),
+}
+
+/// What a lambda's capture is to the arguments that read it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaptureKind {
+    /// A parameter of the function that writes the lambda, which the callee compares itself.
+    Parameter,
+    /// A local whose declaration's state a lambda's body cannot see.
+    Opaque,
+    /// A local `val` initialized with a constant.
+    Static,
 }
 
 impl CallValues<'_> {
@@ -2521,7 +2606,7 @@ impl CallValues<'_> {
         let mut pending = vec![expression];
         while let Some(expression) = pending.pop() {
             if let IrExpr::GetValue(index) = ir.exprs[expression as usize] {
-                if locals.get(index as usize) == Some(&true) {
+                if locals.get(index as usize) == Some(&CaptureKind::Opaque) {
                     return true;
                 }
             }
@@ -2531,12 +2616,65 @@ impl CallValues<'_> {
     }
 }
 
+/// What the value `index` of `caller`'s frame is to a lambda that captures it: a parameter, or a
+/// local declared once, whose initializer a constant makes static.
+fn capture_kind(ir: &IrFile, caller: FunId, index: u32) -> CaptureKind {
+    let function = &ir.functions[caller as usize];
+    let frame = function.params.len() + usize::from(function.dispatch_receiver.is_some());
+    if (index as usize) < frame {
+        return CaptureKind::Parameter;
+    }
+    let mut initializers = Vec::new();
+    let mut reassigned = false;
+    let mut pending = function.body.into_iter().collect::<Vec<_>>();
+    while let Some(expression) = pending.pop() {
+        match ir.exprs[expression as usize] {
+            IrExpr::Variable {
+                index: declared,
+                init: Some(init),
+                ..
+            } if declared == index => initializers.push(init),
+            IrExpr::SetValue { var, .. } if var == index => reassigned = true,
+            _ => {}
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    match initializers.as_slice() {
+        [_] if reassigned => CaptureKind::Opaque,
+        [initializer] if matches!(ir.exprs[*initializer as usize], IrExpr::Const(_)) => {
+            CaptureKind::Static
+        }
+        [initializer] if reads_any_parameter(ir, *initializer, frame as u32) => {
+            CaptureKind::Parameter
+        }
+        _ => CaptureKind::Opaque,
+    }
+}
+
+/// Whether any expression under `expression` reads one of the first `parameters` values.
+fn reads_any_parameter(ir: &IrFile, expression: ExprId, parameters: u32) -> bool {
+    let mut pending = vec![expression];
+    while let Some(expression) = pending.pop() {
+        if matches!(ir.exprs[expression as usize], IrExpr::GetValue(index) if index < parameters) {
+            return true;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    false
+}
+
 /// kotlinc's `argumentMetaOf` for an argument of a call in a function with `parameters` value
 /// parameters, or `None` when its answer depends on more than krusty classifies yet.
 fn argument_state(ir: &IrFile, argument: ExprId, values: CallValues<'_>) -> Option<ArgumentState> {
     match ir.exprs[argument as usize] {
         IrExpr::Const(_) => Some(ArgumentState::Static),
         // A captured value is not a parameter: its callee compares it itself.
+        IrExpr::GetValue(index)
+            if matches!(values, CallValues::Captures(kinds, _)
+                if kinds.get(index as usize) == Some(&CaptureKind::Static)) =>
+        {
+            Some(ArgumentState::Static)
+        }
         IrExpr::GetValue(index) if index < values.count() => Some(
             values
                 .tracked(index)

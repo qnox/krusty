@@ -50,6 +50,9 @@ pub(super) struct KeyPath<'a> {
     /// The path of the composable lambda this scope is the body of, which the declarations in the
     /// body extend: a lambda nested in a lambda is keyed under the outer lambda's whole path.
     pub within: Option<&'a str>,
+    /// The simple name of the top-level class the function is a member of, which the path names
+    /// between the function and the package.
+    pub class: Option<&'a str>,
 }
 
 impl KeyPath<'_> {
@@ -58,8 +61,12 @@ impl KeyPath<'_> {
         if let Some(within) = self.within {
             return within.to_string();
         }
+        let class = self
+            .class
+            .map(|class| format!("/class-{class}"))
+            .unwrap_or_default();
         format!(
-            "fun-{}/pkg-{}/file-{}",
+            "fun-{}{class}/pkg-{}/file-{}",
             self.signature, self.package, self.file_name
         )
     }
@@ -112,6 +119,7 @@ mod tests {
                 package,
                 file_name,
                 within: None,
+                class: None,
             }
             .key()
         };
@@ -129,6 +137,7 @@ mod tests {
             package: "probe",
             file_name: "Probe.kt",
             within: None,
+            class: None,
         };
         assert_eq!(
             card.lambda_key("$anonymous$()Unit", "Box", 0, 0),
@@ -149,6 +158,7 @@ mod tests {
             package: "screens",
             file_name: "receiverLambdas.kt",
             within: None,
+            class: None,
         };
         assert_eq!(
             screen.lambda_key("String.$anonymous$()Unit", "Box", 0, 0),

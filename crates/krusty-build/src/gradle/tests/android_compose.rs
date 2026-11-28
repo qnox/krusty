@@ -62,20 +62,14 @@ fn android_compose_app_is_compiled_by_krusty_with_a_handoff_for_what_it_refuses(
         "{}/app/src/main/kotlin/sample/app/MainActivity.kt",
         root.display()
     );
-    let expected = [
-        ("27:1", "a lambda in a composable function"),
-        (
-            "22:20",
-            "a composable lambda passed other than by a statement of a function body",
-        ),
-    ]
-    .map(|(at, what)| {
-        format!(
+    let expected = [("27:1", "a lambda in a composable function")]
+        .map(|(at, what)| {
+            format!(
             "{source}:{at}: error: krusty's Compose compiler plugin does not support {what} yet; \
              compile this module with kotlinc"
         )
-    })
-    .to_vec();
+        })
+        .to_vec();
     assert_eq!(reasons, expected, "{output}");
     let text = read_invocation_log(log).expect("invocation log");
     assert_eq!(invocations(&text).len(), 2, "{text}");
