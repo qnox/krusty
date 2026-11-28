@@ -46,6 +46,7 @@ fn property(name: &str, receiver: Option<KotlinType>, ty: KotlinType) -> KotlinP
         constant: None,
         annotations: Vec::new(),
         return_value_status: Default::default(),
+        read_stability: Default::default(),
     }
 }
 
