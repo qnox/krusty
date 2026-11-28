@@ -604,12 +604,10 @@ impl Reach {
 }
 
 fn part_order(part: Part) -> usize {
-    match part {
-        Part::Catch => 0,
-        Part::Operand => 1,
-        Part::Local => 2,
-        Part::Frame => 3,
-    }
+    Part::ASM_ORDER
+        .iter()
+        .position(|&at| at == part)
+        .expect("every part has an ASM position")
 }
 
 /// Mark `index` and every entry it names as reached.

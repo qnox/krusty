@@ -30,6 +30,7 @@ use krusty::conformance::TestTarget;
 use krusty::diag::{DiagSink, Severity};
 use krusty::source::SourceInput;
 
+use super::box_lane_klib_route::KlibRoute;
 use super::box_lane_profile::{timed, Stage};
 use super::box_ratchet::{self, Platform};
 
@@ -110,6 +111,16 @@ pub trait Lane: Sync {
 
     /// Compile independently analyzed source modules and run the resulting target program.
     fn compile_modules_and_run(
+        &self,
+        scratch: &Path,
+        stem: &str,
+        modules: &[krusty::conformance::ModuleUnit],
+        directive_source: &str,
+    ) -> Outcome;
+
+    /// Compile every module but the last into a KLIB only, link the last module's program against
+    /// those KLIBs with [`compile_modules_from_klibs`], and run it.
+    fn compile_klib_modules_and_run(
         &self,
         scratch: &Path,
         stem: &str,
@@ -532,6 +543,90 @@ pub fn analyze_module(
     Ok((analysis, stems, native_imports))
 }
 
+#[derive(Clone)]
+struct GeneratedDependency {
+    archive: PathBuf,
+    transitive: Vec<PathBuf>,
+}
+
+struct GeneratedRoot(PathBuf);
+
+impl Drop for GeneratedRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn diagnostic_outcome(diags: &DiagSink, decline_prefix: &str) -> Option<Outcome> {
+    if let Some(decline) = diags
+        .diags
+        .iter()
+        .find_map(|diagnostic| diagnostic.msg.strip_prefix(decline_prefix))
+    {
+        return Some(Outcome::Declined(
+            decline.trim_end_matches(" yet").to_string(),
+        ));
+    }
+    first_error(diags, 0).map(|first| Outcome::Frontend(first.msg.clone()))
+}
+
+fn write_dependency_archive(
+    root: &Path,
+    ordinal: usize,
+    artifacts: &[Artifact],
+) -> Result<PathBuf, Outcome> {
+    let archive = root.join(format!("module-{ordinal}"));
+    for (name, bytes) in artifacts {
+        let relative = Path::new(name);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(Outcome::Harness(format!(
+                "generated KLIB contains an unsafe artifact path {name:?}"
+            )));
+        }
+        let output = archive.join(relative);
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                Outcome::Failed(format!("creating generated KLIB directory: {error}"))
+            })?;
+        }
+        std::fs::write(&output, bytes).map_err(|error| {
+            Outcome::Failed(format!("writing generated KLIB artifact {name}: {error}"))
+        })?;
+    }
+    Ok(archive)
+}
+
+/// The KLIBs one module is analyzed against, its dependencies first and then their transitive
+/// closure in link order, and the subset of those archives that are friends.
+fn dependency_closure(
+    unit: &krusty::conformance::ModuleUnit,
+    generated: &BTreeMap<String, GeneratedDependency>,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), Outcome> {
+    let mut dependency_klibs = Vec::new();
+    let mut friend_klibs = Vec::new();
+    let mut seen = BTreeSet::new();
+    for dependency in &unit.deps {
+        let Some(archive) = generated.get(dependency) else {
+            return Err(Outcome::Harness(format!(
+                "module dependency {dependency} was not built"
+            )));
+        };
+        for path in std::iter::once(&archive.archive).chain(&archive.transitive) {
+            if seen.insert(path.clone()) {
+                dependency_klibs.push(path.clone());
+            }
+        }
+        if unit.friends.contains(dependency) {
+            friend_klibs.push(archive.archive.clone());
+        }
+    }
+    Ok((dependency_klibs, friend_klibs))
+}
+
 /// One multi-module corpus case: where its generated KLIBs live, the case name, and its source
 /// modules in dependency order.
 pub struct ModuleCase<'a> {
@@ -557,63 +652,6 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
         stem,
         modules,
     } = case;
-    #[derive(Clone)]
-    struct GeneratedDependency {
-        archive: PathBuf,
-        transitive: Vec<PathBuf>,
-    }
-
-    struct GeneratedRoot(PathBuf);
-
-    impl Drop for GeneratedRoot {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn diagnostic_outcome(diags: &DiagSink, decline_prefix: &str) -> Option<Outcome> {
-        if let Some(decline) = diags
-            .diags
-            .iter()
-            .find_map(|diagnostic| diagnostic.msg.strip_prefix(decline_prefix))
-        {
-            return Some(Outcome::Declined(
-                decline.trim_end_matches(" yet").to_string(),
-            ));
-        }
-        first_error(diags, 0).map(|first| Outcome::Frontend(first.msg.clone()))
-    }
-
-    fn write_dependency_archive(
-        root: &Path,
-        ordinal: usize,
-        artifacts: &[Artifact],
-    ) -> Result<PathBuf, Outcome> {
-        let archive = root.join(format!("module-{ordinal}"));
-        for (name, bytes) in artifacts {
-            let relative = Path::new(name);
-            if relative.is_absolute()
-                || relative
-                    .components()
-                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
-            {
-                return Err(Outcome::Harness(format!(
-                    "generated KLIB contains an unsafe artifact path {name:?}"
-                )));
-            }
-            let output = archive.join(relative);
-            if let Some(parent) = output.parent() {
-                std::fs::create_dir_all(parent).map_err(|error| {
-                    Outcome::Failed(format!("creating generated KLIB directory: {error}"))
-                })?;
-            }
-            std::fs::write(&output, bytes).map_err(|error| {
-                Outcome::Failed(format!("writing generated KLIB artifact {name}: {error}"))
-            })?;
-        }
-        Ok(archive)
-    }
-
     let compilation_target = backend.compilation_target();
     if compilation_target != target.compilation_target() {
         return Err(Outcome::Harness(format!(
@@ -642,24 +680,7 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
     let mut generated = BTreeMap::<String, GeneratedDependency>::new();
     let mut native_imports = Vec::new();
     for (ordinal, unit) in modules.iter().enumerate() {
-        let mut dependency_klibs = Vec::new();
-        let mut friend_klibs = Vec::new();
-        let mut seen = BTreeSet::new();
-        for dependency in &unit.deps {
-            let Some(archive) = generated.get(dependency) else {
-                return Err(Outcome::Harness(format!(
-                    "module dependency {dependency} was not built"
-                )));
-            };
-            for path in std::iter::once(&archive.archive).chain(&archive.transitive) {
-                if seen.insert(path.clone()) {
-                    dependency_klibs.push(path.clone());
-                }
-            }
-            if unit.friends.contains(dependency) {
-                friend_klibs.push(archive.archive.clone());
-            }
-        }
+        let (dependency_klibs, friend_klibs) = dependency_closure(unit, &generated)?;
         let (analysis, stems, module_imports) = analyze_module(
             unit,
             ModuleDependencies {
@@ -693,6 +714,99 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
     let artifacts = session.finish("box", &mut diags);
     let outcome = diagnostic_outcome(&diags, decline_prefix);
     if let Some(outcome) = outcome {
+        return Err(outcome);
+    }
+    Ok(CompiledProgram {
+        artifacts,
+        native_imports,
+    })
+}
+
+/// Link a module graph the way kotlinc links it: every module but the last is compiled into a
+/// KLIB only, and the program is the last module's source compiled against those KLIBs, so every
+/// other module's code reaches the program from the bodies its KLIB records.
+pub fn compile_modules_from_klibs<B: Backend>(
+    case: ModuleCase<'_>,
+    directive_source: &str,
+    target: TestTarget,
+    backend: &B,
+    library: &krusty::klib::backend::KlibBackend,
+    decline_prefix: &str,
+) -> Result<CompiledProgram, Outcome> {
+    let ModuleCase {
+        scratch,
+        stem,
+        modules,
+    } = case;
+    let compilation_target = backend.compilation_target();
+    if compilation_target != target.compilation_target()
+        || Backend::compilation_target(library) != compilation_target
+    {
+        return Err(Outcome::Harness(format!(
+            "the {target:?} corpus lane received a backend of another target"
+        )));
+    }
+    let Some((program, libraries)) = modules.split_last() else {
+        return Err(Outcome::Harness(
+            "a module graph has no final source module".to_string(),
+        ));
+    };
+    let generated_root = GeneratedRoot(scratch.join(format!(
+        ".krusty-klib-route-{stem}-{}-{}",
+        std::process::id(),
+        rayon::current_thread_index().unwrap_or(0)
+    )));
+    if let Err(error) = std::fs::create_dir_all(&generated_root.0) {
+        return Err(Outcome::Failed(format!(
+            "creating generated KLIB root: {error}"
+        )));
+    }
+    let mut diags = DiagSink::new();
+    let mut generated = BTreeMap::<String, GeneratedDependency>::new();
+    let mut native_imports = Vec::new();
+    for (ordinal, unit) in libraries.iter().enumerate() {
+        let (dependency_klibs, friend_klibs) = dependency_closure(unit, &generated)?;
+        let (analysis, stems, module_imports) = analyze_module(
+            unit,
+            ModuleDependencies {
+                klibs: &dependency_klibs,
+                friends: &friend_klibs,
+            },
+            directive_source,
+            target,
+            compilation_target,
+            &mut diags,
+        )?;
+        native_imports.extend(module_imports);
+        let artifacts =
+            krusty::compiler::emit_analyzed(analysis, &stems, library, &unit.name, &mut diags);
+        if let Some(outcome) = diagnostic_outcome(&diags, decline_prefix) {
+            return Err(outcome);
+        }
+        let archive = write_dependency_archive(&generated_root.0, ordinal, &artifacts)?;
+        generated.insert(
+            unit.name.clone(),
+            GeneratedDependency {
+                archive,
+                transitive: dependency_klibs,
+            },
+        );
+    }
+    let (dependency_klibs, friend_klibs) = dependency_closure(program, &generated)?;
+    let (analysis, stems, module_imports) = analyze_module(
+        program,
+        ModuleDependencies {
+            klibs: &dependency_klibs,
+            friends: &friend_klibs,
+        },
+        directive_source,
+        target,
+        compilation_target,
+        &mut diags,
+    )?;
+    native_imports.extend(module_imports);
+    let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, backend, "box", &mut diags);
+    if let Some(outcome) = diagnostic_outcome(&diags, decline_prefix) {
         return Err(outcome);
     }
     Ok(CompiledProgram {
@@ -1087,7 +1201,13 @@ fn owned_fatal_outcomes_cannot_be_blessed_as_box_failures() {
     );
 }
 
-fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path, source: &str) -> Outcome {
+fn outcome(
+    lane: &dyn Lane,
+    klib_route: &KlibRoute,
+    scratch: &Path,
+    file: &Path,
+    source: &str,
+) -> Outcome {
     let source = source.to_owned();
     let stem = file
         .file_stem()
@@ -1173,9 +1293,33 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path, source: &str) -> Outcom
             }
             emitted.insert(unit.name.clone());
         }
-        return timed(Stage::Lane, || {
-            lane.compile_modules_and_run(scratch, stem, &units, &source)
-        });
+        let started = Instant::now();
+        let source_route = || {
+            timed(Stage::Lane, || {
+                lane.compile_modules_and_run(scratch, stem, &units, &source)
+            })
+        };
+        if !klib_route.enabled() {
+            return source_route();
+        }
+        // Measured beside the KLIB route, a source-route panic becomes the same outcome the
+        // corpus runner would record for it, so the case stays in both routes' comparison.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(source_route))
+            .unwrap_or_else(panic_outcome);
+        let source_time = started.elapsed();
+        let started = Instant::now();
+        // The KLIB route is measured, never ratcheted: its panic is its own outcome and
+        // leaves the source route's verdict alone.
+        let klib = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            lane.compile_klib_modules_and_run(scratch, stem, &units, &source)
+        }))
+        .unwrap_or_else(panic_outcome);
+        klib_route.record(
+            file.to_path_buf(),
+            (&result, source_time),
+            (klib, started.elapsed()),
+        );
+        return result;
     }
     let sources = match prepare_sources(&source, stem, lane.test_target()) {
         Ok(sources) => sources,
@@ -1233,6 +1377,21 @@ fn unexpected_failure_reason_report(
         .filter(|(file, _)| unexpected.contains(&relative(file)))
         .map(|(file, reason)| format!("  unexpected {}: {reason}\n", file.display()))
         .collect()
+}
+
+/// A panic inside the compiler, as the outcome of the case it interrupted, attributed to the file
+/// the panic hook recorded.
+fn panic_outcome(panic: Box<dyn std::any::Any + Send>) -> Outcome {
+    let message = panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_else(|| "panic".to_string());
+    let origin = LAST_PANIC_FILE.with(|last| last.borrow_mut().take());
+    Outcome::CompilerPanic(match origin {
+        Some(origin) => format!("{message} ({origin})"),
+        None => message,
+    })
 }
 
 /// Run the whole corpus through `lane` and hold it to the lane's committed ratchet.
@@ -1299,6 +1458,7 @@ pub fn run(lane: &dyn Lane) {
     let pool = pool.build().expect("build the worker pool");
 
     let bytes = super::box_klib_bytes::ByteRun::new(lane);
+    let klib_route = KlibRoute::from_env(lane.env_infix());
     let started = Instant::now();
     let progress = super::box_lane_profile::ProgressReporter::new(
         lane.label(),
@@ -1318,21 +1478,10 @@ pub fn run(lane: &dyn Lane) {
                 let source = std::fs::read_to_string(file);
                 let result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &source {
-                        Ok(source) => outcome(lane, &scratch.0, file, source),
+                        Ok(source) => outcome(lane, &klib_route, &scratch.0, file, source),
                         Err(error) => Outcome::Harness(format!("reading case: {error}")),
                     }))
-                    .unwrap_or_else(|panic| {
-                        let message = panic
-                            .downcast_ref::<String>()
-                            .cloned()
-                            .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                            .unwrap_or_else(|| "panic".to_string());
-                        let origin = LAST_PANIC_FILE.with(|last| last.borrow_mut().take());
-                        Outcome::CompilerPanic(match origin {
-                            Some(origin) => format!("{message} ({origin})"),
-                            None => message,
-                        })
-                    });
+                    .unwrap_or_else(panic_outcome);
                 bytes.record(
                     lane,
                     file,
@@ -1475,6 +1624,13 @@ pub fn run(lane: &dyn Lane) {
         "{}",
         unexpected_failure_reason_report(&traced, &unexpected_failure_keys, relative)
     );
+    if let Ok(path) = std::env::var(env("BOX_KLIB_ROUTE_REPORT")) {
+        std::fs::write(path, klib_route.rows(relative))
+            .unwrap_or_else(|error| panic!("failed to write {label} KLIB route report: {error}"));
+    }
+    if let Some(parity) = klib_route.report(platform.name(), relative) {
+        eprint!("{parity}");
+    }
 
     // Triage: name the cases behind one decline reason, so a line in the table below can be
     // followed back to the source that produced it.
@@ -1817,4 +1973,45 @@ fn report_line_has_a_stable_shape() {
         report_line("native", &[("scanned", 3), ("passed", 1)]),
         "native conformance: scanned 3, passed 1"
     );
+}
+
+#[test]
+fn a_module_links_each_direct_dependency_before_that_dependency_s_own_libraries() {
+    let source = "\
+// MODULE: a
+// FILE: a.kt
+fun a() = 1
+// MODULE: b(a)
+// FILE: b.kt
+fun b() = a()
+// MODULE: c(b)
+// FILE: c.kt
+fun c() = b()
+// MODULE: main(c)(a)
+// FILE: main.kt
+fun box() = \"OK\"
+";
+    let modules = krusty::conformance::split_modules(source).expect("valid module graph");
+    let units = krusty::conformance::module_units(&modules);
+    let mut generated = BTreeMap::new();
+    for unit in &units[..units.len() - 1] {
+        let (transitive, _) = dependency_closure(unit, &generated).expect("dependencies built");
+        let archive = PathBuf::from(format!("{}.klib", unit.name));
+        generated.insert(
+            unit.name.clone(),
+            GeneratedDependency {
+                archive,
+                transitive,
+            },
+        );
+    }
+    let program = units.last().expect("a final module");
+    let (libraries, friends) = dependency_closure(program, &generated).expect("dependencies built");
+    // The first library that provides a signature wins, so a module's own dependency must precede
+    // the libraries it reached only through that dependency.
+    assert_eq!(
+        libraries,
+        ["c.klib", "b.klib", "a.klib"].map(PathBuf::from).to_vec()
+    );
+    assert_eq!(friends, vec![PathBuf::from("a.klib")]);
 }

@@ -985,34 +985,7 @@ fn write_group(dir: &Path, blocks: &[(String, String)]) -> Result<Vec<PathBuf>, 
 /// appears on the same line, so a real `a < !b` is left intact. Markers never span a line, so
 /// removing them preserves line numbers — and thus `LineNumberTable` bytes — on both sides.
 pub fn strip_diagnostic_markers(src: &str) -> String {
-    let b = src.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'<' && i + 2 < b.len() && b[i + 1] == b'!' && b[i + 2] == b'>' {
-            i += 3; // close marker `<!>`
-            continue;
-        }
-        if b[i] == b'<'
-            && i + 2 < b.len()
-            && b[i + 1] == b'!'
-            && (b[i + 2].is_ascii_uppercase() || b[i + 2] == b'_')
-        {
-            let mut j = i + 2;
-            while j + 1 < b.len() && b[j] != b'\n' && !(b[j] == b'!' && b[j + 1] == b'>') {
-                j += 1;
-            }
-            if j + 1 < b.len() && b[j] == b'!' && b[j + 1] == b'>' {
-                i = j + 2; // consume through `!>`
-                continue;
-            }
-        }
-        // A real `<` or any other byte (including UTF-8 continuation bytes, which are never `<`/`!`)
-        // is copied verbatim.
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8(out).expect("stripping ASCII markers preserves UTF-8")
+    super::diagnostic_markers::parse(src).text
 }
 
 struct ScratchDir(PathBuf);

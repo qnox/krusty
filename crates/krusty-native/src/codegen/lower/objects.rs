@@ -177,6 +177,9 @@ pub(super) struct DescriptorShape<'s> {
     /// Indexed by interface member number; empty for a type implementing no interface of the
     /// program.
     pub(super) itable: &'s [FuncId],
+    /// The function the type answers a call through a function type of each physical operand
+    /// count with: what the function protocol dispatches to (`native::interface_calls`).
+    pub(super) function_invokes: &'s [(usize, FuncId)],
     /// Whether objects of exactly this type are made. An interface's or an abstract class's
     /// descriptor is only ever a supertype, so the link counts none of its table's functions among
     /// a member's implementations.
@@ -404,8 +407,8 @@ impl<'a> FileLowering<'a> {
                 continue;
             }
             if let Slot::FunctionBridge { arity, .. } = &slot {
-                // `kotlin.Function{N}.invoke`'s own signature, which is what a caller reading the
-                // function slot passes and reads: the receiver and every operand a reference, and
+                // `kotlin.Function{N}.invoke`'s own signature, which is what a caller through the
+                // function type passes and reads: the receiver and every operand a reference, and
                 // a reference back.
                 let params = vec![any(); arity + 1];
                 let id = self.declare_slot_function(
@@ -420,7 +423,7 @@ impl<'a> FileLowering<'a> {
             }
             if let Slot::AccessorBridge {
                 declared,
-                receiver,
+                operands,
                 setter,
                 ..
             } = &slot
@@ -429,7 +432,7 @@ impl<'a> FileLowering<'a> {
                 // reading this number through the interface reads what the interface declares.
                 let (params, ret) = super::object_entries::accessor_signature(
                     *declared,
-                    receiver.map(|(declared, _)| declared),
+                    operands.iter().map(|&(declared, _)| declared),
                     *setter,
                 );
                 // Named by position rather than by what it bridges: neither end need be a source
@@ -569,6 +572,7 @@ impl<'a> FileLowering<'a> {
             reference_offsets,
             vtable,
             itable,
+            function_invokes,
             instantiable,
             superclass,
             interfaces,
@@ -611,6 +615,7 @@ impl<'a> FileLowering<'a> {
 
         if instantiable {
             self.record_interface_implementations(descriptor, base, itable)?;
+            self.record_function_implementations(descriptor, base, function_invokes)?;
         }
 
         // The interfaces this type implements, transitively. An interface is not on the super
@@ -904,6 +909,17 @@ impl<'a> FileLowering<'a> {
                 interfaces.push(descriptor);
             }
         }
+        let function_invokes = self
+            .model
+            .function_invokes(class)
+            .iter()
+            .map(|invoke| {
+                vtable
+                    .get(invoke.slot as usize)
+                    .map(|&function| (invoke.operands, function))
+                    .ok_or_else(|| "a function bridge slot outside the class table".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let walk = self.define_walk_members(class, &base)?;
         let (qualified_name, simple_name, class_names) = self.reflection_names(class);
         if instantiable {
@@ -920,6 +936,7 @@ impl<'a> FileLowering<'a> {
                 reference_offsets: &layout.reference_offsets,
                 vtable: &vtable,
                 itable: &itable,
+                function_invokes: &function_invokes,
                 instantiable,
                 superclass,
                 interfaces: &interfaces,
@@ -1398,7 +1415,7 @@ impl<'a> FileLowering<'a> {
         if let Slot::AccessorBridge {
             declared,
             implemented,
-            receiver,
+            operands,
             setter,
             target_slot,
         } = slot
@@ -1406,7 +1423,7 @@ impl<'a> FileLowering<'a> {
             return self.define_accessor_bridge(
                 *declared,
                 *implemented,
-                *receiver,
+                operands,
                 *setter,
                 *target_slot,
                 id,

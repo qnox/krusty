@@ -1424,6 +1424,8 @@ fn adapted_vararg_reference_keeps_collected_value_ordinals() {
         [FirAdaptedReferenceArgument::Vararg {
             values: vec![0, 1].into_boxed_slice(),
             whole_array: false,
+            mapped_whole: false,
+            array_type: string_vararg(),
         }]
     );
 }
@@ -1462,6 +1464,8 @@ fn imported_object_reference_keeps_selected_singleton_classifier_and_vararg_plan
         [FirAdaptedReferenceArgument::Vararg {
             values: vec![0].into_boxed_slice(),
             whole_array: false,
+            mapped_whole: false,
+            array_type: string_vararg(),
         }]
     );
 }
@@ -1575,6 +1579,8 @@ fn adapted_unbound_member_reference_keeps_receiver_outside_the_target_argument_p
             FirAdaptedReferenceArgument::Vararg {
                 values: Box::new([]),
                 whole_array: false,
+                mapped_whole: false,
+                array_type: string_vararg(),
             },
         ]
     );
@@ -1957,4 +1963,9 @@ fn root_package_library_reference_retains_its_selected_external_identity() {
     assert_eq!(*binding, FirCallableReferenceBinding::Static);
     assert_eq!(*dispatch_receiver, None);
     assert_eq!(*extension_receiver, None);
+}
+
+/// The checked type of a `vararg xs: String` parameter.
+fn string_vararg() -> ResolvedTy {
+    ResolvedTy::new(Ty::array(Ty::String)).expect("a publishable array type")
 }

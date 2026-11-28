@@ -1,9 +1,22 @@
-//! A class's or enum class's primary-constructor parameter list. Both declarations share the
+//! A class's or enum class's primary-constructor prefix and parameter list. Both declarations share the
 //! `classParameters` grammar, so one production parses each parameter's annotations, modifiers,
 //! `val`/`var`, type, and default. Besides the parameters, it keeps the closing `)`'s offset:
 //! kotlinc maps the `$default` constructor's `return` there.
 
 use super::*;
+
+/// What precedes a primary constructor's `constructor` keyword or `(`: its annotations and
+/// modifiers.
+#[derive(Default)]
+pub(super) struct PrimaryConstructorPrefix {
+    pub(super) visibility: Visibility,
+    pub(super) visibility_span: Option<Span>,
+    pub(super) annotations: Vec<crate::ast::AnnotationRef>,
+    pub(super) annotation_args: Vec<Vec<crate::ast::ExprId>>,
+    /// Where the primary constructor starts: its first annotation, modifier, `constructor`
+    /// keyword or `(`; 0 when the header has none of them.
+    pub(super) open_offset: u32,
+}
 
 /// The parsed `(params)` of a primary constructor.
 pub(super) struct PrimaryConstructorParameters {
@@ -15,6 +28,38 @@ pub(super) struct PrimaryConstructorParameters {
 }
 
 impl Parser<'_> {
+    /// Parse the annotations and modifiers an explicit primary constructor starts with. They may
+    /// continue across physical newlines, so a header that only carries `(` is left untouched.
+    pub(super) fn parse_primary_constructor_prefix(&mut self) -> PrimaryConstructorPrefix {
+        let mut prefix = PrimaryConstructorPrefix::default();
+        if !self.primary_constructor_header_follows() {
+            return prefix;
+        }
+        self.skip_semicolons();
+        // A KDoc before the constructor is not part of it.
+        prefix.open_offset = self.tok().span.lo;
+        if self.at(TokenKind::At) || self.at_modifier() {
+            let prefix_start = self.i;
+            let modifiers = self.skip_decl_prefix();
+            prefix.visibility_span = self.t[prefix_start..self.i]
+                .iter()
+                .find(|token| {
+                    token.kind == TokenKind::Ident
+                        && matches!(
+                            token.text(self.src),
+                            "private" | "protected" | "internal" | "public"
+                        )
+                })
+                .map(|token| token.span);
+            // The declared constructor visibility survives into `@Metadata` (and, for
+            // `protected`, the JVM `<init>` access flags).
+            prefix.visibility = visibility_of(&modifiers);
+            prefix.annotations = self.take_pending_annotations();
+            prefix.annotation_args = self.take_pending_annotation_args();
+        }
+        prefix
+    }
+
     /// Parse `(params)` positioned on the `(`.
     pub(super) fn parse_primary_constructor_parameters(
         &mut self,

@@ -192,6 +192,7 @@ pub(super) fn attach(file: &mut File, src: &str) {
                 // or every member method keeps line 0 and gets no `LineNumberTable`.
                 for m in &mut c.methods {
                     m.sig_line = line_at(m.span.lo);
+                    m.context_line = m.context_span.map_or(0, |span| line_at(span.lo));
                     m.decl_line = body_line(&m.body, m.sig_line);
                     m.body_lines = function_lines(&m.body, m.span);
                 }
@@ -222,6 +223,7 @@ pub(super) fn attach(file: &mut File, src: &str) {
                     e.decl_line = line_at(e.span.lo);
                     for m in &mut e.methods {
                         m.sig_line = line_at(m.span.lo);
+                        m.context_line = m.context_span.map_or(0, |span| line_at(span.lo));
                         m.decl_line = body_line(&m.body, m.sig_line);
                         m.body_lines = function_lines(&m.body, m.span);
                     }
@@ -249,6 +251,7 @@ pub(super) fn attach(file: &mut File, src: &str) {
             }
             Decl::Fun(f) => {
                 f.sig_line = line_at(f.span.lo);
+                f.context_line = f.context_span.map_or(0, |span| line_at(span.lo));
                 f.decl_line = body_line(&f.body, f.sig_line);
                 f.body_lines = function_lines(&f.body, f.span);
             }

@@ -36,6 +36,20 @@ impl Checker<'_> {
             })
     }
 
+    /// Whether a `null` function value of the declared type `nominal` stays `null` through a
+    /// function-value conversion. A type parameter with a nullable function bound and any other
+    /// nullable function type each have a release range that converts it to an adapter instead
+    /// ([`crate::kotlin_version::Quirk::NullTypeParameterFunctionValueIsDereferenced`],
+    /// [`crate::kotlin_version::Quirk::NullFunctionValueConvertsToAdapter`]).
+    fn null_function_value_stays(&self, nominal: Ty) -> bool {
+        let converts = if nominal.is_ty_param() {
+            crate::kotlin_version::Quirk::NullTypeParameterFunctionValueIsDereferenced
+        } else {
+            crate::kotlin_version::Quirk::NullFunctionValueConvertsToAdapter
+        };
+        !self.file.language.reference.quirks().has(converts)
+    }
+
     /// Commit the type of a selected call's argument. Reaching this seam means the call has
     /// committed its parameter type, so the exact callable constituent a function-value conversion
     /// wraps is retained for checked FIR. A callable reference carries its own checked adaptation
@@ -51,8 +65,10 @@ impl Checker<'_> {
         match self.function_value_conversion_source(scope, argument, nominal, expected) {
             Some(source) => {
                 if !matches!(self.file.expr(argument), Expr::CallableRef { .. }) {
+                    let keeps_null =
+                        source.admits_null() && self.null_function_value_stays(nominal);
                     self.selected_function_value_conversions
-                        .insert(argument, (source, expected));
+                        .insert(argument, (source, expected, keeps_null));
                 }
                 source
             }
@@ -201,6 +217,20 @@ impl Checker<'_> {
         if !target.suspend && !unit_conversion {
             return None;
         }
+        // Some releases pass a type parameter with a nullable function bound to a suspend
+        // function type unconverted.
+        if target.suspend
+            && nominal.is_ty_param()
+            && nominal.upper_bound_admits_null()
+            && self
+                .file
+                .language
+                .reference
+                .quirks()
+                .has(crate::kotlin_version::Quirk::TypeParameterFunctionValueSkipsSuspendConversion)
+        {
+            return None;
+        }
         self.expression_function_types(scope, expression, nominal)
             .into_iter()
             .find(|candidate| {
@@ -230,6 +260,18 @@ impl Checker<'_> {
                     source.suspend,
                 ));
                 self.receiver_is_assignable(*candidate, converted_target)
+            })
+            .map(|candidate| {
+                // A type parameter whose bound admits `null` can hold `null`, which the converted
+                // value then stays, in the releases that do not convert it as if it were present.
+                if nominal.upper_bound_admits_null()
+                    && !candidate.admits_null()
+                    && self.null_function_value_stays(nominal)
+                {
+                    Ty::nullable(candidate)
+                } else {
+                    candidate
+                }
             })
     }
 

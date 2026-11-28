@@ -1,14 +1,7 @@
 //! A CLASS that implements a function type, rather than a lambda.
 //!
-//! `invoke` is the one dependency member this target already gives a fixed slot: a function
-//! value's body sits right after `kotlin.Any`'s three, the runtime names that number itself
-//! (`KT_SLOT_INVOKE`), and every caller through a function type reads it. A class implementing
-//! `Function0<T>` puts its `invoke` there for the same reason a lambda does — and until it did,
-//! every such class was declined as an override of a dependency method.
-//!
-//! Only when every operand and the result are REFERENCES. A caller through the function type
-//! passes and reads references, and an `invoke(x: Int): Int` carries machine integers — that one
-//! needs a bridge and still declines.
+//! A class implementing `Function0<T>` answers a call through the function type the way a lambda
+//! does, through the function protocol (`native::interface_calls`) by the call's operand count.
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 

@@ -466,11 +466,15 @@ impl Numbering<'_> {
                             continue;
                         }
                         // A member extension's receiver crosses the accessor like its value.
-                        let receiver = edge.declared_receiver.zip(edge.implementation_receiver);
+                        let operands = super::accessor_operands(
+                            &edge.declared_contexts,
+                            &edge.implementation_contexts,
+                            edge.declared_receiver.zip(edge.implementation_receiver),
+                        );
                         let bridged = !self
                             .representation
                             .same(edge.declared_type, edge.implementation_type)
-                            || receiver.is_some_and(|(declared, implemented)| {
+                            || operands.iter().any(|&(declared, implemented)| {
                                 !self.representation.same(declared, implemented)
                             });
                         group.push((key(overridden), bridged));

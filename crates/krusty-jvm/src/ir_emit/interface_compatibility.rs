@@ -241,8 +241,19 @@ pub(super) fn emit_inherited_default_surface(
                 erased,
                 signature: holder_signature.as_deref(),
                 // kotlinc gives an inherited member's holder forwarder no line: it has no source in
-                // this interface.
-                lines: ForwardLines::default(),
+                // this interface. Earlier releases map it to the interface's declaration line.
+                lines: if ir
+                    .reference
+                    .quirks()
+                    .has(krusty::kotlin_version::Quirk::InheritedHolderForwarderMapsInterfaceLine)
+                {
+                    ForwardLines {
+                        start: super::static_accessors::class_declaration_line(c),
+                        end: 0,
+                    }
+                } else {
+                    ForwardLines::default()
+                },
                 varargs,
                 target,
                 // An inherited member is not declared here; its holder copies none of its source.

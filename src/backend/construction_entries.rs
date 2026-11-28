@@ -80,11 +80,13 @@ fn publish_constructor_defaults(
     exports: &mut DependencyExportSignatures,
 ) {
     let mut published = ir
-        .constructor_default_entries
+        .checked_constructor_bodies
         .iter()
-        .filter_map(|(&declaration, &target)| {
-            let class = ir.checked_constructor_bodies.get(&declaration)?.class;
-            Some((declaration, class, target))
+        .filter_map(|(&declaration, body)| {
+            let target = *ir
+                .constructor_default_entries
+                .get(&(body.class, body.ordinal))?;
+            Some((declaration, body.class, target))
         })
         .collect::<Vec<_>>();
     published.sort_unstable_by_key(|&(declaration, _, _)| declaration.raw());
@@ -175,26 +177,35 @@ fn publish_default_entry(
     constructor: super::ExportedConstructor,
     entry: FunId,
 ) {
-    let Some((&declaration, _)) = ir.checked_constructor_bodies.iter().find(|(_, body)| {
-        body.class == constructor.class
-            && body.ordinal.checked_sub(1).map(|index| index as usize) == constructor.secondary
-    }) else {
+    let ordinal = constructor
+        .secondary
+        .map_or(0, |secondary| secondary as u32 + 1);
+    let Some(&target) = ir
+        .constructor_default_entries
+        .get(&(constructor.class, ordinal))
+    else {
         return;
     };
-    let Some(&target) = ir.constructor_default_entries.get(&declaration) else {
-        return;
-    };
-    let linked = exports
-        .instance_entries()
+    // A constructor a library exports under a KLIB identity has no checked declaration, so its
+    // entry is built here rather than linked from its module's instance entries.
+    let declaration = ir
+        .checked_constructor_bodies
         .iter()
-        .find_map(|(instance, function)| {
-            matches!(
-            instance,
-            super::instance_links::InstanceEntry::ConstructorDefaults { declaration: published, .. }
-                if *published == declaration
-        )
-        .then_some(*function)
-        });
+        .find(|(_, body)| body.class == constructor.class && body.ordinal == ordinal)
+        .map(|(&declaration, _)| declaration);
+    let linked = declaration.and_then(|declaration| {
+        exports
+            .instance_entries()
+            .iter()
+            .find_map(|(instance, function)| {
+                matches!(
+                    instance,
+                    super::instance_links::InstanceEntry::ConstructorDefaults { declaration: published, .. }
+                        if *published == declaration
+                )
+                .then_some(*function)
+            })
+    });
     let default = match linked {
         Some(function) => Some(function),
         None => target

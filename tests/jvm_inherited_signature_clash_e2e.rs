@@ -14,7 +14,7 @@ fn assert_kotlinc_module_diagnostics(files: &[(&str, &str)]) {
     let result = common::compiler_diagnostics(files, std::slice::from_ref(&stdlib));
     assert_ne!(result.reference_code, 0, "kotlinc accepted {source:?}");
     assert_ne!(result.krusty_code, 0, "krusty accepted {source:?}");
-    let mut observed = complete_errors(&result.krusty_stderr, false);
+    let mut observed = complete_errors(&result.krusty_stderr, true);
     observed.extend(complete_errors(&result.krusty_stdout, false));
     let expected = complete_errors(&result.reference_stderr, true);
     assert!(
@@ -171,7 +171,7 @@ fn an_unused_dependency_overload_takes_its_signature() {
     let result = common::compiler_diagnostics(&[("Derived.kt", source)], &[library, stdlib]);
     assert_ne!(result.reference_code, 0, "kotlinc accepted {source:?}");
     assert_ne!(result.krusty_code, 0, "krusty accepted {source:?}");
-    let mut observed = complete_errors(&result.krusty_stderr, false);
+    let mut observed = complete_errors(&result.krusty_stderr, true);
     observed.extend(complete_errors(&result.krusty_stdout, false));
     let expected = complete_errors(&result.reference_stderr, true);
     assert!(

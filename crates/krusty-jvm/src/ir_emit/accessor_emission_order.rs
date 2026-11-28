@@ -80,10 +80,20 @@ pub(super) fn emit(
             class,
             &physical_parameters,
         );
+        let parameters = super::primary_ctor_source_parameters(ir, class)
+            .iter()
+            .map(|parameter| parameter.annotations.cloned().unwrap_or_default())
+            .collect::<Vec<_>>();
+        let attributes = constructor_accessors::primary_annotations_ride_accessor(ir, class)
+            .then_some(constructor_defaults::MarkerAccessorAttributes {
+                annotations: &class.primary_ctor_annotations,
+                parameters: &parameters,
+            });
         constructor_defaults::emit_ctor_marker_accessor(
             fq_name,
             &physical_parameters,
             &parameter_identities,
+            attributes,
             writer,
         );
     }

@@ -2075,7 +2075,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             diagnostics,
-            vec!["1:16 error unresolved reference 'hidden'."]
+            vec!["1:16 error Unresolved reference 'hidden'."]
         );
         std::fs::remove_dir_all(&directory).expect("remove classpath directory");
         std::fs::remove_dir_all(&cache_root).expect("remove dump cache");
@@ -2615,7 +2615,7 @@ mod tests {
         assert_eq!(diagnostic.span, Span::new(41, 48));
         assert_eq!(diagnostic.severity, Severity::Error);
         assert_eq!(diagnostic.kind, DiagnosticKind::Compiler);
-        assert_eq!(diagnostic.msg, "unresolved reference 'Missing'.");
+        assert_eq!(diagnostic.msg, "Unresolved reference 'Missing'.");
         assert!(analysis.library_definitions.is_empty());
         assert!(analysis.implementation_relations.is_empty());
         assert_eq!(analysis.hover.entry_count(), 0);
@@ -2700,7 +2700,7 @@ mod tests {
             .iter()
             .map(|diagnostic| diagnostic.message.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(messages, vec!["unresolved reference 'hidden'."]);
+        assert_eq!(messages, vec!["Unresolved reference 'hidden'."]);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2761,7 +2761,7 @@ mod tests {
         assert_eq!(diagnostic_messages(&analyses[0]), Vec::<&str>::new());
         assert_eq!(
             diagnostic_messages(&analyses[1]),
-            vec!["unresolved reference 'hidden'."]
+            vec!["Unresolved reference 'hidden'."]
         );
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -2780,7 +2780,7 @@ mod tests {
         assert_eq!(diagnostic_messages(&analyses[0]), Vec::<&str>::new());
         assert_eq!(
             diagnostic_messages(&analyses[1]),
-            vec!["unresolved reference 'p'."]
+            vec!["Unresolved reference 'p'."]
         );
     }
 

@@ -110,7 +110,11 @@ fun build() = Callbacks({ value: Int -> value })\n";
             "",
             format!(
                 "{krusty_path}:2:25: error: argument type mismatch: actual type is '(Int) -> Int', but 'String?' was expected.\n\
-                 krusty: 1 error(s)\n"
+                 fun build() = Callbacks({{ value: Int -> value }})\n\
+                 {}{}\n\
+                 krusty: 1 error(s)\n",
+                " ".repeat(24),
+                "^".repeat(23)
             )
             .as_str(),
         )

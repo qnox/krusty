@@ -135,6 +135,21 @@ impl Diagnostic {
     }
 }
 
+/// One kotlinc factory's report: its name and its rendered `renderMessage()`. A wording function
+/// that renders a factory's message returns it named, so its report cannot lose the name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedMessage {
+    pub name: DiagnosticName,
+    pub message: String,
+}
+
+impl NamedMessage {
+    /// The text kotlinc prints for this message ([`render_message`]).
+    pub fn printed(&self, names: DiagnosticNames) -> Cow<'_, str> {
+        render_message(Some(self.name), &self.message, names)
+    }
+}
+
 /// A diagnostic about the compilation's configuration rather than a source position. It is reported
 /// as a warning; `-Xwarning-level` may promote it to an error.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -291,6 +306,11 @@ impl DiagSink {
         });
     }
 
+    /// Report a factory's error under its name.
+    pub fn report_error(&mut self, span: Span, report: NamedMessage) {
+        self.error_named(span, report.name, report.message);
+    }
+
     /// Report an error under its kotlinc name. `msg` is kotlinc's `renderMessage()`.
     pub fn error_named(&mut self, span: Span, name: DiagnosticName, msg: impl Into<String>) {
         if !self.accepts(span) {
@@ -366,13 +386,25 @@ impl DiagSink {
         identity: DiagnosticIdentity,
         msg: impl Into<String>,
     ) {
+        self.error_with(span, None, Some(identity), msg);
+    }
+
+    /// Report an error under its kotlinc name and with the identity that deduplicates it, each
+    /// where the report has one.
+    pub fn error_with(
+        &mut self,
+        span: Span,
+        name: Option<DiagnosticName>,
+        identity: Option<DiagnosticIdentity>,
+        msg: impl Into<String>,
+    ) {
         if !self.accepts(span) {
             return;
         }
         let msg = msg.into();
         crate::trace_compiler!(
             "diagnostic",
-            "file={} span={span:?} kind={:?} identity={identity:?} message={msg}",
+            "file={} span={span:?} kind={:?} name={name:?} identity={identity:?} message={msg}",
             self.current_file,
             DiagnosticKind::Compiler,
         );
@@ -380,10 +412,10 @@ impl DiagSink {
             span,
             editor_span: None,
             severity: Severity::Error,
-            name: None,
+            name,
             kind: DiagnosticKind::Compiler,
             msg,
-            identity: Some(identity),
+            identity,
             file: self.current_file,
         });
     }
@@ -511,6 +543,7 @@ impl DiagSink {
                 .or_else(|| files.first().copied())
                 .unwrap_or(("<unknown>", ""));
             out.push_str(&render_one(d, path, src, names));
+            out.push_str(&source_excerpt(d.span, src));
         }
         for error in &self.module_errors {
             out.push_str("error: ");
@@ -525,6 +558,45 @@ fn render_one(d: &Diagnostic, path: &str, src: &str, names: DiagnosticNames) -> 
     let (line, col) = line_col(src, d.span.lo);
     let sev = severity_word(d.severity);
     format!("{path}:{line}:{col}: {sev}: {}\n", d.message(names))
+}
+
+/// kotlinc's `PlainTextMessageRenderer` excerpt under a located message: the source line, then a
+/// marker line whose `^` run covers the span, up to the end of the line when the span goes past it
+/// and at least one column wide. Whitespace before the span is kept so tabs line up.
+fn source_excerpt(span: Span, src: &str) -> String {
+    let lo = char_boundary_at_or_before(src, span.lo as usize);
+    let line_start = src[..lo].rfind('\n').map_or(0, |at| at + 1);
+    let line_end = src[lo..].find('\n').map_or(src.len(), |at| lo + at);
+    let line = src[line_start..line_end].trim_end_matches('\r');
+    if line.is_empty() {
+        return String::new();
+    }
+    let hi = char_boundary_at_or_before(src, (span.hi as usize).clamp(lo, line_start + line.len()));
+    let mut out = String::new();
+    out.push_str(line);
+    out.push('\n');
+    for c in src[line_start..lo].chars() {
+        out.push(if c.is_whitespace() { c } else { ' ' });
+    }
+    // A range that runs past its first line is marked by one caret.
+    let width = if (span.hi as usize) > line_end {
+        1
+    } else {
+        src[lo..hi].chars().count().max(1)
+    };
+    out.extend(std::iter::repeat_n('^', width));
+    out.push('\n');
+    out
+}
+
+/// A byte offset into `src` moved back onto a character boundary. A span synthesized from a name's
+/// length rather than from source text can end inside a multi-byte character.
+fn char_boundary_at_or_before(src: &str, offset: usize) -> usize {
+    let mut at = offset.min(src.len());
+    while !src.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
 }
 
 fn severity_word(severity: Severity) -> &'static str {
@@ -657,8 +729,20 @@ mod tests {
         let r = s.render_all(&files, DiagnosticNames::Hidden);
         assert!(r.contains("A.kt:1:1: error: in A"), "got: {r}");
         assert!(r.contains("B.kt:2:2: error: in B"), "got: {r}");
-        // Exactly two lines — no duplication across files.
-        assert_eq!(r.lines().count(), 2, "got: {r}");
+        // Each diagnostic is followed by its own line and marker; nothing is duplicated.
+        assert_eq!(
+            r,
+            "A.kt:1:1: error: in A\nxyz\n^\nB.kt:2:2: error: in B\ncde\n ^\n"
+        );
+    }
+
+    #[test]
+    fn an_excerpt_span_ending_inside_a_multibyte_character_stays_on_its_boundary() {
+        // `é` is two bytes: a span synthesized as one byte wide ends inside it.
+        let mut s = DiagSink::new();
+        s.warning(Span::new(0, 1), "wide");
+        let r = s.render_all(&[("A.kt", "é f n")], DiagnosticNames::Hidden);
+        assert_eq!(r, "A.kt:1:1: warning: wide\né f n\n^\n");
     }
 
     #[test]

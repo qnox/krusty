@@ -151,6 +151,7 @@ impl BodyLowering<'_> {
                         FirAdaptedReferenceArgument::Vararg {
                             values,
                             whole_array,
+                            ..
                         } => {
                             let array_type = parameters[parameter as usize].get();
                             let elements = values

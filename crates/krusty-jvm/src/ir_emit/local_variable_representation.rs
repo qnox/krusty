@@ -64,11 +64,12 @@ fn shared_cell_snapshot(ir: &IrFile, declaration: ExprId) -> Option<(ExprId, Ty,
 
 /// The verifier type of an inlined type-parameter value.
 ///
-/// kotlinc stores that parameter as its erased bound (`T : AutoCloseable?` is `AutoCloseable`) and
-/// `checkcast`s back to the call-site type at each use. An unconstrained `T` stays the specialized
-/// reference: its bound erases to `Object`, and no cast is emitted. A primitive specialization is
-/// boxed into the erased bound, as kotlinc boxes `true.also { }`'s receiver and unboxes it for
-/// each use; the redundant-boxing pass removes the pair when every use unboxes.
+/// kotlinc stores that parameter as its erased bound (`T : AutoCloseable?` is `AutoCloseable`, an
+/// unconstrained `T` is `Object`) and `checkcast`s back to the call-site type at each use; the
+/// redundant-checkcast pass removes the casts of a value whose class is exactly that type. A
+/// primitive specialization is boxed into the erased bound, as kotlinc boxes `true.also { }`'s
+/// receiver and unboxes it for each use; the redundant-boxing pass removes the pair when every use
+/// unboxes.
 fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Option<Ty> {
     let declared = ir.inline_declared_type(declaration)?;
     if !declared.non_null().is_ty_param() {
@@ -85,14 +86,7 @@ fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) 
         let primitive = stored_value_ty(semantic);
         return (primitive.scalar_value_repr() == Some(primitive)).then_some(erased);
     }
-    let top = erased
-        .obj_internal()
-        .is_some_and(krusty::jvm::jvm_class_map::is_jvm_erased_top);
-    if top {
-        None
-    } else {
-        Some(erased)
-    }
+    Some(erased)
 }
 
 /// The built-in primitive a declaration holds boxed in its erased inline type-parameter slot.
@@ -455,6 +449,10 @@ impl Emitter<'_> {
                     source
                 } else if let Some((holder, elem, _)) = shared_cell_snapshot(self.ir, declaration) {
                     self.emit_shared_cell_read(holder, elem, false, code)
+                } else if let Some(uncast) =
+                    self.erased_slot_smart_cast_operand(declaration, initializer, slot_ty)
+                {
+                    self.emit_consumed_operand(uncast, code)
                 } else {
                     self.emit_consumed_operand(initializer, code)
                 }
@@ -473,8 +471,71 @@ impl Emitter<'_> {
             self.mark_expression_start(initializer, code);
         }
         self.adapt_physical_operand(source, semantic, Some(semantic_ty), slot_ty, code);
+        self.coerce_invoke_parameter(declaration, source, semantic_ty, slot_ty, code);
         if marks_line {
             self.mark_declaration_line(declaration, code);
+        }
+    }
+
+    /// The value beneath the smart casts of an operand an inline call hands over at an erased type:
+    /// one stored into an inline type parameter's `Object` slot, or one an inlined lambda receives
+    /// through `invoke`'s `Object`. kotlinc materializes a smart cast only for a consumer that needs
+    /// the narrower class: `if (e is Holder) e.also { }` stores `e` uncast, and the lambda's
+    /// parameter takes the cast of its own class ([`Self::coerce_invoke_parameter`]).
+    fn erased_slot_smart_cast_operand(
+        &self,
+        declaration: ExprId,
+        initializer: ExprId,
+        slot_ty: Ty,
+    ) -> Option<ExprId> {
+        let erased_parameter = self
+            .ir
+            .inline_declared_type(declaration)
+            .is_some_and(|declared| declared.non_null().is_ty_param())
+            && slot_ty
+                .obj_internal()
+                .is_some_and(krusty::jvm::jvm_class_map::is_jvm_erased_top);
+        (erased_parameter || self.is_invoke_parameter(declaration))
+            .then(|| self.consumed_implicit_cast_operand(initializer))
+            .flatten()
+    }
+
+    /// An inlined lambda's parameter, bound from the operand its body's `invoke` passes.
+    fn is_invoke_parameter(&self, declaration: ExprId) -> bool {
+        matches!(
+            self.ir.debug_local_provenance(declaration),
+            Some(
+                IrDebugLocalProvenance::InlineLambdaParameter { .. }
+                    | IrDebugLocalProvenance::InlineLambdaReceiver { .. }
+            )
+        ) && self.ir.call_operand_bindings.contains(&declaration)
+    }
+
+    /// kotlinc's inliner hands an inlined lambda's parameter over as the `Object` its `invoke`
+    /// takes, and `StackValue.coerce` casts it back to the parameter's class before the store. The
+    /// redundant-checkcast pass removes the cast of a value whose class is already exact, so it
+    /// stays only where the value's class is not known exactly (`this`, a subclass instance). A
+    /// value read at its erased type was already narrowed to the slot by the store's adaptation.
+    fn coerce_invoke_parameter(
+        &mut self,
+        declaration: ExprId,
+        source: Ty,
+        semantic_ty: Ty,
+        slot_ty: Ty,
+        code: &mut CodeBuilder,
+    ) {
+        if !self.is_invoke_parameter(declaration)
+            || code.is_dead()
+            || self.is_value_class_ty(&semantic_ty)
+            || source
+                .obj_internal()
+                .is_some_and(krusty::jvm::jvm_class_map::is_jvm_erased_top)
+        {
+            return;
+        }
+        if let (true, Some(internal)) = (source.is_reference(), checkcast_internal(slot_ty)) {
+            let class = self.cw.class_ref(&internal);
+            code.checkcast(class);
         }
     }
 

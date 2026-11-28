@@ -6,13 +6,10 @@ XXmultiPlatformProject/firMultiplatformCompilationWithoutErrors.args
 XeagerLambdaAnalysis/executorSubmitDefault.args
 XeagerLambdaAnalysis/executorSubmitEnabled.args
 XeagerLambdaAnalysis/unitConversionWithEla.args
-XjdkRelease/jdkRelease20WithCorruptedClass.args
 XjdkRelease/jdkRelease6WithJvmTarget8Jdk11.args
-XjdkRelease/jdkRelease6WithJvmTarget8Jdk8.args
 XjdkRelease/jdkRelease6WithJvmTarget9.args
 XjdkRelease/jdkRelease6WithoutExplicitJvmTarget.args
 XjdkRelease/jdkRelease7WithJvmTarget8Jdk11.args
-XjdkRelease/jdkRelease7WithJvmTarget8Jdk8.args
 XjspecifyAnnotation/jspecifyDefault.args
 XjspecifyAnnotation/jspecifyFileRootsProgressive.args
 XjspecifyAnnotation/jspecifyFileRootsWarning.args
@@ -50,7 +47,6 @@ abiStabilityIncorrectValue.args
 annotatedParameterWithoutName.args
 annotationDefaultTargetFirstOnly.args
 annotationDefaultTargetFirstOnlyWarn.args
-annotationDefaultTargetParamProperty.args
 annotationDefaultTargetWithOptInFirstOnly.args
 annotationDefaultTargetWithOptInParamProperty.args
 annotationDefaultTargetWithSuppressedOptInFirstOnly.args
@@ -111,7 +107,6 @@ diagnosticTests/suspensionPointInMonitor.args
 diagnosticTests/wrongAnnotationArgumentInCtor.args
 errorSuppressionWarning.args
 explicitContextArguments.args
-explicitReturnTypesEnabled.args
 expression1.args
 extraArgCommonChecks/extraArgumentEmpty.args
 extraArgCommonChecks/extraArgumentInvalidValue.args
@@ -219,7 +214,6 @@ syntaxError.args
 syntheticAccessorForPropertiesSignatureClash.args
 syntheticAccessorPropertyAndFunSignatureClash.args
 syntheticAccessorSignatureClash.args
-tailrec.args
 twoDiagnosticsOnSingleElement.args
 unknownReleaseVersion.args
 valhallaValueClassesIllegalConfiguration.args

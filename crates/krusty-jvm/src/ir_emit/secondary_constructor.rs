@@ -223,12 +223,18 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         };
         // Reserve this constructor's header — its declared annotations included — before its body
         // interns anything, matching the order kotlinc's writer produces.
+        let reserved_annotations =
+            if super::constructor_accessors::secondary_annotations_ride_accessor(c, sc) {
+                krusty::ir::DeclarationAnnotations::default()
+            } else {
+                sc.annotations.clone()
+            };
         cw.reserve_method_pool_with_annotations(
             "<init>",
             &sc_desc,
             sc_signature.as_deref(),
             &nullability_types,
-            &sc.annotations,
+            &reserved_annotations,
             &method_parameters,
         );
         let sc_words: u16 = sc_param_tys.iter().map(|t| slot_words(*t)).sum();
@@ -673,14 +679,8 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         }
         // Declared constructor annotations, with the same `Deprecated` / `ACC_SYNTHETIC` companions
         // a function's carry (see the method emitter).
-        if !sc.annotations.retains_none() {
-            cw.set_method_annotations("<init>", &sc_desc, &sc.annotations);
-            if sc.annotations.deprecated() {
-                cw.mark_method_deprecated("<init>", &sc_desc);
-            }
-            if super::function_annotations::hidden_realization_is_synthetic(&sc.annotations) {
-                cw.set_method_synthetic("<init>", &sc_desc);
-            }
+        if !super::constructor_accessors::secondary_annotations_ride_accessor(c, sc) {
+            super::function_annotations::emit_constructor_declared(cw, &sc.annotations, &sc_desc);
         }
         if let Some(defaults) = crate::default_wrappers::secondary_constructor(sc) {
             // The stub's physical prefix is everything ahead of the declared parameters — the
@@ -734,6 +734,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 fq_name,
                 &sc_param_tys,
                 &parameter_identities,
+                None,
                 cw,
             );
         }

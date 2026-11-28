@@ -13,6 +13,7 @@ use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrFunction, KlibIrType, KlibIrTypeArgument, KlibIrTypeId,
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
+use crate::types::TypeName;
 
 /// Name in `types` every class of `module` without a public signature that the header of
 /// `function` names. Any other non-public classifier stays unnamed, and reading it still declines.
@@ -22,6 +23,19 @@ pub(super) fn bind(
     module: &str,
     arena: &KlibIrArena,
     function: &KlibIrFunction,
+) -> Result<(), KlibBodyDeclineReason> {
+    bind_with(types, arena, function, &|signature| {
+        super::same_library_class::classifier(bodies, module, signature)
+    })
+}
+
+/// [`bind`], naming each non-public class as `resolve` names it inside the library whose body
+/// declares `function`: a closure of a body names its library's classes as that body does.
+pub(super) fn bind_with(
+    types: &mut KlibTypeParameters,
+    arena: &KlibIrArena,
+    function: &KlibIrFunction,
+    resolve: &dyn Fn(&KlibIrSignature) -> Result<Option<TypeName>, KlibBodyDeclineReason>,
 ) -> Result<(), KlibBodyDeclineReason> {
     let mut pending = header_types(function);
     let mut named = crate::fx_hash::HashSet::default();
@@ -49,7 +63,7 @@ pub(super) fn bind(
         {
             continue;
         }
-        if let Some(name) = super::same_library_class::classifier(bodies, module, signature)? {
+        if let Some(name) = resolve(signature)? {
             types.bind_classifier(signature, name);
         }
     }

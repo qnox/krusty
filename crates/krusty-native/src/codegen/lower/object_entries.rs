@@ -60,7 +60,7 @@ impl FileLowering<'_> {
                 let Some(value) =
                     body.convert(values[index + 1], Some(any()), parameter_slot(want))?
                 else {
-                    return Err("a `Unit` operand crossing the function slot".into());
+                    return Err("a `Unit` operand crossing the function bridge".into());
                 };
                 arguments.push(value);
             }
@@ -200,16 +200,19 @@ impl FileLowering<'_> {
         &mut self,
         declared: Ty,
         implemented: Ty,
-        receiver: Option<(Ty, Ty)>,
+        operands: &[(Ty, Ty)],
         setter: bool,
         target_slot: u32,
         id: FuncId,
     ) -> Result<(), Unsupported> {
-        let (params, result) =
-            accessor_signature(declared, receiver.map(|(declared, _)| declared), setter);
+        let (params, result) = accessor_signature(
+            declared,
+            operands.iter().map(|&(declared, _)| declared),
+            setter,
+        );
         let (forwarded, forwarded_result) = accessor_signature(
             implemented,
-            receiver.map(|(_, implemented)| implemented),
+            operands.iter().map(|&(_, implemented)| implemented),
             setter,
         );
         let signature = self.signature_of(&params, result)?;
@@ -313,11 +316,11 @@ impl FileLowering<'_> {
 /// setter's value; a getter answers the property's type and a setter nothing.
 pub(super) fn accessor_signature(
     property: Ty,
-    receiver: Option<Ty>,
+    operands: impl IntoIterator<Item = Ty>,
     setter: bool,
 ) -> (Vec<Ty>, Ty) {
     let mut params = vec![any()];
-    params.extend(receiver);
+    params.extend(operands);
     if setter {
         params.push(property);
         (params, Ty::Unit)

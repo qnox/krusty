@@ -24,6 +24,7 @@ impl Parser<'_> {
             let entry_name = self.text().to_string();
             self.bump();
             // Optional constructor arguments: `RED(0xFF0000)`, incl. named `RED(rgb = 0xFF0000)`.
+            let explicit_call = self.at(TokenKind::LParen);
             let (args, arg_names) = if self.eat(TokenKind::LParen) {
                 let (args, names, _) = self.parse_call_argument_list();
                 self.expect(TokenKind::RParen, "')'");
@@ -132,6 +133,7 @@ impl Parser<'_> {
                 decl_line: 0,
                 annotations: entry_ann_names,
                 annotation_args: entry_ann_args,
+                explicit_call,
                 args,
                 arg_names,
                 methods: body,

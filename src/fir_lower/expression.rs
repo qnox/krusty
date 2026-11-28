@@ -1555,14 +1555,14 @@ impl BodyLowering<'_> {
                 .callable_reference_provenance
                 .contains_key(&(raw as u32));
             unnamed
-                && matches!(
+                && (matches!(
                     self.ir.exprs[raw],
                     crate::ir::IrExpr::CallableReference(_)
                 ) || matches!(
                     &self.ir.exprs[raw],
                     crate::ir::IrExpr::Checked(checked_op)
                         if matches!(&**checked_op, crate::ir::IrCheckedOperation::PropertyReference { .. })
-                )
+                ))
         });
         let (Some(reference), None) = (references.next(), references.next()) else {
             return;
@@ -1595,7 +1595,32 @@ impl BodyLowering<'_> {
         &self,
         expression_id: crate::fir::FirExprId,
     ) -> Option<crate::ir::IrLocalClassNameProvenance> {
-        let provenance = self.body.generated_class_provenance(expression_id)?;
+        self.ir_class_name_provenance(self.body.generated_class_provenance(expression_id)?)
+    }
+
+    /// Name local or anonymous class `declaration`, realized as `class`, from the provenance this
+    /// body settled for it, which replaces the one published with its declaration.
+    pub(super) fn settle_class_name(
+        &mut self,
+        declaration: crate::fir::DeclarationId,
+        class: crate::ir::ClassId,
+    ) {
+        let Some(provenance) = self
+            .body
+            .settled_class_name(declaration)
+            .and_then(|provenance| self.ir_class_name_provenance(provenance))
+        else {
+            return;
+        };
+        self.ir
+            .local_class_name_provenance
+            .insert(class, provenance);
+    }
+
+    fn ir_class_name_provenance(
+        &self,
+        provenance: &crate::fir::FirGeneratedClassProvenance,
+    ) -> Option<crate::ir::IrLocalClassNameProvenance> {
         let lexical_owner = match provenance.lexical_owner {
             Some(owner) => match self.ir.checked_classifier_classes.get(&owner) {
                 Some(&class) => Some(crate::ir::IrLocalClassOwner::Class(class)),
@@ -1711,18 +1736,18 @@ impl BodyLowering<'_> {
         }
         let expression = self.expression(value)?;
         let first_conversion = self.ir.exprs.len();
-        let converted = self.lowered_with_conversion(expression, source_type, conversion)?;
+        let (converted, generated_class) =
+            self.converted_operand(expression, source_type, conversion)?;
         // fir2ir builds an implicit conversion at the offsets of the value it converts.
         self.ir
             .settle_positions_of(first_conversion..self.ir.exprs.len(), expression);
-        if conversion.is_some_and(|conversion| {
-            matches!(conversion.kind, FirConversionKind::FunctionValue { .. })
-        }) {
+        if let Some(class) = generated_class {
             // The checker named the class a function-value conversion compiles to on its value.
             if let Some(line) = self.ir.source_line(expression) {
                 self.ir.set_source_line(converted, line);
+                self.ir.set_source_line(class, line);
             }
-            self.record_generated_class_provenance(value, converted as usize);
+            self.record_generated_class_provenance(value, class as usize);
         }
         Ok(converted)
     }
@@ -1734,11 +1759,37 @@ impl BodyLowering<'_> {
         source_type: crate::types::Ty,
         conversion: Option<FirConversion>,
     ) -> Result<ExprId, FirLoweringFailure> {
+        self.converted_operand(expression, source_type, conversion)
+            .map(|(converted, _)| converted)
+    }
+
+    /// [`Self::lowered_with_conversion`], with the node of the class a function-value conversion
+    /// compiles to, which the checker named on the converted value.
+    fn converted_operand(
+        &mut self,
+        expression: ExprId,
+        source_type: crate::types::Ty,
+        conversion: Option<FirConversion>,
+    ) -> Result<(ExprId, Option<ExprId>), FirLoweringFailure> {
         let Some(conversion) = conversion else {
-            return Ok(expression);
+            return Ok((expression, None));
         };
         let conversion_origin = conversion.origin;
-        Ok(match conversion.kind {
+        if let FirConversionKind::FunctionValue {
+            from,
+            to,
+            ordinal,
+            keeps_null,
+        } = conversion.kind
+        {
+            let converted = self
+                .function_value_conversion(from, to, ordinal, keeps_null, expression)
+                .ok_or(FirLoweringFailure::UnsupportedConversion {
+                    origin: conversion_origin,
+                })?;
+            return Ok((converted.value, Some(converted.reference)));
+        }
+        let converted = match conversion.kind {
             FirConversionKind::NumericWidening { to }
             | FirConversionKind::NumericConversion { to } => self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
@@ -1773,7 +1824,10 @@ impl BodyLowering<'_> {
                     })
                     .map(platform_null_check)?;
                 if let crate::ir::NullCheck::Unnamed { site } = check {
-                    return Ok(self.unnamed_null_check(expression, source_type, to.get(), site));
+                    return Ok((
+                        self.unnamed_null_check(expression, source_type, to.get(), site),
+                        None,
+                    ));
                 }
                 // A generic external call can already carry its checked result cast. Kotlin checks
                 // the value produced by the call and then casts that checked value; keep the
@@ -1905,13 +1959,10 @@ impl BodyLowering<'_> {
                         })?
                 }
             }
-            FirConversionKind::FunctionValue { from, to, ordinal } => self
-                .function_value_conversion(from, to, ordinal, expression)
-                .ok_or(FirLoweringFailure::UnsupportedConversion {
-                    origin: conversion_origin,
-                })?,
+            FirConversionKind::FunctionValue { .. } => unreachable!("converted above"),
             FirConversionKind::CoerceToUnit => self.unit_value_after_effect(expression),
-        })
+        };
+        Ok((converted, None))
     }
 
     /// kotlinc's implicit not-null cast over a value it cannot name keeps the value in a temporary,
@@ -1963,7 +2014,7 @@ impl BodyLowering<'_> {
 
     /// A fresh read of `slot`: a stable binding the checked value already read (`stable`), or the
     /// temporary holding that value.
-    fn checked_value_read(&mut self, slot: u32, stable: bool) -> ExprId {
+    pub(super) fn checked_value_read(&mut self, slot: u32, stable: bool) -> ExprId {
         let read = self.ir.add_expr(IrExpr::GetValue(slot));
         if stable {
             self.ir

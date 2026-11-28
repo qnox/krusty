@@ -474,7 +474,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("unresolved reference 'RegularFileProperty'"),
+            text.contains("Unresolved reference 'RegularFileProperty'"),
             "{text}"
         );
         assert!(!text.contains("functions ("), "{text}");

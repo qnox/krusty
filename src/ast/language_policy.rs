@@ -84,6 +84,9 @@ pub struct FileLanguagePolicy {
     /// `+ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects`: a non-overriding `operator fun
     /// equals` in an enum entry or anonymous object is an error rather than a deprecation warning.
     pub forbid_operator_equals_in_enum_entries_and_anonymous_objects: bool,
+    /// `CheckOptInOnPureEnumEntries`: an enum entry without a written constructor call reports the
+    /// opt-in requirement of the constructor it selects as an error rather than a warning.
+    pub check_opt_in_on_pure_enum_entries: bool,
     /// Exact per-compilation warning text for that transition. Releases before the diagnostic split
     /// leave this absent and report the construct as an ordinary error.
     pub inapplicable_operator_modifier_warning: Option<String>,

@@ -23,7 +23,7 @@ fn an_unresolved_context_parameter_matches_kotlinc() {
         result.krusty_code, 0,
         "krusty accepted the context parameter"
     );
-    let observed = complete_errors(&result.krusty_stderr, false);
+    let observed = complete_errors(&result.krusty_stderr, true);
     let expected = complete_errors(&result.reference_stderr, true);
     assert!(
         !expected.is_empty(),

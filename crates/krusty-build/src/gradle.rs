@@ -1225,7 +1225,8 @@ tasks.register<JavaExec>("runJvm") {
         // `cli_compiler_plugin_e2e` pins the real refusal status.
         let point = root.join("model/src/main/kotlin/model/Point.kt");
         let source = std::fs::read_to_string(&point).expect("Point.kt");
-        let refusal = format!("  {REFUSAL}");
+        // The plugin reports the proxy's relative path from the project it ran in as an absolute one.
+        let refusal = format!("  {}/model/{REFUSAL}", root.display());
         let internal_error = "error: krusty: internal compiler panic: no slot for Point.x";
         for (round, (status, report, reason, detail)) in [
             // Status 3: every error is a construct krusty does not implement yet.

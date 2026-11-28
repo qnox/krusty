@@ -165,8 +165,9 @@ fn non_unit_assign_is_rejected_like_kotlinc() {
     let fixture = PluginFixture::new("assignment-non-unit");
     let sources = [("Main.kt", NON_UNIT_ASSIGN)];
     let switches = assignment_switches("k.Assignable");
+    let reference = fixture.kotlinc_rejects("main", &sources, &[], &switches);
     assert_eq!(
-        fixture.kotlinc_rejects("main", &sources, &[], &switches),
+        reference,
         "<fixture>/main/src/Main.kt:3:50: error: function 'assign' used for '=' overload must return 'Unit'.\n\
          @Assignable class R { fun assign(value: String): Int = 1 }\n\
          \x20                                                ^^^\n\
@@ -185,12 +186,10 @@ fn non_unit_assign_is_rejected_like_kotlinc() {
     );
     assert_eq!(
         fixture.krusty_rejects("main-krusty", &sources, &[], &switches),
-        "<fixture>/main-krusty/src/Main.kt:3:50: error: function 'assign' used for '=' overload must return 'Unit'.\n\
-         <fixture>/main-krusty/src/Main.kt:4:32: error: function 'assign' used for '=' overload must return 'Unit'.\n\
-         <fixture>/main-krusty/src/Main.kt:6:27: error: function 'assign' used for '=' overload must return 'Unit'.\n\
-         <fixture>/main-krusty/src/Main.kt:7:52: error: function 'assign' used for '=' overload must return 'Unit'.\n\
-         <fixture>/main-krusty/src/Main.kt:9:26: error: function 'assign' used for '=' overload must return 'Unit'.\n\
-         krusty: 5 error(s)\n"
+        format!(
+            "{}krusty: 5 error(s)\n",
+            reference.replace("/main/", "/main-krusty/")
+        )
     );
 }
 
@@ -244,8 +243,9 @@ fn inapplicable_assign_is_rejected_like_kotlinc() {
         ("Unresolved.kt", NO_APPLICABLE_UNRESOLVED),
     ];
     let switches = assignment_switches("k.Assignable");
+    let reference = fixture.kotlinc_rejects("main", &sources, &[], &switches);
     assert_eq!(
-        fixture.kotlinc_rejects("main", &sources, &[], &switches),
+        reference,
         "<fixture>/main/src/Main.kt:13:5: error: none of the following candidates is applicable:\n\
          \n\
          fun Ext.assign(value: String): Unit:\n\
@@ -288,25 +288,9 @@ fn inapplicable_assign_is_rejected_like_kotlinc() {
     );
     assert_eq!(
         fixture.krusty_rejects("main-krusty", &sources, &[], &switches),
-        "<fixture>/main-krusty/src/Main.kt:13:5: error: none of the following candidates is applicable:\n\
-         \n\
-         fun Ext.assign(value: String): Unit:\n\
-         \x20 Candidate 'fun Ext.assign(value: String): Unit' is inapplicable because of a receiver type mismatch.\n\
-         \n\
-         fun Other.assign(value: Int): Unit:\n\
-         \x20 Candidate 'fun Other.assign(value: Int): Unit' is inapplicable because of a receiver type mismatch.\n\
-         \n\
-         fun <T : Zed> T.assign(value: T): Unit:\n\
-         \x20 Candidate 'fun <T : Zed> T.assign(value: T): Unit' is inapplicable because of a receiver type mismatch.\n\
-         <fixture>/main-krusty/src/Main.kt:13:12: error: no applicable 'assign' function found for '=' overload.\n\
-         <fixture>/main-krusty/src/Main.kt:14:14: error: no applicable 'assign' function found for '=' overload.\n\
-         <fixture>/main-krusty/src/Main.kt:14:16: error: argument type mismatch: actual type is 'Int', but 'String' was expected.\n\
-         <fixture>/main-krusty/src/Main.kt:15:11: error: no applicable 'assign' function found for '=' overload.\n\
-         <fixture>/main-krusty/src/Main.kt:15:13: error: argument type mismatch: actual type is 'Int', but 'String' was expected.\n\
-         <fixture>/main-krusty/src/Single.kt:9:22: error: candidate 'fun Other.assign(value: Int): Unit' is inapplicable because of a receiver type mismatch.\n\
-         <fixture>/main-krusty/src/Single.kt:9:29: error: no applicable 'assign' function found for '=' overload.\n\
-         <fixture>/main-krusty/src/Unresolved.kt:5:22: error: unresolved reference 'assign' on receiver of type 'Lone'.\n\
-         <fixture>/main-krusty/src/Unresolved.kt:5:29: error: no applicable 'assign' function found for '=' overload.\n\
-         krusty: 10 error(s)\n"
+        format!(
+            "{}krusty: 10 error(s)\n",
+            reference.replace("/main/", "/main-krusty/")
+        )
     );
 }

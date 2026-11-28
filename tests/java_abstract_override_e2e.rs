@@ -217,7 +217,7 @@ fn a_java_join_does_not_merge_ordinary_kotlin_members_by_erasure() {
         ]
     );
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
 }

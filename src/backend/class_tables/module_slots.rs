@@ -7,10 +7,10 @@
 //! the same number from the same plan.
 //!
 //! The rules are the per-file ones of [`super::class_vtable`], applied to header members in source
-//! order: a table starts as its superclass's (or `kotlin.Any`'s three slots and the reserved
-//! function slot); each member takes the slot of the class member it overrides when both carry
-//! values alike, or a new slot with a bridge left in the base's; an override of `kotlin.Any`'s
-//! members takes their fixed slots, and `invoke` over a function type the fixed function slot.
+//! order: a table starts as its superclass's (or `kotlin.Any`'s three slots); each member takes
+//! the slot of the class member it overrides when both carry values alike, or a new slot with a
+//! bridge left in the base's; an override of `kotlin.Any`'s members takes their fixed slots, and
+//! `invoke` over a function type a new slot followed by the function type's bridge.
 //! Interface members are numbered in [`super::module_interfaces`].
 
 mod published_slots;
@@ -29,7 +29,7 @@ use crate::ir::FunId;
 use crate::types::{SemanticCallRole, Ty, TypeName};
 
 use super::members::any_slot;
-use super::{AnyMember, Representation, Unsupported, FUNCTION_SLOT};
+use super::{AnyMember, FunctionInvoke, Representation, Unsupported};
 
 /// A member's identity in a planned table, the same in every file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -84,8 +84,6 @@ impl PlanKey {
 pub(crate) enum PlannedSlot {
     /// `kotlin.Any`'s own member, which no class of the hierarchy overrides.
     Any(AnyMember),
-    /// The function slot, which nothing in the hierarchy implements.
-    Reserved,
     /// A physical producer slot whose declaration is not visible in this consumer inventory.
     Inherited { slot: u32 },
     /// The member's implementation: its own, or the one it inherits.
@@ -113,6 +111,11 @@ pub(crate) enum PlannedSlot {
     AccessorBridge {
         declared: Ty,
         implemented: Ty,
+        /// The context operands on each side, leading the value.
+        operands: Vec<(Ty, Ty)>,
+        /// What the declared accessor takes after its dispatch receiver: the operands, then the
+        /// value for a setter.
+        parameters: Box<[Ty]>,
         setter: bool,
         target_slot: u32,
     },
@@ -130,6 +133,8 @@ pub struct PlannedTable {
     pub(crate) dependency: bool,
     pub(crate) entries: Vec<PlannedSlot>,
     pub slots: HashMap<PlanKey, u32>,
+    /// The function types its instances implement, inherited ones included.
+    pub(crate) function_invokes: Vec<FunctionInvoke>,
 }
 
 /// Every named class's planned table, or why it has none. A class without one is numbered by its
@@ -148,7 +153,7 @@ pub struct ModuleSlotPlan {
 pub enum PlannedSignature<'p> {
     /// `kotlin.Any`'s own member at its fixed slot.
     Any(AnyMember),
-    /// The reserved function slot, or one holding a function-type bridge: no file types it.
+    /// A slot holding a function-type bridge: no file types it.
     Untyped,
     Member {
         parameters: &'p [Ty],
@@ -192,8 +197,11 @@ impl ModuleSlotPlan {
                     callable,
                     parameters,
                     result,
-                    ..
-                } => vec![(PlanKey::function(*callable), (parameters.clone(), *result))],
+                    suspend,
+                } => vec![(
+                    PlanKey::function(*callable),
+                    carried(parameters, *result, *suspend),
+                )],
                 ModuleMember::Property {
                     property,
                     accessor_parameters,
@@ -300,9 +308,9 @@ impl ModuleSlotPlan {
         };
         match table.entries.get(slot as usize)? {
             PlannedSlot::Any(any) => Some(PlannedSignature::Any(*any)),
-            PlannedSlot::Reserved
-            | PlannedSlot::Inherited { .. }
-            | PlannedSlot::FunctionBridge { .. } => Some(PlannedSignature::Untyped),
+            PlannedSlot::Inherited { .. } | PlannedSlot::FunctionBridge { .. } => {
+                Some(PlannedSignature::Untyped)
+            }
             PlannedSlot::DeclaredBridge {
                 parameters, result, ..
             } => Some(PlannedSignature::Member {
@@ -312,17 +320,13 @@ impl ModuleSlotPlan {
             PlannedSlot::Member(key) => member(key),
             PlannedSlot::Bridge { declared, .. } => member(&PlanKey::Callable(*declared)),
             PlannedSlot::AccessorBridge {
-                declared, setter, ..
-            } => Some(if *setter {
-                PlannedSignature::Member {
-                    parameters: std::slice::from_ref(declared),
-                    result: Ty::Unit,
-                }
-            } else {
-                PlannedSignature::Member {
-                    parameters: &[],
-                    result: *declared,
-                }
+                declared,
+                parameters,
+                setter,
+                ..
+            } => Some(PlannedSignature::Member {
+                parameters,
+                result: if *setter { Ty::Unit } else { *declared },
             }),
         }
     }
@@ -408,8 +412,9 @@ impl Planner<'_> {
             }
             None => None,
         };
-        // One fixed function slot holds one `invoke`: a class overriding the `invoke` of two
-        // function types, named directly or through interfaces, declines as `class_vtable` does.
+        // A call through a function type is keyed by its physical operand count, so a class
+        // overriding the `invoke` of two function types, named directly or through interfaces, is
+        // declined only where two of them carry the same count, as `class_vtable` does.
         let function_types = class
             .function_overrides
             .iter()
@@ -417,12 +422,27 @@ impl Planner<'_> {
                 edge.overridden_role == Some(SemanticCallRole::KotlinFunctionInvoke)
                     && matches!(edge.overridden, ResolvedFunctionOverrideTarget::External(_))
             })
-            .map(|edge| edge.overridden_owner)
+            .map(|edge| (edge.overridden_owner, edge.implementation))
             .collect::<HashSet<_>>();
-        if class.function_type_arities.len() > 1
-            || function_types.len() > 1
-            || class.function_type_arities.iter().any(|&arity| arity > 22)
-        {
+        let operand_counts = function_types
+            .iter()
+            .map(|&(_, implementation)| {
+                class.members.iter().find_map(|member| match member {
+                    ModuleMember::Function {
+                        callable,
+                        parameters,
+                        suspend,
+                        ..
+                    } if *callable == implementation => {
+                        Some(parameters.len() + usize::from(*suspend))
+                    }
+                    _ => None,
+                })
+            })
+            .collect::<Vec<_>>();
+        let colliding = function_types.len() > 1
+            && operand_counts.iter().collect::<HashSet<_>>().len() != operand_counts.len();
+        if colliding || class.function_type_arities.iter().any(|&arity| arity > 22) {
             return Err(format!(
                 "a class implementing more than one function type, or one of more than 22 \
                  parameters (`{}`)",
@@ -432,14 +452,14 @@ impl Planner<'_> {
         let inherited = parent
             .as_ref()
             .map_or(0, |parent| parent.entries.len() as u32);
+        let mut function_invokes = parent
+            .as_ref()
+            .map(|parent| parent.function_invokes.clone())
+            .unwrap_or_default();
         let (mut entries, mut slots) = match parent {
             Some(parent) => (parent.entries, parent.slots),
             None => (
-                AnyMember::ALL
-                    .map(PlannedSlot::Any)
-                    .into_iter()
-                    .chain([PlannedSlot::Reserved])
-                    .collect(),
+                AnyMember::ALL.map(PlannedSlot::Any).into_iter().collect(),
                 HashMap::default(),
             ),
         };
@@ -449,14 +469,19 @@ impl Planner<'_> {
                     callable,
                     parameters,
                     result,
-                    ..
-                } => self.function(
-                    class,
-                    *callable,
-                    (parameters, *result),
-                    &mut entries,
-                    &mut slots,
-                )?,
+                    suspend,
+                } => {
+                    // What the physical `invoke` takes, a `suspend` one's continuation included,
+                    // which is the arity a function bridge must wear.
+                    let (parameters, result) = carried(parameters, *result, *suspend);
+                    self.function(
+                        class,
+                        *callable,
+                        (&parameters, result),
+                        &mut entries,
+                        &mut slots,
+                    )?
+                }
                 ModuleMember::Property {
                     property,
                     getter,
@@ -494,10 +519,9 @@ impl Planner<'_> {
                     .carriers
                     .get(&member)
                     .ok_or("a delegated class member with no module-wide signature")?;
-                if !self.same(
-                    (&forwarder.parameters, forwarder.result),
-                    (parameters, *result),
-                ) {
+                let (forwarded, forwarded_result) =
+                    carried(&forwarder.parameters, forwarder.result, forwarder.suspend);
+                if !self.same((&forwarded, forwarded_result), (parameters, *result)) {
                     return Err(format!(
                         "a delegated member carried differently from the class member it \
                          overrides (`{}`)",
@@ -519,12 +543,26 @@ impl Planner<'_> {
             let slot = place(&mut entries, fixed.or(replaces), PlannedSlot::Member(key));
             slots.insert(key, slot);
         }
+        function_invokes.extend(
+            entries
+                .iter()
+                .enumerate()
+                .skip(inherited as usize)
+                .filter_map(|(slot, entry)| match entry {
+                    PlannedSlot::FunctionBridge { arity, .. } => Some(FunctionInvoke {
+                        operands: *arity,
+                        slot: slot as u32,
+                    }),
+                    _ => None,
+                }),
+        );
         Ok(PlannedTable {
             superclass: planned_superclass,
             inherited,
             dependency: class.dependency,
             entries,
             slots,
+            function_invokes,
         })
     }
 
@@ -546,13 +584,6 @@ impl Planner<'_> {
             edge.overridden_role == Some(SemanticCallRole::KotlinFunctionInvoke)
                 && matches!(edge.overridden, ResolvedFunctionOverrideTarget::External(_))
         });
-        let carries_references = carriers
-            .0
-            .iter()
-            .all(|parameter| self.representation.is_reference(*parameter))
-            && self.representation.is_reference(carriers.1);
-        let fixed = any_replaces.or((invoke && carries_references).then_some(FUNCTION_SLOT));
-        let function_bridge = (fixed.is_none() && invoke).then_some(carriers.0.len());
         let mut class_replaces = None;
         let mut bridged: Vec<(_, _, Box<[Ty]>, Ty)> = Vec::new();
         for edge in &edges {
@@ -582,10 +613,14 @@ impl Planner<'_> {
         }
         let slot = place(
             entries,
-            fixed.or(class_replaces),
+            any_replaces.or(class_replaces),
             PlannedSlot::Member(PlanKey::function(callable)),
         );
         slots.insert(PlanKey::function(callable), slot);
+        // The first class to implement a function type answers a call through it with a bridge of
+        // its own; a subclass overriding that method reaches it by dispatch.
+        let function_bridge = (invoke && class_replaces.is_none() && any_replaces.is_none())
+            .then_some(carriers.0.len());
         if function_bridge.is_none() && bridged.is_empty() {
             return Ok(());
         }
@@ -595,11 +630,11 @@ impl Planner<'_> {
             return Err("a dependency member overridden by no declaration of this module".into());
         };
         if let Some(arity) = function_bridge {
-            entries[FUNCTION_SLOT as usize] = PlannedSlot::FunctionBridge {
+            entries.push(PlannedSlot::FunctionBridge {
                 arity,
                 target_slot: slot,
                 target,
-            };
+            });
         }
         for (base_slot, declared, parameters, result) in bridged {
             entries[base_slot as usize] = match declared {
@@ -648,7 +683,16 @@ impl Planner<'_> {
         edges.sort_by_key(|edge| edge.depth != 1);
         let replaced = match edges.first() {
             Some(edge) => match slots.get(&key(edge.overridden)) {
-                Some(&slot) => Some((slot, edge.declared_type, edge.implementation_type)),
+                Some(&slot) => Some((
+                    slot,
+                    edge.declared_type,
+                    edge.implementation_type,
+                    super::accessor_operands(
+                        &edge.declared_contexts,
+                        &edge.implementation_contexts,
+                        None,
+                    ),
+                )),
                 // A `val` overridden by a `var` adds a setter the base never had.
                 None if setter => None,
                 None => return Err("a property override with no slot to replace".into()),
@@ -657,13 +701,23 @@ impl Planner<'_> {
         };
         let entry = PlannedSlot::Member(key(property));
         let slot = match replaced {
-            Some((slot, declared, implemented))
-                if !self.representation.same(declared, implemented) =>
+            Some((slot, declared, implemented, operands))
+                if !self.representation.same(declared, implemented)
+                    || operands.iter().any(|&(declared, implemented)| {
+                        !self.representation.same(declared, implemented)
+                    }) =>
             {
                 let own = place(entries, None, entry);
+                let parameters = operands
+                    .iter()
+                    .map(|&(declared, _)| declared)
+                    .chain(setter.then_some(declared))
+                    .collect();
                 entries[slot as usize] = PlannedSlot::AccessorBridge {
                     declared,
                     implemented,
+                    operands,
+                    parameters,
                     setter,
                     target_slot: own,
                 };
@@ -707,7 +761,7 @@ impl PlannedTable {
 
 /// What a slot holding a function of `parameters` answering `result` is typed by: a `suspend`
 /// one in the form every target that lowers coroutines on common IR gives it.
-pub(super) fn carried(parameters: &[Ty], result: Ty, suspend: bool) -> (Box<[Ty]>, Ty) {
+pub fn carried(parameters: &[Ty], result: Ty, suspend: bool) -> (Box<[Ty]>, Ty) {
     if suspend {
         let (continuation, completed) = crate::types::continuation_passing(result);
         (

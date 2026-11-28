@@ -16,6 +16,10 @@ impl Emitter<'_> {
         if self.suppress_unsigned_local_line {
             return;
         }
+        if let Some(line) = self.context_parameter_load_line(expression) {
+            code.mark_line(line);
+            return;
+        }
         if crate::line_numbers::marks_value_line_at_start(
             self.ir,
             self.default_call_operands,
@@ -23,6 +27,23 @@ impl Emitter<'_> {
         ) {
             self.mark_expression_start(expression, code);
         }
+    }
+
+    /// The line a context parameter passed on as a context argument is loaded on, in a release that
+    /// reads it at its declaration's offsets
+    /// ([`krusty::kotlin_version::Quirk::ContextParameterLoadMarksDeclarationLine`]).
+    fn context_parameter_load_line(&self, expression: u32) -> Option<u32> {
+        if !self.ir.is_context_parameter_load(expression)
+            || !self
+                .ir
+                .reference
+                .quirks()
+                .has(krusty::kotlin_version::Quirk::ContextParameterLoadMarksDeclarationLine)
+        {
+            return None;
+        }
+        let function = self.function?;
+        self.ir.function_position(function).context_line
     }
 
     pub(super) fn emit_binop(

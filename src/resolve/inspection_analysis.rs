@@ -17,7 +17,7 @@ use super::{
 };
 
 impl ResolvedCall {
-    fn stable_declaration(&self) -> Option<crate::fir::DeclarationId> {
+    pub(super) fn stable_declaration(&self) -> Option<crate::fir::DeclarationId> {
         match self {
             Self::Member(resolved) => resolved.member.stable_declaration,
             Self::TopLevel(call) => call.stable_declaration,

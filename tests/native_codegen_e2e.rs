@@ -546,13 +546,13 @@ fn declines_with_the_same_message_are_reported_at_each_ones_own_position() {
         rendered_diagnostics(&[("Helpers", helpers), ("Main", both)], target);
     assert_eq!(
         rendered,
-        "Main.kt:5:11: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
+        "Main.kt:5:11: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n  val a = runCatching { 1 }.getOrNull()\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"
     );
     assert!(artifacts.iter().all(|(name, _)| name != "Main.o"));
     let (_, rendered) = rendered_diagnostics(&[("Helpers", helpers), ("Main", second)], target);
     assert_eq!(
         rendered,
-        "Main.kt:6:24: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
+        "Main.kt:6:24: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n    val x = 2; println(runCatching { x }.getOrNull())\n                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"
     );
 }
 
@@ -568,7 +568,7 @@ fn a_decline_nested_in_lowered_expressions_is_reported_at_the_innermost_one() {
     let (_, rendered) = rendered_diagnostics(&[("Main", main)], target);
     assert_eq!(
         rendered,
-        "Main.kt:2:23: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n"
+        "Main.kt:2:23: error: krusty: the native backend does not support the member `kotlin.Result.getOrNull` yet\n    println(listOf(1, runCatching { 2 }.getOrNull()))\n                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"
     );
 }
 

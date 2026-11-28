@@ -200,7 +200,7 @@ while read -r lane; do
   done
 done < <(
   { git ls-tree -r --name-only "$base"; git ls-tree -r --name-only "$head"; } |
-    grep -E '^(tests/(box_byte_non_identical|box_expected_failures|box_expected_not_applicable|cli_expected_failures|diagnostics_false_accepts|klib_uncovered_implementations)|src/plugins/[^/]+/boxes/(expected_not_applicable|included))/[^/]+/[^/]+\.txt$' |
+    grep -E '^(tests/(box_byte_non_identical|box_expected_failures|box_expected_not_applicable|cli_expected_failures|diagnostics_false_accepts|diagnostics_ledger_mismatches|klib_uncovered_implementations)|src/plugins/[^/]+/boxes/(expected_not_applicable|included))/[^/]+/[^/]+\.txt$' |
     sed 's|/[^/]*$||' | sort -u
 )
 

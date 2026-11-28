@@ -1095,3 +1095,60 @@ fn range_construction_helpers_declare_their_kotlin_parameters() {
         );
     }
 }
+
+#[test]
+fn an_enum_publishes_each_entry_with_the_annotations_its_field_states() {
+    use crate::jvm::classfile::ClassWriter;
+    use crate::types::ClassifierFactSource;
+
+    let directory = std::env::temp_dir().join(format!(
+        "krusty-enum-entry-annotations-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let named = crate::ir::DeclarationAnnotations::new(vec![crate::ir::RetainedAnnotation {
+        retention: crate::types::AnnotationRetention::Runtime,
+        annotation: crate::ir::AppliedAnnotation {
+            written_order: None,
+            internal: type_name("fixture/Wire"),
+            values: vec![(
+                "value".to_string(),
+                crate::ir::AnnoValue::Const(crate::ir::IrConst::String(
+                    crate::kt_string::KtString::from("x"),
+                )),
+            )],
+        },
+        facts: Default::default(),
+    }]);
+    let mut writer = ClassWriter::new("fixture/Mode", "java/lang/Enum");
+    writer.set_access(0x4031);
+    writer.add_field(0x4019, "A", "Lfixture/Mode;");
+    writer.add_field(0x4019, "B", "Lfixture/Mode;");
+    writer.set_last_field_annotations(&named);
+    let path = directory.join("fixture");
+    std::fs::create_dir_all(&path).expect("fixture directory");
+    std::fs::write(path.join("Mode.class"), writer.finish()).expect("write class");
+    let libraries = initialized_libraries(std::rc::Rc::new(super::Classpath::new(vec![
+        directory.clone()
+    ])));
+
+    let entries = libraries
+        .enum_entries(type_name("fixture/Mode"))
+        .expect("an enum's entries");
+    std::fs::remove_dir_all(&directory).expect("remove fixture");
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.annotations.len()))
+            .collect::<Vec<_>>(),
+        [("A", 0), ("B", 1)]
+    );
+    assert_eq!(
+        entries[1].annotations[0].annotation,
+        type_name("fixture/Wire")
+    );
+    assert_eq!(libraries.enum_entries(type_name("java/lang/String")), None);
+}
