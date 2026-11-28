@@ -19,7 +19,7 @@ settings:
       processorOptions:
         zeta: last
         alpha: first
-    version: 2.4.21
+    version: {kotlin}
 --- app/src/Model.kt
 class Model
 --- app/ksp-generates/src/ksp/kotlin/generated/Registry.kt
@@ -34,7 +34,7 @@ dependencies:
   - ../app
 settings:
   kotlin:
-    version: 2.4.21
+    version: {kotlin}
 --- consumer/src/Use.kt
 fun use() = Model() to generated.Registry
 --- m2/com/google/devtools/ksp/symbol-processing-api/2.3.12/symbol-processing-api-2.3.12.pom
@@ -121,7 +121,7 @@ A stand-in for what the processor needs.
 com.google.devtools.ksp.cmdline.KSPJvmMain
 -module-name=app
 -source-roots=<directory>/project/app/src
--libraries=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-libraries=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/{kotlin}/kotlin-stdlib-{kotlin}.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
 -processor-options=zeta=last:alpha=first
 -language-version=2.4
 -api-version=2.4
@@ -144,14 +144,14 @@ com.google.devtools.ksp.cmdline.KSPJvmMain
 ----
 -Xjdk-release=25
 -jdk-home=<directory>/jdk
--classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar:<directory>/project/build/generated/app/main/classes/ksp
+-classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/{kotlin}/kotlin-stdlib-{kotlin}.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar:<directory>/project/build/generated/app/main/classes/ksp
 -no-stdlib
 -module-name=app
 -Xmulti-platform
 -Xfragments=main
 -Xfragment-sources=main:<directory>/project/app/src/Model.kt
 -Xfragment-sources=main:<directory>/project/build/generated/app/main/src/ksp/kotlin/generated/Registry.kt
--Xkotlin-reference-version=2.4.21
+-Xkotlin-reference-version={kotlin}
 -d
 <directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
 <directory>/project/app/src/Model.kt
@@ -159,10 +159,10 @@ com.google.devtools.ksp.cmdline.KSPJvmMain
 ----
 -Xjdk-release=25
 -jdk-home=<directory>/jdk
--classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output:<directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/resources-output:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output:<directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/resources-output:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/{kotlin}/kotlin-stdlib-{kotlin}.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
 -no-stdlib
 -module-name=consumer
--Xkotlin-reference-version=2.4.21
+-Xkotlin-reference-version={kotlin}
 -d
 <directory>/project/build/artifacts/CompiledJvmArtifact/consumerjvm/kotlin-output
 <directory>/project/consumer/src/Use.kt

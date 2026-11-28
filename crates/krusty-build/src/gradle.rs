@@ -2065,8 +2065,8 @@ fun main() {
             let _ = std::fs::remove_dir_all(&root);
             let plugin_version =
                 std::env::var("KRUSTY_GRADLE_PLUGIN_VERSION").unwrap_or_else(|_| "0.0.1".into());
-            let kgp =
-                std::env::var("KRUSTY_GRADLE_KGP_VERSION").unwrap_or_else(|_| "2.4.21".into());
+            let kgp = std::env::var("KRUSTY_GRADLE_KGP_VERSION")
+                .unwrap_or_else(|_| krusty::kotlin_version::environment_release().to_string());
             write(&root, &plugin_version, &kgp);
             // Every fixture's builds share one daemon, which loads each fixture's plugin
             // classpath (KGP, KSP, AGP) in turn. Gradle's default 384 MiB metaspace ran out in

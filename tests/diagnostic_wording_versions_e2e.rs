@@ -90,8 +90,8 @@ fn the_cli_version_flag_overrides_the_environment_before_compilation() {
     let source = work.join("Flag.kt");
     std::fs::write(&source, "fun f(x: String): Int = x.missing\n").expect("write source");
     let output = std::process::Command::new(common::krusty_binary())
+        .arg(common::lane_reference_version_flag())
         .args([
-            "-Xkotlin-reference-version=2.4.21",
             "-no-stdlib",
             "-no-reflect",
             "-no-jdk",
@@ -118,8 +118,8 @@ fn the_cli_version_flag_positions_a_missing_argument_before_compilation() {
     let source = work.join("Missing.kt");
     std::fs::write(&source, "fun h(x: Int): Int = x\nfun g(): Int = h()\n").expect("write source");
     let output = std::process::Command::new(common::krusty_binary())
+        .arg(common::lane_reference_version_flag())
         .args([
-            "-Xkotlin-reference-version=2.4.21",
             "-no-stdlib",
             "-no-reflect",
             "-no-jdk",

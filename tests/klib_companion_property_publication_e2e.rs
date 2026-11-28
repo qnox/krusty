@@ -5,7 +5,8 @@ use krusty::backend::{Artifact, Backend, CheckedIrFile, DependencyMetadata};
 use krusty::compilation_target::CompilationTarget;
 use krusty::diag::DiagSink;
 use krusty::klib::backend::{KlibBackend, KlibModule};
-use krusty::klib::write::{KlibPlatform, KlibStamp};
+use krusty::klib::write::KlibPlatform;
+use super::common;
 use krusty::klib::KlibArchive;
 use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
 use krusty::libraries::{KlibDeclarationSignature, KlibDependencyCallable};
@@ -178,10 +179,7 @@ fn ordinary_and_value_companion_properties_publish_the_official_accessor_identit
     let backend = ObserveExports {
         backend: KlibBackend::new(
             KlibPlatform::Native,
-            KlibStamp::new(
-                krusty::kotlin_version::environment_release(),
-                krusty::language_version::LanguageVersion::V2_4,
-            ),
+            common::lane_klib_stamp(krusty::language_version::LanguageVersion::V2_4),
         ),
         expected: expected.clone(),
     };

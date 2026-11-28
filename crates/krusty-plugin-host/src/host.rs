@@ -280,8 +280,10 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
-    /// The host's greeting for protocol 6 and kotlinc 2.4.21, as `printf` octal escapes.
-    const HELLO: &str = r"\000\000\000\017\000\000\000\000\006\000\000\000\0062.4.21";
+    /// The release a fixture host greets with: an opaque token, since the handshake only compares it.
+    const RELEASE: &str = "1.2.34";
+    /// The host's greeting for protocol 6 and [`RELEASE`], as `printf` octal escapes.
+    const HELLO: &str = r"\000\000\000\017\000\000\000\000\006\000\000\000\0061.2.34";
     const GRACE: Duration = Duration::from_millis(300);
 
     /// A host that writes its pid to `pid_file`, greets, then runs `then` in the same process.
@@ -291,7 +293,7 @@ mod tests {
             "echo $$ > '{}'; printf '{HELLO}'; {then}",
             pid_file.display()
         ));
-        Host::spawn(command, "2.4.21", GRACE).unwrap()
+        Host::spawn(command, RELEASE, GRACE).unwrap()
     }
 
     #[test]
@@ -302,12 +304,12 @@ mod tests {
             "echo $$ > '{}'; printf '{HELLO}'; exec sleep 600",
             pids.display()
         ));
-        let error = Host::spawn(command, "2.4.20", GRACE).err();
+        let error = Host::spawn(command, "1.2.33", GRACE).err();
         assert_eq!(
             error,
             Some(HostError::KotlinVersion {
-                host: "2.4.21".into(),
-                build: "2.4.20".into()
+                host: RELEASE.into(),
+                build: "1.2.33".into()
             })
         );
         assert!(!exists(&pids));

@@ -50,8 +50,7 @@ fn assert_accepted_like_kotlinc(source: &str) {
     assert_eq!(
         common::krusty_error_ledger_with_args(&sources, &reference_args),
         expected,
-        "krusty's ledger against kotlinc {}",
-        krusty::kotlin_version::environment_release()
+        "krusty's ledger against kotlinc's"
     );
     assert_eq!(
         expected,
@@ -426,8 +425,7 @@ fn an_already_suspend_value_unit_converts_to_a_suspend_parameter() {
     assert_eq!(
         backend.first().map(String::as_str),
         Some("exit code 2"),
-        "kotlinc {} fails internally after accepting the argument: {backend:?}",
-        krusty::kotlin_version::environment_release()
+        "kotlinc fails internally after accepting the argument: {backend:?}"
     );
     assert_eq!(
         common::expect_box_run_with_stdlib(&source, "SuspendUnitValueRun"),

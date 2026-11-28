@@ -16,8 +16,7 @@ fn accepted_like_kotlinc(source: &str) -> bool {
     assert_eq!(
         common::krusty_error_ledger_with_args(&sources, &reference_args),
         expected,
-        "krusty's ledger against kotlinc {}",
-        krusty::kotlin_version::environment_release()
+        "krusty's ledger against kotlinc's"
     );
     expected.is_empty()
 }
@@ -33,8 +32,7 @@ fn assert_compiles_like_kotlinc(
 ) {
     assert!(
         accepted_like_kotlinc(source),
-        "{stem}: kotlinc {} accepts the fixture",
-        krusty::kotlin_version::environment_release()
+        "{stem}: kotlinc accepts the fixture"
     );
     for class in classes {
         common::assert_class_matches_kotlinc(stem, source, class);

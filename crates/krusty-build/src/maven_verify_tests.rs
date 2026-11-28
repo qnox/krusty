@@ -16,7 +16,8 @@ use std::sync::OnceLock;
 
 /// The Kotlin release the sample builds use.
 fn kotlin() -> String {
-    std::env::var("KRUSTY_MAVEN_KOTLIN_VERSION").unwrap_or_else(|_| "2.4.21".into())
+    std::env::var("KRUSTY_MAVEN_KOTLIN_VERSION")
+        .unwrap_or_else(|_| krusty::kotlin_version::environment_release().to_string())
 }
 
 fn mvn() -> PathBuf {

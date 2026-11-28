@@ -528,6 +528,56 @@ fn krusty_cli_diagnostics_in_process(
     )
 }
 
+/// Language settings at `language`, with `features` set, under the Kotlin release the harness runs
+/// this lane under: what a compilation of the lane gets. A test names only what it varies.
+pub fn lane_language_settings(
+    language: krusty::language_version::LanguageVersion,
+    features: &[krusty::features::FeatureSetting],
+) -> krusty::language_settings::LanguageSettings {
+    krusty::language_settings::LanguageSettings::for_release(
+        krusty::kotlin_version::environment_release(),
+        language,
+        None,
+        features,
+    )
+    .unwrap_or_else(|error| panic!("language {language} settings: {error:?}"))
+}
+
+/// The language features at `language` and `api` under the lane's Kotlin release.
+pub fn lane_features(
+    language: krusty::language_version::LanguageVersion,
+    api: krusty::language_version::LanguageVersion,
+) -> krusty::features::LangFeatures {
+    krusty::features::LangFeatures::for_release(
+        krusty::kotlin_version::environment_release(),
+        language,
+        api,
+    )
+}
+
+/// What the lane's compiler stamps on a KLIB compiled at `language`.
+pub fn lane_klib_stamp(
+    language: krusty::language_version::LanguageVersion,
+) -> krusty::klib::write::KlibStamp {
+    krusty::klib::write::KlibStamp::new(krusty::kotlin_version::environment_release(), language)
+}
+
+/// The file name of the lane release's standard library jar in a Maven repository.
+pub fn lane_stdlib_jar_name() -> String {
+    format!(
+        "kotlin-stdlib-{}.jar",
+        krusty::kotlin_version::environment_release()
+    )
+}
+
+/// The command-line flag that selects the lane's Kotlin release explicitly.
+pub fn lane_reference_version_flag() -> String {
+    format!(
+        "-Xkotlin-reference-version={}",
+        krusty::kotlin_version::environment_release()
+    )
+}
+
 /// The expectation the target reference version reads from `rows`, each recorded at the release
 /// where it changes ([`krusty::kotlin_version::ReleaseRecords`]): the newest row at or below the
 /// target.

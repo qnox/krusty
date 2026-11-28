@@ -29,6 +29,9 @@
 
 mod support;
 
+#[path = "support/repository.rs"]
+mod repository;
+
 #[path = "support/compiling.rs"]
 mod compiling;
 
@@ -78,12 +81,7 @@ fn files_below(directory: &Path, prefix: &str, files: &mut Files) {
 }
 
 fn compile_cases() -> Vec<CompileCase> {
-    let mut shared = Vec::new();
-    files_below(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/dependencies/repository"),
-        "",
-        &mut shared,
-    );
+    let shared = repository::shared();
     support::cases("compile")
         .into_iter()
         .map(|case| {
@@ -984,7 +982,8 @@ fn the_real_krusty_compiles_a_library_and_the_application_that_uses_it() {
     };
     let settings = format!(
         "settings:\n  jvm:\n    jdk:\n      version: {}\n  kotlin:\n    version: {}\n",
-        real.jdk_major, KOTLIN_VERSION
+        real.jdk_major,
+        support::kotlin_version()
     );
     let project: Files = vec![
         ("project.yaml".into(), "modules:\n  - app\n  - lib\n".into()),
@@ -1007,18 +1006,16 @@ fn the_real_krusty_compiles_a_library_and_the_application_that_uses_it() {
                 .into(),
         ),
     ];
-    let mut repository = Vec::new();
-    files_below(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/dependencies/repository"),
-        "",
-        &mut repository,
-    );
+    let repository = repository::shared();
     let temp = support::TempDir::new("compile-real-krusty");
     let directory = temp.0.clone();
     let root = support::materialize(&temp, &project);
     Resolving::write_repository(&directory, &repository);
     let local = directory.join(Resolving::HOME).join(".m2/repository");
-    let stdlib = local.join("org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar");
+    let version = support::kotlin_version();
+    let stdlib = local.join(format!(
+        "org/jetbrains/kotlin/kotlin-stdlib/{version}/kotlin-stdlib-{version}.jar"
+    ));
     let annotations = local.join("org/jetbrains/annotations/13.0/annotations-13.0.jar");
     std::fs::copy(real.kotlin_lib.join("kotlin-stdlib.jar"), &stdlib).unwrap();
     std::fs::copy(real.kotlin_lib.join("annotations-13.0.jar"), &annotations).unwrap();
@@ -1148,7 +1145,7 @@ fn diamond() -> CompileCase {
         }
         text.push_str(&format!(
             "settings:\n  kotlin:\n    version: {}\n",
-            KOTLIN_VERSION
+            support::kotlin_version()
         ));
         text
     };
@@ -1168,12 +1165,7 @@ fn diamond() -> CompileCase {
             format!("fun {name}() = 1\n"),
         ));
     }
-    let mut repository = Vec::new();
-    files_below(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/dependencies/repository"),
-        "",
-        &mut repository,
-    );
+    let repository = repository::shared();
     CompileCase {
         name: "diamond".to_string(),
         project,
@@ -1545,7 +1537,3 @@ fn a_module_whose_inputs_and_output_are_unchanged_is_not_compiled_again() {
         );
     }
 }
-
-/// The Kotlin version a compiling project pins. The toolchain's default is a release krusty does
-/// not support, so a project krusty compiles names a supported one.
-const KOTLIN_VERSION: &str = "2.4.21";

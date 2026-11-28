@@ -402,10 +402,15 @@ pub struct RecordingKrustyCompilingPlugin<'a> {
     pub plugin: &'a str,
 }
 
-/// Where the plugin API and the standard library lie in a run's local Maven repository.
+/// Where the plugin API lies in a run's local Maven repository.
 const PLUGIN_API_JAR: &str =
     "org/jetbrains/amper/amper-extensibility-api/0.13.0/amper-extensibility-api-0.13.0.jar";
-const STDLIB_JAR: &str = "org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar";
+
+/// Where the standard library the cases pin lies in a run's local Maven repository.
+fn stdlib_jar() -> String {
+    let version = crate::support::kotlin_version();
+    format!("org/jetbrains/kotlin/kotlin-stdlib/{version}/kotlin-stdlib-{version}.jar")
+}
 
 impl Compiler for RecordingKrustyCompilingPlugin<'_> {
     fn identity(&self) -> Vec<(String, Vec<u8>)> {
@@ -452,19 +457,19 @@ impl Compiler for RecordingKrustyCompilingPlugin<'_> {
         let local = directory.join(Resolving::HOME).join(".m2/repository");
         for (jar, real) in [
             (
-                PLUGIN_API_JAR,
+                PLUGIN_API_JAR.to_string(),
                 distribution.join("extra/jars/amper-extensibility-api-jvm.jar"),
             ),
             (
-                STDLIB_JAR,
+                stdlib_jar(),
                 kotlinc.parent().unwrap().join("../lib/kotlin-stdlib.jar"),
             ),
         ] {
             assert!(
-                local.join(jar).is_file(),
+                local.join(&jar).is_file(),
                 "the case's local repository holds a stand-in for {jar}"
             );
-            std::fs::copy(&real, local.join(jar))
+            std::fs::copy(&real, local.join(&jar))
                 .unwrap_or_else(|error| panic!("copy {}: {error}", real.display()));
         }
         command

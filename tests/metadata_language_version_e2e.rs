@@ -308,13 +308,7 @@ fn language_version_2_2_omits_annotation_records_like_kotlinc() {
     let (code, stderr) = common::kotlinc_compile(&args).expect("reference kotlinc is provisioned");
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
 
-    let language_2_2 = krusty::language_settings::LanguageSettings::for_release(
-        krusty::kotlin_version::environment_release(),
-        krusty::language_version::LanguageVersion::V2_2,
-        None,
-        &[],
-    )
-    .expect("2.2 language settings");
+    let language_2_2 = common::lane_language_settings(krusty::language_version::LanguageVersion::V2_2, &[]);
     let gated = common::compile_in_process_files_language_settings(
         &[("Ann.kt", ANNOTATED_SRC)],
         &[common::stdlib_jar()],

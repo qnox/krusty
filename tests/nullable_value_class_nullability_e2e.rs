@@ -187,16 +187,10 @@ fn member_annotations_and_guards(disassembly: &str) -> Vec<String> {
 /// `String`, so the field is `@NotNull` while the property is `Any?`.
 #[test]
 fn an_explicit_backing_field_is_annotated_by_its_own_type() {
-    let settings = krusty::language_settings::LanguageSettings::for_release(
-        krusty::kotlin_version::environment_release(),
-        krusty::language_version::LanguageVersion::default(),
-        None,
-        &[krusty::features::FeatureSetting {
+    let settings = common::lane_language_settings(krusty::language_version::LanguageVersion::default(), &[krusty::features::FeatureSetting {
             feature: "ExplicitBackingFields".to_string(),
             enabled: true,
-        }],
-    )
-    .expect("explicit backing fields enable under the default language version");
+        }]);
     let Some(built) = common::compare_with_kotlinc_plugin_language_settings(
         "ExplicitBackingFieldNullability",
         "class Backed {\n    val x: Any?\n        field: String = \"x\"\n}\n",

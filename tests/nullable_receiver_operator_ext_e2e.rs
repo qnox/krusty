@@ -114,7 +114,7 @@ fun box(): String {\n\
     return if (joined == \"null: 1|a: 2\") \"OK\" else \"fail: $joined\"\n\
 }\n";
     let dir = common::scratch_dir().expect("allocate repository directory");
-    let stdlib = dir.join("kotlin-stdlib-2.4.21.jar");
+    let stdlib = dir.join(common::lane_stdlib_jar_name());
     std::fs::copy(common::stdlib_jar(), &stdlib).expect("copy stdlib under its repository name");
     let classpath = [stdlib];
     let reference = common::kotlinc_box_result_with_classpath(SRC, &classpath);

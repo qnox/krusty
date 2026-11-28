@@ -28,13 +28,7 @@ const DECLARED_NOTHING_RESULT_SRC: &str = "@JvmInline value class Token(val text
 
 /// kotlinc and krusty write `class` byte for byte alike, the facade included.
 fn assert_identical(src: &str, stem: &str, class: &str) {
-    let language_settings = krusty::language_settings::LanguageSettings::for_release(
-        krusty::kotlin_version::environment_release(),
-        krusty::language_version::LanguageVersion::V2_2,
-        None,
-        &[],
-    )
-    .expect("Kotlin 2.2 language/API settings");
+    let language_settings = common::lane_language_settings(krusty::language_version::LanguageVersion::V2_2, &[]);
     let built = common::compare_with_kotlinc_plugin_language_settings(
         stem,
         src,
@@ -187,13 +181,7 @@ fn a_classpath_inline_nothing_lambda_is_regenerated_at_both_language_levels() {
         krusty::language_version::LanguageVersion::V2_2,
         krusty::language_version::LanguageVersion::V2_4,
     ] {
-        let settings = krusty::language_settings::LanguageSettings::for_release(
-            krusty::kotlin_version::environment_release(),
-            version,
-            None,
-            &[],
-        )
-        .expect("supported language/API settings");
+        let settings = common::lane_language_settings(version, &[]);
         let classes = common::classes_against_kotlinc_lib_language_settings(
             "Use",
             &[("Lib.kt", CLASSPATH_INLINE_LIB)],

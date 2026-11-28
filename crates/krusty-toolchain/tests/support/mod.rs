@@ -6,6 +6,9 @@
 //! reports instead where it deliberately differs. `--- krusty-refusal` is the same ledger for an
 //! explicit unsupported-feature refusal. Each line is `<severity>\t<rendered diagnostic>`; the
 //! toolchain's own output is never written into the repository.
+//!
+//! A case spells the Kotlin release krusty compiles against `{kotlin}`: the release the harness
+//! runs the lane under ([`kotlin_version`]), so moving krusty to another release changes no case.
 
 pub mod kotlin;
 pub mod oracle;
@@ -13,6 +16,7 @@ pub mod rendering;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 /// Sections that hold krusty-toolchain's deliberate difference rather than a file.
 const KRUSTY: &str = "krusty";
@@ -46,6 +50,18 @@ pub struct Case {
     pub krusty: Option<KrustyExpected>,
 }
 
+/// The Kotlin release the harness runs the lane under: the release a project krusty compiles pins,
+/// since the toolchain's own default is one krusty does not support.
+pub fn kotlin_version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| krusty_core::kotlin_version::environment_release().to_string())
+}
+
+/// `text` with every `{kotlin}` spelled as [`kotlin_version`].
+pub fn with_kotlin_version(text: &str) -> String {
+    text.replace("{kotlin}", kotlin_version())
+}
+
 /// The cases in `tests/cases/<directory>`, by file name.
 pub fn cases(directory: &str) -> Vec<Case> {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -64,7 +80,7 @@ pub fn cases(directory: &str) -> Vec<Case> {
 }
 
 fn read_case(path: &Path) -> Case {
-    let text = std::fs::read_to_string(path).unwrap();
+    let text = with_kotlin_version(&std::fs::read_to_string(path).unwrap());
     let mut sections: Vec<(String, Vec<&str>)> = Vec::new();
     for line in text.lines() {
         match line.strip_prefix("--- ") {

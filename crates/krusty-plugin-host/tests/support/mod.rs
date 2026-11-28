@@ -1,9 +1,15 @@
-//! What the tests of the real host share: one provisioned kotlinc 2.4.21 runtime per test process.
+//! What the tests of the real host share: one provisioned kotlinc runtime per test process, of the
+//! Kotlin release the harness runs the lane under.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use krusty_plugin_host::{provision, Curl, Environment, Host, HostRuntime, Pins, Request};
+
+/// The Kotlin release the real host runs: the one the harness runs this lane under.
+pub fn kotlin_version() -> String {
+    krusty_core::kotlin_version::environment_release().to_string()
+}
 
 /// Provisioned once per test process, so parallel tests do not download the same jars side by side.
 pub fn runtime() -> (HostRuntime, Environment) {
@@ -12,7 +18,7 @@ pub fn runtime() -> (HostRuntime, Environment) {
         .get_or_init(|| {
             let env = Environment::from_process().expect("a cache directory");
             let request = Request {
-                kotlin_version: "2.4.21",
+                kotlin_version: &kotlin_version(),
                 reason: "the plugin host test",
                 min_java: 8,
             };

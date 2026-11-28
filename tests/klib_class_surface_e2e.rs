@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 
 use krusty::diag::DiagSink;
 use krusty::klib::backend::KlibBackend;
-use krusty::klib::write::{KlibPlatform, KlibStamp};
+use krusty::klib::write::KlibPlatform;
 use krusty::klib::KlibArchive;
 use krusty::metadata::semantic::{parse_package_fragment_checked, KotlinPackage, KotlinType};
 
@@ -150,10 +150,7 @@ fn written_fragments(
 ) -> (Vec<String>, Vec<Vec<u8>>) {
     let backend = KlibBackend::new(
         KlibPlatform::Native,
-        KlibStamp::new(
-            krusty::kotlin_version::KotlinVersion::V2_4_21,
-            krusty::language_version::LanguageVersion::V2_4,
-        ),
+        common::lane_klib_stamp(krusty::language_version::LanguageVersion::V2_4),
     );
     let entries = krusty::compiler::emit_analyzed(analysis, stems, &backend, "lib", &mut diags);
     let messages = diags
@@ -216,10 +213,7 @@ fn kotlinc_native_consumes_a_krusty_reified_inline_body() {
     let stems = ["Probe".to_owned()];
     let backend = KlibBackend::new(
         KlibPlatform::Native,
-        KlibStamp::new(
-            krusty::kotlin_version::KotlinVersion::V2_4_21,
-            krusty::language_version::LanguageVersion::V2_4,
-        ),
+        common::lane_klib_stamp(krusty::language_version::LanguageVersion::V2_4),
     )
     .with_native_target(krusty_native::NativeTarget::new(
         krusty_native::Arch::X86_64,
@@ -583,11 +577,7 @@ fn constructor_property_annotation_sites_match_native_in_both_language_modes() {
         ];
         let reference = native_property_annotation_sites(&native, language);
         assert_eq!(reference, expected, "official Native language {language}");
-        let features = krusty::features::LangFeatures::for_release(
-            krusty::kotlin_version::environment_release(),
-            language,
-            language,
-        );
+        let features = common::lane_features(language, language);
         let (messages, packages) =
             written_packages_with_native_stdlib(&[("shapes", CLASSES)], &features)
                 .expect("the selected Native stdlib is provisioned");
@@ -965,10 +955,7 @@ fn written_ordinary_ir_constants() -> Option<Vec<String>> {
     let (analysis, stems) = common::native_analysis(&[("Bodies", source)], &mut diags)?;
     let backend = KlibBackend::new(
         KlibPlatform::Native,
-        KlibStamp::new(
-            krusty::kotlin_version::KotlinVersion::V2_4_21,
-            krusty::language_version::LanguageVersion::V2_4,
-        ),
+        common::lane_klib_stamp(krusty::language_version::LanguageVersion::V2_4),
     );
     let entries = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "lib", &mut diags);
     assert_eq!(

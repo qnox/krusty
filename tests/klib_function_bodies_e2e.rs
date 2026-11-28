@@ -12,7 +12,7 @@ use std::process::Command;
 
 use krusty::diag::DiagSink;
 use krusty::klib::backend::KlibBackend;
-use krusty::klib::write::{KlibPlatform, KlibStamp};
+use krusty::klib::write::KlibPlatform;
 
 use crate::common;
 
@@ -84,10 +84,7 @@ fn write_library(work: &Path, source: &str) -> PathBuf {
     );
     let backend = KlibBackend::new(
         KlibPlatform::Native,
-        KlibStamp::new(
-            krusty::kotlin_version::environment_release(),
-            features.language_version(),
-        ),
+        common::lane_klib_stamp(features.language_version()),
     )
     .with_native_target(krusty_native::NativeTarget::new(
         krusty_native::Arch::X86_64,

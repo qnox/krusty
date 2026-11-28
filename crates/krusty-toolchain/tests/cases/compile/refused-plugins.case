@@ -26,7 +26,7 @@ plugins:
 product: jvm/amper-plugin
 settings:
   kotlin:
-    version: 2.4.21
+    version: {kotlin}
 --- tools/pregenerated/plugin.yaml
 tasks:
   declare:
@@ -40,7 +40,7 @@ generated:
 product: jvm/amper-plugin
 settings:
   kotlin:
-    version: 2.4.21
+    version: {kotlin}
 --- tools/direct/plugin.yaml
 generated:
   sources:
@@ -50,7 +50,7 @@ generated:
 product: jvm/amper-plugin
 settings:
   kotlin:
-    version: 2.4.21
+    version: {kotlin}
 --- tools/elaborate/plugin.yaml
 tasks:
   produce:
@@ -76,7 +76,7 @@ pluginInfo:
   id: renamed
 settings:
   kotlin:
-    version: 2.4.21
+    version: {kotlin}
 --- tools/named/plugin.yaml
 generated:
   sources:
@@ -97,7 +97,7 @@ plugins:
   named: enabled
 settings:
   kotlin:
-    version: 2.4.21
+    version: {kotlin}
 --- app/src/main.kt
 fun main() = Unit
 --- unlisted/module.yaml
@@ -108,7 +108,7 @@ plugins:
   elsewhere: enabled
 settings:
   kotlin:
-    version: 2.4.21
+    version: {kotlin}
 --- unlisted/src/A.kt
 class A
 --- configured/module.yaml
@@ -121,7 +121,7 @@ plugins:
     flavor: plain
 settings:
   kotlin:
-    version: 2.4.21
+    version: {kotlin}
 --- configured/src/B.kt
 class B
 --- missing/module.yaml
@@ -132,7 +132,7 @@ plugins:
   pregenerated: enabled
 settings:
   kotlin:
-    version: 2.4.21
+    version: {kotlin}
 --- missing/src/C.kt
 class C
 --- file-root/module.yaml
@@ -141,7 +141,7 @@ repositories:
   - mavenLocal
 settings:
   kotlin:
-    version: 2.4.21
+    version: {kotlin}
 --- file-root/src
 not a directory
 --- krusty-refusal

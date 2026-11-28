@@ -946,6 +946,7 @@ dependencies = [
 name = "krusty-plugin-host"
 version = "0.0.1"
 dependencies = [
+ "krusty-core",
  "krusty-download",
  "krusty-plugin-api",
  "sha2",
@@ -978,6 +979,7 @@ version = "0.0.1"
 name = "krusty-toolchain"
 version = "0.0.1"
 dependencies = [
+ "krusty-core",
  "krusty-test-support",
  "libc",
  "roxmltree",

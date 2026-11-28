@@ -14,17 +14,17 @@ settings:
     storeParameterNames: true
     release: 17
   kotlin:
-    version: 2.4.21
+    version: {kotlin}
 --- app/src/main.kt
 fun main(args: Array<String>) = println(args.size)
 --- krusty-argv
 -Xjdk-release=17
 -jdk-home=<directory>/jdk
--classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/{kotlin}/kotlin-stdlib-{kotlin}.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
 -no-stdlib
 -module-name=app
 -java-parameters
--Xkotlin-reference-version=2.4.21
+-Xkotlin-reference-version={kotlin}
 -d
 <directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
 <directory>/project/app/src/main.kt

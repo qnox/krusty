@@ -420,8 +420,8 @@ fn a_platform_without_a_pinned_jdk_asks_for_java_home() {
 
 /// The real thing: Maven Central and Adoptium, through the system `curl`.
 #[test]
-#[ignore = "downloads kotlin-compiler-embeddable 2.4.21 and its classpath"]
-fn provisions_the_pinned_kotlin_2_4_21_classpath() {
+#[ignore = "downloads kotlin-compiler-embeddable and its classpath"]
+fn provisions_the_pinned_classpath_of_the_harness_kotlin_release() {
     let mut env = Environment::from_process().unwrap();
     // CI sets KRUSTY_CACHE_DIR to the cache it restored, so a run that already holds the verified
     // jars reuses them and never asks Maven Central; anywhere else the test starts from nothing
@@ -433,8 +433,9 @@ fn provisions_the_pinned_kotlin_2_4_21_classpath() {
         env.cache_dir = cache.clone();
     }
     let pins = Pins::builtin(&env.platform);
+    let kotlin_version = krusty_core::kotlin_version::environment_release().to_string();
     let request = Request {
-        kotlin_version: "2.4.21",
+        kotlin_version: &kotlin_version,
         reason: "the network test",
         min_java: 8,
     };
