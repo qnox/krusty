@@ -10,8 +10,32 @@ use std::path::{Path, PathBuf};
 
 use super::common;
 
-/// The release whose behavior the tests pin: the stable checker belongs to it.
-const RELEASE: &str = "2.5.0-RC";
+/// The release under test, whose kotlinc each case is compared with.
+fn release() -> String {
+    krusty::kotlin_version::environment_release().to_string()
+}
+
+/// Whether the release under test has made the checker stable. A release before that has no
+/// `default` mode, and its checker is off unless the command line names a mode.
+fn checker_is_stable() -> bool {
+    !krusty::kotlin_version::Quirks::of_release(krusty::kotlin_version::environment_release())
+        .has(krusty::kotlin_version::Quirk::ReturnValueCheckerHasNoDefaultMode)
+}
+
+/// `arguments` with the checker on: a case that names no mode runs under the stable checker's
+/// default, which is `check`, and a release that has not made the checker stable is given that
+/// mode explicitly.
+fn checking<'a>(arguments: &[&'a str]) -> Vec<&'a str> {
+    let mut checking = arguments.to_vec();
+    if !checker_is_stable()
+        && !arguments
+            .iter()
+            .any(|argument| argument.starts_with("-Xreturn-value-checker="))
+    {
+        checking.push("-Xreturn-value-checker=check");
+    }
+    checking
+}
 
 /// The diagnostics a compiler printed, without kotlinc's source excerpts and with the scratch
 /// directory the source sits in removed.
@@ -29,6 +53,8 @@ fn ledger(stderr: &str) -> Vec<String> {
 /// Compile `source` with both compilers under `arguments`; both must exit alike and report the same
 /// diagnostics.
 fn assert_like_kotlinc(source: &str, arguments: &[&str]) {
+    let arguments = checking(arguments);
+    let arguments = arguments.as_slice();
     let work = common::scratch_dir().expect("allocate a scratch directory");
     let path = |name: &str| -> PathBuf { work.join(name) };
     let text = |path: &Path| path.to_string_lossy().into_owned();
@@ -39,7 +65,7 @@ fn assert_like_kotlinc(source: &str, arguments: &[&str]) {
         command_line
     };
     let (kotlinc_code, kotlinc_stderr) =
-        common::kotlinc_server::kotlinc_compile_for_release(RELEASE, &command_line("kotlinc"))
+        common::kotlinc_server::kotlinc_compile_for_release(&release(), &command_line("kotlinc"))
             .expect("the reference kotlinc is available");
     assert!(
         kotlinc_stderr.contains("warning:")
@@ -47,7 +73,7 @@ fn assert_like_kotlinc(source: &str, arguments: &[&str]) {
         "the case must make kotlinc warn:\n{kotlinc_stderr}"
     );
     let krusty = std::process::Command::new(common::krusty_binary())
-        .arg(format!("-Xkotlin-reference-version={RELEASE}"))
+        .arg(format!("-Xkotlin-reference-version={}", release()))
         .args(command_line("krusty"))
         .output()
         .expect("run krusty");
@@ -109,7 +135,11 @@ fn a_marked_declaration_or_scope_makes_a_discarded_result_a_warning() {
 #[test]
 fn the_check_mode_is_the_default_of_the_stable_release() {
     assert_like_kotlinc(SCOPES, &["-Xreturn-value-checker=check"]);
-    assert_like_kotlinc(SCOPES, &["-Xreturn-value-checker=default"]);
+    // A release that has not made the checker stable refuses `default`, which
+    // `return_value_checker_arguments_e2e` pins.
+    if checker_is_stable() {
+        assert_like_kotlinc(SCOPES, &["-Xreturn-value-checker=default"]);
+    }
 }
 
 /// With `-language-version=2.4` the checker is off unless a mode names it, and the annotations are
