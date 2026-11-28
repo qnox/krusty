@@ -676,26 +676,27 @@ impl ProductionSignatureSemantics<'_> {
             .collect()
     }
 
-    /// Commit the constraint a selected extension property's declared receiver puts on the active
-    /// variables the actual receiver mentions (`Buildee<UserKlass>.p` read on `Buildee<FT>`).
-    pub(super) fn commit_postponed_property_receiver(
+    /// Commit the constraint `actual <: expected` puts on the active postponed variables `actual`
+    /// mentions: a selected extension property's declared receiver read on `Buildee<FT>`, or the
+    /// `Unit` result a lambda's discarded tail relates to.
+    pub(super) fn commit_postponed_assignability(
         &self,
         scope: crate::fir::SignatureScope,
-        property: &crate::libraries::PropertyInfo,
-        receiver: Ty,
+        expected: Option<Ty>,
+        actual: Ty,
     ) {
-        let Some(declared) = property.receiver else {
+        let Some(expected) = expected else {
             return;
         };
         let variables = self.active_postponed_type_variables(scope);
-        if !crate::types::ty_mentions_param(receiver, &variables) {
+        if !crate::types::ty_mentions_param(actual, &variables) {
             return;
         }
         let active = variables.iter().map(|variable| variable.as_str()).collect();
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
         let source = self.source_over(&module);
         let constraints = crate::symbol_resolver::collect_assignability_constraints_from_symbols(
-            &source, declared, receiver,
+            &source, expected, actual,
         );
         let mut bindings = crate::symbol_resolver::GSigBinds::default();
         merge_active_constraints(&source, &mut bindings, constraints, &active);

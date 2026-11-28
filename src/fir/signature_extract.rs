@@ -2760,7 +2760,22 @@ impl SignatureConstraintExtractor {
             .expect("a lambda must close its return scope");
         self.lexical_values.pop();
         let result = match file.anon_fun_ret.get(&expression.0) {
-            Some(declared) => self.compact_type(declared, scope, origin),
+            Some(declared) => {
+                let declared = self.compact_type(declared, scope, origin);
+                // An expression body is a value that flows into the declared return type, so it
+                // constrains the builder variables it mentions (`fun(): Buildee<T> = this`).
+                match result {
+                    Ok(body) if file.anon_fun_expression_bodies.contains(&expression.0) => {
+                        let body = self.graph.expected_value(body, declared, scope);
+                        let effects = self.graph.add_operands(vec![body]);
+                        self.graph.add_expr(SigExpr::Sequence {
+                            effects,
+                            result: declared,
+                        })
+                    }
+                    _ => declared,
+                }
+            }
             None => self.finish_lambda_result(result?, returns, scope, lambda_origin),
         };
         let parameters = self.graph.add_operands(parameter_types);

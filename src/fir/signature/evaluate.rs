@@ -465,16 +465,20 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             } else {
                 evaluate_expression(semantics, result, graph, demand, memo, computing)
             };
+            // The result is related to the expected one while the lambda's constraint frame is
+            // still active: a discarded tail typed by a postponed variable constrains it to `Unit`.
+            let result = evaluated_result.and_then(|result| {
+                semantics.contextual_function_result(
+                    contextual_declaration,
+                    result,
+                    expected_result,
+                )
+            });
             semantics.exit_contextual_function(
                 contextual_declaration,
                 contextual_count + usize::from(contextual_receiver.is_some()),
             );
-            let result = evaluated_result?;
-            let result = semantics.contextual_function_result(
-                contextual_declaration,
-                result,
-                expected_result,
-            )?;
+            let result = result?;
             let mut complete_parameters = expected.params[..value_start].to_vec();
             complete_parameters.extend(actual_values.iter().map(|parameter| parameter.get()));
             let complete_parameters = complete_parameters
