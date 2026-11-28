@@ -102,6 +102,15 @@ pub struct ActualizationTypeBindings {
     /// resolve, publishes nothing, and an alias without a published scope proves no member
     /// missing.
     dependency_scopes: crate::fx_hash::HashSet<DeclarationId>,
+    /// Per such alias, the members of its target the resolver found but could not project into a
+    /// record (a Java accessor property, or a generic or `vararg` member), by
+    /// kind and name. Their presence leaves a same-named `expect` member unproven.
+    unprojected_members:
+        crate::fx_hash::HashMap<DeclarationId, crate::fx_hash::HashSet<(DeclarationKind, String)>>,
+    /// Per such alias, the classifiers of this module among its target's supertypes, whose
+    /// headers belong to the alias's member scope.
+    dependency_target_source_supertypes:
+        crate::fx_hash::HashMap<DeclarationId, Vec<crate::types::TypeName>>,
 }
 
 impl ActualizationTypeBindings {
@@ -124,6 +133,35 @@ impl ActualizationTypeBindings {
 
     pub(crate) fn publish_dependency_scope(&mut self, alias: DeclarationId) {
         self.dependency_scopes.insert(alias);
+    }
+
+    pub(crate) fn bind_unprojected_member(
+        &mut self,
+        alias: DeclarationId,
+        kind: DeclarationKind,
+        name: String,
+    ) {
+        self.unprojected_members
+            .entry(alias)
+            .or_default()
+            .insert((kind, name));
+    }
+
+    fn unprojected_member(&self, alias: DeclarationId, kind: DeclarationKind, name: &str) -> bool {
+        self.unprojected_members
+            .get(&alias)
+            .is_some_and(|members| members.contains(&(kind, name.to_owned())))
+    }
+
+    pub(crate) fn bind_dependency_target_source_supertypes(
+        &mut self,
+        alias: DeclarationId,
+        supertypes: Vec<crate::types::TypeName>,
+    ) {
+        if !supertypes.is_empty() {
+            self.dependency_target_source_supertypes
+                .insert(alias, supertypes);
+        }
     }
 
     pub(crate) fn bind_inherited_dependency_members(
@@ -202,7 +240,27 @@ fn actual_member_owners(
             .and_then(implementation_classifier)
         {
             Some(class) => actual_member_owners(headers, bindings, class),
-            None => vec![actual],
+            // A dependency or Java target can extend classifiers of this module, whose members
+            // are part of its scope and have headers of their own.
+            None => {
+                let mut owners = vec![actual];
+                for supertype in bindings
+                    .dependency_target_source_supertypes
+                    .get(&actual)
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(class) = implementation_classifier(*supertype) else {
+                        continue;
+                    };
+                    for owner in actual_member_owners(headers, bindings, class) {
+                        if !owners.contains(&owner) {
+                            owners.push(owner);
+                        }
+                    }
+                }
+                owners
+            }
         };
     }
     let mut owners = vec![actual];
@@ -1308,10 +1366,12 @@ pub fn actualization(
         }
         // An `actual typealias` answers from its target's member scope. For a dependency class
         // that is what the provider publishes, which is not everything the class declares: a
-        // dependency's `internal` members are not published, and the `equals`/`hashCode`/
-        // `toString` the compiler generates for a data or value class are members every class
-        // has. Neither is evidence that the class lacks the member, so neither is owed, and an
-        // alias whose scope was not published owes nothing.
+        // dependency's `internal` members are not published, and the members the compiler
+        // generates for a class of its kind (`equals`/`hashCode`/`toString` of a data or value
+        // class) are members every such class has. Neither is evidence that the class lacks the
+        // member, so neither is owed, and an alias whose scope was not published owes nothing.
+        // kotlinc does not match an enum class's constructors at all: an enum's constructors are
+        // private to it.
         let alias_owners = actual_member_owners(headers, bindings, pair.actual)
             .into_iter()
             .filter(|owner| {
@@ -1324,13 +1384,28 @@ pub fn actualization(
         let unpublished_scope = alias_owners
             .iter()
             .any(|alias| !bindings.dependency_scopes.contains(alias));
+        // The record states functions, properties and constructors; an enum entry or a nested
+        // classifier of a dependency target is not in it, so its absence proves nothing.
+        let expect_is_enum = headers
+            .stub(pair.expect)
+            .is_some_and(|stub| stub.flags.has(DeclarationFlags::ENUM));
         let owes = |child: &DeclarationStub| {
             !(unpublished_scope
                 || dependency_alias_target
                     && (child
                         .flags
                         .has(crate::fir::DeclarationFlags::GENERATED_STRUCTURAL_MEMBER)
-                        || child.visibility == crate::types::Visibility::Internal))
+                        || child
+                            .flags
+                            .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+                        || child.kind == DeclarationKind::Constructor && expect_is_enum
+                        || child.visibility == crate::types::Visibility::Internal
+                        || !matches!(
+                            child.kind,
+                            DeclarationKind::Function
+                                | DeclarationKind::Property
+                                | DeclarationKind::Constructor
+                        )))
         };
         let mut owed = Vec::new();
         for child in expect_children {
@@ -1340,18 +1415,31 @@ pub fn actualization(
             // A source member nearer than a dependency supertype hides an inherited one only when
             // it implements the `expect` member itself, so the dependency candidates are
             // consulted whenever no source member does, not only when no source bucket exists.
+            // An alias's dependency target proves a member missing only from evidence the record
+            // states in full: a candidate it cannot compare, or one the resolver could not
+            // project, leaves the member unproven rather than owed.
             let discharged_by_dependency = || {
-                dependency_members::implementations(
+                let owners = actual_member_owners(headers, bindings, pair.actual);
+                match dependency_members::implementations(
                     headers,
                     bindings,
                     &actualized_aliases,
                     child,
                     &key.1,
-                    actual_member_owners(headers, bindings, pair.actual)
-                        .into_iter()
-                        .filter_map(|owner| bindings.inherited_dependency_members.get(&owner))
+                    owners
+                        .iter()
+                        .filter_map(|owner| bindings.inherited_dependency_members.get(owner))
                         .flatten(),
-                ) == 1
+                ) {
+                    dependency_members::Discharge::Implemented => true,
+                    dependency_members::Discharge::Unprovable => dependency_alias_target,
+                    dependency_members::Discharge::Owed => {
+                        dependency_alias_target
+                            && alias_owners.iter().any(|alias| {
+                                bindings.unprojected_member(*alias, child.kind, &key.1)
+                            })
+                    }
+                }
             };
             let Some(candidates) = actual_children.get(&key) else {
                 if !discharged_by_dependency() && owes(child) {

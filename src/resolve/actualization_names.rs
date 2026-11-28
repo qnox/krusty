@@ -385,12 +385,24 @@ fn bind_inherited_dependency_members(
         };
         bindings.publish_dependency_scope(stub.id);
         let receiver = crate::types::Ty::obj_name(target);
-        let members = expected_names
-            .iter()
-            .flat_map(|name| inherited_members(platform, receiver, name))
-            .chain(dependency_constructors(platform, target))
-            .collect();
-        bindings.bind_inherited_dependency_members(stub.id, members);
+        let mut records = Vec::new();
+        for name in &expected_names {
+            let members = inherited_members(platform, receiver, name);
+            records.extend(members.records);
+            for (kind, name) in members.unprojected {
+                bindings.bind_unprojected_member(stub.id, kind, name);
+            }
+        }
+        let constructors = dependency_constructors(platform, target);
+        records.extend(constructors.records);
+        for (kind, name) in constructors.unprojected {
+            bindings.bind_unprojected_member(stub.id, kind, name);
+        }
+        bindings.bind_inherited_dependency_members(stub.id, records);
+        bindings.bind_dependency_target_source_supertypes(
+            stub.id,
+            source_supertypes(platform, declarations, target),
+        );
     }
     if expected_names.is_empty() {
         return;
@@ -422,46 +434,95 @@ fn bind_inherited_dependency_members(
         let receiver = crate::types::Ty::intersection(&dependency_supertypes);
         let members = expected_names
             .iter()
-            .flat_map(|name| inherited_members(platform, receiver, name))
+            .flat_map(|name| inherited_members(platform, receiver, name).records)
             .collect();
         bindings.bind_inherited_dependency_members(stub.id, members);
     }
 }
 
+/// The classifiers of this module a dependency `target` extends, directly or through other
+/// dependency classifiers, in breadth-first order. A Java class compiled with the module can
+/// extend a Kotlin class or interface of it; those members are in the target's scope, with headers
+/// of their own rather than records.
+fn source_supertypes(
+    platform: &dyn SemanticPlatform,
+    declarations: &crate::fx_hash::HashSet<TypeName>,
+    target: TypeName,
+) -> Vec<TypeName> {
+    let mut found = Vec::new();
+    let mut visited = vec![target];
+    let mut next = 0;
+    while next < visited.len() {
+        let current = visited[next];
+        next += 1;
+        let Some(class) = crate::symbol_source::SymbolSource::classifier(platform, current) else {
+            continue;
+        };
+        for supertype in class.supertypes.iter() {
+            if visited.contains(&supertype) {
+                continue;
+            }
+            visited.push(supertype);
+            if declarations.contains(&supertype) {
+                found.push(supertype);
+            }
+        }
+    }
+    found
+}
+
 /// The constructors an `actual typealias` to a dependency class makes available: they are the
 /// target's own, not inherited, and an `expect` constructor is implemented by the one that agrees
-/// on its value parameters. A constructor with a type parameter, a receiver-like context or a
-/// `vararg` cannot be stated by the record and is left out, with its evidence intact.
-fn dependency_constructors(
-    platform: &dyn SemanticPlatform,
-    target: TypeName,
-) -> Vec<crate::fir::InheritedDependencyMember> {
+/// on its value parameters. kotlinc gives a Java annotation the constructor of its elements, which
+/// the provider publishes as the annotation's parameter list. A constructor with a type parameter,
+/// context parameters or a `vararg` cannot be stated by a record and is kept as unprojected.
+fn dependency_constructors(platform: &dyn SemanticPlatform, target: TypeName) -> InheritedMembers {
+    let mut members = InheritedMembers::default();
     let Some(class) = crate::symbol_source::SymbolSource::classifier(platform, target) else {
-        return Vec::new();
+        return members;
     };
-    class
+    let record = |parameters: &[crate::types::Ty]| crate::fir::InheritedDependencyMember {
+        kind: crate::fir::DeclarationKind::Constructor,
+        name: String::new(),
+        parameters: parameters.into(),
+        result: crate::types::Ty::Unit,
+        mutable: false,
+        operator: false,
+        infix: false,
+        inline: false,
+    };
+    let unprojected = (crate::fir::DeclarationKind::Constructor, String::new());
+    for constructor in class
         .constructors
         .iter()
-        .filter(|constructor| {
-            crate::symbol_resolver::member_is_inheritable(constructor.visibility)
-                && constructor.context_count == 0
-                && !constructor.call_sig.vararg
-                && constructor
-                    .generic_sig
-                    .as_ref()
-                    .is_none_or(|signature| signature.formals.is_empty())
-        })
-        .map(|constructor| crate::fir::InheritedDependencyMember {
-            kind: crate::fir::DeclarationKind::Constructor,
-            name: String::new(),
-            parameters: constructor.params.clone().into_boxed_slice(),
-            result: crate::types::Ty::Unit,
-            mutable: false,
-            operator: false,
-            infix: false,
-            inline: false,
-        })
-        .collect()
+        .filter(|constructor| crate::symbol_resolver::member_is_inheritable(constructor.visibility))
+    {
+        if constructor.context_count != 0
+            || constructor.call_sig.vararg
+            || constructor
+                .generic_sig
+                .as_ref()
+                .is_some_and(|signature| !signature.formals.is_empty())
+        {
+            members.unprojected.push(unprojected.clone());
+        } else {
+            members.records.push(record(&constructor.params));
+        }
+    }
+    if !class.is_kotlin && class.kind == crate::libraries::TypeKind::Annotation {
+        for list in class
+            .named_parameter_lists
+            .iter()
+            .filter(|list| list.annotation.is_some())
+        {
+            if list.vararg.is_some() || list.types.len() != list.names.len() {
+                members.unprojected.push(unprojected.clone());
+            } else {
+                members.records.push(record(&list.types));
+            }
+        }
+    }
+    members
 }
 
 fn has_type_arguments(
@@ -482,15 +543,16 @@ fn has_type_arguments(
 /// The members of one name the shared member hierarchy selects for `receiver`, normalized to the
 /// evidence an `expect` member states. The hierarchy has already decided inheritance, overriding
 /// and specialization, so a member a nearer declaration overrides is absent. Private members are
-/// never inherited. A member the `expect` side cannot state is excluded here, with its evidence
-/// intact, rather than projected into a record it would then equal: one with a receiver, context
-/// parameters, type parameters, a modifier the record cannot carry (`suspend`) or `vararg`, an accessor with its own availability or
-/// visibility, or a property that is a Java field or synthesized from Java accessors.
+/// never inherited, and a Java field is not matched against a property. A member the record
+/// cannot state is not projected into one it would then equal: one with context parameters, type
+/// parameters, a modifier the record cannot carry (`suspend`) or `vararg`, an accessor with its own
+/// availability or visibility, or a property synthesized from Java accessors. Its kind and name are
+/// kept instead, so its presence is not mistaken for absence.
 fn inherited_members(
     platform: &dyn SemanticPlatform,
     receiver: crate::types::Ty,
     name: &str,
-) -> Vec<crate::fir::InheritedDependencyMember> {
+) -> InheritedMembers {
     // Actualization matches declarations, not call candidates: a member hidden from calls (a
     // Java method's renamed builtin copy beside a declared `get`, a HIDDEN-deprecated member)
     // is still a member that can actualize, so two compatible ones are ambiguous.
@@ -509,30 +571,56 @@ fn inherited_members(
                 .flat_map(|property| property.getter.overridden_declarations.iter()),
         )
         .collect::<Vec<_>>();
-    let functions = callables
-        .functions()
-        .iter()
-        .filter(|function| {
-            let declared = function
-                .callable
-                .declared_params
-                .as_deref()
-                .unwrap_or(&function.callable.params);
-            !overridden.iter().any(|over| {
-                over.owner == function.callable.owner
-                    && *over.name == *name
-                    && *over.params == *declared
-            }) && function.kind == crate::libraries::FnKind::Member
-                && crate::symbol_resolver::member_is_inheritable(function.callable.visibility)
-                && function.context_count == 0
-                && !function.flags.suspend
-                && !function.call_sig.vararg
-                && function
-                    .generic_sig
-                    .as_ref()
-                    .is_none_or(|signature| signature.formals.is_empty())
-        })
-        .map(|function| crate::fir::InheritedDependencyMember {
+    let mut members = InheritedMembers::default();
+    for function in callables.functions() {
+        let declared = function
+            .callable
+            .declared_params
+            .as_deref()
+            .unwrap_or(&function.callable.params);
+        // Neither an overridden declaration nor a member the class cannot see is in its scope.
+        if overridden.iter().any(|over| {
+            over.owner == function.callable.owner
+                && *over.name == *name
+                && *over.params == *declared
+        }) || function.kind != crate::libraries::FnKind::Member
+            || !crate::symbol_resolver::member_is_inheritable(function.callable.visibility)
+        {
+            continue;
+        }
+        if function.context_count != 0
+            || function.flags.suspend
+            || function.call_sig.vararg
+            || function
+                .generic_sig
+                .as_ref()
+                .is_some_and(|signature| !signature.formals.is_empty())
+        {
+            members
+                .unprojected
+                .push((crate::fir::DeclarationKind::Function, name.to_owned()));
+            continue;
+        }
+        // Kotlin sees a Java annotation's element methods as its `val` properties.
+        let annotation_element = function.callable.params.is_empty()
+            && crate::symbol_source::SymbolSource::classifier(platform, function.callable.owner)
+                .is_some_and(|owner| {
+                    !owner.is_kotlin && owner.kind == crate::libraries::TypeKind::Annotation
+                });
+        if annotation_element {
+            members.records.push(crate::fir::InheritedDependencyMember {
+                kind: crate::fir::DeclarationKind::Property,
+                name: name.to_owned(),
+                parameters: Box::default(),
+                result: function.callable.ret,
+                mutable: false,
+                operator: false,
+                infix: false,
+                inline: false,
+            });
+            continue;
+        }
+        members.records.push(crate::fir::InheritedDependencyMember {
             kind: crate::fir::DeclarationKind::Function,
             name: name.to_owned(),
             parameters: function.callable.params.clone().into_boxed_slice(),
@@ -542,24 +630,33 @@ fn inherited_members(
             infix: function.flags.infix,
             inline: function.flags.inline != crate::libraries::InlineKind::None,
         });
-    let properties = callables
-        .properties()
-        .iter()
-        .filter(|property| {
-            !overridden.iter().any(|over| {
-                over.owner == property.owner && *over.name == *name && over.params.is_empty()
-            }) && property.kind == crate::libraries::PropKind::Member
-                && property.producer == crate::libraries::PropertyProducer::KotlinAccessor
-                && crate::symbol_resolver::member_is_inheritable(property.visibility)
-                && property.context_count == 0
-                && property.formals.is_empty()
-                && property.readable()
-                && property.setter.as_ref().is_none_or(|_| {
-                    property.accessor_availability.setter
-                        && property.setter_visibility == property.visibility
-                })
-        })
-        .map(|property| crate::fir::InheritedDependencyMember {
+    }
+    for property in callables.properties() {
+        // kotlinc's matcher does not match a Java field against a property (KT-63667), so a field
+        // is not in the scope it reads.
+        if overridden.iter().any(|over| {
+            over.owner == property.owner && *over.name == *name && over.params.is_empty()
+        }) || property.kind != crate::libraries::PropKind::Member
+            || property.producer == crate::libraries::PropertyProducer::Field
+            || !crate::symbol_resolver::member_is_inheritable(property.visibility)
+        {
+            continue;
+        }
+        if property.producer != crate::libraries::PropertyProducer::KotlinAccessor
+            || property.context_count != 0
+            || !property.formals.is_empty()
+            || !property.readable()
+            || property.setter.as_ref().is_some_and(|_| {
+                !property.accessor_availability.setter
+                    || property.setter_visibility != property.visibility
+            })
+        {
+            members
+                .unprojected
+                .push((crate::fir::DeclarationKind::Property, name.to_owned()));
+            continue;
+        }
+        members.records.push(crate::fir::InheritedDependencyMember {
             kind: crate::fir::DeclarationKind::Property,
             name: name.to_owned(),
             parameters: Box::default(),
@@ -569,7 +666,16 @@ fn inherited_members(
             infix: false,
             inline: false,
         });
-    functions.chain(properties).collect()
+    }
+    members
+}
+
+/// The members of one name a dependency classifier's scope holds: those projected into records,
+/// and the kind and name of each one that is there but has a shape a record cannot state.
+#[derive(Default)]
+struct InheritedMembers {
+    records: Vec<crate::fir::InheritedDependencyMember>,
+    unprojected: Vec<(crate::fir::DeclarationKind, String)>,
 }
 
 /// The distinct names of the members declared inside an `expect` classifier's body, nested

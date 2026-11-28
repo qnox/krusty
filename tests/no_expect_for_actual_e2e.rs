@@ -1942,3 +1942,112 @@ actual typealias Unsigned = UInt
     assert_eq!(reference, Vec::new(), "the reference compiler is silent");
     assert_eq!(krusty, reference);
 }
+
+/// A Java target's member scope is the one Kotlin sees: members it inherits from this module's
+/// Kotlin supertypes, a Java getter overriding a Kotlin property, a `void` method for `: Unit`,
+/// generic and platform-typed members, a Java enum (whose constructors are not matched) and a Java
+/// annotation's elements as its properties and constructor. None of these is a missing member.
+#[test]
+fn an_actual_typealias_to_a_java_class_sees_the_scope_kotlin_sees() {
+    let common_source = "\
+expect class Members {
+    val foo: Int
+    fun bar(): Int
+    fun run(i: Int): Unit
+    fun names(list: List<String>?): MutableMap<Boolean?, Members>
+    fun <T : Set<Number>> pick(t: T): T?
+}
+expect enum class Mode {
+    FAST, SLOW
+}
+expect annotation class Mark(val value: Int, val label: String = \"\")
+expect annotation class Empty()
+";
+    let platform = "\
+interface WithFoo {
+    val foo: Int
+}
+interface WithBar {
+    fun bar(): Int = 1
+}
+actual typealias Members = JavaMembers
+actual typealias Mode = JavaMode
+actual typealias Mark = JavaMark
+actual typealias Empty = JavaEmpty
+";
+    let members = "\
+import java.util.*;
+public class JavaMembers implements WithFoo, WithBar {
+    @Override
+    public int getFoo() {
+        return 0;
+    }
+    public void setFoo(int value) {}
+    public void run(int i) {}
+    public Map<Boolean, JavaMembers> names(List<String> list) {
+        return null;
+    }
+    public <T extends Set<Number>> T pick(T t) {
+        return t;
+    }
+}
+";
+    let (reference, krusty) = both_split(
+        "alias_java_scope",
+        &[("Common.kt", common_source)],
+        &[
+            ("JavaMembers.java", members),
+            (
+                "JavaMode.java",
+                "public enum JavaMode { FAST, SLOW; JavaMode() {} }\n",
+            ),
+            (
+                "JavaMark.java",
+                "public @interface JavaMark { int value(); String label() default \"\"; }\n",
+            ),
+            ("JavaEmpty.java", "public @interface JavaEmpty {}\n"),
+            ("Platform.kt", platform),
+        ],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}
+
+/// What a Java target does lack is still owed: a method it does not declare, a `var` only a Java
+/// field could answer for (kotlinc does not match fields), and an annotation constructor whose
+/// element has no default.
+#[test]
+fn an_actual_typealias_to_a_java_class_owes_what_kotlin_does_not_see() {
+    let common_source = "\
+expect class Lacking {
+    fun missing(): Int
+    var count: Int
+}
+expect annotation class Required()
+";
+    let platform = "\
+actual typealias Lacking = JavaLacking
+actual typealias Required = JavaRequired
+";
+    let (reference, krusty) = both_split(
+        "alias_java_owes",
+        &[("Common.kt", common_source)],
+        &[
+            (
+                "JavaLacking.java",
+                "public class JavaLacking { public int count = 0; }\n",
+            ),
+            (
+                "JavaRequired.java",
+                "public @interface JavaRequired { String path(); }\n",
+            ),
+            ("Platform.kt", platform),
+        ],
+    );
+    assert_eq!(
+        reference.len(),
+        2,
+        "the reference compiler names each alias once: {reference:#?}"
+    );
+    assert_eq!(krusty, reference);
+}

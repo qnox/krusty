@@ -867,6 +867,7 @@ compiler/testData/diagnostics/tests/multiplatform/actualTypealiasCycle.kt
 compiler/testData/diagnostics/tests/multiplatform/actualTypealias_defaultParamsIncompatibility.kt
 compiler/testData/diagnostics/tests/multiplatform/aliasedRepeatedAnnotationInMultiplatform.kt
 compiler/testData/diagnostics/tests/multiplatform/arraySort.kt
+compiler/testData/diagnostics/tests/multiplatform/defaultArguments/annotationsViaActualTypeAliasExpectEnumArg.kt
 compiler/testData/diagnostics/tests/multiplatform/defaultArguments/companionMethodViaActualTypealias.kt
 compiler/testData/diagnostics/tests/multiplatform/defaultArguments/constructorDefaultArgsViaActualTypealias.kt
 compiler/testData/diagnostics/tests/multiplatform/defaultArguments/expectedDeclaresDefaultArguments.kt
