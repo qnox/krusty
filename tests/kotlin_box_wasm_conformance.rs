@@ -46,6 +46,23 @@ impl WasmLane {
         Ok(backend)
     }
 
+    /// The KLIB backend that writes this target's module libraries.
+    fn library_backend(&self, directive_source: &str) -> krusty::klib::backend::KlibBackend {
+        let features = krusty::features::LangFeatures::from_source_in_environment(directive_source);
+        let platform = match self.target {
+            WasmTarget::Js => krusty::klib::write::KlibPlatform::WasmJs,
+            WasmTarget::Wasi => krusty::klib::write::KlibPlatform::WasmWasi,
+        };
+        krusty::klib::backend::KlibBackend::new(
+            platform,
+            krusty::klib::write::KlibStamp::new(
+                krusty::kotlin_version::environment_release(),
+                features.language_version(),
+            ),
+        )
+        .with_annotations_in_metadata(features.has("AnnotationsInMetadata"))
+    }
+
     fn run_artifacts(
         &self,
         scratch: &Path,
@@ -118,6 +135,36 @@ fn node_unavailable() -> Option<String> {
 }
 
 impl Lane for WasmLane {
+    fn compile_klib_modules_and_run(
+        &self,
+        scratch: &Path,
+        stem: &str,
+        modules: &[krusty::conformance::ModuleUnit],
+        directive_source: &str,
+    ) -> Outcome {
+        let backend = match self.backend(directive_source) {
+            Ok(backend) => backend,
+            Err(outcome) => return outcome,
+        };
+        let library = self.library_backend(directive_source);
+        let program = match box_lane::compile_modules_from_klibs(
+            ModuleCase {
+                scratch,
+                stem,
+                modules,
+            },
+            directive_source,
+            self.test_target(),
+            &backend,
+            &library,
+            DECLINE_PREFIX,
+        ) {
+            Ok(program) => program,
+            Err(outcome) => return outcome,
+        };
+        self.run_artifacts(scratch, stem, "klib-modules", directive_source, program)
+    }
+
     fn platform(&self) -> Platform {
         match self.target {
             WasmTarget::Js => Platform::WasmJs,
@@ -203,19 +250,7 @@ impl Lane for WasmLane {
             Ok(backend) => backend.with_entry_module(entry_module.name.clone()),
             Err(outcome) => return outcome,
         };
-        let features = krusty::features::LangFeatures::from_source_in_environment(directive_source);
-        let platform = match self.target {
-            WasmTarget::Js => krusty::klib::write::KlibPlatform::WasmJs,
-            WasmTarget::Wasi => krusty::klib::write::KlibPlatform::WasmWasi,
-        };
-        let metadata = krusty::klib::backend::KlibBackend::new(
-            platform,
-            krusty::klib::write::KlibStamp::new(
-                krusty::kotlin_version::environment_release(),
-                features.language_version(),
-            ),
-        )
-        .with_annotations_in_metadata(features.has("AnnotationsInMetadata"));
+        let metadata = self.library_backend(directive_source);
         let program = match box_lane::compile_modules(
             ModuleCase {
                 scratch,
@@ -829,31 +864,19 @@ fun box(): String {
 }
 
 #[test]
-fn wasm_declines_an_instruction_wrapper_whose_body_lowering_does_not_model() {
-    // PLATFORM-SPECIFIC: pin the Wasm intrinsic-support decline, including its category ownership.
-    // `pow` reaches fdlibm's `__ieee754_pow`, whose locals have no initializer: the wrapper is not
-    // support code, so its call declines instead of failing compilation.
-    expect_wasm_decline(
+fn wasm_lowers_the_library_body_of_pow_over_unsigned_locals() {
+    // PLATFORM-SPECIFIC: pin that Wasm lowers fdlibm's library body of `pow`; Native declares it
+    // `external` libm and the JVM calls `Math.pow`.
+    // `pow` reaches fdlibm's `__ieee754_pow`, whose locals have no initializer and whose bit tests
+    // compare unsigned values: the library body lowers with the unsigned storage getter, the
+    // unsigned comparison, and a deferred unsigned local starting at its carrier's zero.
+    expect_wasm_box(
         r#"
 import kotlin.math.pow
 
 fun box(): String = if (2.0.pow(3.0) == 8.0) "OK" else "pow"
 "#,
-        "wasmUnmodelledInstructionWrapper",
-        concat!(
-            r#"a dependency callable whose target code was not emitted: `pow`; "#,
-            r#"selected declaration KlibDependencyCallable { module: "kotlin", declaration: Public(KlibPublicIdSignature { package: KlibNamePath { segments: ["kotlin", "math"] }, declaration: KlibNamePath { segments: ["pow"] }, member_id: Some(15712335000106601333), mask: 0 }) }; "#,
-            r#"owner Some(Package(TypeName("kotlin/math"))); "#,
-            r#"kind Extension; "#,
-            r#"realization Dispatch; "#,
-            r#"checked parameters [Obj(TypeName("kotlin/Double"), [])]; "#,
-            r#"checked result Obj(TypeName("kotlin/Double"), []); "#,
-            r#"provider parameters [Obj(TypeName("kotlin/Double"), []), Obj(TypeName("kotlin/Double"), [])]; "#,
-            r#"provider result Obj(TypeName("kotlin/Double"), []); "#,
-            r#"declared parameters Some([Obj(TypeName("kotlin/Double"), []), Obj(TypeName("kotlin/Double"), [])]); "#,
-            r#"declared result None; "#,
-            r#"compiler operation None"#,
-        ),
+        "wasmLibraryPow",
     );
 }
 
@@ -1015,28 +1038,6 @@ fn expect_wasm_box(src: &str, stem: &str) {
             src,
         );
         assert_eq!(outcome, Outcome::Pass, "{stem} on {}", target.name());
-    }
-}
-
-/// Require both Wasm targets to decline `src` with exactly `reason`.
-fn expect_wasm_decline(src: &str, stem: &str, reason: &str) {
-    for target in WasmTarget::ALL {
-        let lane = WasmLane { target };
-        if !focused_wasm_lane_available(&lane, stem) {
-            return;
-        }
-        let outcome = lane.compile_and_run(
-            &std::env::temp_dir(),
-            stem,
-            &[(format!("{stem}.kt"), src.to_string())],
-            src,
-        );
-        assert_eq!(
-            outcome,
-            Outcome::Declined(reason.to_string()),
-            "{stem} on {}",
-            target.name()
-        );
     }
 }
 
@@ -1348,10 +1349,7 @@ fn wasm_reference_array_store_bounds_follow_the_value_under_every_bounds_policy(
 /// must run `box()` to `OK`, and an unchecked one must stop at the exact host trap.
 fn expect_reference_array_bounds(source: &str, name: &str) {
     use krusty::kotlin_version::{KotlinVersion, ReleaseRecords};
-    const DEFAULTS: ReleaseRecords<bool> = ReleaseRecords::new(&[
-        (KotlinVersion::V2_4_0, false),
-        (KotlinVersion::V2_4_20, true),
-    ]);
+    const DEFAULTS: ReleaseRecords<bool> = ReleaseRecords::new(&[(KotlinVersion::V2_4_21, true)]);
     assert_eq!(DEFAULTS.check(), Ok(()));
     let default = *DEFAULTS
         .get(krusty::kotlin_version::environment_release())
@@ -1857,6 +1855,9 @@ mod type_of;
 #[path = "wasm_char_sequence_appends.rs"]
 mod char_sequence_appends;
 
+#[path = "wasm_kotlinc_defects.rs"]
+mod kotlinc_defects;
+
 #[test]
 fn wasm_finally_preserves_values_original_exceptions_and_cleanup_precedence() {
     expect_wasm_box(
@@ -1995,4 +1996,140 @@ fn wasm_library_abstract_members_dispatch_to_their_overrides() {
     let src = include_str!("box_regressions/libraryAbstractMemberCalls.kt");
     expect_reference_box(src, "libraryAbstractMemberCalls");
     expect_wasm_box(src, "libraryAbstractMemberCalls");
+}
+
+#[test]
+fn wasm_links_a_library_s_class_bodies_from_its_klib() {
+    let source = include_str!("box_regressions/multimodule/libraryClassBodies.kt");
+    let stem = "wasmLibraryClassBodies";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the whole library-classes program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name(),
+        );
+    }
+}
+
+#[test]
+fn wasm_links_a_library_s_interfaces_abstract_classes_and_objects_from_its_klib() {
+    let source = include_str!("box_regressions/multimodule/libraryClassForms.kt");
+    let stem = "wasmLibraryClassForms";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the whole library class-forms program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name(),
+        );
+    }
+}
+
+/// The KLIB writer has no IR type for a function type yet, so a class storing one keeps its file
+/// metadata-only rather than reaching the type table with a type it cannot write.
+#[test]
+fn wasm_keeps_a_function_typed_property_s_class_out_of_its_klib_s_bodies() {
+    let source = include_str!("box_regressions/multimodule/libraryFunctionTypedProperty.kt");
+    let stem = "wasmLibraryFunctionTypedProperty";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the function-typed property program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Declined(
+                concat!(
+                    "a dependency callable whose target code was not emitted: `run`; ",
+                    r#"selected declaration KlibDependencyCallable { module: "lib", declaration: Public(KlibPublicIdSignature { package: KlibNamePath { segments: ["fixture"] }, declaration: KlibNamePath { segments: ["Holder", "run"] }, member_id: Some(17455565997157616742), mask: 0 }) }; "#,
+                    r#"owner Some(Classifier(TypeName("fixture/Holder"))); "#,
+                    "kind Member; ",
+                    "realization Dispatch; ",
+                    "checked parameters []; ",
+                    r#"checked result Obj(TypeName("kotlin/String"), []); "#,
+                    "provider parameters []; ",
+                    r#"provider result Obj(TypeName("kotlin/String"), []); "#,
+                    "declared parameters Some([]); ",
+                    "declared result None; ",
+                    "compiler operation None",
+                )
+                .to_owned()
+            ),
+            "{stem} on {}",
+            target.name(),
+        );
+    }
+}
+
+/// The KLIB writer does not record a local call's type arguments yet, so a body calling a generic
+/// function of its own file stays metadata-only rather than holding a call kotlinc cannot read.
+#[test]
+fn wasm_keeps_a_generic_call_s_caller_out_of_its_klib_s_bodies() {
+    let source = include_str!("box_regressions/multimodule/libraryGenericFunctionCalls.kt");
+    let stem = "wasmLibraryGenericFunctionCalls";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the generic-call program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Declined(
+                concat!(
+                    "a dependency callable whose target code was not emitted: `callsAnswer`; ",
+                    r#"selected declaration KlibDependencyCallable { module: "lib", declaration: Public(KlibPublicIdSignature { package: KlibNamePath { segments: ["fixture"] }, declaration: KlibNamePath { segments: ["callsAnswer"] }, member_id: Some(4112838969493605911), mask: 0 }) }; "#,
+                    r#"owner Some(Package(TypeName("fixture"))); "#,
+                    "kind TopLevel; ",
+                    "realization Dispatch; ",
+                    "checked parameters []; ",
+                    r#"checked result Obj(TypeName("kotlin/Int"), []); "#,
+                    "provider parameters []; ",
+                    r#"provider result Obj(TypeName("kotlin/Int"), []); "#,
+                    "declared parameters Some([]); ",
+                    "declared result None; ",
+                    "compiler operation None",
+                )
+                .to_owned()
+            ),
+            "{stem} on {}",
+            target.name(),
+        );
+    }
+}
+
+#[test]
+fn wasm_links_a_library_s_top_level_function_bodies_from_its_klib() {
+    let source = include_str!("box_regressions/multimodule/libraryTopLevelFunctionBodies.kt");
+    let stem = "wasmLibraryTopLevelFunctionBodies";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the exact Kotlin compiler must run the whole library-bodies program");
+    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(focused_wasm_lane_available(&lane, stem));
+        assert_eq!(
+            lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
+            Outcome::Pass,
+            "{stem} on {}",
+            target.name(),
+        );
+    }
 }

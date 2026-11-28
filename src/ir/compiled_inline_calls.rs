@@ -35,6 +35,8 @@ pub struct CompiledInlineOperands {
 #[derive(Default)]
 pub(super) struct CompiledInlineCalls {
     lowering: SameModuleInlining,
+    /// Which dependency classifiers the backend lays out itself.
+    target_representation: Option<std::rc::Rc<dyn Fn(crate::types::TypeName) -> bool>>,
     /// Each call kept for the backend → the function whose compiled body it inlines.
     calls: HashMap<ExprId, FunId>,
 }
@@ -49,6 +51,23 @@ impl IrFile {
     /// any body is lowered.
     pub fn set_same_module_inlining(&mut self, lowering: SameModuleInlining) {
         self.compiled_inline_calls.lowering = lowering;
+    }
+
+    /// Whether the backend lays the dependency classifier `class` out itself.
+    pub fn target_represents(&self, class: crate::types::TypeName) -> bool {
+        self.compiled_inline_calls
+            .target_representation
+            .as_ref()
+            .is_some_and(|represents| represents(class))
+    }
+
+    /// State which dependency classifiers the backend lays out itself. Set once, before any body
+    /// is lowered.
+    pub fn set_target_representation(
+        &mut self,
+        represents: std::rc::Rc<dyn Fn(crate::types::TypeName) -> bool>,
+    ) {
+        self.compiled_inline_calls.target_representation = Some(represents);
     }
 
     /// Record that `call` is inlined from the compiled body of `function`. Each operand carries the
@@ -160,12 +179,20 @@ impl IrFile {
 impl InheritedFacts for CompiledInlineCalls {
     fn inherit(&mut self, source: ExprId, target: ExprId) {
         // How the file inlines same-module calls is a file-wide decision.
-        let Self { lowering: _, calls } = self;
+        let Self {
+            lowering: _,
+            target_representation: _,
+            calls,
+        } = self;
         calls.inherit(source, target);
     }
 
     fn relocate(&mut self, source: ExprId, target: ExprId) {
-        let Self { lowering: _, calls } = self;
+        let Self {
+            lowering: _,
+            target_representation: _,
+            calls,
+        } = self;
         calls.relocate(source, target);
     }
 

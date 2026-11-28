@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use krusty::jvm::classpath::Classpath;
-use krusty::jvm::compilation_inputs::{JdkApi, JvmCompilationInputInventory};
+use krusty::jvm::compilation_inputs::{JdkApi, JdkReleaseError, JvmCompilationInputInventory};
 use krusty::kotlin_version::KotlinVersion;
 use krusty::language_settings::LanguageSettings;
 use krusty::language_version::LanguageVersion;
@@ -30,6 +30,7 @@ use arguments::{
     take_reference_version, unsupported, ParsedSettings,
 };
 pub use arguments::{CLASSPATH_SEPARATOR, FIX_KOTLINC_DEFECTS};
+pub use source_roots::diagnostic_path;
 use source_roots::{duplicate_source_root, SourceRoots};
 pub use warning_policy::{WarningDisposition, WarningLevel, WarningPolicy};
 
@@ -521,12 +522,18 @@ impl Options {
             .iter()
             .map(|entry| entry.display().to_string())
             .collect::<Vec<_>>();
+        let supported = KotlinVersion::supported()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let reproduced_releases = supported.iter().map(String::as_str).collect::<Vec<_>>();
         let resolved = PluginRegistry::with_builtins().resolve(&Activation {
             config: &self.plugins,
             classpath: &classpath,
             module_name: &self.module_name,
             codegen_host: false,
             module_ir_host: false,
+            reproduced_releases: &reproduced_releases,
         });
         let (errors, notes) = resolved
             .diagnostics
@@ -565,7 +572,7 @@ fn plugin_jar_problems(plugins: &PluginConfig) -> Vec<String> {
 impl Options {
     /// The errors kotlinc reports for an `-Xjdk-release` whose API the selected JDK cannot provide
     /// (see [`JdkApi::for_release`]). Kept out of `parse` so parsing stays env-independent.
-    pub fn check_jdk_release(&self) -> Result<(), Vec<String>> {
+    pub fn check_jdk_release(&self) -> Result<(), Vec<JdkReleaseError>> {
         if self.no_jdk {
             return Ok(());
         }
@@ -613,8 +620,14 @@ impl Options {
         if self.no_jdk {
             return Ok(JvmCompilationInputInventory::from_effective_classpath(&cp));
         }
-        let api = JdkApi::for_release(self.jdk_home.as_deref(), self.jdk_release)
-            .map_err(|errors| errors.join("\n"))?;
+        let api =
+            JdkApi::for_release(self.jdk_home.as_deref(), self.jdk_release).map_err(|errors| {
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })?;
         Ok(JvmCompilationInputInventory::from_explicit_classpath_and_jdk_api(&cp, api))
     }
 
@@ -861,7 +874,7 @@ mod tests {
                 "kotlinc {release}"
             );
         }
-        let o = parse_args(&["-Xkotlin-reference-version=2.4.20", "-progressive", "f.kt"]);
+        let o = parse_args(&["-Xkotlin-reference-version=2.4.21", "-progressive", "f.kt"]);
         for feature in [
             "ReportReificationProblemsInDnnAndFlexible",
             "ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier",
@@ -874,13 +887,13 @@ mod tests {
     /// silently reproducing a different kotlinc than the one asked for.
     #[test]
     fn the_reference_version_flag_accepts_only_supported_releases() {
-        let parsed = parse_args(&["-Xkotlin-reference-version=2.4.10", "x.kt"]);
+        let parsed = parse_args(&["-Xkotlin-reference-version=2.4.21", "x.kt"]);
         assert_eq!(
             parsed.kotlin_reference_version,
-            Some(KotlinVersion::V2_4_10)
+            Some(KotlinVersion::V2_4_21)
         );
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
-        for bad in ["2.3.0", "2.4", "latest", ""] {
+        for bad in ["2.3.0", "2.4", "2.4.20", "latest", ""] {
             let parsed = parse_args(&[&format!("-Xkotlin-reference-version={bad}"), "x.kt"]);
             assert_eq!(parsed.kotlin_reference_version, None, "{bad:?}");
             assert_eq!(parsed.errors.len(), 1, "{bad:?}: {:?}", parsed.errors);
@@ -1509,17 +1522,15 @@ mod tests {
     #[test]
     fn xxlanguage_uses_the_selected_releases_feature_table() {
         let modeled = parse_args(&[
-            "-Xkotlin-reference-version=2.4.20",
+            "-Xkotlin-reference-version=2.4.21",
             "-XXLanguage:+FullValueClasses",
             "f.kt",
         ]);
         assert!(modeled.errors.is_empty(), "{:?}", modeled.errors);
         assert!(modeled.language_settings.features.has("FullValueClasses"));
 
-        for (release, feature) in [
-            ("2.4.20", "ShapeKrustyDoesNotModel"),
-            ("2.4.0", "FullValueClasses"),
-        ] {
+        let (release, feature) = ("2.4.21", "ShapeKrustyDoesNotModel");
+        {
             let unknown = parse_args(&[
                 &format!("-Xkotlin-reference-version={release}"),
                 &format!("-XXLanguage:+{feature}"),
@@ -1545,7 +1556,7 @@ mod tests {
     #[test]
     fn xxlanguage_applies_a_release_known_feature_without_a_second_capability_list() {
         let enabled = parse_args(&[
-            "-Xkotlin-reference-version=2.4.20",
+            "-Xkotlin-reference-version=2.4.21",
             "-XXLanguage:+ErrorAboutDataClassCopyVisibilityChange",
             "f.kt",
         ]);
@@ -1556,7 +1567,7 @@ mod tests {
             .features
             .has("ErrorAboutDataClassCopyVisibilityChange"));
         let disabled = parse_args(&[
-            "-Xkotlin-reference-version=2.4.20",
+            "-Xkotlin-reference-version=2.4.21",
             "-XXLanguage:-ErrorAboutDataClassCopyVisibilityChange",
             "f.kt",
         ]);
@@ -1580,7 +1591,7 @@ mod tests {
 
     #[test]
     fn accepted_levels_and_no_option_default_follow_the_selected_kotlinc_release() {
-        let no_option = parse_args(&["-Xkotlin-reference-version=2.4.10", "f.kt"]);
+        let no_option = parse_args(&["-Xkotlin-reference-version=2.4.21", "f.kt"]);
         assert!(no_option.errors.is_empty(), "{:?}", no_option.errors);
         assert_eq!(
             no_option.language_settings.language_version,
@@ -1591,19 +1602,19 @@ mod tests {
             LanguageVersion::V2_4
         );
 
-        let older_release = parse_args(&[
-            "-Xkotlin-reference-version=2.4.10",
+        let unknown = parse_args(&[
+            "-Xkotlin-reference-version=2.4.21",
             "-language-version",
-            "2.6",
+            "2.7",
             "f.kt",
         ]);
         assert_eq!(
-            older_release.errors,
-            ["unknown language version: 2.6\nSupported language versions: 2.0 (deprecated), 2.1 (deprecated), 2.2, 2.3, 2.4, 2.5 (experimental)".to_owned()]
+            unknown.errors,
+            ["unknown language version: 2.7\nSupported language versions: 2.0 (deprecated), 2.1 (deprecated), 2.2, 2.3, 2.4, 2.5 (experimental), 2.6 (experimental)".to_owned()]
         );
 
         let current_release = parse_args(&[
-            "-Xkotlin-reference-version=2.4.20",
+            "-Xkotlin-reference-version=2.4.21",
             "-language-version",
             "2.6",
             "f.kt",
@@ -1671,7 +1682,7 @@ mod tests {
             "-language-version",
             "2.6",
             "-Xsuppress-version-warnings",
-            "-Xkotlin-reference-version=2.4.20",
+            "-Xkotlin-reference-version=2.4.21",
             "f.kt",
         ]);
         assert!(
@@ -1862,7 +1873,7 @@ mod tests {
     }
 
     #[test]
-    fn warning_level_rejects_names_absent_from_the_selected_release() {
+    fn warning_level_accepts_the_selected_releases_migration_warnings() {
         const NAMES: &[(&str, krusty::diag::DiagnosticName)] = &[
             (
                 "DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING",
@@ -1881,21 +1892,6 @@ mod tests {
                 krusty::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING,
             ),
         ];
-        for &(name, _) in NAMES {
-            for release in ["2.4.0", "2.4.10"] {
-                let parsed = parse_args(&[
-                    &format!("-Xkotlin-reference-version={release}"),
-                    &format!("-Xwarning-level={name}:warning"),
-                    "f.kt",
-                ]);
-                assert_eq!(
-                    parsed.errors,
-                    [format!("warning with name \"{name}\" does not exist")],
-                    "{release}: {name}"
-                );
-            }
-        }
-
         for &(name, identity) in NAMES {
             for (level, expected) in [
                 ("disabled", WarningLevel::Disabled),
@@ -1903,7 +1899,7 @@ mod tests {
                 ("error", WarningLevel::Error),
             ] {
                 let parsed = parse_args(&[
-                    "-Xkotlin-reference-version=2.4.20",
+                    "-Xkotlin-reference-version=2.4.21",
                     &format!("-Xwarning-level={name}:{level}"),
                     "f.kt",
                 ]);

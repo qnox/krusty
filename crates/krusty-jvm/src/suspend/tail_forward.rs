@@ -120,12 +120,7 @@ pub(super) fn record_return_adaptations(
     declared_return: Ty,
     returns: &mut super::SuspendedResultReturns,
 ) {
-    if declared_return == Ty::Unit
-        && !ir
-            .reference
-            .quirks()
-            .has(krusty::kotlin_version::Quirk::SuspendUnitTailCallKeepsCalleeResult)
-    {
+    if declared_return == Ty::Unit {
         returns.extend(
             returned
                 .into_iter()

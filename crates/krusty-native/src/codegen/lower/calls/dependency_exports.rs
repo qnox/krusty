@@ -4,6 +4,78 @@
 use super::*;
 
 impl BodyLowering<'_, '_, '_> {
+    /// An interface property without a concrete accessor export still dispatches through the
+    /// exact property identity its declaring module and every implementor published. Runtime
+    /// property operations have already had priority when this fallback is reached.
+    pub(in super::super) fn dependency_interface_property(
+        &mut self,
+        operation: &IrCheckedOperation,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let access = self.file.callables.dependency_accessor(operation)?;
+        let realization = access.callable;
+        if !access.dispatches()
+            || !realization.owner_is_interface
+            || !realization.is_member_function()
+        {
+            return None;
+        }
+        let identity = realization.dependency_callable.as_ref()?;
+        Some((|| {
+            // These properties may also be implemented by runtime-owned values. An unhandled
+            // runtime operation must decline rather than send those values to source-only stubs.
+            if !realization.builtin_implementations.is_empty() {
+                return Err(
+                    "an interface property with an unmodeled builtin implementation".into(),
+                );
+            }
+            let callee = access.callee().map_err(Unsupported::from)?;
+            let Callee::External { params, ret, .. } = &callee else {
+                unreachable!("a frozen dependency accessor is an external call")
+            };
+            // Until an accessor bridge carries distinct declaration and applied shapes, preserve
+            // the exact declared frame. The accessor adapter also rejects unchecked generic
+            // substitutions, rather than treating an erased reference as a scalar result.
+            let declared_params = realization
+                .declared_params
+                .as_deref()
+                .unwrap_or(&realization.params);
+            let declared_ret = realization.declared_ret.unwrap_or(realization.ret);
+            if params.as_slice() != declared_params || *ret != declared_ret {
+                return Err("a dependency interface property requiring an accessor bridge".into());
+            }
+            if access.arguments.len() != params.len() {
+                return Err("an interface property with an invalid accessor operand count".into());
+            }
+            let receiver = access
+                .receiver
+                .ok_or("an interface property without its receiver")?;
+            // A property's getter and setter use the property's canonical identity and distinct
+            // roles, exactly as the declaring interface and its implementations publish them.
+            let member = krusty::backend::interface_identity::property_member_identity(
+                identity,
+                access.writes(),
+            )
+            .ok_or("a dependency interface property without an accessor identity")?;
+            let signature = super::super::super::super::intrinsics::FunctionSignature::new(
+                super::super::super::super::intrinsics::DeclarationOwner::callable(
+                    realization.physical_owner,
+                    realization.declaration_owner,
+                ),
+                &realization.name,
+                &realization.params,
+                realization.ret,
+            );
+            self.dependency_interface_stub(
+                member,
+                signature,
+                receiver,
+                access.arguments,
+                params,
+                *ret,
+            )
+        })())
+    }
+
     /// A selected property's exact accessor export owns the access before target storage helpers.
     /// No accessor spelling, overload reconstruction, or second evaluation of operands is needed.
     pub(in super::super) fn emitted_dependency_property(
@@ -399,12 +471,15 @@ impl BodyLowering<'_, '_, '_> {
     }
 
     /// Another module's class, constructed through the entry its module exports under the
-    /// selected constructor's identity; `None` when that module published none.
+    /// selected constructor's identity, or through that constructor's default-argument entry when
+    /// the construction leaves arguments out; `None` when that module published none.
     pub(in super::super) fn dependency_construction(
         &mut self,
         target: krusty::fir::ExternalCallableId,
         internal: krusty::types::TypeName,
         args: &[u32],
+        defaults: &[u32],
+        default_prefix_count: u32,
     ) -> Option<Result<Option<Value>, Unsupported>> {
         if self.file.ir.class_id_by_name(internal).is_some() {
             return None;
@@ -416,19 +491,68 @@ impl BodyLowering<'_, '_, '_> {
             .dependency_callable
             .as_ref()?;
         let export = self.file.dependency_symbols.get(identity)?;
+        let entry = match defaults.is_empty() {
+            true => None,
+            false => Some(export.default_entry.as_deref()?),
+        };
         Some((|| {
             let parameters = export.signature.parameters().to_vec();
             let result = export.signature.result();
-            if parameters.len() != args.len() {
+            if parameters.len() != args.len() + defaults.len() {
                 return Err(
                     "a dependency construction whose operands disagree with its constructor".into(),
                 );
             }
-            let arguments = self.arguments(args, &parameters)?;
+            // The ordinals number the source parameters, which follow the compiler's leading
+            // operands; the masks number the source parameters alone.
+            let prefix = default_prefix_count as usize;
+            let omitted = defaults
+                .iter()
+                .map(|&ordinal| ordinal as usize + prefix)
+                .collect::<Vec<_>>();
+            let supplied = parameters
+                .iter()
+                .enumerate()
+                .filter(|(position, _)| !omitted.contains(position))
+                .map(|(_, ty)| *ty)
+                .collect::<Vec<_>>();
+            let arguments = self.arguments(args, &supplied)?;
             if self.terminated {
                 return Ok(None);
             }
-            let id = self.file.import(&export.symbol, &parameters, result)?;
+            let (symbol, signature, arguments) = match entry {
+                Some(entry) => {
+                    // A zero in each omitted slot and its bit in the mask; the entry evaluates
+                    // the marked defaults in the declaring module, in declaration order.
+                    let mut supplied = arguments.into_iter();
+                    let mut operands = Vec::new();
+                    for (position, ty) in parameters.iter().enumerate() {
+                        if omitted.contains(&position) {
+                            operands.push(self.zero_of(*ty));
+                        } else {
+                            operands.push(supplied.next().expect("one value per supplied operand"));
+                        }
+                    }
+                    for mask in krusty::backend::default_arguments::omission_masks(
+                        parameters.len() - prefix,
+                        omitted.iter().map(|&position| position - prefix),
+                    ) {
+                        operands.push(
+                            self.builder
+                                .ins()
+                                .iconst(types::I32, i64::from(mask as i32)),
+                        );
+                    }
+                    let mut signature = parameters.clone();
+                    signature.extend(std::iter::repeat_n(
+                        Ty::Int,
+                        krusty::backend::default_arguments::mask_words(parameters.len() - prefix),
+                    ));
+                    (entry, signature, operands)
+                }
+                None => (export.symbol.as_str(), parameters.clone(), arguments),
+            };
+            let id = self.file.import(symbol, &signature, result)?;
             let func_ref = self.func_ref(id);
             let call = self.emit_call(func_ref, &arguments)?;
             match self.builder.inst_results(call).first().copied() {

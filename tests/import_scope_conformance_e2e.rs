@@ -22,13 +22,9 @@ fn assert_unresolved_against_library(
         file: "Main.kt".to_string(),
         line: 1,
         column,
-        message: krusty::diagnostic_wording::unresolved_reference_on(
-            krusty::kotlin_version::ReferenceProfile::of_release(
-                krusty::kotlin_version::environment_release(),
-            ),
-            name,
-            receiver,
-        ),
+        message: krusty::diagnostic_wording::unresolved_reference_on(name, receiver)
+            .printed(krusty::diag::DiagnosticNames::Hidden)
+            .into_owned(),
     }];
     assert_eq!(result.krusty_code, 1, "{}", result.krusty_stderr);
     assert_eq!(result.reference_code, 1, "{}", result.reference_stderr);
@@ -220,7 +216,7 @@ fn assert_conflicting_classifier_imports(
     assert_eq!(result.reference_code, 1, "{}", result.reference_stderr);
     assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         expected
     );
     assert_eq!(

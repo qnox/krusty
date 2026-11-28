@@ -16,7 +16,6 @@ struct ElementDecode<'a> {
     /// Every element of the wire shape, each with the class its property is declared on.
     fields: &'a [super::WireElement],
     type_parameter_serializers: super::type_parameter_serializers::TypeParameterSerializers<'a>,
-    bounded_type_parameters: bool,
     descriptor_local: u32,
     field_locals: &'a [u32],
     seen_locals: &'a [u32],
@@ -33,12 +32,9 @@ struct ElementDecode<'a> {
 /// The type of the local an element is decoded into. A value-class element (an unsigned one
 /// included) is held as its nullable type, as kotlinc holds it: the local starts `null`, and a
 /// decoded box is unboxed null-safely. A type-parameter element is held as the `$serializer`'s
-/// own type parameter: unbounded (`Any?`) unless the plugin copies the class's bounds onto it
-/// (`bounded_type_parameters`). An unbounded local is narrowed only where the constructor takes it.
-fn decode_local_ty(ir: &IrFile, ty: Ty, bounded_type_parameters: bool) -> Ty {
-    if !bounded_type_parameters && ty.non_null().ty_param_name().is_some() {
-        Ty::nullable(class_ty("kotlin/Any"))
-    } else if value_class_underlying(ir, &ty).is_some() || ty.is_unsigned() {
+/// own type parameter, which carries the serialized class's bounds.
+fn decode_local_ty(ir: &IrFile, ty: Ty) -> Ty {
+    if value_class_underlying(ir, &ty).is_some() || ty.is_unsigned() {
         Ty::nullable(ty.non_null())
     } else {
         ty
@@ -128,7 +124,7 @@ impl ElementDecode<'_> {
         ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::Cast,
             arg: raw,
-            type_operand: decode_local_ty(ir, ty, self.bounded_type_parameters),
+            type_operand: decode_local_ty(ir, ty),
         })
     }
 
@@ -224,8 +220,6 @@ pub(super) struct DeserializeBody<'a> {
     /// The serializers of the class's type parameters, on the generic `$serializer`.
     pub(super) type_parameter_serializers:
         super::type_parameter_serializers::TypeParameterSerializers<'a>,
-    /// Whether the `$serializer`'s type parameters carry the serialized class's bounds.
-    pub(super) bounded_type_parameters: bool,
     /// The serialized class's `$childSerializers` plan, or `None` when it has no cache. Passed in
     /// rather than rediscovered: the builder's answer about which properties have a slot is the
     /// only one, so a reader cannot believe in a slot that was never written.
@@ -240,7 +234,6 @@ impl DeserializeBody<'_> {
             serialized_class: foo_id,
             fields,
             type_parameter_serializers,
-            bounded_type_parameters,
             cache: cache_plan,
         } = self;
         let ser_idx = serializer_class as usize;
@@ -360,7 +353,6 @@ impl DeserializeBody<'_> {
         let elements = ElementDecode {
             fields,
             type_parameter_serializers,
-            bounded_type_parameters,
             descriptor_local: serial_desc_local,
             field_locals: &field_locals,
             seen_locals: &seen_locals,
@@ -407,7 +399,7 @@ impl DeserializeBody<'_> {
             // Field locals start at their JVM zero. Optional defaults belong solely to
             // the synthetic constructor and must not be evaluated before decoding.
             for (k, ty) in fields.iter().map(|element| &element.ty).enumerate() {
-                let ty = decode_local_ty(ir, *ty, bounded_type_parameters);
+                let ty = decode_local_ty(ir, *ty);
                 let dc = IrConst::zero_for_value_type(ty);
                 let init = ir.add_expr(IrExpr::Const(dc));
                 stmts.push(ir.add_expr(IrExpr::Variable {

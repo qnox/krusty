@@ -86,7 +86,7 @@ mod tests {
         assert_eq!(
             report,
             Some(format!(
-                "{}script.kts:2:1: error: third-file error\nHelper.java:1:2: warning: first-file warning\nMain.kt:1:1: error: second-file error\n",
+                "{}script.kts:2:1: error: third-file error\ncd\n^\nHelper.java:1:2: warning: first-file warning\nclass H {{}}\n ^\nMain.kt:1:1: error: second-file error\nfun f() {{}}\n^\n",
                 header("sample")
             ))
         );

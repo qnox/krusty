@@ -14,6 +14,25 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
+/// Whether this target answers a library body's read of a value class's storage property itself:
+/// the provider's declaration names the property, and the class travels as the scalar it wraps, so
+/// the read is the receiver's own value ([`Body::scalar_value_storage_read`] lowers it).
+pub(in super::super) fn realizes_scalar_value_storage_getter(
+    getter: krusty::backend::DependencyGetterSignature<'_>,
+) -> bool {
+    let Some(declaration) = getter.value_declaration else {
+        return false;
+    };
+    getter.parameters.is_empty()
+        && getter.result == declaration.underlying
+        && matches!(
+            scalar_representation(getter.owner, declaration),
+            Ok(Some(
+                ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64
+            ))
+        )
+}
+
 /// The scalar a value class `classifier` declared as `declaration` travels as, when this target
 /// carries the class and its underlying type alike; `None` when the class is carried otherwise
 /// (as an object reference) or its declared underlying type uses a different carrier.

@@ -189,8 +189,10 @@ fn an_incompatible_block_branch_is_still_rejected() {
             1,
             format!(
                 "{path}:5:13: error: argument type mismatch: actual type is '(String!) -> Any!', \
-                 but 'Function<in String, out Mono<out Auth>!>!' was expected.\nkrusty: \
-                 1 error(s)\n"
+                 but 'Function<in String, out Mono<out Auth>!>!' was expected.\n  m.flatMap {{ s -> if (s.isEmpty()) {{}} else {{ Mono.empty() }} }}\n{}{}\nkrusty: \
+                 1 error(s)\n",
+                " ".repeat(12),
+                "^".repeat(50)
             )
             .as_str()
         ),

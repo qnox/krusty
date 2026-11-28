@@ -12,11 +12,11 @@ All paths below are relative to this directory (`tools/krusty-bazel/smoke`).
        (cd ../../.. && cargo build --release && just kotlinc)
 
    `just kotlinc` populates `target/cache/kotlinc/<ver>/`, where `<ver>` is `just max-version`
-   (2.4.10 at the time of writing) — or just look at `ls ../../../target/cache/kotlinc/`.
+   (2.4.21 at the time of writing) — or just look at `ls ../../../target/cache/kotlinc/`.
 
 2. Copy the stdlib in (`lib/*.jar` is gitignored; the directory is committed):
 
-       cp ../../../target/cache/kotlinc/2.4.10/kotlinc/lib/kotlin-stdlib.jar lib/
+       cp ../../../target/cache/kotlinc/2.4.21/kotlinc/lib/kotlin-stdlib.jar lib/
 
 3. **Edit the `KRUSTY_BINARY` path in `BUILD.bazel`.** It is passed through the rule's `env`
    attribute, which REPLACES the action environment, so it cannot be supplied with `--action_env`

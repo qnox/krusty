@@ -191,7 +191,7 @@ mod tests {
             let mut policy = WarningPolicy::default();
             policy.promote_warnings();
             policy
-                .configure(&format!("DEPRECATION:{level}"), KotlinVersion::V2_4_20)
+                .configure(&format!("DEPRECATION:{level}"), KotlinVersion::V2_4_21)
                 .unwrap();
             assert_eq!(
                 policy.compiler_disposition(Some(names::DEPRECATION)),
@@ -204,37 +204,24 @@ mod tests {
         }
     }
 
-    /// Measured with kotlinc 2.4.0: of the reified warnings it declares only
-    /// `TYPE_INTERSECTION_AS_REIFIED_WARNING`; the two deprecation warnings are new in 2.4.20.
     #[test]
     fn reified_warning_names_follow_the_selected_release_catalog() {
         for release in KotlinVersion::supported() {
-            for (name, diagnostic, since) in [
+            for (name, diagnostic) in [
                 (
                     "TYPE_INTERSECTION_AS_REIFIED_WARNING",
                     names::TYPE_INTERSECTION_AS_REIFIED_WARNING,
-                    KotlinVersion::V2_4_0,
                 ),
                 (
                     "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING",
                     names::TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING,
-                    KotlinVersion::V2_4_20,
                 ),
                 (
                     "TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING",
                     names::TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING,
-                    KotlinVersion::V2_4_20,
                 ),
             ] {
                 let mut policy = WarningPolicy::default();
-                if release < since {
-                    assert_eq!(
-                        policy.configure(&format!("{name}:error"), release),
-                        Err(format!("warning with name \"{name}\" does not exist")),
-                        "{release}: {name}"
-                    );
-                    continue;
-                }
                 assert_eq!(
                     policy.configure(&format!("{name}:error"), release),
                     Ok(()),
@@ -266,25 +253,18 @@ mod tests {
     #[test]
     fn an_error_is_not_a_configurable_warning() {
         assert_eq!(
-            warning_name("UNRESOLVED_REFERENCE", KotlinVersion::V2_4_20),
+            warning_name("UNRESOLVED_REFERENCE", KotlinVersion::V2_4_21),
             None
+        );
+        assert_eq!(
+            WarningPolicy::default()
+                .configure("UNRESOLVED_REFERENCE:error", KotlinVersion::V2_4_21),
+            Err("warning with name \"UNRESOLVED_REFERENCE\" does not exist".to_string())
         );
     }
 
     #[test]
     fn compiler_warning_names_follow_the_selected_release_catalog() {
-        const NAME: &str = "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING:warning";
-        for release in [KotlinVersion::V2_4_0, KotlinVersion::V2_4_10] {
-            assert_eq!(
-                WarningPolicy::default().configure(NAME, release),
-                Err(
-                    "warning with name \
-                     \"VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING\" does not exist"
-                        .to_string()
-                ),
-                "{release}"
-            );
-        }
         for (level, expected_level, expected_disposition) in [
             (
                 "disabled",
@@ -302,7 +282,7 @@ mod tests {
             assert_eq!(
                 current.configure(
                     &format!("VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING:{level}"),
-                    KotlinVersion::V2_4_20,
+                    KotlinVersion::V2_4_21,
                 ),
                 Ok(())
             );
@@ -354,14 +334,6 @@ mod tests {
     #[test]
     fn operator_modifier_warning_name_follows_the_selected_release_catalog() {
         const NAME: &str = "INAPPLICABLE_OPERATOR_MODIFIER_WARNING";
-        // Measured: kotlinc 2.4.0 and 2.4.10 already declare it, so both accept the level.
-        for release in [KotlinVersion::V2_4_0, KotlinVersion::V2_4_10] {
-            assert_eq!(
-                WarningPolicy::default().configure(&format!("{NAME}:warning"), release),
-                Ok(()),
-                "{release}"
-            );
-        }
         for (level, expected_level, expected_disposition) in [
             (
                 "disabled",
@@ -377,7 +349,7 @@ mod tests {
         ] {
             let mut current = WarningPolicy::default();
             assert_eq!(
-                current.configure(&format!("{NAME}:{level}"), KotlinVersion::V2_4_20),
+                current.configure(&format!("{NAME}:{level}"), KotlinVersion::V2_4_21),
                 Ok(())
             );
             assert_eq!(

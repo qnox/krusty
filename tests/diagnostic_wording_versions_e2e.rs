@@ -82,6 +82,8 @@ fn implemented_expect() {
     );
 }
 
+/// The flag selects the release before the environment is read, so an environment naming a release
+/// krusty does not support does not fail a compilation the flag configures.
 #[test]
 fn the_cli_version_flag_overrides_the_environment_before_compilation() {
     let work = common::scratch_dir().expect("scratch dir");
@@ -89,7 +91,7 @@ fn the_cli_version_flag_overrides_the_environment_before_compilation() {
     std::fs::write(&source, "fun f(x: String): Int = x.missing\n").expect("write source");
     let output = std::process::Command::new(common::krusty_binary())
         .args([
-            "-Xkotlin-reference-version=2.4.10",
+            "-Xkotlin-reference-version=2.4.21",
             "-no-stdlib",
             "-no-reflect",
             "-no-jdk",
@@ -105,11 +107,11 @@ fn the_cli_version_flag_overrides_the_environment_before_compilation() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         common::ledger(&stderr),
-        ["Flag.kt:1:27: unresolved reference 'missing'."]
+        ["Flag.kt:1:27: unresolved reference 'missing' on receiver of type 'String'."]
     );
 }
 
-/// The compilation's own profile positions a body-check diagnostic, not the newest release's.
+/// The flag's profile positions a body-check diagnostic, whatever the environment names.
 #[test]
 fn the_cli_version_flag_positions_a_missing_argument_before_compilation() {
     let work = common::scratch_dir().expect("scratch dir");
@@ -117,7 +119,7 @@ fn the_cli_version_flag_positions_a_missing_argument_before_compilation() {
     std::fs::write(&source, "fun h(x: Int): Int = x\nfun g(): Int = h()\n").expect("write source");
     let output = std::process::Command::new(common::krusty_binary())
         .args([
-            "-Xkotlin-reference-version=2.4.10",
+            "-Xkotlin-reference-version=2.4.21",
             "-no-stdlib",
             "-no-reflect",
             "-no-jdk",
@@ -133,7 +135,7 @@ fn the_cli_version_flag_positions_a_missing_argument_before_compilation() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         common::ledger(&stderr),
-        ["Missing.kt:2:17: no value passed for parameter 'x'."]
+        ["Missing.kt:2:16: no value passed for parameter 'x'."]
     );
 }
 

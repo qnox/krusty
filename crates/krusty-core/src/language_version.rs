@@ -138,9 +138,9 @@ mod tests {
 
     #[test]
     fn parses_only_the_levels_supported_by_the_selected_compiler() {
-        for &version in LanguageVersion::supported_for(KotlinVersion::V2_4_20) {
+        for &version in LanguageVersion::supported_for(KotlinVersion::V2_4_21) {
             assert_eq!(
-                LanguageVersion::parse_supported_for(&version.to_string(), KotlinVersion::V2_4_20,),
+                LanguageVersion::parse_supported_for(&version.to_string(), KotlinVersion::V2_4_21,),
                 Some(version)
             );
         }
@@ -148,22 +148,14 @@ mod tests {
             "", "2", "2.4.0", "+2.2", "-2.2", "2.x", "1.9", "2.7", "999.1",
         ] {
             assert_eq!(
-                LanguageVersion::parse_supported_for(value, KotlinVersion::V2_4_20),
+                LanguageVersion::parse_supported_for(value, KotlinVersion::V2_4_21),
                 None,
                 "{value:?}"
             );
         }
         assert_eq!(
-            LanguageVersion::supported_text_for(KotlinVersion::V2_4_20),
+            LanguageVersion::supported_text_for(KotlinVersion::V2_4_21),
             "2.0 (deprecated), 2.1 (deprecated), 2.2, 2.3, 2.4, 2.5 (experimental), 2.6 (experimental)"
-        );
-        assert_eq!(
-            LanguageVersion::supported_text_for(KotlinVersion::V2_4_10),
-            "2.0 (deprecated), 2.1 (deprecated), 2.2, 2.3, 2.4, 2.5 (experimental)"
-        );
-        assert_eq!(
-            LanguageVersion::parse_supported_for("2.6", KotlinVersion::V2_4_10),
-            None
         );
         assert_eq!(
             LanguageVersion::supported_for(KotlinVersion::new(2, 4, 30)),
@@ -190,7 +182,7 @@ mod tests {
         assert_eq!(LanguageVersion::V2_2.metadata_version(), [2, 2, 0]);
         assert_eq!(LanguageVersion::default(), LanguageVersion::V2_4);
         assert_eq!(
-            LanguageVersion::default_for(KotlinVersion::V2_4_0),
+            LanguageVersion::default_for(KotlinVersion::V2_4_21),
             LanguageVersion::V2_4
         );
     }

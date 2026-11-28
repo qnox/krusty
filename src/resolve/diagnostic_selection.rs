@@ -10,13 +10,12 @@ use crate::types::TyKind;
 /// narrowed type, a safe call the non-null one, a platform type its Kotlin spelling, and the null
 /// literal `Nothing?`. Type parameters and failed types have no reportable receiver type.
 pub(crate) fn unresolved_member_message(
-    reference: crate::kotlin_version::ReferenceProfile,
     name: &str,
     receiver: Ty,
     hidden_deprecated: bool,
-) -> String {
+) -> crate::diag::NamedMessage {
     if hidden_deprecated {
-        return crate::diagnostic_wording::unresolved_reference_on(reference, name, None);
+        return crate::diagnostic_wording::unresolved_reference(name);
     }
     let rendered = match receiver.kind() {
         TyKind::Error | TyKind::Pending | TyKind::TyParam(..) | TyKind::Var(..) => None,
@@ -25,38 +24,10 @@ pub(crate) fn unresolved_member_message(
         TyKind::PlatformNullable(inner) => Some(inner.source_name()),
         _ => Some(receiver.source_name()),
     };
-    crate::diagnostic_wording::unresolved_reference_on(reference, name, rendered.as_deref())
-}
-
-impl SymbolTable {
-    /// [`unresolved_member_message`] under this
-    /// compilation's profile.
-    pub(crate) fn unresolved_member_message(
-        &self,
-        name: &str,
-        receiver: Ty,
-        hidden_deprecated: bool,
-    ) -> String {
-        unresolved_member_message(self.reference, name, receiver, hidden_deprecated)
-    }
+    crate::diagnostic_wording::unresolved_reference_on(name, rendered.as_deref())
 }
 
 impl Checker<'_> {
-    /// The span selected by one versioned diagnostic positioning strategy.
-    pub(super) fn anchored_span(
-        &self,
-        anchor: crate::diagnostic_wording::Anchor,
-        call: ExprId,
-        value_arguments: impl FnOnce() -> Span,
-    ) -> Span {
-        match anchor {
-            crate::diagnostic_wording::Anchor::ValueArguments => value_arguments(),
-            crate::diagnostic_wording::Anchor::ReferencedNameByQualified => {
-                self.call_callee_name_span(call)
-            }
-        }
-    }
-
     pub(super) fn call_callee_name_span(&self, call: ExprId) -> Span {
         let callee = match self.file.expr(call) {
             Expr::Call { callee, .. } => callee,
@@ -78,7 +49,7 @@ impl Checker<'_> {
         receiver: Option<ExprId>,
         name: &str,
         receiver_ty: Ty,
-    ) -> String {
+    ) -> crate::diag::NamedMessage {
         let hidden_deprecated = self
             .resolver()
             .receiver_has_hidden_deprecated_member(receiver_ty, name);
@@ -100,7 +71,7 @@ impl Checker<'_> {
         receiver: Option<ExprId>,
         name: &str,
         receiver_ty: Ty,
-    ) -> String {
+    ) -> crate::diag::NamedMessage {
         let hidden_deprecated = self
             .resolver()
             .receiver_has_hidden_deprecated_property_accessor(
@@ -124,7 +95,7 @@ impl Checker<'_> {
         name: &str,
         receiver_ty: Ty,
         hidden_deprecated: bool,
-    ) -> String {
+    ) -> crate::diag::NamedMessage {
         let qualifier = receiver.is_some_and(|receiver| {
             matches!(
                 self.qualifier(scope, QualifierInput::Expression(receiver)),
@@ -134,9 +105,9 @@ impl Checker<'_> {
         if qualifier
             || (self.omit_unshaped_any_receiver_type > 0 && receiver_ty == Ty::obj("kotlin/Any"))
         {
-            crate::diagnostic_wording::unresolved_reference_on(self.file.reference, name, None)
+            crate::diagnostic_wording::unresolved_reference(name)
         } else {
-            unresolved_member_message(self.file.reference, name, receiver_ty, hidden_deprecated)
+            unresolved_member_message(name, receiver_ty, hidden_deprecated)
         }
     }
 }

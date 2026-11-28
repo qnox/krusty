@@ -35,6 +35,10 @@ pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
                         );
                     }
                 }
+                for diagnostic in crate::declaration_validation::enum_constructor_diagnostics(class)
+                {
+                    diagnostics.error(diagnostic.span, diagnostic.message.to_string());
+                }
                 for function in &class.methods {
                     validate_function(function, true, diagnostics);
                 }
@@ -228,7 +232,7 @@ pub(super) fn validate_expect_bodies(file: &File, diagnostics: &mut DiagSink) ->
                 // the reference compiler points. It travels with the declaration; nothing here
                 // searches for it, and nothing substitutes another position when it is absent.
                 if !matches!(function.body, crate::ast::FunBody::None) {
-                    diagnostics.error(expect.keyword, body_message(file.reference));
+                    diagnostics.error(expect.keyword, body_message());
                 }
             }
             Decl::Property(property) => {
@@ -244,7 +248,7 @@ pub(super) fn validate_expect_bodies(file: &File, diagnostics: &mut DiagSink) ->
 fn validate_expect_class(file: &File, class: &crate::ast::ClassDecl, diagnostics: &mut DiagSink) {
     for function in &class.methods {
         if !matches!(function.body, crate::ast::FunBody::None) {
-            diagnostics.error(function.signature_span, body_message(file.reference));
+            diagnostics.error(function.signature_span, body_message());
         }
     }
     for property in &class.body_props {
@@ -257,7 +261,7 @@ fn validate_expect_class(file: &File, class: &crate::ast::ClassDecl, diagnostics
             // a broken parse product rather than a block to skip: reporting nothing here would drop
             // the diagnostic for an implementation the header really carries.
             match file.init_blocks.get(body) {
-                Some(header) => diagnostics.error(header.keyword, body_message(file.reference)),
+                Some(header) => diagnostics.error(header.keyword, body_message()),
                 None => diagnostics.error(
                     class.span,
                     "internal error: an init block in an expect classifier has no `init` keyword",
@@ -268,7 +272,7 @@ fn validate_expect_class(file: &File, class: &crate::ast::ClassDecl, diagnostics
     for entry in &class.enum_entries {
         for function in &entry.methods {
             if !matches!(function.body, crate::ast::FunBody::None) {
-                diagnostics.error(function.signature_span, body_message(file.reference));
+                diagnostics.error(function.signature_span, body_message());
             }
         }
     }
@@ -290,7 +294,7 @@ fn validate_expect_property(
     if let Some(init) = property.init {
         // At the initializer EXPRESSION: `expect val x: Int = 3` is reported under the `3`.
         match file.expr_span(init) {
-            Some(at) => diagnostics.error(at, initializer_message(file.reference)),
+            Some(at) => diagnostics.error(at, initializer_message()),
             None => diagnostics.error(declaration, missing("initializer")),
         }
     }
@@ -298,19 +302,19 @@ fn validate_expect_property(
         // A delegate is an implementation too, and gets its own sentence — at the delegate
         // EXPRESSION (`by lazy { 1 }` is reported under `lazy { 1 }`).
         match file.expr_span(delegate) {
-            Some(at) => diagnostics.error(at, delegate_message(file.reference)),
+            Some(at) => diagnostics.error(at, delegate_message()),
             None => diagnostics.error(declaration, missing("delegate")),
         }
     }
     if property.getter.is_some() {
         match property.getter_span {
-            Some(at) => diagnostics.error(at, body_message(file.reference)),
+            Some(at) => diagnostics.error(at, body_message()),
             None => diagnostics.error(declaration, missing("getter")),
         }
     }
     if let Some(setter) = &property.setter {
         if setter.body.is_some() {
-            diagnostics.error(setter.span, body_message(file.reference));
+            diagnostics.error(setter.span, body_message());
         }
     }
 }

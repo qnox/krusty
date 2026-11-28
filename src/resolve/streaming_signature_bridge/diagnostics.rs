@@ -11,6 +11,8 @@ pub(super) struct ProductionSignatureDiagnostic {
     pub(super) file: u32,
     pub(super) span: Span,
     pub(super) message: String,
+    /// kotlinc's name for the diagnostic, when its report names it.
+    name: Option<crate::diag::DiagnosticName>,
     pub(super) identity: Option<crate::diag::DiagnosticIdentity>,
     pub(super) unconditional: bool,
     /// The candidates an ambiguity names. A candidate whose result was still being inferred when
@@ -20,7 +22,7 @@ pub(super) struct ProductionSignatureDiagnostic {
 }
 
 #[derive(Clone)]
-struct NamedCandidates {
+pub(super) struct NamedCandidates {
     spelling: String,
     candidates: Box<[crate::libraries::FunctionInfo]>,
 }
@@ -37,6 +39,7 @@ impl ProductionSignatureDiagnostic {
             file,
             span,
             message,
+            name: None,
             identity: None,
             unconditional: false,
             named_candidates: None,
@@ -124,11 +127,12 @@ pub(super) fn emit_production_signature_diagnostic(
 ) {
     diagnostics.set_file(diagnostic.file);
     let message = diagnostic.reported_message(published);
-    if let Some(identity) = diagnostic.identity {
-        diagnostics.error_with_identity(diagnostic.span, identity, message);
-    } else {
-        diagnostics.error(diagnostic.span, message);
-    }
+    diagnostics.error_with(
+        diagnostic.span,
+        diagnostic.name,
+        diagnostic.identity,
+        message,
+    );
 }
 
 /// Report every unconditional finding of `recorded`, in recording order. A finding that only
@@ -188,7 +192,7 @@ impl ProductionSignatureSemantics<'_> {
         origin: crate::fir::OriginId,
         message: String,
     ) -> crate::fir::DiagnosticId {
-        self.record_source_finding(declaration, origin, message, None)
+        self.record_source_finding(declaration, origin, message, None, None)
     }
 
     /// kotlinc's ambiguity for a call whose most specific candidates tie, naming each candidate by
@@ -206,7 +210,7 @@ impl ProductionSignatureSemantics<'_> {
             spelling: spelling.to_owned(),
             candidates: candidates.into(),
         };
-        self.record_source_finding(scope.owner, origin, message, Some(named))
+        self.record_source_finding(scope.owner, origin, message, None, Some(named))
     }
 
     fn record_source_finding(
@@ -214,6 +218,7 @@ impl ProductionSignatureSemantics<'_> {
         declaration: crate::fir::DeclarationId,
         origin: crate::fir::OriginId,
         message: String,
+        name: Option<crate::diag::DiagnosticName>,
         named_candidates: Option<NamedCandidates>,
     ) -> crate::fir::DiagnosticId {
         let fallback = self
@@ -234,6 +239,18 @@ impl ProductionSignatureSemantics<'_> {
         let Some((file, span)) = location else {
             return Self::failure();
         };
+        self.record_source_finding_at(declaration, (file, span), message, name, named_candidates)
+    }
+
+    /// Record a finding at `span` of `file`, once per location and message.
+    pub(super) fn record_source_finding_at(
+        &self,
+        declaration: crate::fir::DeclarationId,
+        (file, span): (u32, Span),
+        message: String,
+        name: Option<crate::diag::DiagnosticName>,
+        named_candidates: Option<NamedCandidates>,
+    ) -> crate::fir::DiagnosticId {
         let mut diagnostics = self.diagnostics.borrow_mut();
         if let Some(index) = diagnostics.iter().position(|diagnostic| {
             diagnostic.file == file && diagnostic.span == span && diagnostic.message == message
@@ -241,6 +258,7 @@ impl ProductionSignatureSemantics<'_> {
             return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
         }
         diagnostics.push(ProductionSignatureDiagnostic {
+            name,
             named_candidates,
             ..ProductionSignatureDiagnostic::conditional(declaration, file, span, message)
         });
@@ -253,11 +271,8 @@ impl ProductionSignatureSemantics<'_> {
         origin: crate::fir::OriginId,
         spelling: &str,
     ) -> crate::fir::DiagnosticId {
-        self.record_source_diagnostic(
-            declaration,
-            origin,
-            format!("unresolved reference '{spelling}'."),
-        )
+        let report = crate::diagnostic_wording::unresolved_reference(spelling);
+        self.record_source_finding(declaration, origin, report.message, Some(report.name), None)
     }
 
     /// Report `UNSAFE_CALL` when the member exists on the receiver's non-null type; otherwise report
@@ -320,11 +335,11 @@ impl ProductionSignatureSemantics<'_> {
             Ok(hidden) => hidden,
             Err(diagnostic) => return diagnostic,
         };
-        self.record_source_diagnostic(
-            scope.owner,
-            origin,
-            self.table
-                .unresolved_member_message(spelling, receiver, hidden_deprecated),
-        )
+        let report = crate::resolve::diagnostic_selection::unresolved_member_message(
+            spelling,
+            receiver,
+            hidden_deprecated,
+        );
+        self.record_source_finding(scope.owner, origin, report.message, Some(report.name), None)
     }
 }

@@ -86,16 +86,19 @@ impl ClassWriter {
         let builder_labels = builder_labels(&mut node, source, &offsets, code_len);
 
         // The labels an instruction gets besides the reader's: they stand right after the
-        // reader's label there, ahead of its line numbers, as one run of labels does in kotlinc.
-        let extra = |index: usize| {
+        // reader's label there, ahead of its line numbers, as one run of labels does in kotlinc. A
+        // label the builder bound only after marking the offset's line stands after that line
+        // number instead, as kotlinc's does when it is visited after the `LineNumberNode`.
+        let extra = |index: usize, after_line: bool| {
             let builder = offsets
                 .get(index)
                 .and_then(|offset| builder_labels.get(offset))
                 .into_iter()
                 .flatten()
-                .cloned();
+                .filter(move |&&(_, after)| after == after_line)
+                .map(|(label, _)| label.clone());
             let implicit = implicit_return
-                .filter(|&(at, _)| at == index)
+                .filter(|&(at, _)| !after_line && at == index)
                 .map(|(_, label)| Node::Label(label));
             builder.chain(implicit)
         };
@@ -106,13 +109,14 @@ impl ClassWriter {
             match entry {
                 Node::Label(_) if !placed => {
                     nodes.push(entry);
-                    nodes.extend(extra(index));
+                    nodes.extend(extra(index, false));
                     placed = true;
                 }
                 Node::Insn(_) => {
                     if !placed {
-                        nodes.extend(extra(index));
+                        nodes.extend(extra(index, false));
                     }
+                    nodes.extend(extra(index, true));
                     nodes.push(entry);
                     index += 1;
                     placed = false;
@@ -121,8 +125,9 @@ impl ClassWriter {
             }
         }
         if !placed {
-            nodes.extend(extra(index));
+            nodes.extend(extra(index, false));
         }
+        nodes.extend(extra(index, true));
         node.nodes = nodes;
         Some(FinishedNode {
             node,
@@ -138,7 +143,7 @@ fn builder_labels(
     source: &RewriteSource,
     offsets: &[usize],
     code_len: usize,
-) -> BTreeMap<usize, Vec<Node>> {
+) -> BTreeMap<usize, Vec<(Node, bool)>> {
     let builder = &source.builder;
     let mut linked: HashMap<usize, u32> = HashMap::default();
     for &(operand, label) in &builder.fixups {
@@ -189,12 +194,15 @@ fn builder_labels(
         }
     }
     fresh.sort_by_key(|&label| (builder.bind_sequence(label as usize), label));
-    let mut standing: BTreeMap<usize, Vec<Node>> = BTreeMap::new();
+    let mut standing: BTreeMap<usize, Vec<(Node, bool)>> = BTreeMap::new();
     for label in fresh {
+        let offset = builder.labels[label as usize];
+        let after_line =
+            u16::try_from(offset).is_ok_and(|pc| builder.bound_after_line(label as usize, pc));
         standing
-            .entry(builder.labels[label as usize])
+            .entry(offset)
             .or_default()
-            .push(Node::Label(own[&label]));
+            .push((Node::Label(own[&label]), after_line));
     }
     standing
 }
@@ -258,5 +266,65 @@ mod tests {
             .collect();
         assert_eq!(targets, labels[1..3]);
         assert_eq!(finished.implicit_return, Some(labels[3]));
+    }
+
+    #[test]
+    fn a_label_bound_after_its_offsets_line_stands_after_the_line_number() {
+        // `if (c) 1 else 2` whose else branch ends by marking line 7 before the join is bound:
+        // kotlinc visits the join's label after that `LineNumberNode`, which is what lets its
+        // redundant-goto pass thread a jump to the join through a `goto` that follows it.
+        let mut writer = ClassWriter::new("T", "java/lang/Object");
+        let mut code = CodeBuilder::new(1);
+        let otherwise = code.new_label();
+        let join = code.new_label();
+        code.mark_line(6);
+        code.iload(0);
+        code.ifeq(otherwise);
+        code.push_int(1, &mut writer);
+        code.goto(join);
+        code.bind(otherwise);
+        code.push_int(2, &mut writer);
+        code.mark_line(7);
+        code.bind(join);
+        code.ireturn();
+        code.link();
+        writer.add_method(ACC_PUBLIC | ACC_STATIC, "f", "(Z)I", &code);
+
+        let method = &writer.methods[0];
+        let source = method.rewrite_source.as_deref().expect("rewrite source");
+        let bytes = method.code.as_deref().expect("method body");
+        let pool = PoolLookup::new(&writer.cp, &writer.bootstrap_methods);
+        let finished = writer
+            .finished_node(method, source, bytes, &pool)
+            .expect("finished node");
+
+        let nodes = &finished.node.nodes;
+        let return_at = nodes
+            .iter()
+            .position(|node| *node == Node::Insn(Insn::Op(0xac)))
+            .expect("ireturn");
+        let goto_target = finished
+            .node
+            .instructions()
+            .find_map(|insn| match insn {
+                Insn::Jump { op: 0xa7, target } => Some(*target),
+                _ => None,
+            })
+            .expect("goto");
+        let Node::Label(reader) = nodes[return_at - 3] else {
+            panic!("the reader's label: {nodes:?}");
+        };
+        assert_eq!(
+            nodes[return_at - 3..return_at],
+            [
+                Node::Label(reader),
+                Node::Line {
+                    line: 7,
+                    start: reader
+                },
+                Node::Label(goto_target),
+            ],
+            "{nodes:?}"
+        );
     }
 }

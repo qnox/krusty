@@ -168,6 +168,7 @@ fn a_construction_reaches_a_constructor_entry_that_fills_and_delegates() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     let constructors = &ir.classes[class as usize].secondary_ctors;
@@ -249,6 +250,7 @@ fn an_entry_whose_parameter_list_a_declared_constructor_has_is_reached_by_its_pl
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     let constructors = &ir.classes[class as usize].secondary_ctors;
@@ -317,6 +319,7 @@ fn an_entry_takes_the_prefix_first_and_counts_masks_after_it() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     assert_eq!(
@@ -369,6 +372,7 @@ fn a_superclass_call_drops_its_placeholders_for_the_entry() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     let declaration = &ir.classes[child as usize];
@@ -432,6 +436,7 @@ fn a_delegation_and_an_enum_constant_share_one_entry() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     let declaration = &ir.classes[class as usize];
@@ -498,6 +503,7 @@ fn constructor_calls_this_lowering_cannot_realize_keep_their_checked_form() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     for site in [elsewhere, unselected, omitting] {
@@ -543,6 +549,7 @@ fn a_default_calling_with_an_omission_calls_the_entry_from_the_constructor_entry
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     let function_entry = ir.default_entries[&function];
@@ -597,6 +604,7 @@ fn an_uncalled_constructors_defaults_publish_no_function_entry() {
         &mut CheckedBackendCallables::default(),
         |_| false,
         |_| false,
+        &[],
     );
 
     // Only a constructor entry's filled copies are emitted; no construction asked for one here.

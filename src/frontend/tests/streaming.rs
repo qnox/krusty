@@ -172,7 +172,7 @@ fn emission_pass_one_checks_inline_bodies_but_defers_ordinary_body_diagnostics()
     assert_eq!(diagnostics.diags.len(), 1);
     assert_eq!(diagnostics.diags[0].file, 0);
     assert_eq!(diagnostics.diags[0].span, crate::diag::Span::new(65, 72));
-    assert_eq!(diagnostics.diags[0].msg, "unresolved reference 'missing'.");
+    assert_eq!(diagnostics.diags[0].msg, "Unresolved reference 'missing'.");
 }
 
 #[test]
@@ -211,11 +211,8 @@ fn inferred_signature_reports_a_missing_member_during_pass_one() {
     );
     assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
     assert_eq!(diagnostics.diags[0].file, 0);
-    let expected = crate::diagnostic_wording::unresolved_reference_on(
-        crate::features::ReferenceProfile::default(),
-        "missing",
-        Some("String"),
-    );
+    let expected =
+        crate::diagnostic_wording::unresolved_reference_on("missing", Some("String")).message;
     assert_eq!(diagnostics.diags[0].msg, expected);
 }
 
@@ -366,7 +363,7 @@ fn emission_pass_one_does_not_check_ordinary_members_beside_an_inline_member() {
     assert_eq!(diagnostics.diags.len(), 1);
     assert_eq!(diagnostics.diags[0].file, 0);
     assert_eq!(diagnostics.diags[0].span, crate::diag::Span::new(79, 86));
-    assert_eq!(diagnostics.diags[0].msg, "unresolved reference 'missing'.");
+    assert_eq!(diagnostics.diags[0].msg, "Unresolved reference 'missing'.");
 }
 
 #[test]
@@ -403,14 +400,14 @@ fn unresolved_body_local_classifier_header_is_checked_in_pass_two() {
         Some(crate::diag::Span::new(start, start + 7))
     );
     assert_eq!(census.failures[0].kind, "Rejected");
-    assert_eq!(census.failures[0].detail, "unresolved reference 'Missing'.");
+    assert_eq!(census.failures[0].detail, "Unresolved reference 'Missing'.");
     assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
     assert_eq!(diagnostics.diags[0].file, 0);
     assert_eq!(
         diagnostics.diags[0].span,
         crate::diag::Span::new(start, start + 7)
     );
-    assert_eq!(diagnostics.diags[0].msg, "unresolved reference 'Missing'.");
+    assert_eq!(diagnostics.diags[0].msg, "Unresolved reference 'Missing'.");
 }
 
 #[test]

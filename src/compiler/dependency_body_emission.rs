@@ -228,8 +228,21 @@ pub(super) fn emit_dependencies<B: Backend>(
         }
     }
     let target_realizes_intrinsic = |operation| backend.realizes_dependency_intrinsic(operation);
+    let getter_classifiers = CheckedBackendClassifiers::new(module_facts, platform);
     let target_realizes_getter = |signature: crate::backend::DependencyGetterSignature<'_>| {
-        backend.realizes_dependency_getter(signature)
+        // The provider's declaration of the owner says which property stores a value class.
+        let owner = crate::backend::BackendClassifierSource::classifier(
+            &getter_classifiers,
+            signature.owner,
+        );
+        let value_declaration = owner
+            .as_ref()
+            .and_then(|fact| fact.value_declaration.as_ref())
+            .filter(|declaration| &*declaration.property == signature.name);
+        backend.realizes_dependency_getter(crate::backend::DependencyGetterSignature {
+            value_declaration,
+            ..signature
+        })
     };
     let capabilities = emitted_roots::OrdinaryRootCapabilities {
         realizes_intrinsic: &target_realizes_intrinsic,
@@ -291,12 +304,29 @@ pub(super) fn emit_dependencies<B: Backend>(
     // Category ownership is a declaration capability, not an emission-success test. An intrinsic
     // wrapper whose unsupported body transaction declines must not be retried as an ordinary body.
     let intrinsic_roots: HashSet<_> = roots.iter().map(|root| root.identity()).collect();
-    // A function a source module of this program declares and exports is called, never lowered a
-    // second time from the body its own KLIB also records.
+    // A function, constructor or accessor a source module of this program declares and exports is
+    // called, never lowered a second time from the body its own KLIB also records.
     let source_exports: HashSet<&KlibDependencyCallable> = uses
         .iter()
-        .flat_map(|use_| use_.file.dependency_exports.callables())
-        .map(|(_, identity)| identity)
+        .flat_map(|use_| {
+            let exports = &use_.file.dependency_exports;
+            exports
+                .callables()
+                .map(|(_, identity)| identity)
+                .chain(exports.constructors().iter().map(|(_, identity)| identity))
+                .chain(
+                    exports
+                        .constructor_declarations()
+                        .iter()
+                        .map(|(_, identity)| identity),
+                )
+                .chain(
+                    exports
+                        .property_accessors()
+                        .iter()
+                        .map(|(_, identity)| identity),
+                )
+        })
         .collect();
     ordinary.retain(|root| {
         let intrinsic_owned = intrinsic_roots.contains(root.identity());
@@ -340,14 +370,29 @@ pub(super) fn emit_dependencies<B: Backend>(
     let root_objects = root_objects
         .into_iter()
         .filter(|object| {
-            !support_state
-                .materialized_classes
-                .contains_key(&object.classifier)
+            // An object a source module of this program declares is that module's one instance,
+            // read through its exports rather than materialized again from its own KLIB.
+            !uses
+                .iter()
+                .any(|use_| use_.file.ir.class_id_by_name(object.classifier).is_some())
+                && !support_state
+                    .materialized_classes
+                    .contains_key(&object.classifier)
                 && !support_state
                     .materializing_classes
                     .contains_key(&object.classifier)
         })
         .collect::<Vec<_>>();
+    let mut dispatched_calls = HashSet::default();
+    for use_ in uses {
+        match emitted_roots::dispatched_source_calls(use_.file) {
+            Ok(calls) => dispatched_calls.extend(calls),
+            Err(error) => {
+                diags.error(Span::new(0, 0), format!("internal error: {error}"));
+                return Vec::new();
+            }
+        }
+    }
     let mut artifacts = Vec::new();
     for (requires_intrinsic_link, mut roots) in [(true, roots), (false, ordinary)] {
         // Intrinsic support may have emitted an ordinary root transitively in the preceding unit.
@@ -399,6 +444,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             emitted_roots::ClosureRoots {
                 callables: &roots,
                 objects: root_objects,
+                dispatched_calls: &dispatched_calls,
             },
             &externals,
             &capabilities,

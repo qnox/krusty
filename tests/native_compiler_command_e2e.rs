@@ -395,7 +395,7 @@ fn a_source_error_is_reported_and_no_program_is_written() {
             Some(1),
             String::new(),
             format!(
-                "{}:2:5: error: unresolved reference 'missing'.\n",
+                "{}:2:5: error: unresolved reference 'missing'.\n    missing()\n    ^^^^^^^\n",
                 source.display()
             )
         )
@@ -512,7 +512,7 @@ fn expect_and_actual_outside_a_multiplatform_project_are_reported() {
             format!(
                 "{}:1:1: error: 'expect' and 'actual' declarations can be used only in \
                  multiplatform projects. Learn more about Kotlin Multiplatform: \
-                 https://kotl.in/multiplatform-setup\n",
+                 https://kotl.in/multiplatform-setup\nexpect fun f(): Int\n^^^^^^\n",
                 source.display()
             )
         )

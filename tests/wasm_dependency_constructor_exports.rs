@@ -409,3 +409,45 @@ fn wasm_official_root_package_dependency_declarations_run_their_bodies() {
         "RootPackageDependencyDeclarations",
     );
 }
+
+/// An official producer's anonymous object inherits an interface default that only dispatch
+/// reaches: the consumer declares the inherited body and implements the member with it.
+#[test]
+fn wasm_official_dependency_anonymous_object_runs_its_inherited_interface_default() {
+    run_against_official_producer(
+        include_str!("box_regressions/libraryAnonymousObjectInheritedDefault.kt"),
+        "AnonymousObjectInheritedDefault",
+    );
+}
+
+/// An official producer's lambda calls an abstract member of its receiver's class before anything
+/// constructs the class: the call dispatches to the private subclass's override.
+#[test]
+fn wasm_official_dependency_abstract_member_called_before_construction_dispatches() {
+    run_against_official_producer(
+        include_str!(
+            "box_regressions/multimodule/dependencyAbstractMemberCalledBeforeConstruction.kt"
+        ),
+        "DependencyAbstractMemberCalledBeforeConstruction",
+    );
+}
+
+/// An official producer's lambda takes a value of a class private to the library's file: the
+/// lambda's header names the class as the body that creates it does.
+#[test]
+fn wasm_official_dependency_lambda_over_file_private_class_runs() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyLambdaOverFilePrivateClass.kt"),
+        "DependencyLambdaOverFilePrivateClass",
+    );
+}
+
+/// An official producer's body reads and writes a property a class private to its file inherits:
+/// the accessors link to the inherited property's.
+#[test]
+fn wasm_official_dependency_file_private_class_inherited_property_runs() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyFilePrivateClassInheritedProperty.kt"),
+        "DependencyFilePrivateClassInheritedProperty",
+    );
+}

@@ -1637,11 +1637,11 @@ fn stdlib_calls_reach_header_declared_callees() {
     // declined at an implicit conversion now passes it and declines at an enum value whose class
     // its closure did not read. An internal top-level function no selection records now links
     // as a file-private one does, with the formals its identity mints, so bodies reach past a
-    // generic one and decline further on, on the newest release three of them at a member call.
-    let expected = if crate::kotlin_version::environment_release()
-        >= crate::kotlin_version::KotlinVersion::V2_4_20
-    {
-        vec![
+    // generic one and decline further on, three of them at a member call.
+    // An unsigned constant is serialized as its signed bits, typed unsigned, and now lowers: the
+    // six reaches that declined at it go on to decline at a member call or a property accessor
+    // signature, where the deeper bodies are counted once per path that reaches them.
+    let expected = vec![
                 ("it calls `kotlin.ArithmeticException.<init>`)", 2),
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
@@ -1656,9 +1656,8 @@ fn stdlib_calls_reach_header_declared_callees() {
                      indices)",
                     6,
                 ),
-                ("it uses a call of a member function)", 95),
-                ("it uses a call through a property accessor signature)", 41),
-                ("it uses a constant of another type than its value's)", 6),
+                ("it uses a call of a member function)", 97),
+                ("it uses a call through a property accessor signature)", 47),
                 (
                     "it uses an enum value whose class the closure did not read)",
                     1,
@@ -1668,37 +1667,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                     "its serialized declaration disagrees with the selected one: an object literal's supertype TypeName(\"kotlinx/cinterop/CValues\") is not a selected classifier)",
                     1,
                 ),
-            ]
-    } else {
-        vec![
-                ("it calls `kotlin.ArithmeticException.<init>`)", 2),
-                ("it calls `kotlin.NumberFormatException.<init>`)", 4),
-                ("it calls `kotlin.UInt.<init>`)", 4),
-                ("it converts a value implicitly)", 4),
-                ("it declares type parameters)", 165),
-                (
-                    "it uses a `for` loop over a progression that is not a range literal)",
-                    4,
-                ),
-                (
-                    "it uses a `for` loop over an extension property that is not an array's \
-                     indices)",
-                    6,
-                ),
-                ("it uses a call of a member function)", 84),
-                ("it uses a call through a property accessor signature)", 41),
-                ("it uses a constant of another type than its value's)", 6),
-                (
-                    "it uses an enum value whose class the closure did not read)",
-                    1,
-                ),
-                ("its library serializes none)", 100),
-                (
-                    "its serialized declaration disagrees with the selected one: an object literal's supertype TypeName(\"kotlinx/cinterop/CValues\") is not a selected classifier)",
-                    1,
-                ),
-            ]
-    };
+            ];
     assert_eq!(
         reached.into_iter().collect::<Vec<_>>(),
         expected

@@ -7,6 +7,7 @@
 //! are is an explicit declaration, not something inferred from the data a pass happens to carry —
 //! see [`super::source_fragment`].
 
+use super::annotation_host_kind::AnnotationHostKind;
 use super::*;
 
 #[derive(Default)]
@@ -129,7 +130,7 @@ enum AnnotationApplicationHost {
         constructor_parameter: bool,
     },
     NonProperty {
-        declaration_target: &'static str,
+        declaration_target: AnnotationHostKind,
         constructor_parameter: bool,
         /// A declaration no annotation target denotes (an initializer): an annotation that allows
         /// an explicit use-site target is still wrong on it.
@@ -138,6 +139,28 @@ enum AnnotationApplicationHost {
 }
 
 impl Checker<'_> {
+    /// kotlinc's WRONG_ANNOTATION_TARGET on a declaration that is no property: the annotation class
+    /// must list one of the targets `hosts` the declaration denotes.
+    fn check_non_property_target(
+        &mut self,
+        annotation: &AnnotationRef,
+        targets: crate::types::AnnotationTargets,
+        kind: AnnotationHostKind,
+        hosts: &[crate::types::KotlinTarget],
+    ) -> bool {
+        if hosts.iter().any(|&host| targets.allows(host))
+            || self.suppresses_diagnostic("WRONG_ANNOTATION_TARGET")
+        {
+            return true;
+        }
+        self.diags.error(
+            Span::new(annotation.at, annotation.span.hi),
+            wrong_annotation_target_message(kind.description(), targets),
+        );
+        self.discard_annotation_application(annotation);
+        false
+    }
+
     fn discard_annotation_application(&mut self, annotation: &AnnotationRef) {
         self.applied_annotations.discard(annotation);
     }
@@ -158,7 +181,10 @@ impl Checker<'_> {
         );
         for (annotation, arguments) in function.annotations.iter().zip(&function.annotation_args) {
             self.check_non_property_annotation_application(
-                scope, annotation, arguments, "function",
+                scope,
+                annotation,
+                arguments,
+                AnnotationHostKind::LocalFunction,
             );
         }
         for parameter in &function.params {
@@ -169,7 +195,7 @@ impl Checker<'_> {
                     scope,
                     annotation,
                     arguments,
-                    "value parameter",
+                    AnnotationHostKind::ValueParameter,
                 );
             }
         }
@@ -186,7 +212,7 @@ impl Checker<'_> {
             scope,
             annotation,
             arguments,
-            "type parameter",
+            AnnotationHostKind::TypeParameter,
         );
     }
 
@@ -340,7 +366,7 @@ impl Checker<'_> {
                 }
             } else {
                 AnnotationApplicationHost::NonProperty {
-                    declaration_target: "value parameter",
+                    declaration_target: AnnotationHostKind::ValueParameter,
                     constructor_parameter: true,
                     targetless: false,
                 }
@@ -357,7 +383,7 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         annotation: &AnnotationRef,
         arguments: &[ExprId],
-        declaration_target: &'static str,
+        declaration_target: AnnotationHostKind,
     ) -> Option<TypeName> {
         self.check_annotation_application_for_host(
             scope,
@@ -647,7 +673,7 @@ impl Checker<'_> {
                 constructor_parameter,
                 ..
             } => (
-                Some(declaration_target),
+                Some(declaration_target.description()),
                 None,
                 false,
                 false,
@@ -664,7 +690,52 @@ impl Checker<'_> {
             } => targets.property_declaration_site(constructor_parameter),
             _ => None,
         });
-        let Some(site) = site else { return true };
+        if site.is_none() {
+            if let AnnotationApplicationHost::NonProperty {
+                declaration_target, ..
+            } = host
+            {
+                if let Some(hosts) = declaration_target.targets() {
+                    return self.check_non_property_target(
+                        annotation,
+                        targets,
+                        declaration_target,
+                        hosts,
+                    );
+                }
+            }
+        }
+        let Some(site) = site else {
+            // No default site (parameter, property, field) is applicable: the declaration itself
+            // is the wrong target.
+            if let (
+                AnnotationApplicationHost::Property {
+                    has_backing_field,
+                    constructor_parameter,
+                    ..
+                },
+                Some(description),
+            ) = (host, declaration_target)
+            {
+                let sites = targets.property_declaration_sites(
+                    crate::types::PropertyAnnotationHost {
+                        constructor_parameter,
+                        has_backing_field,
+                    },
+                    self.file.property_annotation_default_target_mode,
+                    None,
+                );
+                if sites.is_empty() && !self.suppresses_diagnostic("WRONG_ANNOTATION_TARGET") {
+                    self.diags.error(
+                        Span::new(annotation.at, annotation.span.hi),
+                        wrong_annotation_target_message(description, targets),
+                    );
+                    self.discard_annotation_application(annotation);
+                    return false;
+                }
+            }
+            return true;
+        };
         let wrong_target_suppression = if annotation.property_site.is_some() {
             "WRONG_ANNOTATION_TARGET_WITH_USE_SITE_TARGET"
         } else {
@@ -777,7 +848,12 @@ impl Checker<'_> {
         let container = self.enter_annotation_class_rung(owner.and_then(TypeName::nested_owner));
         let annotated = std::mem::replace(&mut self.annotated_classifier, owner);
         for (annotation, arguments) in class.annotations.iter().zip(&class.annotation_args) {
-            self.check_non_property_annotation_application(scope, annotation, arguments, "class");
+            self.check_non_property_annotation_application(
+                scope,
+                annotation,
+                arguments,
+                class_host_kind(class),
+            );
         }
         self.annotated_classifier = annotated;
         self.exit_annotation_class_rung(container);
@@ -805,6 +881,17 @@ impl Checker<'_> {
             let removed = self.lexical_class_context.remove(0);
             debug_assert_eq!(removed, rung);
         }
+    }
+}
+
+/// The declaration kind of `class`.
+fn class_host_kind(class: &ClassDecl) -> AnnotationHostKind {
+    match class.kind {
+        crate::ast::ClassKind::Annotation => AnnotationHostKind::AnnotationClass,
+        crate::ast::ClassKind::Enum => AnnotationHostKind::EnumClass,
+        crate::ast::ClassKind::Interface => AnnotationHostKind::Interface,
+        crate::ast::ClassKind::Class if class.singleton => AnnotationHostKind::StandaloneObject,
+        crate::ast::ClassKind::Class => AnnotationHostKind::Class,
     }
 }
 
@@ -856,7 +943,7 @@ impl Checker<'_> {
                 scope,
                 &constructor.annotations,
                 &constructor.annotation_args,
-                "constructor",
+                AnnotationHostKind::Constructor,
             );
         }
     }
@@ -882,7 +969,7 @@ impl Checker<'_> {
                 annotation,
                 arguments,
                 AnnotationApplicationHost::NonProperty {
-                    declaration_target: "initializer",
+                    declaration_target: AnnotationHostKind::Initializer,
                     constructor_parameter: false,
                     targetless: true,
                 },

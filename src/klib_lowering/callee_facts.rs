@@ -48,7 +48,7 @@ pub struct KlibCalleeFacts<'a> {
     /// The prepared-inline copies of the loaded libraries' inline functions, which a call of a
     /// suspend inline function expands from.
     expansion_copies: Option<&'a crate::klib_libraries::KlibDeclarationBodies>,
-    /// The interface defaults a materialized object declares and emits.
+    /// The interface defaults a materialized object or local class declares and emits.
     object_defaults: Rc<HashSet<KlibDependencyCallable>>,
 }
 
@@ -205,7 +205,8 @@ impl<'a> KlibCalleeFacts<'a> {
         self
     }
 
-    /// Whether the closure released `identity`, an interface default an object inherits.
+    /// Whether the closure released `identity`, an interface default an object or a local class
+    /// inherits.
     pub(crate) fn is_object_default(&self, identity: &KlibDependencyCallable) -> bool {
         self.object_defaults.contains(identity)
     }
@@ -556,6 +557,29 @@ impl<'a> KlibCalleeFacts<'a> {
         super::decline::KlibBodyDeclineReason,
     > {
         super::class_initialization::object_inherited_defaults(class, bodies, self)
+    }
+
+    /// The interface defaults the class `identity` constructs inherits, with what each implements.
+    pub(crate) fn constructor_inherited_defaults(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<
+        Vec<super::class_initialization::InheritedDefault>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        match self.get(identity) {
+            Some(KlibCalleeFact::Selected(callables)) => {
+                super::class_initialization::constructor_inherited_defaults(
+                    callables[0],
+                    bodies,
+                    self,
+                )
+            }
+            _ => Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                "an initializer has no unique selected constructor declaration".to_owned(),
+            )),
+        }
     }
 
     /// The declarations the overrides of the object or enum class `class` override.

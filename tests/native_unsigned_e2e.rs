@@ -404,10 +404,10 @@ fn a_signed_value_converts_to_an_unsigned_one_by_its_own_signedness() {
     );
 }
 
-/// A FLOAT converted to an unsigned type still declines, and that is the rule rather than an
-/// oversight: `Double.toUInt()` saturates at zero for a negative where the signed conversion
-/// reinterpreted would answer a huge positive. It is a different rule, so it is a different change,
-/// and this pins that the backend refuses it instead of answering it wrongly.
+/// A FLOAT converted to an unsigned type still declines on this path: the e2e Native inputs here
+/// do not realize `toUInt` for a `Double`. That is a gap of this path, not a rule. The conversion's
+/// result, saturating at zero for a negative, is pinned where the library body does run:
+/// `box_regressions/floatToUnsignedSaturates.kt` passes on the JVM and every KLIB lane.
 #[test]
 fn a_float_converted_to_an_unsigned_type_is_declined() {
     expect_native_decline(

@@ -4,11 +4,11 @@
 
 use super::*;
 
-/// Whether a use site can see a member function through a receiver. The checker owns the
-/// decision (lexical classes, module ownership, protected receivers, suppression); this resolver
-/// only consumes it when it ranks candidates.
-pub(crate) trait MemberAccessSite {
-    fn member_accessible(&self, member: &FunctionInfo, receiver: Ty) -> bool;
+/// Whether a use site can see a callable candidate of any kind through a receiver, whatever a
+/// `@Suppress` of the visibility errors says. The checker owns the decision (lexical classes,
+/// module ownership, protected receivers); this resolver only consumes it when it ranks candidates.
+pub(crate) trait CallableAccessSite {
+    fn callable_visible(&self, candidate: &FunctionInfo, receiver: Ty) -> bool;
 }
 
 impl<'a> SymbolResolver<'a> {
@@ -32,11 +32,11 @@ impl<'a> SymbolResolver<'a> {
         self
     }
 
-    /// Install the access site's member visibility. Overload selection then ranks a member this
-    /// site cannot see below every accessible applicable candidate, as Kotlin ranks a visibility
+    /// Install the access site's callable visibility. Overload selection then ranks a candidate
+    /// this site cannot see below every visible applicable candidate, as Kotlin ranks a visibility
     /// error below a resolved call.
-    pub(crate) fn with_member_access(mut self, site: &'a dyn MemberAccessSite) -> Self {
-        self.member_access = Some(site);
+    pub(crate) fn with_callable_access(mut self, site: &'a dyn CallableAccessSite) -> Self {
+        self.callable_access = Some(site);
         self
     }
 

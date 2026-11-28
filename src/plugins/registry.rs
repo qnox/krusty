@@ -39,7 +39,7 @@ use crate::plugins::convention::ConventionInstance;
 use crate::plugins::parcelize::ParcelizePlugin;
 use crate::plugins::plugin_order::{self, PluginOrderConstraint, PluginOrderCycle};
 use crate::plugins::serialization::{SerializationAbi, SerializationPlugin};
-use crate::plugins::{IrPlugin, PluginHost, PluginRelease};
+use crate::plugins::{IrPlugin, PluginHost};
 
 /// Per-compilation context handed to a native extension's builder.
 pub struct Activation<'a> {
@@ -54,6 +54,9 @@ pub struct Activation<'a> {
     /// compiler-plugin jar krusty does not implement and transforms the module's IR through the
     /// plugin API. A driver without one refuses such a jar instead of dropping what it generates.
     pub module_ir_host: bool,
+    /// The Kotlin releases whose bundled compiler plugins krusty reproduces: the driver's supported
+    /// reference versions. A native extension activated by a jar of another release is refused.
+    pub reproduced_releases: &'a [&'a str],
 }
 
 /// A plugin jar the driver's module-IR host runs, and the registrars of it the host runs.
@@ -67,11 +70,10 @@ pub struct HostedJar {
     pub registrars: Vec<String>,
 }
 
-/// Builds the native `IrPlugin` for an extension, configured from the activation context and the
-/// release of the compiler-plugin jar that activated it (see [`declared_release`]), when one did.
-/// The options are the ones configuring that extension, from either syntax.
+/// Builds the native `IrPlugin` for an extension, configured from the activation context. The
+/// options are the ones configuring that extension, from either syntax.
 type NativeBuilder =
-    fn(&Activation, Option<&str>, &[PluginOption], Option<CompilationTarget>) -> Box<dyn IrPlugin>;
+    fn(&Activation, &[PluginOption], Option<CompilationTarget>) -> Box<dyn IrPlugin>;
 
 /// What a registered extension *is* to krusty.
 pub enum ExtensionKind {
@@ -173,9 +175,9 @@ pub fn declared_registrars(entry: &str) -> Option<Vec<String>> {
 }
 
 /// The release a plugin classpath entry declares as its manifest's `Implementation-Version`, e.g.
-/// `2.4.10-release-377` for the serialization plugin kotlinc 2.4.10 ships. A plugin bundled with
-/// kotlinc changes with each kotlinc release, so a native reimplementation follows the jar it was
-/// given rather than the Kotlin version krusty targets.
+/// `2.4.21-release-377` for the serialization plugin kotlinc 2.4.21 ships. A plugin bundled with
+/// kotlinc changes with each kotlinc release, so a native reimplementation reproduces only the
+/// plugins of the releases krusty supports (see [`reproduces_plugin_release`]).
 pub fn declared_release(entry: &str) -> Option<String> {
     use std::io::Read;
     const MANIFEST: &str = "META-INF/MANIFEST.MF";
@@ -193,6 +195,20 @@ pub fn declared_release(entry: &str) -> Option<String> {
         let value = line.strip_prefix("Implementation-Version:")?.trim();
         (!value.is_empty()).then(|| value.to_string())
     })
+}
+
+/// Whether `release`, a jar's [`declared_release`], is one of the `reproduced` releases. kotlinc's own
+/// build number (`-release-377`) is not part of the release; any other qualifier is.
+fn reproduces_plugin_release(release: &str, reproduced: &[&str]) -> bool {
+    let release = match release.rsplit_once("-release-") {
+        Some((release, build))
+            if !build.is_empty() && build.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            release
+        }
+        _ => release,
+    };
+    reproduced.contains(&release)
 }
 
 /// A diagnostic emitted while resolving plugins for a compilation. The driver forwards these to the
@@ -223,6 +239,16 @@ pub enum PluginDiagnostic {
     /// An `-Xcompiler-plugin-order` value kotlinc cannot parse — its own error, reported before any
     /// plugin is loaded.
     UnparsedOrderConstraint { message: String },
+    /// The compiler-plugin jar comes from a Kotlin release krusty does not reproduce — hard error.
+    /// Its checkers and generated code follow that release, so substituting the supported release's
+    /// implementation would silently report and generate what that jar does not.
+    UnsupportedRelease {
+        plugin_id: String,
+        jar: String,
+        release: String,
+        /// The releases krusty does reproduce ([`Activation::reproduced_releases`]).
+        reproduced: Vec<String>,
+    },
     /// krusty substitutes a native pass that covers only part of what the plugin generates. Not an
     /// error for a compilation, which rejects an uncovered construct itself as a plugin refusal
     /// (`DiagnosticKind::PluginRefusal`) that a build can hand to kotlinc.
@@ -234,6 +260,7 @@ impl PluginDiagnostic {
         matches!(
             self,
             PluginDiagnostic::Unsupported { .. }
+                | PluginDiagnostic::UnsupportedRelease { .. }
                 | PluginDiagnostic::HostUnavailable { .. }
                 | PluginDiagnostic::UnsupportedOption { .. }
                 | PluginDiagnostic::UnimplementedOption { .. }
@@ -269,6 +296,17 @@ impl PluginDiagnostic {
                  Ignoring it would silently produce wrong output, so this is an error — remove the \
                  plugin or compile this module with kotlinc."
             ),
+            PluginDiagnostic::UnsupportedRelease {
+                plugin_id,
+                jar,
+                release,
+                reproduced,
+            } => format!(
+                "krusty: the '{plugin_id}' compiler-plugin jar '{jar}' is from Kotlin {release}, \
+                 which krusty does not reproduce (supported: {}). Use the plugin jar of a supported \
+                 Kotlin release, or compile this module with kotlinc.",
+                reproduced.join(", ")
+            ),
             PluginDiagnostic::UnsupportedOption { option } => format!(
                 "unsupported plugin option: {}:{}={}",
                 option.id, option.key, option.value
@@ -299,9 +337,6 @@ pub struct NativePlugins {
     enabled: Vec<EnabledNative>,
     config: PluginConfig,
     classpath: Vec<String>,
-    /// The reference compiler's release, which is the release of every plugin it bundles. It
-    /// stands in for an extension activated without a jar that declares its own release.
-    reference_release: Option<String>,
     /// The compilation these extensions were stamped for. A plugin reads it when it selects a
     /// target representation.
     compilation_target: Option<CompilationTarget>,
@@ -311,8 +346,6 @@ pub struct NativePlugins {
 struct EnabledNative {
     plugin_id: &'static str,
     build: NativeBuilder,
-    /// The activating jar's [`declared_release`].
-    release: Option<String>,
     /// The options configuring this extension ([`PluginConfig::options_for`]).
     options: Vec<PluginOption>,
 }
@@ -324,7 +357,6 @@ impl NativePlugins {
             enabled: Vec::new(),
             config: PluginConfig::none(),
             classpath: Vec::new(),
-            reference_release: None,
             compilation_target: None,
         }
     }
@@ -334,15 +366,6 @@ impl NativePlugins {
     pub fn with_compilation_target(self, target: CompilationTarget) -> Self {
         Self {
             compilation_target: Some(target),
-            ..self
-        }
-    }
-
-    /// Build every extension as the plugin `release` of the reference compiler bundles, unless the
-    /// jar that activated it declares its own release.
-    pub fn with_reference_release(self, release: String) -> Self {
-        Self {
-            reference_release: Some(release),
             ..self
         }
     }
@@ -382,15 +405,12 @@ impl NativePlugins {
             module_name,
             codegen_host: false,
             module_ir_host: false,
+            reproduced_releases: &[],
         };
         let mut host = PluginHost::new();
         for native in &self.enabled {
             host.register((native.build)(
                 &activation,
-                native
-                    .release
-                    .as_deref()
-                    .or(self.reference_release.as_deref()),
                 &native.options,
                 self.compilation_target,
             ));
@@ -415,34 +435,27 @@ impl Resolved {
     }
 }
 
-/// Build the native serialization plugin, reading its target ABI from the classpath runtime jar and
-/// its diagnostics' wording from the compiler-plugin jar's release.
 fn build_compose(
     _act: &Activation,
-    _release: Option<&str>,
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
     Box::new(ComposePlugin::new(ComposeOptions::from_options(options)))
 }
 
+/// Build the native serialization plugin, reading its target ABI from the classpath runtime jar.
 fn build_serialization(
     act: &Activation,
-    release: Option<&str>,
     _options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
     let abi = SerializationAbi::from_classpath(act.classpath).unwrap_or_default();
-    Box::new(
-        SerializationPlugin::new(abi, act.module_name.to_string())
-            .with_compiler_plugin_release(release.and_then(PluginRelease::parse)),
-    )
+    Box::new(SerializationPlugin::new(abi, act.module_name.to_string()))
 }
 
 /// Build the native all-open plugin from the compilation's options for it.
 fn build_allopen(
     _act: &Activation,
-    _release: Option<&str>,
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
@@ -455,7 +468,6 @@ fn build_allopen(
 /// Build the native no-arg plugin from the compilation's options for it.
 fn build_noarg(
     _act: &Activation,
-    _release: Option<&str>,
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
@@ -468,7 +480,6 @@ fn build_noarg(
 /// Build the native sam-with-receiver plugin from the compilation's options for it.
 fn build_sam_with_receiver(
     _act: &Activation,
-    _release: Option<&str>,
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
@@ -482,20 +493,15 @@ fn build_sam_with_receiver(
 /// no options.
 fn build_atomicfu(
     _act: &Activation,
-    release: Option<&str>,
     _options: &[PluginOption],
     target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
-    Box::new(AtomicfuPlugin::new(
-        release.and_then(PluginRelease::parse),
-        target,
-    ))
+    Box::new(AtomicfuPlugin::new(target))
 }
 
 /// Build the native Parcelize plugin from the compilation's options for it.
 fn build_parcelize(
     _act: &Activation,
-    _release: Option<&str>,
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
@@ -505,7 +511,6 @@ fn build_parcelize(
 /// Build the native assignment plugin from the compilation's options for it.
 fn build_assignment(
     _act: &Activation,
-    _release: Option<&str>,
     options: &[PluginOption],
     _target: Option<CompilationTarget>,
 ) -> Box<dyn IrPlugin> {
@@ -645,7 +650,6 @@ impl PluginRegistry {
                     ExtensionKind::Native(build) => Some(EnabledNative {
                         plugin_id: ext.plugin_id,
                         build,
-                        release: None,
                         options: Vec::new(),
                     }),
                     ExtensionKind::PartialNative(_)
@@ -669,7 +673,6 @@ impl PluginRegistry {
             enabled: Vec::new(),
             config: act.config.clone(),
             classpath: act.classpath.to_vec(),
-            reference_release: None,
             compilation_target: None,
         };
         let order_constraints = match plugin_order::parse_constraints(&act.config.order_constraints)
@@ -742,12 +745,30 @@ impl PluginRegistry {
                         option: option.clone(),
                     }),
             );
+            if let (ExtensionKind::Native(_) | ExtensionKind::PartialNative(_), Some(jar)) =
+                (&ext.kind, jar.as_deref())
+            {
+                if let Some(release) = declared_release(jar)
+                    .filter(|release| !reproduces_plugin_release(release, act.reproduced_releases))
+                {
+                    diagnostics.push(PluginDiagnostic::UnsupportedRelease {
+                        plugin_id: ext.plugin_id.to_string(),
+                        jar: jar.to_string(),
+                        release,
+                        reproduced: act
+                            .reproduced_releases
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect(),
+                    });
+                    continue;
+                }
+            }
             match ext.kind {
                 ExtensionKind::Native(build) => {
                     native.enabled.push(EnabledNative {
                         plugin_id: ext.plugin_id,
                         build,
-                        release: jar.as_deref().and_then(declared_release),
                         options,
                     });
                     diagnostics.push(PluginDiagnostic::NativeSubstitution {
@@ -759,7 +780,6 @@ impl PluginRegistry {
                     native.enabled.push(EnabledNative {
                         plugin_id: ext.plugin_id,
                         build,
-                        release: jar.as_deref().and_then(declared_release),
                         options,
                     });
                     diagnostics.push(PluginDiagnostic::PartialSubstitution {
@@ -921,6 +941,16 @@ mod tests {
     /// A jar named `file_name` whose `service` file declares `registrars` (after a license comment, as
     /// real plugin jars carry one). Returns its path.
     fn jar_declaring(file_name: &str, service: &str, registrars: &[&str]) -> String {
+        released_jar_declaring(file_name, service, registrars, None)
+    }
+
+    /// The same, whose manifest declares `release` as its `Implementation-Version` when given.
+    fn released_jar_declaring(
+        file_name: &str,
+        service: &str,
+        registrars: &[&str],
+        release: Option<&str>,
+    ) -> String {
         use std::io::Write;
         let path = scratch().join(file_name);
         let mut archive =
@@ -933,6 +963,11 @@ mod tests {
         archive
             .write_all(b"Manifest-Version: 1.0\n")
             .expect("write the manifest");
+        if let Some(release) = release {
+            archive
+                .write_all(format!("Implementation-Version: {release}\n").as_bytes())
+                .expect("write the manifest's release");
+        }
         if !registrars.is_empty() {
             archive
                 .start_file(service, options)
@@ -961,6 +996,7 @@ mod tests {
             module_name: "app",
             codegen_host: true,
             module_ir_host: false,
+            reproduced_releases: &["2.4.21"],
         }
     }
 
@@ -1088,6 +1124,58 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_plugin_jar_of_a_supported_release_is_substituted() {
+        let jar = released_jar_declaring(
+            "allopen-compiler-plugin-2.4.21.jar",
+            REGISTRAR_SERVICES[0],
+            &[registrar_of(ALLOPEN_PLUGIN_ID)],
+            Some("2.4.21-release-377"),
+        );
+        let c = cfg(&[&format!("-Xplugin={jar}")]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert_eq!(resolved.native.plugin_ids(), vec![ALLOPEN_PLUGIN_ID]);
+        assert_eq!(
+            resolved.diagnostics,
+            vec![PluginDiagnostic::NativeSubstitution {
+                plugin_id: ALLOPEN_PLUGIN_ID.to_string(),
+                jar: Some(jar),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_plugin_jar_of_an_unsupported_release_is_rejected() {
+        for release in ["2.4.10-release-377", "2.4.21-dev-123", "2.3.0"] {
+            let jar = released_jar_declaring(
+                "kotlin-serialization-compiler-plugin.jar",
+                REGISTRAR_SERVICES[0],
+                &[registrar_of(SERIALIZATION_PLUGIN_ID)],
+                Some(release),
+            );
+            let c = cfg(&[&format!("-Xplugin={jar}")]);
+            let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+            assert!(resolved.native.is_empty(), "{release}");
+            let diagnostic = PluginDiagnostic::UnsupportedRelease {
+                plugin_id: SERIALIZATION_PLUGIN_ID.to_string(),
+                jar: jar.clone(),
+                release: release.to_string(),
+                reproduced: vec!["2.4.21".to_string()],
+            };
+            assert!(diagnostic.is_error());
+            assert_eq!(
+                diagnostic.message(),
+                format!(
+                    "krusty: the '{SERIALIZATION_PLUGIN_ID}' compiler-plugin jar '{jar}' is from \
+                     Kotlin {release}, which krusty does not reproduce (supported: 2.4.21). Use \
+                     the plugin jar of a supported Kotlin release, or compile this module with \
+                     kotlinc."
+                )
+            );
+            assert_eq!(resolved.diagnostics, vec![diagnostic], "{release}");
+        }
     }
 
     #[test]
@@ -1580,13 +1668,13 @@ mod tests {
             )
             .expect("start the manifest");
         archive
-            .write_all(b"Manifest-Version: 1.0\r\nImplementation-Version: 2.4.10-release-377\r\n")
+            .write_all(b"Manifest-Version: 1.0\r\nImplementation-Version: 2.4.21-release-377\r\n")
             .expect("write the manifest");
         archive.finish().expect("finish the test jar");
         let path = path.to_string_lossy();
         assert_eq!(
             declared_release(&path).as_deref(),
-            Some("2.4.10-release-377")
+            Some("2.4.21-release-377")
         );
         let unversioned = plugin_jar("unversioned.jar", &[]);
         assert_eq!(declared_release(&unversioned), None);
@@ -1660,7 +1748,6 @@ mod tests {
         // proving registration is general, not hardcoded to the two builtins.
         fn build_noop(
             _: &Activation,
-            _: Option<&str>,
             _: &[PluginOption],
             _: Option<CompilationTarget>,
         ) -> Box<dyn IrPlugin> {

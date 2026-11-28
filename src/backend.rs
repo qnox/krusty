@@ -29,6 +29,7 @@ pub mod module_links;
 pub mod property_entries;
 pub mod property_reference_values;
 pub mod range_constructions;
+pub mod receiver_property_accessors;
 pub mod reference_names;
 mod source_class_members;
 pub use source_class_members::SourceMemberAnnotations;
@@ -237,6 +238,14 @@ pub trait Backend {
     /// object does not have and is never lowered.
     fn represents_dependency_classifier(&self, _classifier: DependencyClassifier) -> bool {
         false
+    }
+
+    /// [`represents_dependency_classifier`](Self::represents_dependency_classifier) as a value
+    /// common lowering keeps for the file, which is how it decides what the target lays out.
+    fn dependency_classifier_representation(
+        &self,
+    ) -> std::rc::Rc<dyn Fn(DependencyClassifier) -> bool> {
+        std::rc::Rc::new(|_| false)
     }
 
     /// The dependency classes this target lays out itself (each one it

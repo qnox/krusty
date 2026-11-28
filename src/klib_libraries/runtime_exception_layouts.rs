@@ -12,23 +12,7 @@ pub(super) fn normalize(
     if !compiler_builtin_owner {
         return None;
     }
-    let kind = [
-        RuntimeExceptionKind::Throwable,
-        RuntimeExceptionKind::Exception,
-        RuntimeExceptionKind::RuntimeException,
-        RuntimeExceptionKind::IndexOutOfBounds,
-        RuntimeExceptionKind::NullPointer,
-        RuntimeExceptionKind::IllegalState,
-        RuntimeExceptionKind::IllegalArgument,
-        RuntimeExceptionKind::UnsupportedOperation,
-        RuntimeExceptionKind::Arithmetic,
-        RuntimeExceptionKind::NumberFormat,
-        RuntimeExceptionKind::ClassCast,
-        RuntimeExceptionKind::NoSuchElement,
-        RuntimeExceptionKind::ConcurrentModification,
-    ]
-    .into_iter()
-    .find(|kind| kind.classifier() == identity)?;
+    let kind = RuntimeExceptionKind::of(identity)?;
     if shape.kind != TypeKind::Class
         || !shape.type_params().is_empty()
         || shape.outer_instance.is_some()

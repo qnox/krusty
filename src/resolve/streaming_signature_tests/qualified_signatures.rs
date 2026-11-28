@@ -86,7 +86,7 @@ fun box() = Package.Outer.Nested().first
         reported,
         [(
             outer..outer + "Outer".len(),
-            "unresolved reference 'Outer'."
+            "Unresolved reference 'Outer'."
         )]
     );
 }

@@ -122,6 +122,7 @@ mod inline_scope_frames;
 mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;
 mod inherited_default_forwarders;
+mod inherited_member_target;
 mod interface_compatibility;
 mod intrinsic_probes;
 mod lambda_class;
@@ -525,8 +526,6 @@ pub(super) struct EmitEnv<'a> {
     /// The `@kotlin.Metadata` `mv` (`-language-version`, or [`DEFAULT_METADATA_VERSION`]) and
     /// pre-release flag this emission writes.
     metadata_stamp: krusty::jvm::classfile::MetadataStamp,
-    /// The kotlinc profile the compilation reproduces.
-    quirks: krusty::kotlin_version::Quirks,
 }
 
 use crate::override_results::boxes_sam_result;
@@ -717,7 +716,7 @@ fn attach_synth_nullability(
     }
     // The USER annotations written on the primary-constructor parameters, per source parameter
     // (the same slots `ctor_params` above describes).
-    if !c.ctor_param_annotations.is_empty() {
+    if constructor_accessors::primary_parameters_keep_annotations(ir, c) {
         let user: Vec<krusty::ir::DeclarationAnnotations> = source_parameters
             .iter()
             .map(|parameter| {
@@ -2415,17 +2414,7 @@ fn emit_class(
         }
         // Declared PRIMARY-constructor annotations (`class C @Mark constructor(…)`), with the same
         // `Deprecated` / `ACC_SYNTHETIC` companions a secondary constructor's carry.
-        let primary_annotations = &c.primary_ctor_annotations;
-        if !primary_annotations.retains_none() {
-            let ctor_desc = method_descriptor(&param_tys, Ty::Unit);
-            cw.set_method_annotations("<init>", &ctor_desc, primary_annotations);
-            if primary_annotations.deprecated() {
-                cw.mark_method_deprecated("<init>", &ctor_desc);
-            }
-            if function_annotations::hidden_realization_is_synthetic(primary_annotations) {
-                cw.set_method_synthetic("<init>", &ctor_desc);
-            }
-        }
+        constructor_accessors::emit_primary_declared_annotations(&mut cw, ir, c, &param_tys);
         // A default on any primary-ctor parameter → kotlinc's synthetic
         // `<init>(params…, int mask, DefaultConstructorMarker)` overload (fills the masked slots from the
         // defaults, then `invokespecial` the real `<init>`).
@@ -2944,10 +2933,9 @@ fn emit_interface_class(
                 parameter_names: &parameter_names,
                 ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
                 varargs: method_access::varargs_access(ir, fid),
-                // A split interface member's source declaration is the trampoline, while
-                // `suspend_funs` stays with the `$suspendImpl` body carrier that the coroutine
-                // transformer owns. The copied declared signature is the exact semantic fact
-                // this declaration-side bridge needs; do not recover it from the CPS descriptor.
+                // A split interface member's declaration is the trampoline; `suspend_funs` stays
+                // with the coroutine transformer's `$suspendImpl` carrier. The copied declared
+                // signature is the exact fact this bridge needs, never the CPS descriptor.
                 suspend: ir.suspend_declared_sigs.contains_key(&fid),
             },
         );
@@ -2958,7 +2946,7 @@ fn emit_interface_class(
             c,
             &mut cw,
             &mut default_impls,
-            env.dependency_callables,
+            env,
             opts,
         );
     }
@@ -2973,7 +2961,7 @@ fn emit_interface_class(
         });
         // A compiler-generated implementation class carries the minimal synthetic-class metadata
         // record. Kotlin reflection and downstream metadata readers rely on `k=3` to classify it.
-        let xi = synthetic_class_xi(env.quirks, SYNTHETIC_PUBLIC);
+        let xi = synthetic_class_xi(SYNTHETIC_PUBLIC);
         di.set_kotlin_metadata(3, opts.metadata_stamp(), xi, &[], &[]);
         extra.push((holder, env.run.finish_class(di)));
     }
@@ -3176,7 +3164,7 @@ fn emit_enum_class(
                 defaults,
                 secondary_lines: None,
                 target_uses_marker_accessor: false,
-                deprecated: false,
+                deprecated: c.primary_ctor_annotations.deprecated(),
                 access: ACC_SYNTHETIC,
             },
             &mut cw,

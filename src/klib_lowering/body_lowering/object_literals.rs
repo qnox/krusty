@@ -266,6 +266,9 @@ impl<'a> BodyLowering<'a> {
             &capture_fields,
             &storage,
         )?;
+        // Dispatch through an interface member the object inherits a body for reaches that body.
+        self.linker
+            .implement_inherited_members(self.ir, &class.base.symbol.signature, owner)?;
         self.initialize_object(class, class_id, owner, &capture_fields, &storage, &stored)?;
         let mut args = Vec::with_capacity(captures.len());
         let mut params = Vec::with_capacity(captures.len());
@@ -1097,6 +1100,9 @@ impl<'a> BodyLowering<'a> {
                     implementation_type: ty,
                     declared_receiver: None,
                     implementation_receiver: None,
+                    declared_contexts: Vec::new(),
+                    implementation_contexts: Vec::new(),
+                    declared_context_identities: Vec::new(),
                     overridden_setter_value: None,
                     implementation_mutable: false,
                     has_kotlin_superclass_override: false,

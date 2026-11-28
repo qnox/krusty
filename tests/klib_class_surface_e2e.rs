@@ -151,7 +151,7 @@ fn written_fragments(
     let backend = KlibBackend::new(
         KlibPlatform::Native,
         KlibStamp::new(
-            krusty::kotlin_version::KotlinVersion::V2_4_20,
+            krusty::kotlin_version::KotlinVersion::V2_4_21,
             krusty::language_version::LanguageVersion::V2_4,
         ),
     );
@@ -217,7 +217,7 @@ fn kotlinc_native_consumes_a_krusty_reified_inline_body() {
     let backend = KlibBackend::new(
         KlibPlatform::Native,
         KlibStamp::new(
-            krusty::kotlin_version::KotlinVersion::V2_4_20,
+            krusty::kotlin_version::KotlinVersion::V2_4_21,
             krusty::language_version::LanguageVersion::V2_4,
         ),
     )
@@ -966,7 +966,7 @@ fn written_ordinary_ir_constants() -> Option<Vec<String>> {
     let backend = KlibBackend::new(
         KlibPlatform::Native,
         KlibStamp::new(
-            krusty::kotlin_version::KotlinVersion::V2_4_20,
+            krusty::kotlin_version::KotlinVersion::V2_4_21,
             krusty::language_version::LanguageVersion::V2_4,
         ),
     );

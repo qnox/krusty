@@ -48,9 +48,8 @@ pub struct KotlinVersion {
 }
 
 impl KotlinVersion {
-    pub const V2_4_0: Self = Self::new(2, 4, 0);
-    pub const V2_4_10: Self = Self::new(2, 4, 10);
-    pub const V2_4_20: Self = Self::new(2, 4, 20);
+    /// The numeric boundary of the 2.5 release family, which a quirk fixed in 2.5 is bounded by.
+    pub const V2_5_0: Self = Self::new(2, 5, 0);
     pub const V2_4_21: Self = Self::new(2, 4, 21);
 
     /// Whether this is a pre-release (`-BetaN`, `-RC`, `-RCN`) rather than a stable release.
@@ -438,31 +437,27 @@ mod tests {
     #[test]
     fn the_manifest_is_the_supported_set() {
         let supported = KotlinVersion::supported();
-        assert!(supported.contains(&KotlinVersion::V2_4_10));
-        assert!(supported.contains(&KotlinVersion::V2_4_20));
+        assert!(supported.contains(&KotlinVersion::V2_4_21));
         assert!(!supported.contains(&KotlinVersion::parse("2.5.0-Beta2").unwrap()));
         assert_eq!(KotlinVersion::newest(), *supported.last().unwrap());
         assert_eq!(
             manifest_versions("# c\n2.4.0 a\n\n2.4.10 b # note\n"),
-            [KotlinVersion::V2_4_0, KotlinVersion::V2_4_10]
+            [KotlinVersion::new(2, 4, 0), KotlinVersion::new(2, 4, 10)]
         );
     }
 
     #[test]
     fn a_release_reads_the_newest_record_at_or_below_it() {
-        static RECORDS: ReleaseRecords<&str> = ReleaseRecords::new(&[
-            (KotlinVersion::V2_4_0, "first"),
-            (KotlinVersion::V2_4_20, "second"),
-        ]);
+        static RECORDS: ReleaseRecords<&str> =
+            ReleaseRecords::new(&[(KotlinVersion::V2_4_21, "first")]);
         assert_eq!(RECORDS.check(), Ok(()));
-        assert_eq!(RECORDS.get(KotlinVersion::V2_4_0), Some(&"first"));
-        assert_eq!(RECORDS.get(KotlinVersion::V2_4_10), Some(&"first"));
-        assert_eq!(RECORDS.get(KotlinVersion::V2_4_20), Some(&"second"));
-        assert_eq!(RECORDS.get(KotlinVersion::newest()), Some(&"second"));
+        assert_eq!(RECORDS.get(KotlinVersion::V2_4_21), Some(&"first"));
+        assert_eq!(RECORDS.get(KotlinVersion::newest()), Some(&"first"));
         assert_eq!(
-            RECORDS.recorded_release(KotlinVersion::V2_4_10),
-            Some(KotlinVersion::V2_4_0)
+            RECORDS.recorded_release(KotlinVersion::V2_4_21),
+            Some(KotlinVersion::V2_4_21)
         );
+        assert_eq!(RECORDS.get(KotlinVersion::new(2, 4, 20)), None);
         assert_eq!(RECORDS.get(KotlinVersion::new(2, 4, 99)), None);
         assert_eq!(RECORDS.get(KotlinVersion::new(2, 3, 0)), None);
     }
@@ -472,11 +467,9 @@ mod tests {
         let newest = KotlinVersion::newest();
         let reproduce = ReferenceProfile::new(newest, KotlincDefects::Reproduce);
         let fix = ReferenceProfile::new(newest, KotlincDefects::Fix);
-        let older = ReferenceProfile::of_release(KotlinVersion::V2_4_0);
         assert_eq!(reproduce.defects(), KotlincDefects::Reproduce);
         assert_eq!(fix.defects(), KotlincDefects::Fix);
         assert_eq!(reproduce.release(), fix.release());
-        assert_eq!(older.release(), KotlinVersion::V2_4_0);
         assert_eq!(fix.quirks(), reproduce.quirks().under(KotlincDefects::Fix));
         assert_eq!(fix.with_defects(KotlincDefects::Reproduce), reproduce);
     }
@@ -484,11 +477,12 @@ mod tests {
     #[test]
     fn the_environment_selects_the_target_and_defaults_to_the_newest() {
         assert_eq!(
-            target_from(Some("2.4.10".into())),
-            Ok(KotlinVersion::V2_4_10)
+            target_from(Some("2.4.21".into())),
+            Ok(KotlinVersion::V2_4_21)
         );
         assert_eq!(target_from(None), Ok(KotlinVersion::newest()));
         assert!(target_from(Some(String::new())).is_err());
+        assert!(target_from(Some("2.4.20".into())).is_err());
         assert!(target_from(Some("2.4.99".into())).is_err());
         assert!(target_from(Some("2.5.0-Beta2".into())).is_err());
     }

@@ -5,8 +5,8 @@
 //! member its interfaces declare (see `native::interface_calls`).
 
 use super::super::super::interface_calls::{
-    identities_section, implementations_section, padded, DEPENDENCY_IMPLEMENTATIONS_SECTION,
-    RECORD_SIZE,
+    function_implementations_section, identities_section, implementations_section, padded,
+    DEPENDENCY_IMPLEMENTATIONS_SECTION, RECORD_SIZE,
 };
 use super::*;
 use krusty::backend::class_tables::module_slots::PlanKey;
@@ -14,6 +14,9 @@ use krusty::backend::interface_identity::{member_identity, property_member_ident
 use krusty::fir::ResolvedFunctionOverrideTarget;
 
 use super::super::super::laid_out_classes::DependencyImplementation;
+
+#[cfg(test)]
+mod property_identity_tests;
 
 impl FileLowering<'_> {
     /// Record, for the link, which function stands at each number of `itable`, the interface
@@ -39,20 +42,59 @@ impl FileLowering<'_> {
         if implemented.is_empty() {
             return Ok(());
         }
-        let id = self.declare_local_data(&format!("kt_itfimpl_{base}"), false)?;
+        let section = implementations_section(self.module_name);
+        self.define_implementation_records(
+            &format!("kt_itfimpl_{base}"),
+            &section,
+            descriptor,
+            &implemented,
+        )
+    }
+
+    /// Record, for the link, which function answers a call through a function type of each operand
+    /// count `type` implements (`native::interface_calls`, the function protocol).
+    pub(super) fn record_function_implementations(
+        &mut self,
+        descriptor: DataId,
+        base: &str,
+        functions: &[(usize, FuncId)],
+    ) -> Result<(), Unsupported> {
+        if functions.is_empty() {
+            return Ok(());
+        }
+        let implemented = functions
+            .iter()
+            .map(|&(operands, function)| (operands as u32, function))
+            .collect::<Vec<_>>();
+        self.define_implementation_records(
+            &format!("kt_fnimpl_{base}"),
+            &function_implementations_section(),
+            descriptor,
+            &implemented,
+        )
+    }
+
+    fn define_implementation_records(
+        &mut self,
+        symbol: &str,
+        section: &str,
+        descriptor: DataId,
+        implemented: &[(u32, FuncId)],
+    ) -> Result<(), Unsupported> {
+        let id = self.declare_local_data(symbol, false)?;
         let mut description = DataDescription::new();
         let mut contents = vec![0; implemented.len() * RECORD_SIZE as usize];
         for (record, &(number, _)) in contents
             .as_chunks_mut::<{ RECORD_SIZE as usize }>()
             .0
             .iter_mut()
-            .zip(&implemented)
+            .zip(implemented)
         {
             record[..8].copy_from_slice(&u64::from(number).to_le_bytes());
         }
         description.define(contents.into_boxed_slice());
         description.set_align(8);
-        description.set_custom_section(&implementations_section(self.module_name));
+        description.set_custom_section(section);
         let ty = self
             .module
             .declare_data_in_data(descriptor, &mut description);
@@ -64,7 +106,7 @@ impl FileLowering<'_> {
         }
         self.module
             .define_data(id, &description)
-            .map_err(|error| format!("defining `kt_itfimpl_{base}` ({error})"))?;
+            .map_err(|error| format!("defining `{symbol}` ({error})"))?;
         Ok(())
     }
 }
@@ -352,9 +394,17 @@ impl FileLowering<'_> {
                 if implemented.iter().any(|(known, _)| *known == identity) {
                     continue;
                 }
-                // A default the interface publishes and the class does not override implements the
-                // member with its own body, which is not a slot of the class.
-                if edge.implementation == edge.overridden
+                // A default an interface publishes and the class does not override implements the
+                // member with its own body, which is not a slot of the class: the member's own
+                // default, or one a subinterface overrides it with.
+                let interface_default = match edge.implementation {
+                    ResolvedFunctionOverrideTarget::External(implementation) => self
+                        .callables
+                        .callable(implementation)
+                        .is_some_and(|fact| fact.owner_is_interface),
+                    ResolvedFunctionOverrideTarget::Module(_) => false,
+                };
+                if interface_default
                     && edge.implementation_function.is_some_and(|function| {
                         self.ir.functions[function as usize].dispatch_receiver
                             != Some(self.ir.classes[owner as usize].fq_name_id())

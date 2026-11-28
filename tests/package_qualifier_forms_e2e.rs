@@ -7,7 +7,6 @@
 
 use super::common;
 use krusty::compilation_target::CompilationTarget;
-use krusty::kotlin_version::KotlinVersion;
 
 const FEATURE: &str =
     "-XXLanguage:+ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier";
@@ -26,12 +25,6 @@ fn error(location: &str, message: &str) -> String {
 
 fn unresolved(location: &str, name: &str) -> String {
     format!("{location}: unresolved reference '{name}'.")
-}
-
-/// Whether the reference release has the feature. Earlier releases have neither its deprecation
-/// warnings nor the language feature itself.
-fn release_has_feature() -> bool {
-    krusty::kotlin_version::environment_release() >= KotlinVersion::V2_4_20
 }
 
 /// Compile `sources` with both compilers, passing `args` to each, and require the same complete
@@ -130,26 +123,22 @@ fun suppressed() = (part1).part2.top()
 
 #[test]
 fn parenthesized_package_qualifiers_are_deprecated() {
-    let warnings = if release_has_feature() {
-        [
-            "Use.kt:4:13",
-            "Use.kt:5:13",
-            "Use.kt:6:13",
-            "Use.kt:7:13",
-            "Use.kt:8:14",
-            "Use.kt:10:13",
-            "Use.kt:11:5",
-            "Use.kt:12:13",
-            "Use.kt:13:13",
-            "Use.kt:14:13",
-            "Use.kt:17:13",
-            "Use.kt:17:38",
-        ]
-        .map(|location| warning(location, PARENTHESIZED))
-        .to_vec()
-    } else {
-        Vec::new()
-    };
+    let warnings = [
+        "Use.kt:4:13",
+        "Use.kt:5:13",
+        "Use.kt:6:13",
+        "Use.kt:7:13",
+        "Use.kt:8:14",
+        "Use.kt:10:13",
+        "Use.kt:11:5",
+        "Use.kt:12:13",
+        "Use.kt:13:13",
+        "Use.kt:14:13",
+        "Use.kt:17:13",
+        "Use.kt:17:38",
+    ]
+    .map(|location| warning(location, PARENTHESIZED))
+    .to_vec();
     assert_matches_kotlinc(
         &[("Declarations.kt", DECLARATIONS), ("Use.kt", PARENTHESES)],
         &[],
@@ -162,9 +151,6 @@ fn parenthesized_package_qualifiers_are_deprecated() {
 /// suppressible.
 #[test]
 fn forbidden_parenthesized_package_qualifiers_are_errors() {
-    if !release_has_feature() {
-        return;
-    }
     let parenthesized = |location| error(location, PARENTHESIZED);
     let errors = vec![
         parenthesized("Use.kt:4:13"),
@@ -212,21 +198,17 @@ object Deep { val x = 1 }
 
 #[test]
 fn type_arguments_on_an_earlier_package_segment_are_deprecated() {
-    let warnings = if release_has_feature() {
-        [
-            "Use.kt:2:18",
-            "Use.kt:3:18",
-            "Use.kt:4:18",
-            "Use.kt:5:18",
-            "Use.kt:5:46",
-            "Use.kt:6:18",
-            "Use.kt:7:15",
-        ]
-        .map(|location| warning(location, TYPE_ARGUMENTS))
-        .to_vec()
-    } else {
-        Vec::new()
-    };
+    let warnings = [
+        "Use.kt:2:18",
+        "Use.kt:3:18",
+        "Use.kt:4:18",
+        "Use.kt:5:18",
+        "Use.kt:5:46",
+        "Use.kt:6:18",
+        "Use.kt:7:15",
+    ]
+    .map(|location| warning(location, TYPE_ARGUMENTS))
+    .to_vec();
     assert_matches_kotlinc(
         &[
             ("Declarations.kt", DECLARATIONS),
@@ -241,9 +223,6 @@ fn type_arguments_on_an_earlier_package_segment_are_deprecated() {
 
 #[test]
 fn a_type_argument_segment_cannot_name_a_package() {
-    if !release_has_feature() {
-        return;
-    }
     let errors = vec![
         unresolved("Use.kt:2:13", "part1"),
         unresolved("Use.kt:3:13", "part1"),
@@ -434,17 +413,13 @@ fun use() {
 
 #[test]
 fn package_qualifiers_of_selected_values_are_deprecated() {
-    let warnings = if release_has_feature() {
-        vec![
-            warning("Use.kt:2:13", PARENTHESIZED),
-            warning("Use.kt:3:13", PARENTHESIZED),
-            warning("Use.kt:4:18", TYPE_ARGUMENTS),
-            warning("Use.kt:5:13", PARENTHESIZED),
-            warning("Use.kt:6:18", TYPE_ARGUMENTS),
-        ]
-    } else {
-        Vec::new()
-    };
+    let warnings = vec![
+        warning("Use.kt:2:13", PARENTHESIZED),
+        warning("Use.kt:3:13", PARENTHESIZED),
+        warning("Use.kt:4:18", TYPE_ARGUMENTS),
+        warning("Use.kt:5:13", PARENTHESIZED),
+        warning("Use.kt:6:18", TYPE_ARGUMENTS),
+    ];
     assert_matches_kotlinc(
         &[
             ("Declarations.kt", DECLARATIONS),
@@ -458,9 +433,6 @@ fn package_qualifiers_of_selected_values_are_deprecated() {
 
 #[test]
 fn a_type_argument_segment_cannot_name_the_last_package() {
-    if !release_has_feature() {
-        return;
-    }
     let errors = vec![
         unresolved("Use.kt:2:13", "part1"),
         unresolved("Use.kt:3:19", "part2"),
@@ -498,19 +470,15 @@ fun use() {
 
 #[test]
 fn parenthesized_package_qualifiers_of_alias_constructors_are_deprecated() {
-    let warnings = if release_has_feature() {
-        [
-            "Use.kt:4:13",
-            "Use.kt:5:13",
-            "Use.kt:6:13",
-            "Use.kt:7:13",
-            "Use.kt:8:13",
-        ]
-        .map(|location| warning(location, PARENTHESIZED))
-        .to_vec()
-    } else {
-        Vec::new()
-    };
+    let warnings = [
+        "Use.kt:4:13",
+        "Use.kt:5:13",
+        "Use.kt:6:13",
+        "Use.kt:7:13",
+        "Use.kt:8:13",
+    ]
+    .map(|location| warning(location, PARENTHESIZED))
+    .to_vec();
     assert_matches_kotlinc(
         &[
             ("Declarations.kt", DECLARATIONS),
@@ -526,9 +494,6 @@ fn parenthesized_package_qualifiers_of_alias_constructors_are_deprecated() {
 /// unresolved-reference error.
 #[test]
 fn an_alias_constructor_needs_a_resolved_package_qualifier() {
-    if !release_has_feature() {
-        return;
-    }
     let parenthesized = |location| error(location, PARENTHESIZED);
     let errors = vec![
         parenthesized("Use.kt:4:13"),
@@ -559,9 +524,6 @@ fun use() {
 
 #[test]
 fn a_type_argument_segment_cannot_name_an_alias_constructor_package() {
-    if !release_has_feature() {
-        return;
-    }
     let errors = vec![
         unresolved("Use.kt:2:13", "part1"),
         unresolved("Use.kt:3:19", "part2"),
@@ -813,11 +775,7 @@ fun use() {
 #[test]
 fn a_package_receiver_resolves_its_callee_in_the_package_scope() {
     let expected = |location| error(location, EXPRESSION_EXPECTED);
-    let on_unit = if release_has_feature() {
-        "unresolved reference 'top' on receiver of type 'Unit'."
-    } else {
-        "unresolved reference 'top'."
-    };
+    let on_unit = "unresolved reference 'top' on receiver of type 'Unit'.";
     let errors = vec![
         unresolved("Use.kt:2:25", "toString"),
         unresolved("Use.kt:3:25", "prop"),
@@ -984,9 +942,6 @@ fn klib_outcome(
 /// provisioned still checks krusty's.
 #[test]
 fn progressive_package_qualifiers_match_every_klib_reference_compiler() {
-    if !release_has_feature() {
-        return;
-    }
     let rejected = common::CompilerOutcome {
         accepted: false,
         errors: vec![

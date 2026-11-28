@@ -5,16 +5,19 @@
 //! declarations or expressions a component holds; the component writers ([`super::inline_ir`]) own
 //! that and call into these tables for identities and encodings.
 
-use crate::metadata::id_signature::KlibPublicIdSignature;
+use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::protobuf::Pb;
 use crate::types::{Ty, TyKind, TypeName};
 
 pub(super) const FUNCTION_SYMBOL: u64 = 0;
 pub(super) const CONSTRUCTOR_SYMBOL: u64 = 1;
+pub(super) const FIELD_SYMBOL: u64 = 3;
 pub(super) const VALUE_PARAMETER_SYMBOL: u64 = 4;
 pub(super) const CLASS_SYMBOL: u64 = 6;
 pub(super) const TYPE_PARAMETER_SYMBOL: u64 = 7;
+pub(super) const ANONYMOUS_INITIALIZER_SYMBOL: u64 = 9;
 pub(super) const RECEIVER_PARAMETER_SYMBOL: u64 = 11;
+pub(super) const PROPERTY_SYMBOL: u64 = 12;
 
 /// The tables of one IR file under construction.
 #[derive(Default)]
@@ -111,6 +114,30 @@ impl IrTables {
         self.signature(encoded.canonical().into_bytes())
     }
 
+    /// A property accessor's identity: its property's public signature, its own name, and its
+    /// member hash.
+    pub(super) fn accessor_signature(&mut self, signature: &KlibAccessorIdSignature) -> u32 {
+        let property = self.public_signature(signature.property());
+        let name = self.string(signature.name());
+        let mut accessor = Pb::new();
+        accessor.field_varint(1, u64::from(property));
+        accessor.field_varint(2, u64::from(name));
+        accessor.field_varint(3, signature.member_id());
+        if signature.mask() != 0 {
+            accessor.field_varint(4, signature.mask());
+        }
+        let mut encoded = Pb::new();
+        encoded.field_message(3, &accessor);
+        self.signature(encoded.canonical().into_bytes())
+    }
+
+    /// Append one body-table entry and answer its index.
+    pub(super) fn body(&mut self, bytes: Vec<u8>) -> u32 {
+        let index = u32::try_from(self.bodies.len()).expect("body table fits u32");
+        self.bodies.push(bytes);
+        index
+    }
+
     pub(super) fn file_signature(&mut self) -> u32 {
         let mut encoded = Pb::new();
         encoded.field_message(7, &Pb::new());
@@ -124,6 +151,19 @@ impl IrTables {
         let mut encoded = Pb::new();
         encoded.field_message(5, &composite);
         self.signature(encoded.canonical().into_bytes())
+    }
+
+    /// The backing field of the property `property` signs: the property's identity scoped to the
+    /// local `<BF>`.
+    pub(super) fn field_signature(&mut self, property: &KlibPublicIdSignature) -> u32 {
+        let property = self.public_signature(property);
+        let name = self.string("<BF>");
+        let mut local = Pb::new();
+        local.field_packed_varints(1, &[u64::from(name)]);
+        let mut encoded = Pb::new();
+        encoded.field_message(6, &local);
+        let local = self.signature(encoded.canonical().into_bytes());
+        self.composite_signature(property, local)
     }
 
     pub(super) fn type_parameter_signature(&mut self, function: u32, index: usize) -> u32 {

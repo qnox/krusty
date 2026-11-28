@@ -161,10 +161,16 @@ fn synthesize(
     let Some(start) = direct_supertype(class) else {
         return BridgeSelection::default();
     };
-    let Some(collection_face) = applied_collection_face(classpath, start) else {
-        return BridgeSelection::default();
-    };
-    let specifications = builtin_bridge_members(classpath, collection_face);
+    let mut specifications = Vec::<BridgeMember>::new();
+    for face in applied_builtin_faces(classpath, start) {
+        for member in builtin_bridge_members(classpath, face) {
+            if !specifications.iter().any(|known| {
+                known.physical_name == member.physical_name && known.descriptor == member.descriptor
+            }) {
+                specifications.push(member);
+            }
+        }
+    }
     if specifications.is_empty() {
         return BridgeSelection::default();
     }
@@ -266,28 +272,56 @@ fn direct_supertype(class: &IrClass) -> Option<Ty> {
         .find(|ty| ty.non_null().obj_internal() == Some(class.superclass))
 }
 
-/// The first mapped collection interface reached through the superclass's semantic hierarchy. A
-/// Kotlin class's supertypes come from its metadata, so a Kotlin face keeps its own mutability
-/// (`kotlin.collections.AbstractSet<E>` is a read-only `Set<E>` with no `remove`). A Java class is
-/// walked through its generic signature, and the central JVM↔Kotlin class map identifies the
-/// mutable semantic face of the Java collection it reaches, however the signature reader spells
-/// it; no collection spelling is reconstructed here.
-fn applied_collection_face(classpath: &Classpath, start: Ty) -> Option<Ty> {
+/// The mapped builtin interfaces reached through the superclass's semantic hierarchy: the first
+/// collection face, and every other builtin a JVM class realizes under its own names
+/// (`kotlin.CharSequence` as `java.lang.CharSequence`, whose `length` is `length()` and `get` is
+/// `charAt`). A Kotlin class's supertypes come from its metadata, so a Kotlin face keeps its own
+/// mutability (`kotlin.collections.AbstractSet<E>` is a read-only `Set<E>` with no `remove`). A
+/// Java class is walked through its generic signature, and the central JVM↔Kotlin class map
+/// identifies the mutable semantic face of the Java collection it reaches, however the signature
+/// reader spells it; no collection spelling is reconstructed here. A face's own supertypes are
+/// the builtin's, which its members already include.
+fn applied_builtin_faces(classpath: &Classpath, start: Ty) -> Vec<Ty> {
+    let mut faces = Vec::new();
+    let mut collection_face = false;
     let mut pending = VecDeque::from([(start, Declarer::Java)]);
     let mut seen = HashSet::default();
     while let Some((applied, declarer)) = pending.pop_front() {
-        let owner = applied.non_null().obj_internal()?;
+        let Some(owner) = applied.non_null().obj_internal() else {
+            continue;
+        };
         let jvm_owner = krusty::jvm::jvm_class_map::to_jvm_type_name(owner);
         if !seen.insert((jvm_owner, declarer)) {
             continue;
         }
+        // A superclass that IS a mapped builtin (`java.lang.Number`) is that builtin: its members
+        // are inherited as declared, with nothing realized under another name to bridge.
+        if applied == start
+            && krusty::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(jvm_owner).is_some()
+        {
+            break;
+        }
         if let Some(kotlin) =
             krusty::jvm::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name(jvm_owner)
         {
-            return Some(match declarer {
+            if !collection_face {
+                collection_face = true;
+                faces.push(match declarer {
+                    Declarer::Kotlin => applied.non_null(),
+                    Declarer::Java => Ty::obj_args_name(kotlin, applied.non_null().type_args()),
+                });
+            }
+            continue;
+        }
+        if let Some(kotlin) =
+            krusty::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(jvm_owner)
+                .filter(|kotlin| *kotlin != krusty::types::wk::any())
+        {
+            faces.push(match declarer {
                 Declarer::Kotlin => applied.non_null(),
                 Declarer::Java => Ty::obj_args_name(kotlin, applied.non_null().type_args()),
             });
+            continue;
         }
         let Some(info) = classpath.find_name(jvm_owner) else {
             continue;
@@ -306,7 +340,7 @@ fn applied_collection_face(classpath: &Classpath, start: Ty) -> Option<Ty> {
             );
         }
     }
-    None
+    faces
 }
 
 /// Which language declared a supertype edge, and so what a mapped collection interface on it means.
@@ -583,6 +617,26 @@ fn member_bridges(
     ) {
         return BridgeSelection::default();
     }
+    // The Java superclass's own method under the builtin's Kotlin name is an unrelated member
+    // that the renamed face does not override (`CharBuffer.get(int)` beside `charAt(int)`).
+    // kotlinc still emits the face's entry under that name, which overrides the Java method, or
+    // fails to load when it is final ([`Quirk::JavaRenamedBuiltinEntryOverridesJavaMember`]).
+    //
+    // [`Quirk::JavaRenamedBuiltinEntryOverridesJavaMember`]: krusty::kotlin_version::Quirk::JavaRenamedBuiltinEntryOverridesJavaMember
+    if specialized_name != specification.physical_name
+        && !ir
+            .reference
+            .quirks()
+            .has(krusty::kotlin_version::Quirk::JavaRenamedBuiltinEntryOverridesJavaMember)
+        && inherits_method(
+            classpath,
+            class.superclass,
+            &specialized_name,
+            &specialized_descriptor,
+        )
+    {
+        return BridgeSelection::default();
+    }
 
     let physical_signature = if specification.kind == MappedBuiltinMemberKind::Property {
         Some(InheritedBridgeSignature {
@@ -829,7 +883,25 @@ fn declares(
     })
 }
 
-fn inherits_final(classpath: &Classpath, mut next: TypeName, name: &str, descriptor: &str) -> bool {
+fn inherits_final(classpath: &Classpath, next: TypeName, name: &str, descriptor: &str) -> bool {
+    inherits_matching(classpath, next, name, descriptor, MethodSig::is_final)
+}
+
+/// Whether a superclass from `next` up declares an instance method `name` `descriptor` a subclass
+/// would override.
+fn inherits_method(classpath: &Classpath, next: TypeName, name: &str, descriptor: &str) -> bool {
+    inherits_matching(classpath, next, name, descriptor, |method| {
+        !method.is_private() && !method.is_static()
+    })
+}
+
+fn inherits_matching(
+    classpath: &Classpath,
+    mut next: TypeName,
+    name: &str,
+    descriptor: &str,
+    matches: impl Fn(&MethodSig) -> bool,
+) -> bool {
     for _ in 0..64 {
         if next == krusty::types::wk::java_object() {
             return false;
@@ -837,9 +909,11 @@ fn inherits_final(classpath: &Classpath, mut next: TypeName, name: &str, descrip
         let Some(info) = classpath.find_name(next) else {
             return false;
         };
-        if info.methods.iter().any(|method| {
-            method.is_final() && method.name == name && method.descriptor == descriptor
-        }) {
+        if info
+            .methods
+            .iter()
+            .any(|method| method.name == name && method.descriptor == descriptor && matches(method))
+        {
             return true;
         }
         match info.super_class {

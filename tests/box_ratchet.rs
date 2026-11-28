@@ -425,18 +425,17 @@ mod tests {
 
     #[test]
     fn platform_and_version_are_both_part_of_the_paths() {
-        assert!(failure_path(Platform::Jvm, KotlinVersion::V2_4_20)
-            .ends_with("tests/box_expected_failures/jvm/2.4.20.txt"));
-        // 2.4.10 records no inventory of its own and reads 2.4.0's.
+        assert!(failure_path(Platform::Jvm, KotlinVersion::V2_4_21)
+            .ends_with("tests/box_expected_failures/jvm/2.4.21.txt"));
         assert!(
-            not_applicable_path(Platform::Native, KotlinVersion::V2_4_10)
-                .ends_with("tests/box_expected_not_applicable/native-klib/2.4.0.txt")
+            not_applicable_path(Platform::Native, KotlinVersion::V2_4_21)
+                .ends_with("tests/box_expected_not_applicable/native-klib/2.4.21.txt")
         );
-        assert!(failure_path(Platform::WasmJs, KotlinVersion::V2_4_20)
-            .ends_with("tests/box_expected_failures/wasm-js-klib/2.4.20.txt"));
+        assert!(failure_path(Platform::WasmJs, KotlinVersion::V2_4_21)
+            .ends_with("tests/box_expected_failures/wasm-js-klib/2.4.21.txt"));
         assert!(
-            not_applicable_path(Platform::WasmWasi, KotlinVersion::V2_4_0)
-                .ends_with("tests/box_expected_not_applicable/wasm-wasi-klib/2.4.0.txt")
+            not_applicable_path(Platform::WasmWasi, KotlinVersion::V2_4_21)
+                .ends_with("tests/box_expected_not_applicable/wasm-wasi-klib/2.4.21.txt")
         );
     }
 
@@ -485,14 +484,14 @@ mod tests {
     #[test]
     fn rendered_inventory_is_sorted_and_round_trips() {
         let paths = set(&["b/two.kt", "a/one.kt"]);
-        let text = render_failures(Platform::Native, KotlinVersion::V2_4_10, &paths);
+        let text = render_failures(Platform::Native, KotlinVersion::V2_4_21, &paths);
         assert_eq!(parse(&text), Ok(paths));
         assert!(text.find("a/one.kt").unwrap() < text.find("b/two.kt").unwrap());
     }
 
     #[test]
     fn malformed_and_stale_baselines_have_an_exact_report() {
-        let version = KotlinVersion::V2_4_10;
+        let version = KotlinVersion::V2_4_21;
         let expected = Baseline {
             failures: set(&["both.kt", "deleted.kt"]),
             not_applicable: set(&["both.kt"]),
@@ -513,7 +512,7 @@ mod tests {
 
     #[test]
     fn an_expectation_mismatch_is_reported_as_a_failed_line_of_its_lane() {
-        let version = KotlinVersion::V2_4_20;
+        let version = KotlinVersion::V2_4_21;
         let expected = Baseline {
             failures: BTreeSet::new(),
             not_applicable: set(&["na-to-pass.kt"]),

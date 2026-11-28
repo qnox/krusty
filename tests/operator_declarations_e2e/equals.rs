@@ -131,9 +131,6 @@ fun test(): Any {
 
 #[test]
 fn anonymous_owner_warning_matches_kotlinc() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     let warning = format!(
         "{NOT_OVERRIDING} This will become an error in language version 2.5. See \
          https://youtrack.jetbrains.com/issue/KT-86143."
@@ -148,9 +145,6 @@ fn anonymous_owner_warning_matches_kotlinc() {
 
 #[test]
 fn forbidden_anonymous_owner_failure_is_an_error() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     assert_matches_kotlinc(
         ANONYMOUS,
         &[FORBID],
@@ -180,24 +174,7 @@ fn diagnostics_for_release(source: &str, release: KotlinVersion) -> Vec<krusty::
 #[test]
 fn anonymous_owner_policy_is_owned_by_the_selected_release() {
     const SOURCE: &str = "fun make() = object { operator fun equals(other: Int) = true }\n";
-    for release in [KotlinVersion::V2_4_0, KotlinVersion::V2_4_10] {
-        let diagnostics = diagnostics_for_release(SOURCE, release);
-        assert_eq!(diagnostics.len(), 1, "{release}: {diagnostics:?}");
-        let diagnostic = &diagnostics[0];
-        assert_eq!(diagnostic.span, krusty::diag::Span::new(22, 30));
-        assert_eq!(diagnostic.editor_span, None);
-        assert_eq!(diagnostic.severity, krusty::diag::Severity::Error);
-        assert_eq!(
-            diagnostic.name,
-            Some(krusty::diag::names::INAPPLICABLE_OPERATOR_MODIFIER)
-        );
-        assert_eq!(diagnostic.kind, krusty::diag::DiagnosticKind::Compiler);
-        assert_eq!(diagnostic.msg, NOT_OVERRIDING);
-        assert_eq!(diagnostic.identity, None);
-        assert_eq!(diagnostic.file, 0);
-    }
-
-    let diagnostics = diagnostics_for_release(SOURCE, KotlinVersion::V2_4_20);
+    let diagnostics = diagnostics_for_release(SOURCE, KotlinVersion::V2_4_21);
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     let diagnostic = &diagnostics[0];
     assert_eq!(diagnostic.span, krusty::diag::Span::new(22, 30));
@@ -220,9 +197,6 @@ fn anonymous_owner_policy_is_owned_by_the_selected_release() {
 
 #[test]
 fn suppression_hides_only_the_warning_phase() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     let source = "@Suppress(\"INAPPLICABLE_OPERATOR_MODIFIER_WARNING\")\n\
                   fun make() = object { operator fun equals(other: Int) = true }\n";
     assert_matches_kotlinc(source, &[], &[], &[]);
@@ -236,9 +210,6 @@ fn suppression_hides_only_the_warning_phase() {
 
 #[test]
 fn named_warning_policy_controls_the_exact_operator_diagnostic() {
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     let source = "fun make() = object {\n\
                       operator fun equals(other: Int): Boolean = true\n\
                   }\n";
@@ -275,9 +246,6 @@ fn custom_typed_equals_uses_the_selected_value_class_representation() {
         &[],
     );
 
-    if krusty::kotlin_version::environment_release() < KotlinVersion::V2_4_20 {
-        return;
-    }
     let full = "value class Full(val x: Int) {\n\
                     operator fun equals(other: Full): Boolean = x == other.x\n\
                 }\n\

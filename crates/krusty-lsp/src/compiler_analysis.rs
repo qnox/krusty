@@ -606,7 +606,7 @@ mod tests {
                     "too many arguments for 'fun hostAction(): Unit'."
                 ),
                 (at(3, 23), mismatch),
-                (at(3, 1), "unresolved reference 'hostNamed'."),
+                (at(3, 1), "Unresolved reference 'hostNamed'."),
                 (
                     at(4, 13),
                     "too many arguments for 'fun localAction(): Unit'."
@@ -995,15 +995,8 @@ mod tests {
             krusty::diag::Span::new(callee, callee + 4),
         );
         // The LSP boundary consumes the compiler's alternate editor span, but preserves the
-        // reference compiler's diagnostic order for the selected Kotlin version.
-        let expected = if krusty::features::LangFeatures::new()
-            .reference()
-            .at_least(krusty::kotlin_version::KotlinVersion::V2_4_20)
-        {
-            vec![missing, mixing]
-        } else {
-            vec![mixing, missing]
-        };
+        // reference compiler's diagnostic order.
+        let expected = vec![missing, mixing];
         assert_eq!(
             diagnostics
                 .iter()

@@ -1,6 +1,0 @@
-# Kotlin 2.4.0 compose box cases that pass and are part of the corpus on jvm, relative to
-# the upstream corpus directory. Later releases with no file of their own read this one.
-# Regenerate with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local run.
-constExprInitializer.kt
-interface.kt
-interfaceDelegation.kt

@@ -9,7 +9,6 @@
 1	src/resolve/streaming_signature_bridge/lookups.rs	this function has too many arguments (8/7)
 1	src/resolve/streaming_signature_bridge/lookups.rs	this function has too many arguments (9/7)
 1	src/resolve/streaming_signature_bridge/rejected_member_call.rs	this function has too many arguments (10/7)
-1	src/resolve/streaming_signature_bridge/selected_result_publication.rs	this function has too many arguments (13/7)
 1	tests/common/byte_dump.rs	unused import: `immutable_classpath_content_fingerprint`
 1	tests/common/byte_dump/fingerprint.rs	function `immutable_classpath_content_fingerprint` is never used
 1	tests/common/source_set_compile.rs	function `source_set_diagnostics` is never used

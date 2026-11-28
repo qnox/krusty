@@ -85,120 +85,110 @@ impl ProductionSignatureSemantics<'_> {
             recovery_candidates
                 .retain(|candidate| Self::candidate_scope_rank(candidate) == direct_rank);
         }
-        // A rejected direct member and a rejected member extension still form one specificity
-        // family only when the configured compiler version does. Older versions stop at a mapped
-        // rejected member; all versions fall through to member extensions when no direct shape
-        // maps. Signature recovery follows the same policy as body diagnostics.
+        // A rejected direct member and a rejected member extension form one specificity family,
+        // and signature recovery follows the same policy as body diagnostics.
         let direct_maps = direct_rank.is_some();
-        if crate::diagnostic_wording::inapplicable_member_joins_extensions(self.table.reference)
-            || !direct_maps
-        {
-            let member_extensions =
-                self.implicit_member_extension_candidate_sources(scope, receiver, spelling);
-            let unprojected = member_extensions
+        let member_extensions =
+            self.implicit_member_extension_candidate_sources(scope, receiver, spelling);
+        let unprojected = member_extensions
+            .iter()
+            .map(|source| source.candidate.clone())
+            .collect::<Vec<_>>();
+        let (mut extension_candidates, mut extension_unavailable_context) = self
+            .partition_implicit_context_candidates_with_constraints(
+                scope,
+                unprojected,
+                type_arguments,
+                expected,
+            );
+        let mut extension_recovery_candidates = extension_candidates.clone();
+        extension_recovery_candidates.extend(
+            extension_unavailable_context
                 .iter()
-                .map(|source| source.candidate.clone())
-                .collect::<Vec<_>>();
-            let (mut extension_candidates, mut extension_unavailable_context) = self
-                .partition_implicit_context_candidates_with_constraints(
-                    scope,
-                    unprojected,
-                    type_arguments,
-                    expected,
-                );
-            let mut extension_recovery_candidates = extension_candidates.clone();
-            extension_recovery_candidates.extend(
-                extension_unavailable_context
+                .cloned()
+                .map(Self::without_implicit_context),
+        );
+        let extension_rank = Self::nearest_mapped_candidate_rank(
+            &extension_recovery_candidates,
+            arguments.len(),
+            names,
+            trailing_lambda,
+        );
+        if let Some(extension_rank) = extension_rank {
+            extension_candidates
+                .retain(|candidate| Self::candidate_scope_rank(candidate) == extension_rank);
+            extension_unavailable_context
+                .retain(|candidate| Self::candidate_scope_rank(candidate) == extension_rank);
+            extension_recovery_candidates
+                .retain(|candidate| Self::candidate_scope_rank(candidate) == extension_rank);
+            // Dispatch inheritance/override priority applies to applicable call shapes. A
+            // nearer owner whose same-named extension cannot map the written arguments must
+            // not hide the inherited declaration that can map them.
+            extension_recovery_candidates.retain(|candidate| {
+                Self::candidate_maps_value_arguments(
+                    candidate,
+                    arguments.len(),
+                    names,
+                    trailing_lambda,
+                )
+            });
+            let any_type_arity_matches = extension_recovery_candidates.iter().any(|candidate| {
+                type_arguments.is_empty()
+                    || type_arguments.len() == candidate.semantic_signature().formals.len()
+            });
+            if any_type_arity_matches {
+                extension_recovery_candidates.retain(|candidate| {
+                    type_arguments.is_empty()
+                        || type_arguments.len() == candidate.semantic_signature().formals.len()
+                });
+            }
+            self.retain_member_extension_dispatch_priority(
+                scope,
+                &member_extensions,
+                &mut extension_recovery_candidates,
+            );
+            extension_candidates.retain(|candidate| {
+                extension_recovery_candidates.iter().any(|selected| {
+                    super::receiver_member_level::same_candidate_declaration(candidate, selected)
+                })
+            });
+            extension_unavailable_context.retain(|candidate| {
+                extension_recovery_candidates.iter().any(|selected| {
+                    super::receiver_member_level::same_candidate_declaration(candidate, selected)
+                })
+            });
+        }
+        if direct_maps && extension_rank.is_some() {
+            // kotlinc compares mapped rejected declarations across the member and extension
+            // families before assigning the diagnostic owner. Dispatch-tower rank selected
+            // the extension rung already; it is not comparable to the member family's scope
+            // rank, so present both chosen families at the direct rung for specificity.
+            let direct_rank = direct_rank.expect("a mapped direct family has a selected rank");
+            for candidate in extension_candidates
+                .iter_mut()
+                .chain(&mut extension_unavailable_context)
+            {
+                candidate.scope_rank = direct_rank.1;
+            }
+            candidates.extend(extension_candidates);
+            unavailable_context.extend(extension_unavailable_context);
+            recovery_candidates = candidates.clone();
+            recovery_candidates.extend(
+                unavailable_context
                     .iter()
                     .cloned()
                     .map(Self::without_implicit_context),
             );
-            let extension_rank = Self::nearest_mapped_candidate_rank(
-                &extension_recovery_candidates,
-                arguments.len(),
-                names,
-                trailing_lambda,
-            );
-            if let Some(extension_rank) = extension_rank {
-                extension_candidates
-                    .retain(|candidate| Self::candidate_scope_rank(candidate) == extension_rank);
-                extension_unavailable_context
-                    .retain(|candidate| Self::candidate_scope_rank(candidate) == extension_rank);
-                extension_recovery_candidates
-                    .retain(|candidate| Self::candidate_scope_rank(candidate) == extension_rank);
-                // Dispatch inheritance/override priority applies to applicable call shapes. A
-                // nearer owner whose same-named extension cannot map the written arguments must
-                // not hide the inherited declaration that can map them.
-                extension_recovery_candidates.retain(|candidate| {
-                    Self::candidate_maps_value_arguments(
-                        candidate,
-                        arguments.len(),
-                        names,
-                        trailing_lambda,
-                    )
-                });
-                let any_type_arity_matches =
-                    extension_recovery_candidates.iter().any(|candidate| {
-                        type_arguments.is_empty()
-                            || type_arguments.len() == candidate.semantic_signature().formals.len()
-                    });
-                if any_type_arity_matches {
-                    extension_recovery_candidates.retain(|candidate| {
-                        type_arguments.is_empty()
-                            || type_arguments.len() == candidate.semantic_signature().formals.len()
-                    });
-                }
-                self.retain_member_extension_dispatch_priority(
-                    scope,
-                    &member_extensions,
-                    &mut extension_recovery_candidates,
-                );
-                extension_candidates.retain(|candidate| {
-                    extension_recovery_candidates.iter().any(|selected| {
-                        super::receiver_member_level::same_candidate_declaration(
-                            candidate, selected,
-                        )
-                    })
-                });
-                extension_unavailable_context.retain(|candidate| {
-                    extension_recovery_candidates.iter().any(|selected| {
-                        super::receiver_member_level::same_candidate_declaration(
-                            candidate, selected,
-                        )
-                    })
-                });
-            }
-            if direct_maps && extension_rank.is_some() {
-                // 2.4.20 compares mapped rejected declarations across the member and extension
-                // families before assigning the diagnostic owner. Dispatch-tower rank selected
-                // the extension rung already; it is not comparable to the member family's scope
-                // rank, so present both chosen families at the direct rung for specificity.
-                let direct_rank = direct_rank.expect("a mapped direct family has a selected rank");
-                for candidate in extension_candidates
-                    .iter_mut()
-                    .chain(&mut extension_unavailable_context)
-                {
-                    candidate.scope_rank = direct_rank.1;
-                }
-                candidates.extend(extension_candidates);
-                unavailable_context.extend(extension_unavailable_context);
-                recovery_candidates = candidates.clone();
-                recovery_candidates.extend(
-                    unavailable_context
-                        .iter()
-                        .cloned()
-                        .map(Self::without_implicit_context),
-                );
-                candidate_sources.extend(member_extensions);
-            } else if !direct_maps && extension_rank.is_some() {
-                // Falling through leaves the failed member rung behind. Its lower numeric scope
-                // rank must not mask a mapped extension on an outer implicit receiver.
-                candidates = extension_candidates;
-                unavailable_context = extension_unavailable_context;
-                recovery_candidates = extension_recovery_candidates;
-                candidate_sources = member_extensions;
-            }
+            candidate_sources.extend(member_extensions);
+        } else if !direct_maps && extension_rank.is_some() {
+            // Falling through leaves the failed member rung behind. Its lower numeric scope
+            // rank must not mask a mapped extension on an outer implicit receiver.
+            candidates = extension_candidates;
+            unavailable_context = extension_unavailable_context;
+            recovery_candidates = extension_recovery_candidates;
+            candidate_sources = member_extensions;
         }
+
         let available_count = candidates.len();
         if let Some((index, candidate, parameter_by_argument)) = self.sole_mapped_candidate(
             scope,

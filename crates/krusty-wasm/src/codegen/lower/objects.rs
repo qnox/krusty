@@ -27,7 +27,7 @@ use super::super::super::interface_dispatch::MemberRef;
 use super::super::super::objects::{slot_field, REFERENCE};
 use super::super::super::runtime::{Runtime, EQZ32, OR32};
 use super::super::classes::{Accessor, FileClasses};
-use super::super::interface_members::{accessor_types, member_signature};
+use super::super::interface_members::{member_signature, operand_accessor_types};
 use super::super::property_registry::{
     AccessorProperty, MemberProperty, MemberPropertyDefinition, TopLevelProperty,
 };
@@ -86,6 +86,27 @@ impl Body<'_> {
         let field = self.file_classes()?.field(class, index);
         self.code.struct_get(structure, field);
         Ok(())
+    }
+
+    /// A field read with the throw-if-null a `lateinit` field carries. Every read of a `lateinit`
+    /// field is guarded, the default getter's included; only the raw read `isInitialized` makes
+    /// (`LateinitInitialized`) uses [`Self::field_read`] alone.
+    pub(super) fn guarded_field_read(
+        &mut self,
+        receiver: u32,
+        class: ClassId,
+        index: u32,
+    ) -> Result<(), Unsupported> {
+        self.field_read(receiver, class, index)?;
+        let field = &self.ir.classes[class as usize].fields[index as usize];
+        if !field.is_lateinit() {
+            return Ok(());
+        }
+        let name = field.name.clone();
+        let Some(reference @ ValType::Ref { .. }) = carrier(field.ty)? else {
+            return Err("a `lateinit` read without a reference carrier".to_string());
+        };
+        self.guard_lateinit(reference, &name)
     }
 
     /// Consume one checked enclosing edge through the producer-certified constructor field.
@@ -455,6 +476,20 @@ impl Body<'_> {
                     Some(*getter)
                 }
             }
+            // A member property declaring context parameters takes them as leading accessor
+            // operands, which dispatches the way a member extension's receiver does.
+            Some(IrLocalPropertyLayout::Member {
+                getter,
+                setter: property_setter,
+                context_parameters,
+                ..
+            }) if !context_parameters.is_empty() => {
+                if setter {
+                    *property_setter
+                } else {
+                    *getter
+                }
+            }
             _ => None,
         }
         .ok_or_else(|| "a member-extension property call with no recorded accessor".to_string())?;
@@ -641,15 +676,15 @@ impl Body<'_> {
         let Some(number) = self.numbers.number(key) else {
             return Ok(None);
         };
-        let ty = match self.ir.local_property_layouts.get(&property) {
+        let (context, ty) = match self.ir.local_property_layouts.get(&property) {
             Some(IrLocalPropertyLayout::Member {
                 ty,
                 context_parameters,
                 ..
-            }) if context_parameters.is_empty() => *ty,
+            }) => (context_parameters.as_slice(), *ty),
             // A member extension of an interface is called through its accessor's dispatch.
             Some(IrLocalPropertyLayout::MemberExtension { .. }) => return Ok(None),
-            Some(_) => return Err("an interface property with context parameters".to_string()),
+            Some(_) => return Err("an interface property with an unrecognized layout".to_string()),
             None => {
                 let reference = self
                     .ir
@@ -659,13 +694,10 @@ impl Body<'_> {
                 if reference.extension_receiver.is_some() {
                     return Ok(None);
                 }
-                if !reference.context_parameters.is_empty() {
-                    return Err("an interface property with context parameters".to_string());
-                }
-                reference.ty
+                (reference.context_parameters.as_slice(), reference.ty)
             }
         };
-        let (params, result) = accessor_types(ty, setter);
+        let (params, result) = operand_accessor_types(context.iter().copied(), ty, setter);
         self.numbered_member(number, params, result).map(Some)
     }
 
@@ -940,6 +972,12 @@ impl Body<'_> {
                             .dispatch_member_extension_property(
                                 class, *property, false, receiver, args,
                             ),
+                        Some(IrLocalPropertyLayout::Member {
+                            context_parameters, ..
+                        }) if !context_parameters.is_empty() => self
+                            .dispatch_member_extension_property(
+                                class, *property, false, receiver, args,
+                            ),
                         _ if args.is_empty() => self.property_read(None, *property, Some(receiver)),
                         _ => self.context_member_accessor(*property, false, receiver, args),
                     },
@@ -947,6 +985,12 @@ impl Body<'_> {
                         property,
                     )) => match self.ir.local_property_layouts.get(property) {
                         Some(IrLocalPropertyLayout::MemberExtension { .. }) => self
+                            .dispatch_member_extension_property(
+                                class, *property, true, receiver, args,
+                            ),
+                        Some(IrLocalPropertyLayout::Member {
+                            context_parameters, ..
+                        }) if !context_parameters.is_empty() => self
                             .dispatch_member_extension_property(
                                 class, *property, true, receiver, args,
                             ),
@@ -1108,6 +1152,18 @@ impl Body<'_> {
                     return Err("a top-level property read that requires an accessor".to_string());
                 }
                 self.code.global_get(storage.global);
+                // A `lateinit` property's storage is read through its guard, as a read of the
+                // storage in its own file is, unless it is the raw read `isInitialized` makes.
+                if operation
+                    .is_none_or(|read| !self.ir.lateinit_initialization_probes.contains(&read))
+                {
+                    if let Some(name) = self.lateinit_top_level_name(target) {
+                        let Some(reference @ ValType::Ref { .. }) = carrier(storage.ty)? else {
+                            return Err("a `lateinit` read without a reference carrier".to_string());
+                        };
+                        self.guard_lateinit(reference, &name)?;
+                    }
+                }
                 return Ok(());
             }
         }
@@ -1147,7 +1203,7 @@ impl Body<'_> {
         }
         match property.backing_field {
             Some(field) => {
-                self.field_read(receiver, class, field)?;
+                self.guarded_field_read(receiver, class, field)?;
                 // The field keeps its storage type. Callers of the read see the public type: the
                 // checker lowers a read of the field itself as a field access, so a property read
                 // that remains is the default getter.
@@ -1258,12 +1314,60 @@ impl Body<'_> {
         if declaration.owner != Some(entry.owner)
             || declaration.ty != entry.ty
             || declaration.mutable != entry.setter.is_some()
-            || declaration.extension_receiver.is_some()
-            || !declaration.context_parameters.is_empty()
+            || *entry.parameters
+                != *krusty::backend::receiver_property_accessors::record_parameters(declaration)
         {
             return Err("a cross-file member property disagrees with its module record".into());
         }
         Ok(Some(entry))
+    }
+
+    /// An access to an extension or context property another file of the module declares: a call
+    /// of its getter or setter entry with the dispatch receiver of a member, then `declared` (its
+    /// context arguments, then its extension receiver), then a written value, in that order.
+    pub(super) fn module_receiver_property(
+        &mut self,
+        target: PropertyId,
+        dispatch_receiver: Option<u32>,
+        declared: &[u32],
+        value: Option<u32>,
+    ) -> Result<(), Unsupported> {
+        if self.ir.local_property_layouts.contains_key(&target) {
+            return Err("an extension or context property access left unrealized".to_string());
+        }
+        let (getter, setter, ty, parameters) = match dispatch_receiver {
+            Some(receiver) => {
+                let entry = self.module_member_property(target)?.ok_or_else(|| {
+                    "a cross-file member extension or context property with no module entry"
+                        .to_string()
+                })?;
+                self.value(receiver, Ty::obj_name(entry.owner))?;
+                (entry.getter, entry.setter, entry.ty, entry.parameters)
+            }
+            None => {
+                let entry = self.properties.accessor(target).ok_or_else(|| {
+                    "a cross-file extension or context property with no module entry".to_string()
+                })?;
+                (entry.getter, entry.setter, entry.ty, entry.parameters)
+            }
+        };
+        if parameters.len() != declared.len() {
+            return Err("a cross-file accessor call whose operands do not match its entry".into());
+        }
+        for (&operand, &parameter) in declared.iter().zip(parameters.iter()) {
+            self.argument(operand, parameter)?;
+        }
+        let entry = match value {
+            None => getter,
+            Some(value) => {
+                let setter = setter
+                    .ok_or_else(|| "a read-only cross-file property was written".to_string())?;
+                self.value(value, ty)?;
+                setter
+            }
+        };
+        self.code.call(entry);
+        Ok(())
     }
 
     /// The entries of a receiver-less property another file realizes through its accessors.
@@ -1272,6 +1376,22 @@ impl Body<'_> {
             return None;
         }
         self.properties.accessor(target)
+    }
+
+    /// The name of the top-level property `target` when it is `lateinit`, as this file declares it
+    /// or as another file of the module declared it.
+    fn lateinit_top_level_name(&self, target: PropertyId) -> Option<String> {
+        if let Some(IrLocalPropertyLayout::TopLevelStorage { storage, .. }) =
+            self.ir.local_property_layouts.get(&target)
+        {
+            let declaration = self.ir.statics.get(*storage as usize)?;
+            return declaration.is_lateinit.then(|| declaration.name.clone());
+        }
+        let reference = self.ir.referenced_module_properties.get(&target)?;
+        reference
+            .flags
+            .has(krusty::fir::DeclarationFlags::LATEINIT)
+            .then(|| reference.name.clone())
     }
 
     /// The storage selected for a receiver-less property in this or an earlier source file.
@@ -1542,6 +1662,14 @@ impl Body<'_> {
                         .exception_class(self.module, self.classifiers, name)?;
                 self.code.ref_test(nullable, HeapType::Concrete(structure));
             }
+            // `Unit` has no carrier, so its one instance is a struct of its own, boxed as the
+            // primitives are.
+            _ if tested == Ty::Unit
+                || matches!(tested.kind(), TyKind::Obj(name, _) if name == krusty::types::wk::unit()) =>
+            {
+                let structure = self.runtime.unit_structure(self.module);
+                self.code.ref_test(nullable, HeapType::Concrete(structure));
+            }
             // Each array classifier is an object type of its own, so the test is its type's:
             // `UIntArray` is not an `IntArray`, though one wraps the other's storage.
             _ if tested.is_array() => {
@@ -1799,6 +1927,12 @@ pub(super) fn define_module_property_functions(
             .local_property_layouts
             .get(&definition.property)
             .ok_or_else(|| "a module member property with no local layout".to_string())?;
+        if !definition.entry.parameters.is_empty() {
+            super::accessor_property_entries::define_receiver_member(
+                context, classes, definition, layout, module, runtime,
+            )?;
+            continue;
+        }
         let IrLocalPropertyLayout::Member {
             class,
             owner,
@@ -2012,7 +2146,7 @@ fn coerce_property_entry(
 }
 
 /// Append the table reference and indirect call after the wrapper's receiver and value operands.
-fn emit_module_property_dispatch(
+pub(super) fn emit_module_property_dispatch(
     classes: &FileClasses,
     runtime: &Runtime,
     class: ClassId,

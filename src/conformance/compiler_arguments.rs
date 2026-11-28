@@ -332,10 +332,8 @@ mod tests {
 
     #[test]
     fn symbolic_api_levels_use_the_selected_release_and_raise_the_implicit_language_level() {
-        for (compiler, latest) in [
-            (KotlinVersion::V2_4_10, LanguageVersion::V2_5),
-            (KotlinVersion::V2_4_20, LanguageVersion::V2_6),
-        ] {
+        let (compiler, latest) = (KotlinVersion::V2_4_21, LanguageVersion::V2_6);
+        {
             let configure = |src: &str| case_compiler_configuration_for_release(src, compiler);
             let levels = |api: LanguageVersion, language: LanguageVersion| {
                 vec![

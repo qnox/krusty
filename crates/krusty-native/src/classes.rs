@@ -42,7 +42,7 @@ use krusty::types::{Ty, TypeName};
 use super::laid_out_classes::{LaidOutClass, LaidOutClasses};
 
 pub(super) use krusty::backend::class_tables::{
-    function_key, local_property_target, AnyMember, SlotKey, FUNCTION_SLOT,
+    function_key, local_property_target, AnyMember, SlotKey,
 };
 
 /// The construct a lowering declined, phrased for a diagnostic.
@@ -273,8 +273,7 @@ pub(super) enum Slot {
         target_slot: u32,
         target: FunId,
     },
-    /// See [`class_tables::Slot::FunctionBridge`]; the runtime names the number it stands in
-    /// `KT_SLOT_INVOKE`.
+    /// See [`class_tables::Slot::FunctionBridge`].
     FunctionBridge {
         arity: usize,
         target_slot: u32,
@@ -294,7 +293,8 @@ pub(super) enum Slot {
     AccessorBridge {
         declared: Ty,
         implemented: Ty,
-        receiver: Option<(Ty, Ty)>,
+        /// The operands between the receiver and the value, on each side.
+        operands: Vec<(Ty, Ty)>,
         setter: bool,
         target_slot: u32,
     },
@@ -365,13 +365,13 @@ impl Slot {
             class_tables::Slot::AccessorBridge {
                 declared,
                 implemented,
-                receiver,
+                operands,
                 setter,
                 target_slot,
             } => Self::AccessorBridge {
                 declared,
                 implemented,
-                receiver,
+                operands,
                 setter,
                 target_slot,
             },
@@ -453,10 +453,6 @@ impl Representation for NativeRepresentation<'_> {
         representation(self.0, a) == representation(self.0, b)
     }
 
-    fn is_reference(&self, ty: Ty) -> bool {
-        c_kind(self.0, ty) == CKind::Ref
-    }
-
     fn owns_base(&self, superclass: TypeName) -> bool {
         superclass == krusty::types::wk::kotlin_enum() || external_base(superclass).is_some()
     }
@@ -517,9 +513,18 @@ pub(super) enum Dispatch {
     Class(u32),
     /// The receiver's interface table, by module-wide member number.
     Interface(u32),
+    /// A function type's `invoke`, by the physical operand count of the call: the function
+    /// protocol, which no module numbers (`native::interface_calls`).
+    Function(usize),
 }
 
 impl ClassModel {
+    /// The function types `class`'s instances implement, each with the slot of the bridge a call
+    /// through that function type reaches ([`class_tables::ClassTable::function_invokes`]).
+    pub(super) fn function_invokes(&self, class: ClassId) -> &[class_tables::FunctionInvoke] {
+        &self.laid_out_tables[class as usize].function_invokes
+    }
+
     /// Whether `function` is a method its class's table does not dispatch, which a call reaches
     /// directly.
     pub(super) fn is_direct(&self, function: FunId) -> bool {
@@ -668,6 +673,7 @@ pub(super) fn build(
             interfaces: numbered.interface_tables.implemented[id].clone(),
             interface_entries: numbered.interface_tables.members[id].clone(),
             members: numbered.members[id].clone(),
+            function_invokes: numbered.tables[id].function_invokes.clone(),
         })
         .collect();
     let direct_methods = numbered
@@ -786,6 +792,9 @@ mod tests {
         add_method, class, field, function, record_override, record_semantic_override,
         stored_property,
     };
+    use krusty::backend::class_tables::ANY_SLOTS;
+    /// The first table number a method of a class takes: right after `kotlin.Any`'s.
+    const FIRST: u32 = ANY_SLOTS;
     use krusty::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
     use krusty::ir::IrProperty;
 
@@ -822,13 +831,13 @@ mod tests {
         let layout = model.layout(point);
         assert_eq!(
             layout.vtable,
-            vec![
+            [
                 Slot::Runtime("kt_any_equals"),
                 Slot::Runtime("kt_any_hash_code"),
                 Slot::Runtime("kt_any_to_string"),
-                // The function slot, reserved in every table so no member ever stands there.
-                Slot::Abstract,
             ]
+            .into_iter()
+            .collect::<Vec<_>>()
         );
         assert_eq!(layout.instance_size, HEADER_SIZE);
     }
@@ -845,32 +854,35 @@ mod tests {
         record_override(&mut ir, b, b_name, a_name);
 
         let model = build(&ir).expect("layout");
-        assert_eq!(model.slot(a, &SlotKey::Function(a_name)), Some(4));
-        assert_eq!(model.slot(a, &SlotKey::Function(a_other)), Some(5));
-        assert_eq!(model.layout(a).vtable[4], Slot::Function(a_name));
+        assert_eq!(model.slot(a, &SlotKey::Function(a_name)), Some(FIRST));
+        assert_eq!(model.slot(a, &SlotKey::Function(a_other)), Some(FIRST + 1));
+        assert_eq!(
+            model.layout(a).vtable[FIRST as usize],
+            Slot::Function(a_name)
+        );
 
         let b_layout = model.layout(b);
         assert_eq!(
-            b_layout.vtable[4],
+            b_layout.vtable[FIRST as usize],
             Slot::Function(b_name),
             "the override takes the slot its base assigned"
         );
         assert_eq!(
-            b_layout.vtable[5],
+            b_layout.vtable[FIRST as usize + 1],
             Slot::Function(a_other),
             "inherited unchanged"
         );
         assert_eq!(
-            b_layout.vtable[6],
+            b_layout.vtable[FIRST as usize + 2],
             Slot::Function(b_extra),
             "new members append"
         );
         assert_eq!(
             model.slot(b, &SlotKey::Function(a_name)),
-            Some(4),
+            Some(FIRST),
             "a call naming the base method finds the same slot on the subclass"
         );
-        assert_eq!(model.slot(b, &SlotKey::Function(b_name)), Some(4));
+        assert_eq!(model.slot(b, &SlotKey::Function(b_name)), Some(FIRST));
     }
 
     #[test]
@@ -885,16 +897,22 @@ mod tests {
         record_override(&mut ir, c, c_f, a_f);
 
         let model = build(&ir).expect("layout");
-        assert_eq!(model.layout(a).vtable[4], Slot::Abstract);
-        assert_eq!(model.layout(b).vtable[4], Slot::Abstract);
-        assert_eq!(model.layout(b).vtable[5], Slot::Function(b_g));
+        assert_eq!(model.layout(a).vtable[FIRST as usize], Slot::Abstract);
+        assert_eq!(model.layout(b).vtable[FIRST as usize], Slot::Abstract);
         assert_eq!(
-            model.layout(c).vtable[4],
+            model.layout(b).vtable[FIRST as usize + 1],
+            Slot::Function(b_g)
+        );
+        assert_eq!(
+            model.layout(c).vtable[FIRST as usize],
             Slot::Function(c_f),
             "an override two levels down replaces the slot the root declared"
         );
-        assert_eq!(model.layout(c).vtable[5], Slot::Function(b_g));
-        assert_eq!(model.layout(c).vtable.len(), 6);
+        assert_eq!(
+            model.layout(c).vtable[FIRST as usize + 1],
+            Slot::Function(b_g)
+        );
+        assert_eq!(model.layout(c).vtable.len(), FIRST as usize + 2);
         assert_eq!(model.order, vec![a, b, c]);
     }
 
@@ -921,7 +939,10 @@ mod tests {
         );
         let model = build(&ir).expect("layout");
         assert_eq!(model.layout(p).vtable[2], Slot::Function(display));
-        assert_eq!(model.layout(p).vtable[4], Slot::Function(overload));
+        assert_eq!(
+            model.layout(p).vtable[FIRST as usize],
+            Slot::Function(overload)
+        );
     }
 
     #[test]
@@ -1103,7 +1124,7 @@ mod tests {
         );
         let model = build(&ir).expect("layout");
         assert_eq!(
-            model.layout(a).vtable[4],
+            model.layout(a).vtable[FIRST as usize],
             Slot::FieldGetter { class: a, field: 0 }
         );
         assert_eq!(
@@ -1111,7 +1132,7 @@ mod tests {
                 a,
                 &SlotKey::Getter(ResolvedPropertyOverrideTarget::Module(property))
             ),
-            Some(4)
+            Some(FIRST)
         );
     }
 
@@ -1207,10 +1228,10 @@ mod tests {
     }
 
     #[test]
-    fn a_function_class_never_takes_the_slot_of_a_member_it_inherits() {
-        // `open class A { open fun foo(): String }` and `class B : A(), () -> String`: `invoke`
-        // belongs at the function slot, and `A.foo` must still be where every call through `A`
-        // looks for it.
+    fn a_function_class_answers_through_a_bridge_after_the_members_it_inherits() {
+        // `open class A { open fun foo(): String }` and `class B : A(), () -> String`: `A.foo` is
+        // still where every call through `A` looks for it, `invoke` takes a slot after it, and the
+        // function type's bridge a slot after that, found by the operand count.
         let mut ir = IrFile::default();
         let a = class(&mut ir, "A", "kotlin/Any", 0);
         let b = class(&mut ir, "B", "A", 1);
@@ -1231,14 +1252,27 @@ mod tests {
         )
         .expect("layout");
         let foo_slot = model.slot(b, &SlotKey::Function(foo)).expect("foo's slot");
-        assert_ne!(foo_slot, FUNCTION_SLOT);
+        assert_eq!(foo_slot, FIRST);
         assert_eq!(
             model.layout(b).vtable[foo_slot as usize],
             Slot::Function(foo)
         );
+        let invoke_slot = model
+            .slot(b, &SlotKey::Function(invoke))
+            .expect("invoke's slot");
+        assert_eq!(invoke_slot, FIRST + 1);
+        let [bridge] = model.function_invokes(b) else {
+            panic!("one function type implemented");
+        };
+        assert_eq!(bridge.operands, 0);
+        assert_eq!(bridge.slot, FIRST + 2);
         assert_eq!(
-            model.layout(b).vtable[FUNCTION_SLOT as usize],
-            Slot::Function(invoke)
+            model.layout(b).vtable[bridge.slot as usize],
+            Slot::FunctionBridge {
+                arity: 0,
+                target_slot: invoke_slot,
+                target: invoke
+            }
         );
     }
 

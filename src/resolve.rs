@@ -13,6 +13,7 @@ use std::fmt::Write;
 
 use crate::ast::*;
 use crate::diag::{DiagSink, DiagnosticIdentity, DiagnosticKind, Span};
+use crate::diagnostic_wording::unresolved_reference;
 use crate::libraries::{
     map_call_args, required_arity, AnnotationParameterPolicy, AnnotationPositionalPolicy,
     CallArgMappingError, CallArgMappingFailure, CallSig, EmptySymbolSource, GenericReturnPolicy,
@@ -36,7 +37,10 @@ mod class_capture_discovery;
 mod class_names;
 mod common_supertype;
 use class_capture_discovery::*;
+mod constructor_rung_failure;
 mod declaration_type_inference;
+mod source_constructor_failure;
+use source_constructor_failure::ConstructorValueParameters;
 mod symbol_table;
 use common_supertype::*;
 use declaration_type_inference::*;
@@ -90,11 +94,11 @@ mod annotation_applications;
 mod annotation_argument_constness;
 mod annotation_arguments;
 mod annotation_bindings;
+mod annotation_host_kind;
 use annotation_bindings::{BoundAnnotation, BoundAnnotations};
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
 mod backing_field_binding;
-mod boolean_implications;
 mod dependency_annotation_defaults;
 mod dependency_body_call_edges;
 pub(crate) use anonymous_object_capture::discover_inline_anonymous_object_captures;
@@ -175,6 +179,7 @@ mod collection_literals;
 mod common_classifier_views;
 mod compound_assignments;
 mod condition_exclusions;
+mod condition_narrowings;
 mod conditional_branch;
 mod constant_evaluation;
 mod constructor_arguments;
@@ -255,6 +260,7 @@ mod inner_constructor_calls;
 mod member_call_bindings;
 mod member_slot_calls;
 mod nested_producer_bindings;
+mod tailrec_calls;
 mod try_expression;
 use inner_constructor_calls::BoundInnerConstruction;
 mod import_diagnostics;
@@ -267,6 +273,7 @@ mod intersection_inference;
 mod intersection_receiver_selection;
 mod invoke_selection;
 mod lexical_value_invoke;
+mod unnarrowed_member_receiver;
 use lexical_value_invoke::{DeferredInvokePeers, DeferredLexicalInvoke, LexicalInvokeSite};
 mod lambda_call_shapes;
 mod property_read_selection;
@@ -432,6 +439,7 @@ mod singleton_receivers;
 pub use singleton_receivers::SingletonValue;
 mod anonymous_capture_remap;
 mod constructor_receiver_frames;
+mod lexical_receivers;
 mod primary_constructor_arguments;
 mod source_constructors;
 mod source_package;
@@ -440,6 +448,7 @@ mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
 mod super_calls;
+use lexical_receivers::{lexical_context_receiver, lexical_receiver_declaration};
 use super_calls::is_super_qualifier;
 pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
@@ -452,6 +461,7 @@ mod type_argument_arity;
 mod uninferred_call_results;
 mod upper_bound_violations;
 mod value_class_declaration;
+mod value_implications;
 mod variance_conflicts;
 mod when_comparison;
 mod when_exhaustiveness;
@@ -538,35 +548,6 @@ const MAX_OVERLOAD_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES: usize = 4 * 1024 * 1024;
 const CONFLICTING_OVERLOAD_PREFIX: &str = "conflicting overloads:";
 const INAPPLICABLE_OVERLOAD_PREFIX: &str = "none of the following candidates is applicable:";
-
-fn lexical_receiver_label(file: &File, reference: &TypeRef) -> String {
-    file.alias_spellings
-        .get(&reference.span)
-        .unwrap_or(reference)
-        .name
-        .rsplit(['.', '/'])
-        .next()
-        .unwrap_or(&reference.name)
-        .to_string()
-}
-
-fn lexical_receiver_declaration(file: &File, reference: &TypeRef) -> (Span, String) {
-    (reference.span, lexical_receiver_label(file, reference))
-}
-
-fn lexical_context_receiver(file: &File, parameter: &Param, ty: Ty) -> ContextReceiver {
-    let kind = match parameter.context_kind {
-        crate::types::ContextParameterKind::Named => {
-            return ContextReceiver::named(ty, parameter.name.clone())
-                .with_declaration(parameter.ty.span)
-        }
-        crate::types::ContextParameterKind::Anonymous => ContextReceiverKind::Anonymous,
-        crate::types::ContextParameterKind::LegacyReceiver => ContextReceiverKind::LegacyReceiver,
-        crate::types::ContextParameterKind::None => unreachable!("a context parameter has a kind"),
-    };
-    ContextReceiver::new(ty, kind, Some(lexical_receiver_label(file, &parameter.ty)))
-        .with_declaration(parameter.ty.span)
-}
 
 fn header_type_has_annotation(
     annotations: &[TypeRef],
@@ -1435,14 +1416,17 @@ pub struct TypeInfo {
     /// and ordinary stable-local smart casts. FIR publishes the selected target view as a checked
     /// conversion; lowering never reconstructs flow facts from the source condition.
     pub(crate) selected_value_smartcasts: HashMap<ExprId, Ty>,
+    /// Member accesses (an assignment by its receiver) that dispatch on their smart-cast receiver's
+    /// unnarrowed type, with that type; FIR drops the cast. See `unnarrowed_member_receiver`.
+    pub(crate) unnarrowed_dispatch_calls: HashMap<ExprId, Ty>,
     /// Context-selected conversion of a folded integer constant expression to its declaration or
     /// argument target. The expression itself may still be an `Int` operator tree; checked FIR
     /// carries this boundary explicitly so lowering never repeats constant-expression inference.
     pub(crate) selected_numeric_conversions: HashMap<ExprId, Ty>,
     /// Exact regular callable constituent selected for a function-value conversion (suspend and/or
-    /// `Unit` result), with its target. The nominal expression may implement several callable
-    /// supertypes, so checked FIR must consume this pair instead of selecting a constituent again.
-    pub(crate) selected_function_value_conversions: HashMap<ExprId, (Ty, Ty)>,
+    /// `Unit` result), with its target and whether a `null` value stays `null`. The nominal value
+    /// may implement several callable supertypes, so checked FIR consumes this selection.
+    pub(crate) selected_function_value_conversions: HashMap<ExprId, (Ty, Ty, bool)>,
     /// Generated-class names settled against the selected function-value conversions.
     pub(crate) generated_class_names: crate::frontend::SettledGeneratedClassNames,
     /// A bare-member read (`Expr::Name`) or unqualified call that resolved against a FLOW-NARROWED
@@ -3471,8 +3455,6 @@ struct Local {
     /// Identity smart-cast facts about this value are keyed by. Every declaration allocates one,
     /// whatever its origin; a narrowing shadow keeps the identity of the value it narrows.
     flow_identity: u32,
-    /// Immutable origin identity implied by this safe-call result; follows lexical shadowing.
-    safe_call_origin: Option<lexical_bindings::BindingIdentity>,
 }
 
 /// The receiver stack a lambda body is checked under: any context receivers, the extension
@@ -3577,14 +3559,6 @@ struct NamedCallArguments<'a> {
 struct DispatchPropertyProvenance {
     enum_entry: Option<EnumEntryProperty>,
     selected_receiver: Option<(usize, usize)>,
-}
-
-/// The value-parameter list a constructor-arity diagnostic is written against.
-struct ConstructorValueParameters<'a> {
-    types: &'a [Ty],
-    names: &'a [String],
-    defaults: &'a [bool],
-    vararg: Option<usize>,
 }
 
 /// The selected formal a committed argument is checked against.
@@ -4907,7 +4881,7 @@ impl<'a> Checker<'a> {
                 _ => None,
             });
             let message = self.unresolved_property_read_diagnostic(scope, receiver, name, rt);
-            self.diags.error(diagnostic_span, message);
+            self.diags.report_error(diagnostic_span, message);
         }
         Ty::Error
     }
@@ -5284,14 +5258,21 @@ impl<'a> Checker<'a> {
                 &[],
             )
             .is_some_and(|symbol| !symbol.overloads().is_empty());
-        self.diags.error(
-            self.call_callee_name_span(call),
-            if has_candidates {
-                INAPPLICABLE_OVERLOAD_PREFIX.to_string()
-            } else {
-                format!("unresolved reference '{name}'.")
-            },
-        );
+        let applicability = if has_candidates {
+            self.callable_rung_applicability(scope, call, args, &type_args, &candidates)
+        } else {
+            constructor_rung_failure::RungApplicability::NoCandidate
+        };
+        if self.settle_deferred_constructor_failure(scope, call, args, applicability) {
+            return ClassifierValueCall::Checked(Ty::Error);
+        }
+        let span = self.call_callee_name_span(call);
+        if has_candidates {
+            self.diags
+                .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+        } else {
+            self.diags.report_error(span, unresolved_reference(name));
+        }
         ClassifierValueCall::Checked(Ty::Error)
     }
 
@@ -6982,6 +6963,9 @@ impl<'a> Checker<'a> {
         let expected = expected
             .filter(|expected| *expected != Ty::Error)
             .map(Ty::non_null);
+        let Some(expected) = self.collection_literal_expectation(call, span, expected) else {
+            return Ty::Error;
+        };
 
         // Array literals are compiler-provided constructions, selected from the expected array
         // classifier rather than from the provisional parser spelling. Primitive and unsigned
@@ -7945,18 +7929,25 @@ impl<'a> Checker<'a> {
                             InvokeResolution::Inapplicable(_) | InvokeResolution::Absent => {}
                         }
                     }
-                    if !self.report_source_constructor_mapping_error(
-                        call,
-                        args,
-                        &arguments,
-                        &candidates,
-                        &qname,
-                    ) && !self.call_already_has_argument_diagnostic(call, args)
-                    {
-                        self.diags
-                            .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                    // The later rungs of a classifier qualifier (`C`'s associated, companion and
+                    // static callables) still name `Name`; they settle this failure.
+                    let trailing_lambda = arguments.trailing_lambda;
+                    let failure = constructor_rung_failure::DeferredConstructorFailure::source(
+                        arguments,
+                        candidates,
+                        qname,
+                        trailing_lambda,
+                    );
+                    self.defer_constructor_failure(call, failure);
+                    if !matches!(receiver_qualifier, Ok(ResolvedQualifier::Classifier(_))) {
+                        self.settle_deferred_constructor_failure(
+                            scope,
+                            call,
+                            args,
+                            constructor_rung_failure::RungApplicability::NoCandidate,
+                        );
+                        return Ty::Error;
                     }
-                    return Ty::Error;
                 }
                 // CLASSPATH nested-class constructor `Outer.Nested(args)` (a sealed subclass
                 // `Subject.User("x")`, or any nested class), OR a FULLY-QUALIFIED constructor via a package
@@ -7965,6 +7956,7 @@ impl<'a> Checker<'a> {
                 {
                     if let Ok(ResolvedQualifier::Classifier(internal)) = member_qualifier {
                         let mut constructor_mapping_error = None;
+                        let mut rejected_constructors = None;
                         match self.record_resolved_library_constructor(
                             scope,
                             call,
@@ -7998,7 +7990,9 @@ impl<'a> Checker<'a> {
                                 self.report_invisible_constructor(call, &invisible);
                                 return Ty::Error;
                             }
-                            Ok(LibraryConstructorSelection::NoMatch(_)) => {}
+                            Ok(LibraryConstructorSelection::NoMatch(rejected)) => {
+                                rejected_constructors = rejected;
+                            }
                             Err(error) => {
                                 constructor_mapping_error = Some(error);
                             }
@@ -8021,13 +8015,20 @@ impl<'a> Checker<'a> {
                                 InvokeResolution::Inapplicable(_) | InvokeResolution::Absent => {}
                             }
                         }
-                        if let Some(error) = constructor_mapping_error {
-                            self.report_library_constructor_failure(scope, call, args, error);
-                        } else if !self.call_already_has_argument_diagnostic(call, args) {
-                            self.diags
-                                .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                        let failure = constructor_rung_failure::DeferredConstructorFailure::library(
+                            constructor_mapping_error,
+                            rejected_constructors.as_deref(),
+                        );
+                        self.defer_constructor_failure(call, failure);
+                        if !matches!(receiver_qualifier, Ok(ResolvedQualifier::Classifier(_))) {
+                            self.settle_deferred_constructor_failure(
+                                scope,
+                                call,
+                                args,
+                                constructor_rung_failure::RungApplicability::NoCandidate,
+                            );
+                            return Ty::Error;
                         }
-                        return Ty::Error;
                     }
                 }
                 if let Ok(ResolvedQualifier::Package(package)) = receiver_qualifier {
@@ -8476,6 +8477,17 @@ impl<'a> Checker<'a> {
                     // The one candidate whose parameters the arguments map onto owns the failure,
                     // as for a member call: `J.a(null)` against `a(@NotNull String)` is that
                     // candidate's argument mismatch, not an unresolved static.
+                    let applicability = self.callable_rung_applicability(
+                        scope,
+                        call,
+                        args,
+                        &explicit_type_args,
+                        &rejected_candidates,
+                    );
+                    if self.settle_deferred_constructor_failure(scope, call, args, applicability) {
+                        self.set(receiver, classifier_receiver);
+                        return Ty::Error;
+                    }
                     let call_diagnostics = self.diags.diags.len();
                     if let Some(rejected) = self.report_single_mapped_candidate_type_errors(
                         scope,
@@ -8522,13 +8534,22 @@ impl<'a> Checker<'a> {
                                 ),
                             );
                         } else {
-                            self.diags.error(
+                            self.diags.report_error(
                                 self.call_callee_name_span(call),
-                                format!("unresolved reference '{name}'."),
+                                unresolved_reference(&name),
                             );
                         }
                         return Ty::Error;
                     }
+                }
+                // A deferred constructor rung with no later classifier rung owns the failure.
+                if self.settle_deferred_constructor_failure(
+                    scope,
+                    call,
+                    args,
+                    constructor_rung_failure::RungApplicability::NoCandidate,
+                ) {
+                    return Ty::Error;
                 }
                 let receiver_diag_mark = self.diags.diags.len();
                 let mut rt = self.expr(scope, receiver);
@@ -8543,7 +8564,7 @@ impl<'a> Checker<'a> {
                     .flow_intersection_member_receiver(scope, receiver, &name)
                     .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
                 {
-                    rt = self.set(receiver, projected);
+                    rt = self.project_receiver_view(receiver, projected);
                 }
                 let receiver_callables = if rt != Ty::Error {
                     self.stable_receiver_callables(rt, &name)
@@ -8988,9 +9009,9 @@ impl<'a> Checker<'a> {
                     }
                     if !self.error_receiver_expression_flavored(scope, receiver, receiver_diag_mark)
                     {
-                        self.diags.error(
+                        self.diags.report_error(
                             self.member_name_span(callee, &name),
-                            format!("unresolved reference '{name}'."),
+                            unresolved_reference(&name),
                         );
                     } else {
                         self.silent_error_exprs.insert(call);
@@ -10264,8 +10285,9 @@ impl<'a> Checker<'a> {
                     self.postponed_context_sensitive_name(scope, argument)
                         .is_some()
                 });
-                let toplevel_partial: Option<Vec<Option<Ty>>> = if !self
-                    .lexical_value_declares(scope, &fname)
+                let lexical_value_claims_call =
+                    self.lexical_value_claims_call_with_arguments(scope, &fname, args);
+                let toplevel_partial: Option<Vec<Option<Ty>>> = if !lexical_value_claims_call
                     && (has_lambda_argument
                         || has_callable_ref_argument
                         || has_function_value_argument
@@ -10612,7 +10634,7 @@ impl<'a> Checker<'a> {
                 let top_level_sam = if (has_lambda_argument
                     || has_callable_ref_argument
                     || has_function_value_argument)
-                    && !self.lexical_value_declares(scope, &fname)
+                    && !lexical_value_claims_call
                 {
                     self.top_level_sam_selection(
                         scope,
@@ -10639,7 +10661,7 @@ impl<'a> Checker<'a> {
                     && top_level_functions
                         .top_level()
                         .any(|o| o.flags.inline.can_inline());
-                let toplevel_must_inline = !self.lexical_value_declares(scope, &fname)
+                let toplevel_must_inline = !lexical_value_claims_call
                     && !self.module_declares(&fname)
                     && known_sig.is_none()
                     && args
@@ -10671,10 +10693,8 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                let implicit_member_lambda_enabled = !self
-                    .lexical_value_claims_call_with_arguments(scope, &fname, args)
-                    && known_sig.is_none()
-                    && has_lambda_argument;
+                let implicit_member_lambda_enabled =
+                    !lexical_value_claims_call && known_sig.is_none() && has_lambda_argument;
                 let ordinary_this_member_lambda_shape = implicit_member_lambda_enabled
                     .then(|| {
                         self.implicit_source_member_lambda_shape(
@@ -10820,21 +10840,21 @@ impl<'a> Checker<'a> {
                     boxes_captures: selected_lambda_boxes_captures,
                     inline: selected_shape_inline,
                 } = lambda_call_shapes::SelectedLambdaInputs::of(selected_lambda_shape);
-                let constructor_expectations: Option<ConstructionExpectations> = if !self
-                    .lexical_value_declares(scope, &fname)
-                    && self.resolver().top_level_candidates(&fname).is_empty()
-                {
-                    bare_constructor_classifier.and_then(|internal| {
-                        self.construction_argument_expectations(
-                            internal,
-                            args.len(),
-                            arg_names.as_deref(),
-                            self.file.call_has_trailing_lambda.contains(&call.0),
-                        )
-                    })
-                } else {
-                    None
-                };
+                let constructor_expectations: Option<ConstructionExpectations> =
+                    if !lexical_value_claims_call
+                        && self.resolver().top_level_candidates(&fname).is_empty()
+                    {
+                        bare_constructor_classifier.and_then(|internal| {
+                            self.construction_argument_expectations(
+                                internal,
+                                args.len(),
+                                arg_names.as_deref(),
+                                self.file.call_has_trailing_lambda.contains(&call.0),
+                            )
+                        })
+                    } else {
+                        None
+                    };
                 let constructor_result_context_admitted = constructor_expectations
                     .as_ref()
                     .zip(bare_constructor_classifier)
@@ -10849,7 +10869,7 @@ impl<'a> Checker<'a> {
                 // the rule. Ordinary functions and extensions keep their established eager fallback
                 // (notably zero-parameter lambdas whose empty parameter vector is a real shape).
                 let defer_unshaped_constructor_lambdas = has_lambda_argument
-                    && !self.lexical_value_declares(scope, &fname)
+                    && !lexical_value_claims_call
                     && self.resolver().top_level_candidates(&fname).is_empty()
                     && bare_constructor_classifier
                         .and_then(|internal| self.resolved_type_name(internal))
@@ -11971,15 +11991,15 @@ impl<'a> Checker<'a> {
                     if self.expr_types[expression.0 as usize] != Ty::Error {
                         continue;
                     }
-                    let message = format!("unresolved reference '{name}'.");
+                    let message = unresolved_reference(&name);
                     let already_reported = self.postponed_diagnostics.contains(
                         self.diags,
                         self.file_index,
                         diagnostic_span,
-                        &message,
+                        &message.message,
                     );
                     if !already_reported {
-                        self.diags.error(diagnostic_span, message);
+                        self.diags.report_error(diagnostic_span, message);
                     }
                 }
                 if let Some(mark) = deferred_mark {
@@ -12619,6 +12639,7 @@ impl<'a> Checker<'a> {
                             bindings,
                             intersection_bindings: HashMap::default(),
                             candidate_index: None,
+                            ambiguous_literals: Vec::new(),
                         }))
                     })
                     .or(competing_function)
@@ -13254,16 +13275,17 @@ impl<'a> Checker<'a> {
                         return Ty::Error;
                     }
                 }
-                let (message, identity, diagnostic_span) = if had_rejected_callable {
-                    (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, span)
+                let (message, name, identity, diagnostic_span) = if had_rejected_callable {
+                    (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, None, span)
                 } else if let Some((internal, access)) = self.inaccessible_classifier(scope, &fname)
                 {
                     let reference = self.call_callee_name_span(call);
                     if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
-                        (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, span)
+                        (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, None, span)
                     } else {
                         (
                             inaccessible_classifier_message(&fname, access),
+                            None,
                             Some(DiagnosticIdentity::ClassifierAccess {
                                 reference,
                                 classifier: internal,
@@ -13285,18 +13307,12 @@ impl<'a> Checker<'a> {
                 } else {
                     // kotlinc has no "unresolved function" diagnostic: a callee that names nothing at
                     // all is UNRESOLVED_REFERENCE, the same diagnostic a bare unresolved name gets.
-                    (
-                        format!("unresolved reference '{fname}'."),
-                        None,
-                        self.call_callee_name_span(call),
-                    )
+                    let report = unresolved_reference(&fname);
+                    let span = self.call_callee_name_span(call);
+                    (report.message, Some(report.name), None, span)
                 };
-                if let Some(identity) = identity {
-                    self.diags
-                        .error_with_identity(diagnostic_span, identity, message);
-                } else {
-                    self.diags.error(diagnostic_span, message);
-                }
+                self.diags
+                    .error_with(diagnostic_span, name, identity, message);
                 Ty::Error
             }
             _ => self.check_arbitrary_callee(scope, call, callee, args, span, expected),
@@ -13642,11 +13658,6 @@ impl<'a> Checker<'a> {
                 format!("krusty: conflicting local declaration '{name}'"),
             );
         }
-        // Keep the implication on the result's eventual binding, but resolve its origin before the
-        // result is declared: `val x = x?.p` refers to the OUTER `x` on the right-hand side.
-        // The bounded path accepts immutable lexical roots only. A mutable root needs edge
-        // invalidation and branch joins; declining it is conservative and cannot invent a cast.
-        let safe_call_origin = self.safe_call_origin_for_initializer(scope, init, is_var);
         let declared = ty.as_ref().map(|r| self.type_ref_ty(scope, r));
         // An UNRESOLVED annotation must fail the file, not silently bind `Error`: the local
         // would otherwise take its initializer's shape while every use site's checks are
@@ -13747,8 +13758,8 @@ impl<'a> Checker<'a> {
         // An explicitly typed callable-reference local has already adapted to its target shape.
         // Keep that shape instead of reopening the raw reference and undoing the adaptation.
         // Computed before the val is declared: `val x = x != null` talks about the OUTER `x`.
-        let boolean_implications = (!is_var)
-            .then(|| self.boolean_val_implications(scope, init, bound_ty))
+        let value_implications = (!is_var)
+            .then(|| self.value_implications(scope, init, bound_ty))
             .flatten();
         let flow_identity = if let Some(function_type) = declared
             .filter(|ty| ty.is_fun())
@@ -13768,6 +13779,10 @@ impl<'a> Checker<'a> {
             },
         );
         self.local_properties.record(flow_identity, is_var);
+        if stable_reference_val {
+            self.local_properties
+                .record_initializer_narrowing(flow_identity, bind);
+        }
         if deferred {
             self.local_initialization.declare_deferred(s, flow_identity);
         }
@@ -13775,11 +13790,11 @@ impl<'a> Checker<'a> {
             self.record_enhanced_local(flow_identity, init, bound_ty);
             self.record_flexible_local(flow_identity, init, bound_ty);
         }
-        if let Some(origin) = safe_call_origin {
-            self.attach_safe_call_origin(scope, &name, origin);
-        }
-        if let Some(implications) = boolean_implications {
-            scope.record_boolean_implications(flow_identity, implications);
+        if let Some(implications) = value_implications {
+            scope.record_value_implications(
+                NarrowPath::root_only(scope::PathRoot::Value(flow_identity)),
+                implications,
+            );
         }
         if declared.is_none() && !is_var {
             if let Some(path) = self.visible_value_path(scope, &name) {
@@ -13974,9 +13989,9 @@ impl<'a> Checker<'a> {
                 PropertyWriteSelection::None
                 | PropertyWriteSelection::Implicit(_)
                 | PropertyWriteSelection::Receiverless(_)
-                | PropertyWriteSelection::ClassifierProperty(_) => self
-                    .diags
-                    .error(span, format!("unresolved reference '{name}'.")),
+                | PropertyWriteSelection::ClassifierProperty(_) => {
+                    self.diags.report_error(span, unresolved_reference(&name))
+                }
             },
         }
     }
@@ -14095,6 +14110,9 @@ impl<'a> Checker<'a> {
                             ty,
                             stable: true,
                         });
+                    if let Some(implications) = self.value_implications(scope, value, ty) {
+                        scope.record_value_implications(path.clone(), implications);
+                    }
                     if let Some(narrowed) =
                         self.assignment_narrowing(&name, ty, vt, self.span(value))
                     {
@@ -14286,9 +14304,9 @@ impl<'a> Checker<'a> {
                         PropertyWriteSelection::AccessorAmbiguous(candidates) => {
                             self.report_accessor_ambiguity(target_span, candidates)
                         }
-                        PropertyWriteSelection::None => self
-                            .diags
-                            .error(span, format!("unresolved reference '{name}'.")),
+                        PropertyWriteSelection::None => {
+                            self.diags.report_error(span, unresolved_reference(&name))
+                        }
                     }
                 }
             }
@@ -14456,11 +14474,17 @@ impl<'a> Checker<'a> {
         if inferred_intersection.len() > 1 {
             receiver_ty = Ty::intersection(&inferred_intersection);
         }
-        if let Some(projected) = self
+        // A write has no access expression of its own: its receiver keys the decision.
+        let access = (receiver, receiver);
+        if let Some(declared) =
+            self.unnarrowed_explicit_property_receiver(scope, access, receiver_ty, &name, true)
+        {
+            receiver_ty = declared;
+        } else if let Some(projected) = self
             .flow_intersection_property_receiver(scope, receiver, &name, true)
             .or_else(|| self.type_parameter_member_receiver(scope, receiver_ty, &name))
         {
-            receiver_ty = self.set(receiver, projected);
+            receiver_ty = self.project_receiver_view(receiver, projected);
         } else if let Some(projected) =
             self.nominal_intersection_property_receiver(receiver_ty, &name, true)
         {
@@ -15151,6 +15175,7 @@ impl<'a> Checker<'a> {
                 }
                 FunBody::None => {}
             }
+            c.check_tailrec_calls(f, tailrec_calls::TailrecTarget::Local(stmt_id));
             if semantic_receiver.is_some() {
                 c.extension_receiver_labels.pop();
                 c.this_labels.pop();
@@ -15251,18 +15276,6 @@ mod tests {
     mod annotation_identity;
     mod explicit_backing_fields;
     mod range_membership;
-
-    /// Where NO_VALUE_FOR_PARAMETER is anchored: `argument` in the argument list, or the callee's
-    /// name where the reference version reports it there. That table row is checked against kotlinc
-    /// by `tests/diagnostic_wording_versions_e2e.rs`; these tests check the resolver follows it.
-    fn missing_argument_anchor<'a>(argument: &'a str, callee: &'a str) -> &'a str {
-        match crate::diagnostic_wording::no_value_for_parameter_anchor(
-            crate::kotlin_version::ReferenceProfile::default(),
-        ) {
-            crate::diagnostic_wording::Anchor::ValueArguments => argument,
-            crate::diagnostic_wording::Anchor::ReferencedNameByQualified => callee,
-        }
-    }
 
     fn initialized_jvm_libraries(
         classpath: std::rc::Rc<crate::jvm::classpath::Classpath>,
@@ -16149,11 +16162,10 @@ fun rejected(owner: Owner) { owner.hidden() }
 
         assert_eq!(
             errors,
-            [crate::diagnostic_wording::unresolved_reference_on(
-                crate::kotlin_version::ReferenceProfile::default(),
-                "component2",
-                Some("Box")
-            )]
+            [
+                crate::diagnostic_wording::unresolved_reference_on("component2", Some("Box"))
+                    .message
+            ]
         );
     }
 
@@ -19327,22 +19339,14 @@ fun box(): String {
         let (_, _, diagnostics) = retained_platform_analysis(source, Box::new(FakeMemberPlatform));
         let mixing = "mixing named and positional arguments is not allowed unless the order of the arguments matches the order of the parameters.";
         let missing = "no value passed for parameter 'a'.";
-        // kotlinc reports in source order. Where the missing argument anchors on the value arguments
-        // (2.4.0 and 2.4.10), both diagnostics start at the positional `1` and the mixing error,
-        // reported while mapping arguments, comes first; on the callee it precedes the mixing error.
+        // kotlinc reports in source order: the missing argument anchors on the callee, so it
+        // precedes the mixing error at the positional `1`.
         let expected = ["knownPair", "known", "mixExt"]
             .into_iter()
             .flat_map(|callee| {
-                let missing = (missing, missing_argument_anchor("1)", callee), Some(callee));
+                let missing = (missing, callee, Some(callee));
                 let mixing = (mixing, "1", None);
-                match crate::diagnostic_wording::no_value_for_parameter_anchor(
-                    crate::kotlin_version::ReferenceProfile::default(),
-                ) {
-                    crate::diagnostic_wording::Anchor::ValueArguments => [mixing, missing],
-                    crate::diagnostic_wording::Anchor::ReferencedNameByQualified => {
-                        [missing, mixing]
-                    }
-                }
+                [missing, mixing]
             })
             .collect::<Vec<_>>();
         let actual = diagnostics
@@ -21155,7 +21159,7 @@ fun use() {
              fun use(): Int = consume(A::missing)",
         );
 
-        assert_eq!(errors, ["unresolved reference 'missing'."]);
+        assert_eq!(errors, ["Unresolved reference 'missing'."]);
     }
 
     #[test]
@@ -21188,7 +21192,7 @@ fun use() {
             } if member.name == "exists"
                 && matches!(
                     argument_mapping.as_slice(),
-                    [AdaptedRefArgument::Value(0), AdaptedRefArgument::Vararg { values, whole_array: false }]
+                    [AdaptedRefArgument::Value(0), AdaptedRefArgument::Vararg { values, whole_array: false, .. }]
                         if values.is_empty()
                 )
         )));
@@ -21698,13 +21702,13 @@ fun use() {
         let errors = check_with_detected_features(&format!(
             "// LANGUAGE: -AllowAccessToProtectedFieldFromSuperCompanion\n{source}"
         ));
-        assert_eq!(errors, ["unresolved reference 'secret'."]);
+        assert_eq!(errors, ["Unresolved reference 'secret'."]);
     }
 
     #[test]
     fn object_self_reference_resolves() {
         // An `object` may refer to itself by name inside its own body (it resolves to the singleton).
-        // Previously this errored "unresolved reference". (Prerequisite for synthesized serializers,
+        // Previously this errored "Unresolved reference". (Prerequisite for synthesized serializers,
         // whose `$serializer` object references its own INSTANCE.)
         ok("object Baz { fun me(): Baz = Baz }");
         // And an object used as a plain value elsewhere.
@@ -21794,14 +21798,12 @@ fun use() {
     fn call_argument_mapping_recovery_requires_overload_unanimity() {
         let duplicate = CallArgMappingFailure {
             errors: vec![CallArgMappingError::AlreadyPassed { argument: 1 }],
-            recovery_argument: None,
         };
         let unknown = CallArgMappingFailure {
             errors: vec![CallArgMappingError::NoParameterNamed {
                 name: "a".to_string(),
                 argument: 0,
             }],
-            recovery_argument: None,
         };
 
         for mut conflicts in [
@@ -21911,7 +21913,7 @@ fun use() {
 
     #[test]
     fn unresolved_reference() {
-        err_contains("fun f(): Int = q", "unresolved reference 'q'.");
+        err_contains("fun f(): Int = q", "Unresolved reference 'q'.");
     }
 
     #[test]
@@ -22118,7 +22120,7 @@ fun use() {
         assert_eq!(diagnostic.msg, "no value passed for parameter 'right'.");
         assert_eq!(
             &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
-            missing_argument_anchor("1", "pair")
+            "pair"
         );
         let editor_span = diagnostic.editor_span.expect("official editor range");
         assert_eq!(
@@ -22138,7 +22140,7 @@ fun use() {
         assert_eq!(diagnostic.msg, "no value passed for parameter 'right'.");
         assert_eq!(
             &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize],
-            missing_argument_anchor("left", "namedPair")
+            "namedPair"
         );
         let editor_span = diagnostic.editor_span.expect("official editor range");
         assert_eq!(
@@ -22179,11 +22181,10 @@ fun use() {
         let (errors, _) = check("fun f(a: Int): Int = a.substring(1)");
         assert_eq!(
             errors,
-            [crate::diagnostic_wording::unresolved_reference_on(
-                crate::kotlin_version::ReferenceProfile::default(),
-                "substring",
-                Some("Int")
-            )]
+            [
+                crate::diagnostic_wording::unresolved_reference_on("substring", Some("Int"))
+                    .message
+            ]
         );
     }
 
@@ -22390,11 +22391,7 @@ fun use() {
         let (errors, _) = check("class Point(val x: Int)\nfun f(p: Point): Int = p.z");
         assert_eq!(
             errors,
-            [crate::diagnostic_wording::unresolved_reference_on(
-                crate::kotlin_version::ReferenceProfile::default(),
-                "z",
-                Some("Point")
-            )]
+            [crate::diagnostic_wording::unresolved_reference_on("z", Some("Point")).message]
         );
         err_contains(
             "class Point(val x: Int)\nfun f(): Point = Point()",
@@ -22402,7 +22399,7 @@ fun use() {
         );
         err_contains(
             "fun f(p: TextOnly): Int = 0",
-            "unresolved reference 'TextOnly'.",
+            "Unresolved reference 'TextOnly'.",
         );
     }
 
@@ -23636,6 +23633,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_ext_fun_rets: HashMap::default(),
         inferred_method_rets: HashMap::default(),
         operator_of_overloads: Vec::new(),
+        collection_literal_ambiguities: std::cell::RefCell::default(),
         inferred_source_member_rets: HashMap::default(),
         inferred_stable_declaration_rets: HashMap::default(),
         inferred_declaration_publications: Default::default(),
@@ -23669,7 +23667,9 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         selected_generic_calls: HashMap::default(),
         inferred_expression_intersections: HashMap::default(),
         selected_value_smartcasts: HashMap::default(),
+        unnarrowed_dispatch_calls: Default::default(),
         selected_numeric_conversions: HashMap::default(),
+        deferred_constructor_failures: HashMap::default(),
         selected_function_value_conversions: HashMap::default(),
         narrowed_this_member: HashMap::default(),
         script_receiver_members: HashSet::default(),
@@ -24638,7 +24638,8 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     c.narrow_script_template_receivers();
     c.publish_member_declaring_receivers();
     c.report_operator_of_overloads();
-    let enhanced_values = c.enhanced_value_heads();
+    let (enhanced_values, contract_descriptions) =
+        (c.enhanced_value_heads(), c.contract_description_calls());
     let builtin_implementations = match builtin_implementation::for_checked_unit(&c) {
         Ok(implementations) => implementations,
         Err(error) => {
@@ -24672,6 +24673,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         inferred_ext_fun_rets,
         inferred_method_rets,
         operator_of_overloads: _,
+        collection_literal_ambiguities: _,
         inferred_source_member_rets,
         inferred_stable_declaration_rets,
         inferred_declaration_publications,
@@ -24692,6 +24694,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         equality_bound_parameters,
         selected_generic_calls,
         selected_value_smartcasts,
+        unnarrowed_dispatch_calls,
         selected_numeric_conversions,
         selected_function_value_conversions,
         narrowed_this_member,
@@ -24964,13 +24967,12 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_sam_conversions.keys().collect::<Vec<_>>(),
         resolved_constructors.keys().collect::<Vec<_>>(),
     );
-    let generated_class_names = crate::frontend::settle_generated_class_names(
-        file,
-        &selected_function_value_conversions
-            .keys()
-            .copied()
-            .collect(),
-    );
+    let converted = HashSet::from_iter(selected_function_value_conversions.keys().copied());
+    let naming = crate::frontend::ResolvedNamingFacts {
+        converted,
+        contract_descriptions,
+    };
+    let generated_class_names = crate::frontend::settle_generated_class_names(file, naming);
     TypeInfo {
         expr_types,
         callable_reference_types,
@@ -25011,6 +25013,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         checked_local_supertypes,
         selected_generic_calls,
         selected_value_smartcasts,
+        unnarrowed_dispatch_calls,
         selected_numeric_conversions,
         selected_function_value_conversions,
         generated_class_names,
@@ -25196,6 +25199,9 @@ struct SelectedCallable {
     /// Position in the exact family passed to `select_callable_candidate`. A postponed call can
     /// therefore finish against the same declaration instead of selecting the overload again.
     candidate_index: Option<usize>,
+    /// Collection-literal arguments (by argument position) passed for a type variable, with the
+    /// bounds of that variable, in bound order, one per classifier that constructs literals.
+    ambiguous_literals: Vec<(usize, Vec<Ty>)>,
 }
 
 impl std::ops::Deref for SelectedCallable {
@@ -25416,7 +25422,6 @@ struct LambdaCheckMode {
 }
 
 type InnerOwnerTypeParameter = (String, String, Ty, Vec<Ty>);
-type StableReceiverCallableKey = (Ty, String, Vec<TypeName>);
 type DemandReject<'a> = &'a dyn Fn(&str, Span) -> bool;
 type FlowNarrowing = (NarrowPath, Ty);
 type DeclinedFlowNarrowing = (String, Ty);
@@ -25505,10 +25510,11 @@ struct Checker<'a> {
     /// instead of reporting an unresolved reference.
     member_bound_retries: crate::fx_hash::HashSet<(Ty, String)>,
     /// Immutable provider/member queries reused while checking one Pass-2 source unit. The key
-    /// includes lexical class access because visibility can change across nested classifier bodies.
+    /// includes lexical class access and visibility suppression, which change across declarations.
     /// Pass-1 and legacy mutable-symbol checks bypass this cache entirely.
-    stable_receiver_callable_cache:
-        std::cell::RefCell<HashMap<StableReceiverCallableKey, crate::libraries::Callables>>,
+    stable_receiver_callable_cache: std::cell::RefCell<
+        HashMap<checker_symbol_queries::StableReceiverCallableKey, crate::libraries::Callables>,
+    >,
     /// Complete function supertypes of an applied classifier. This is immutable after the Pass-1
     /// declaration index is finalized and is queried for nearly every call argument, including
     /// ordinary primitives whose answer is the same empty set each time.
@@ -25680,6 +25686,9 @@ struct Checker<'a> {
     inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
     inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
     operator_of_overloads: Vec<operator_of_declarations::OperatorOfOverload>,
+    /// Collection literals passed for a type variable, with the literal-constructing bounds of
+    /// that variable, published by the selection that won their call.
+    collection_literal_ambiguities: std::cell::RefCell<HashMap<ExprId, Vec<Ty>>>,
     inferred_source_member_rets: HashMap<crate::libraries::SourceMember, Ty>,
     inferred_stable_declaration_rets: HashMap<crate::fir::DeclarationId, Ty>,
     inferred_declaration_publications: declaration_publication::InferredDeclarationPublications,
@@ -25775,8 +25784,12 @@ struct Checker<'a> {
     inferred_expression_intersections:
         HashMap<ExprId, intersection_inference::InferredIntersection>,
     selected_value_smartcasts: HashMap<ExprId, Ty>,
+    unnarrowed_dispatch_calls: HashMap<ExprId, Ty>,
     selected_numeric_conversions: HashMap<ExprId, Ty>,
-    selected_function_value_conversions: HashMap<ExprId, (Ty, Ty)>,
+    /// A qualified call's inapplicable nested-constructor rung, kept while its later rungs select.
+    deferred_constructor_failures:
+        HashMap<ExprId, constructor_rung_failure::DeferredConstructorFailure>,
+    selected_function_value_conversions: HashMap<ExprId, (Ty, Ty, bool)>,
     narrowed_this_member: HashMap<ExprId, TypeName>,
     /// Bare member reads and calls whose implicit receiver is a script's own instance. Once their
     /// targets are settled, those not declared by the script are template members (see
@@ -27290,7 +27303,7 @@ impl<'a> Checker<'a> {
     /// Report an argument-MAPPING failure shared by every declaration named at a member call.
     ///
     /// Name lookup has already succeeded when this runs. Keeping this pass separate from overload
-    /// selection prevents a wrong call shape from degrading into "unresolved reference": if every
+    /// selection prevents a wrong call shape from degrading into "Unresolved reference": if every
     /// candidate rejects the same mapping, report that precise kotlinc diagnostic; otherwise the
     /// ordinary inapplicable-overload family remains the honest result.
     fn report_inapplicable_member_mapping_error(
@@ -27491,10 +27504,9 @@ impl<'a> Checker<'a> {
         e: ExprId,
     ) {
         if !self.error_receiver_expression_flavored(scope, operand, operand_diag_mark) {
-            self.diags.error(
-                self.span(e),
-                "unresolved reference 'not' for operator '!'.".to_string(),
-            );
+            let report =
+                crate::diagnostic_wording::unresolved_operator_reference_on("not", "!", None);
+            self.diags.report_error(self.span(e), report);
         }
     }
 
@@ -27941,10 +27953,9 @@ impl<'a> Checker<'a> {
                 }
                 let direct_prefix = plan.iter().enumerate().all(|(target, argument)| match argument {
                     AdaptedRefArgument::Value(value) => *value == target,
-                    AdaptedRefArgument::Vararg {
-                        values,
-                        whole_array: true,
-                    } => values.as_slice() == [target],
+                    AdaptedRefArgument::Vararg { values, whole_array: true, .. } => {
+                        values.as_slice() == [target]
+                    }
                     AdaptedRefArgument::Context
                     | AdaptedRefArgument::Default
                     | AdaptedRefArgument::Vararg {
@@ -27955,7 +27966,7 @@ impl<'a> Checker<'a> {
                 let vararg_collect = vararg.and_then(|index| {
                     (index + 1 == declared
                         && plan.get(index).is_some_and(|argument| {
-                            matches!(argument, AdaptedRefArgument::Vararg { values, whole_array: false }
+                            matches!(argument, AdaptedRefArgument::Vararg { values, whole_array: false, .. }
                                 if !values.is_empty())
                         })
                         && plan[..index].iter().enumerate().all(|(target, argument)| {
@@ -27969,10 +27980,9 @@ impl<'a> Checker<'a> {
                     } else {
                         match argument {
                             AdaptedRefArgument::Default => true,
-                            AdaptedRefArgument::Vararg {
-                                values,
-                                whole_array: false,
-                            } => values.is_empty(),
+                            AdaptedRefArgument::Vararg { values, whole_array: false, .. } => {
+                                values.is_empty()
+                            }
                             _ => false,
                         }
                     }
@@ -28144,6 +28154,30 @@ impl<'a> Checker<'a> {
         type_args: &[Ty],
         overloads: &[crate::libraries::FunctionInfo],
     ) -> Option<(CallArgMappingFailure, crate::libraries::FunctionInfo)> {
+        let mut failures =
+            self.callable_mapping_failures(scope, call, args, type_args, overloads)?;
+        let same_mapping_shape = failures.first().is_some_and(|(_, first)| {
+            failures
+                .iter()
+                .skip(1)
+                .all(|(_, candidate)| Self::same_argument_mapping_shape(first, candidate))
+        });
+        if !same_mapping_shape {
+            return None;
+        }
+        take_unanimous_mapping_error(&mut failures)
+    }
+
+    /// Each visible candidate's argument-mapping failure, or `None` when a candidate maps the
+    /// source argument list.
+    fn callable_mapping_failures(
+        &self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        args: &[ExprId],
+        type_args: &[Ty],
+        overloads: &[crate::libraries::FunctionInfo],
+    ) -> Option<Vec<(CallArgMappingFailure, crate::libraries::FunctionInfo)>> {
         let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let mut failures = Vec::new();
@@ -28173,16 +28207,7 @@ impl<'a> Checker<'a> {
                 Err(failure) => failures.push((failure, candidate.clone())),
             }
         }
-        let same_mapping_shape = failures.first().is_some_and(|(_, first)| {
-            failures
-                .iter()
-                .skip(1)
-                .all(|(_, candidate)| Self::same_argument_mapping_shape(first, candidate))
-        });
-        if !same_mapping_shape {
-            return None;
-        }
-        take_unanimous_mapping_error(&mut failures)
+        Some(failures)
     }
 
     // Call-site sugar over the ONE resolution entry point [`SymbolResolver::resolve_symbol`]: each
@@ -29261,25 +29286,6 @@ impl<'a> Checker<'a> {
             .flatten()
     }
 
-    fn call_recovery_span(&self, call: ExprId, args: &[ExprId], fallback: Span) -> Span {
-        let trailing = self.file.call_has_trailing_lambda.contains(&call.0);
-        let last_index = args.len().checked_sub(1 + usize::from(trailing));
-        let Some(last_index) = last_index else {
-            return fallback;
-        };
-        let start = self
-            .call_argument_name_span(call, last_index)
-            .unwrap_or_else(|| self.span(args[last_index]))
-            .lo;
-        let end = self
-            .file
-            .trailing_call_close_paren_ends
-            .get(&call.0)
-            .copied()
-            .unwrap_or_else(|| self.span(call).hi);
-        Span::new(start, end)
-    }
-
     fn report_call_arg_mapping_error(
         &mut self,
         call: ExprId,
@@ -29292,13 +29298,6 @@ impl<'a> Checker<'a> {
             self.file.expr(call),
             failure.errors,
         );
-        let recovery_span = failure.recovery_argument.map(|argument| {
-            let fallback = args
-                .get(argument)
-                .map(|argument| self.span(*argument))
-                .unwrap_or_else(|| self.call_argument_list_span(call, args));
-            self.call_recovery_span(call, args, fallback)
-        });
         // kotlinc lists one call's mapping errors in source order; where they share a position,
         // in the order mapping found them.
         let reported_from = self.diags.diags.len();
@@ -29315,11 +29314,7 @@ impl<'a> Checker<'a> {
                     .get(*argument)
                     .map(|argument| self.span(*argument))
                     .unwrap_or_else(|| self.call_argument_list_span(call, args)),
-                CallArgMappingError::MissingRequired { .. } => self.anchored_span(
-                    crate::diagnostic_wording::no_value_for_parameter_anchor(self.file.reference),
-                    call,
-                    || recovery_span.unwrap_or_else(|| self.call_argument_list_span(call, args)),
-                ),
+                CallArgMappingError::MissingRequired { .. } => self.call_callee_name_span(call),
             };
             if error.highlights_callee() {
                 self.diags.error_with_editor_span(
@@ -30917,115 +30912,6 @@ impl<'a> Checker<'a> {
         candidates
     }
 
-    /// Preserve the concrete part of a declared generic constructor parameter instead of reducing
-    /// "mentions a type variable" to a boolean. `<T>` itself is inference-only, a function containing
-    /// `T` still constrains its outer shape, and a constructed type such as `List<T>` still constrains
-    /// its argument by the `List` head.
-    /// Report WHY no source constructor accepted the call, when every candidate agrees on the reason.
-    ///
-    /// `select_source_constructor` answers only yes/no, so the reason was dropped and the caller fell back
-    /// to the generic "none of the following candidates is applicable:" list — `Point()` on
-    /// `class Point(val x: Int)` said that instead of "no value passed for parameter 'x'.", which is what
-    /// every other callable origin reports for the same mistake. Re-run the argument mapping over the
-    /// candidates to recover it. Returns whether a canonical error was reported.
-    fn report_source_constructor_mapping_error(
-        &mut self,
-        call: ExprId,
-        args: &[ExprId],
-        arguments: &CtorDelegationCall,
-        candidates: &[CtorDelegationCandidate],
-        class_name: &str,
-    ) -> bool {
-        let names: Option<&[Option<String>]> = arguments
-            .names
-            .iter()
-            .any(Option::is_some)
-            .then_some(&arguments.names);
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-        let mut failures = Vec::new();
-        for (index, candidate) in candidates.iter().enumerate() {
-            let params = crate::libraries::ParamList {
-                visibility: Visibility::Public,
-                names: candidate.param_names.clone(),
-                defaults: candidate.defaults.as_slice().into(),
-                types: candidate.target.params().to_vec(),
-                recv_fun: candidate.lambda_receivers.as_slice().into(),
-                vararg: candidate.vararg,
-                annotation: None,
-            };
-            if let Err(failure) = map_param_list_args(args, names, &params, trailing_lambda) {
-                failures.push((failure, index));
-            }
-        }
-        match take_unanimous_mapping_error(&mut failures) {
-            Some((failure, index)) => {
-                if let Some(candidate) = candidates.get(index) {
-                    if self.report_constructor_too_many_arguments(
-                        call,
-                        args,
-                        &failure,
-                        class_name,
-                        ConstructorValueParameters {
-                            types: candidate.target.params(),
-                            names: &candidate.param_names,
-                            defaults: &candidate.defaults,
-                            vararg: candidate.vararg,
-                        },
-                    ) {
-                        return true;
-                    }
-                }
-                self.report_call_arg_mapping_error(call, args, failure);
-                true
-            }
-            None => false,
-        }
-    }
-
-    fn report_constructor_too_many_arguments(
-        &mut self,
-        call: ExprId,
-        args: &[ExprId],
-        failure: &CallArgMappingFailure,
-        class_name: &str,
-        parameters: ConstructorValueParameters<'_>,
-    ) -> bool {
-        let ConstructorValueParameters {
-            types: params,
-            names,
-            defaults,
-            vararg,
-        } = parameters;
-        if !matches!(
-            failure.errors.as_slice(),
-            [CallArgMappingError::TooManyArguments { .. }]
-        ) || names.len() != params.len()
-        {
-            return false;
-        }
-        let rendered = names
-            .iter()
-            .zip(params)
-            .enumerate()
-            .map(|(index, (name, ty))| {
-                let default = if defaults.get(index).copied().unwrap_or(false) {
-                    " = ..."
-                } else {
-                    ""
-                };
-                let vararg = if vararg == Some(index) { "vararg " } else { "" };
-                format!("{vararg}{name}: {}{default}", ty.source_name())
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let span = self.arity_diagnostic_span(call, args, names.len());
-        self.diags.error(
-            span,
-            format!("too many arguments for 'constructor({rendered}): {class_name}'."),
-        );
-        true
-    }
-
     fn select_source_constructor(
         &self,
         scope: &CheckerScope<'_>,
@@ -32096,17 +31982,15 @@ impl<'a> Checker<'a> {
                 .active_declaration_spelling_facts
                 .take()
                 .expect("declaration spelling capture must remain active for one type traversal");
-            let mut annotations = crate::spelling::RecordedTypeAnnotations::default();
-            for (&occurrence, name) in &self.file.function_type_parameter_names {
-                annotations.record_parameter_name(occurrence, name);
-            }
-            if checked_source_facts.is_some_and(|facts| {
-                !annotations.record_checked_source_facts(binding_reference, facts)
-            }) {
+            let Some(annotations) = crate::spelling::declaration_type_annotations(
+                &self.file.function_type_parameter_names,
+                binding_reference,
+                checked_source_facts,
+            ) else {
                 self.resolved_declaration_types
                     .insert((reference.span.lo, reference.span.hi), Ty::Error);
                 return Ty::Error;
-            }
+            };
             let already_written_aliases = HashMap::default();
             let source_spellings = crate::spelling::SourceSpellings {
                 aliases: if checked_source_facts.is_some() {
@@ -32836,7 +32720,7 @@ impl<'a> Checker<'a> {
                     if narrows_then != for_else {
                         self.null_check_narrowings(scope, operand, &mut out, declined);
                     } else {
-                        self.null_branch_narrowings(scope, operand, &mut out);
+                        self.null_branch_narrowings(scope, operand, &mut out, declined);
                     }
                 } else if matches!(op, BinOp::Eq | BinOp::RefEq) != for_else {
                     // `x?.p == v` holds only when every `?.` held, as long as `v` cannot be null:
@@ -32914,124 +32798,6 @@ impl<'a> Checker<'a> {
             declined,
         );
         out
-    }
-
-    fn condition_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        cond: ExprId,
-        truth: bool,
-    ) -> (Vec<FlowNarrowing>, Vec<DeclinedFlowNarrowing>) {
-        let mut candidates = Vec::new();
-        let mut declined = Vec::new();
-        self.collect_condition_narrowings(scope, cond, truth, &mut candidates, &mut declined);
-        let nonnull: crate::fx_hash::HashSet<NarrowPath> = candidates
-            .iter()
-            .filter_map(|(path, ty)| (!ty.is_nullable()).then_some(path.clone()))
-            .collect();
-        let mut result: Vec<(NarrowPath, Ty)> = Vec::new();
-        for (path, ty) in candidates {
-            let ty = match ty.kind() {
-                TyKind::Nullable(inner) if nonnull.contains(&path) && !inner.is_unsigned() => inner,
-                _ => ty,
-            };
-            let matching = result
-                .iter()
-                .enumerate()
-                .filter_map(|(index, (existing, current))| {
-                    (*existing == path).then_some((index, *current))
-                })
-                .collect::<Vec<_>>();
-            if matching.is_empty() {
-                result.push((path, ty));
-                continue;
-            }
-            let context = crate::assignable::TyCtx::new();
-            // Keep the minimal set of proven types. Comparable facts collapse to the narrower one;
-            // unrelated facts form a real flow intersection and must both survive. Treating that
-            // case as a conflict discarded `A & B` entirely and made every member unresolved.
-            if matching
-                .iter()
-                .any(|(_, current)| crate::assignable::is_subtype(&context, self, *current, ty))
-            {
-                continue;
-            }
-            let dominated = matching
-                .into_iter()
-                .filter_map(|(index, current)| {
-                    crate::assignable::is_subtype(&context, self, ty, current).then_some(index)
-                })
-                .collect::<crate::fx_hash::HashSet<_>>();
-            if !dominated.is_empty() {
-                result = result
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(index, entry)| (!dominated.contains(&index)).then_some(entry))
-                    .collect();
-            }
-            result.push((path, ty));
-        }
-        (result, declined)
-    }
-
-    fn collect_condition_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        cond: ExprId,
-        truth: bool,
-        out: &mut Vec<(NarrowPath, Ty)>,
-        declined: &mut Vec<(String, Ty)>,
-    ) {
-        // `!cond` flips the branch facts: the narrowings of `cond`-false hold when `!cond` is true
-        // (and vice versa). Recursing with a flipped `truth` also yields De Morgan for `!(a && b)` /
-        // `!(a || b)` through the combine rule below.
-        if let Expr::Unary {
-            op: UnOp::Not,
-            operand,
-        } = self.file.expr(cond).clone()
-        {
-            self.collect_condition_narrowings(scope, operand, !truth, out, declined);
-            return;
-        }
-        if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
-            if matches!(op, BinOp::Eq | BinOp::Ne) {
-                for (condition, literal) in [(lhs, rhs), (rhs, lhs)] {
-                    let Expr::BoolLit(literal) = self.file.expr(literal) else {
-                        continue;
-                    };
-                    if self.expr_types[condition.0 as usize].non_null() != Ty::Boolean {
-                        continue;
-                    }
-                    let condition_truth = if (op == BinOp::Eq) == truth {
-                        *literal
-                    } else {
-                        !*literal
-                    };
-                    self.collect_condition_narrowings(
-                        scope,
-                        condition,
-                        condition_truth,
-                        out,
-                        declined,
-                    );
-                    // Projecting the Boolean value must not discard facts established by the
-                    // equality expression itself. In particular, a true `x?.p == true` also
-                    // proves that the safe-call receiver `x` was non-null.
-                    out.extend(self.smartcast_narrowings(scope, cond, !truth, declined));
-                    return;
-                }
-            }
-            let combines = (truth && op == BinOp::And) || (!truth && op == BinOp::Or);
-            if combines {
-                self.collect_condition_narrowings(scope, lhs, truth, out, declined);
-                self.collect_condition_narrowings(scope, rhs, truth, out, declined);
-                return;
-            }
-        }
-        self.contract_condition_narrowings(scope, cond, truth, out, declined);
-        self.implied_condition_narrowings(scope, cond, truth, out, declined);
-        out.extend(self.smartcast_narrowings(scope, cond, !truth, declined));
-        self.as_cast_narrowings(scope, cond, out);
     }
 
     /// Bring the narrowings a condition proves into scope for a guarded region. The single
@@ -33534,7 +33300,7 @@ impl<'a> Checker<'a> {
                     scope,
                     &entry.annotations,
                     &entry.annotation_args,
-                    "enum entry",
+                    annotation_host_kind::AnnotationHostKind::EnumEntry,
                 );
             }
             self.check_secondary_constructor_annotations(scope, cl);
@@ -33557,7 +33323,7 @@ impl<'a> Checker<'a> {
                     scope,
                     annotations,
                     &cl.primary_ctor_annotation_args,
-                    "constructor",
+                    annotation_host_kind::AnnotationHostKind::Constructor,
                 );
             }
             self.exit_annotation_class_rung(member_rung);
@@ -37000,11 +36766,9 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                for &argument in &entry.args {
-                    self.finish_executable_root(argument);
-                }
                 self.record_enum_entry_constructor(
-                    entry.span,
+                    scope,
+                    entry,
                     streamed_enum_owner,
                     enum_signature.as_ref(),
                     selected,
@@ -37251,11 +37015,7 @@ impl<'a> Checker<'a> {
                 missing.and_then(|index| names_complete.then(|| &param_names[index]))
             {
                 let editor_span = self.call_callee_name_span(call);
-                let span = self.anchored_span(
-                    crate::diagnostic_wording::no_value_for_parameter_anchor(self.file.reference),
-                    call,
-                    || span,
-                );
+                let span = self.call_callee_name_span(call);
                 self.diags.error_with_editor_span(
                     span,
                     editor_span,
@@ -40683,7 +40443,14 @@ impl<'a> Checker<'a> {
                 // of this lexical flow (`x!!.let { use(x) }`, and later statements). Reassignments
                 // invalidate the fact through the ordinary scope machinery; temporaries and
                 // unstable properties never produce a reusable path.
+                // The assertion proves what `operand != null` would: a safe-call chain's links, a
+                // call's `returnsNotNull()` effect, and a stable value's initializer implications.
                 if narrowed != Ty::Error {
+                    let mut proven = Vec::new();
+                    self.null_check_narrowings(scope, operand, &mut proven, &mut Vec::new());
+                    for (path, ty) in proven {
+                        self.apply_narrowing_unchecked(scope, &path, ty);
+                    }
                     if let Some(path) = self.expr_access_path(operand).filter(|path| {
                         self.stable_path_ty(scope, path, self.span(operand))
                             .is_some()
@@ -41061,7 +40828,7 @@ impl<'a> Checker<'a> {
                             ty
                         } else {
                             self.diags
-                                .error(self.span(e), format!("unresolved reference '{n}'."));
+                                .report_error(self.span(e), unresolved_reference(&n));
                             Ty::Error
                         }
                     }
@@ -41746,18 +41513,19 @@ impl<'a> Checker<'a> {
             return true;
         }
         if let Some(miss) = self.unresolved_type_segments.get(&(r.span.lo, r.span.hi)) {
-            let message = match miss {
+            match miss {
                 crate::symbol_resolver::ClassifierMiss::Unresolved(segment) => {
-                    format!("unresolved reference '{segment}'.")
+                    let report = unresolved_reference(segment);
+                    self.diags.report_error(r.span, report);
                 }
                 crate::symbol_resolver::ClassifierMiss::Ambiguous(candidates) => {
                     let resolver = self.resolver();
-                    ambiguous_classifier_message(candidates, |candidate| {
+                    let message = ambiguous_classifier_message(candidates, |candidate| {
                         resolver.classifier(candidate)
-                    })
+                    });
+                    self.diags.error(r.span, message);
                 }
-            };
-            self.diags.error(r.span, message);
+            }
             return true;
         }
         let nested = r
@@ -41928,10 +41696,9 @@ impl<'a> Checker<'a> {
                 &[],
                 operator_span,
             ) {
-                self.diags.error(
+                self.diags.report_error(
                     operator_span,
                     crate::diagnostic_wording::unresolved_operator_reference_on(
-                        self.file.reference,
                         operator_name,
                         if decrement { "--" } else { "++" },
                         Some(read_ty.source_name().as_ref()),
@@ -42061,7 +41828,7 @@ impl<'a> Checker<'a> {
                             | PropertyWriteSelection::Receiverless(_)
                             | PropertyWriteSelection::ClassifierProperty(_) => self
                                 .diags
-                                .error(self.span(e), format!("unresolved reference '{name}'.")),
+                                .report_error(self.span(e), unresolved_reference(&name)),
                         }
                         Ty::Error
                     }
@@ -42308,7 +42075,7 @@ impl<'a> Checker<'a> {
                 // stored in a local (`val parent = explicit?.let { … }`) is null whenever its base
                 // is, so reaching the selector proves the base non-null too. Without it,
                 // `parent?.let { explicit.name }` reads `explicit` as still nullable.
-                self.apply_safe_call_origin_narrowing(&selector_scope, &path, self.span(receiver));
+                self.apply_implied_non_null_narrowing(&selector_scope, &path, self.span(receiver));
             }
             let scope = &selector_scope;
             // Diagnostic checkpoint for the "nothing resolved, nothing reported" report below. Taken
@@ -42710,7 +42477,8 @@ impl<'a> Checker<'a> {
             {
                 let message =
                     self.unresolved_member_diagnostic(scope, Some(receiver), &name, safe_rt);
-                self.diags.error(self.member_name_span(e, &name), message);
+                self.diags
+                    .report_error(self.member_name_span(e, &name), message);
             }
             // Named arguments must have a checker-owned parameter-slot mapping before lowering.
             if result != Ty::Error
@@ -42987,7 +42755,7 @@ impl<'a> Checker<'a> {
             )
         }) {
             for receiver in self.implicit_receivers_before_value_binding(scope, &n) {
-                let receiver = self.implicit_intersection_property_view(receiver, &n);
+                let receiver = self.implicit_property_receiver_view(receiver, &n);
                 if let Some(ty) =
                     self.try_member_read(scope, receiver.ty, &n, self.span(e), Some(e))
                 {
@@ -43092,7 +42860,7 @@ impl<'a> Checker<'a> {
                                 continue;
                             }
                             implicit_rungs::ImplicitRung::Receiver(receiver) => {
-                                self.implicit_intersection_property_view(receiver, &n)
+                                self.implicit_property_receiver_view(receiver, &n)
                             }
                         };
                         if let Some(selected_ty) =
@@ -43279,7 +43047,7 @@ impl<'a> Checker<'a> {
                             continue;
                         }
                         implicit_rungs::ImplicitRung::Receiver(receiver) => {
-                            self.implicit_intersection_property_view(receiver, &n)
+                            self.implicit_property_receiver_view(receiver, &n)
                         }
                     };
                     if context_receiver_priority::is_context_parameter_receiver(
@@ -43416,10 +43184,8 @@ impl<'a> Checker<'a> {
                                 match self.demand_name.and_then(|demand| demand(&n)) {
                                     Some(ty) => ty,
                                     None => {
-                                        self.diags.error(
-                                            self.span(e),
-                                            format!("unresolved reference '{n}'."),
-                                        );
+                                        self.diags
+                                            .report_error(self.span(e), unresolved_reference(&n));
                                         Ty::Error
                                     }
                                 }
@@ -43455,7 +43221,7 @@ impl<'a> Checker<'a> {
                         return self.set(e, ty);
                     }
                     self.diags
-                        .error(self.span(e), format!("unresolved reference '{n}'."));
+                        .report_error(self.span(e), unresolved_reference(&n));
                     Ty::Error
                 } else if let Some(property) = self.imported_associated_property(&n) {
                     self.record_associated_property(Some(e), property, true)
@@ -43503,7 +43269,7 @@ impl<'a> Checker<'a> {
                     self.package_used_as_expression(self.span(e))
                 } else {
                     self.diags
-                        .error(self.span(e), format!("unresolved reference '{n}'."));
+                        .report_error(self.span(e), unresolved_reference(&n));
                     Ty::Error
                 }
             }
@@ -44122,12 +43888,7 @@ impl<'a> Checker<'a> {
                     let ty = self.package_used_as_expression(span);
                     return self.set(e, ty);
                 }
-                let message = crate::diagnostic_wording::unresolved_reference_on(
-                    self.file.reference,
-                    &name,
-                    None,
-                );
-                self.diags.error(span, message);
+                self.diags.report_error(span, unresolved_reference(&name));
                 return self.set(e, Ty::Error);
             }
             let diag_mark = self.diags.diags.len();
@@ -44137,10 +43898,8 @@ impl<'a> Checker<'a> {
                     return self.set(e, ty);
                 }
                 if !self.error_receiver_expression_flavored(scope, receiver, diag_mark) {
-                    self.diags.error(
-                        self.member_name_span(e, &name),
-                        format!("unresolved reference '{name}'."),
-                    );
+                    self.diags
+                        .report_error(self.member_name_span(e, &name), unresolved_reference(&name));
                 } else if matches!(
                     self.resolver().error_receiver_functions(&name),
                     crate::symbol_resolver::ErrorReceiverSelection::Absent
@@ -44153,11 +43912,15 @@ impl<'a> Checker<'a> {
             if inferred_intersection.len() > 1 {
                 rt = Ty::intersection(&inferred_intersection);
             }
-            if let Some(projected) = self
+            if let Some(declared) =
+                self.unnarrowed_explicit_property_receiver(scope, (e, receiver), rt, &name, false)
+            {
+                rt = declared;
+            } else if let Some(projected) = self
                 .flow_intersection_property_receiver(scope, receiver, &name, false)
                 .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
             {
-                rt = self.set(receiver, projected);
+                rt = self.project_receiver_view(receiver, projected);
             } else if let Some(projected) =
                 self.nominal_intersection_property_receiver(rt, &name, false)
             {
@@ -45138,13 +44901,7 @@ impl<'a> Checker<'a> {
         }
         let mut inner_alias_receiver_mismatch = None;
         let selected = (|| {
-            let receiver_ty = receiver_ty.unboxed_primitive().unwrap_or_else(|| {
-                if internal.matches("kotlin/String") {
-                    Ty::String
-                } else {
-                    receiver_ty
-                }
-            });
+            let receiver_ty = callable_reference_lhs::unbound_ref_receiver_ty(receiver_ty);
             if receiver_ty == Ty::Error {
                 return None;
             }
@@ -45616,9 +45373,9 @@ impl<'a> Checker<'a> {
     /// revisit replaces semantic handoff data, but it is not a second source error.
     fn report_unresolved_callable_reference(&mut self, expression: ExprId, name: &str) {
         if self.silent_error_exprs.insert(expression) {
-            self.diags.error(
+            self.diags.report_error(
                 self.member_name_span(expression, name),
-                format!("unresolved reference '{name}'."),
+                unresolved_reference(name),
             );
         }
     }
@@ -46587,6 +46344,13 @@ impl<'a> Checker<'a> {
         } = call_args;
         let selected = match selection {
             None => {
+                if !overloads.is_empty() {
+                    let applicability =
+                        self.callable_rung_applicability(scope, e, args, type_args, &overloads);
+                    if self.settle_deferred_constructor_failure(scope, e, args, applicability) {
+                        return Some(Ty::Error);
+                    }
+                }
                 if let Some((failure, candidate)) =
                     self.unanimous_callable_mapping_failure(scope, e, args, type_args, &overloads)
                 {
@@ -49627,8 +49391,7 @@ impl<'a> Checker<'a> {
         let InheritedNestedClassifier::Found(internal) = self.select_classifier(scope, name) else {
             return None;
         };
-        self.resolver()
-            .inaccessible_classifier_access(internal)
+        self.inaccessible_classifier_reference(internal)
             .map(|access| (internal, access))
     }
 
@@ -49640,7 +49403,7 @@ impl<'a> Checker<'a> {
         if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
             return false;
         }
-        let Some(access) = self.resolver().inaccessible_classifier_access(internal) else {
+        let Some(access) = self.inaccessible_classifier_reference(internal) else {
             return false;
         };
         crate::trace_compiler!(
@@ -49672,7 +49435,7 @@ impl<'a> Checker<'a> {
         );
         // The receiver is semantically bound but unusable because that classifier access was
         // diagnosed. Preserve that provenance across cached expression reads so an enclosing
-        // member access does not add an unrelated "unresolved reference" cascade.
+        // member access does not add an unrelated "Unresolved reference" cascade.
         self.silent_error_exprs.insert(expression);
         true
     }
@@ -49708,7 +49471,7 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         function: &FunDecl,
-        declaration_target: &'static str,
+        declaration_target: annotation_host_kind::AnnotationHostKind,
     ) -> usize {
         self.fold_function_annotation_applications(scope, function, declaration_target)
     }
@@ -49731,7 +49494,7 @@ impl<'a> Checker<'a> {
         classifier: TypeName,
         selected: &SelectedCallable,
     ) {
-        if self.resolver().inaccessible_classifier_access(classifier)
+        if self.inaccessible_classifier_reference(classifier)
             == Some(crate::libraries::ClassifierAccess::PackagePrivate)
         {
             let display = self

@@ -451,7 +451,7 @@ impl Checker<'_> {
         if !scope.tparam_contains(&syntax.name) {
             if let Some(internal) = resolved.non_null().kotlin_class_internal() {
                 if !syntax.is_import() && !self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
-                    if let Some(access) = self.resolver().inaccessible_classifier_access(internal) {
+                    if let Some(access) = self.inaccessible_classifier_reference(internal) {
                         self.diags.error_with_identity(
                             syntax.span,
                             DiagnosticIdentity::ClassifierAccess {

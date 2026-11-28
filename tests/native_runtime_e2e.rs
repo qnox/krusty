@@ -58,6 +58,12 @@ fn native_crate_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/krusty-native")
 }
 
+/// The function protocol's stubs, which a program's link writes and a driver, linking no program,
+/// must supply: every driver links them beside the runtime that calls them.
+fn function_protocol_stubs() -> PathBuf {
+    driver_dir().join("support/function_protocol.c")
+}
+
 fn driver_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/native_runtime")
 }
@@ -133,6 +139,7 @@ fn runtime_objects() -> &'static Result<Vec<PathBuf>, String> {
             .map(|entry| entry.expect("runtime directory entry").path())
             .filter(|path| path.extension().is_some_and(|extension| extension == "c"))
             .collect();
+        sources.push(function_protocol_stubs());
         sources.sort();
         let scratch = common::scratch_dir().expect("scratch directory");
         let compiles: Vec<(PathBuf, std::process::Child)> = sources
@@ -660,6 +667,7 @@ fn foreign_runtime_objects(arch: &str) -> Result<Vec<PathBuf>, String> {
         .map(|entry| entry.expect("runtime directory entry").path())
         .filter(|path| path.extension().is_some_and(|extension| extension == "c"))
         .collect();
+    sources.push(function_protocol_stubs());
     sources.sort();
     let mut objects = Vec::new();
     let mut errors = String::new();

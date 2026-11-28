@@ -1,5 +1,6 @@
 //! Checked declaration-annotation folding and stable cross-file publication.
 
+use super::annotation_host_kind::AnnotationHostKind;
 use super::*;
 use crate::fir::DeclarationKind;
 
@@ -758,7 +759,7 @@ impl Checker<'_> {
         &mut self,
         scope: &CheckerScope<'_>,
         function: &FunDecl,
-        declaration_target: &'static str,
+        declaration_target: AnnotationHostKind,
     ) -> usize {
         let suppression_depth =
             self.push_declaration_policies(scope, &function.annotations, &function.annotation_args);
@@ -779,7 +780,7 @@ impl Checker<'_> {
                     scope,
                     annotation,
                     arguments,
-                    "value parameter",
+                    AnnotationHostKind::ValueParameter,
                 );
             }
         }
@@ -889,7 +890,7 @@ impl Checker<'_> {
                         scope,
                         annotation,
                         arguments,
-                        "value parameter",
+                        AnnotationHostKind::ValueParameter,
                     );
                 }
             }
@@ -1011,8 +1012,11 @@ impl Checker<'_> {
         method_scope.declare_tparams(&function.type_params, &type_parameters, |name| {
             function.reified_type_params.contains(name)
         });
-        let suppression_depth =
-            self.fold_function_annotation_applications(&method_scope, function, "function");
+        let suppression_depth = self.fold_function_annotation_applications(
+            &method_scope,
+            function,
+            AnnotationHostKind::Function,
+        );
         self.active_lexical_policies.truncate(suppression_depth);
     }
 

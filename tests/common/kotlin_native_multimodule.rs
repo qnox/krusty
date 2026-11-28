@@ -7,7 +7,6 @@ use std::process::Command;
 
 use krusty::compilation_target::CompilationTarget;
 use krusty::fx_hash::{HashMap, HashSet};
-use krusty::kotlin_version::KotlinVersion;
 
 use super::reference_recording_support::{
     kotlin_native_program_arguments, kotlin_native_root, recorded, run_program_bounded,
@@ -142,11 +141,7 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
         // order even though frontend selection correctly admits only the friend. Releases before
         // 2.4.20 select the first definition while 2.4.20 selects the last, so put the friend at
         // the precedence position used by the pinned compiler.
-        order_libraries_for_native_linker(
-            &mut libraries,
-            &friend_paths,
-            krusty::kotlin_version::environment_release(),
-        );
+        order_libraries_for_native_linker(&mut libraries, &friend_paths);
 
         // Only the arguments are used: the persistent server runs the compiler.
         let mut command = Command::new(&compiler);
@@ -227,16 +222,9 @@ fn kotlin_native_multimodule_live(work: &Path, source: &str) -> Option<BTreeMap<
     Some(BTreeMap::from([("stdout".to_string(), run.stdout)]))
 }
 
-fn order_libraries_for_native_linker(
-    libraries: &mut [PathBuf],
-    friends: &[PathBuf],
-    version: KotlinVersion,
-) {
-    if version >= KotlinVersion::V2_4_20 {
-        libraries.sort_by_key(|library| friends.contains(library));
-    } else {
-        libraries.sort_by_key(|library| !friends.contains(library));
-    }
+/// kotlinc-native's linker gives a friend library the lowest precedence.
+fn order_libraries_for_native_linker(libraries: &mut [PathBuf], friends: &[PathBuf]) {
+    libraries.sort_by_key(|library| friends.contains(library));
 }
 
 /// Select the callable the final module's generated runner can invoke. Libraries are not in this
@@ -503,33 +491,19 @@ mod tests {
     }
 
     #[test]
-    fn friend_library_precedence_follows_the_native_linker_version() {
+    fn friend_libraries_link_last() {
         let friend = PathBuf::from("/work/friend.klib");
         let sibling = PathBuf::from("/work/sibling.klib");
         let transitive = PathBuf::from("/work/transitive.klib");
         let other = PathBuf::from("/work/other.klib");
-        let original = vec![
+        let mut libraries = vec![
             friend.clone(),
             sibling.clone(),
             transitive.clone(),
             other.clone(),
         ];
-
-        let mut before_2_4_20 = original.clone();
-        order_libraries_for_native_linker(
-            &mut before_2_4_20,
-            std::slice::from_ref(&friend),
-            KotlinVersion::V2_4_10,
-        );
-        assert_eq!(before_2_4_20, original);
-
-        let mut since_2_4_20 = original;
-        order_libraries_for_native_linker(
-            &mut since_2_4_20,
-            std::slice::from_ref(&friend),
-            KotlinVersion::V2_4_20,
-        );
-        assert_eq!(since_2_4_20, [sibling, transitive, other, friend]);
+        order_libraries_for_native_linker(&mut libraries, std::slice::from_ref(&friend));
+        assert_eq!(libraries, [sibling, transitive, other, friend]);
     }
 
     #[test]

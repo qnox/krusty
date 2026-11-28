@@ -19,7 +19,4 @@
 # Add a line only once that reference version actually passes the harness (it is a correctness claim).
 #
 # reference   baseline
-2.4.0         6dc9f6b4d5337fee0bbc2ba5bd913cf30204c37b
-2.4.10        1643c221f09d6f01be78e028590e64fac3237c67
-2.4.20        00671c17db8b23111eaab0f7a23f35595629ae2e
 2.4.21        6782ee02a03022d258ec7945539f5e224034038a

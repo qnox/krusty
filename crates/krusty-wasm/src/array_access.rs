@@ -2,10 +2,7 @@
 
 use krusty::kotlin_version::{KotlinVersion, ReleaseRecords};
 
-const RANGE_CHECKS: ReleaseRecords<bool> = ReleaseRecords::new(&[
-    (KotlinVersion::V2_4_0, false),
-    (KotlinVersion::V2_4_20, true),
-]);
+const RANGE_CHECKS: ReleaseRecords<bool> = ReleaseRecords::new(&[(KotlinVersion::V2_4_21, true)]);
 
 pub(super) fn default_range_checks(release: KotlinVersion) -> bool {
     *RANGE_CHECKS

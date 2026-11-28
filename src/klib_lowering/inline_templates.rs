@@ -466,6 +466,26 @@ impl CallLinker for TemplateCalls<'_> {
         super::site_containers::site_container(self.bodies, self.identity)
     }
 
+    fn implement_inherited_members(
+        &mut self,
+        _ir: &mut IrFile,
+        signature: &crate::metadata::klib_ir::KlibIrSignature,
+        _owner: crate::types::TypeName,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        // A template expands into the file being compiled, which declares no dependency body.
+        let inherited = self
+            .bodies
+            .inherited_implementations_of(self.module, signature)
+            .map_err(|reason| KlibBodyDeclineReason::SignatureMismatch(reason.to_owned()))?;
+        if inherited.is_empty() {
+            Ok(())
+        } else {
+            Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "an object literal inheriting a member body",
+            ))
+        }
+    }
+
     fn is_suspend_callable(&self, target: ExternalCallableId) -> bool {
         self.callees
             .source

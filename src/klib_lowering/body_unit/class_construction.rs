@@ -126,6 +126,21 @@ impl<'u, 's> Linker<'u, 's> {
             Some(class) => class,
             None => self.declare_materialized_class(ir, &plan, &header, self_type)?,
         };
+        // A superclass the unit materialized from a secondary constructor is reached through that
+        // constructor, not through a primary one it lacks.
+        if existing.is_none() && superclass.is_some() {
+            if let Some(secondary) = plan
+                .superclass
+                .as_ref()
+                .and_then(|call| self.constructors.get(&call.constructor))
+                .and_then(|constructor| constructor.secondary)
+            {
+                ir.classes[class as usize].super_ctor = crate::ir::IrConstructorTarget {
+                    ordinal: u32::try_from(secondary).expect("a constructor ordinal fits u32") + 1,
+                    access: crate::ir::IrConstructorAccess::Unrestricted,
+                };
+            }
+        }
         let function = declare_function(ir, &header);
         ir.functions[function as usize].is_static = false;
         ir.functions[function as usize].dispatch_receiver = Some(classifier);
@@ -988,9 +1003,7 @@ impl<'u, 's> Linker<'u, 's> {
             );
             // An interface default is declared with the class only when a call reaches it; one
             // nothing calls has no frozen declaration, and nothing dispatches to it.
-            let reached_default = !from_class
-                && contract.kind == crate::libraries::TypeKind::Object
-                && self.sources.callees.is_object_default(body);
+            let reached_default = !from_class && self.sources.callees.is_object_default(body);
             if (from_class || reached_default) && self.declared_member(body).is_none() {
                 if let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) {
                     let selected = callables[0];
@@ -1032,6 +1045,15 @@ impl<'u, 's> Linker<'u, 's> {
         implemented: &[KlibDependencyCallable],
     ) -> Result<(), KlibBodyDeclineReason> {
         if self.declared_member(body).is_none() {
+            // An interface default nothing dispatches to is left out: neither a source call
+            // through a declaration it implements selected it, nor a walked body released it. A
+            // header the closure only holds as declaration evidence selects nothing.
+            if self.sources.bodies.is_interface_default(body)
+                && !self.sources.callees.is_selected(body)
+                && !self.sources.callees.is_object_default(body)
+            {
+                return Ok(());
+            }
             // The class carries the body however dispatch reaches it, so a body the closure did
             // not select uniquely declines rather than leaving the slot without an implementation.
             let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) else {

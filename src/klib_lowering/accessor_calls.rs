@@ -21,6 +21,7 @@ pub(super) fn signature(
         name: &accessor.name,
         parameters: selected.params(),
         result: selected.ret(),
+        value_declaration: None,
     })
 }
 

@@ -271,6 +271,7 @@ fn emit_analyzed_into<B: Backend>(
             .map(|package| package.render().replace('/', "."));
         let mut ir = crate::ir::IrFile::with_package(package);
         ir.set_same_module_inlining(backend.same_module_inlining());
+        ir.set_target_representation(backend.dependency_classifier_representation());
         ir.recursive_type_of = source.recursive_type_of(reparse_sources.features());
         ir.reference = reparse_sources.features().reference();
         ir.source_debug =

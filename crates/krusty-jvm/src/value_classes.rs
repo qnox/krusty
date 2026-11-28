@@ -32,6 +32,7 @@ mod hidden_constructors;
 mod impl_call_parameters;
 mod inherited_default_calls;
 mod inline_body_slots;
+mod input_trace;
 mod interface_entries;
 mod lambda_slots;
 mod mangled_calls;
@@ -44,6 +45,7 @@ mod parameter_guards;
 mod private_accessor_calls;
 mod property_annotation_markers;
 mod property_references;
+mod realization_facts;
 mod reference_returns;
 mod representation;
 mod result_tail_boxing;
@@ -81,7 +83,8 @@ use lambda_slots::{boxed_lambda_own_params_from, lambda_sam_params, lambda_slot_
 pub(crate) use member_names::{member_signature_is_mangled, suspend_lambda_invoke_name};
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::*;
-use operand_nullness::{operand_nonnull, operand_null_only};
+use operand_nullness::operand_null_only;
+pub(crate) use realization_facts::RealizationFacts;
 pub(crate) use representation::{
     boxed_value_class_carrier, boxed_value_class_underlying, instance_representation,
     is_boxed_value_class, type_operation_internal_name,
@@ -155,47 +158,14 @@ pub(crate) fn lower_value_classes(
     module: ModuleValueClasses<'_>,
     // The static each of this file's value classes realizes an inherited interface default with.
     inherited_default_statics: &InheritedDefaultStatics,
-    bridge_adaptations: &mut crate::bridge_adaptations::BridgeAdaptations,
-    override_results: &mut crate::override_results::OverrideResults,
-    // What the property-reference pass already selected for each synthesized reference class.
-    // Realizing those accessors over a carrier is the one thing left to decide about them, and it
-    // is decided from these recorded facts rather than from the reference's spelling.
-    property_reference_realizations: &mut crate::property_references::PropertyReferenceRealizations,
+    facts: RealizationFacts<'_>,
 ) -> bool {
     let ModuleValueClasses {
         underlying: module_value_classes,
         readable: module_readable_value_classes,
         storage_properties,
     } = module;
-    krusty::trace_compiler!(
-        "value_classes",
-        "lower start classes={} functions={} expressions={}",
-        ir.classes.len(),
-        ir.functions.len(),
-        ir.exprs.len()
-    );
-    for (id, expression) in ir.exprs.iter().enumerate() {
-        match expression {
-            IrExpr::PropertyRead { owner, name, .. } => krusty::trace_compiler!(
-                "value_classes",
-                "input property read {id}: {}.{}",
-                owner,
-                name
-            ),
-            IrExpr::Call {
-                callee: call_callee,
-                ..
-            } if let Callee::Virtual { owner, name, .. } = &**call_callee => {
-                krusty::trace_compiler!(
-                    "value_classes",
-                    "input virtual call {id}: {}.{}",
-                    owner,
-                    name
-                )
-            }
-            _ => {}
-        }
-    }
+    input_trace::trace_inputs(ir);
     // Merge classpath `@JvmInline value class`es referenced by this file (`Result` → `Object`). They are
     // NOT in `ir.classes` (no synthesized members — their `-impl`/`box-impl` live on the classpath), so
     // they only contribute to the erasure map: every occurrence of their type erases to the underlying.
@@ -1140,7 +1110,7 @@ pub(crate) fn lower_value_classes(
     let interface_entries = interface_entries::materialize(
         ir,
         &static_members,
-        override_results,
+        facts.override_results,
         |ir: &IrFile, member: u32| match realized_members.accessors.get(&member) {
             Some(accessor_entry) => accessor_entry.clone(),
             None => {
@@ -1161,7 +1131,7 @@ pub(crate) fn lower_value_classes(
         .iter()
         .map(|&function| {
             let target = &ir.functions[function as usize];
-            let result = override_results.physical_result(ir, function);
+            let result = facts.override_results.physical_result(ir, function);
             let realized = (target.name.clone(), target.params.clone(), result);
             (function, realized)
         })
@@ -1181,7 +1151,7 @@ pub(crate) fn lower_value_classes(
             lowered_member_targets: &lowered_member_targets,
             interface_entries: &interface_entries,
         },
-        bridge_adaptations,
+        facts.bridge_adaptations,
     );
 
     // 2. Erase class field + ctor-arg types; drop the `<init>` null-check on a constructor parameter
@@ -1268,7 +1238,7 @@ pub(crate) fn lower_value_classes(
                 method_keys.insert((b.name.clone(), desc)) || b.module_name_bridge
             })
             .collect::<Vec<_>>();
-        bridge_adaptations.retain(c.fq_name_id(), &kept);
+        facts.bridge_adaptations.retain(c.fq_name_id(), &kept);
         let mut kept = kept.into_iter();
         c.bridges
             .retain(|_| kept.next().expect("one answer per bridge"));
@@ -2259,7 +2229,9 @@ pub(crate) fn lower_value_classes(
                 }
                 Some(expr)
             }
-            Some(Rw::VcCtorDefault(construction)) => Some(construction.realize(ir, id, &under)),
+            Some(Rw::VcCtorDefault(construction)) => {
+                Some(construction.realize(ir, id, &under, facts.default_call_operands))
+            }
             Some(Rw::Prop {
                 receiver,
                 owner,
@@ -2385,14 +2357,19 @@ pub(crate) fn lower_value_classes(
                 }
                 // The `-impl` of an override whose primitive result is boxed returns the wrapper.
                 let boxed_result = match (function, module_target) {
-                    (Some(function), _) => override_results
+                    (Some(function), _) => facts
+                        .override_results
                         .boxes(function)
                         .then(|| ir.functions[function as usize].ret),
-                    (None, Some(callable)) => override_results.boxed_callable_result(ir, callable),
+                    (None, Some(callable)) => {
+                        facts.override_results.boxed_callable_result(ir, callable)
+                    }
                     (None, None) => None,
                 };
                 if let Some(primitive) = boxed_result.filter(|_| !uses_default_stub) {
-                    override_results.record_static_member_call(id, primitive);
+                    facts
+                        .override_results
+                        .record_static_member_call(id, primitive);
                 }
                 let descriptor = if uses_default_stub {
                     name.push_str("$default");
@@ -3069,35 +3046,6 @@ pub(crate) fn lower_value_classes(
                             .collect()
                     }
                 }
-                // A semantic sibling-source default call still carries only supplied arguments.
-                // Adapt each one against the provider declaration parameter that remains after
-                // removing omitted ordinals; JVM placeholders are created only after this pass.
-                IrExpr::Call {
-                    callee: call_callee,
-                    args,
-                    ..
-                } if let Callee::ModuleWithDefaults {
-                    target,
-                    default_provider,
-                    defaults,
-                    ..
-                } = &**call_callee =>
-                {
-                    args.iter()
-                        .zip(default_calls::supplied_provider_parameters(
-                            ir,
-                            *target,
-                            *default_provider,
-                            defaults,
-                        ))
-                        .map(|(argument, parameter)| {
-                            (
-                                repr_ctx.through_erased_generic_coercion(*argument).0,
-                                parameter,
-                            )
-                        })
-                        .collect()
-                }
                 // A sibling-source call has already crossed from its stable `Module` identity into
                 // the JVM `CrossFile` realization. Its retained finalized declaration signature is
                 // still the authoritative representation boundary: a concrete value class selected
@@ -3670,7 +3618,7 @@ pub(crate) fn lower_value_classes(
     property_annotation_markers::rename(ir, &callable_under);
 
     let realized =
-        property_references::realize(ir, &callable_under, property_reference_realizations);
+        property_references::realize(ir, &callable_under, facts.property_reference_realizations);
     type_operation_roles::record_primitive_array_type_operations(ir, &under);
     adapter_realization::realize(ir, &callable_under);
     realized
@@ -3771,15 +3719,6 @@ impl ReprCtx<'_> {
             return Repr::Unboxed(value_class);
         }
         repr(self, id)
-    }
-
-    /// A selected call is non-null when its checked declaration returns a non-null type.
-    fn operand_nonnull(&self, id: ExprId) -> bool {
-        operand_nonnull(self.exprs, self.rets, self.fields, self.slots, id)
-            || matches!(
-                self.types.declared_result(id, self.under).map(Ty::kind),
-                Some(TyKind::Obj(..))
-            )
     }
 
     /// Non-null value-class identity whose checked value is carried unboxed. Generated local reads

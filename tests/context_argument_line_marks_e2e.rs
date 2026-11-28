@@ -67,3 +67,21 @@ fn implicit_context_calls_start_their_line_where_kotlinc_does() {
     common::assert_class_matches_kotlinc("ContextArgumentLines", SOURCE, "Holder");
     common::expect_box_same_as_kotlinc(SOURCE, "ContextArgumentLinesRun");
 }
+
+const MEMBER_SOURCE: &str = "context(c: String)\n\
+    fun size(): Int = c.length\n\
+    class Holder {\n\
+    \x20   context(c: String)\n\
+    \x20   fun fromMember(): Int {\n\
+    \x20       return size()\n\
+    \x20   }\n\
+    \x20   context(c: String)\n\
+    \x20   fun fromMemberExpression(): Int = size() + 1\n\
+    }\n\
+    fun box(): String = with(\"ab\") { if (Holder().fromMember() + Holder().fromMemberExpression() == 5) \"OK\" else \"Fail\" }\n";
+
+#[test]
+fn a_member_passing_its_context_parameter_on_starts_its_line_where_kotlinc_does() {
+    common::assert_class_matches_kotlinc("ContextMemberLines", MEMBER_SOURCE, "Holder");
+    common::expect_box_same_as_kotlinc(MEMBER_SOURCE, "ContextMemberLinesRun");
+}

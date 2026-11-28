@@ -1487,6 +1487,15 @@ impl<'s> CallLinker for Linker<'_, 's> {
         self.install_local_interface(ir, signature)
     }
 
+    fn implement_inherited_members(
+        &mut self,
+        ir: &mut IrFile,
+        signature: &KlibIrSignature,
+        owner: TypeName,
+    ) -> Result<(), KlibBodyDeclineReason> {
+        self.declare_inherited_members(ir, signature, owner)
+    }
+
     fn link_local_constructor(
         &mut self,
         ir: &mut IrFile,
@@ -1500,27 +1509,7 @@ impl<'s> CallLinker for Linker<'_, 's> {
     }
 
     fn inherited_member(&self, callee: &KlibIrSignature) -> Option<KlibIrSignature> {
-        let &KlibIrSignature::FileLocal { file, slot } = callee else {
-            return None;
-        };
-        let signature = KlibDeclarationSignature::FileLocal { file, slot };
-        match self
-            .sources
-            .bodies
-            .linked_origin(&self.active_module, &signature)
-        {
-            KlibCalleeOrigin::Exact(KlibDependencyCallable {
-                declaration: KlibDeclarationSignature::Public(member),
-                ..
-            }) => Some(KlibIrSignature::Public(member)),
-            KlibCalleeOrigin::Exact(KlibDependencyCallable {
-                declaration: KlibDeclarationSignature::Accessor(member),
-                ..
-            }) => Some(KlibIrSignature::Accessor(member)),
-            KlibCalleeOrigin::Exact(_)
-            | KlibCalleeOrigin::Missing
-            | KlibCalleeOrigin::Ambiguous => None,
-        }
+        fake_overrides::inherited_member(self, callee)
     }
 
     fn link_local_function(
@@ -2176,9 +2165,7 @@ impl<'s> Linker<'_, 's> {
         };
         // An abstract accessor is declared with its class, as an abstract member function is,
         // and a call of it dispatches to the instance's override.
-        let abstract_ = declaration.body.is_none()
-            && crate::metadata::semantic::declaration_modality(declaration.base.flags)
-                == crate::metadata::semantic::KotlinModality::Abstract;
+        let abstract_ = is_abstract_member(declaration);
         if !abstract_ && !matches!(declaration.body, Some(KlibIrBody::Block(_))) {
             return Ok(None);
         }
@@ -2413,9 +2400,7 @@ impl<'s> Linker<'_, 's> {
         let Some((_, declaration)) = self.sources.bodies.function(identity) else {
             return false;
         };
-        declaration.body.is_none()
-            && crate::metadata::semantic::declaration_modality(declaration.base.flags)
-                == crate::metadata::semantic::KotlinModality::Abstract
+        is_abstract_member(declaration)
             && !self.functions.contains_key(identity)
             && self.class_realized_earlier(callables[0])
             && self.sources.callees.reference_target(identity).is_some()
@@ -2435,6 +2420,15 @@ impl<'s> Linker<'_, 's> {
             Some(&function) => {
                 body_header(Some(selected), arena, declaration, self.sources.bodies)?;
                 function
+            }
+            // An abstract member is a dispatch slot of its class, which declares it when the
+            // unit materializes the class; a call can reach it before any construction does.
+            None if is_abstract_member(declaration) => {
+                self.materialize_member_class(ir, selected)?;
+                *self
+                    .functions
+                    .get(identity)
+                    .ok_or(KlibBodyDeclineReason::NoBody)?
             }
             None => self.declare_callee(ir, identity, Some(selected), arena, declaration)?,
         };
@@ -2975,3 +2969,10 @@ type PrimitiveSelection = for<'f> fn(
     Option<super::primitive_calls::CommonPrimitiveCall>,
     KlibBodyDeclineReason,
 >;
+
+/// Whether `declaration` is an abstract member: a dispatch slot its class declares, with no body.
+fn is_abstract_member(declaration: &KlibIrFunction) -> bool {
+    declaration.body.is_none()
+        && crate::metadata::semantic::declaration_modality(declaration.base.flags)
+            == crate::metadata::semantic::KotlinModality::Abstract
+}

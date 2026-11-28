@@ -4,7 +4,7 @@
 //! borrow the existing classpath and leave its class/field records and caches unchanged.
 
 use super::Classpath;
-use crate::jvm::classreader::{self, MethodAnnotations};
+use crate::jvm::classreader::{self, FieldAnnotations, MethodAnnotations};
 use crate::types::{ResolvedAnnotation, TypeName};
 
 struct DeclarationAnnotations<'a> {
@@ -28,6 +28,11 @@ impl DeclarationAnnotations<'_> {
         classreader::read_method_annotations(&bytes, name, descriptor)
     }
 
+    fn fields(&self, internal: TypeName) -> Option<Vec<FieldAnnotations>> {
+        let bytes = self.class_bytes(internal)?;
+        classreader::field_annotations(&bytes).ok()
+    }
+
     fn methods(&self, internal: TypeName) -> Option<Vec<MethodAnnotations>> {
         let bytes = self.class_bytes(internal)?;
         classreader::method_annotations(&bytes).ok()
@@ -43,6 +48,15 @@ impl Classpath {
         descriptor: &str,
     ) -> Option<Vec<ResolvedAnnotation>> {
         DeclarationAnnotations { classpath: self }.method(internal, name, descriptor)
+    }
+
+    /// Annotations and their arguments on each annotated field of `internal`, read from its class
+    /// file. Returns `None` when the class has no readable class file.
+    pub(in crate::jvm) fn class_field_annotations(
+        &self,
+        internal: TypeName,
+    ) -> Option<Vec<FieldAnnotations>> {
+        DeclarationAnnotations { classpath: self }.fields(internal)
     }
 
     /// Annotations and their arguments on each method of `internal`, read from its class file.

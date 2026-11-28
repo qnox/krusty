@@ -260,10 +260,7 @@ pub(super) fn primary_constructor(
     );
     let prefix = class.constructor_prefix_count as usize;
     let mut parameters = constructor_prefix(ir, class, prefix);
-    let projected = crate::parameter_names::constructor_method_parameters(
-        ir.reference.quirks(),
-        &class.ctor_args,
-    );
+    let projected = crate::parameter_names::constructor_method_parameters(&class.ctor_args);
     parameters.extend(projected[prefix..].iter().cloned().map(|name| (name, 0)));
     parameters
 }

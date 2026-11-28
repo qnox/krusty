@@ -1377,14 +1377,21 @@ fn phase_timing_coverage_run_prints_every_phase() {
 
 const DIAGNOSTICS_TEST: &str =
     "kotlin_diagnostics_jvm_conformance::krusty_rejects_what_kotlinc_rejects_in_its_diagnostics_test_data";
+const DIAGNOSTICS_LEDGER_TEST: &str =
+    "kotlin_diagnostics_ledger_jvm_conformance::krusty_reports_kotlinc_s_diagnostics_in_its_diagnostics_test_data";
 
-/// A conformance binary stand-in that lists `listed` for `--list` and otherwise runs `run`.
+/// The `--list` reply of a binary that has every test it is asked for: the `--exact` filter, the
+/// sixth argument of `--list --format terse --ignored --exact <test>`.
+const LISTS_EVERY_TEST: &str = "\"$6: test\"";
+
+/// A conformance binary stand-in that prints the shell word `listed` for `--list` and otherwise
+/// runs `run`.
 #[cfg(unix)]
 fn diagnostics_fixture(name: &str, listed: &str, run: &str) -> (PathBuf, PathBuf) {
     regression_fixture(
         &format!("diagnostics-{name}"),
         &format!(
-            "#!/usr/bin/env bash\nif [ \"$1\" = --list ]; then\n  printf '%s' '{listed}'\n  exit 0\nfi\n{run}\n"
+            "#!/usr/bin/env bash\nif [ \"$1\" = --list ]; then\n  printf '%s' {listed}\n  exit 0\nfi\n{run}\n"
         ),
     )
 }
@@ -1410,7 +1417,7 @@ fn run_diagnostics_conformance(temp: &Path, binary: &Path, timeout: &str) -> std
 #[cfg(unix)]
 #[test]
 fn diagnostics_conformance_refuses_a_binary_without_its_test() {
-    let (temp, binary) = diagnostics_fixture("stale", "", "exit 0");
+    let (temp, binary) = diagnostics_fixture("stale", "''", "exit 0");
     let output = run_diagnostics_conformance(&temp, &binary, "30");
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
@@ -1425,17 +1432,20 @@ fn diagnostics_conformance_refuses_a_binary_without_its_test() {
 
 #[cfg(unix)]
 #[test]
-fn diagnostics_conformance_runs_the_listed_test_and_keeps_its_status() {
+fn diagnostics_conformance_runs_every_lane_and_keeps_the_first_failure() {
     let (temp, binary) = diagnostics_fixture(
         "status",
-        &format!("{DIAGNOSTICS_TEST}: test"),
-        "printf '%s\\n' \"$*\"\nexit 7",
+        LISTS_EVERY_TEST,
+        "printf '%s\\n' \"$*\"\n[ \"$3\" = kotlin_diagnostics_jvm_conformance::krusty_rejects_what_kotlinc_rejects_in_its_diagnostics_test_data ] && exit 7\nexit 3",
     );
     let output = run_diagnostics_conformance(&temp, &binary, "30");
     assert_eq!(output.status.code(), Some(7), "{output:?}");
     assert_eq!(
         String::from_utf8(output.stdout).expect("stdout is UTF-8"),
-        format!("--ignored --exact {DIAGNOSTICS_TEST} --nocapture\n")
+        format!(
+            "--ignored --exact {DIAGNOSTICS_TEST} --nocapture\n\
+             --ignored --exact {DIAGNOSTICS_LEDGER_TEST} --nocapture\n"
+        )
     );
     fs::remove_dir_all(temp).expect("remove diagnostics fixture");
 }
@@ -1443,15 +1453,17 @@ fn diagnostics_conformance_runs_the_listed_test_and_keeps_its_status() {
 #[cfg(unix)]
 #[test]
 fn diagnostics_conformance_enforces_its_deadline() {
-    let (temp, binary) =
-        diagnostics_fixture("deadline", &format!("{DIAGNOSTICS_TEST}: test"), "sleep 10");
+    let (temp, binary) = diagnostics_fixture("deadline", LISTS_EVERY_TEST, "sleep 10");
     let started = std::time::Instant::now();
     let output = run_diagnostics_conformance(&temp, &binary, "1");
     assert_eq!(output.status.code(), Some(124));
     assert_eq!(
         String::from_utf8(output.stderr).expect("stderr is UTF-8"),
-        "diagnostics-conformance: timed out after 1s: Kotlin 2.4.10\n"
+        format!(
+            "diagnostics-conformance: timed out after 1s: {DIAGNOSTICS_TEST}, Kotlin 2.4.10\n\
+             diagnostics-conformance: timed out after 1s: {DIAGNOSTICS_LEDGER_TEST}, Kotlin 2.4.10\n"
+        )
     );
-    assert!(started.elapsed().as_secs() < 5);
+    assert!(started.elapsed().as_secs() < 8);
     fs::remove_dir_all(temp).expect("remove diagnostics fixture");
 }

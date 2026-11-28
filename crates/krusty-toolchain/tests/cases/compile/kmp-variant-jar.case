@@ -15,6 +15,9 @@ dependencies:
   - bom: org.example:platform:1.0
   - org.example:managed
   - org.example:aggregate:1.0
+settings:
+  kotlin:
+    version: 2.4.21
 --- app/src/App.kt
 class App
 --- m2/org/example/multi/1.0/multi-1.0.pom
@@ -200,10 +203,10 @@ class App
 --- krusty-argv
 -Xjdk-release=25
 -jdk-home=<directory>/jdk
--classpath=<directory>/home/.m2/repository/org/example/managed/3.0/managed-3.0.jar:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/example/multi-jvm/1.0/multi-jvm-1.0.jar:<directory>/home/.m2/repository/org/example/aggregated/1.0/aggregated-1.0.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar:<directory>/home/.m2/repository/org/example/multi-dep/1.0/multi-dep-1.0.jar
+-classpath=<directory>/home/.m2/repository/org/example/managed/3.0/managed-3.0.jar:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar:<directory>/home/.m2/repository/org/example/multi-jvm/1.0/multi-jvm-1.0.jar:<directory>/home/.m2/repository/org/example/aggregated/1.0/aggregated-1.0.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar:<directory>/home/.m2/repository/org/example/multi-dep/1.0/multi-dep-1.0.jar
 -no-stdlib
 -module-name=app
--Xkotlin-reference-version=2.4.20
+-Xkotlin-reference-version=2.4.21
 -d
 <directory>/project/build/artifacts/CompiledJvmArtifact/appjvm/kotlin-output
 <directory>/project/app/src/App.kt

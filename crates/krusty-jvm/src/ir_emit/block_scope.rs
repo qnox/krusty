@@ -223,6 +223,7 @@ impl Emitter<'_> {
         let mut dead = false;
         let mut reserved_inline_stack = None;
         let mut anchored_lambda_result = false;
+        let mut lambda_stack_closed = false;
         let mut deferred_invocation_result = None;
         let mut copied_frame_result = None;
         let optimized_postfix = self.emit_postfix_iinc(block, false, code);
@@ -329,6 +330,15 @@ impl Emitter<'_> {
                         self.emit_spliced_lambda_brace(block, code);
                         self.bind_unit_lambda_braces(brace_join_depth, code);
                         self.close_scope_locals(code, false);
+                        // kotlinc brackets only the lambda's body: the caller stack it saved is
+                        // back before `return this` loads the result on the call's line.
+                        if delays_stack_normalization
+                            && reserved_inline_stack.is_some()
+                            && self.inline_coercions.pending_for(block).is_none()
+                        {
+                            close_inline_stack(inline_stack_height, code);
+                            lambda_stack_closed = true;
+                        }
                         self.anchor_spliced_lambda_result(block, code);
                         self.emit_value(value, code);
                         anchored_lambda_result = true;
@@ -376,6 +386,7 @@ impl Emitter<'_> {
             self.adapt_copied_frame_result(result, code);
         }
         if normalizes_inline_stack
+            && !lambda_stack_closed
             && (!delays_stack_normalization || reserved_inline_stack.is_some())
         {
             self.close_or_defer_inline_stack(

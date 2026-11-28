@@ -96,62 +96,20 @@ macro_rules! quirks {
 }
 
 quirks! {
-    /// A delegate whose `getValue`/`setValue` resolves nowhere names only the candidates of the
-    /// earliest convention rung that contributed any (members, then member extensions, then
-    /// extensions). Later releases name every rung's candidates, members first.
-    DelegateFailureNamesFirstRungOnly {
+    /// A `null` function value suspend-converted to a nullable suspend function type converts to an
+    /// adapter whose `invoke` yields `null`, instead of staying `null` (KT-89451).
+    NullFunctionValueConvertsToAdapter {
         since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
-    }
-    /// `+UnitConversionsOnArbitraryExpressions` is known but converts no function value whose
-    /// result is not `Unit` (KT-84393).
-    UnitConversionRejectsNonUnitResult {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
+        fixed_in: Some(KotlinVersion::V2_5_0),
         defect: true,
     }
-    /// A suspend function declared to return `Unit` that forwards a tail call returns the callee's
-    /// result as it is, instead of adapting it to `Unit`.
-    SuspendUnitTailCallKeepsCalleeResult {
+    /// A `null` function value held by a type parameter with a nullable function bound, passed
+    /// where a suspend function type is expected, converts to an adapter that invokes it without a
+    /// null check: calling it throws `NullPointerException`.
+    NullTypeParameterFunctionValueIsDereferenced {
         since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
-    }
-    /// An anonymous context parameter is unnamed in the IR, so it gets no local-variable row; its
-    /// label reaches only reflection and null assertions.
-    AnonymousContextParameterIsNotLocal {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
-    }
-    /// A repeated anonymous context label is numbered after `#` (`$context-String#1`) instead of
-    /// `$` (`$context-String$1`).
-    AnonymousContextOrdinalAfterHash {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
-    }
-    /// `@Metadata.xi` of a `k=3` synthetic class holds the IR flags alone, without the class's
-    /// normalized visibility in bits 8–10.
-    SyntheticClassXiOmitsVisibility {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
-    }
-    /// A synthetic annotation implementation stamps nullability on its constructor, `equals` and
-    /// `toString`.
-    AnnotationImplCarriesNullability {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
-    }
-    /// A library compiled below language 2.3 stamps KLIB `metadata_version` `1.4.1` instead of the
-    /// language level's own (read off `kotlinc-native -p library -Xmetadata-klib`).
-    KlibLegacyMetadataVersionBelowLanguage23 {
-        since: None,
-        fixed_in: Some(KotlinVersion::V2_4_20),
-        defect: false,
+        fixed_in: Some(KotlinVersion::V2_5_0),
+        defect: true,
     }
     /// A callable reference to a `vararg` function takes an expected input that the enclosing call
     /// declares as one of its own type variables (`f: (T) -> Int`) as one collected element, even
@@ -179,6 +137,28 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: false,
     }
+    /// A `tailrec` function's recursive infix call or operator expression is reported at the infix
+    /// name or the operator token. From 2.5 the position is the start of the whole expression,
+    /// as wide as the function's name.
+    TailrecDotlessCallReportedAtOperator {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
+    /// In a `tailrec` function a recursive call followed by `return Unit` is not a tail call:
+    /// reading the `Unit` object is an instruction after it. From 2.5 it is not.
+    TailrecUnitObjectReturnFollowsCall {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
+    /// In a `tailrec` function with a non-null result, a recursive call that is the left operand of
+    /// `?:` in tail position is itself a tail call. From 2.5 an elvis operand never is.
+    TailrecElvisLeftOperandIsTail {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
     /// The Kotlin/Native and Kotlin/Wasm standard library's `ArrayList.addAll` makes room for the
     /// new elements before it reads the argument, so a range of the list being appended to is
     /// invalidated first: `list.addAll(list.subList(0, 2))` raises
@@ -186,6 +166,17 @@ quirks! {
     /// the argument first and appends the range. A library quirk, which only those platforms'
     /// backends test.
     ArrayListAddAllGrowsBeforeReadingItsArgument {
+        since: None,
+        fixed_in: None,
+        defect: true,
+    }
+    /// A Kotlin subclass of a Java class that realizes a builtin under another JVM name and also
+    /// declares a method under the builtin's Kotlin name (`charAt(int)` beside its own
+    /// `get(int)`) gets the builtin's entry under the Kotlin name, delegating to the renamed
+    /// method. The entry overrides the unrelated Java method, so a call to it reaches `charAt`, and
+    /// a class over a final one fails to load. The Java method is not the builtin's override, so a
+    /// subclass inherits it unchanged.
+    JavaRenamedBuiltinEntryOverridesJavaMember {
         since: None,
         fixed_in: None,
         defect: true,
@@ -292,12 +283,12 @@ mod tests {
     #[test]
     fn a_quirk_spans_since_up_to_its_fix() {
         let affected = Affected {
-            since: Some(KotlinVersion::V2_4_10),
+            since: Some(KotlinVersion::new(2, 4, 10)),
             fixed_in: Some(KotlinVersion::V2_4_21),
         };
-        assert!(!affected.contains(KotlinVersion::V2_4_0));
-        assert!(affected.contains(KotlinVersion::V2_4_10));
-        assert!(affected.contains(KotlinVersion::V2_4_20));
+        assert!(!affected.contains(KotlinVersion::new(2, 4, 0)));
+        assert!(affected.contains(KotlinVersion::new(2, 4, 10)));
+        assert!(affected.contains(KotlinVersion::new(2, 4, 20)));
         assert!(!affected.contains(KotlinVersion::V2_4_21));
         assert!(!affected.contains(KotlinVersion::new(2, 10, 0)));
         let open = Affected {
@@ -364,9 +355,9 @@ mod tests {
     fn precedes_orders_numerically() {
         let releases = [
             KotlinVersion::new(1, 9, 25),
-            KotlinVersion::V2_4_0,
+            KotlinVersion::new(2, 4, 0),
             KotlinVersion::new(2, 4, 9),
-            KotlinVersion::V2_4_10,
+            KotlinVersion::new(2, 4, 10),
             KotlinVersion::new(2, 10, 0),
             KotlinVersion::new(3, 0, 0),
         ];

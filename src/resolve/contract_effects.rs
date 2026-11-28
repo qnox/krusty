@@ -47,6 +47,23 @@ impl Checker<'_> {
         )
     }
 
+    /// The calls that selected the contract intrinsic. kotlinc lifts each into its function's
+    /// contract description, so nothing written inside one is lowered or named.
+    ///
+    /// Only a complete file is renumbered: a restricted fragment has released its neighboring
+    /// bodies, so a walk over it cannot replay the file's sequence, and it keeps the names the
+    /// naming walk gave the complete file.
+    pub(super) fn contract_description_calls(&self) -> HashSet<ExprId> {
+        if self.fragment != SourceFragmentMode::Complete {
+            return HashSet::default();
+        }
+        self.resolved_calls
+            .keys()
+            .copied()
+            .filter(|&call| self.selects_contract_intrinsic(call))
+            .collect()
+    }
+
     /// The contract of the function a call resolved to: the Pass-1 contract or the metadata contract
     /// attached to the selected callable.
     pub(super) fn contract_for_call(
@@ -285,7 +302,6 @@ impl Checker<'_> {
     /// conclusion when the call's truth value matches the effect's return constant. The contract
     /// is decoded from same-file source or from `@Metadata` (`!s.isNullOrBlank()` narrows `s`
     /// through the deserialized kotlin.text contract — no per-function special cases).
-    /// `nn(x) != null` likewise applies `returnsNotNull() implies …`.
     pub(super) fn contract_condition_narrowings(
         &self,
         scope: &CheckerScope<'_>,
@@ -294,33 +310,22 @@ impl Checker<'_> {
         out: &mut Vec<(NarrowPath, Ty)>,
         declined: &mut Vec<(String, Ty)>,
     ) {
-        use crate::contracts::ReturnsValue;
-        // A Boolean call proves the effect for its own value; a call compared with `null` proves
-        // `returnsNotNull()` when it is not null and `returns(null)` when it is.
-        let (call, result) = match self.file.expr(cond) {
-            Expr::Binary {
-                op: op @ (BinOp::Eq | BinOp::Ne),
-                lhs,
-                rhs,
-                ..
-            } => {
-                let call = match (self.file.expr(*lhs), self.file.expr(*rhs)) {
-                    (_, Expr::NullLit) => *lhs,
-                    (Expr::NullLit, _) => *rhs,
-                    _ => return,
-                };
-                let not_null = (*op == BinOp::Ne) == truth;
-                (
-                    call,
-                    if not_null {
-                        ReturnsValue::NotNull
-                    } else {
-                        ReturnsValue::Null
-                    },
-                )
-            }
-            _ => (cond, ReturnsValue::Bool(truth)),
-        };
+        // A call compared with `null` proves its `returnsNotNull()`/`returns(null)` effects through
+        // the null proof of its value (`null_check_narrowings`, `null_branch_narrowings`).
+        let (call, result) = (cond, crate::contracts::ReturnsValue::Bool(truth));
+        self.contract_result_narrowings(scope, call, result, out, declined);
+    }
+
+    /// Smart casts the resolved callable's contract proves when `call` returns `result`: the
+    /// conclusion of each `returns(…) implies …` effect whose value is `result`.
+    pub(super) fn contract_result_narrowings(
+        &self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        result: crate::contracts::ReturnsValue,
+        out: &mut Vec<(NarrowPath, Ty)>,
+        declined: &mut Vec<(String, Ty)>,
+    ) {
         let Some(contract) = self.contract_for_call(call) else {
             return;
         };

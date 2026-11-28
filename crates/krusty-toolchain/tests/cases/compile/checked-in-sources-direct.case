@@ -14,6 +14,9 @@ plugins:
 product: jvm/amper-plugin
 repositories:
   - mavenLocal
+settings:
+  kotlin:
+    version: 2.4.21
 --- tools/pregenerated/plugin.yaml
 tasks:
   declare:
@@ -42,6 +45,9 @@ repositories:
   - mavenLocal
 plugins:
   pregenerated: enabled
+settings:
+  kotlin:
+    version: 2.4.21
 --- generated-only/generated-src/kotlin/org/example/Model.kt
 package org.example
 
@@ -58,6 +64,9 @@ dependencies:
 plugins:
   pregenerated:
     enabled: true
+settings:
+  kotlin:
+    version: 2.4.21
 --- mixed/src/main/kotlin/Use.kt
 fun use() = org.example.Model()
 --- mixed/generated-src/kotlin/Generated.kt
@@ -76,24 +85,24 @@ pregenerated
 --- krusty-argv
 -Xjdk-release=25
 -jdk-home=<directory>/jdk
--classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-classpath=<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
 -no-stdlib
 -module-name=generated-only
--Xkotlin-reference-version=2.4.20
+-Xkotlin-reference-version=2.4.21
 -d
 <directory>/project/build/artifacts/CompiledJvmArtifact/generated-onlyjvm/kotlin-output
 <directory>/project/generated-only/generated-src/kotlin/org/example/Model.kt
 ----
 -Xjdk-release=25
 -jdk-home=<directory>/jdk
--classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/generated-onlyjvm/kotlin-output:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
+-classpath=<directory>/project/build/artifacts/CompiledJvmArtifact/generated-onlyjvm/kotlin-output:<directory>/home/.m2/repository/org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar:<directory>/home/.m2/repository/org/jetbrains/annotations/13.0/annotations-13.0.jar
 -no-stdlib
 -module-name=mixed
 -Xmulti-platform
 -Xfragments=main
 -Xfragment-sources=main:<directory>/project/mixed/src/main/kotlin/Use.kt
 -Xfragment-sources=main:<directory>/project/mixed/generated-src/kotlin/Generated.kt
--Xkotlin-reference-version=2.4.20
+-Xkotlin-reference-version=2.4.21
 -d
 <directory>/project/build/artifacts/CompiledJvmArtifact/mixedjvm/kotlin-output
 <directory>/project/mixed/generated-src/kotlin/Generated.kt

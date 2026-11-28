@@ -405,7 +405,7 @@ pub struct RecordingKrustyCompilingPlugin<'a> {
 /// Where the plugin API and the standard library lie in a run's local Maven repository.
 const PLUGIN_API_JAR: &str =
     "org/jetbrains/amper/amper-extensibility-api/0.13.0/amper-extensibility-api-0.13.0.jar";
-const STDLIB_JAR: &str = "org/jetbrains/kotlin/kotlin-stdlib/2.4.20/kotlin-stdlib-2.4.20.jar";
+const STDLIB_JAR: &str = "org/jetbrains/kotlin/kotlin-stdlib/2.4.21/kotlin-stdlib-2.4.21.jar";
 
 impl Compiler for RecordingKrustyCompilingPlugin<'_> {
     fn identity(&self) -> Vec<(String, Vec<u8>)> {

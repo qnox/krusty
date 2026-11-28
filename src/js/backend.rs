@@ -288,7 +288,12 @@ fun box(): String {\n\
              }",
         )]);
 
-        assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
+        // kotlinc warns about the two operands that are not the last one: an elvis operand is not
+        // in tail position, only its right-hand side is.
+        assert_eq!(
+            diagnostic_messages(&diags),
+            ["recursive call is not a tail call."; 2]
+        );
         let source = String::from_utf8(outputs[0].1.clone()).expect("JavaScript must be UTF-8");
         assert_eq!(
             source,

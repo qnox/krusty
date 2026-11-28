@@ -848,6 +848,37 @@ fn a_mutable_compiler_temporary_lowers_as_an_unnamed_reassignable_local() {
     );
 }
 
+/// An unsigned constant is serialized as its signed value of the same width, typed unsigned: the
+/// bits are the unsigned value's, and a constant of any other mismatched type still declines.
+#[test]
+fn an_unsigned_constant_keeps_the_bits_its_signed_serialization_carries() {
+    use crate::ir::IrConst;
+    use crate::klib_lowering::body_lowering::constant_value;
+    use crate::metadata::klib_ir::KlibIrConstant;
+    assert_eq!(
+        constant_value(&KlibIrConstant::Int(-1), Ty::UInt).unwrap(),
+        (IrConst::UInt(u32::MAX), Ty::UInt)
+    );
+    assert_eq!(
+        constant_value(&KlibIrConstant::Long(-1), Ty::ULong).unwrap(),
+        (IrConst::ULong(u64::MAX), Ty::ULong)
+    );
+    assert_eq!(
+        constant_value(&KlibIrConstant::Byte(-1), Ty::UByte).unwrap(),
+        (IrConst::UByte(u8::MAX), Ty::UByte)
+    );
+    assert_eq!(
+        constant_value(&KlibIrConstant::Short(-1), Ty::UShort).unwrap(),
+        (IrConst::UShort(u16::MAX), Ty::UShort)
+    );
+    assert_eq!(
+        constant_value(&KlibIrConstant::Long(-1), Ty::UInt),
+        Err(KlibBodyDeclineReason::UnsupportedOperation(
+            "a constant of another type than its value's"
+        ))
+    );
+}
+
 /// A local declared without an initializer and assigned later lowers as the source declaration
 /// does: a reassignable binding holding the deferred type's zero until its definite assignment.
 #[test]

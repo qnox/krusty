@@ -52,7 +52,9 @@ use tests::lower_alone;
 pub(super) use array_storage::realizes_storage_getter;
 pub(super) use exceptions::runtime_lays_out;
 pub(super) use scalar_instructions::is_scalar_operation;
-pub(super) use scalar_value_classes::runtime_value_declaration;
+pub(super) use scalar_value_classes::{
+    realizes_scalar_value_storage_getter, runtime_value_declaration,
+};
 pub(super) use shared_cells::parameter_carrier;
 
 pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerIntrinsic) -> bool {
@@ -164,13 +166,6 @@ pub(super) fn lower_file(
         classes: laid_out_classes,
         tables: module_tables,
     } = state;
-    // A classifier-owned static (an object or companion `const val`) is the same storage as a
-    // top-level one: a global initialized with the file, which its qualified reads address.
-    for property in &ir.statics {
-        if property.is_lateinit {
-            return Err("a `lateinit` top-level property".to_string());
-        }
-    }
     let globals = property_registry.prepare_file(ir, |ty| {
         let Some(value) = carrier(ty)? else {
             return Err("a `Unit` top-level property".to_string());
@@ -676,7 +671,10 @@ fn expression_type(
                 .ok_or_else(|| "an enclosing instance without authenticated storage".to_string())?;
             ir.classes[class as usize].fields[field as usize].ty
         }
-        IrExpr::GetField { class, index, .. } if ir.checked_type(id).is_none() => {
+        IrExpr::GetField { class, index, .. }
+        | IrExpr::LateinitInitialized { class, index, .. }
+            if ir.checked_type(id).is_none() =>
+        {
             ir.classes[*class as usize].fields[*index as usize].ty
         }
         IrExpr::MethodCall { class, index, .. } if ir.checked_type(id).is_none() => {
@@ -719,6 +717,13 @@ fn expression_type(
                 && branches.iter().all(|(condition, _)| condition.is_some()) =>
         {
             Ty::Unit
+        }
+        // A `when` built after checking, as the suspend lowering builds the decision tree of a
+        // suspending condition, names its result on the `when` itself rather than as a checked type.
+        IrExpr::When { .. }
+            if ir.checked_type(id).is_none() && ir.when_result_type(id).is_some() =>
+        {
+            ir.when_result_type(id).expect("guarded by the arm")
         }
         // A top-level property read has its storage's declared type.
         IrExpr::GetStatic(index) if ir.checked_type(id).is_none() => ir.statics[*index as usize].ty,
@@ -1191,6 +1196,11 @@ impl<'a> Body<'a> {
                         // The nullable reference local's Wasm default is sufficient: every read
                         // is erased at an authenticated dependency call, and the exact singleton
                         // access was proved to have no initialization effect.
+                    } else if self.ir.deferred_local_types.contains_key(&id) {
+                        // A local declared without an initializer holds a target-neutral zero
+                        // that stands for its type's own: a Wasm local starts at it, whatever the
+                        // carrier, where the placeholder constant has no value of an unsigned
+                        // type's carrier.
                     } else if let Some(init) = init {
                         self.value(init, ty)?;
                         self.code.local_set(local);
@@ -1210,6 +1220,17 @@ impl<'a> Body<'a> {
             },
             IrExpr::GetStatic(index) => {
                 self.code.global_get(self.globals[index as usize]);
+                // A read of a `lateinit` top-level property is guarded unless it is the raw
+                // storage read `::p.isInitialized` compares with null.
+                let declaration = &self.ir.statics[index as usize];
+                if declaration.is_lateinit && !self.ir.lateinit_initialization_probes.contains(&id)
+                {
+                    let name = declaration.name.clone();
+                    let Some(reference @ ValType::Ref { .. }) = carrier(declaration.ty)? else {
+                        return Err("a `lateinit` read without a reference carrier".to_string());
+                    };
+                    self.guard_lateinit(reference, &name)?;
+                }
             }
             IrExpr::SetStatic { index, value } => {
                 let ty = self.ir.statics[index as usize].ty;
@@ -1612,7 +1633,8 @@ impl<'a> Body<'a> {
                     .and_then(|fact| fact.compiler_operation())
                     .and_then(intrinsic_operations::member_operation) =>
             {
-                intrinsic_operations::string_get_frame(
+                intrinsic_operations::call_frame(
+                    operation,
                     params,
                     *ret,
                     defaults,
@@ -1783,6 +1805,7 @@ impl<'a> Body<'a> {
                 ctor_params,
                 external_target,
                 defaults,
+                default_prefix_count,
                 ..
             } => {
                 self.new_object(
@@ -1791,7 +1814,10 @@ impl<'a> Body<'a> {
                     &args,
                     ctor_params.as_deref(),
                     external_target,
-                    &defaults,
+                    dependency_exports::OmittedArguments {
+                        ordinals: &defaults,
+                        prefix: default_prefix_count,
+                    },
                 )?;
             }
             IrExpr::EnumConstant {
@@ -1839,7 +1865,7 @@ impl<'a> Body<'a> {
                 class,
                 index,
             } => {
-                self.field_read(receiver, class, index)?;
+                self.guarded_field_read(receiver, class, index)?;
                 // A field that stores `kotlin.Unit`'s instance and is read where the checked use
                 // is `Unit` has no carrier there: the stored reference is discarded, as any value
                 // converted to a type without a carrier is.
@@ -1848,6 +1874,14 @@ impl<'a> Body<'a> {
                     self.code.drop_();
                 }
             }
+            // The raw field a `lateinit` read would guard, for `::p.isInitialized` to compare with
+            // null: the same read as an ordinary field's, without the guard.
+            IrExpr::LateinitInitialized {
+                receiver,
+                class,
+                index,
+            } => self.field_read(receiver, class, index)?,
+            IrExpr::LateinitCheck { operand, name } => self.lateinit_check(operand, &name)?,
             IrExpr::SetField {
                 receiver,
                 class,
@@ -2053,6 +2087,42 @@ impl<'a> Body<'a> {
                     && context_arguments.is_empty() =>
             {
                 self.property_write(Some(id), *target, *dispatch_receiver, *value)?
+            }
+            // An extension or context property this file does not lay out: another file of the
+            // module declares it and exports its accessors' entries. A local one was realized as
+            // a call of its accessor before emission.
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::PropertyRead {
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments,
+                    ..
+                } = &**checked_op =>
+            {
+                let declared = context_arguments
+                    .iter()
+                    .copied()
+                    .chain(*extension_receiver)
+                    .collect::<Vec<_>>();
+                self.module_receiver_property(*target, *dispatch_receiver, &declared, None)?
+            }
+            IrExpr::Checked(ref checked_op)
+                if let krusty::ir::IrCheckedOperation::PropertyWrite {
+                    target,
+                    dispatch_receiver,
+                    extension_receiver,
+                    context_arguments,
+                    value,
+                    ..
+                } = &**checked_op =>
+            {
+                let declared = context_arguments
+                    .iter()
+                    .copied()
+                    .chain(*extension_receiver)
+                    .collect::<Vec<_>>();
+                self.module_receiver_property(*target, *dispatch_receiver, &declared, Some(*value))?
             }
             IrExpr::Call {
                 callee: ref call_callee,

@@ -2069,20 +2069,17 @@ KRef kt_lazy_of(KRef initializer) {
 kt_boolean kt_lazy_is_initialized(KRef lazy) { return ((const KLazy *)lazy)->computed; }
 
 /* The value, computing it on the first ask. This is the one place the runtime CALLS back into
-   emitted code: the initializer is a `Function0`, and a function value answers `invoke` in the one
-   vtable slot it declares beyond `kotlin.Any`'s three. */
+   emitted code: the initializer is a `Function0`, called through the function protocol. */
 KRef kt_lazy_value(KRef lazy) {
     KLazy *self = (KLazy *)lazy;
     if (self->computed) {
         return self->value;
     }
     KRef initializer = self->initializer;
-    if (initializer == NULL || initializer->header.type->vtable == NULL ||
-        initializer->header.type->vtable_length <= KT_SLOT_INVOKE) {
+    if (initializer == NULL) {
         KT_FAIL("krusty: a lazy value has no initializer to run\n");
     }
-    KRef value =
-        ((KRef(*)(KRef))initializer->header.type->vtable[KT_SLOT_INVOKE])(initializer);
+    KRef value = kt_itf__1_function_0(initializer);
     /* An initializer that THREW produced no value. The lazy stays uncomputed and keeps its
        initializer, so the exception propagates and the next read runs it again, as Kotlin's does;
        caching what the aborted call returned would hand that back from every later read. */
@@ -2772,6 +2769,9 @@ kt_boolean kt_range_iterator_has_next(KRef iterator) {
     }
     if (kt_walk_is(iterator)) {
         return kt_walk_has_next(iterator);
+    }
+    if (!kt_is_range_iterator(iterator) && iterator->header.type->walk_has_next != NULL) {
+        return iterator->header.type->walk_has_next(iterator);
     }
     if (!kt_is_range_iterator(iterator)) {
         KT_FAIL("krusty: this value is no iterator\n");

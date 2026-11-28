@@ -332,8 +332,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// A call through one of the receiver's tables: its vtable by class slot —
-    /// `receiver.type.vtable[slot](receiver, args…)` — or, for a module interface member, the
-    /// member's stub, which the final link writes from every implementation in the program (see
+    /// `receiver.type.vtable[slot](receiver, args…)` — or, for a module interface member or a
+    /// function type, the stub the final link writes from every implementation in the program (see
     /// `native::interface_calls`).
     pub(super) fn dispatch_through(
         &mut self,
@@ -350,11 +350,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         all_arguments.extend_from_slice(arguments);
         let slot = match through {
             model::Dispatch::Class(slot) => slot,
-            model::Dispatch::Interface(number) => {
-                let stub = super::super::super::interface_calls::stub_symbol(
-                    self.file.module_name,
-                    number,
-                );
+            model::Dispatch::Interface(_) | model::Dispatch::Function(_) => {
+                let stub = match through {
+                    model::Dispatch::Function(operands) => {
+                        super::super::super::interface_calls::function_stub_symbol(operands)
+                    }
+                    model::Dispatch::Interface(number) => {
+                        super::super::super::interface_calls::stub_symbol(
+                            self.file.module_name,
+                            number,
+                        )
+                    }
+                    model::Dispatch::Class(_) => unreachable!("matched above"),
+                };
                 let stub = self.file.import(&stub, &all_params, ret)?;
                 let func_ref = self.func_ref(stub);
                 let call = self.emit_call(func_ref, &all_arguments)?;
@@ -707,6 +715,65 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(self.builder.inst_results(call).first().copied())
     }
 
+    /// `super.f()` to the default body of an interface another module declares: a call of the
+    /// export that module publishes for the member, with the receiver first and the member's
+    /// declared operands after it.
+    fn interface_default_super_call(
+        &mut self,
+        super_target: SuperTarget<'_>,
+        target: krusty::fir::ExternalCallableId,
+        receiver: u32,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        let SuperTarget {
+            owner,
+            name,
+            parameters: selected_parameters,
+            result: selected_result,
+            ..
+        } = super_target;
+        let selected_parameters = selected_parameters.as_deref().ok_or_else(|| {
+            declined!("a `super` call to `{name}` without its checked parameters")
+        })?;
+        let selected_result = selected_result
+            .ok_or_else(|| declined!("a `super` call to `{name}` without its checked result"))?;
+        let outside = || {
+            declined!(
+                "a `super` call to the default `{name}` of `{}`, which its module does not export",
+                owner.render()
+            )
+        };
+        let fact = self.file.callables.callable(target).ok_or_else(outside)?;
+        let identity = fact.dependency_callable.as_ref().ok_or_else(outside)?;
+        let export = self
+            .file
+            .dependency_symbols
+            .get(identity)
+            .ok_or_else(outside)?;
+        let parameters = export.signature.parameters().to_vec();
+        let result = export.signature.result();
+        if parameters.len() != args.len() + 1 || parameters.len() != selected_parameters.len() + 1 {
+            return Err(declined!(
+                "a `super` call to `{name}` whose operands disagree with its exported default"
+            ));
+        }
+        let object = self
+            .coerce(receiver, parameters[0])?
+            .ok_or_else(|| declined!("a `Unit` receiver for a `super` call to `{name}`"))?;
+        let mut arguments = vec![object];
+        arguments.extend(self.arguments(args, &parameters[1..])?);
+        if self.terminated {
+            return Ok(None);
+        }
+        let id = self.file.import(&export.symbol, &parameters, result)?;
+        let func_ref = self.func_ref(id);
+        let call = self.emit_call(func_ref, &arguments)?;
+        match self.builder.inst_results(call).first().copied() {
+            Some(value) => self.convert(value, Some(result), selected_result),
+            None => Ok(None),
+        }
+    }
+
     /// `super.f()` to a method of a superclass an earlier file laid out, through the symbol its
     /// record names.
     fn laid_out_direct_call(
@@ -732,6 +799,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         };
         if kind != krusty::ir::IrSuperCallKind::Function {
             return Err(outside());
+        }
+        // An interface has no layout to record; its default body is the export its module
+        // publishes for the member, which a `super` call enters directly.
+        if let Some(krusty::fir::ResolvedFunctionOverrideTarget::External(target)) = declaration {
+            if self.file.callables.callable(target).is_some_and(|fact| {
+                fact.owner_is_interface
+                    && fact.declaration_owner
+                        == Some(krusty::types::SemanticCallableOwner::Classifier(owner))
+            }) {
+                return self.interface_default_super_call(
+                    SuperTarget {
+                        owner,
+                        name,
+                        kind,
+                        declaration,
+                        parameters,
+                        result: selected_result,
+                    },
+                    target,
+                    receiver,
+                    args,
+                );
+            }
         }
         let record = self.file.laid_out.get(owner).ok_or_else(&outside)?;
         let (function, params, _) = match declaration {

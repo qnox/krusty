@@ -15,14 +15,13 @@ use crate::plugins::{
 };
 use crate::types::{type_name, AnnotationValue, Ty};
 
-use super::{PluginRelease, KSERIALIZER_FQ, SERIALIZABLE_FQ};
+use super::{KSERIALIZER_FQ, SERIALIZABLE_FQ};
 
 /// Select the primary constructor of the serializer class `ctx`'s `@Serializable(with = …)` names,
 /// or report why that constructor breaks the contract. A `with =` object, or a class this
 /// compilation does not declare, is not a named source class and selects nothing.
 pub(super) fn select_constructor(
     ctx: &FrontendNamedClassContext<'_>,
-    release: Option<PluginRelease>,
     diagnostics: &mut Vec<FrontendPluginDiagnostic>,
 ) -> Option<FrontendNamedClassConstruction> {
     let serializable = type_name(SERIALIZABLE_FQ);
@@ -61,7 +60,6 @@ pub(super) fn select_constructor(
             &serializer.display_name,
             served,
             parameters,
-            release,
         )
         .into_iter()
         .map(|message| FrontendPluginDiagnostic::error(span, message)),
@@ -93,33 +91,24 @@ fn constructor_operands(type_parameters: usize, parameters: &[(String, Ty)]) -> 
 }
 
 /// kotlinc's diagnostics for a primary constructor that breaks the contract, in its order: the
-/// parameter count first, then each non-`KSerializer` parameter. The wording follows the plugin
-/// release; without a known release it is the newest.
+/// parameter count first, then each non-`KSerializer` parameter.
 fn contract_violations(
     type_parameters: usize,
     display_name: &str,
     served: &str,
     parameters: &[(String, Ty)],
-    release: Option<PluginRelease>,
 ) -> Vec<String> {
-    let newest = release.is_none_or(|release| release >= PluginRelease::V2_4_20);
-    let cannot = if newest { "cannot" } else { "can not" };
-    let prefix = format!("custom serializer '{display_name}' {cannot} be used for '{served}'");
+    let prefix = format!("custom serializer '{display_name}' cannot be used for '{served}'");
     let count = parameters.len();
     let mut violations = Vec::new();
     if count != 0 && count != type_parameters {
-        let constructor = if newest {
-            "the primary constructor"
-        } else {
-            "primary constructor"
-        };
         let expected = if type_parameters == 0 {
             "expected no parameters but".to_string()
         } else {
             format!("expected no parameters or {type_parameters}, but")
         };
         violations.push(format!(
-            "{prefix} since it has an invalid number of parameters in {constructor}: {expected} \
+            "{prefix} since it has an invalid number of parameters in the primary constructor: {expected} \
              has {count} parameters"
         ));
     }
@@ -128,17 +117,10 @@ fn contract_violations(
             .iter()
             .filter(|(_, ty)| !is_serializer(*ty))
             .map(|(name, _)| {
-                if newest {
-                    format!(
-                        "{prefix}. The type of parameter '{name}' in the serializer's primary \
-                         constructor must be 'KSerializer'."
-                    )
-                } else {
-                    format!(
-                        "{prefix}, type of parameter '{name}' in serializers primary constructor \
-                         should be 'KSerializer'"
-                    )
-                }
+                format!(
+                    "{prefix}. The type of parameter '{name}' in the serializer's primary \
+                     constructor must be 'KSerializer'."
+                )
             }),
     );
     violations
@@ -178,31 +160,13 @@ mod tests {
     }
 
     #[test]
-    fn a_broken_constructor_reports_count_then_types_in_each_release_wording() {
+    fn a_broken_constructor_reports_count_then_types() {
         let parameters = [
             parameter("a", serializer_of(Ty::String)),
             parameter("b", Ty::String),
         ];
         assert_eq!(
-            contract_violations(
-                1,
-                "S<*>",
-                "C<T (of class S<T>)>",
-                &parameters,
-                Some(PluginRelease::new(2, 4, 10))
-            ),
-            vec![
-                "custom serializer 'S<*>' can not be used for 'C<T (of class S<T>)>' since it has \
-                 an invalid number of parameters in primary constructor: expected no parameters \
-                 or 1, but has 2 parameters"
-                    .to_string(),
-                "custom serializer 'S<*>' can not be used for 'C<T (of class S<T>)>', type of \
-                 parameter 'b' in serializers primary constructor should be 'KSerializer'"
-                    .to_string(),
-            ]
-        );
-        assert_eq!(
-            contract_violations(1, "S<*>", "C<T (of class S<T>)>", &parameters, None),
+            contract_violations(1, "S<*>", "C<T (of class S<T>)>", &parameters),
             vec![
                 "custom serializer 'S<*>' cannot be used for 'C<T (of class S<T>)>' since it has \
                  an invalid number of parameters in the primary constructor: expected no \
@@ -219,7 +183,7 @@ mod tests {
     fn a_non_generic_class_expects_no_parameters() {
         let parameters = [parameter("inner", serializer_of(Ty::String))];
         assert_eq!(
-            contract_violations(0, "S", "C", &parameters, None),
+            contract_violations(0, "S", "C", &parameters),
             vec![
                 "custom serializer 'S' cannot be used for 'C' since it has an invalid number of \
                  parameters in the primary constructor: expected no parameters but has 1 \

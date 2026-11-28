@@ -100,7 +100,7 @@ fn preview_shape(bytes: &[u8]) -> (u16, Vec<krusty::jvm::classreader::InnerClass
 /// releases stop at 26, below target 28 where the identity flag begins.
 fn newest_targets() -> (&'static str, &'static str) {
     use krusty::kotlin_version::KotlinVersion;
-    common::for_reference(&[(KotlinVersion::V2_4_0, ("26", "25"))])
+    common::for_reference(&[(KotlinVersion::V2_4_21, ("26", "25"))])
 }
 
 fn assert_matches_kotlinc(arguments: &[&str], preview: bool) {

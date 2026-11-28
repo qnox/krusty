@@ -161,13 +161,13 @@ impl Backend for WasmBackend {
         &self,
         classifier: krusty::backend::DependencyClassifier,
     ) -> bool {
-        // `Unit`'s value is the runtime's own, as a source reference of it is. Every enum
-        // constant is laid out with the runtime's `kotlin.Enum` base, so its members are too.
-        classifier == krusty::types::wk::string()
-            || classifier == krusty::types::wk::kotlin_enum()
-            || classifier == krusty::types::wk::unit()
-            || lower::is_string_builder(classifier)
-            || lower::runtime_lays_out(classifier)
+        represents_dependency_classifier(classifier)
+    }
+
+    fn dependency_classifier_representation(
+        &self,
+    ) -> std::rc::Rc<dyn Fn(krusty::backend::DependencyClassifier) -> bool> {
+        std::rc::Rc::new(represents_dependency_classifier)
     }
 
     /// The runtime's `StringBuilder` answers the `Appendable` and `CharSequence` members it
@@ -190,13 +190,15 @@ impl Backend for WasmBackend {
         lower::is_direct_operation(operation)
     }
 
-    /// An array classifier's `storage` property is this target's own array storage.
+    /// An array classifier's `storage` property is this target's own array storage, and an
+    /// value class's storage is the scalar it travels as.
     fn realizes_dependency_getter(
         &self,
         signature: krusty::backend::DependencyGetterSignature<'_>,
     ) -> bool {
         // An enum constant answers `kotlin.Enum`'s `name` and `ordinal` from its `$Enum` fields.
         lower::realizes_storage_getter(signature)
+            || lower::realizes_scalar_value_storage_getter(signature)
             || krusty::backend::enums::getter_base_member(signature).is_some()
     }
 
@@ -470,6 +472,16 @@ const COUNTED_LOOPS: krusty::backend::counted_loops::CountedLoopPolicy =
         inlining: krusty::backend::counted_loops::HeaderInlining::None,
         until_steps: krusty::backend::counted_loops::UntilSteps::Built,
     };
+
+/// `Unit`'s value is the runtime's own, as a source reference of it is. Every enum constant is
+/// laid out with the runtime's `kotlin.Enum` base, so its members are too.
+fn represents_dependency_classifier(classifier: krusty::backend::DependencyClassifier) -> bool {
+    classifier == krusty::types::wk::string()
+        || classifier == krusty::types::wk::kotlin_enum()
+        || classifier == krusty::types::wk::unit()
+        || lower::is_string_builder(classifier)
+        || lower::runtime_lays_out(classifier)
+}
 
 #[cfg(test)]
 mod tests {
@@ -993,12 +1005,12 @@ mod tests {
     fn an_unsupported_construct_declines_the_whole_compilation_by_name() {
         let (outputs, diagnostics) = compile(
             WasmTarget::Js,
-            "lateinit var pending: String\nfun box(): String = \"OK\"",
+            "fun box(): String { var s = 0.0f; s %= 2f; return \"OK\" }",
         );
         assert_eq!(outputs, Vec::<Artifact>::new());
         assert_eq!(
             diagnostics,
-            ["krusty: the wasm backend does not support a `lateinit` top-level property yet"]
+            ["krusty: the wasm backend does not support the operator Rem on `kotlin.Float` yet"]
         );
     }
 

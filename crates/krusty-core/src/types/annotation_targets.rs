@@ -1,0 +1,611 @@
+//! Where an annotation class may be applied: its declared Kotlin targets.
+//!
+//! The applicable set decides two things. A checker rejects an application on a declaration whose
+//! target the set does not list (kotlinc's WRONG_ANNOTATION_TARGET), naming the set in its message.
+//! And an application written on a property declaration without a use-site prefix lands on the
+//! configured default sites among `param`, `property` and `field`.
+
+/// A Kotlin annotation target (`kotlin.annotation.AnnotationTarget`), in kotlinc's `KotlinTarget`
+/// order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum KotlinTarget {
+    Class,
+    AnnotationClass,
+    TypeParameter,
+    Property,
+    Field,
+    LocalVariable,
+    ValueParameter,
+    Constructor,
+    Function,
+    PropertyGetter,
+    PropertySetter,
+    Type,
+    Expression,
+    File,
+    Typealias,
+}
+
+impl KotlinTarget {
+    /// Every target, in order.
+    const ALL: [Self; 15] = [
+        Self::Class,
+        Self::AnnotationClass,
+        Self::TypeParameter,
+        Self::Property,
+        Self::Field,
+        Self::LocalVariable,
+        Self::ValueParameter,
+        Self::Constructor,
+        Self::Function,
+        Self::PropertyGetter,
+        Self::PropertySetter,
+        Self::Type,
+        Self::Expression,
+        Self::File,
+        Self::Typealias,
+    ];
+
+    /// The target an enum entry denotes when its declaring enum is exactly
+    /// `kotlin.annotation.AnnotationTarget`. An entry of any other enum, whatever its name, is no
+    /// target. `owner` is the resolved or provider-normalized declaring classifier; `entry` is the
+    /// entry's declared name.
+    pub fn of_entry(owner: crate::types::TypeName, entry: &str) -> Option<Self> {
+        if owner != crate::types::type_name("kotlin/annotation/AnnotationTarget") {
+            return None;
+        }
+        Self::named(entry)
+    }
+
+    /// kotlinc's recovery for an INVALID `@Target` application, used only to reproduce the
+    /// secondary diagnostics kotlinc reports for it: `getAllowedAnnotationTargets` reads every
+    /// argument's selected entry by its declared name, ignoring the enum that declares it. Never a
+    /// semantic target policy.
+    pub fn recovered_from_invalid_entry(entry: &str) -> Option<Self> {
+        Self::named(entry)
+    }
+
+    fn named(entry: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|target| target.entry_name() == entry)
+    }
+
+    /// The name of the `kotlin.annotation.AnnotationTarget` entry this target is.
+    pub fn entry_name(self) -> &'static str {
+        match self {
+            Self::Class => "CLASS",
+            Self::AnnotationClass => "ANNOTATION_CLASS",
+            Self::TypeParameter => "TYPE_PARAMETER",
+            Self::Property => "PROPERTY",
+            Self::Field => "FIELD",
+            Self::LocalVariable => "LOCAL_VARIABLE",
+            Self::ValueParameter => "VALUE_PARAMETER",
+            Self::Constructor => "CONSTRUCTOR",
+            Self::Function => "FUNCTION",
+            Self::PropertyGetter => "PROPERTY_GETTER",
+            Self::PropertySetter => "PROPERTY_SETTER",
+            Self::Type => "TYPE",
+            Self::Expression => "EXPRESSION",
+            Self::File => "FILE",
+            Self::Typealias => "TYPEALIAS",
+        }
+    }
+
+    /// The targets a Java `ElementType` entry stands for (kotlinc's `JavaAnnotationTargetMapper`).
+    pub fn of_java_element_type(entry: &str) -> &'static [Self] {
+        match entry {
+            "TYPE" => &[Self::Class, Self::File],
+            "ANNOTATION_TYPE" => &[Self::AnnotationClass],
+            "TYPE_PARAMETER" => &[Self::TypeParameter],
+            "FIELD" => &[Self::Field],
+            "LOCAL_VARIABLE" => &[Self::LocalVariable],
+            "PARAMETER" => &[Self::ValueParameter],
+            "CONSTRUCTOR" => &[Self::Constructor],
+            "METHOD" => &[Self::Function, Self::PropertyGetter, Self::PropertySetter],
+            "TYPE_USE" => &[Self::Type],
+            _ => &[],
+        }
+    }
+
+    /// Index into [`super::JAVA_ELEMENT_TYPES`] of the `ElementType` kotlinc mirrors this target
+    /// onto. `None` for a Kotlin-only target (`PROPERTY`, `FILE`, `TYPEALIAS`, `EXPRESSION`, which
+    /// the JVM cannot express); such a target contributes nothing to the mirror, though the mirror
+    /// itself is still emitted — a set of only Kotlin-only targets mirrors to an EMPTY array,
+    /// matching kotlinc, rather than being omitted.
+    ///
+    /// The rows are measured against kotlinc, not derived: the mapping is neither an identity
+    /// (`CLASS` becomes `TYPE`, `VALUE_PARAMETER` becomes `PARAMETER`) nor injective (`FUNCTION`,
+    /// `PROPERTY_GETTER` and `PROPERTY_SETTER` all become `METHOD`, and collapse to one entry).
+    pub fn java_element_type(self) -> Option<usize> {
+        let element = match self {
+            Self::Class => "TYPE",
+            Self::AnnotationClass => "ANNOTATION_TYPE",
+            Self::TypeParameter => "TYPE_PARAMETER",
+            Self::Field => "FIELD",
+            Self::LocalVariable => "LOCAL_VARIABLE",
+            Self::ValueParameter => "PARAMETER",
+            Self::Constructor => "CONSTRUCTOR",
+            Self::Function | Self::PropertyGetter | Self::PropertySetter => "METHOD",
+            Self::Type => "TYPE_USE",
+            Self::Property | Self::File | Self::Typealias | Self::Expression => return None,
+        };
+        super::JAVA_ELEMENT_TYPES
+            .iter()
+            .position(|&java| java == element)
+    }
+
+    /// The target's name in kotlinc's diagnostics.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Class => "class",
+            Self::AnnotationClass => "annotation class",
+            Self::TypeParameter => "type parameter",
+            Self::Property => "property",
+            Self::Field => "field",
+            Self::LocalVariable => "local variable",
+            Self::ValueParameter => "value parameter",
+            Self::Constructor => "constructor",
+            Self::Function => "function",
+            Self::PropertyGetter => "getter",
+            Self::PropertySetter => "setter",
+            Self::Type => "type usage",
+            Self::Expression => "expression",
+            Self::File => "file",
+            Self::Typealias => "typealias",
+        }
+    }
+}
+
+/// An annotation class's applicable targets, in the order kotlinc lists them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnnotationTargets {
+    targets: [KotlinTarget; 15],
+    len: u8,
+    /// Whether an application written on a property may land on the PROPERTY itself. Java has no
+    /// properties, so kotlinc places a bare Java annotation on the parameter or backing field
+    /// instead, even where its default targets list `property`.
+    property_site: bool,
+    /// Whether these are kotlinc's `DEFAULT_TARGET_SET`, which also holds the `backing field`
+    /// target no `AnnotationTarget` entry names. It shows only in diagnostics.
+    default_set: bool,
+}
+
+/// Where an annotation written on a property declaration with no use-site prefix belongs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyAnnotationSite {
+    /// A primary-constructor `val`/`var` parameter's own annotation — `RuntimeVisible…
+    /// ParameterAnnotations` on the constructor.
+    ValueParameter,
+    /// The Kotlin PROPERTY, which has no class-file declaration of its own: the annotation goes on a
+    /// synthetic `get<Name>$annotations()` marker method.
+    Property,
+    /// The backing field.
+    Field,
+    /// The property's getter declaration.
+    Getter,
+    /// The property's setter declaration.
+    Setter,
+    /// The property's setter value parameter.
+    SetterParameter,
+}
+
+/// Default placement selected at the compilation's language-feature boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PropertyAnnotationDefaultTargetMode {
+    #[default]
+    FirstOnly,
+    ParamProperty,
+}
+
+/// The checked destinations of one property annotation application, not its declared targets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PropertyAnnotationSites(u8);
+
+impl PropertyAnnotationSites {
+    pub fn contains(self, site: PropertyAnnotationSite) -> bool {
+        self.0 & (1 << site as u8) != 0
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    fn insert(&mut self, site: PropertyAnnotationSite) {
+        self.0 |= 1 << site as u8;
+    }
+}
+
+/// Storage and parameter facts of the property declaration owning an application.
+#[derive(Clone, Copy)]
+pub struct PropertyAnnotationHost {
+    pub constructor_parameter: bool,
+    pub has_backing_field: bool,
+}
+
+impl PropertyAnnotationSite {
+    /// The source keyword kotlinc names when diagnosing an explicit use-site target.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::ValueParameter => "param",
+            Self::Property => "property",
+            Self::Field => "field",
+            Self::Getter => "get",
+            Self::Setter => "set",
+            Self::SetterParameter => "setparam",
+        }
+    }
+
+    /// The declaration target selected by this property use-site.
+    pub fn kotlin_target(self) -> KotlinTarget {
+        match self {
+            Self::ValueParameter | Self::SetterParameter => KotlinTarget::ValueParameter,
+            Self::Property => KotlinTarget::Property,
+            Self::Field => KotlinTarget::Field,
+            Self::Getter => KotlinTarget::PropertyGetter,
+            Self::Setter => KotlinTarget::PropertySetter,
+        }
+    }
+}
+
+impl AnnotationTargets {
+    /// A Kotlin annotation class that declares no `@Target` (kotlinc's `DEFAULT_TARGET_SET`).
+    pub const DEFAULT: Self = Self {
+        targets: [
+            KotlinTarget::Class,
+            KotlinTarget::AnnotationClass,
+            KotlinTarget::Property,
+            KotlinTarget::Field,
+            KotlinTarget::LocalVariable,
+            KotlinTarget::ValueParameter,
+            KotlinTarget::Constructor,
+            KotlinTarget::Function,
+            KotlinTarget::PropertyGetter,
+            KotlinTarget::PropertySetter,
+            KotlinTarget::Class,
+            KotlinTarget::Class,
+            KotlinTarget::Class,
+            KotlinTarget::Class,
+            KotlinTarget::Class,
+        ],
+        len: 10,
+        property_site: true,
+        default_set: true,
+    };
+
+    /// A Kotlin `@Target(…)`: its entries in declared order, each listed once.
+    pub fn kotlin(declared: impl IntoIterator<Item = KotlinTarget>) -> Self {
+        let mut targets = Self {
+            len: 0,
+            default_set: false,
+            ..Self::DEFAULT
+        };
+        for target in declared {
+            targets.push(target);
+        }
+        targets
+    }
+
+    /// A Java `@interface`'s `@java.lang.annotation.Target` entries (`ElementType` names). The
+    /// Kotlin targets they map to are listed in target order, then `expression`, which every Java
+    /// annotation allows; one without a `@Target` allows the default set.
+    pub fn java(element_types: &[String]) -> Self {
+        let mut targets = if element_types.is_empty() {
+            Self::DEFAULT
+        } else {
+            let mut targets = Self::kotlin([]);
+            for target in KotlinTarget::ALL {
+                if element_types
+                    .iter()
+                    .any(|entry| KotlinTarget::of_java_element_type(entry).contains(&target))
+                {
+                    targets.push(target);
+                }
+            }
+            targets
+        };
+        targets.push(KotlinTarget::Expression);
+        targets.property_site = false;
+        targets
+    }
+
+    fn push(&mut self, target: KotlinTarget) {
+        if !self.allows(target) {
+            self.targets[usize::from(self.len)] = target;
+            self.len += 1;
+        }
+    }
+
+    /// The applicable targets, in kotlinc's order.
+    pub fn applicable(&self) -> &[KotlinTarget] {
+        &self.targets[..usize::from(self.len)]
+    }
+
+    /// The applicable targets as kotlinc's WRONG_ANNOTATION_TARGET lists them, comma-separated.
+    /// The default set lists `backing field` after `setter`.
+    pub fn diagnostic_list(&self) -> String {
+        let mut list = Vec::new();
+        for target in self.applicable() {
+            list.push(target.description());
+            if self.default_set && *target == KotlinTarget::PropertySetter {
+                list.push("backing field");
+            }
+        }
+        list.join(", ")
+    }
+
+    pub fn allows(self, target: KotlinTarget) -> bool {
+        self.applicable().contains(&target)
+    }
+
+    /// Kotlin's use-site default for an annotation written on a property declaration: the first
+    /// applicable of `param` (a primary-constructor property parameter only) → `property` → `field`.
+    /// `None` when the annotation targets none of the three (its application is a frontend error).
+    pub fn property_declaration_site(
+        self,
+        on_constructor_parameter: bool,
+    ) -> Option<PropertyAnnotationSite> {
+        if on_constructor_parameter && self.allows(KotlinTarget::ValueParameter) {
+            return Some(PropertyAnnotationSite::ValueParameter);
+        }
+        if self.property_site && self.allows(KotlinTarget::Property) {
+            return Some(PropertyAnnotationSite::Property);
+        }
+        self.allows(KotlinTarget::Field)
+            .then_some(PropertyAnnotationSite::Field)
+    }
+
+    /// Select once from the owning declaration's facts. Modern defaulting adds a parameter and,
+    /// independently, a property (or an available backing field). Accessors are never implicit.
+    /// Explicit sites remain singleton selections; the checker validates their host contracts.
+    pub fn property_declaration_sites(
+        self,
+        host: PropertyAnnotationHost,
+        mode: PropertyAnnotationDefaultTargetMode,
+        explicit: Option<PropertyAnnotationSite>,
+    ) -> PropertyAnnotationSites {
+        let mut selected = PropertyAnnotationSites::default();
+        if let Some(site) = explicit {
+            selected.insert(site);
+            return selected;
+        }
+        if mode == PropertyAnnotationDefaultTargetMode::FirstOnly {
+            if let Some(site) = self.property_declaration_site(host.constructor_parameter) {
+                selected.insert(site);
+            }
+            return selected;
+        }
+        if host.constructor_parameter && self.allows(KotlinTarget::ValueParameter) {
+            selected.insert(PropertyAnnotationSite::ValueParameter);
+        }
+        if self.property_site && self.allows(KotlinTarget::Property) {
+            selected.insert(PropertyAnnotationSite::Property);
+        } else if host.has_backing_field && self.allows(KotlinTarget::Field) {
+            selected.insert(PropertyAnnotationSite::Field);
+        }
+        selected
+    }
+}
+
+/// The `@Target` policies published for annotation classes, keyed by classifier identity.
+///
+/// Only a VALID policy is semantic: it decides where an application may sit and where an
+/// unprefixed property application lands. A source class whose `@Target` application is itself
+/// invalid (an argument type mismatch) has no semantic policy; kotlinc still derives secondary
+/// WRONG_ANNOTATION_TARGET diagnostics from it, so that recovery is kept apart and is consulted only
+/// when reporting them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DeclaredTargetPolicies {
+    valid: crate::fx_hash::HashMap<super::TypeName, AnnotationTargets>,
+    invalid_recovery: crate::fx_hash::HashMap<super::TypeName, AnnotationTargets>,
+}
+
+impl DeclaredTargetPolicies {
+    /// Publish a valid policy; false when the classifier already has one.
+    pub fn publish_valid(
+        &mut self,
+        classifier: super::TypeName,
+        targets: AnnotationTargets,
+    ) -> bool {
+        !self.invalid_recovery.contains_key(&classifier)
+            && self.valid.insert(classifier, targets).is_none()
+    }
+
+    /// Record kotlinc's diagnostic recovery for an invalid `@Target` application; false when the
+    /// classifier already has a policy.
+    pub fn publish_invalid_recovery(
+        &mut self,
+        classifier: super::TypeName,
+        targets: AnnotationTargets,
+    ) -> bool {
+        !self.valid.contains_key(&classifier)
+            && self.invalid_recovery.insert(classifier, targets).is_none()
+    }
+
+    /// The semantic policy, when the classifier declares a valid `@Target`.
+    pub fn semantic(&self, classifier: super::TypeName) -> Option<AnnotationTargets> {
+        self.valid.get(&classifier).copied()
+    }
+
+    /// The targets WRONG_ANNOTATION_TARGET names: the valid policy, or for an invalid `@Target`
+    /// application kotlinc's recovery from it.
+    pub fn diagnostic(&self, classifier: super::TypeName) -> Option<AnnotationTargets> {
+        self.semantic(classifier)
+            .or_else(|| self.invalid_recovery.get(&classifier).copied())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AnnotationTargets, KotlinTarget};
+
+    #[test]
+    fn modern_default_selects_parameter_plus_property_instead_of_field_or_accessor() {
+        use super::{PropertyAnnotationDefaultTargetMode as Mode, PropertyAnnotationSite as Site};
+        let targets = AnnotationTargets::kotlin([
+            KotlinTarget::ValueParameter,
+            KotlinTarget::Property,
+            KotlinTarget::Field,
+            KotlinTarget::PropertyGetter,
+        ]);
+        let host = super::PropertyAnnotationHost {
+            constructor_parameter: true,
+            has_backing_field: true,
+        };
+        let modern = targets.property_declaration_sites(host, Mode::ParamProperty, None);
+        assert_eq!(
+            modern,
+            super::PropertyAnnotationSites(
+                (1 << Site::ValueParameter as u8) | (1 << Site::Property as u8)
+            )
+        );
+        let old = targets.property_declaration_sites(host, Mode::FirstOnly, None);
+        assert_eq!(
+            old,
+            super::PropertyAnnotationSites(1 << Site::ValueParameter as u8)
+        );
+        let body = targets.property_declaration_sites(
+            super::PropertyAnnotationHost {
+                constructor_parameter: false,
+                ..host
+            },
+            Mode::ParamProperty,
+            None,
+        );
+        assert_eq!(
+            body,
+            super::PropertyAnnotationSites(1 << Site::Property as u8)
+        );
+    }
+
+    #[test]
+    fn modern_field_default_requires_real_backing_storage() {
+        use super::{PropertyAnnotationDefaultTargetMode as Mode, PropertyAnnotationSite as Site};
+        let targets =
+            AnnotationTargets::kotlin([KotlinTarget::ValueParameter, KotlinTarget::Field]);
+        let fieldless = super::PropertyAnnotationHost {
+            constructor_parameter: true,
+            has_backing_field: false,
+        };
+        assert_eq!(
+            targets.property_declaration_sites(fieldless, Mode::ParamProperty, None),
+            super::PropertyAnnotationSites(1 << Site::ValueParameter as u8)
+        );
+        let stored = targets.property_declaration_sites(
+            super::PropertyAnnotationHost {
+                has_backing_field: true,
+                ..fieldless
+            },
+            Mode::ParamProperty,
+            None,
+        );
+        assert_eq!(
+            stored,
+            super::PropertyAnnotationSites(
+                (1 << Site::ValueParameter as u8) | (1 << Site::Field as u8)
+            )
+        );
+    }
+
+    #[test]
+    fn explicit_property_sites_are_singletons_in_both_modes() {
+        use super::{PropertyAnnotationDefaultTargetMode as Mode, PropertyAnnotationSite as Site};
+        for mode in [Mode::FirstOnly, Mode::ParamProperty] {
+            for site in [
+                Site::ValueParameter,
+                Site::Property,
+                Site::Field,
+                Site::Getter,
+                Site::Setter,
+                Site::SetterParameter,
+            ] {
+                let selected = AnnotationTargets::DEFAULT.property_declaration_sites(
+                    super::PropertyAnnotationHost {
+                        constructor_parameter: true,
+                        has_backing_field: true,
+                    },
+                    mode,
+                    Some(site),
+                );
+                assert_eq!(selected, super::PropertyAnnotationSites(1 << site as u8));
+            }
+        }
+    }
+
+    #[test]
+    fn normalized_java_default_targets_select_parameter_and_field_not_property() {
+        use super::{PropertyAnnotationDefaultTargetMode as Mode, PropertyAnnotationSite as Site};
+        let selected = AnnotationTargets::java(&[]).property_declaration_sites(
+            super::PropertyAnnotationHost {
+                constructor_parameter: true,
+                has_backing_field: true,
+            },
+            Mode::ParamProperty,
+            None,
+        );
+        assert_eq!(
+            selected,
+            super::PropertyAnnotationSites(
+                (1 << Site::ValueParameter as u8) | (1 << Site::Field as u8)
+            )
+        );
+    }
+
+    fn described(targets: AnnotationTargets) -> Vec<&'static str> {
+        targets
+            .applicable()
+            .iter()
+            .map(|target| target.description())
+            .collect()
+    }
+
+    /// kotlinc's default target set lists `backing field` after `setter` in diagnostics, also
+    /// for a Java annotation without `@Target`, whose list ends with `expression`. A declared
+    /// `@Target` lists only its own entries.
+    #[test]
+    fn the_default_set_lists_the_backing_field_target_in_diagnostics() {
+        assert_eq!(
+            AnnotationTargets::DEFAULT.diagnostic_list(),
+            "class, annotation class, property, field, local variable, value parameter, \
+             constructor, function, getter, setter, backing field"
+        );
+        assert_eq!(
+            AnnotationTargets::java(&[]).diagnostic_list(),
+            "class, annotation class, property, field, local variable, value parameter, \
+             constructor, function, getter, setter, backing field, expression"
+        );
+        assert_eq!(
+            AnnotationTargets::kotlin([KotlinTarget::PropertySetter, KotlinTarget::Field])
+                .diagnostic_list(),
+            "setter, field"
+        );
+    }
+
+    /// kotlinc lists a Kotlin `@Target` in declared order, once per target.
+    #[test]
+    fn a_kotlin_target_keeps_its_declared_order() {
+        let targets = AnnotationTargets::kotlin([
+            KotlinTarget::Function,
+            KotlinTarget::Field,
+            KotlinTarget::Function,
+            KotlinTarget::Class,
+        ]);
+        assert_eq!(described(targets), ["function", "field", "class"]);
+    }
+
+    /// A Java `@Target` lists its mapped targets in target order, then `expression`.
+    #[test]
+    fn a_java_target_maps_its_element_types_like_kotlinc() {
+        let targets = AnnotationTargets::java(&["FIELD".into(), "TYPE".into()]);
+        assert_eq!(described(targets), ["class", "field", "file", "expression"]);
+        let targets = AnnotationTargets::java(&["METHOD".into(), "FIELD".into()]);
+        assert_eq!(
+            described(targets),
+            ["field", "function", "getter", "setter", "expression"]
+        );
+        assert_eq!(
+            targets.property_declaration_site(false),
+            Some(super::PropertyAnnotationSite::Field)
+        );
+    }
+}

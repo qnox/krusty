@@ -20,7 +20,7 @@
 use krusty::fx_hash::HashMap;
 
 use krusty::backend::class_tables::module_interfaces::ModuleInterfaces;
-use krusty::backend::class_tables::module_slots::PlanKey;
+use krusty::backend::class_tables::module_slots::{carried, PlanKey};
 use krusty::backend::class_tables::planned_itable::InterfaceEntry;
 use krusty::backend::class_tables::{function_key, Slot, SlotKey};
 use krusty::backend::interface_identity::{member_identity, property_member_identity};
@@ -69,11 +69,16 @@ pub(super) fn accessor_types(ty: Ty, setter: bool) -> (Vec<Ty>, Ty) {
     }
 }
 
-/// The parameters and result of a property accessor of a value of type `ty` on a member extension
-/// whose receiver is `receiver`: the receiver comes first, then (for a setter) the value.
-fn extension_accessor_types(receiver: Option<Ty>, ty: Ty, setter: bool) -> (Vec<Ty>, Ty) {
+/// The parameters and result of a property accessor of a value of type `ty` that takes `operands`
+/// (its context parameters, then a member extension's receiver): they come first, then (for a
+/// setter) the value.
+pub(super) fn operand_accessor_types(
+    operands: impl IntoIterator<Item = Ty>,
+    ty: Ty,
+    setter: bool,
+) -> (Vec<Ty>, Ty) {
     let (value, result) = accessor_types(ty, setter);
-    (receiver.into_iter().chain(value).collect(), result)
+    (operands.into_iter().chain(value).collect(), result)
 }
 
 /// What every recording of one file reads.
@@ -283,8 +288,13 @@ fn publish_identities(
                 continue;
             };
             let signature = match layout {
-                IrLocalPropertyLayout::Member { ty, .. } => {
-                    let (params, result) = accessor_types(*ty, setter);
+                IrLocalPropertyLayout::Member {
+                    ty,
+                    context_parameters,
+                    ..
+                } => {
+                    let (params, result) =
+                        operand_accessor_types(context_parameters.iter().copied(), *ty, setter);
                     member_signature(&params, result)?
                 }
                 // A member extension's accessor takes its extension receiver as a parameter.
@@ -438,14 +448,21 @@ impl FileRecorder<'_, '_, '_> {
             InterfaceEntry::Slot(Slot::AccessorBridge {
                 declared,
                 implemented,
-                receiver: None,
+                operands,
                 setter,
                 target_slot,
             }) => {
                 let implementation = self.slot_function(*target_slot)?;
-                let (declared_params, declared_result) = accessor_types(*declared, *setter);
-                let (implemented_params, implemented_result) =
-                    accessor_types(*implemented, *setter);
+                let (declared_params, declared_result) = operand_accessor_types(
+                    operands.iter().map(|&(declared, _)| declared),
+                    *declared,
+                    *setter,
+                );
+                let (implemented_params, implemented_result) = operand_accessor_types(
+                    operands.iter().map(|&(_, implemented)| implemented),
+                    *implemented,
+                    *setter,
+                );
                 self.thunk(
                     (&declared_params, declared_result),
                     (&implemented_params, implemented_result),
@@ -869,18 +886,31 @@ impl FileRecorder<'_, '_, '_> {
                 if self.implements(member.member) {
                     continue;
                 }
-                // A default the interface publishes, which the class does not override, is its own
-                // implementation: the exported body, not a slot of the class. So is an inherited
-                // default overriding the member, such as `CoroutineContext.Element.fold` for
+                // A default an interface publishes, which the class does not override, is its own
+                // implementation: the declared or exported body, not a slot of the class. That is
+                // the overridden member's own default, or an inherited interface's default
+                // overriding it, such as `CoroutineContext.Element.fold` for
                 // `CoroutineContext.fold`.
-                let implemented = if edge.implementation == edge.overridden
-                    && edge.implementation_function.is_some_and(|function| {
+                let interface_default = match edge.implementation {
+                    ResolvedFunctionOverrideTarget::External(implementation) => (implementation
+                        == target
+                        || self
+                            .recording
+                            .callables
+                            .callable(implementation)
+                            .is_some_and(|fact| fact.owner_is_interface))
+                    .then_some(implementation),
+                    ResolvedFunctionOverrideTarget::Module(_) => None,
+                };
+                let implemented = if let Some(default) = interface_default.filter(|_| {
+                    edge.implementation_function.is_some_and(|function| {
                         ir.functions[function as usize].dispatch_receiver
                             != Some(ir.classes[owner as usize].fq_name_id())
-                    }) {
+                    })
+                }) {
                     self.dependency_default_implementation(
                         member,
-                        target,
+                        default,
                         edge.implementation_function,
                     )
                 } else if let Some(default) = self.inherited_interface_default(edge) {
@@ -1074,8 +1104,14 @@ impl FileRecorder<'_, '_, '_> {
             }
         };
         let declared = member_signature(declaration.0, declaration.1)?;
-        let implemented =
-            member_signature(&edge.implementation_parameters, edge.implementation_result)?;
+        // What the placed function physically takes: a `suspend` override's frame carries its
+        // continuation after the source parameters and answers the erased result.
+        let (implemented_parameters, implemented_result) = carried(
+            &edge.implementation_parameters,
+            edge.implementation_result,
+            edge.suspend,
+        );
+        let implemented = member_signature(&implemented_parameters, implemented_result)?;
         let special_bridge = self
             .recording
             .classifiers
@@ -1090,7 +1126,7 @@ impl FileRecorder<'_, '_, '_> {
             });
         let adapters = self.adapters_for_placed(
             declaration,
-            (&edge.implementation_parameters, edge.implementation_result),
+            (&implemented_parameters, implemented_result),
             &declared,
             &implemented,
             &placed,
@@ -1179,10 +1215,19 @@ impl FileRecorder<'_, '_, '_> {
                 }
             }
         };
-        let declared_types =
-            extension_accessor_types(edge.declared_receiver, edge.declared_type, setter);
-        let implemented_types = extension_accessor_types(
-            edge.implementation_receiver,
+        let declared_types = operand_accessor_types(
+            edge.declared_contexts
+                .iter()
+                .copied()
+                .chain(edge.declared_receiver),
+            edge.declared_type,
+            setter,
+        );
+        let implemented_types = operand_accessor_types(
+            edge.implementation_contexts
+                .iter()
+                .copied()
+                .chain(edge.implementation_receiver),
             edge.implementation_type,
             setter,
         );

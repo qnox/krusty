@@ -27,7 +27,6 @@ mod default_value;
 mod dependency_access_policy;
 mod dependency_body_contract;
 mod dependency_body_modifiers;
-mod enhanced_nullability;
 pub mod function_classifiers;
 mod generic_signature;
 mod inline_body;
@@ -98,10 +97,10 @@ pub(crate) use dependency_body_contract::{
     DependencyBodyProviderRole, DependencyBodyProviderSnapshot, DependencyBodySnapshot,
 };
 pub(crate) use dependency_body_modifiers::KlibBodyDeclarationModifiers;
-pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnhancement};
 pub use inline_kind::InlineKind;
 pub use klib_body_accessor::DependencyGetterSignature;
 pub(crate) use klib_body_accessor::{KlibAccessorRole, KlibBodyAccessor};
+pub use krusty_core::enhanced_nullability::{EnhancedResult, TypeEnhancement};
 pub use param_flags::ParamFlags;
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_abi::PlatformAbi;
@@ -1153,6 +1152,14 @@ pub struct CallSig {
     /// True if a logical param is `vararg` (callers pack values into its array).
     pub vararg: bool,
     pub vararg_index: Option<usize>,
+    /// A callable-reference specialization's reading of the vararg, never published by a provider:
+    /// kotlinc mapped the reference's last input onto the vararg as its whole array, and then bound
+    /// the vararg's element type to that input
+    /// ([`Quirk::VarargReferenceTakesTypeVariableInputAsElement`], KT-90169). The adapter still
+    /// collects the input as one element, but the reference reports no vararg conversion.
+    ///
+    /// [`Quirk::VarargReferenceTakesTypeVariableInputAsElement`]: crate::kotlin_version::Quirk::VarargReferenceTakesTypeVariableInputAsElement
+    pub vararg_element_mapped_whole: bool,
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
@@ -1337,10 +1344,7 @@ pub fn map_call_args<T: Copy>(
     if errors.is_empty() {
         Ok(slots)
     } else {
-        Err(CallArgMappingFailure {
-            errors,
-            recovery_argument,
-        })
+        Err(CallArgMappingFailure { errors })
     }
 }
 

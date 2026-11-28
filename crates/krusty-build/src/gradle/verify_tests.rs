@@ -139,7 +139,7 @@ fn verify_task_reports_only_the_current_invocation() {
         "{output}"
     );
 
-    let kgp = std::env::var("KRUSTY_GRADLE_KGP_VERSION").unwrap_or_else(|_| "2.4.20".into());
+    let kgp = std::env::var("KRUSTY_GRADLE_KGP_VERSION").unwrap_or_else(|_| "2.4.21".into());
     let mut inventory = std::fs::read_dir(&records)
         .expect("records")
         .map(|entry| entry.expect("entry").path())

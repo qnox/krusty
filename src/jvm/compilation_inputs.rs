@@ -78,6 +78,46 @@ pub struct JvmCompilationInputInventory {
     common_expectation_klib: Option<PathBuf>,
 }
 
+/// One refusal of a `-Xjdk-release` selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JdkReleaseError {
+    message: String,
+    /// Whether kotlinc reports this refusal in these words (and so without krusty's prefix), as
+    /// opposed to a configuration error only krusty has.
+    kotlinc: bool,
+}
+
+impl JdkReleaseError {
+    fn kotlinc(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kotlinc: true,
+        }
+    }
+
+    fn krusty(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kotlinc: false,
+        }
+    }
+
+    /// The message line as the command line reports it.
+    pub fn report_line(&self) -> String {
+        if self.kotlinc {
+            format!("error: {}\n", self.message)
+        } else {
+            format!("krusty: error: {}\n", self.message)
+        }
+    }
+}
+
+impl std::fmt::Display for JdkReleaseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// The JDK API a compilation compiles against: a bootclasspath root, and the release view to read
 /// when that root is the JDK's `lib/ct.sym`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,27 +147,29 @@ impl JdkApi {
     pub fn for_release(
         jdk_home: Option<&Path>,
         release: Option<u16>,
-    ) -> Result<Option<JdkApi>, Vec<String>> {
+    ) -> Result<Option<JdkApi>, Vec<JdkReleaseError>> {
         let Some(release) = release else {
             return Ok(JdkApi::own(jdk_home));
         };
         let Some(home) = selected_jdk_home(jdk_home) else {
-            return Err(vec![format!(
+            return Err(vec![JdkReleaseError::krusty(format!(
                 "-Xjdk-release={release} needs a JDK: pass -jdk-home or set JAVA_HOME"
-            )]);
+            ))]);
         };
         let unavailable = |reason: String| {
             let mut errors = Vec::new();
             if release >= 9 {
-                errors.push("module java.base cannot be found in the module graph".to_string());
+                errors.push(JdkReleaseError::kotlinc(
+                    "module java.base cannot be found in the module graph",
+                ));
             }
-            errors.push(reason);
+            errors.push(JdkReleaseError::kotlinc(reason));
             errors
         };
         let symbols = home.join("lib").join("ct.sym");
         let releases = if symbols.is_file() {
             crate::jvm::classpath::ct_sym_index::ct_sym_releases(&symbols)
-                .map_err(|error| vec![error])?
+                .map_err(|error| vec![JdkReleaseError::kotlinc(error)])?
         } else {
             None
         };
@@ -144,25 +186,37 @@ impl JdkApi {
         {
             return match JdkApi::own(Some(&home)) {
                 Some(own) => Ok(Some(own)),
-                None => Err(vec![format!(
+                None => Err(vec![JdkReleaseError::krusty(format!(
                     "-Xjdk-release={release} is the JDK's own release, but {} has neither \
                      lib/modules nor jre/lib/rt.jar",
                     home.display()
-                )]),
+                ))]),
             };
         }
         match u8::try_from(release)
             .ok()
             .filter(|release| releases.contains(release))
         {
-            Some(release) => Ok(Some(JdkApi {
-                root: symbols,
-                ct_sym_release: Some(release),
+            Some(release) => {
+                crate::jvm::classpath::ct_sym_index::validate_module_descriptors(&symbols, release)
+                    .map_err(|error| vec![JdkReleaseError::kotlinc(error)])?;
+                Ok(Some(JdkApi {
+                    root: symbols,
+                    ct_sym_release: Some(release),
+                }))
+            }
+            None => Err(unavailable(match releases.last() {
+                // Before JDK 12 the archive keeps module descriptors in `<release>-modules`
+                // folders, and kotlinc names the missing signatures rather than the option.
+                Some(&own) if own < 12 => format!(
+                    "can't find modules signatures in `ct.sym` file for `-Xjdk-release={release}` in {}",
+                    symbols.display()
+                ),
+                _ => format!(
+                    "'-Xjdk-release={release}' option is not supported by used JDK: {}",
+                    home.display()
+                ),
             })),
-            None => Err(unavailable(format!(
-                "'-Xjdk-release={release}' option is not supported by used JDK: {}",
-                home.display()
-            ))),
         }
     }
 }
@@ -486,6 +540,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A JDK before 12 stores module descriptors apart, and kotlinc then reports the missing
+    /// signatures in `ct.sym` instead of an unsupported option.
+    #[test]
+    fn a_release_a_jdk_before_12_does_not_describe_names_the_missing_module_signatures() {
+        let root = std::env::temp_dir().join(format!(
+            "krusty-jvm-jdk-release-old-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("lib")).expect("mkdir");
+        std::fs::write(root.join("lib/modules"), b"jimage").expect("modules");
+        let symbols = root.join("lib/ct.sym");
+        let file = std::fs::File::create(&symbols).expect("create ct.sym");
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, bytes) in [
+            ("8/java/lang/Object.sig", b"unread".as_slice()),
+            ("9A/java/lang/Object.sig", b"unread".as_slice()),
+            ("9A-modules/java.base/module-info.sig", b"unread".as_slice()),
+            ("B/java/lang/Object.sig", b"unread".as_slice()),
+            ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0".as_slice()),
+        ] {
+            archive.start_file(name, options).expect("start entry");
+            std::io::Write::write_all(&mut archive, bytes).expect("write entry");
+        }
+        archive.finish().expect("finish ct.sym");
+        assert_eq!(
+            JdkApi::for_release(Some(&root), Some(12)),
+            Err(vec![
+                JdkReleaseError::kotlinc("module java.base cannot be found in the module graph"),
+                JdkReleaseError::kotlinc(format!(
+                    "can't find modules signatures in `ct.sym` file for `-Xjdk-release=12` in {}",
+                    symbols.display()
+                )),
+            ])
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// `-Xjdk-release` selects from the releases `ct.sym` names: its newest is the JDK's own and
     /// reads the module image, an older one reads that release's signatures, and one it does not
     /// name, or a JDK without `ct.sym`, is reported in kotlinc's words.
@@ -511,13 +608,13 @@ mod tests {
         };
         assert_eq!(
             JdkApi::for_release(Some(&root), Some(8)),
-            Err(vec![missing(8)])
+            Err(vec![JdkReleaseError::kotlinc(missing(8))])
         );
         assert_eq!(
             JdkApi::for_release(Some(&root), Some(11)),
             Err(vec![
-                "module java.base cannot be found in the module graph".to_string(),
-                missing(11)
+                JdkReleaseError::kotlinc("module java.base cannot be found in the module graph"),
+                JdkReleaseError::kotlinc(missing(11))
             ])
         );
 
@@ -564,13 +661,13 @@ mod tests {
         };
         assert_eq!(
             JdkApi::for_release(Some(&root), Some(7)),
-            Err(vec![not_supported(7)])
+            Err(vec![JdkReleaseError::kotlinc(not_supported(7))])
         );
         assert_eq!(
             JdkApi::for_release(Some(&root), Some(11)),
             Err(vec![
-                "module java.base cannot be found in the module graph".to_string(),
-                not_supported(11)
+                JdkReleaseError::kotlinc("module java.base cannot be found in the module graph"),
+                JdkReleaseError::kotlinc(not_supported(11))
             ])
         );
 

@@ -12,8 +12,11 @@ use crate::language_version::LanguageVersion;
 use crate::libraries::AnnotationElementDefault;
 use crate::types::{TypeName, TypeNameList};
 
+mod field_annotations;
 mod member_nullability_attributes;
 mod method_annotations;
+
+pub use field_annotations::{field_annotations, FieldAnnotations};
 
 pub use method_annotations::{
     method_annotations, read_method_annotation_applications, read_method_annotations,

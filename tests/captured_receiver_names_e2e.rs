@@ -62,26 +62,3 @@ fn lifted_callables_name_captured_receivers_like_kotlinc() {
         &["Holder", "CapturedReceiverNamesKt"],
     );
 }
-
-/// Kotlin 2.4.20 removed the legacy `context(Type)` source form. On older supported references,
-/// pin its distinct `$context_receiver_N` provenance as an exact facade-byte comparison.
-#[test]
-fn a_lifted_legacy_context_receiver_keeps_its_own_role() {
-    if krusty::kotlin_version::environment_release()
-        >= krusty::kotlin_version::KotlinVersion::V2_4_20
-    {
-        return;
-    }
-    let source = "// LANGUAGE: +ContextReceivers\n\
-        class LegacyOutcome\n\
-        class LegacyReceiver\n\
-        context(value: LegacyReceiver)\n\
-        fun consumeLegacy(): LegacyOutcome = LegacyOutcome()\n\
-        context(LegacyReceiver)\n\
-        fun legacy(): () -> LegacyOutcome = { consumeLegacy() }\n";
-    common::assert_classes_identical_to_kotlinc(
-        "LegacyCapturedReceiver",
-        source,
-        &["LegacyCapturedReceiverKt"],
-    );
-}

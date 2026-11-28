@@ -3,6 +3,7 @@
 //! Each one forwards to an already-selected declaration; nothing here looks a target up, and the
 //! bridge's own shape follows that declaration's rather than the call site's.
 
+use super::inherited_member_target::InheritedMemberTarget;
 use super::*;
 
 pub(super) fn emit_function_reference_access_bridge(
@@ -131,6 +132,24 @@ pub(super) fn emit_jd_access_bridge(
     decl_line: u32,
     member: JdAccessBridgeMember<'_>,
 ) {
+    let target = InheritedMemberTarget {
+        params: member.param_tys,
+        ret: member.ret,
+        value_class_params: &[],
+        value_class_ret: None,
+    };
+    emit_specialized_jd_access_bridge(cw, interface, decl_line, member, target);
+}
+
+/// Emit the `access$<name>$jd` bridge an interface republishes an inherited default under: the
+/// bridge declares `member`'s shape and calls the default as `target` declares it.
+pub(super) fn emit_specialized_jd_access_bridge(
+    cw: &mut ClassWriter,
+    interface: krusty::types::TypeName,
+    decl_line: u32,
+    member: JdAccessBridgeMember<'_>,
+    target: InheritedMemberTarget<'_>,
+) {
     let JdAccessBridgeMember {
         name: member_name,
         param_tys,
@@ -145,7 +164,7 @@ pub(super) fn emit_jd_access_bridge(
         "an access bridge needs every declaration parameter identity"
     );
     let fq = interface.render();
-    let member_desc = method_descriptor(param_tys, ret);
+    let member_desc = method_descriptor(target.params, target.ret);
     let mut with_receiver = vec![Ty::obj_name(interface)];
     with_receiver.extend_from_slice(param_tys);
     let bridge_desc = method_descriptor(&with_receiver, ret);
@@ -158,16 +177,14 @@ pub(super) fn emit_jd_access_bridge(
         code.mark_line(decl_line);
     }
     code.aload(0);
-    let mut slot = 1u16;
-    for ty in param_tys {
-        load(*ty, slot, &mut code);
-        slot += slot_words(*ty);
-    }
+    target.load_arguments(cw, &mut code, 1, param_tys);
     if !suspend && decl_line != 0 {
         code.mark_line(decl_line);
     }
-    let target = cw.interface_methodref(&fq, member_name, &member_desc);
-    code.invokespecial(target, argument_words as i32, slot_words(ret) as i32);
+    let target_words = 1 + target.params.iter().map(|t| slot_words(*t)).sum::<u16>();
+    let member = cw.interface_methodref(&fq, member_name, &member_desc);
+    code.invokespecial(member, target_words as i32, slot_words(target.ret) as i32);
+    target.cast_result(cw, &mut code, ret);
     emit_return(ret, &mut code);
     code.ensure_locals(argument_words);
     code.link();
@@ -368,7 +385,6 @@ fn extends_target(
 /// The local-variable names of a protected property accessor's parameters: the setter's value is
 /// named as its declaration names it.
 fn protected_property_parameter_names(
-    quirks: krusty::kotlin_version::Quirks,
     property: &krusty::ir::IrModuleProperty,
     write: bool,
     accessor: &str,
@@ -378,14 +394,9 @@ fn protected_property_parameter_names(
     if write {
         let setter = property.setter_parameter.as_ref().map(std::slice::from_ref);
         names.push(setter.and_then(|identity| {
-            crate::parameter_names::resolved_local_variables(
-                quirks,
-                identity,
-                &[property.ty],
-                accessor,
-            )
-            .pop()
-            .flatten()
+            crate::parameter_names::resolved_local_variables(identity, &[property.ty], accessor)
+                .pop()
+                .flatten()
         }));
     }
     names
@@ -690,12 +701,8 @@ pub(super) fn cross_owner_member_calls(
                         if *write {
                             target_parameters.push(property.ty);
                         }
-                        let parameter_names = protected_property_parameter_names(
-                            ir.reference.quirks(),
-                            property,
-                            *write,
-                            &name,
-                        );
+                        let parameter_names =
+                            protected_property_parameter_names(property, *write, &name);
                         // A `@JvmField` property has no accessor: kotlinc's bridge reads or writes
                         // the field itself and is named after the accessor with a `$p` suffix.
                         let field = crate::module_calls::instance_jvm_field_owner(property)

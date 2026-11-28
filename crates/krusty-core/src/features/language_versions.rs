@@ -27,8 +27,7 @@ macro_rules! releases {
 }
 
 releases! {
-    V2_4_0 => "2.4.0",
-    V2_4_20 => "2.4.20",
+    V2_4_21 => "2.4.21",
 }
 
 /// The vendored policy text a supported release reads, for comparison with a fresh dump.
@@ -199,13 +198,12 @@ mod tests {
         assert!(LanguageVersionPolicy::for_release(KotlinVersion::new(2, 4, 30)).is_none());
     }
 
-    /// Recorded from kotlinc 2.4.0 and 2.4.20: 2.4 is the latest stable level, 2.0 and 2.1 are
-    /// deprecated in favour of 2.2, 1.9 is no longer supported, and 2.6 exists only in 2.4.20.
+    /// Recorded from kotlinc 2.4.21: 2.4 is the latest stable level, 2.0 and 2.1 are deprecated
+    /// in favour of 2.2, 1.9 is no longer supported, and 2.6 is the newest experimental level.
     #[test]
     fn the_policy_is_the_releases_own() {
-        let older = LanguageVersionPolicy::for_release(KotlinVersion::V2_4_0).unwrap();
-        let newer = LanguageVersionPolicy::for_release(KotlinVersion::V2_4_20).unwrap();
-        for policy in [older, newer] {
+        let policy = LanguageVersionPolicy::for_release(KotlinVersion::V2_4_21).unwrap();
+        {
             assert_eq!(policy.latest_stable(), LanguageVersion::V2_4);
             assert_eq!(policy.first_non_deprecated(false), LanguageVersion::V2_2);
             assert_eq!(policy.first_non_deprecated(true), LanguageVersion::V2_2);
@@ -217,9 +215,7 @@ mod tests {
                     .unsupported
             );
         }
-        assert_eq!(older.supported().last(), Some(&LanguageVersion::V2_5));
-        assert_eq!(newer.supported().last(), Some(&LanguageVersion::V2_6));
-        assert_eq!(older.language(LanguageVersion::V2_6), None);
+        assert_eq!(policy.supported().last(), Some(&LanguageVersion::V2_6));
     }
 
     #[test]

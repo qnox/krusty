@@ -32,6 +32,7 @@ mod inner_class_scopes;
 mod jar_package_census;
 mod jimage_catalog;
 mod jimage_locations;
+pub(crate) mod module_descriptor;
 use builtin_signatures::{
     builtin_bounds, builtin_declared_return, builtin_descriptor, builtin_erased, builtin_ty,
 };

@@ -61,28 +61,33 @@ pub(crate) struct FunctionValueConversionName {
     pub ordinal: u32,
 }
 
-/// A file's generated-class names once resolution has selected its function-value conversions.
-/// kotlinc names every conversion in the same walk as the lambdas and references around it, so a
-/// conversion shifts every later position of its sequence and names what its operand declares.
-/// Empty when the file converts no value: the naming walk's own provenance is then final.
+/// A file's generated-class names once resolution has selected its function-value conversions
+/// and its contract descriptions. kotlinc names every conversion in the same walk as the lambdas
+/// and references around it, so a conversion shifts every later position of its sequence and
+/// names what its operand declares. A call that selected the contract intrinsic is lifted into
+/// its function's contract description before that walk, so nothing inside it takes a position.
+/// `None` when the file has neither: the naming walk's own provenance is then final.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SettledGeneratedClassNames {
-    pub references: HashMap<ExprId, LocalClassNameProvenance>,
+    pub references: Option<HashMap<ExprId, LocalClassNameProvenance>>,
     pub conversions: HashMap<ExprId, FunctionValueConversionName>,
+    /// Local and anonymous classifier → its settled provenance. Their identities are published
+    /// with the file's declarations under the naming walk's names; these replace them when the
+    /// classes are realized. Empty when the naming walk's names are final.
+    pub classes: HashMap<DeclId, LocalClassNameProvenance>,
 }
 
 impl SettledGeneratedClassNames {
     /// The provenance of the callable reference or lambda `expression`: the settled walk's when
-    /// the file converts a value, else the naming walk's own.
+    /// resolution changed what the walk numbers, else the naming walk's own.
     pub fn reference<'a>(
         &'a self,
         file: &'a File,
         expression: ExprId,
     ) -> Option<&'a LocalClassNameProvenance> {
-        if self.conversions.is_empty() {
-            file.callable_reference_provenance.get(&expression.0)
-        } else {
-            self.references.get(&expression)
+        match &self.references {
+            Some(references) => references.get(&expression),
+            None => file.callable_reference_provenance.get(&expression.0),
         }
     }
 }
@@ -108,22 +113,30 @@ pub(super) fn restore_retained_classifier_source_names(mut files: Vec<File>) -> 
     files
 }
 
-/// Replay the naming walk of `file` knowing which values resolution converted, from the sequence
-/// positions its first walk started at. Local and anonymous classifiers keep the names the first
-/// walk gave them: their identities are published with the file's declarations before any body is
-/// resolved.
+/// What resolution decided that changes which nodes the naming walk numbers.
+pub(crate) struct ResolvedNamingFacts {
+    /// The function values resolution converted.
+    pub converted: crate::fx_hash::HashSet<ExprId>,
+    /// The calls that selected the contract intrinsic `kotlin.contracts.contract`.
+    pub contract_descriptions: crate::fx_hash::HashSet<ExprId>,
+}
+
+/// Replay the naming walk of `file` knowing what resolution decided, from the sequence positions
+/// its first walk started at. kotlinc names every generated class in one walk after resolution, so
+/// the replay names all of them: lambdas, references, conversions, and local and anonymous classes.
 pub(crate) fn settle_generated_class_names(
     file: &File,
-    converted: &crate::fx_hash::HashSet<ExprId>,
+    resolved: ResolvedNamingFacts,
 ) -> SettledGeneratedClassNames {
-    if converted.is_empty() {
+    if resolved.converted.is_empty() && resolved.contract_descriptions.is_empty() {
         return SettledGeneratedClassNames::default();
     }
     let mut counters = file.generated_class_sequence_starts.clone();
-    let names = walk(file, &mut counters, Some(converted));
+    let names = walk(file, &mut counters, Some(&resolved));
     SettledGeneratedClassNames {
-        references: names.references,
+        references: Some(names.references),
         conversions: names.conversions,
+        classes: names.classes,
     }
 }
 
@@ -212,8 +225,8 @@ struct Inventor<'a> {
     counters: &'a mut HashMap<Vec<String>, u32>,
     names: InventedLocalNames,
     expression_depth: u32,
-    /// The function values resolution converted, once it has run.
-    converted: Option<&'a crate::fx_hash::HashSet<ExprId>>,
+    /// What resolution decided, once it has run.
+    resolved: Option<&'a ResolvedNamingFacts>,
     /// Conversions numbered so far in each enclosing callable, innermost last.
     conversion_scopes: Vec<u32>,
 }
@@ -227,14 +240,14 @@ pub(super) fn invent(file: &File, counters: &mut HashMap<Vec<String>, u32>) -> I
 fn walk<'a>(
     file: &'a File,
     counters: &'a mut HashMap<Vec<String>, u32>,
-    converted: Option<&'a crate::fx_hash::HashSet<ExprId>>,
+    resolved: Option<&'a ResolvedNamingFacts>,
 ) -> InventedLocalNames {
     let mut inventor = Inventor {
         file,
         counters,
         names: InventedLocalNames::default(),
         expression_depth: 0,
-        converted,
+        resolved,
         // A script's top-level statements convert in the file's own scope.
         conversion_scopes: vec![0],
     };
@@ -548,6 +561,12 @@ impl Inventor<'_> {
     }
 
     fn expr(&mut self, expression: ExprId, chain: &Chain) {
+        if self
+            .resolved
+            .is_some_and(|resolved| resolved.contract_descriptions.contains(&expression))
+        {
+            return;
+        }
         self.expression_depth = self
             .expression_depth
             .checked_add(1)
@@ -569,8 +588,8 @@ impl Inventor<'_> {
     /// inside it; the returned chain is where the operand is walked.
     fn function_value_conversion(&mut self, expression: ExprId, chain: &Chain) -> Option<Chain> {
         if !self
-            .converted
-            .is_some_and(|converted| converted.contains(&expression))
+            .resolved
+            .is_some_and(|resolved| resolved.converted.contains(&expression))
         {
             return None;
         }

@@ -3,23 +3,122 @@
 //! Equality unification treats `In<Nothing?>` and `In<Left>` as `E = Left`. Those arguments are
 //! upper bounds: their solution is `Nothing? & Left`, which is `Nothing`.
 
+use crate::ast::DeclId;
+use crate::fx_hash::HashMap;
 use crate::libraries::GenericSig;
 use crate::symbol_resolver::{CallArgKind, GSigBinds};
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
 use super::super::Signature;
+use super::ProductionSignatureSemantics;
 
-pub(super) fn demanded_source_result(
+/// The demanded signature of a selected source callable and the call's inputs it is specialized by.
+#[derive(Clone, Copy)]
+pub(super) struct DemandedSourceCall<'a> {
+    pub(super) receiver: Option<Ty>,
+    pub(super) signature: &'a crate::fir::ResolvedSignature,
+    pub(super) arguments: &'a [Ty],
+    pub(super) argument_kinds: Option<&'a [CallArgKind]>,
+    pub(super) explicit_type_arguments: &'a [Ty],
+    pub(super) expected: Option<Ty>,
+}
+
+impl ProductionSignatureSemantics<'_> {
+    pub(super) fn apply_demanded_source_callable(
+        &self,
+        source: (u32, u32),
+        receiver: Option<Ty>,
+        signature: &crate::fir::ResolvedSignature,
+        arguments: &[Ty],
+        argument_kinds: Option<&[CallArgKind]>,
+        explicit_type_arguments: &[Ty],
+        expected: Option<Ty>,
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        let declaration = DeclId(source.1);
+        let Some(callable) = self
+            .table
+            .funs
+            .values()
+            .flatten()
+            .chain(
+                self.table
+                    .ext_funs
+                    .values()
+                    .flat_map(HashMap::values)
+                    .flatten(),
+            )
+            .find(|callable| {
+                callable.source_file == Some(source.0) && callable.source_decl == Some(declaration)
+            })
+        else {
+            crate::trace_compiler!(
+                "signature",
+                "demanded source callable missing source={source:?}",
+            );
+            return Err(Self::failure());
+        };
+        let call = DemandedSourceCall {
+            receiver,
+            signature,
+            arguments,
+            argument_kinds,
+            explicit_type_arguments,
+            expected,
+        };
+        self.apply_demanded_callable(source.0, callable, call)
+    }
+
+    /// The same specialization for a selection that carries only its stable declaration identity
+    /// and no top-level source key: a member extension imported from an object.
+    pub(super) fn apply_demanded_declared_callable(
+        &self,
+        declaration: crate::fir::DeclarationId,
+        call: DemandedSourceCall<'_>,
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        let callable = self.callable_signature(declaration);
+        let stub = self.headers.stub(declaration);
+        let (Some(callable), Some(stub)) = (callable, stub) else {
+            return Err(Self::failure());
+        };
+        self.apply_demanded_callable(stub.source.raw(), callable, call)
+    }
+
+    fn apply_demanded_callable(
+        &self,
+        file: u32,
+        callable: &Signature,
+        call: DemandedSourceCall<'_>,
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, file);
+        let semantic_source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn SymbolSource,
+            &*self.table.libraries as &dyn SymbolSource,
+        ]);
+        let result = demanded_source_result(&semantic_source, callable, &call);
+        crate::trace_compiler!(
+            "signature",
+            "apply demanded source callable file={file} expected={:?} arguments={:?} result={result:?}",
+            call.expected,
+            call.arguments,
+        );
+        crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure())
+    }
+}
+
+fn demanded_source_result(
     source: &dyn SymbolSource,
     callable: &Signature,
-    signature: &crate::fir::ResolvedSignature,
-    receiver: Option<Ty>,
-    arguments: &[Ty],
-    argument_kinds: Option<&[CallArgKind]>,
-    explicit_type_arguments: &[Ty],
-    expected: Option<Ty>,
+    call: &DemandedSourceCall<'_>,
 ) -> Ty {
+    let DemandedSourceCall {
+        receiver,
+        signature,
+        arguments,
+        argument_kinds,
+        explicit_type_arguments,
+        expected,
+    } = *call;
     let mut bindings = GSigBinds::default();
     if let Some(generic) = callable.generic_sig.as_ref() {
         bindings.extend(

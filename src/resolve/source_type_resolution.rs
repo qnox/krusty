@@ -6,6 +6,7 @@
 
 use crate::ast::{File, TypeRef};
 use crate::diag::DiagSink;
+use crate::diagnostic_wording::unresolved_reference;
 use crate::types::{type_name, Ty, TyKind, TypeName};
 
 use super::{ClassNames, ClassifierBindingError, SymbolTable, TParams};
@@ -380,13 +381,10 @@ pub(super) fn ty_of_ref_with(
             // The signature pass reports an ambiguous classifier with its candidates.
             Some(ClassifierBindingError::Ambiguous(_)) => {}
             Some(ClassifierBindingError::Unresolved(segment)) => {
-                diags.error(reference.span, format!("unresolved reference '{segment}'."));
+                diags.report_error(reference.span, unresolved_reference(segment));
             }
             None => {
-                diags.error(
-                    reference.span,
-                    format!("unresolved reference '{}'.", reference.name),
-                );
+                diags.report_error(reference.span, unresolved_reference(&reference.name));
             }
         }
         Ty::Error

@@ -1621,28 +1621,20 @@ mod tests {
 
     #[test]
     fn language_wire_preserves_the_selected_reference_release() {
-        let old = LanguageSettings::for_release(
-            KotlinVersion::V2_4_0,
-            LanguageVersion::V2_4,
-            Some(LanguageVersion::V2_4),
+        let selected = LanguageSettings::for_release(
+            KotlinVersion::V2_4_21,
+            LanguageVersion::V2_3,
+            Some(LanguageVersion::V2_2),
             &[],
         )
         .unwrap();
 
-        let wire = WireLanguage::of(&old);
-        assert_eq!(wire.reference_version, "2.4.0");
+        let wire = WireLanguage::of(&selected);
+        assert_eq!(wire.reference_version, "2.4.21");
         let carried = WireLanguage::settings(Some(&wire)).unwrap();
-        assert_eq!(carried.features.release(), KotlinVersion::V2_4_0);
-        assert_eq!(carried.language_version, LanguageVersion::V2_4);
-        assert_eq!(carried.api_version, LanguageVersion::V2_4);
-        assert!(
-            carried
-                .features
-                .table()
-                .get("ForbidValueClassRecursionViaTypeParameters")
-                .is_none(),
-            "the worker must not rebuild old-release semantics from its process-global target"
-        );
+        assert_eq!(carried.features.release(), KotlinVersion::V2_4_21);
+        assert_eq!(carried.language_version, LanguageVersion::V2_3);
+        assert_eq!(carried.api_version, LanguageVersion::V2_2);
     }
 
     #[test]
@@ -2075,7 +2067,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             diagnostics,
-            vec!["1:16 error unresolved reference 'hidden'."]
+            vec!["1:16 error Unresolved reference 'hidden'."]
         );
         std::fs::remove_dir_all(&directory).expect("remove classpath directory");
         std::fs::remove_dir_all(&cache_root).expect("remove dump cache");
@@ -2615,7 +2607,7 @@ mod tests {
         assert_eq!(diagnostic.span, Span::new(41, 48));
         assert_eq!(diagnostic.severity, Severity::Error);
         assert_eq!(diagnostic.kind, DiagnosticKind::Compiler);
-        assert_eq!(diagnostic.msg, "unresolved reference 'Missing'.");
+        assert_eq!(diagnostic.msg, "Unresolved reference 'Missing'.");
         assert!(analysis.library_definitions.is_empty());
         assert!(analysis.implementation_relations.is_empty());
         assert_eq!(analysis.hover.entry_count(), 0);
@@ -2700,7 +2692,7 @@ mod tests {
             .iter()
             .map(|diagnostic| diagnostic.message.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(messages, vec!["unresolved reference 'hidden'."]);
+        assert_eq!(messages, vec!["Unresolved reference 'hidden'."]);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2761,7 +2753,7 @@ mod tests {
         assert_eq!(diagnostic_messages(&analyses[0]), Vec::<&str>::new());
         assert_eq!(
             diagnostic_messages(&analyses[1]),
-            vec!["unresolved reference 'hidden'."]
+            vec!["Unresolved reference 'hidden'."]
         );
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -2780,7 +2772,7 @@ mod tests {
         assert_eq!(diagnostic_messages(&analyses[0]), Vec::<&str>::new());
         assert_eq!(
             diagnostic_messages(&analyses[1]),
-            vec!["unresolved reference 'p'."]
+            vec!["Unresolved reference 'p'."]
         );
     }
 

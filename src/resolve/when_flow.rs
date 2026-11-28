@@ -263,7 +263,7 @@ impl Checker<'_> {
                 let mut casts = Vec::new();
                 let mut declined = Vec::new();
                 if truth {
-                    self.null_branch_narrowings(scope, subject, &mut casts);
+                    self.null_branch_narrowings(scope, subject, &mut casts, &mut declined);
                 } else {
                     self.null_check_narrowings(scope, subject, &mut casts, &mut declined);
                 }

@@ -163,7 +163,7 @@ impl Checker<'_> {
                         .ok()
                         .map(|_| {
                             (
-                                self.receiver_property_accessible(
+                                self.receiver_property_visible(
                                     property.visibility,
                                     property.owner,
                                     receiver,
@@ -286,7 +286,7 @@ impl Checker<'_> {
                 }));
                 // kotlinc's tower does not stop at an invisible member: a visible candidate at a
                 // later level wins, and the member is reported only when no level has one.
-                if self.hidden_property_read(&member, receiver).is_none() {
+                if self.property_read_visible(&member, receiver) {
                     return Ok(Some(member));
                 }
                 invisible = Some(member);
@@ -323,10 +323,7 @@ impl Checker<'_> {
                 Ok(Some(property)) => {
                     let member_extension =
                         PropertyReadSelection::MemberExtension(Box::new(property));
-                    if self
-                        .hidden_property_read(&member_extension, receiver)
-                        .is_none()
-                    {
+                    if self.property_read_visible(&member_extension, receiver) {
                         return Ok(Some(member_extension));
                     }
                     invisible.get_or_insert(member_extension);
@@ -364,7 +361,7 @@ impl Checker<'_> {
                 }),
                 (!type_variables.is_empty()).then_some(receiver),
             );
-            if self.hidden_property_read(&extension, receiver).is_none() {
+            if self.property_read_visible(&extension, receiver) {
                 return Ok(Some(extension));
             }
             invisible.get_or_insert(extension);
@@ -387,7 +384,7 @@ impl Checker<'_> {
         let Some(member) = self.resolver().select_member_property(receiver, name) else {
             return false;
         };
-        let visible = self.receiver_property_accessible(
+        let visible = self.receiver_property_visible(
             member.visibility,
             member.owner,
             receiver,
@@ -404,6 +401,17 @@ impl Checker<'_> {
                         | PropertyReadSelection::Extension(..)
                 ))
             )
+    }
+
+    /// Whether the site can see a read's property, a `@Suppress` of the visibility errors
+    /// ignored. The read's tower passes over an invisible candidate for a visible one at a later
+    /// level; the suppression only lets the invisible one stand when no level has a visible one.
+    fn property_read_visible(&self, selection: &PropertyReadSelection, receiver: Ty) -> bool {
+        selection
+            .hidden_from(receiver, |visibility, owner, probed, callable| {
+                self.receiver_property_visible(visibility, owner, probed, callable)
+            })
+            .is_none()
     }
 
     pub(super) fn hidden_property_read(

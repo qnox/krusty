@@ -14,7 +14,7 @@ use crate::ir::{for_each_child, Callee, ClassId, ExprId, IrCheckedOperation, IrE
 use crate::plugins::runtime_declarations::{
     BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction, RuntimeRequirement,
 };
-use crate::plugins::{PluginRejection, PluginRelease, PluginSourceView};
+use crate::plugins::{PluginRejection, PluginSourceView};
 use crate::types::{type_name, wk, Ty, TypeName, Visibility};
 
 const PACKAGE: &str = "kotlinx/atomicfu";
@@ -284,7 +284,6 @@ pub(super) fn record(
     source: &PluginSourceView<'_>,
     runtime: &mut dyn PluginRuntime,
     rejections: &mut Vec<PluginRejection>,
-    release: Option<PluginRelease>,
     target: Option<CompilationTarget>,
 ) {
     let mut recorder = Recorder {
@@ -292,7 +291,6 @@ pub(super) fn record(
         source,
         runtime,
         rejections,
-        release,
         target,
         updaters: Vec::new(),
         directs: Vec::new(),
@@ -324,7 +322,6 @@ struct Recorder<'a, 'b> {
     source: &'a PluginSourceView<'b>,
     runtime: &'a mut dyn PluginRuntime,
     rejections: &'a mut Vec<PluginRejection>,
-    release: Option<PluginRelease>,
     target: Option<CompilationTarget>,
     updaters: Vec<FieldUpdater>,
     directs: Vec<DirectAtomic>,
@@ -407,23 +404,15 @@ impl Recorder<'_, '_> {
         self.rejections.push(PluginRejection {
             refusal: false,
             span: source.visibility_modifier.unwrap_or(source.name),
-            message: publication_error(declaration, self.release),
+            message: publication_error(declaration),
         });
         // The official checker reports mutability independently, after publication.
         if property.is_mutable() {
-            let consider = if self
-                .release
-                .is_some_and(|release| release < PluginRelease::V2_4_20)
-            {
-                "Please consider"
-            } else {
-                "Consider"
-            };
             self.rejections.push(PluginRejection {
 refusal: false,
                 span: source.keyword,
                 message: format!(
-                    "{consider} declaring `'{declaration}'` as a private val or internal val.\n\
+                    "Consider declaring `'{declaration}'` as a private val or internal val.\n\
                      If you need to declare a variable with accessors delegated to the atomic \
                      property value, you can use a delegated property declared within the same scope, e.g:\n\
                      ```\n\
@@ -808,19 +797,13 @@ refusal: false,
 }
 
 /// The official atomicfu publication diagnostic renders the complete written declaration.
-fn publication_error(declaration: &str, release: Option<PluginRelease>) -> String {
-    let (requirement, consider) = if release.is_some_and(|release| release < PluginRelease::V2_4_20)
-    {
-        ("should", "Please consider")
-    } else {
-        ("must", "Consider")
-    };
+fn publication_error(declaration: &str) -> String {
     format!(
         "\nTo prevent atomic properties from being referenced outside the current Kotlin module, \
-         they {requirement} be declared as either private or internal. Note, that `@kotlin.PublishedApi` \
+         they must be declared as either private or internal. Note, that `@kotlin.PublishedApi` \
          annotation, when applied to a class or a member with internal visibility, makes it \
          effectively public.\n\
-         {consider} setting the visibility of the property `'{declaration}'` to private or internal \
+         Consider setting the visibility of the property `'{declaration}'` to private or internal \
          or limit the scope of the containing class. \n\
          Alternatively, if you need to expose the atomic property value to the public, you can \
          use a delegated property declared within the same scope, e.g:\n\

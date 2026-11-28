@@ -58,3 +58,53 @@ fn runtime_array_views_retain_their_own_representation() {
         Ok(None),
     );
 }
+
+#[test]
+fn a_scalar_value_class_answers_the_storage_getter_its_declaration_names() {
+    use krusty::backend::DependencyGetterSignature;
+    let getter = |owner: &str, result: Ty, declaration: Option<&'static DeclaredValueClass>| {
+        DependencyGetterSignature {
+            owner: type_name(owner),
+            name: "data",
+            parameters: &[],
+            result,
+            value_declaration: declaration,
+        }
+    };
+    let int: &'static DeclaredValueClass = Box::leak(Box::new(declared(Ty::Int)));
+    let long: &'static DeclaredValueClass = Box::leak(Box::new(declared(Ty::Long)));
+    let bytes: &'static DeclaredValueClass =
+        Box::leak(Box::new(declared(Ty::obj("kotlin/ByteArray"))));
+    assert!(realizes_scalar_value_storage_getter(getter(
+        "kotlin/UInt",
+        Ty::Int,
+        Some(int)
+    )));
+    assert!(realizes_scalar_value_storage_getter(getter(
+        "kotlin/ULong",
+        Ty::Long,
+        Some(long)
+    )));
+    // No declaration naming this property, a different result, a class carried as an object, or
+    // a class carried as an array view each leave the read to the library body.
+    assert!(!realizes_scalar_value_storage_getter(getter(
+        "kotlin/UInt",
+        Ty::Int,
+        None
+    )));
+    assert!(!realizes_scalar_value_storage_getter(getter(
+        "kotlin/UInt",
+        Ty::Long,
+        Some(int)
+    )));
+    assert!(!realizes_scalar_value_storage_getter(getter(
+        "sample/Meters",
+        Ty::Int,
+        Some(int)
+    )));
+    assert!(!realizes_scalar_value_storage_getter(getter(
+        "kotlin/UByteArray",
+        Ty::obj("kotlin/ByteArray"),
+        Some(bytes)
+    )));
+}

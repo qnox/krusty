@@ -1,6 +1,7 @@
 //! The local properties a function body declares in source, by flow identity.
 
-use crate::fx_hash::HashSet;
+use crate::fx_hash::{HashMap, HashSet};
+use crate::types::Ty;
 
 /// Every local-property declaration (plain, `lateinit`, delegated, destructured, or a loop
 /// variable) records its flow identity here once, with the mutability its source declares. A
@@ -9,6 +10,9 @@ use crate::fx_hash::HashSet;
 pub(super) struct LocalProperties {
     declared: HashSet<u32>,
     source_var: HashSet<u32>,
+    /// The declared type of a `val` whose non-null initializer already narrows its binding
+    /// (`val x: Any? = Q` reads as `Any`).
+    initializer_narrowed: HashMap<u32, Ty>,
 }
 
 impl LocalProperties {
@@ -17,6 +21,17 @@ impl LocalProperties {
         if source_var {
             self.source_var.insert(identity);
         }
+    }
+
+    /// Record that `val identity: declared` reads as its non-null initializer's narrowing.
+    pub(super) fn record_initializer_narrowing(&mut self, identity: u32, declared: Ty) {
+        self.initializer_narrowed.insert(identity, declared);
+    }
+
+    /// The source-declared type of a `val` its initializer narrowed, which its binding no longer
+    /// shows.
+    pub(super) fn declared_before_initializer(&self, identity: u32) -> Option<Ty> {
+        self.initializer_narrowed.get(&identity).copied()
     }
 
     pub(super) fn contains(&self, identity: &u32) -> bool {

@@ -24,6 +24,9 @@ plugins:
   - ./tools/pregenerated
 --- tools/pregenerated/module.yaml
 product: jvm/amper-plugin
+settings:
+  kotlin:
+    version: 2.4.21
 --- tools/pregenerated/plugin.yaml
 tasks:
   declare:
@@ -35,6 +38,9 @@ generated:
       directory: ${tasks.declare.action.sourceDir}
 --- tools/direct/module.yaml
 product: jvm/amper-plugin
+settings:
+  kotlin:
+    version: 2.4.21
 --- tools/direct/plugin.yaml
 generated:
   sources:
@@ -42,6 +48,9 @@ generated:
       directory: ${module.rootDir}/generated-src/kotlin
 --- tools/elaborate/module.yaml
 product: jvm/amper-plugin
+settings:
+  kotlin:
+    version: 2.4.21
 --- tools/elaborate/plugin.yaml
 tasks:
   produce:
@@ -65,6 +74,9 @@ commands: []
 product: jvm/amper-plugin
 pluginInfo:
   id: renamed
+settings:
+  kotlin:
+    version: 2.4.21
 --- tools/named/plugin.yaml
 generated:
   sources:
@@ -83,6 +95,9 @@ plugins:
   direct: enabled
   elaborate: enabled
   named: enabled
+settings:
+  kotlin:
+    version: 2.4.21
 --- app/src/main.kt
 fun main() = Unit
 --- unlisted/module.yaml
@@ -91,6 +106,9 @@ repositories:
   - mavenLocal
 plugins:
   elsewhere: enabled
+settings:
+  kotlin:
+    version: 2.4.21
 --- unlisted/src/A.kt
 class A
 --- configured/module.yaml
@@ -101,6 +119,9 @@ plugins:
   pregenerated:
     enabled: true
     flavor: plain
+settings:
+  kotlin:
+    version: 2.4.21
 --- configured/src/B.kt
 class B
 --- missing/module.yaml
@@ -109,12 +130,18 @@ repositories:
   - mavenLocal
 plugins:
   pregenerated: enabled
+settings:
+  kotlin:
+    version: 2.4.21
 --- missing/src/C.kt
 class C
 --- file-root/module.yaml
 product: jvm/lib
 repositories:
   - mavenLocal
+settings:
+  kotlin:
+    version: 2.4.21
 --- file-root/src
 not a directory
 --- krusty-refusal

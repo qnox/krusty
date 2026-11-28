@@ -1137,7 +1137,7 @@ impl Emitter<'_> {
             },
         );
         self.inline_scopes = scopes;
-        let inlined = match inlined {
+        let mut inlined = match inlined {
             Ok(inlined) => inlined,
             Err(error) => {
                 for lease in leases {
@@ -1147,6 +1147,11 @@ impl Emitter<'_> {
                 return Err(error);
             }
         };
+        if self.ir.checked_type(call_expression) == Some(Ty::Unit) {
+            krusty::jvm::bytecode_passes::coroutines::markers::bind_generic_suspend_call_to_unit(
+                &mut inlined.nodes,
+            );
+        }
         let placement = InlinePlacement {
             call_expression,
             args,

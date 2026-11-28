@@ -666,8 +666,9 @@ fn a_local_reference_coerces_substituted_arguments_to_declared_slots() {
         "LocalGenericReferenceCoercion",
     );
 
-    // The generic slots are the lifted functions' declared `F`: the value's, and the vararg's
-    // element.
+    // The generic value slot is the lifted function's declared `F`. The vararg is built as the
+    // reference specialized it (`Array<Boolean>`), as kotlinc builds it, so its element needs no
+    // coercion; the call converts the array to the lifted parameter.
     let declared_slot = |index: usize| {
         let parameter = ir
             .functions
@@ -678,10 +679,21 @@ fn a_local_reference_coerces_substituted_arguments_to_declared_slots() {
             .params[0];
         parameter.array_elem().unwrap_or(parameter)
     };
-    let declared = [declared_slot(0), declared_slot(2)];
+    assert!(
+        declared_slot(2).is_ty_param(),
+        "the generic local vararg keeps its type parameter"
+    );
+    let declared = [declared_slot(0)];
     assert!(
         declared.iter().all(|slot| slot.is_ty_param()),
         "the generic local functions keep their type parameter: {declared:?}"
+    );
+    assert!(
+        ir.exprs.iter().any(|expression| matches!(
+            expression,
+            IrExpr::Vararg { array_type, .. } if array_type.array_read_elem() == Some(Ty::Boolean)
+        )),
+        "the local vararg is collected as the reference's specialized array"
     );
     let coercions = ir
         .exprs
@@ -698,7 +710,7 @@ fn a_local_reference_coerces_substituted_arguments_to_declared_slots() {
     assert_eq!(
         coercions.iter().map(|&(_, operand)| operand).collect::<Vec<_>>(),
         declared,
-        "the erased value and vararg element are coerced, but the identical value is not; ops={:?} functions={:?}",
+        "the erased value is coerced, but the identical value and the specialized vararg element are not; ops={:?} functions={:?}",
         ir.exprs
             .iter()
             .filter_map(|expression| match expression {

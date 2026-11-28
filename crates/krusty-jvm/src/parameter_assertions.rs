@@ -158,8 +158,7 @@ pub(super) fn realize(ir: &mut IrFile) {
         if !class.is_source_declared || class.is_sealed || private {
             continue;
         }
-        let assertion_names =
-            crate::parameter_names::constructor_assertions(ir.reference.quirks(), &class.ctor_args);
+        let assertion_names = crate::parameter_names::constructor_assertions(&class.ctor_args);
         for (parameter, assertion_name) in class.ctor_args.iter_mut().zip(assertion_names) {
             if parameter.check.is_some() {
                 continue;

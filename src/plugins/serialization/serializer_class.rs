@@ -134,7 +134,7 @@ pub(super) fn declare(
         owner_end_line,
         !type_params.is_empty(),
     );
-    statuses.record(ir, members);
+    super::generated_members::record_inherited_statuses(statuses, ir, members);
     let GeneratedSerializerMembers {
         descriptor,
         serialize,
@@ -275,7 +275,7 @@ pub(super) fn complete(
         )
         .expect("a plain serializable class has its declared $serializer");
     assert_eq!(ir.classes[ser_id as usize].fq_name_id(), serializer_name);
-    if plugin.serializer_type_parameters_are_bounded() && !type_params.is_empty() {
+    if !type_params.is_empty() {
         let bounded = ir
             .class_signature_name(ir.classes[class_id as usize].fq_name_id())
             .map(|signature| signature.type_params.clone())
