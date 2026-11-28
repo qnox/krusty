@@ -555,7 +555,10 @@ impl BodyLowering<'_, '_, '_> {
                         params,
                         *ret,
                         defaults,
-                        dispatch_receiver,
+                        dispatch_receiver.map(|value| c_calls::CCallReceiver {
+                            value,
+                            declared: declared_receiver,
+                        }),
                         args,
                     );
                 }

@@ -54,6 +54,12 @@ const SOURCES: &[&str] = &[
     "krusty_lang.c",
     "krusty_appendable.c",
     "krusty_fp.c",
+    "krusty_math_data.c",
+    "krusty_math_exp.c",
+    "krusty_math_expf.c",
+    "krusty_math_pow.c",
+    "krusty_math_powf.c",
+    "krusty_math_atan.c",
     "krusty_gc.c",
     "krusty_threads.c",
     "krusty_start.c",
@@ -65,6 +71,7 @@ const SOURCES: &[&str] = &[
 ];
 const HEADERS: &[&str] = &[
     "krusty_sys.h",
+    "krusty_math.h",
     "krusty_rt.h",
     "krusty_internal.h",
     "krusty_posix.h",

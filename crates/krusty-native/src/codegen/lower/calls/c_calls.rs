@@ -7,6 +7,14 @@
 
 use super::*;
 
+/// The value a call carries ahead of its arguments, with the type its declaration gives it when
+/// that is not the class it is an instance of (the receiver of a numeric extension).
+#[derive(Clone, Copy)]
+pub(super) struct CCallReceiver {
+    pub(super) value: u32,
+    pub(super) declared: Option<Ty>,
+}
+
 impl BodyLowering<'_, '_, '_> {
     pub(super) fn direct_c_call(
         &mut self,
@@ -14,7 +22,7 @@ impl BodyLowering<'_, '_, '_> {
         params: &[Ty],
         ret: Ty,
         defaults: &[u32],
-        dispatch_receiver: Option<u32>,
+        receiver: Option<CCallReceiver>,
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
         let symbol = function.symbol();
@@ -33,7 +41,7 @@ impl BodyLowering<'_, '_, '_> {
         }
         match function.abi() {
             krusty::libraries::CFunctionAbi::Interop => {
-                if dispatch_receiver.is_some() {
+                if receiver.is_some() {
                     return Err(declined!("a C function `{symbol}` called with a receiver"));
                 }
                 for ty in params.iter().chain([&ret]) {
@@ -51,14 +59,37 @@ impl BodyLowering<'_, '_, '_> {
                 self.runtime_call(symbol, params, ret, &arguments)
             }
             krusty::libraries::CFunctionAbi::Runtime => {
+                // The runtime's C functions take a number as the number it is: a `Double` crosses
+                // as a double, an object as the pointer it is. The declaration's own types say
+                // which, so a receiver of a numeric extension (`Double.pow`) is not boxed first.
+                let params: Vec<Ty> = params.iter().map(|ty| ty.canonical_semantic()).collect();
+                let ret = ret.canonical_semantic();
                 let mut arguments = Vec::with_capacity(args.len() + 1);
                 let mut carried = Vec::with_capacity(args.len() + 1);
-                if let Some(receiver) = dispatch_receiver {
-                    arguments.push(self.reference(receiver)?);
-                    carried.push(any());
+                if let Some(CCallReceiver {
+                    value: receiver,
+                    declared,
+                }) = receiver
+                {
+                    let receiver_ty = declared
+                        .map(|ty| ty.canonical_semantic())
+                        .filter(|ty| !matches!(self.carrier(*ty), Carrier::Ref));
+                    match receiver_ty {
+                        Some(ty) => {
+                            let Some(value) = self.coerce(receiver, ty)? else {
+                                return Ok(None);
+                            };
+                            arguments.push(value);
+                            carried.push(ty);
+                        }
+                        None => {
+                            arguments.push(self.reference(receiver)?);
+                            carried.push(any());
+                        }
+                    }
                 }
-                carried.extend_from_slice(params);
-                arguments.extend(self.arguments(args, params)?);
+                carried.extend_from_slice(&params);
+                arguments.extend(self.arguments(args, &params)?);
                 if self.terminated {
                     return Ok(None);
                 }

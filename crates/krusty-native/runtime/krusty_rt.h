@@ -1333,6 +1333,16 @@ kt_long kt_abs_long(kt_long value);
 kt_float kt_abs_float(kt_float value);
 kt_double kt_abs_double(kt_double value);
 
+/* The `kotlin.math` functions Kotlin/Native answers from the platform's libm, which this runtime
+   does not link: `krusty_math_*.c` carries them under the entry names the standard library binds
+   them to with `@GCUnsafeCall`. Each takes and answers its own width. */
+kt_double Kotlin_math_exp(kt_double x);
+kt_float Kotlin_math_expf(kt_float x);
+kt_double Kotlin_math_Double_pow(kt_double x, kt_double y);
+kt_float Kotlin_math_Float_pow(kt_float x, kt_float y);
+kt_double Kotlin_math_atan(kt_double x);
+kt_double Kotlin_math_atan2(kt_double y, kt_double x);
+
 /* `countLeadingZeroBits`: the zero bits above the highest set one; the whole width for zero. */
 kt_int kt_count_leading_zero_bits_int(kt_int value);
 kt_int kt_count_leading_zero_bits_long(kt_long value);
