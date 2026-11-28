@@ -1133,7 +1133,6 @@ functions/kt47527.kt
 functions/kt58825_arrayOverloads.kt
 functions/localFunction.kt
 functions/localFunctions/callBetweenLocalFunctions.kt
-functions/localFunctions/definedWithinLambdaInnerUsage1.kt
 functions/localFunctions/kt2895.kt
 functions/localFunctions/kt4783.kt
 functions/localFunctions/kt4784.kt
@@ -1193,7 +1192,6 @@ inference/pcla/issues/kt60447a.kt
 inference/pcla/issues/kt60447b.kt
 inference/pcla/issues/kt63840b.kt
 inference/pcla/issues/kt63840c.kt
-inference/pcla/issues/kt65300g.kt
 inference/pcla/issues/kt65300i.kt
 inference/pcla/issues/kt65300j.kt
 inference/pcla/issues/kt66272.kt
@@ -1214,7 +1212,6 @@ inference/pcla/substituteStubTypeIntolambdaParameterDescriptor.kt
 inference/pcla/substitutelambdaExtensionReceiverType.kt
 inference/plusAssignInsideLambda.kt
 inference/safeCastWithElvis.kt
-inference/sumOfOverloads.kt
 inference/tryCatchAtAssignmentWithSmartCast.kt
 inference/whenAtAssignmentWithSmartCast.kt
 inference/whenAtAssignmentWithSmartCastInsideCapturedLambda.kt
@@ -1240,7 +1237,6 @@ inline/inline21.kt
 inline/inline26.kt
 inline/inline5.kt
 inline/inlineCallInsideStringTemplate.kt
-inline/inlineFunctionInLambda.kt
 inline/inlineInInlineWithLambdaPrivate.kt
 inline/inlineLambdaWithCapture.kt
 inline/innerInlineFunCapturesOuter.kt
@@ -1259,7 +1255,6 @@ inline/redundantCoercionsCleaner.kt
 inline/rootConstructor.kt
 inline/safeCall.kt
 inline/severalClosures.kt
-inline/severalUsage.kt
 inline/typeParameterSymbolIsUnbound.kt
 inline/vararg.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
@@ -1589,10 +1584,8 @@ localClasses/localExtendsInnerAndReferencesOuterMember.kt
 localClasses/nameWithWhitespace.kt
 localClasses/subclassingExtensionReceiverClass.kt
 localEscapeAnalysis/arraysFieldWrite.kt
-lower/forLoopsLowering/arrays.kt
 lower/forLoopsLowering/nested.kt
 lower/forLoopsLowering/progressions.kt
-lower/forLoopsLowering/sequences.kt
 lower/forLoopsLowering/withIndex.kt
 multiDecl/forRange/explicitRangeTo/int/MultiDeclForComponentExtensions.kt
 multiDecl/forRange/explicitRangeTo/int/MultiDeclForComponentExtensionsValCaptured.kt
