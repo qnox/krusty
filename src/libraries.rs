@@ -1108,6 +1108,11 @@ pub struct CallSig {
     pub reified_type_parameter_ordinals: Vec<u32>,
     /// Parameter names, parallel to the logical params — maps named arguments (`f(x = 1)`) to positions.
     pub param_names: Vec<String>,
+    /// The names a Java declaration wrote for its parameters, parallel to the logical parameters;
+    /// empty when the declaring class states none. Java declarations accept no named arguments, so
+    /// these are NOT [`Self::param_names`]: they exist so a diagnostic can render the declaration
+    /// as its author spelled it, and nothing maps an argument through them.
+    pub declared_parameter_names: Vec<String>,
     /// Provider-published semantic identities parallel to the logical parameter list. Context
     /// roles are typed at the declaration boundary; consumers never rediscover them from `_`, an
     /// empty metadata name, or another spelling convention.

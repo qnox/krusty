@@ -251,6 +251,8 @@ pub(crate) struct Member {
     pub(crate) name: String,
     pub(crate) tparams: Vec<(String, Option<SrcType>)>,
     pub(crate) params: Vec<SrcType>,
+    /// The declared names of `params`, in order: what a `MethodParameters` attribute carries.
+    pub(crate) param_names: Vec<String>,
     pub(crate) ret: Option<SrcType>,
     pub(crate) throws: Vec<SrcType>,
     pub(crate) access: u16,
@@ -1227,12 +1229,13 @@ fn type_decl_with_access(
         {
             p.i += 1;
             p.eat_punct('(').then_some(())?;
-            let (params, varargs) = param_list(p)?;
+            let (params, param_names, varargs) = param_list(p)?;
             let throws = skip_throws_and_body(p)?;
             decl.ctors.push(Member {
                 name: "<init>".into(),
                 tparams: mtparams,
                 params,
+                param_names,
                 ret: None,
                 throws,
                 access: (macc & (ACC_PUBLIC | ACC_PROTECTED | ACC_PRIVATE))
@@ -1246,12 +1249,13 @@ fn type_decl_with_access(
         ty.prepend_modifier_annotations(member_annotations);
         let name = p.ident()?;
         if p.eat_punct('(') {
-            let (params, varargs) = param_list(p)?;
+            let (params, param_names, varargs) = param_list(p)?;
             let throws = skip_throws_and_body(p)?;
             decl.methods.push(Member {
                 name,
                 tparams: mtparams,
                 params,
+                param_names,
                 ret: Some(ty),
                 throws,
                 access: macc | if varargs { ACC_VARARGS } else { 0 },
@@ -1358,6 +1362,7 @@ fn annotation_type_decl(
             name,
             tparams: Vec::new(),
             params: Vec::new(),
+            param_names: Vec::new(),
             ret: Some(ty),
             throws: Vec::new(),
             access: macc,
@@ -1394,19 +1399,21 @@ fn typed_parameter(p: &mut P) -> Option<(String, SrcType, bool)> {
 
 /// `( Type name, Type... name )` — parameter list (opening paren consumed). Varargs `...` maps to
 /// an array, exactly as javac compiles it.
-fn param_list(p: &mut P) -> Option<(Vec<SrcType>, bool)> {
+fn param_list(p: &mut P) -> Option<(Vec<SrcType>, Vec<String>, bool)> {
     let mut out = Vec::new();
+    let mut names = Vec::new();
     if p.eat_punct(')') {
-        return Some((out, false));
+        return Some((out, names, false));
     }
     loop {
-        let (_name, mut ty, parameter_is_varargs) = typed_parameter(p)?;
+        let (name, mut ty, parameter_is_varargs) = typed_parameter(p)?;
+        names.push(name);
         if parameter_is_varargs {
             // Java permits variable arity only in the final parameter. Requiring the closing delimiter
             // here rejects malformed declarations instead of retaining ACC_VARARGS on an earlier array.
             out.push(ty);
             p.eat_punct(')').then_some(())?;
-            return Some((out, true));
+            return Some((out, names, true));
         }
         // C-style array suffix on the NAME (`int a[]`).
         while p.eat_punct('[') {
@@ -1418,7 +1425,7 @@ fn param_list(p: &mut P) -> Option<(Vec<SrcType>, bool)> {
             continue;
         }
         p.eat_punct(')').then_some(())?;
-        return Some((out, false));
+        return Some((out, names, false));
     }
 }
 

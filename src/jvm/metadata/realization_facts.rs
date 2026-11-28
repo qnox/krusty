@@ -115,6 +115,7 @@ mod tests {
             descriptor: "(Ljava/lang/String;)V".to_string(),
             signature: None,
             parameter_nullability: Vec::new(),
+            parameter_names: Vec::new(),
             return_nullability: None,
             deprecated_hidden: false,
             deprecated_hidden_since: None,
