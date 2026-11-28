@@ -242,6 +242,14 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: false,
     }
+    /// A class literal whose receiver failed to resolve in an annotation argument also earns
+    /// `ANNOTATION_ARGUMENT_MUST_BE_CONST` beside the unresolved-reference error. From 2.5 the
+    /// failed resolution is the argument's only diagnostic.
+    UnresolvedClassLiteralReceiverIsNotConstant {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
     /// The Kotlin/Native and Kotlin/Wasm standard library's `ArrayList.addAll` makes room for the
     /// new elements before it reads the argument, so a range of the list being appended to is
     /// invalidated first: `list.addAll(list.subList(0, 2))` raises
