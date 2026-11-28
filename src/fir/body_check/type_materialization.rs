@@ -436,7 +436,15 @@ impl BodyFirChecker<'_> {
         // manufactures a second singleton nor leaves the original slot value on the stack.
         let stored_unit_view = storage_ty.get().canonical_semantic() == Ty::Unit
             && result_ty.get() == crate::types::stored_value_ty(Ty::Unit);
-        let conversion = (!stored_unit_view)
+        // A read view only ever narrows its storage. Between two nullable references that is a
+        // smart cast (`a is String?` on a `CharSequence?`), not the nullability widening an
+        // argument boundary would read the same pair as.
+        let nullable_narrowing = storage_ty != result_ty
+            && storage_ty.get().is_nullable()
+            && result_ty.get().is_nullable()
+            && storage_ty.get().is_reference()
+            && result_ty.get().is_reference();
+        let conversion = (!stored_unit_view && !nullable_narrowing)
             .then(|| self.selected_type_conversion(storage_ty, result_ty, origin))
             .flatten()
             .or_else(|| {

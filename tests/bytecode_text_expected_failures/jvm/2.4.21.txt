@@ -65,7 +65,6 @@ inline/reifiedSafeAsWithMutable.kt
 inline/syntheticPropertyReference.kt
 inlineClasses/boxingForNonLocalAndLabeledReturnsOfInlineClasses.kt
 inlineClasses/equalsIsCalledByInlineClass.kt
-inlineClasses/isCheckForInlineClass.kt
 inlineClasses/noManglingForFunctionsWithJvmName.kt
 inlineClasses/passInlineClassesWithSpreadOperatorToVarargs.kt
 inlineClasses/resultApiDoesntCallSpecializedEquals.kt

@@ -199,6 +199,16 @@ impl Checker<'_> {
                 let actual = if declared.non_null().is_fun() {
                     crate::symbol_resolver::classifier_callable_signature(&source, actual)
                         .unwrap_or(actual)
+                } else if matches!(actual.non_null().kind(), TyKind::Intersection(_)) {
+                    // A proven intersection binds the declared receiver through the constituent
+                    // that reaches it, as any other receiver binds through its applied supertype.
+                    // A postponed call's variable in a constituent stays free, as it did when the
+                    // candidate was collected for this receiver.
+                    let type_variables = self.postponed_type_variables_in(actual);
+                    crate::symbol_resolver::ReceiverMro::new(&source, actual)
+                        .with_type_variables(&type_variables)
+                        .binding_receiver(&source, declared)
+                        .unwrap_or(actual)
                 } else {
                     actual
                 };
