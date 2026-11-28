@@ -63,6 +63,8 @@ impl InheritedMemberTarget<'_> {
     pub(super) fn cast_result(&self, cw: &mut ClassWriter, code: &mut CodeBuilder, ret: Ty) {
         if let Some(carried) = self.value_class_ret {
             emit_value_class_unbox_adapter(cw, code, carried.owner, ret, carried.null_preserving);
+        } else if self.ret.is_reference() && ret.is_jvm_scalar() {
+            unbox_prim_from(cw, code, self.ret, ret);
         } else if self.ret != ret && self.ret.is_reference() && ret.is_reference() {
             let result = cw.class_ref(&krusty::jvm::names::instanceof_internal_name(ret));
             code.checkcast(result);
