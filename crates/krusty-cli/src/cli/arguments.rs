@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use krusty::kotlin_version::{KotlinVersion, KotlincDefects};
 use krusty::language_settings::LanguageSettings;
 use krusty::language_version::LanguageVersion;
-use krusty_jvm::ir_emit::{JvmDefaultMode, LambdaMode};
+use krusty_jvm::ir_emit::{JvmDefaultMode, LambdaMode, StringConcatMode};
 
 use krusty::features::{FeatureTable, LangFeatures, LanguageVersionPolicy};
 
@@ -378,14 +378,12 @@ pub(super) fn apply(
                 "unknown assertions mode: {text}, supported modes: [always-enable, always-disable, jvm, legacy]"
             )),
         },
-        // `-Xstring-concat` selects how a string concatenation is built from JVM 9 on. `inline`
-        // (`StringBuilder`) is emitted at every target; krusty's `invokedynamic` shape is the
-        // target default, so naming either `indy` mode explicitly is not modeled yet.
+        // `-Xstring-concat` selects how a string concatenation is built. `inline`
+        // (`StringBuilder`) is emitted at every target; both `indy` modes need JVM 9+.
         "-Xstring-concat" => match text {
-            "inline" => opts.inline_string_concat = true,
-            "indy" | "indy-with-constants" => opts.refuse(format!(
-                "{name}={text} selects an output shape krusty does not emit"
-            )),
+            "inline" => opts.string_concat = StringConcatMode::Inline,
+            "indy-with-constants" => opts.string_concat = StringConcatMode::IndyWithConstants,
+            "indy" => opts.string_concat = StringConcatMode::Indy,
             _ => opts.errors.push(format!(
                 "unknown `-Xstring-concat` mode: {text}\nSupported modes: inline, indy-with-constants, indy"
             )),

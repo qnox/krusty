@@ -72,7 +72,7 @@ impl<'a> CheckedEmitFacts<'a> {
             jvm_default: opts.jvm_default,
             lambda_modes: opts.lambda_modes,
             java_parameters: opts.java_parameters,
-            inline_string_concat: opts.inline_string_concat,
+            string_concat: opts.string_concat,
             inline_scopes_numbers: opts.inline_scopes_numbers,
             metadata_stamp: opts.metadata_stamp(),
             property_realizations: self.property_realizations,

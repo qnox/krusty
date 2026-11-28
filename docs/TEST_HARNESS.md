@@ -1067,6 +1067,12 @@ To inspect where bytes are lost, focus a case with `KRUSTY_BOX_ONLY=<substring>`
 score on for that selection, failed boxes included) and add `KRUSTY_BYTE_DIFF=1` for the first
 difference per class set in `target/byte_diff_report.txt` (see "Byte-Identity Differential Mode").
 
+`codegen/boxModernJdk` cases run on the JDK their directory names (`testsWithJava11`, `17`, `21`),
+with `--enable-preview` for `// ENABLE_JVM_PREVIEW` cases, and compile their Java sources on that
+JDK too. They join the JVM lane only with `KRUSTY_BOX_MODERN_JDK=1` and the JDKs installed
+(`JAVA_HOME_<N>_X64` or `KRUSTY_JDK_<N>_HOME`); a missing JDK fails the case. The lane stays opt-in
+until every case passes. `testsWithValhalla` needs a Valhalla JDK and is not discovered.
+
 Read the badges, or the `conformance` job of the latest master CI run, when you need today's
 figures; use the target-specific recipes locally when you need this checkout's.
 
