@@ -34,6 +34,9 @@ pub struct CoroutineRequest {
     /// the class declares for the lambda's parameters, by normalized descriptor with the highest
     /// index of each.
     pub suspend_lambda: Option<Vec<(String, usize)>>,
+    /// Whether the reference release checks a suspend lambda's resumption result once, before
+    /// the `tableswitch`, when no suspension point lies inside a protected range.
+    pub lambda_checks_unprotected_result_once: bool,
 }
 
 /// What the transformation of one function found.
@@ -142,6 +145,7 @@ impl ClassWriter {
                     .line_number
                     .ok_or("a suspend lambda's invokeSuspend has no declaration line")?,
                 declared_spill_fields: &declared_spill_fields,
+                checks_unprotected_result_once: request.lambda_checks_unprotected_result_once,
             };
             let machine =
                 transform_suspend_lambda(node, &lambda).map_err(|error| describe(&error))?;

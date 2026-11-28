@@ -33,6 +33,10 @@ pub(crate) struct SuspendLambda<'a> {
     /// The spill fields the lambda class already declares for its parameters, which the machine
     /// reuses rather than declares again (`initialVarsCountByType`), in the class's order.
     pub declared_spill_fields: &'a [DeclaredSpillFields<'a>],
+    /// Whether the reference release checks the resumption result once, before the
+    /// `tableswitch`, when no suspension point lies inside a protected range (kotlinc 2.5's
+    /// `shouldHoistThrowOnFailure`); before 2.5 every state checks it.
+    pub checks_unprotected_result_once: bool,
 }
 
 /// `invokeSuspend`'s own descriptor.
@@ -86,10 +90,12 @@ pub(crate) fn transform_suspend_lambda(
             line_number: lambda.line_number,
             continuation_index: CONTINUATION_SLOT,
             data_index: RESULT_SLOT,
+            checks_result_once: false,
         },
         completion_slot: None,
         last_parameter_slot: RESULT_SLOT,
         declared_spill_fields: lambda.declared_spill_fields,
+        checks_unprotected_result_once: lambda.checks_unprotected_result_once,
     };
     build_state_machine(method, points, &spec, coroutine_start)
 }

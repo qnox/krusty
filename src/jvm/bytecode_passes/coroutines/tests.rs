@@ -859,6 +859,7 @@ fn a_lambda_parameter_is_spilled_into_its_own_field_and_not_restored() {
             descriptor: "I",
             max_index: 0,
         }],
+        checks_unprotected_result_once: false,
     };
     let StateMachine {
         method,
@@ -913,6 +914,7 @@ fn a_lambda_without_parameters_spills_into_new_fields() {
         source_file: "A.kt",
         line_number: 8,
         declared_spill_fields: &[],
+        checks_unprotected_result_once: false,
     };
     let StateMachine {
         method,
@@ -929,6 +931,41 @@ fn a_lambda_without_parameters_spills_into_new_fields() {
     assert_eq!(debug_metadata.next_line_numbers, vec![11]);
     assert_eq!(debug_metadata.spilled, vec!["I$0"]);
     assert_eq!(debug_metadata.local_names, vec!["a"]);
+}
+
+/// The same lambda under a release that checks the resumption result once (kotlinc 2.5's
+/// `shouldHoistThrowOnFailure`): no suspension point is inside a protected range, so the check
+/// runs once before the `tableswitch` and no state repeats it.
+#[test]
+fn a_lambda_checks_an_unprotected_result_once_before_the_tableswitch() {
+    const CLASS: &str = "AKt$g$1";
+    let mut body = Body::new(0x0011, "invokeSuspend", INVOKE_SUSPEND, 3);
+    let start = body.label();
+    body.line(9);
+    body.op(ICONST_1).var(ISTORE, 2);
+    let a_start = body.line(10);
+    call_leaf(&mut body);
+    body.line(11);
+    body.var(ILOAD, 2);
+    box_int_and_return(&mut body);
+    let end = body.label();
+    body.local("a", "I", a_start, end, 2);
+    lambda_receivers(&mut body, CLASS, start, end);
+
+    let lambda = SuspendLambda {
+        class: CLASS,
+        source_file: "A.kt",
+        line_number: 8,
+        declared_spill_fields: &[],
+        checks_unprotected_result_once: true,
+    };
+    let StateMachine { method, .. } =
+        transform_suspend_lambda(body.method, &lambda).expect("the body transforms");
+    // kotlinc 2.5.0-RC2's `AKt$g$1.invokeSuspend`.
+    assert_eq!(
+        listing(&method),
+        include_str!("testdata/lambda_checks_result_once.txt")
+    );
 }
 
 /// ```kotlin
@@ -1007,6 +1044,7 @@ fn a_lambda_declares_only_the_spill_fields_past_its_parameters() {
             descriptor: "I",
             max_index: 0,
         }],
+        checks_unprotected_result_once: false,
     };
     let StateMachine {
         method,
@@ -1085,6 +1123,7 @@ fn a_dead_reference_parameter_is_spilled_back_into_its_field() {
             descriptor: OBJECT,
             max_index: 0,
         }],
+        checks_unprotected_result_once: false,
     };
     let StateMachine {
         method,
@@ -1108,6 +1147,7 @@ fn a_lambda_body_must_be_an_instance_invoke_suspend() {
         source_file: "A.kt",
         line_number: 3,
         declared_spill_fields: &[],
+        checks_unprotected_result_once: false,
     };
     let method = Body::new(0x0019, "invokeSuspend", INVOKE_SUSPEND, 1).method;
     assert_eq!(
