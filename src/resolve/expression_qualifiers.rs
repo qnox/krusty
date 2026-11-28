@@ -12,6 +12,7 @@
 use super::classifier_binding::{QualifiedRoot, SelectedTypeAlias};
 use super::qualifiers::subpackage;
 use super::*;
+use crate::symbol_resolver::ClassifierDenial;
 use crate::symbol_source::SymbolNamespace;
 
 /// `FirStandaloneQualifierChecker`: a package qualifier that is not the explicit receiver of a
@@ -186,7 +187,33 @@ impl Checker<'_> {
             alias,
         };
         self.bound_qualifier_segments.insert(expression, segment);
+        if let QualifierBinding::Classifier(internal) = binding {
+            self.report_unexported_qualifier(expression, internal);
+        }
         segment
+    }
+
+    /// A classifier named as a qualifier is a reference to it: when its platform module does not
+    /// export its package, the whole written qualifier is the error site, as for a type reference.
+    /// Visibility denials are reported by the access checks of the use that follows.
+    fn report_unexported_qualifier(&mut self, expression: ExprId, internal: TypeName) {
+        let Some(denial @ ClassifierDenial::PackageNotExported { .. }) =
+            self.resolver().inaccessible_classifier_access(internal)
+        else {
+            return;
+        };
+        if self.suppresses_diagnostic(denial.suppression_name()) {
+            return;
+        }
+        let reference = self.span(expression);
+        self.diags.error_with_identity(
+            reference,
+            DiagnosticIdentity::ClassifierAccess {
+                reference,
+                classifier: internal,
+            },
+            inaccessible_classifier_message("", &denial),
+        );
     }
 
     /// The recorded qualifier of a written segment of a resolved receiver chain.

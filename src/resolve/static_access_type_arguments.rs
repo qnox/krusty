@@ -39,7 +39,7 @@ impl Checker<'_> {
             .error(arguments.span, PROPERTY_ACCESS_MESSAGE.to_string());
     }
 
-    fn member_qualifier(&self, expression: ExprId) -> Option<ExprId> {
+    pub(super) fn member_qualifier(&self, expression: ExprId) -> Option<ExprId> {
         let member = match self.file.expr(expression) {
             Expr::Call { callee, .. } => *callee,
             Expr::Member { .. } => expression,

@@ -13,12 +13,18 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::name_tree::{NameId, NameTree};
 
 use super::jimage_locations::JimageLocations;
+use super::jimage_modules::JimageModule;
 use super::{entry_stamp, EntryKey, JarPackages};
 
 #[derive(Debug)]
 pub(super) struct JimageIndex {
     names: Arc<NameTree>,
     locations: JimageLocations,
+    path: std::path::PathBuf,
+    modules: Vec<JimageModule>,
+    /// The module whose image resources hold each package's classes. A named module owns its
+    /// packages exclusively, so one package maps to one module.
+    package_modules: HashMap<NameId, u32>,
 }
 
 impl Default for JimageIndex {
@@ -26,6 +32,9 @@ impl Default for JimageIndex {
         Self {
             names: Arc::new(NameTree::default()),
             locations: JimageLocations::default(),
+            path: std::path::PathBuf::new(),
+            modules: Vec::new(),
+            package_modules: HashMap::default(),
         }
     }
 }
@@ -38,6 +47,26 @@ impl JimageIndex {
     pub(super) fn entry(&self, internal: &str) -> Option<(u64, usize, bool)> {
         let id = self.names.get(internal)?;
         self.locations.get(id)
+    }
+
+    /// The module declaring `class` when its package is unreachable from code outside every named
+    /// module, because the module's descriptor has no unqualified `exports` for it. `None` for a
+    /// class the image does not hold, or whose package is exported.
+    pub(super) fn unexported_class_module(&self, class: &str) -> Option<&str> {
+        let package = self.names.parent(self.names.get(class)?)?;
+        let module = &self.modules[*self.package_modules.get(&package)? as usize];
+        let exports = module.exports(&self.names, |location| self.read_entry(location))?;
+        (!exports.contains(&package)).then_some(module.name())
+    }
+
+    /// Read one resource's bytes. A "zip"-compressed resource (the JetBrains Runtime, or any
+    /// `jlink --compress` image) is wrapped in a 29-byte `CompressedResourceHeader` (little-endian
+    /// magic `0xCAFEFAFA`, then `size`/`uncompressed_size` i64s, decompressor name/config offsets, an
+    /// `is_terminal` byte) before a zlib Deflate stream; inflate it. The `compressed` flag is set by
+    /// the indexer only when a decompressor is named, so a resource without the header magic is
+    /// returned as-is rather than mis-inflated.
+    pub(super) fn read_entry(&self, location: (u64, usize, bool)) -> Option<Vec<u8>> {
+        read_resource(&self.path, location.0, location.1, location.2)
     }
 
     /// Project the completed location index into the package view without copying its name tree.
@@ -76,6 +105,25 @@ pub(super) fn cached_jimage_index(path: &Path) -> Option<Arc<JimageIndex>> {
     let index = Arc::new(build_index(path)?);
     cache.insert(key, Arc::clone(&index));
     Some(index)
+}
+
+fn read_resource(path: &Path, offset: u64, size: usize, compressed: bool) -> Option<Vec<u8>> {
+    use std::io::SeekFrom;
+    let mut file = File::open(path).ok()?;
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut buf = vec![0u8; size];
+    file.read_exact(&mut buf).ok()?;
+    if compressed && buf.len() >= 29 && buf[0..4] == [0xFA, 0xFA, 0xFE, 0xCA] {
+        let uncompressed = u64::from_le_bytes(buf[12..20].try_into().ok()?) as usize;
+        // The jimage is a trusted local JDK file, but cap the pre-allocation hint anyway: a real
+        // `.class` is far under this, and `read_to_end` grows past it if ever needed.
+        let mut out = Vec::with_capacity(uncompressed.min(16 * 1024 * 1024));
+        flate2::read::ZlibDecoder::new(&buf[29..])
+            .read_to_end(&mut out)
+            .ok()?;
+        return Some(out);
+    }
+    Some(buf)
 }
 
 /// Class identity `parent/base` assembled without allocating or re-parsing the joined spelling.
@@ -134,7 +182,7 @@ fn build_index(path: &Path) -> Option<JimageIndex> {
         }
         std::str::from_utf8(&bytes[start..end]).unwrap_or("")
     };
-    // ImageLocation attributes: 2=PARENT, 3=BASE, 4=EXTENSION, 5=OFFSET,
+    // ImageLocation attributes: 1=MODULE, 2=PARENT, 3=BASE, 4=EXTENSION, 5=OFFSET,
     // 6=COMPRESSED, 7=UNCOMPRESSED.
     let decode = |mut cursor: usize| -> [usize; 8] {
         let mut attributes = [0usize; 8];
@@ -161,7 +209,11 @@ fn build_index(path: &Path) -> Option<JimageIndex> {
         attributes
     };
 
-    let mut index = JimageIndex::default();
+    let mut index = JimageIndex {
+        path: path.to_path_buf(),
+        ..JimageIndex::default()
+    };
+    let mut module_ids: HashMap<&str, u32> = HashMap::default();
     index.locations.reserve_classes(table_length);
     for slot in 0..table_length {
         let location_offset = table_word(offsets + slot * 4) as usize;
@@ -174,7 +226,7 @@ fn build_index(path: &Path) -> Option<JimageIndex> {
         }
         let parent = read_string(attributes[2]);
         let base = read_string(attributes[3]);
-        if parent.is_empty() || base.is_empty() {
+        if base.is_empty() {
             continue;
         }
         let (offset, compressed, uncompressed) = (attributes[5], attributes[6], attributes[7]);
@@ -183,7 +235,28 @@ fn build_index(path: &Path) -> Option<JimageIndex> {
         } else {
             uncompressed
         };
+        let module_name = read_string(attributes[1]);
+        let module = (!module_name.is_empty()).then(|| {
+            *module_ids.entry(module_name).or_insert_with(|| {
+                index.modules.push(JimageModule::new(module_name));
+                (index.modules.len() - 1) as u32
+            })
+        });
+        if parent.is_empty() {
+            // `/<module>/module-info.class`: the module descriptor, not a class of any package.
+            if let (Some(module), "module-info") = (module, base) {
+                index.modules[module as usize].set_descriptor(
+                    (content + offset) as u64,
+                    stored,
+                    compressed != 0,
+                );
+            }
+            continue;
+        }
         let class = class_id(&index.names, parent, base);
+        if let (Some(module), Some(package)) = (module, index.names.parent(class)) {
+            index.package_modules.entry(package).or_insert(module);
+        }
         index
             .locations
             .insert(class, (content + offset) as u64, stored, compressed != 0);

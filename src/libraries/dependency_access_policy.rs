@@ -14,6 +14,12 @@ pub trait DependencyAccessPolicy {
         false
     }
 
+    /// The named platform module declaring `owner` when that module does not export the
+    /// classifier's package to code outside every named module.
+    fn unexported_package_module(&self, _owner: TypeName) -> Option<String> {
+        None
+    }
+
     /// Whether this internal callable belongs to a friend module of the current compilation.
     fn internal_callable_accessible(
         &self,

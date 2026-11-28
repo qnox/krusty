@@ -11,6 +11,26 @@ pub(crate) trait CallableAccessSite {
     fn callable_visible(&self, candidate: &FunctionInfo, receiver: Ty) -> bool;
 }
 
+/// Why a use site cannot name a classifier that resolution found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ClassifierDenial {
+    /// The classifier's own visibility hides it from the site.
+    Access(crate::symbol_source::ClassifierAccess),
+    /// The classifier is visible, but the platform module declaring it does not export its package
+    /// to code outside every named module.
+    PackageNotExported { module: String, package: TypeName },
+}
+
+impl ClassifierDenial {
+    /// The diagnostic a `@Suppress` names to silence this denial.
+    pub(crate) fn suppression_name(&self) -> &'static str {
+        match self {
+            Self::Access(_) => "INVISIBLE_REFERENCE",
+            Self::PackageNotExported { .. } => "JAVA_MODULE_DOES_NOT_EXPORT_PACKAGE",
+        }
+    }
+}
+
 impl<'a> SymbolResolver<'a> {
     pub(crate) fn with_access_context(
         mut self,
@@ -139,9 +159,19 @@ impl<'a> SymbolResolver<'a> {
     pub(crate) fn inaccessible_classifier_access(
         &self,
         internal: TypeName,
-    ) -> Option<crate::symbol_source::ClassifierAccess> {
+    ) -> Option<ClassifierDenial> {
         let access = self.src.classifier(internal)?.access;
-        (!self.classifier_accessible(internal)).then_some(access)
+        if !self.classifier_accessible(internal) {
+            return Some(ClassifierDenial::Access(access));
+        }
+        let module = self
+            .lib
+            .dependency_access_policy()
+            .unexported_package_module(internal)?;
+        Some(ClassifierDenial::PackageNotExported {
+            module,
+            package: internal.namespace(),
+        })
     }
 
     pub(super) fn package_private_member_accessible(&self, owner: TypeName) -> bool {
