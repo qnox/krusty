@@ -1712,7 +1712,13 @@ impl JvmLibraries {
                 } else if declaration.is_some() {
                     members.push(member);
                 } else if m.is_static() {
-                    provider_normalization::publish_classifier_static(&mut companion, member);
+                    // A mapped Kotlin classifier (`kotlin.collections.Map`) is realized by a JDK
+                    // class, but its Kotlin static scope is empty: the realization's statics
+                    // (`java.util.Map.of`) belong to the Java classifier, which only its own
+                    // spelling (an explicit `java.util.Map` import or a qualified name) selects.
+                    if ci.this_class == internal_name {
+                        provider_normalization::publish_classifier_static(&mut companion, member);
+                    }
                 } else {
                     // `java.lang.Number.intValue` is Kotlin's `Number.toInt`. The table records the
                     // classfile owner (`java/lang/Number`); the requested name may be the Kotlin
@@ -3761,9 +3767,11 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn inherits_classifier_callables(&self, internal: TypeName) -> bool {
-        self.cp
-            .find_name(internal)
-            .is_some_and(|classifier| !classifier.meta.is_present())
+        // A mapped Kotlin classifier is a Kotlin declaration realized by a JDK class: it has no
+        // Java statics to inherit.
+        self.cp.find_name(internal).is_some_and(|classifier| {
+            !classifier.meta.is_present() && classifier.this_class == internal
+        })
     }
 
     fn function_type(&self, arity: usize) -> Option<Ty> {
