@@ -23,10 +23,32 @@ impl Checker<'_> {
         seen
     }
 
+    /// The branches an `else`-less subject `when` lacks, by the first rule that recognizes its
+    /// subject: a type check covering the whole subject type, a sealed hierarchy, an enum, or
+    /// `Boolean`. `None` when no rule applies; an empty list when the branches are exhaustive.
+    pub(super) fn when_missing_branches(
+        &self,
+        scope: &CheckerScope<'_>,
+        subject_expression: Option<ExprId>,
+        subject_ty: Option<Ty>,
+        arms: &[WhenArm],
+    ) -> Option<Vec<String>> {
+        self.when_type_check_missing_branches(subject_ty, arms)
+            .or_else(|| {
+                self.when_sealed_missing_branches(scope, subject_expression, subject_ty, arms)
+            })
+            .or_else(|| {
+                self.when_enum_missing_branches(scope, subject_expression, subject_ty, arms)
+            })
+            .or_else(|| {
+                self.when_boolean_missing_branches(scope, subject_expression, subject_ty, arms)
+            })
+    }
+
     /// A subject `when` whose unguarded `is T` branch accepts every value of the subject's type is
     /// exhaustive: `when (x: Any) { …; is Any -> … }`. The subject's `null` is accepted by `is T?`
     /// or by a `null` branch.
-    pub(super) fn when_type_check_missing_branches(
+    fn when_type_check_missing_branches(
         &self,
         subject_ty: Option<Ty>,
         arms: &[WhenArm],
@@ -64,7 +86,7 @@ impl Checker<'_> {
         (covers_values && covers_null).then(Vec::new)
     }
 
-    pub(super) fn when_sealed_missing_branches(
+    fn when_sealed_missing_branches(
         &self,
         scope: &CheckerScope<'_>,
         subject_expression: Option<ExprId>,
@@ -231,7 +253,7 @@ impl Checker<'_> {
         Some(missing)
     }
 
-    pub(super) fn when_enum_missing_branches(
+    fn when_enum_missing_branches(
         &self,
         scope: &CheckerScope<'_>,
         subject_expression: Option<ExprId>,
@@ -288,7 +310,7 @@ impl Checker<'_> {
         Some(missing)
     }
 
-    pub(super) fn when_boolean_missing_branches(
+    fn when_boolean_missing_branches(
         &self,
         scope: &CheckerScope<'_>,
         subject_expression: Option<ExprId>,
