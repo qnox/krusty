@@ -909,11 +909,7 @@ compiler/testData/diagnostics/tests/collectionLiterals/stdlibTypes/collectionLit
 compiler/testData/diagnostics/tests/collectionLiterals/stdlibTypes/fallbackInWhen.kt
 compiler/testData/diagnostics/tests/collectionLiterals/stdlibTypes/flexibleExpectedTypes.kt
 compiler/testData/diagnostics/tests/collectionLiterals/stdlibTypes/incorrectCollections.kt
-compiler/testData/diagnostics/tests/collectionLiterals/stdlibTypes/listOperatorOf.kt
-compiler/testData/diagnostics/tests/collectionLiterals/stdlibTypes/mutableListOperatorOf.kt
-compiler/testData/diagnostics/tests/collectionLiterals/stdlibTypes/mutableSetOperatorOf.kt
 compiler/testData/diagnostics/tests/collectionLiterals/stdlibTypes/propertyDelegation.kt
-compiler/testData/diagnostics/tests/collectionLiterals/stdlibTypes/setOperatorOf.kt
 compiler/testData/diagnostics/tests/collectionLiterals/stdlibTypes/simpleFallback.kt
 compiler/testData/diagnostics/tests/collectionLiterals/stdlibTypes/trickyCases/directAndIndirectLowerBound.kt
 compiler/testData/diagnostics/tests/collectionLiterals/stdlibTypes/trickyCases/expectedIsOutputOfLambda.kt
