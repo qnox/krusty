@@ -1,4 +1,5 @@
-//! JVM realization of a delegated property whose delegate is a singleton or a constant.
+//! JVM realization of a delegated property whose delegate is a singleton, a constant, or a read
+//! of a final stored top-level value.
 //!
 //! kotlinc's `SingletonOrConstantDelegationLowering`: such a delegate needs no storage, because
 //! evaluating it again yields the same value. The JVM therefore declares no `x$delegate` field.
@@ -15,7 +16,8 @@
 use krusty::fx_hash::{HashMap, HashSet};
 use krusty::ir::{
     ClassId, ExprId, FnParamInfo, FunId, IrConst, IrExpr, IrFile, IrFunction,
-    IrGeneratedParameterRole, IrLocalPropertyLayout, IrParameterIdentity, IrTypeOp,
+    IrGeneratedParameterRole, IrLocalPropertyLayout, IrParameterIdentity, IrStatic,
+    IrStaticAccessor, IrTypeOp,
 };
 use krusty::types::{Ty, TyKind, TypeName, Visibility};
 
@@ -50,8 +52,22 @@ fn in_place_delegate(ir: &IrFile, delegate: ExprId) -> Option<InPlaceDelegate> {
             IrConst::UByte(_) | IrConst::UShort(_) | IrConst::UInt(_) | IrConst::ULong(_),
         ) => None,
         IrExpr::Const(_) => Some(InPlaceDelegate::Constant),
+        // A final top-level `val` whose getter is the default one reads the same stored value
+        // however often it is read, so kotlinc evaluates it in place like a singleton.
+        IrExpr::GetStatic(index) if reads_final_stored_value(&ir.statics[*index as usize]) => {
+            Some(InPlaceDelegate::Singleton)
+        }
         _ => None,
     }
+}
+
+/// kotlinc's `isInlineable` for a property read: a final property whose getter is the default
+/// accessor returning its final backing field.
+fn reads_final_stored_value(declaration: &IrStatic) -> bool {
+    !declaration.is_var
+        && !declaration.is_lateinit
+        && !declaration.property_delegate
+        && declaration.accessors.getter != IrStaticAccessor::Declared
 }
 
 /// Realize every package and member delegated property whose delegate is a singleton or constant,
