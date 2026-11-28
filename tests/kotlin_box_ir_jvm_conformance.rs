@@ -992,7 +992,22 @@ pub(super) fn krusty_classes_matching_reference(
     stem: &str,
     classpath: &[PathBuf],
     reference: &box_reference_classes::ReferenceClasses,
-) -> Result<Vec<(String, Vec<u8>)>, String> {
+) -> Result<KrustyClasses, String> {
+    krusty_classes_against_reference(source, stem, classpath, reference)?
+}
+
+/// Every class file krusty wrote for a case, by its path.
+pub(super) type KrustyClasses = Vec<(String, Vec<u8>)>;
+
+/// [`krusty_classes_matching_reference`], keeping apart a case krusty cannot compile (the outer
+/// `Err`) from classes that differ from the reference compiler's (the inner `Err`, which names the
+/// first difference).
+pub(super) fn krusty_classes_against_reference(
+    source: &str,
+    stem: &str,
+    classpath: &[PathBuf],
+    reference: &box_reference_classes::ReferenceClasses,
+) -> Result<Result<KrustyClasses, String>, String> {
     let jdk = common::jdk_modules();
     // Every module is krusty's own: a library module is compiled before the modules using it.
     let compiled = if source.contains("// MODULE:") {
@@ -1009,13 +1024,21 @@ pub(super) fn krusty_classes_matching_reference(
             .filter(class_file)
             .cloned()
             .collect();
-        let expected = reference
-            .module(module)
-            .ok_or_else(|| format!("the reference compiler emits no module {module}"))?;
-        compare_class_sets(&classes, expected)
-            .map_err(|difference| format!("module {module}: {difference}"))?;
+        let Some(expected) = reference.module(module) else {
+            return Ok(Err(format!(
+                "the reference compiler emits no module {module}"
+            )));
+        };
+        if let Err(difference) = compare_class_sets(&classes, expected) {
+            return Ok(Err(format!("module {module}: {difference}")));
+        }
     }
-    Ok(compiled.flat.iter().filter(class_file).cloned().collect())
+    Ok(Ok(compiled
+        .flat
+        .iter()
+        .filter(class_file)
+        .cloned()
+        .collect()))
 }
 
 /// `(module, internal name)` of every class in one inventory.
