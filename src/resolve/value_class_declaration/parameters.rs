@@ -77,7 +77,7 @@ impl Checker<'_> {
         let full = selected
             .as_ref()
             .is_some_and(|selected| selected.kind == SelectedValueClassKind::Full);
-        let value_prefix = if self.file.full_value_classes {
+        let value_prefix = if self.file.unsupported_full_value_classes.is_none() {
             "Final value"
         } else {
             "Value"
@@ -126,7 +126,7 @@ impl Checker<'_> {
                 if let Some(rendered) =
                     self.inapplicable_value_class_parameter(scope, parameter, underlying)
                 {
-                    let prefix = if self.file.full_value_classes {
+                    let prefix = if self.file.unsupported_full_value_classes.is_none() {
                         "@JvmInline value"
                     } else {
                         "Value"

@@ -418,6 +418,38 @@ fun f(b: Boolean, a: Any) {
             ],
             errors: 14,
         },
+        // A construct whose language feature the compilation does not enable: one a later
+        // language version enables, and an experimental one.
+        Case {
+            file: "Unsupported.kt",
+            source: "\
+fun f(): Int {
+    val [a, b] = listOf(1, 2)
+    return a + b
+}
+value class V(val a: Int, val b: Int)
+",
+            arguments: &[],
+            diagnostics: &[
+                "Unsupported.kt:2:9: error: [UNSUPPORTED_FEATURE] The feature \"name based destructuring\" is only available since language version 2.5",
+                "Unsupported.kt:5:1: error: [UNSUPPORTED_FEATURE] The feature \"full value classes\" is experimental and should be enabled explicitly. This can be done by supplying the compiler argument '-XXLanguage:+FullValueClasses', but note that no stability guarantees are provided.",
+            ],
+            errors: 2,
+        },
+        // A context-parameter clause under a language version before the feature's.
+        Case {
+            file: "ContextOff.kt",
+            source: "\
+context(a: String)
+fun f(): String = a
+",
+            arguments: &["-language-version", "2.1"],
+            diagnostics: &[
+                "warning: [DEPRECATED_LANGUAGE_VERSION] Language version 2.1 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.",
+                "ContextOff.kt:1:1: error: [UNSUPPORTED_FEATURE] The feature \"context parameters\" is only available since language version 2.4",
+            ],
+            errors: 1,
+        },
         Case {
             file: "Forbidden.kt",
             source: "\

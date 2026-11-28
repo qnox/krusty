@@ -1276,7 +1276,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         }
                         .representation(
                             target,
-                            file.full_value_classes,
+                            file.unsupported_full_value_classes.as_ref(),
                             diags,
                         )
                     });

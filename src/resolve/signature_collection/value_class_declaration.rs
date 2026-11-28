@@ -36,9 +36,10 @@ impl ValueClassDeclaration {
     pub(super) fn representation(
         &self,
         target: CompilationTarget,
-        full_value_classes: bool,
+        unsupported_full_value_classes: Option<&crate::diag::NamedMessage>,
         diags: &mut DiagSink,
     ) -> ValueClassRepresentation {
+        let full_value_classes = unsupported_full_value_classes.is_none();
         let annotation_required = target.inline_value_classes_require_jvm_inline();
         // Only the JVM reads the annotation; elsewhere it is not part of the representation. An
         // `inline` modifier declares the class inline on every target.
@@ -92,13 +93,9 @@ impl ValueClassDeclaration {
             }
             _ if full_value_classes => ValueClassRepresentation::Full,
             _ => {
-                diags.error(
-                    self.keyword.span,
-                    "the feature \"full value classes\" is experimental and should be enabled \
-                     explicitly. This can be done by supplying the compiler argument \
-                     '-XXLanguage:+FullValueClasses', but note that no stability guarantees are \
-                     provided.",
-                );
+                if let Some(report) = unsupported_full_value_classes {
+                    diags.report_error(self.keyword.span, report.clone());
+                }
                 ValueClassRepresentation::Rejected
             }
         }

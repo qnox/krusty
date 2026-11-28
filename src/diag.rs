@@ -143,6 +143,20 @@ pub struct NamedMessage {
     pub message: String,
 }
 
+/// kotlinc's `UNSUPPORTED_FEATURE` for a construct that needs the language feature `name`, or
+/// `None` when `features` enable it ([`crate::features::LangFeatures::unsupported_message`]).
+pub fn unsupported_feature(
+    features: &crate::features::LangFeatures,
+    feature: &str,
+) -> Option<NamedMessage> {
+    features
+        .unsupported_message(feature)
+        .map(|message| NamedMessage {
+            name: names::UNSUPPORTED_FEATURE,
+            message,
+        })
+}
+
 /// A diagnostic's message and, when its report names it, kotlinc's name for it.
 pub struct Finding {
     pub name: Option<DiagnosticName>,

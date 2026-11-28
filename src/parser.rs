@@ -638,8 +638,8 @@ struct Parser<'a> {
     /// the RECEIVER PROPERTY of the same name (not `componentN`). An explicit `(a = prop)` still
     /// renames. Bracket `[a, b]` stays positional.
     short_form_destructuring: bool,
-    multi_dollar_interpolation: bool,
-    context_parameters: bool,
+    unsupported_multi_dollar: Option<crate::diag::NamedMessage>,
+    unsupported_context_parameters: Option<crate::diag::NamedMessage>,
     context_receivers: bool,
     when_guards: bool,
     /// When set, `parse_postfix` does NOT attach a trailing `{ … }` to a call as a lambda argument —
@@ -824,9 +824,15 @@ impl<'a> Parser<'a> {
             diags,
             name_based_destructuring: features.has("NameBasedDestructuring"),
             short_form_destructuring: features.has("EnableNameBasedDestructuringShortForm"),
-            multi_dollar_interpolation: features.has("MultiDollarInterpolation"),
+            unsupported_multi_dollar: crate::diag::unsupported_feature(
+                features,
+                "MultiDollarInterpolation",
+            ),
             explicit_backing_fields: features.has("ExplicitBackingFields"),
-            context_parameters: features.has("ContextParameters"),
+            unsupported_context_parameters: crate::diag::unsupported_feature(
+                features,
+                "ContextParameters",
+            ),
             context_receivers: features.has("ContextReceivers"),
             when_guards: features.has("WhenGuards"),
             no_trailing_lambda: false,
@@ -6077,7 +6083,7 @@ typealias Box<@Marker T> = List<T>
                 .iter()
                 .map(|diagnostic| diagnostic.msg.as_str())
                 .collect::<Vec<_>>(),
-            ["multi-dollar string interpolation is disabled by the language feature set"]
+            ["The feature \"multi dollar interpolation\" is disabled"]
         );
     }
 

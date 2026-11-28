@@ -39,7 +39,8 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         features.has("AllowEagerSupertypeAccessibilityChecks");
     file.lambda_implementation_uses_inferred_result =
         features.language_version() < crate::language_version::LanguageVersion::V2_4;
-    file.full_value_classes = features.has("FullValueClasses");
+    file.unsupported_full_value_classes =
+        crate::diag::unsupported_feature(features, "FullValueClasses");
     file.smart_cast_value_class_components =
         features.has("AllowSmartCastsOnValueClassUnderlyingProperties");
     file.forbid_value_class_recursion_via_type_parameters =

@@ -1989,9 +1989,9 @@ pub struct File {
     /// separately from the caller-facing function result. The checked FIR boundary records that
     /// semantic choice so a backend never needs its own language-version switch.
     pub lambda_implementation_uses_inferred_result: bool,
-    /// `+FullValueClasses`: a `value class` without `@JvmInline` is a boxed class with structural
-    /// `equals`/`hashCode`/`toString`. Without the feature that declaration is an error.
-    pub full_value_classes: bool,
+    /// `+FullValueClasses` (boxed value classes with structural members) is enabled when this
+    /// is `None`; otherwise it is the `UNSUPPORTED_FEATURE` such a declaration reports.
+    pub unsupported_full_value_classes: Option<crate::diag::NamedMessage>,
     /// `+AllowSmartCastsOnValueClassUnderlyingProperties`: a value class's component declared in
     /// another module is a stable smart-cast subject.
     pub smart_cast_value_class_components: bool,
