@@ -104,6 +104,15 @@ quirks! {
         fixed_in: Some(KotlinVersion::V2_4_20),
         defect: false,
     }
+    /// Once no visible candidate applies, the candidates the site cannot see still compete scope
+    /// level by scope level, nearest first, instead of as one visibility-error group across the
+    /// tower: under a suppressed visibility error an explicitly imported `Any.tag` takes the call
+    /// from a star-imported `String.tag`.
+    InvisibleCandidatesKeepScopeLevels {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
+    }
     /// `+UnitConversionsOnArbitraryExpressions` is known but converts no function value whose
     /// result is not `Unit` (KT-84393).
     UnitConversionRejectsNonUnitResult {

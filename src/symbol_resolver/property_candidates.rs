@@ -200,3 +200,62 @@ pub(super) fn source_property_visible(
                 .dependency_access_policy()
                 .internal_callable_accessible(property.getter.external_identity, property.owner))
 }
+
+impl SymbolResolver<'_> {
+    /// The extension property `name` a family of candidates selects for `receiver`: the nearest
+    /// receiver rank among the visible, readable or writable candidates, then the most specific.
+    pub(super) fn select_extension_property_from_callables<'p>(
+        &self,
+        receiver: Ty,
+        name: &str,
+        access: PropertyAccess,
+        properties: impl IntoIterator<Item = &'p PropertyInfo>,
+    ) -> Result<Option<PropertyInfo>, AmbiguousExtensionProperty> {
+        let mut properties = properties.into_iter().peekable();
+        if properties.peek().is_none() {
+            return Ok(None);
+        }
+        let receiver_mro = self.receiver_mro(receiver);
+        let mut candidates = properties
+            .filter(|property| property.kind == PropKind::Extension)
+            .filter(|property| match access {
+                PropertyAccess::Read => property.readable(),
+                PropertyAccess::Write => property.write_selectable(),
+            })
+            .filter(|property| self.property_visible(property))
+            .filter(|property| {
+                generic_bounds_admit(
+                    &self.src,
+                    property.getter.generic_sig.as_deref(),
+                    receiver,
+                    &[],
+                    &[],
+                )
+            })
+            .filter_map(|property| {
+                let declared = property.receiver?;
+                let rank = receiver_mro.rank(&self.src, declared);
+                crate::trace_compiler!(
+                    "resolve",
+                    "extension property candidate name={name} receiver={receiver:?} declared={declared:?} setter={} source={:?} rank={rank:?}",
+                    property.setter.is_some(),
+                    property.source_key,
+                );
+                rank.map(|rank| (rank, property.clone()))
+            })
+            .collect::<Vec<_>>();
+        let Some(nearest) = candidates.iter().map(|(rank, _)| *rank).min() else {
+            return Ok(None);
+        };
+        candidates.retain(|(rank, _)| *rank == nearest);
+        retain_most_specific_properties(&self.src, &mut candidates);
+        match candidates.as_mut_slice() {
+            [(_, property)] => Ok(Some(specialize_property(
+                &self.src,
+                property.clone(),
+                receiver,
+            ))),
+            _ => Err(AmbiguousExtensionProperty),
+        }
+    }
+}
