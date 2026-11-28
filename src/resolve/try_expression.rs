@@ -231,7 +231,7 @@ impl Checker<'_> {
             // Reapply exact local write results as well: a finalizer assignment dominates the
             // normal continuation even when it left the same fact as the conservative entry.
             for (name, narrowing) in finalizer_local_flow {
-                scope.narrow_local(&name, narrowing);
+                self.record_local_read_fact(scope, &name, narrowing);
             }
         }
         self.set(e, result)

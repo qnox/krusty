@@ -1201,17 +1201,14 @@ compiler/testData/diagnostics/tests/smartCasts/intersectionScope/conflictingRetu
 compiler/testData/diagnostics/tests/smartCasts/intersectionScope/propertiesConflict.kt
 compiler/testData/diagnostics/tests/smartCasts/kt30826.kt
 compiler/testData/diagnostics/tests/smartCasts/kt50875.kt
-compiler/testData/diagnostics/tests/smartCasts/loops/loopInInitBlock.kt
 compiler/testData/diagnostics/tests/smartCasts/noSmartcastForNonFinalMembersFromJava.kt
 compiler/testData/diagnostics/tests/smartCasts/objectLiterals/captured.kt
 compiler/testData/diagnostics/tests/smartCasts/propertyAsCondition.kt
 compiler/testData/diagnostics/tests/smartCasts/toInvisible.kt
 compiler/testData/diagnostics/tests/smartCasts/variables/capturedByAtLeastOnce.kt
 compiler/testData/diagnostics/tests/smartCasts/variables/capturedWithControlJumps.kt
-compiler/testData/diagnostics/tests/smartCasts/variables/varChangedInLoop.kt
 compiler/testData/diagnostics/tests/smartCasts/varnotnull/classDelegationError.kt
 compiler/testData/diagnostics/tests/smartCasts/varnotnull/leakingLambdaInCalledInPlace.kt
-compiler/testData/diagnostics/tests/smartCasts/varnotnull/varChangedInLoop.kt
 compiler/testData/diagnostics/tests/sourceCompatibility/apiVersion/annotations.kt
 compiler/testData/diagnostics/tests/sourceCompatibility/apiVersion/classesAndConstructors.kt
 compiler/testData/diagnostics/tests/sourceCompatibility/apiVersion/overriddenMembers.kt

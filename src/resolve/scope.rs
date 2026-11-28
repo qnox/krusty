@@ -718,6 +718,21 @@ impl<'p, B> Scope<'p, B> {
         }
     }
 
+    /// Whether a write to `name` from this scope leaves a function rung before reaching the rung
+    /// that declares the binding: a lambda or local function body, which may run any number of
+    /// times, at any later point, rather than being an edge of the enclosing execution.
+    pub(crate) fn binding_crosses_function_rung(&self, name: &str, ns: Ns) -> bool {
+        for rung in self.ancestors() {
+            if rung.declared_here(name, ns) {
+                return false;
+            }
+            if matches!(rung.kind, ScopeKind::Function { .. }) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// This scope and every enclosing one, innermost first.
     pub(crate) fn ancestors<'s>(&'s self) -> impl Iterator<Item = &'s Scope<'p, B>> {
         std::iter::successors(Some(self), |s: &&'s Scope<'p, B>| s.parent)

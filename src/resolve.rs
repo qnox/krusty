@@ -13468,6 +13468,9 @@ impl<'a> Checker<'a> {
                     self.apply_condition_exclusions(scope, cond, true);
                     self.check_loop_body(scope, body, &label);
                 }
+                // A write in the body reaches every exit, and the condition's own proof sits in
+                // the enclosing scope, so the continuation loses what the loop writes.
+                self.clear_narrowings_a_loop_invalidates(scope, &[cond, body]);
             }
             Stmt::DoWhile { body, cond, label } => {
                 self.clear_narrowings_a_do_while_invalidates(scope, body, cond);
@@ -13498,6 +13501,7 @@ impl<'a> Checker<'a> {
                 if label.is_some() {
                     self.loop_labels.pop();
                 }
+                self.clear_narrowings_a_do_while_invalidates(scope, body, cond);
             }
             Stmt::For {
                 name,
@@ -13507,6 +13511,7 @@ impl<'a> Checker<'a> {
             } => {
                 self.clear_narrowings_a_loop_invalidates(scope, &[body]);
                 self.stmt_for(scope, s, name, range, body, label);
+                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
             }
             Stmt::ForEach {
                 name,
@@ -13516,6 +13521,7 @@ impl<'a> Checker<'a> {
             } => {
                 self.clear_narrowings_a_loop_invalidates(scope, &[body]);
                 self.stmt_for_each(scope, s, name, iterable, body, label);
+                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
             }
             Stmt::Expr(e) => {
                 // A `kotlin.contracts.contract { … }` statement is erased metadata: it is never
@@ -14207,18 +14213,18 @@ impl<'a> Checker<'a> {
                         } else {
                             self.set_local_narrow(scope, &name, narrowing);
                         }
-                        // A write under a live smart-cast shadow must also move the PROOF binding:
-                        // reads below the shadow's rung type the variable through it, so a stale
-                        // shadow would keep a killed cast alive (`if (t != null) { t = null;
-                        // t.length }`). A write in the shadow's OWN rung is dominated by the
-                        // guard, so the new flow type is exact; a write in a nested rung may not
-                        // execute, so the proof keeps the wider of the old and new facts (the
-                        // conservative join falls back to the declared type).
+                        // A write under a live smart-cast shadow ends that proof only for the
+                        // edge it runs on: a branch's write must not reach its sibling edge, so
+                        // the proof binding stays as it was and the write's own read fact, recorded
+                        // above, hides it from reads below the write. A closure body is no edge of
+                        // the enclosing flow. Once it exists it may write at any later point, so
+                        // its write moves the PROOF binding itself.
                         if let Some(cur) = scoped {
                             let declared = cur.write_ty.unwrap_or(cur.ty);
                             if matches!(cur.origin, ReceiverFnValueOrigin::Local)
                                 && cur.is_var
                                 && cur.ty != declared
+                                && scope.binding_crosses_function_rung(&name, Ns::Value)
                             {
                                 // This assignment may be sequential for reads in its own lambda,
                                 // but the closure still invalidates a proof owned by the enclosing
