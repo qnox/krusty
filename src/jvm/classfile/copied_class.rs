@@ -152,6 +152,7 @@ impl ClassWriter {
             signature,
             lnt: Vec::new(),
             source_map: None,
+            dropped_lines: Vec::new(),
             lvt: Vec::new(),
             visible_anns,
             invisible_anns,
