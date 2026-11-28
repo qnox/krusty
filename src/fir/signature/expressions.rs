@@ -111,6 +111,13 @@ pub enum SigExpr {
         suspend: bool,
     },
     ContextualParameter(DeclarationId),
+    /// A read of `it` inside a parameter-less literal. The literal's own implicit parameter exists
+    /// only when its expected function type supplies a value parameter; otherwise `it` lexically
+    /// names the enclosing literal's parameter, if any.
+    ImplicitIt {
+        parameter: SigExprId,
+        enclosing: Option<SigExprId>,
+    },
     /// The extension receiver of a labeled contextual function literal, read as `this@label`.
     /// Like a contextual parameter, its type exists only once the literal's expected function
     /// type supplies a receiver; the label binds lexically to this literal, never by spelling.
@@ -363,6 +370,13 @@ impl SignatureGraph {
                     | SigExpr::ContextualReceiver(_),
                 )
                 | None => {}
+                Some(SigExpr::ImplicitIt {
+                    parameter,
+                    enclosing,
+                }) => {
+                    pending.push(parameter);
+                    pending.extend(enclosing);
+                }
             }
         }
         false

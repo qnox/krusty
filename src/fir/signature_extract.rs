@@ -2665,8 +2665,17 @@ impl SignatureConstraintExtractor {
             let parameter = self
                 .graph
                 .add_expr(SigExpr::ContextualParameter(declaration));
-            bindings.insert("it".into(), parameter);
-            parameter_types.push(parameter);
+            let enclosing = self
+                .lexical_values
+                .iter()
+                .rev()
+                .find_map(|values| values.get("it").copied());
+            let read = self.graph.add_expr(SigExpr::ImplicitIt {
+                parameter,
+                enclosing,
+            });
+            bindings.insert("it".into(), read);
+            parameter_types.push(read);
         } else {
             for (index, name) in params.iter().enumerate() {
                 let ty = match declared

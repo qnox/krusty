@@ -27,6 +27,7 @@ mod modifier_containing_declarations;
 mod no_expect_for_actual;
 mod published_declarations;
 mod published_overrides;
+mod reserved_declaration_names;
 pub use declaration_outline::{DeclarationOutline, OutlineKind, OutlineNode};
 pub use published_overrides::OverriddenMember;
 mod retained_syntax;
@@ -1350,6 +1351,7 @@ where
         }
         if source.kind == SourceKind::Kotlin {
             header_validation::validate(&file, diags);
+            reserved_declaration_names::check(&file, diags);
             modifier_containing_declarations::check(&file, diags);
             explicit_api::check(&file, &features, diags);
             // `expect`/`actual` outside a multiplatform project is an ERROR, not a no-op. Accepting
