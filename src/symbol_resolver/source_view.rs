@@ -199,6 +199,13 @@ impl SymbolSource for ResolverSource<'_> {
         }
     }
 
+    fn enum_entries(&self, classifier: TypeName) -> Option<Vec<crate::types::EnumEntryFacts>> {
+        match self {
+            Self::Direct(source) => source.enum_entries(classifier),
+            Self::Memoized(source) => source.enum_entries(classifier),
+        }
+    }
+
     fn annotation_conventions(&self) -> &crate::symbol_source::AnnotationConventions {
         match self {
             Self::Direct(source) => source.annotation_conventions(),

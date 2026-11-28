@@ -76,6 +76,10 @@ impl SymbolSource for JvmLibraries {
     ) -> Option<crate::types::SerializableClassElements> {
         classifier_facts::serializable_class_elements(self, classifier)
     }
+
+    fn enum_entries(&self, classifier: TypeName) -> Option<Vec<crate::types::EnumEntryFacts>> {
+        classifier_facts::enum_entries(self, classifier)
+    }
 }
 
 #[cfg(test)]

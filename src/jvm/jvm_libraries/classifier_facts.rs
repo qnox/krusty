@@ -142,6 +142,32 @@ pub(super) fn align_mapped_owner_type_parameters(
     }
 }
 
+pub(super) fn enum_entries(
+    libraries: &JvmLibraries,
+    classifier: TypeName,
+) -> Option<Vec<crate::types::EnumEntryFacts>> {
+    let shape = SymbolSource::classifier(libraries, classifier)?;
+    if shape.kind != crate::libraries::TypeKind::Enum {
+        return None;
+    }
+    // An entry is a static field of the enum, so its annotations are its field's.
+    let mut annotated = libraries.cp.class_field_annotations(classifier)?;
+    Some(
+        shape
+            .enum_entries
+            .iter()
+            .map(|name| crate::types::EnumEntryFacts {
+                name: name.clone(),
+                annotations: annotated
+                    .iter_mut()
+                    .find(|field| field.name == *name)
+                    .map(|field| std::mem::take(&mut field.annotations))
+                    .unwrap_or_default(),
+            })
+            .collect(),
+    )
+}
+
 pub(super) fn generated_serializer_singleton(
     libraries: &JvmLibraries,
     classifier: TypeName,
@@ -570,26 +596,7 @@ impl crate::types::ClassifierFactSource for JvmLibraries {
     }
 
     fn enum_entries(&self, classifier: TypeName) -> Option<Vec<crate::types::EnumEntryFacts>> {
-        let shape = SymbolSource::classifier(self, classifier)?;
-        if shape.kind != crate::libraries::TypeKind::Enum {
-            return None;
-        }
-        // An entry is a static field of the enum, so its annotations are its field's.
-        let mut annotated = self.cp.class_field_annotations(classifier)?;
-        Some(
-            shape
-                .enum_entries
-                .iter()
-                .map(|name| crate::types::EnumEntryFacts {
-                    name: name.clone(),
-                    annotations: annotated
-                        .iter_mut()
-                        .find(|field| field.name == *name)
-                        .map(|field| std::mem::take(&mut field.annotations))
-                        .unwrap_or_default(),
-                })
-                .collect(),
-        )
+        SymbolSource::enum_entries(self, classifier)
     }
 
     fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
