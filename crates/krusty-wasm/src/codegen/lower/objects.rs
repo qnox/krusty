@@ -1442,8 +1442,14 @@ impl Body<'_> {
             .referenced_module_properties
             .get(&target)
             .ok_or_else(|| "a cross-file property with no module record".to_string())?;
+        // A `companion { }` block property's checked receiver is the class that declared the
+        // block, which names its storage's owner rather than an operand of the access.
+        let block_member = matches!(
+            reference.placement,
+            krusty::ir::IrStaticPlacement::CompanionBlock { .. }
+        );
         if reference.owner.is_some()
-            || reference.extension_receiver.is_some()
+            || (reference.extension_receiver.is_some() && !block_member)
             || !reference.context_parameters.is_empty()
         {
             return Err("a cross-file property storage with a receiver".to_string());
