@@ -32,6 +32,12 @@ impl ClassWriter {
         Rc::clone(&self.value_classes)
     }
 
+    /// The quirks of the kotlinc release whose optimizer this class's passes reproduce, which a
+    /// class copied for its code shares.
+    pub fn optimizer_quirks(&self) -> crate::kotlin_version::Quirks {
+        self.optimizer_quirks
+    }
+
     /// What the pool relayout does with an entry nothing names: a copied class, whose table keeps
     /// the rows as they were visited, keeps what its visits interned.
     pub(super) fn unnamed_entries(&self) -> Unnamed {
@@ -237,6 +243,7 @@ impl ClassWriter {
                 .sum::<u16>();
         let context = PassContext {
             value_classes: &*self.value_classes,
+            quirks: self.optimizer_quirks,
             parameter_slots,
             post_coroutine: stage == BodyStage::Transformed,
             kept_for_inlining: false,

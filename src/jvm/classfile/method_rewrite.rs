@@ -470,6 +470,7 @@ impl ClassWriter {
         let entry = expand_slots(&entry);
         let context = PassContext {
             value_classes: &*self.value_classes,
+            quirks: self.optimizer_quirks,
             parameter_slots: u16::try_from(entry.len()).ok()?,
             post_coroutine: stage == BodyStage::Transformed,
             kept_for_inlining: stage == BodyStage::KeptForInlining,

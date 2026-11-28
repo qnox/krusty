@@ -27,7 +27,16 @@ use N::*;
 fn body(desc: &str, max_locals: u16, nodes: &[N]) -> (MethodNode, Vec<LabelId>) {
     let mut method = MethodNode::new(0x0009, "f", desc);
     method.max_locals = max_locals;
-    let labels: Vec<LabelId> = (0..8).map(|_| method.new_label()).collect();
+    // Eight labels, or as many as the body names: a label the pass makes is the next one.
+    let named = nodes
+        .iter()
+        .filter_map(|node| match *node {
+            At(k) | Line(_, k) | Jump(_, k) => Some(k + 1),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let labels: Vec<LabelId> = (0..named.max(8)).map(|_| method.new_label()).collect();
     method.nodes = nodes
         .iter()
         .map(|node| match *node {
@@ -52,10 +61,29 @@ fn body(desc: &str, max_locals: u16, nodes: &[N]) -> (MethodNode, Vec<LabelId>) 
 
 /// Run the pass over `nodes` and compare with `expected`; `changed` is what the pass reports.
 fn folds(desc: &str, max_locals: u16, nodes: &[N], expected: &[N], changed: bool) {
+    folds_as(
+        GotoThreading::ToTheBranchTaken,
+        desc,
+        max_locals,
+        nodes,
+        expected,
+        changed,
+    );
+}
+
+/// [`folds`] with the `goto` behavior given.
+fn folds_as(
+    gotos: GotoThreading,
+    desc: &str,
+    max_locals: u16,
+    nodes: &[N],
+    expected: &[N],
+    changed: bool,
+) {
     let (mut method, _) = body(desc, max_locals, nodes);
     let (wanted, _) = body(desc, max_locals, expected);
     assert_eq!(
-        eliminate(&mut method, "T").map(|result| result.changed),
+        eliminate_as(&mut method, "T", gotos).map(|result| result.changed),
         Ok(changed)
     );
     assert_eq!(method.nodes, wanted.nodes);
@@ -263,7 +291,8 @@ fn equal_constants_meeting_stay_known_and_different_ones_do_not() {
             Var(ILOAD, 0),
             Jump(IFEQ, 0),
             Int(BIPUSH, 7),
-            Jump(GOTO, 1),
+            Op(POP),
+            Jump(GOTO, 2),
             At(0),
             Int(SIPUSH, 7),
             At(1),
@@ -276,7 +305,77 @@ fn equal_constants_meeting_stay_known_and_different_ones_do_not() {
         true,
     );
     let different = merged(Int(BIPUSH, 7), Int(SIPUSH, 0));
-    folds("(I)I", 1, &different, &different, false);
+    folds_as(
+        GotoThreading::Kept,
+        "(I)I",
+        1,
+        &different,
+        &different,
+        false,
+    );
+    // From 2.5 the `goto` still carries its own `7` past the jump, which then sees only the `0`.
+    folds(
+        "(I)I",
+        1,
+        &different,
+        &[
+            Var(ILOAD, 0),
+            Jump(IFEQ, 0),
+            Int(BIPUSH, 7),
+            Op(POP),
+            Jump(GOTO, 2),
+            At(0),
+            Int(SIPUSH, 0),
+            At(1),
+            Op(POP),
+            Op(ICONST_1),
+            Op(IRETURN),
+            At(2),
+            Op(ICONST_2),
+            Op(IRETURN),
+        ],
+        true,
+    );
+}
+
+#[test]
+fn before_2_5_equal_constants_meeting_decide_only_the_jump() {
+    let nodes = [
+        Var(ILOAD, 0),
+        Jump(IFEQ, 0),
+        Int(BIPUSH, 7),
+        Jump(GOTO, 1),
+        At(0),
+        Int(SIPUSH, 7),
+        At(1),
+        Jump(IFNE, 2),
+        Op(ICONST_1),
+        Op(IRETURN),
+        At(2),
+        Op(ICONST_2),
+        Op(IRETURN),
+    ];
+    folds_as(
+        GotoThreading::Kept,
+        "(I)I",
+        1,
+        &nodes,
+        &[
+            Var(ILOAD, 0),
+            Jump(IFEQ, 0),
+            Int(BIPUSH, 7),
+            Jump(GOTO, 1),
+            At(0),
+            Int(SIPUSH, 7),
+            At(1),
+            Op(POP),
+            Jump(GOTO, 2),
+            At(2),
+            Op(ICONST_2),
+            Op(IRETURN),
+        ],
+        true,
+    );
 }
 
 #[test]
@@ -324,7 +423,8 @@ fn unreachable_code_goes_with_its_line_but_not_its_label() {
     folds("(I)I", 1, &source, &expected, true);
 
     let (mut method, labels) = body("(I)I", 1, &source);
-    let result = eliminate(&mut method, "T").expect("analysis succeeds");
+    let result = eliminate(&mut method, "T", crate::kotlin_version::Quirks::NONE)
+        .expect("analysis succeeds");
     assert_eq!(
         result.preserved_unreachable_labels,
         BTreeSet::from([labels[1]])
@@ -365,7 +465,8 @@ fn a_label_beside_a_reached_jump_target_is_not_retained_from_deleted_code() {
     ];
     let (mut method, _) = body("(I)I", 1, &source);
     let (unchanged, _) = body("(I)I", 1, &source);
-    let result = eliminate(&mut method, "T").expect("analysis succeeds");
+    let result = eliminate(&mut method, "T", crate::kotlin_version::Quirks::NONE)
+        .expect("analysis succeeds");
     assert_eq!(result, Elimination::default());
     assert_eq!(method.nodes, unchanged.nodes);
 }
@@ -385,9 +486,176 @@ fn a_label_after_a_throw_beside_a_reached_jump_target_stays_retained() {
         Op(IRETURN),
     ];
     let (mut method, labels) = body("(I)I", 1, &source);
-    let result = eliminate(&mut method, "T").expect("analysis succeeds");
+    let result = eliminate(&mut method, "T", crate::kotlin_version::Quirks::NONE)
+        .expect("analysis succeeds");
     assert_eq!(
         result.preserved_unreachable_labels,
         BTreeSet::from([labels[0]])
     );
+}
+
+/// `if (x != 0 || …)` on a materialized `x == 0`: `iload; ifne 0; iconst_1; goto 1; 0: iconst_0;
+/// 1: <jump> 2; iconst_2; ireturn; 2: iconst_3; ireturn`, with `extra` before the tested jump.
+fn materialized(jump: u8, extra: &[N]) -> Vec<N> {
+    let mut nodes = vec![
+        At(4),
+        Line(7, 4),
+        Var(ILOAD, 0),
+        Jump(IFNE, 0),
+        Op(ICONST_1),
+        Jump(GOTO, 1),
+        At(0),
+        Op(ICONST_0),
+        At(1),
+    ];
+    nodes.extend(extra.iter().map(|node| match *node {
+        At(k) => At(k),
+        Line(line, k) => Line(line, k),
+        _ => unreachable!("only labels and lines go before the tested jump"),
+    }));
+    nodes.extend([
+        Jump(jump, 2),
+        Op(ICONST_2),
+        Op(IRETURN),
+        At(2),
+        Op(ICONST_3),
+        Op(IRETURN),
+    ]);
+    nodes
+}
+
+#[test]
+fn a_goto_with_a_known_value_goes_to_the_branch_the_comparison_takes() {
+    folds(
+        "(I)I",
+        1,
+        &materialized(IFNE, &[]),
+        &[
+            At(4),
+            Line(7, 4),
+            Var(ILOAD, 0),
+            Jump(IFNE, 0),
+            Op(ICONST_1),
+            Op(POP),
+            Jump(GOTO, 2),
+            At(0),
+            Op(ICONST_0),
+            At(1),
+            // Reached only with the `0` now, so the next round decides it too.
+            Op(POP),
+            Op(ICONST_2),
+            Op(IRETURN),
+            At(2),
+            Op(ICONST_3),
+            Op(IRETURN),
+        ],
+        true,
+    );
+}
+
+#[test]
+fn before_2_5_the_goto_keeps_jumping_to_the_comparison() {
+    let nodes = materialized(IFNE, &[]);
+    folds_as(GotoThreading::Kept, "(I)I", 1, &nodes, &nodes, false);
+}
+
+#[test]
+fn a_comparison_the_value_fails_is_passed_to_a_label_made_after_it() {
+    folds(
+        "(I)I",
+        1,
+        &materialized(IFEQ, &[]),
+        &[
+            At(4),
+            Line(7, 4),
+            Var(ILOAD, 0),
+            Jump(IFNE, 0),
+            Op(ICONST_1),
+            Op(POP),
+            Jump(GOTO, 8),
+            At(0),
+            Op(ICONST_0),
+            At(1),
+            Op(POP),
+            Jump(GOTO, 2),
+            At(8),
+            Op(ICONST_2),
+            Op(IRETURN),
+            At(2),
+            Op(ICONST_3),
+            Op(IRETURN),
+        ],
+        true,
+    );
+}
+
+#[test]
+fn the_goto_takes_the_line_of_a_comparison_on_another_line() {
+    folds(
+        "(I)I",
+        1,
+        &materialized(IFNE, &[At(5), Line(8, 5)]),
+        &[
+            At(4),
+            Line(7, 4),
+            Var(ILOAD, 0),
+            Jump(IFNE, 0),
+            Op(ICONST_1),
+            Op(POP),
+            At(8),
+            Line(8, 8),
+            Jump(GOTO, 2),
+            At(0),
+            Op(ICONST_0),
+            At(1),
+            At(5),
+            Line(8, 5),
+            Op(POP),
+            Op(ICONST_2),
+            Op(IRETURN),
+            At(2),
+            Op(ICONST_3),
+            Op(IRETURN),
+        ],
+        true,
+    );
+}
+
+#[test]
+fn a_goto_does_not_leave_its_inline_scope_for_the_comparison() {
+    // The `goto` is inside an inlined lambda's marker range; the comparison is after it.
+    let nodes = [
+        Var(ILOAD, 0),
+        Jump(IFNE, 0),
+        At(4),
+        Op(ICONST_1),
+        Jump(GOTO, 1),
+        At(5),
+        At(0),
+        Op(ICONST_0),
+        At(1),
+        Jump(IFNE, 2),
+        Op(ICONST_2),
+        Op(IRETURN),
+        At(2),
+        Op(ICONST_3),
+        Op(IRETURN),
+    ];
+    let (mut method, labels) = body("(I)I", 2, &nodes);
+    method
+        .local_variables
+        .push(crate::jvm::method_node::LocalVariable {
+            name: "$i$a$-run-MainKt$f$1".to_string(),
+            desc: "I".to_string(),
+            start: labels[4],
+            end: labels[5],
+            slot: 1,
+        });
+    let unchanged = method.nodes.clone();
+    assert_eq!(
+        eliminate_as(&mut method, "T", GotoThreading::ToTheBranchTaken)
+            .map(|result| result.changed),
+        Ok(false)
+    );
+    assert_eq!(method.nodes, unchanged);
 }

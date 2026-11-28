@@ -218,6 +218,14 @@ quirks! {
         fixed_in: Some(KotlinVersion::new(2, 5, 0)),
         defect: true,
     }
+    /// The JVM optimizer's constant-condition elimination leaves a `goto` that carries a known
+    /// `int` to an `if<cond>` jumping there, instead of sending it straight to the branch that
+    /// constant takes: a materialized Boolean is tested again (`iconst_1; goto L; …; L: ifne`).
+    ConstantGotoNotThreadedToComparison {
+        since: None,
+        fixed_in: Some(KotlinVersion::new(2, 5, 0)),
+        defect: false,
+    }
     /// A function reference class's constructor numbers its bound receiver parameter
     /// (`receiver0`). From 2.5 kotlinc passes at most one bound receiver and names it `receiver`.
     FunctionReferenceNumbersBoundReceiver {

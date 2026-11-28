@@ -524,6 +524,8 @@ pub struct ClassWriter {
     inner_class_resolver: Option<InnerClassResolver>,
     inner_class_table: inner_classes::InnerClassTable,
     value_classes: Rc<crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors>,
+    /// The quirks of the kotlinc release whose optimizer the bytecode passes reproduce.
+    optimizer_quirks: crate::kotlin_version::Quirks,
     /// Internal names of every ANNOTATION type this class applies (class/field/method/parameter).
     /// An applied annotation appears only as a descriptor string inside the annotation attribute —
     /// never as a class constant — yet kotlinc still gives a nested one an `InnerClasses` entry, so
@@ -594,6 +596,7 @@ impl ClassWriter {
             inner_class_resolver: None,
             inner_class_table: inner_classes::InnerClassTable::default(),
             value_classes: Rc::default(),
+            optimizer_quirks: crate::kotlin_version::Quirks::NONE,
             annotation_class_refs: crate::fx_hash::HashSet::default(),
             permitted_subclasses: Vec::new(),
             version: ClassFileVersion::default(),
@@ -645,6 +648,11 @@ impl ClassWriter {
         value_classes: Rc<crate::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors>,
     ) {
         self.value_classes = value_classes;
+    }
+
+    /// Set the quirks of the kotlinc release whose optimizer the bytecode passes reproduce.
+    pub fn set_optimizer_quirks(&mut self, quirks: crate::kotlin_version::Quirks) {
+        self.optimizer_quirks = quirks;
     }
 
     /// Set the `PermittedSubclasses` entries in emission order.

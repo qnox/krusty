@@ -13,10 +13,14 @@
 //!   `if<cond>` of its first operand;
 //! - every node the analysis does not reach goes, except a label (line numbers go with the code).
 //!
+//! - from kotlinc 2.5, a `goto` that carries a known `int` to an `if<cond>` goes straight to the
+//!   branch that value takes ([`goto_threading`]).
+//!
 //! The rounds repeat while a round changes anything, since a jump become a `goto` leaves code
 //! unreachable and can make a merge see one value fewer. The popped operands stay for the later
 //! passes, which remove a load or constant that is only popped.
 
+mod goto_threading;
 mod interpreter;
 
 #[cfg(test)]
@@ -170,6 +174,7 @@ fn labels_sharing_a_reached_position(
 fn round(
     method: &mut MethodNode,
     owner: &str,
+    gotos: GotoThreading,
     preserved_unreachable_labels: &mut BTreeSet<LabelId>,
 ) -> Result<bool, AnalyzerError> {
     // Only a jump's frame decides anything; every other node needs only to be known reached.
@@ -185,7 +190,22 @@ fn round(
         labels_sharing_a_reached_position(method, |at| frames.is_reached(at));
     let mut changed = false;
     let mut nodes = Vec::with_capacity(method.nodes.len());
-    for (at, node) in std::mem::take(&mut method.nodes).into_iter().enumerate() {
+    // The nodes not reached yet, by their position in the analyzed body; a `goto` rewrite can place
+    // a label among them.
+    let mut ahead: Vec<(Option<usize>, Option<Node>)> = std::mem::take(&mut method.nodes)
+        .into_iter()
+        .enumerate()
+        .map(|(at, node)| (Some(at), Some(node)))
+        .collect();
+    let mut next = 0;
+    while next < ahead.len() {
+        let (position, node) = &mut ahead[next];
+        let (position, node) = (*position, node.take().expect("each node is reached once"));
+        next += 1;
+        let Some(at) = position else {
+            nodes.push(node);
+            continue;
+        };
         if !frames.is_reached(at) {
             if let Node::Label(label) = node {
                 if !shares_reached_position[at] {
@@ -202,6 +222,19 @@ fn round(
             continue;
         };
         let frame = frames.get(at).expect("a reached jump keeps its frame");
+        if op == GOTO {
+            nodes.push(node);
+            let known = peek(frame, 0).and_then(ConstValue::known);
+            if let Some(value) = known.filter(|_| gotos == GotoThreading::ToTheBranchTaken) {
+                let body = goto_threading::Body {
+                    done: &mut nodes,
+                    ahead: &mut ahead,
+                    from: next,
+                };
+                changed |= goto_threading::thread(method, body, value);
+            }
+            continue;
+        }
         let Some(action) = rewrite(op, frame) else {
             nodes.push(node);
             continue;
@@ -224,17 +257,53 @@ fn round(
     Ok(changed)
 }
 
+/// What the elimination does with a `goto` that carries a known `int` to an `if<cond>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GotoThreading {
+    /// It stays (kotlinc before 2.5).
+    Kept,
+    /// It goes straight to the branch the value takes.
+    ToTheBranchTaken,
+}
+
+impl GotoThreading {
+    /// The behavior of the kotlinc release whose `quirks` the compilation reproduces.
+    fn of(quirks: crate::kotlin_version::Quirks) -> Self {
+        if quirks.has(crate::kotlin_version::Quirk::ConstantGotoNotThreadedToComparison) {
+            GotoThreading::Kept
+        } else {
+            GotoThreading::ToTheBranchTaken
+        }
+    }
+}
+
 /// Fold every `int` jump of `method`, a member of `owner`, whose outcome its constant operands
-/// decide, and the exact labels retained in deleted unreachable regions.
+/// decide, as the target kotlinc release does, and the exact labels retained in deleted
+/// unreachable regions.
 pub(crate) fn eliminate(
     method: &mut MethodNode,
     owner: &str,
+    quirks: crate::kotlin_version::Quirks,
+) -> Result<Elimination, AnalyzerError> {
+    eliminate_as(method, owner, GotoThreading::of(quirks))
+}
+
+/// [`eliminate`] with the `goto` behavior given.
+fn eliminate_as(
+    method: &mut MethodNode,
+    owner: &str,
+    gotos: GotoThreading,
 ) -> Result<Elimination, AnalyzerError> {
     if !has_optimizable_conditions(method) {
         return Ok(Elimination::default());
     }
     let mut result = Elimination::default();
-    while round(method, owner, &mut result.preserved_unreachable_labels)? {
+    while round(
+        method,
+        owner,
+        gotos,
+        &mut result.preserved_unreachable_labels,
+    )? {
         result.changed = true;
     }
     Ok(result)

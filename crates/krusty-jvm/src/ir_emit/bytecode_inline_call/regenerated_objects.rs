@@ -299,6 +299,7 @@ pub(super) struct CallObjects<'a> {
     /// The caller's source map as the call's lambdas left it: their lines are lines of it.
     caller_lines: SourceMap,
     value_classes: Rc<ValueClassDescriptors>,
+    optimizer_quirks: krusty::kotlin_version::Quirks,
     reified: ReifiedArguments,
     /// The calling class's source file name.
     source_file: Option<String>,
@@ -336,6 +337,7 @@ impl<'a> Emitter<'a> {
             callee: callee.to_string(),
             caller_lines,
             value_classes: self.cw.value_classes(),
+            optimizer_quirks: self.cw.optimizer_quirks(),
             reified,
             same_module: self.ir.compiled_inline_call(call_expression).is_some(),
             source_file: self.cw.source_file_name(),
@@ -450,6 +452,7 @@ impl AnonymousObjects for CallObjects<'_> {
                 caller_lines: &self.caller_lines,
                 classes: &self.bodies,
                 value_classes: &self.value_classes,
+                optimizer_quirks: self.optimizer_quirks,
                 reified: &self.reified,
                 continuation: None,
                 same_module: self.same_module,

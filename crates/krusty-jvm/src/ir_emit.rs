@@ -1028,6 +1028,7 @@ fn new_writer_generic(
     cw.set_param_assertions(opts.param_assertions);
     cw.set_inner_class_resolver(opts.inner_class_resolver.clone());
     cw.set_value_classes(opts.value_classes.clone());
+    cw.set_optimizer_quirks(opts.optimizer_quirks);
     cw
 }
 
@@ -1078,6 +1079,7 @@ fn emit_all_with_class_meta_impl(
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let opts = &EmitOptions {
         value_classes: std::rc::Rc::new(value_class_descriptors::of(ir)),
+        optimizer_quirks: ir.reference.quirks(),
         ..opts.clone()
     };
     // Pass 1 (discovery): emit everything, recording live closure implementations. A lambda spliced by the inliner emits neither realization.

@@ -131,6 +131,8 @@ pub struct Regeneration<'a> {
     pub classes: &'a dyn ClassRoles,
     /// The caller's value classes, which the copy's code boxes like the caller's.
     pub value_classes: &'a Rc<ValueClassDescriptors>,
+    /// The caller's optimizer quirks, which the copy's code is optimized under like the caller's.
+    pub optimizer_quirks: crate::kotlin_version::Quirks,
     /// The state machine whose continuation this copy is, when it is the continuation of a copied
     /// suspend method (`isContinuation`).
     pub continuation: Option<&'a ContinuationMachine>,
@@ -253,6 +255,7 @@ pub fn regenerate(
         cw.set_signature(signature);
     }
     cw.set_value_classes(Rc::clone(regeneration.value_classes));
+    cw.set_optimizer_quirks(regeneration.optimizer_quirks);
     cw.set_access(original.access);
     if original.deprecated {
         cw.set_deprecated();

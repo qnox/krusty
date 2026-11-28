@@ -265,6 +265,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
         | Quirk::SyntheticClassXiOmitsVisibility
         | Quirk::AnnotationImplCarriesNullability
         | Quirk::KlibLegacyMetadataVersionBelowLanguage23
+        | Quirk::ConstantGotoNotThreadedToComparison
         | Quirk::ClassStaticsInitializeBeforeCompanionBody
         | Quirk::NotNullOperatorDropsIntersectionApproximation
         | Quirk::InvisibleCandidatesKeepScopeLevels

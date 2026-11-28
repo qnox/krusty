@@ -103,6 +103,8 @@ const ANALYZED_OWNER: &str = "fake";
 pub(crate) struct PassContext<'a> {
     /// The value classes whose boxes the boxing pass recognizes.
     pub value_classes: &'a dyn ValueClasses,
+    /// The quirks of the kotlinc release whose optimizer the passes reproduce.
+    pub quirks: crate::kotlin_version::Quirks,
     /// The slots `this` and the parameters take, which slot compaction leaves where they are.
     pub parameter_slots: u16,
     /// This body has passed through the coroutine transformer. Its conservative safe-call receiver
@@ -159,7 +161,8 @@ impl Run {
                 redundant_checkcasts::eliminate(method, ANALYZED_OWNER).ok()?
             }
             Pass::ConstantCondition => {
-                let done = constant_conditions::eliminate(method, ANALYZED_OWNER).ok()?;
+                let done =
+                    constant_conditions::eliminate(method, ANALYZED_OWNER, context.quirks).ok()?;
                 self.constant_condition_labels = done.preserved_unreachable_labels;
                 done.changed
             }
@@ -269,6 +272,7 @@ mod tests {
     fn context(value_classes: &ValueClassDescriptors) -> PassContext<'_> {
         PassContext {
             value_classes,
+            quirks: crate::kotlin_version::Quirks::NONE,
             parameter_slots: 0,
             post_coroutine: false,
             kept_for_inlining: false,
