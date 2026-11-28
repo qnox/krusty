@@ -601,6 +601,9 @@ fn emit_primary_overloads(
         annotations: &class.primary_ctor_annotations,
         signature: &signature,
         varargs: false,
+        annotations_ride_accessor: constructor_accessors::primary_annotations_ride_accessor(
+            ir, class,
+        ),
     };
     overloads.emit_all(phase, hidden, cw);
 }
@@ -693,6 +696,10 @@ fn emit_secondary_overloads(
         annotations: &constructor.annotations,
         signature: &signature,
         varargs: method_access::secondary_constructor_varargs(constructor) != 0,
+        annotations_ride_accessor: constructor_accessors::secondary_annotations_ride_accessor(
+            class,
+            constructor,
+        ),
     };
     overloads.emit_all(phase, hidden, cw);
 }
@@ -810,6 +817,9 @@ struct ConstructorOverloads<'a> {
     signature: &'a dyn Fn(&[usize]) -> Option<String>,
     /// Whether the declaration ends in a `vararg` parameter.
     varargs: bool,
+    /// Whether the annotations belong on the marker accessor of each overload and not on the
+    /// private overload itself (a constructor taking a value class).
+    annotations_ride_accessor: bool,
 }
 
 impl ConstructorOverloads<'_> {
@@ -836,7 +846,23 @@ impl ConstructorOverloads<'_> {
             .chain(kept.iter().map(|&index| self.prefix.len() + index))
             .map(|position| self.local_names.get(position).cloned().flatten())
             .collect::<Vec<_>>();
-        constructor_defaults::emit_ctor_marker_accessor(self.owner, &physical, &identities, cw);
+        let parameters = kept
+            .iter()
+            .filter_map(|&index| self.parameter_annotations.get(index).cloned())
+            .collect::<Vec<_>>();
+        let attributes = self.annotations_ride_accessor.then_some(
+            constructor_defaults::MarkerAccessorAttributes {
+                annotations: self.annotations,
+                parameters: &parameters,
+            },
+        );
+        constructor_defaults::emit_ctor_marker_accessor(
+            self.owner,
+            &physical,
+            &identities,
+            attributes,
+            cw,
+        );
     }
 
     fn emit(&self, kept: &[usize], cw: &mut ClassWriter) {
@@ -876,12 +902,17 @@ impl ConstructorOverloads<'_> {
             })
             .map(|(_, parameter)| parameter.clone())
             .collect::<Vec<_>>();
+        let annotations = if self.annotations_ride_accessor {
+            &krusty::ir::DeclarationAnnotations::default()
+        } else {
+            self.annotations
+        };
         cw.reserve_method_pool_with_annotations(
             "<init>",
             &descriptor,
             signature.as_deref(),
             &nullability_types,
-            self.annotations,
+            annotations,
             &method_parameters,
         );
         let mut code = CodeBuilder::new(1 + physical.iter().map(|ty| slot_words(*ty)).sum::<u16>());
@@ -978,10 +1009,10 @@ impl ConstructorOverloads<'_> {
         if nullability.iter().any(Option::is_some) {
             cw.set_method_nullability("<init>", &descriptor, None, &nullability);
         }
-        if !parameter_annotations.is_empty() {
+        if !parameter_annotations.is_empty() && !self.annotations_ride_accessor {
             cw.set_method_param_annotations("<init>", &descriptor, &parameter_annotations);
         }
-        function_annotations::emit_constructor_declared(cw, self.annotations, &descriptor);
+        function_annotations::emit_constructor_declared(cw, annotations, &descriptor);
     }
 }
 

@@ -142,9 +142,6 @@ fn enum_constructor_overloads_keep_the_name_and_ordinal_prefix_like_kotlinc() {
     );
 }
 
-// PLATFORM-SPECIFIC: kotlinc moves the annotations of a constructor hidden behind a value-class
-// marker accessor onto that accessor, which krusty does not model for any such constructor yet, so
-// the class files are compared by behaviour here and not byte for byte.
 const VALUE_CLASS_CONSTRUCTORS: &str = "@JvmInline value class V(val v: Int)
 
 class HiddenSecondary(val x: String) {
@@ -177,6 +174,36 @@ fun box(): String {
 #[test]
 fn value_class_constructor_overloads_are_reachable_through_marker_accessors() {
     common::expect_box_same_as_kotlinc(VALUE_CLASS_CONSTRUCTORS, "jvm_overloads_value_class");
+}
+
+const ANNOTATED_VALUE_CLASS_CONSTRUCTORS: &str = "package p
+
+@JvmInline value class V(val v: Int)
+
+annotation class Mark
+
+class HiddenSecondary(val x: String) {
+    @Mark @Deprecated(\"d\") @JvmOverloads constructor(a: V, b: Int = 1, c: Int = 2) : this(\"\")
+}
+
+class HiddenPrimary @Mark @Deprecated(\"d\") @JvmOverloads constructor(
+    @Mark val v: V,
+    val a: Int = 1,
+    val b: String = \"b\",
+)
+
+class PlainSecondary(val x: String) {
+    @Mark constructor(a: V, b: Int = 1) : this(\"\")
+}
+";
+
+#[test]
+fn value_class_constructor_overloads_and_annotations_sit_on_the_marker_accessors_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc(
+        "JvmOverloadsValueClassConstructors",
+        ANNOTATED_VALUE_CLASS_CONSTRUCTORS,
+        &["p/HiddenSecondary", "p/HiddenPrimary", "p/PlainSecondary"],
+    );
 }
 
 const COMPANION: &str = "package p
