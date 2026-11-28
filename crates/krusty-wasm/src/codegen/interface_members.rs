@@ -495,10 +495,27 @@ impl FileRecorder<'_, '_, '_> {
         )
     }
 
-    /// The function class slot `slot` of this class holds.
+    /// The function class slot `slot` of this class holds. A representation bridge there (see
+    /// [`Slot::Bridge`]) is the function the class table realized for it, wearing the base's
+    /// carriers.
     fn slot_function(&mut self, slot: u32) -> Result<Placed, Unsupported> {
         let entry = self.classes.tables.table(self.id).vtable[slot as usize].clone();
-        self.slot_entry(&entry)
+        if !matches!(
+            entry,
+            Slot::Bridge { .. }
+                | Slot::DeclaredBridge { .. }
+                | Slot::AccessorBridge { .. }
+                | Slot::FunctionBridge { .. }
+        ) {
+            return self.slot_entry(&entry);
+        }
+        self.classes
+            .realized_entry(self.id, slot)
+            .and_then(|function| {
+                let ty = self.classes.slot_type(self.id, slot)?;
+                Some((function, self.program.module.func_signature(ty)?))
+            })
+            .ok_or_else(|| self.declined("a representation bridge its class table did not realize"))
     }
 
     /// The function a class table entry stands for.

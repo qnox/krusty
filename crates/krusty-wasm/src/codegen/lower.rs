@@ -32,8 +32,11 @@ mod enums;
 mod exceptions;
 mod function_values;
 mod generated_members;
+mod host_imports;
 mod intrinsic_operations;
+mod js_code_functions;
 pub(super) mod library_members;
+mod linear_memory;
 mod local_delegates;
 mod objects;
 mod scalar_instructions;
@@ -188,7 +191,7 @@ pub(super) fn lower_file(
             signatures.push(Some(super::classes::method_type(module, ir, id as FunId)?));
             continue;
         }
-        if function.body.is_none() {
+        if function.body.is_none() && !ir.host_imports.contains_key(&(id as FunId)) {
             return Err(format!("the bodiless function `{}`", function.name));
         }
         let params = function
@@ -302,6 +305,21 @@ pub(super) fn lower_file(
             }
             continue;
         };
+        if let Some(import) = ir.host_imports.get(&(id as FunId)) {
+            host_imports::host_import(module, ir, id as FunId, index, signature, import)?;
+            continue;
+        }
+        if let Some(js) = js_code_functions::js_code_function(ir, callables, id as FunId)? {
+            runtime.js_functions.import(
+                module,
+                (runtime.chars, runtime.string),
+                index,
+                signature,
+                js.code,
+                js.crossings,
+            );
+            continue;
+        }
         let Some(root) = function.body else {
             // An abstract member: its slot holds the trap, and nothing calls it directly.
             module.define(
@@ -1416,6 +1434,18 @@ impl<'a> Body<'a> {
                     krusty::backend::default_arguments::mask_words(params.len()),
                 ));
                 self.direct_call(function, &frame, &args)?;
+            }
+            // Only a function whose whole body is the call realizes `js(…)`, by importing it.
+            IrExpr::Call {
+                callee: ref call_callee,
+                ..
+            } if let Callee::External { target, .. } = &**call_callee
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(krusty::backend::BackendCompilerIntrinsic::JsCode)
+                }) =>
+            {
+                return Err("a `js(…)` call that is not its function's whole body".into());
             }
             // The target stdlib's own `typeOf` body only says it is a compiler intrinsic.
             IrExpr::Call {

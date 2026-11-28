@@ -311,6 +311,14 @@ impl FileClasses {
             .flatten()
     }
 
+    /// The function the table of `class` holds at `slot`, once the table is realized.
+    pub(super) fn realized_entry(&self, class: ClassId, slot: u32) -> Option<u32> {
+        self.entries[class as usize]
+            .get(slot as usize)
+            .copied()
+            .flatten()
+    }
+
     /// The struct field holding field `index` of `class`.
     pub(super) fn field(&self, class: ClassId, index: u32) -> u32 {
         PREFIX_FIELDS + self.base_fields(class) + self.tables.table(class).first_field + index

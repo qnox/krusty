@@ -168,7 +168,6 @@ module=6:kotlin public package=2[6:kotlin,11:collections] declaration=2[8:Iterab
 module=6:kotlin public package=2[6:kotlin,11:collections] declaration=2[8:Iterator,4:next] member=4628025478201224268 mask=0
 module=6:kotlin public package=2[6:kotlin,11:collections] declaration=2[8:Iterator,7:hasNext] member=14797722415841785784 mask=0
 module=6:kotlin public package=2[6:kotlin,11:collections] declaration=3[10:MutableMap,12:MutableEntry,8:setValue] member=5796777615504182882 mask=0
-module=6:kotlin public package=2[6:kotlin,2:js] declaration=1[2:js] member=2399998844066816087 mask=0
 module=6:kotlin public package=2[6:kotlin,2:js] declaration=2[10:JsFileName,6:<init>] member=1280618353163213788 mask=1
 module=6:kotlin public package=2[6:kotlin,2:js] declaration=2[11:JsNoRuntime,6:<init>] member=12801060637557984885 mask=1
 module=6:kotlin public package=2[6:kotlin,2:js] declaration=2[7:JsArray,6:<init>] member=12801060637557984885 mask=0

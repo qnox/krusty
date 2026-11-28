@@ -52,7 +52,6 @@ basics/unchecked_cast11.kt
 basics/unchecked_cast12.kt
 basics/unchecked_cast13.kt
 basics/unchecked_cast2.kt
-basics/unchecked_cast3.kt
 basics/unchecked_cast4.kt
 basics/unchecked_cast5.kt
 basics/unchecked_cast6x.kt
@@ -188,7 +187,6 @@ controlStructures/forInCharSequenceWithIndex/forInStringWithIndexNameBasedDestru
 controlStructures/forInIterableWithIndex/forInListWithIndexNameBasedDestructuringShortForm.kt
 controlStructures/forInSequenceWithIndex/forInSequenceWithIndexNameBasedDestructuringShortForm.kt
 controlStructures/kt416.kt
-controlStructures/kt513.kt
 controlStructures/kt628.kt
 controlflow/for_loops.kt
 controlflow/for_loops_array_break_continue.kt
@@ -456,9 +454,6 @@ funInterface/nonAbstractMethod.kt
 funInterface/nullableSam.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 funInterface/suspendFunctionAndFunInterfaceSharedClassSplit.kt
-function/defaults.kt
-function/defaults1.kt
-function/defaults2.kt
 function/defaults4.kt
 function/defaults5.kt
 function/defaults7.kt
@@ -620,7 +615,6 @@ nothingValue/nothingValueException.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromAnonymousObjectInNestedClass.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlock.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlockOfNestedClass.kt
-objects/kt32749.kt
 objects/objectInLocalAnonymousObject.kt
 operatorConventions/kt20387.kt
 operatorConventions/kt44647.kt
@@ -650,7 +644,6 @@ properties/generalAccess.kt
 properties/genericPropertyMultiModule.kt
 properties/kt4383.kt
 properties/kt78962.kt
-properties/lateinit/local/kt23260.kt
 properties/lateinit/overrideException.kt
 properties/lazyInitialization.kt
 properties/lazyInitializationCyclicImports.kt
@@ -771,7 +764,6 @@ reflection/typeOf/nonReifiedTypeParameters/upperBoundUsesOuterClassParameter.kt
 reflection/typeOf/nonReifiedTypeParameters/upperBounds.kt
 reflection/typeOf/reifiedAsNestedArgument.kt
 reflection/typeOf/typeOfCapturedStar.kt
-regressions/kt15196.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
 regressions/kt5056.kt
@@ -807,7 +799,6 @@ secondaryConstructors/innerClasses.kt
 secondaryConstructors/innerClassesInheritance.kt
 secondaryConstructors/localClasses.kt
 serialization/serializedVararg.kt
-size/helloWorld.kt
 specialBuiltins/bridges.kt
 specialBuiltins/emptyList.kt
 specialBuiltins/enumAsOrdinaled.kt
@@ -867,7 +858,6 @@ underscoredTypeArguments/simple.kt
 unit/kt3634.kt
 unsignedTypes/generic.kt
 vararg/varargInTailrec.kt
-wasm-annotations/branchHint.kt
 wasm-new-exception-handling/finally5.kt
 wasm-new-exception-handling/finally6.kt
 wasm-new-exception-handling/finally7.kt

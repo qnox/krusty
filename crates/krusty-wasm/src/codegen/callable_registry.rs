@@ -507,7 +507,10 @@ impl CallableRegistry {
                             *operation
                                 != krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
                         })
-                        .is_some_and(super::lower::is_direct_operation)
+                        .is_some_and(|operation| {
+                            super::lower::is_direct_operation(operation)
+                                || operation == krusty::backend::BackendCompilerIntrinsic::JsCode
+                        })
                         && !published
                     {
                         // Emission realizes this exact operation; there is no dependency entry.

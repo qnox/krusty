@@ -67,6 +67,8 @@ mod emitted_body_roots;
 mod plugin_file_facts;
 pub use plugin_file_facts::PluginFileFacts;
 mod enums;
+mod host_imports;
+pub use host_imports::IrHostImport;
 mod expect_actualization;
 mod expression_copy;
 pub(crate) use expression_copy::{
@@ -2025,6 +2027,8 @@ pub struct IrFile {
     /// Metadata, reflection, and receiver-name projection consume this semantic name and never
     /// recover it from the realized function spelling.
     pub fn_source_names: crate::fx_hash::HashMap<u32, String>,
+    /// Bodyless dependency functions the target imports from its host ([`IrHostImport`]).
+    pub host_imports: crate::fx_hash::HashMap<FunId, IrHostImport>,
     /// The same, for a CLASS HEADER (supertypes, primary-constructor parameters, type-parameter
     /// bounds), keyed by the class's fully-qualified name.
     pub class_declared_spellings:

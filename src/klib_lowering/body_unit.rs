@@ -42,6 +42,7 @@ mod constructor_linking;
 mod enum_materialization;
 mod fake_overrides;
 mod file_private_functions;
+mod host_imports;
 pub(crate) use fake_overrides::emitted_body;
 #[cfg(test)]
 mod initializer_capability_tests;
@@ -2540,7 +2541,7 @@ impl<'s> Linker<'_, 's> {
         arena: &'s KlibIrArena,
         function: &'s KlibIrFunction,
     ) -> Result<FunId, KlibBodyDeclineReason> {
-        block_statements(function)?;
+        host_imports::require_body(arena, function)?;
         let header = body_header(selected, arena, function, self.sources.bodies)?;
         self.declare_with_header(ir, identity, selected, arena, function, header)
     }
@@ -2555,7 +2556,7 @@ impl<'s> Linker<'_, 's> {
         function: &'s KlibIrFunction,
         types: super::klib_types::KlibTypeParameters,
     ) -> Result<FunId, KlibBodyDeclineReason> {
-        block_statements(function)?;
+        host_imports::require_body(arena, function)?;
         let header = super::function_lowering::raw_function_header_with_class(
             selected,
             HeaderPurpose::Body(None),
@@ -2631,6 +2632,11 @@ impl<'s> Linker<'_, 's> {
             value_member,
         }: BodyHeader<'s>,
     ) -> Result<FunId, KlibBodyDeclineReason> {
+        // A host function has no body to queue; the target imports it.
+        if let Some(declared) = host_imports::declare(ir, arena, function, &header) {
+            self.functions.insert(identity.clone(), declared);
+            return Ok(declared);
+        }
         let statements = block_statements(function)?;
         let declared = declare_function(ir, &header);
         let callee = inline_functions::Candidate::new(declared, function, &header, selected);

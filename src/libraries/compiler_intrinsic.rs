@@ -122,6 +122,10 @@ pub enum CompilerIntrinsic {
     /// authenticated declaration fixes its operand and result types. Checked FIR and common IR
     /// keep its call an ordinary call; only the target emitter replaces it with the instruction.
     ScalarInstruction(super::ScalarInstruction),
+    /// One linear-memory instruction the target stdlib declares as the callable's implementation,
+    /// over the exact operand and result types the provider authenticated. As with
+    /// [`Self::ScalarInstruction`], only the target emitter replaces its call.
+    LinearMemory(super::LinearMemoryOperation),
     /// Native's exact `GCUnsafeCall` floating-point predicate declaration. The provider
     /// authenticates the runtime entry and complete extension-receiver shape while it still owns
     /// the platform KLIB; target lowering consumes only this operation and scalar type.
@@ -254,6 +258,10 @@ pub enum CompilerIntrinsic {
     /// `BuiltInsLowering` expands it to `if (cont is CoroutineImpl) cont.intercepted() else cont`
     /// over the stdlib's state-machine `kotlin.coroutines.CoroutineImpl`.
     InterceptedContinuation,
+    /// Kotlin/Wasm's `kotlin.js.js(code: String): Nothing`, an `@ExcludedFromCodegen` declaration
+    /// of the wasm-js stdlib. kotlinc's `JsCodeCallsLowering` turns a function whose whole body is
+    /// `js("…")` into a JavaScript function the host supplies; the call itself never runs.
+    JsCode,
     EnumValues,
     EnumValueOf,
     /// The zero-argument `kotlin.enums.enumEntries<T>()`. Its stdlib body only throws; the selected

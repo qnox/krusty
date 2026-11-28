@@ -1384,14 +1384,17 @@ fn expect_reference_array_bounds(source: &str, name: &str) {
                     .find(|(name, _)| name == "box.mjs")
                     .expect("generated loader");
                 loader.0 = "bounds-program.mjs".to_owned();
-                program.artifacts.push(("box.mjs".to_owned(), br#"try {
+                // The module frames its answer after `box()` returns, which a trap never reaches:
+                // the observed trap is framed here instead.
+                let frame = krusty::backend::BOX_RESULT_FRAME.replace('\0', "\\u0000");
+                program.artifacts.push(("box.mjs".to_owned(), format!(r#"try {{
     await import('./bounds-program.mjs');
     throw new Error('unchecked array access unexpectedly completed');
-} catch (failure) {
+}} catch (failure) {{
     if (!(failure instanceof WebAssembly.RuntimeError) || failure.message !== 'array element access out of bounds') throw failure;
-    process.stdout.write('OK');
-}
-"#.to_vec()));
+    process.stdout.write('{frame}OK');
+}}
+"#).into_bytes()));
             }
             assert_eq!(
                 lane.run_artifacts(&std::env::temp_dir(), &stem, "bounds", source, program),
@@ -1910,6 +1913,9 @@ fn wasm_js_kotlin_js_declarations_resolve_without_an_import() {
 
 #[path = "wasm_unsigned_decimal.rs"]
 mod unsigned_decimal;
+
+#[path = "wasm_console_output.rs"]
+mod console_output;
 
 #[path = "wasm_enclosing_instances.rs"]
 mod enclosing_instances;

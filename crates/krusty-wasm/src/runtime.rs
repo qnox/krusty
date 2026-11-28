@@ -111,6 +111,8 @@ pub(super) struct Runtime {
     type_objects: TypeObjects,
     /// What a class literal evaluates to.
     pub(super) class_tokens: ClassTokens,
+    /// The JavaScript functions a `wasm-js` module imports.
+    pub(super) js_functions: super::js_code::JsFunctions,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
     /// Dispatch and type information for directly allocated root `Any` instances.
@@ -208,6 +210,7 @@ impl Runtime {
             ),
             hashing,
             class_tokens,
+            js_functions: Default::default(),
             exceptions,
             object_strings,
             boxes: Boxes::default(),

@@ -183,11 +183,17 @@ impl Backend for WasmBackend {
         true
     }
 
+    fn imports_wasm_functions(&self) -> bool {
+        true
+    }
+
     fn realizes_dependency_intrinsic(
         &self,
         operation: krusty::backend::BackendCompilerIntrinsic,
     ) -> bool {
         lower::is_direct_operation(operation)
+            || (operation == krusty::backend::BackendCompilerIntrinsic::JsCode
+                && self.target == WasmTarget::Js)
     }
 
     /// An array classifier's `storage` property is this target's own array storage, and an
@@ -426,6 +432,7 @@ impl Backend for WasmBackend {
         let start = started.module.declare();
         let ty = started.module.func_type(Vec::new(), Vec::new());
         let mut code = Code::default();
+        let mut locals = Vec::new();
         for initializer in &state.initializers {
             code.call(*initializer);
         }
@@ -434,30 +441,31 @@ impl Backend for WasmBackend {
                 code.call(entry);
             }
             Entry::Box => {
+                // What `box()` prints goes before the frame, so the answer is only its result.
+                locals.push(started.runtime.nullable_string_type());
+                code.call(entry)
+                    .call(started.runtime.string_or_null)
+                    .local_set(0);
                 let frame = BOX_RESULT_FRAME.encode_utf16().collect::<Vec<_>>();
                 started
                     .runtime
                     .string_constant(&mut started.module, &mut code, &frame);
                 code.call(started.runtime.write_string)
-                    .call(entry)
-                    .call(started.runtime.string_or_null)
+                    .local_get(0)
+                    .ref_as_non_null()
                     .call(started.runtime.write_string);
             }
         }
-        started.module.define(
-            start,
-            Function {
-                ty,
-                locals: Vec::new(),
-                code,
-            },
-        );
+        started.module.define(start, Function { ty, locals, code });
         started.module.export_function("_start", start);
         vec![
             (format!("{module_name}.wasm"), started.module.encode()),
             (
                 format!("{module_name}.mjs"),
-                started.host.loader(module_name).into_bytes(),
+                started
+                    .host
+                    .loader(module_name, &started.runtime.js_functions)
+                    .into_bytes(),
             ),
         ]
     }

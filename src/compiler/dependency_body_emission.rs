@@ -433,6 +433,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             unit: &unit,
             callees: &callees,
             target_realizes_bodyless: backend.realizes_bodyless_dependency_support(),
+            target_imports_wasm_functions: backend.imports_wasm_functions(),
             target_realizes_intrinsic: &target_realizes_intrinsic,
             target_realizes_getter: &target_realizes_getter,
             target_represents_classifier: &target_represents_classifier,
@@ -489,6 +490,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             unit: &unit,
             callees: &callees,
             target_realizes_bodyless: backend.realizes_bodyless_dependency_support(),
+            target_imports_wasm_functions: backend.imports_wasm_functions(),
             target_realizes_intrinsic: &target_realizes_intrinsic,
             target_realizes_getter: &target_realizes_getter,
             target_represents_classifier: &target_represents_classifier,
@@ -1101,6 +1103,8 @@ struct DependencyLeafCapabilities<'a> {
     unit: &'a DependencyBodyUnit,
     callees: &'a KlibCalleeFacts<'a>,
     target_realizes_bodyless: bool,
+    /// The target imports an `@WasmImport` declaration from its host.
+    target_imports_wasm_functions: bool,
     target_realizes_intrinsic: &'a dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
     target_realizes_getter: &'a dyn Fn(crate::backend::DependencyGetterSignature<'_>) -> bool,
     target_represents_classifier: &'a dyn Fn(crate::types::TypeName) -> bool,
@@ -1425,6 +1429,15 @@ fn prepare_bodyless_externals(
                     return false;
                 };
                 externals.insert(callee, external);
+                continue;
+            }
+            // An `@WasmImport` declaration is the host's: the unit declares it without a body
+            // and the target imports it.
+            if capabilities.target_imports_wasm_functions
+                && bodies.function(&callee).is_some_and(|(arena, function)| {
+                    crate::klib_libraries::wasm_import(arena, function).is_some()
+                })
+            {
                 continue;
             }
             if !capabilities.target_realizes_bodyless {

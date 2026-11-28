@@ -1088,6 +1088,9 @@ fn realize_expressions(
             Some(krusty::libraries::CompilerIntrinsic::ScalarInstruction(_)) => {
                 unreachable!("a target KLIB scalar instruction cannot reach JVM call realization")
             }
+            Some(krusty::libraries::CompilerIntrinsic::LinearMemory(_)) => {
+                unreachable!("a Wasm linear-memory instruction cannot reach JVM call realization")
+            }
             Some(
                 krusty::libraries::CompilerIntrinsic::CurrentContinuation
                 | krusty::libraries::CompilerIntrinsic::ReturnIfSuspended,
@@ -1096,6 +1099,9 @@ fn realize_expressions(
             }
             Some(krusty::libraries::CompilerIntrinsic::InterceptedContinuation) => {
                 unreachable!("a Wasm continuation intrinsic cannot reach JVM call realization")
+            }
+            Some(krusty::libraries::CompilerIntrinsic::JsCode) => {
+                unreachable!("the wasm-js stdlib's `js` cannot reach JVM call realization")
             }
             Some(
                 krusty::libraries::CompilerIntrinsic::UnsignedDivide { .. }
