@@ -81,17 +81,7 @@ basics/unchecked_cast6.kt
 basics/unit4.kt
 bce/bceCases.kt
 bce/delegatedProperty.kt
-bce/forDownToSize.kt
-bce/forDownToWithStep.kt
 bce/forEachIndexedTest.kt
-bce/forEachIndicies.kt
-bce/forIndiciesWithStep.kt
-bce/forRangeToSize.kt
-bce/forRangeToWithStep.kt
-bce/forReversed.kt
-bce/forUntilSize.kt
-bce/forUntilWithStep.kt
-bce/forWithIndex.kt
 bce/inheritance.kt
 binaryOp/divisionByZero.kt
 binaryOp/kt44402.kt
@@ -183,7 +173,6 @@ callableReference/bound/arrayGetIntrinsic.kt
 callableReference/bound/companionObjectReceiverInheritsFromOuter.kt
 callableReference/bound/emptyLHS.kt
 callableReference/bound/equals/nullableReceiverInEquals.kt
-callableReference/bound/equals/reflectionReference.kt
 callableReference/bound/genericBoundPropertyAsCrossinline.kt
 callableReference/bound/genericValOnLHS.kt
 callableReference/bound/inlineFunctionRefToAnonymousObject.kt
@@ -720,7 +709,6 @@ coroutines/multipleInvokeCallsInsideInlineLambda1.kt
 coroutines/multipleInvokeCallsInsideInlineLambda2.kt
 coroutines/multipleInvokeCallsInsideInlineLambda3.kt
 coroutines/nestedTryCatch.kt
-coroutines/nonLocalReturn.kt
 coroutines/nonLocalReturnFromInlineLambda.kt
 coroutines/nonLocalReturnFromInlineLambdaDeep.kt
 coroutines/nullableSuspendFunctionType.kt
@@ -1227,7 +1215,6 @@ inline/blocksMaterialization.kt
 inline/callableReference.kt
 inline/callableReferenceOfLocalFun.kt
 inline/callableReferenceOfLocalKT77102.kt
-inline/changingCapturedLocal.kt
 inline/classDeclarationInsideInline.kt
 inline/coercionToUnit.kt
 inline/crossModuleTypeOf.kt
@@ -1242,7 +1229,6 @@ inline/inline5.kt
 inline/inlineCallInsideStringTemplate.kt
 inline/inlineFunctionInLambda.kt
 inline/inlineInInlineWithLambdaPrivate.kt
-inline/inlineLambdaWithCapture.kt
 inline/innerInlineFunCapturesOuter.kt
 inline/iteratorOnInlineFunctionResult.kt
 inline/kt26117.kt
@@ -1448,7 +1434,6 @@ inlineClasses/kt45991.kt
 inlineClasses/kt47762.kt
 inlineClasses/kt47762Generic.kt
 inlineClasses/kt47823.kt
-inlineClasses/kt50974_resultMultiModule.kt
 inlineClasses/kt70461.kt
 inlineClasses/kt71649.kt
 inlineClasses/mangledDefaultParameterFunction.kt
@@ -1505,7 +1490,6 @@ inlineEvaluationOrder/arrayLiteralMultipleInlineCalls.kt
 inlineEvaluationOrder/arrayLiteralNested.kt
 inlineEvaluationOrder/callQualifier.kt
 inlineEvaluationOrder/callQualifierComplex.kt
-inlineEvaluationOrder/capturedVarAsArgument.kt
 inlineEvaluationOrder/for.kt
 inlineEvaluationOrder/lambdaPropertyExtracted.kt
 inlineEvaluationOrder/logicalAnd.kt
@@ -1884,9 +1868,7 @@ ranges/stepped/literal/rangeTo/mixedTypeStep.kt
 ranges/stepped/literal/rangeTo/reversed/reversedThenStepThenReversed.kt
 ranges/stepped/literal/rangeTo/reversed/stepThenReversedThenStepThenReversed.kt
 ranges/stepped/literal/rangeTo/stepNonConst.kt
-ranges/stepped/literal/rangeUntil/illegalStepThenLegalStep.kt
 ranges/stepped/literal/rangeUntil/legalStepThenIllegalStep.kt
-ranges/stepped/literal/until/illegalStepThenLegalStep.kt
 ranges/stepped/literal/until/legalStepThenIllegalStep.kt
 ranges/stepped/unsigned/expression/downTo/illegalStepNegative.kt
 ranges/stepped/unsigned/expression/downTo/illegalStepThenLegalStep.kt
@@ -1961,9 +1943,7 @@ ranges/stepped/unsigned/literal/rangeTo/nestedStep/stepToSmallerLastThenStepOne.
 ranges/stepped/unsigned/literal/rangeTo/reversed/reversedThenStepThenReversed.kt
 ranges/stepped/unsigned/literal/rangeTo/reversed/stepThenReversedThenStepThenReversed.kt
 ranges/stepped/unsigned/literal/rangeTo/stepNonConst.kt
-ranges/stepped/unsigned/literal/rangeUntil/illegalStepThenLegalStep.kt
 ranges/stepped/unsigned/literal/rangeUntil/legalStepThenIllegalStep.kt
-ranges/stepped/unsigned/literal/until/illegalStepThenLegalStep.kt
 ranges/stepped/unsigned/literal/until/legalStepThenIllegalStep.kt
 ranges/stepped/unsigned/literal/until/mixedTypeStep.kt
 ranges/unsigned/expression/emptyRange.kt
@@ -2113,7 +2093,6 @@ regressions/inlineDefaultEvaluatesNestedInlineCall.kt
 regressions/inlineDefaultLambdaCapturedByClosure.kt
 regressions/inlineDefaultStubRun.kt
 regressions/inlineJvmStaticDefaultStub.kt
-regressions/inlineLibraryCountedLoops.kt
 regressions/inlineLibraryFunctionReference.kt
 regressions/inlineObjectCopySuperArguments.kt
 regressions/inlineObjectLiftedLambdaBesideConstructorCapture.kt
@@ -2140,7 +2119,6 @@ regressions/kt6434.kt
 regressions/kt789.kt
 regressions/lambdaTailGuardIntersectionPublishesAny.kt
 regressions/lambdaTailSmartCastPublishedType.kt
-regressions/libraryArrayLoops.kt
 regressions/libraryClassInheritedDefaults.kt
 regressions/libraryInterfaceTypeTests.kt
 regressions/libraryObjectValues.kt
@@ -2173,7 +2151,6 @@ regressions/multimodule/dependencyMemberContractInitialization.kt
 regressions/multimodule/distinctScalarBackingFieldExport.kt
 regressions/multimodule/inlineLambdaSuspendCompletion.kt
 regressions/multimodule/inlineNarrowElementInRange.kt
-regressions/multimodule/inlineStdlibRepeat.kt
 regressions/multimodule/inlineSuspendValueDirectInvoke.kt
 regressions/multimodule/inlineTodoDefaultMessage.kt
 regressions/multimodule/libraryExtensionBoundThroughReceiverSupertype.kt
@@ -2261,9 +2238,7 @@ reified/innerObject.kt
 reified/kt16445.kt
 reified/kt36237.kt
 reified/lambdaNameClash.kt
-reified/multipleTypeParameters.kt
 reified/newArrayInt.kt
-reified/parameterSwap.kt
 reified/recursiveNewArray.kt
 reified/reifiedIntersectionType.kt
 reified/reifiedIntersectionTypeArgument.kt

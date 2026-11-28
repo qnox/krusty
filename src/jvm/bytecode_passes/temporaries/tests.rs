@@ -1310,7 +1310,8 @@ fn a_line_at_a_reached_label_after_the_null_target_stays_after_its_pop() {
 fn an_instruction_is_stepped_again_only_when_its_incoming_state_changed() {
     let analyze = |code: &Code| {
         let mut steps = 0;
-        let found = temporary_values::analyze(&code.method, &mut || steps += 1).expect("analyzed");
+        let found =
+            temporary_values::analyze(&code.method, &(0..0), &mut || steps += 1).expect("analyzed");
         (found, steps)
     };
 
