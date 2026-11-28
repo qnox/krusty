@@ -530,32 +530,51 @@ pub(super) fn finish_language_settings(
         // kotlinc reports the notice before the problems found while reading the settings.
         opts.language_feature_problems.insert(0, notice);
     }
-    let language_version = match parsed.language_version.take() {
-        Some(text) => match LanguageVersion::parse_supported_for(&text, reference_version) {
-            Some(version) => version,
-            None => {
-                opts.errors.push(format!(
-                    "unknown language version: {text}\nSupported language versions: {}",
-                    LanguageVersion::supported_text_for(reference_version)
-                ));
-                LanguageVersion::default_for(reference_version)
-            }
-        },
-        None => LanguageVersion::default_for(reference_version),
-    };
-    let api_version = match parsed.api_version.take() {
+    // A level kotlinc declares but no longer accepts is a different refusal from one it never
+    // heard of; it is reported only when every given level parses, and the language level first.
+    // An unrelated argument error reported before the levels does not drop the refusal.
+    let errors_before_levels = opts.errors.len();
+    let mut retired = None;
+    let mut level = |text: Option<String>, what: &str, language: bool| match text {
         Some(text) => match LanguageVersion::parse_supported_for(&text, reference_version) {
             Some(version) => Some(version),
             None => {
-                opts.errors.push(format!(
-                    "unknown API version: {text}\nSupported API versions: {}",
-                    LanguageVersion::supported_text_for(reference_version)
-                ));
+                let declared = LanguageVersion::from_major_minor_text(&text)
+                    .and_then(|version| {
+                        let status = if language {
+                            versions.language(version)
+                        } else {
+                            versions.api(version)
+                        };
+                        status.filter(|status| status.unsupported)
+                    })
+                    .is_some();
+                match versions.supported().first() {
+                    Some(first) if declared => {
+                        retired.get_or_insert_with(|| {
+                            format!(
+                                "{} version {text} is no longer supported; use version {first} or greater instead.",
+                                if language { "language" } else { "API" }
+                            )
+                        });
+                    }
+                    _ => opts.errors.push(format!(
+                        "unknown {what} version: {text}\nSupported {what} versions: {}",
+                        LanguageVersion::supported_text_for(reference_version)
+                    )),
+                }
                 None
             }
         },
         None => None,
     };
+    let language_level = level(parsed.language_version.take(), "language", true);
+    let api_version = level(parsed.api_version.take(), "API", false);
+    if let Some(retired) = retired.filter(|_| opts.errors.len() == errors_before_levels) {
+        opts.errors.push(retired);
+    }
+    let language_version =
+        language_level.unwrap_or_else(|| LanguageVersion::default_for(reference_version));
     let feature_arguments = language_features::feature_arguments(explicit);
     let common = language_features::common_settings(&feature_arguments);
     let progressive = if parsed.progressive {

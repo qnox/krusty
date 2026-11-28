@@ -31,7 +31,7 @@ use super::common::{self, byte_dump};
 
 #[path = "box_reference_classes/reference_verdict.rs"]
 mod reference_verdict;
-pub use reference_verdict::ReferenceFailure;
+pub use reference_verdict::{refusals, ReferenceFailure};
 
 /// The stable module identity for every single-module topology (ordinary, `// FILE:` multi-file,
 /// and mixed Java). It matches the module name krusty emits those cases under.

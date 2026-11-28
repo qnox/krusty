@@ -20,8 +20,13 @@ pub enum ReferenceFailure {
     /// kotlinc exited with `COMPILATION_ERROR` and reported an error at a Kotlin source position:
     /// the reference rejects the program. `diagnostics` is kotlinc's complete output.
     Rejected { module: String, diagnostics: String },
+    /// kotlinc exited with `COMPILATION_ERROR` before reading a source: it refused the command line
+    /// the case selects (`error: <message>` lines, none anchored at a source position).
+    /// `diagnostics` is its complete output.
+    CommandLineRefused { module: String, diagnostics: String },
     /// kotlinc finished without a verdict: an internal error or crash status, or a compilation
-    /// error with no source position. `diagnostics` is its complete output.
+    /// error that is neither anchored at a source position nor a command-line refusal.
+    /// `diagnostics` is its complete output.
     KotlincNoVerdict {
         module: String,
         code: i32,
@@ -45,6 +50,14 @@ impl fmt::Display for ReferenceFailure {
                 let error = source_error(diagnostics).unwrap_or_default();
                 write!(formatter, "reference module {module}: {}", error.trim())
             }
+            ReferenceFailure::CommandLineRefused {
+                module,
+                diagnostics,
+            } => write!(
+                formatter,
+                "reference module {module}: command line refused: {}",
+                refusals(diagnostics).join("; ")
+            ),
             ReferenceFailure::KotlincNoVerdict {
                 module,
                 code,
@@ -68,6 +81,27 @@ impl fmt::Display for ReferenceFailure {
     }
 }
 
+/// The messages kotlinc refused the command line with, in order: each `error: <message>` line with
+/// the continuation lines that follow it (a message may list the offenders on the next line).
+pub fn refusals(diagnostics: &str) -> Vec<String> {
+    let mut messages: Vec<String> = Vec::new();
+    let mut open = false;
+    for line in diagnostics.lines() {
+        if let Some(message) = line.strip_prefix("error: ") {
+            messages.push(message.trim_end().to_string());
+            open = true;
+        } else if line.starts_with("info: ") || line.starts_with("warning: ") {
+            open = false;
+        } else if open {
+            if let Some(last) = messages.last_mut() {
+                last.push('\n');
+                last.push_str(line.trim_end());
+            }
+        }
+    }
+    messages
+}
+
 /// The first error kotlinc anchored at a Kotlin source position.
 fn source_error(diagnostics: &str) -> Option<&str> {
     diagnostics
@@ -88,6 +122,12 @@ pub(super) fn kotlinc_outcome(
         0 => Ok(()),
         COMPILATION_ERROR if source_error(&diagnostics).is_some() => {
             Err(ReferenceFailure::Rejected {
+                module,
+                diagnostics,
+            })
+        }
+        COMPILATION_ERROR if !refusals(&diagnostics).is_empty() => {
+            Err(ReferenceFailure::CommandLineRefused {
                 module,
                 diagnostics,
             })
@@ -191,11 +231,44 @@ mod tests {
     }
 
     #[test]
-    fn exit_one_without_a_source_position_is_no_verdict() {
+    fn exit_one_with_only_a_positionless_error_is_a_command_line_refusal() {
         // A case whose own `// API_VERSION:` exceeds its language version: kotlinc refuses the
         // command line the case selects before it reads a source.
         let diagnostics =
             "error: -api-version (2.5) cannot be greater than -language-version (2.4).\n";
+        let failure = kotlinc_outcome("main", Some((1, diagnostics.to_string())))
+            .expect_err("a refused command line is not a compile");
+        assert_eq!(
+            failure,
+            ReferenceFailure::CommandLineRefused {
+                module: "main".to_string(),
+                diagnostics: diagnostics.to_string(),
+            }
+        );
+        assert_eq!(
+            refusals(diagnostics),
+            ["-api-version (2.5) cannot be greater than -language-version (2.4)."]
+        );
+    }
+
+    #[test]
+    fn a_refusal_keeps_the_lines_that_list_its_offenders() {
+        let diagnostics = "error: the following features cannot be disabled manually, because the \
+                           version they first appeared in is no longer supported:\nFeatureA, FeatureB\n\
+                           error: second\ninfo: use -help for more information\n";
+        assert_eq!(
+            refusals(diagnostics),
+            [
+                "the following features cannot be disabled manually, because the version they \
+                 first appeared in is no longer supported:\nFeatureA, FeatureB",
+                "second"
+            ]
+        );
+    }
+
+    #[test]
+    fn exit_one_with_no_error_line_at_all_is_no_verdict() {
+        let diagnostics = "warning: something happened\nexception: boom\n";
         assert_eq!(
             kotlinc_outcome("main", Some((1, diagnostics.to_string()))),
             Err(ReferenceFailure::KotlincNoVerdict {
