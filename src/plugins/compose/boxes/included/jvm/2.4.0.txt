@@ -4,3 +4,4 @@
 constExprInitializer.kt
 interface.kt
 interfaceDelegation.kt
+interfaceWithFakeOverride.kt

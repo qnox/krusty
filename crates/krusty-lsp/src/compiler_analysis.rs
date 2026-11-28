@@ -606,7 +606,7 @@ mod tests {
                     "too many arguments for 'fun hostAction(): Unit'."
                 ),
                 (at(3, 23), mismatch),
-                (at(3, 1), "unresolved reference 'hostNamed'."),
+                (at(3, 1), "Unresolved reference 'hostNamed'."),
                 (
                     at(4, 13),
                     "too many arguments for 'fun localAction(): Unit'."

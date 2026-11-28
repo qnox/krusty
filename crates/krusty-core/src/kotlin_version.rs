@@ -49,6 +49,8 @@ pub struct KotlinVersion {
 }
 
 impl KotlinVersion {
+    /// The numeric boundary of the 2.5 release family, which a quirk fixed in 2.5 is bounded by.
+    pub const V2_5_0: Self = Self::new(2, 5, 0);
     pub const V2_4_0: Self = Self::new(2, 4, 0);
     pub const V2_4_10: Self = Self::new(2, 4, 10);
     pub const V2_4_20: Self = Self::new(2, 4, 20);

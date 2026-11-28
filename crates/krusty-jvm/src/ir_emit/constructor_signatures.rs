@@ -34,7 +34,14 @@ pub(super) fn primary_constructor_signature_keeping(
         .into_iter()
         .enumerate()
         .filter(|(position, _)| *position < prefix || kept.contains(&(position - prefix)))
-        .map(|(_, parameter)| parameter)
+        .map(|(_, parameter)| parameter);
+    // An enum's overloads, like its constructor, lead with the constant's name and ordinal.
+    let parameters = class
+        .is_enum
+        .then(enum_prefix)
+        .into_iter()
+        .flatten()
+        .chain(parameters)
         .collect::<Vec<_>>();
     formatter.constructor_signature(&parameters)
 }

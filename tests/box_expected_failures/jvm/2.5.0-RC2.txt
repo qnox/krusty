@@ -18,4 +18,3 @@ contextParameters/callableReferences/contextual/generic.kt
 contextParameters/callableReferences/contextual/jvmStaticObjectProperty.kt
 contextParameters/callableReferences/contextual/valueClassContextArg.kt
 regressions/contextParameters/contextualReferenceNullableValueClassContext.kt
-suspendConversion/suspendConversionNullableNpe2.kt

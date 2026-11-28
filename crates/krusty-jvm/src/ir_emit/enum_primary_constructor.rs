@@ -80,7 +80,7 @@ impl<'a> EnumPrimaryConstructor<'a> {
             ctor_desc,
             Some(ctor_sig),
             &[],
-            &krusty::ir::DeclarationAnnotations::default(),
+            &c.primary_ctor_annotations,
             ctor_parameters,
         );
         // The source parameters' annotations follow the constructor header, before its body. A private
@@ -204,6 +204,7 @@ impl<'a> EnumPrimaryConstructor<'a> {
         // The synthetic `(String, int)` prefix is not annotable: the attributes count only the
         // source parameters.
         cw.set_annotable_method_param_annotations("<init>", ctor_desc, &c.ctor_param_annotations);
+        function_annotations::emit_constructor_declared(cw, &c.primary_ctor_annotations, ctor_desc);
         let header = c.decl_line;
         let start = if c.decl_start_line == 0 {
             header

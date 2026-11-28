@@ -110,7 +110,7 @@ impl Fixture {
         let result = self.krusty_with_jdk(jdk, "krusty", extra);
         let krusty = expected
             .iter()
-            .map(|error| format!("krusty: error: {error}\n"))
+            .map(|error| format!("error: {error}\n"))
             .collect::<String>();
         assert_eq!(result.status.code(), Some(1), "krusty {extra:?}");
         assert_eq!(

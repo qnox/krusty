@@ -350,7 +350,13 @@ pub(super) fn emit_annotation_impl_class(
         let parameters: Vec<Ty> = members.iter().map(|(_, ty)| *ty).collect();
         let identities: Vec<Option<String>> =
             members.iter().map(|(name, _)| Some(name.clone())).collect();
-        constructor_defaults::emit_ctor_marker_accessor(&fq, &parameters, &identities, &mut cw);
+        constructor_defaults::emit_ctor_marker_accessor(
+            &fq,
+            &parameters,
+            &identities,
+            None,
+            &mut cw,
+        );
     }
     env.inner_classes.register(&mut cw);
     // Part of the public ABI when created in a public inline function's body.

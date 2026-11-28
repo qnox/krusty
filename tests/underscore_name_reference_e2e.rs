@@ -30,7 +30,7 @@ fn an_underscore_only_name_reference_without_back_ticks_is_rejected_like_kotlinc
     assert_eq!(result.reference_code, 1, "{}", result.reference_stderr);
     assert_eq!(result.krusty_code, 1, "{}", result.krusty_stderr);
     assert_eq!(
-        common::rendered_error_blocks(&result.krusty_stderr, false),
+        common::rendered_error_blocks(&result.krusty_stderr, true),
         reference
     );
     assert_eq!(

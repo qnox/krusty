@@ -71,6 +71,8 @@ pub(super) enum TempRole {
     InlineDepthMarker,
     /// Words FixStack will fill with the operand stack saved across an inline lambda body.
     InlineStackSpill,
+    /// The `StringBuilder` a long concatenation appends to in chunks.
+    StringBuilder,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -14,9 +14,9 @@ pub(crate) fn unresolved_member_message(
     name: &str,
     receiver: Ty,
     hidden_deprecated: bool,
-) -> String {
+) -> crate::diag::NamedMessage {
     if hidden_deprecated {
-        return crate::diagnostic_wording::unresolved_reference_on(reference, name, None);
+        return crate::diagnostic_wording::unresolved_reference(name);
     }
     let rendered = match receiver.kind() {
         TyKind::Error | TyKind::Pending | TyKind::TyParam(..) | TyKind::Var(..) => None,
@@ -36,7 +36,7 @@ impl SymbolTable {
         name: &str,
         receiver: Ty,
         hidden_deprecated: bool,
-    ) -> String {
+    ) -> crate::diag::NamedMessage {
         unresolved_member_message(self.reference, name, receiver, hidden_deprecated)
     }
 }
@@ -78,7 +78,7 @@ impl Checker<'_> {
         receiver: Option<ExprId>,
         name: &str,
         receiver_ty: Ty,
-    ) -> String {
+    ) -> crate::diag::NamedMessage {
         let hidden_deprecated = self
             .resolver()
             .receiver_has_hidden_deprecated_member(receiver_ty, name);
@@ -100,7 +100,7 @@ impl Checker<'_> {
         receiver: Option<ExprId>,
         name: &str,
         receiver_ty: Ty,
-    ) -> String {
+    ) -> crate::diag::NamedMessage {
         let hidden_deprecated = self
             .resolver()
             .receiver_has_hidden_deprecated_property_accessor(
@@ -124,7 +124,7 @@ impl Checker<'_> {
         name: &str,
         receiver_ty: Ty,
         hidden_deprecated: bool,
-    ) -> String {
+    ) -> crate::diag::NamedMessage {
         let qualifier = receiver.is_some_and(|receiver| {
             matches!(
                 self.qualifier(scope, QualifierInput::Expression(receiver)),
@@ -134,11 +134,7 @@ impl Checker<'_> {
         if qualifier
             || (self.omit_unshaped_any_receiver_type > 0 && receiver_ty == Ty::obj("kotlin/Any"))
         {
-            crate::diagnostic_wording::unresolved_reference_on(
-                self.file.language.reference,
-                name,
-                None,
-            )
+            crate::diagnostic_wording::unresolved_reference(name)
         } else {
             unresolved_member_message(
                 self.file.language.reference,

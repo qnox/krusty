@@ -136,7 +136,10 @@ mod tests {
             // rather than in a user's link.
             for (object, symbol) in undefined {
                 assert!(
-                    defined.contains(&symbol) || symbol == "kt_program_entry",
+                    defined.contains(&symbol)
+                        || symbol == "kt_program_entry"
+                        // The function protocol's stubs, which the final link writes.
+                        || crate::interface_calls::stub_number(&symbol).is_some(),
                     "{target}/{object} needs `{symbol}`, which no runtime object defines"
                 );
             }

@@ -34,7 +34,9 @@ fn diagnostics_with_spans(sources: &[&str]) -> Vec<(u32, u32, u32, String)> {
                 diagnostic.file,
                 diagnostic.span.lo,
                 diagnostic.span.hi,
-                diagnostic.msg,
+                diagnostic
+                    .message(krusty::diag::DiagnosticNames::Hidden)
+                    .into_owned(),
             )
         })
         .collect()

@@ -951,7 +951,7 @@ impl Checker<'_> {
         let message =
             self.unresolved_member_diagnostic(scope, Some(receiver), name, constraints.receiver);
         self.diags
-            .error(self.call_callee_name_span(call_args.call), message);
+            .report_error(self.call_callee_name_span(call_args.call), message);
         self.report_unshaped_lambda_diagnostics(scope, call_args.args, Some(name));
     }
 

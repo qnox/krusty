@@ -581,12 +581,9 @@ impl ProductionSignatureSemantics<'_> {
         span: Span,
         spelling: &str,
     ) -> crate::fir::DiagnosticId {
-        self.record_source_diagnostic_at(
-            declaration,
-            source,
-            span,
-            format!("unresolved reference '{spelling}'."),
-        )
+        let report = crate::diagnostic_wording::unresolved_reference(spelling);
+        let (message, name) = (report.message, Some(report.name));
+        self.record_source_finding_at(declaration, (source.raw(), span), message, name, None)
     }
 
     fn record_top_level_context_call_failure(
@@ -783,20 +780,7 @@ impl ProductionSignatureSemantics<'_> {
         span: Span,
         message: String,
     ) -> crate::fir::DiagnosticId {
-        let file = source.raw();
-        let mut diagnostics = self.diagnostics.borrow_mut();
-        if let Some(index) = diagnostics.iter().position(|diagnostic| {
-            diagnostic.file == file && diagnostic.span == span && diagnostic.message == message
-        }) {
-            return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
-        }
-        diagnostics.push(ProductionSignatureDiagnostic::conditional(
-            declaration,
-            file,
-            span,
-            message,
-        ));
-        crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
+        self.record_source_finding_at(declaration, (source.raw(), span), message, None, None)
     }
 
     /// A finding reported on every exit, once per `identity`.
@@ -1816,61 +1800,6 @@ impl ProductionSignatureSemantics<'_> {
         .map_err(|_| Self::failure())
     }
 
-    fn apply_demanded_source_callable(
-        &self,
-        source: (u32, u32),
-        receiver: Option<Ty>,
-        signature: &crate::fir::ResolvedSignature,
-        arguments: &[Ty],
-        argument_kinds: Option<&[crate::symbol_resolver::CallArgKind]>,
-        explicit_type_arguments: &[Ty],
-        expected: Option<Ty>,
-    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let declaration = DeclId(source.1);
-        let Some(callable) = self
-            .table
-            .funs
-            .values()
-            .flatten()
-            .chain(
-                self.table
-                    .ext_funs
-                    .values()
-                    .flat_map(HashMap::values)
-                    .flatten(),
-            )
-            .find(|callable| {
-                callable.source_file == Some(source.0) && callable.source_decl == Some(declaration)
-            })
-        else {
-            crate::trace_compiler!(
-                "signature",
-                "demanded source callable missing source={source:?}",
-            );
-            return Err(Self::failure());
-        };
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, source.0);
-        let semantic_source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
-        let result = demanded_source_call::demanded_source_result(
-            &semantic_source,
-            callable,
-            signature,
-            receiver,
-            arguments,
-            argument_kinds,
-            explicit_type_arguments,
-            expected,
-        );
-        crate::trace_compiler!(
-            "signature",
-            "apply demanded source callable source={source:?} expected={expected:?} arguments={arguments:?} result={result:?}",
-        );
-        crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure())
-    }
-
     fn apply_demanded_source_property(
         &self,
         source: (u32, u32),
@@ -2243,7 +2172,7 @@ impl ProductionSignatureSemantics<'_> {
                                 .find(|function| {
                                     function.signature().stable_declaration == Some(scope.owner)
                                 })
-                                .map(|function| function.receiver_ty())
+                                .map(stable_function_index::member_extension_receiver)
                             {
                                 receivers.push(SignatureImplicitReceiver::ordinary(extension));
                             }

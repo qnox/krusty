@@ -640,6 +640,7 @@ impl FileLowering<'_> {
                 slots: PublishedClassSlots {
                     count: record.table.slots,
                     declarations: declaration_slots,
+                    function_invokes: record.table.function_invokes.clone(),
                 },
                 interfaces,
                 interface_entries,

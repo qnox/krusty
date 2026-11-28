@@ -19,7 +19,7 @@ mod suspension;
 mod value_conversion;
 pub use classifier_declarations::{
     ClassifierDeclarationFacts, ClassifierDeclarationKind, ClassifierDeclarationName,
-    DeclaredValueClass, GeneratedClassifierFact, GeneratedClassifierKind,
+    DeclaredValueClass, EnumEntryFacts, GeneratedClassifierFact, GeneratedClassifierKind,
     GeneratedClassifierPurpose, SerializableClassElements, SerializableElement,
     SerializationGeneratedMemberStatuses,
 };
@@ -1957,6 +1957,13 @@ pub trait ClassifierFactSource {
     /// needs to name the members the classifier's own compilation generated for it. `None` when the
     /// provider does not know the classifier.
     fn classifier_declaration(&self, _classifier: TypeName) -> Option<ClassifierDeclarationFacts> {
+        None
+    }
+
+    /// The entries of the enum `classifier`, in declaration order, each with the annotations its
+    /// declaration states. `None` when the classifier is not an enum or the provider cannot state
+    /// its entries' annotations.
+    fn enum_entries(&self, _classifier: TypeName) -> Option<Vec<EnumEntryFacts>> {
         None
     }
 

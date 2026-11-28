@@ -108,6 +108,7 @@ impl BodyLowering<'_> {
                     [FirAdaptedReferenceArgument::Vararg {
                         values,
                         whole_array: true,
+                        ..
                     }] if vararg_factory && values.len() == 1 => {
                         let source = values[0];
                         if reference.params.get(source as usize).is_none() {
@@ -121,6 +122,7 @@ impl BodyLowering<'_> {
                     [FirAdaptedReferenceArgument::Vararg {
                         values,
                         whole_array: false,
+                        ..
                     }] if vararg_factory => {
                         let elements = values
                             .iter()

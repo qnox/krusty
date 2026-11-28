@@ -48,7 +48,7 @@ fn unchanged_java_stubs_are_generated_once() {
     assert_eq!(diagnostic_messages(&analyses[1]), Vec::<&str>::new());
     assert_eq!(
         diagnostic_messages(&analyses[2]),
-        vec!["unresolved reference 'p'."]
+        vec!["Unresolved reference 'p'."]
     );
     assert_eq!(diagnostic_messages(&analyses[3]), Vec::<&str>::new());
 }
@@ -79,7 +79,7 @@ fn a_java_source_change_rebuilds_stubs() {
     assert_eq!(diagnostic_messages(&analyses[0]), Vec::<&str>::new());
     assert_eq!(
         diagnostic_messages(&analyses[1]),
-        vec!["unresolved reference 'Widget'."]
+        vec!["Unresolved reference 'Widget'."]
     );
 }
 

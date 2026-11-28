@@ -271,6 +271,7 @@ fn ensure_invoke(
         declaration.call_sig = synthesized_invoke_call_sig(parameters.len());
         declaration.flags.operator = true;
         declaration.flags.is_abstract = true;
+        declaration.flags.suspend = suspend;
         // The seed's own `invoke` has the physical shape (a suspend function's runtime interface
         // takes the continuation as one more parameter); the classifier declares only this one.
         shape.members.retain(|member| member.name != "invoke");

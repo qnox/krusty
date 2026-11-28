@@ -29,14 +29,6 @@ use super::interface_members::Signature;
 /// A function and the signature it is carried as.
 pub(super) type Placed = (u32, Signature);
 
-/// The erased function-interface entry a class table physically carries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct FunctionBridgeEntry {
-    pub(super) arity: usize,
-    pub(super) function: u32,
-    pub(super) signature: u32,
-}
-
 /// Program-owned operations that adapt one physical signature to another, without provider types.
 #[derive(Clone, Debug)]
 pub(super) struct SignatureAdapters {
@@ -103,8 +95,6 @@ pub(super) struct LaidOutClass {
     pub(super) slot_types: Vec<Option<u32>>,
     /// The function each slot of its table holds; `None` for an untyped one.
     pub(super) entries: Vec<Option<u32>>,
-    /// The fixed function slot's defined adapter, if this class is a function value.
-    pub(super) function_bridge: Option<FunctionBridgeEntry>,
     /// Its struct, then every struct it is declared a subtype of, nearest first.
     pub(super) ancestors: Vec<u32>,
     /// Each constructor by ordinal, the primary first: its function and the parameters it takes.
@@ -546,7 +536,6 @@ mod tests {
             base: OwnedBase::None,
             slot_types: Vec::new(),
             entries: Vec::new(),
-            function_bridge: None,
             function_arities: Vec::new(),
             suspend_function_arities: Vec::new(),
             ancestors: Vec::new(),

@@ -280,12 +280,10 @@ pub(super) fn checked_parameter_plan(
             AdaptedRefArgument::Vararg {
                 values,
                 whole_array,
+                ..
             } => {
-                let target = if *whole_array {
-                    declared
-                } else {
-                    declared.array_read_elem().unwrap_or(declared)
-                };
+                let target =
+                    super::callable_reference_selection::vararg_input_type(declared, *whole_array);
                 if values.iter().any(|value| {
                     expected_params
                         .get(*value)

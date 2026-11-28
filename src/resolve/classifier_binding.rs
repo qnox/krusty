@@ -111,6 +111,11 @@ fn same_selected_alias(
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum QualifiedRoot {
     Committed,
+    /// The root of a qualified expression's receiver chain. It commits like [`Self::Committed`],
+    /// but a root written through a JDK class a Kotlin classifier maps onto (`import
+    /// java.util.Map`) names that Java classifier, whose statics `Map.of(...)` selects; only a
+    /// type position (or a constructor call) reads the mapped Kotlin declaration.
+    ReceiverRoot,
     CompletePath,
 }
 
@@ -177,7 +182,7 @@ impl Checker<'_> {
         self.select_classifier_binding_with(scope, name, QualifiedRoot::CompletePath)
     }
 
-    fn select_classifier_binding_with(
+    pub(super) fn select_classifier_binding_with(
         &self,
         scope: &CheckerScope<'_>,
         name: &str,
@@ -207,6 +212,7 @@ impl Checker<'_> {
                 root_name,
                 &segments,
                 alias,
+                mode,
             );
             if mode == QualifiedRoot::CompletePath
                 && binding.0 == InheritedNestedClassifier::NotFound
@@ -281,7 +287,7 @@ impl Checker<'_> {
             // An expression qualifier commits its root before any suffix is examined, and a
             // conflicting import binds no root: the reference names its unbound root (kotlinc
             // 2.4.20 reports `Same()` as an unresolved reference).
-            [_, _, ..] if mode == QualifiedRoot::Committed => {
+            [_, _, ..] if mode != QualifiedRoot::CompletePath => {
                 return (
                     InheritedNestedClassifier::NotFound,
                     Some(ClassifierMiss::Unresolved(root_name.clone())),
@@ -374,7 +380,7 @@ impl Checker<'_> {
                         "classifier root={root_name} imported={}",
                         internal.render()
                     );
-                    let internal = self.libraries.canonical_source_type_name(internal);
+                    let internal = self.binding_identity(internal, mode);
                     let Ok(alias) = self.selected_imported_type_alias(root_name, internal) else {
                         return Self::invalid_alias_selection(root_name);
                     };
@@ -406,6 +412,7 @@ impl Checker<'_> {
                 root_name,
                 &segments,
                 None,
+                mode,
             );
         }
         (
@@ -416,6 +423,17 @@ impl Checker<'_> {
         )
     }
 
+    /// The identity a selected classifier binds as: the canonical Kotlin declaration, except that a
+    /// receiver root keeps the JDK class it was written as.
+    fn binding_identity(&self, internal: TypeName, mode: QualifiedRoot) -> TypeName {
+        match mode {
+            QualifiedRoot::ReceiverRoot => internal,
+            QualifiedRoot::Committed | QualifiedRoot::CompletePath => {
+                self.libraries.canonical_source_type_name(internal)
+            }
+        }
+    }
+
     /// Walk the written suffix from one selected root through the shared qualifier loop.
     fn commit_classifier_suffix(
         &self,
@@ -424,6 +442,7 @@ impl Checker<'_> {
         root_name: &str,
         segments: &[(Option<ExprId>, String)],
         mut selected_alias: Option<SelectedTypeAlias>,
+        mode: QualifiedRoot,
     ) -> ClassifierBinding {
         match walk_qualifier_namespace_facets_with_binding_identity(
             source,
@@ -437,7 +456,7 @@ impl Checker<'_> {
                 declaration_identity,
                 classifier_segment,
             )) => {
-                let internal = self.libraries.canonical_source_type_name(internal);
+                let internal = self.binding_identity(internal, mode);
                 if let Some(declaration) = declaration_identity {
                     let Ok(alias) = selected_alias_from_declaration(internal, Some(&declaration))
                     else {
@@ -534,6 +553,7 @@ impl Checker<'_> {
                     root_name,
                     segments,
                     alias.as_ref().ok().cloned().flatten(),
+                    QualifiedRoot::CompletePath,
                 );
                 let InheritedNestedClassifier::Found(classifier) = binding.0 else {
                     nearest_miss.get_or_insert(binding);

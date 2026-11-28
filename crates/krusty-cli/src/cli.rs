@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use krusty::jvm::classpath::Classpath;
-use krusty::jvm::compilation_inputs::{JdkApi, JvmCompilationInputInventory};
+use krusty::jvm::compilation_inputs::{JdkApi, JdkReleaseError, JvmCompilationInputInventory};
 use krusty::kotlin_version::KotlinVersion;
 use krusty::language_settings::LanguageSettings;
 use krusty::language_version::LanguageVersion;
@@ -30,6 +30,7 @@ use arguments::{
     take_reference_version, unsupported, ParsedSettings,
 };
 pub use arguments::{CLASSPATH_SEPARATOR, FIX_KOTLINC_DEFECTS};
+pub use source_roots::diagnostic_path;
 use source_roots::{duplicate_source_root, SourceRoots};
 pub use warning_policy::{WarningDisposition, WarningLevel, WarningPolicy};
 
@@ -575,7 +576,7 @@ fn plugin_jar_problems(plugins: &PluginConfig) -> Vec<String> {
 impl Options {
     /// The errors kotlinc reports for an `-Xjdk-release` whose API the selected JDK cannot provide
     /// (see [`JdkApi::for_release`]). Kept out of `parse` so parsing stays env-independent.
-    pub fn check_jdk_release(&self) -> Result<(), Vec<String>> {
+    pub fn check_jdk_release(&self) -> Result<(), Vec<JdkReleaseError>> {
         if self.no_jdk {
             return Ok(());
         }
@@ -623,8 +624,14 @@ impl Options {
         if self.no_jdk {
             return Ok(JvmCompilationInputInventory::from_effective_classpath(&cp));
         }
-        let api = JdkApi::for_release(self.jdk_home.as_deref(), self.jdk_release)
-            .map_err(|errors| errors.join("\n"))?;
+        let api =
+            JdkApi::for_release(self.jdk_home.as_deref(), self.jdk_release).map_err(|errors| {
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })?;
         Ok(JvmCompilationInputInventory::from_explicit_classpath_and_jdk_api(&cp, api))
     }
 

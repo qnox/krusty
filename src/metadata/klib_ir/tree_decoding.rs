@@ -65,9 +65,9 @@ pub struct KlibIrModuleTrees {
     local_classes: HashMap<KlibIrSignature, (usize, KlibIrClassId)>,
     /// The container and id each file-local signature of this library serializes.
     file_local_origins: HashMap<KlibIrSignature, super::symbols::KlibFileLocalOrigin>,
-    /// The public identity each file-private signature scopes to its file.
+    /// The public or accessor identity each file-private signature scopes to its file.
     file_private_identities:
-        HashMap<KlibIrSignature, crate::metadata::id_signature::KlibPublicIdSignature>,
+        HashMap<KlibIrSignature, crate::metadata::id_signature::KlibDeclarationSignature>,
     classes: super::class_index::KlibIrClassIndex,
 }
 
@@ -181,13 +181,14 @@ impl KlibIrModuleTrees {
         Some((package, tree.arena.class(class)))
     }
 
-    /// The public identity the file-private `signature` (`Composite(File, Public)`) scopes to its
-    /// file: the identity of a declaration private to its file, or of a member of a class private
-    /// to its file, including a fake override no declaration defines.
+    /// The identity the file-private `signature` (`Composite(File, Public)` or
+    /// `Composite(File, Accessor)`) scopes to its file: the identity of a declaration private to
+    /// its file, or of a member or property accessor of a class private to its file, including a
+    /// fake override no declaration defines.
     pub(crate) fn file_private_identity(
         &self,
         signature: &KlibIrSignature,
-    ) -> Option<&crate::metadata::id_signature::KlibPublicIdSignature> {
+    ) -> Option<&crate::metadata::id_signature::KlibDeclarationSignature> {
         self.file_private_identities.get(signature)
     }
 
@@ -204,7 +205,13 @@ impl KlibIrModuleTrees {
                 || self
                     .file_private_identities
                     .get(signature)
-                    .is_none_or(|identity| identity.declaration_path() != *path)
+                    .is_none_or(|identity| {
+                        !matches!(
+                            identity,
+                            crate::metadata::id_signature::KlibDeclarationSignature::Public(class)
+                                if class.declaration_path() == *path
+                        )
+                    })
             {
                 continue;
             }

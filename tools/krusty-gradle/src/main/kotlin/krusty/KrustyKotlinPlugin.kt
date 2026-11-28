@@ -593,11 +593,13 @@ abstract class KrustyCompileTask @Inject constructor(
             return
         }
         val executable = binary.get().asFile.absolutePath
+        val projectDir = File(projectDirectory.get())
         val errors = ByteArrayOutputStream()
         val result = try {
             execOperations.exec {
                 this.executable = executable
                 args(arguments)
+                workingDir = projectDir
                 errorOutput = TeeOutputStream(System.err, errors)
                 isIgnoreExitValue = true
             }
@@ -609,7 +611,8 @@ abstract class KrustyCompileTask @Inject constructor(
         // kotlinc writes the module's classes into the same directory; nothing krusty wrote stays.
         fileSystemOperations.delete { delete(destination) }
         destination.mkdirs()
-        handOff(kotlincHandoff(result.exitValue, errors.toString(Charsets.UTF_8)))
+        val report = errors.toString(Charsets.UTF_8).lines().joinToString("\n") { absoluteDiagnostic(it, projectDir) }
+        handOff(kotlincHandoff(result.exitValue, report))
     }
 
     private fun handOff(handoff: KotlincHandoff) {
@@ -623,6 +626,19 @@ abstract class KrustyCompileTask @Inject constructor(
         this.handoff.get().asFile.writeText(handoff.record())
     }
 }
+
+/**
+ * krusty prints a path under its working directory relative to it, as kotlinc does; the build
+ * output and the handoff keep the absolute path, as kotlinc's Gradle report does.
+ */
+private fun absoluteDiagnostic(line: String, workingDir: File): String {
+    val located = LOCATED_DIAGNOSTIC.find(line) ?: return line
+    val path = located.groupValues[1]
+    if (File(path).isAbsolute) return line
+    return File(workingDir, path).path + line.substring(path.length)
+}
+
+private val LOCATED_DIAGNOSTIC = Regex("^(.+?):\\d+:\\d+: error: ")
 
 /** Writes to both streams, so krusty's report reaches the build output and the task keeps it. */
 private class TeeOutputStream(private val first: OutputStream, private val second: OutputStream) : OutputStream() {

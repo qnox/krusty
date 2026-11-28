@@ -193,6 +193,11 @@ impl FileLowering<'_> {
             // which is what a caller reading the slot gets.
             Slot::Bridge { declared, .. } => Ok(self.ir.functions[declared as usize].ret),
             Slot::DeclaredBridge { result, .. } => Ok(result),
+            // A property backed by its field answers with the field's type, as the getter a
+            // caller dispatches to does.
+            Slot::FieldGetter { class, field } => {
+                Ok(self.ir.classes[class as usize].fields[field as usize].ty)
+            }
             other => Err(declined!("a walk through the vtable entry {other:?}")),
         }
     }
@@ -283,7 +288,7 @@ impl FileLowering<'_> {
         }
         if text {
             slots.length = self.walk_accessor_slot(class, "length");
-            slots.char_at = self.walk_slot_of(class, "get", 1);
+            slots.char_at = self.walk_char_at_slot(class);
             // Both or neither, for the reason the iterator's pair is: text is walked by its
             // length AND its indexed read, and half of that is no walk.
             if slots.length == 0 || slots.char_at == 0 {
@@ -323,6 +328,54 @@ impl FileLowering<'_> {
         0
     }
 
+    /// The slot of the class's `CharSequence.get` implementation, PLUS ONE so that 0 says it has
+    /// none.
+    ///
+    /// The override edge names the selected implementation, so a same-named overload of the same
+    /// arity (`fun get(key: String)` beside `override fun get(index: Int)`) is never mistaken for
+    /// it. Searched up the super chain for the class declaring the edge.
+    fn walk_char_at_slot(&self, class: ClassId) -> u32 {
+        use crate::intrinsics::CollectionShape;
+        let mut at = Some(class);
+        while let Some(owner) = at {
+            for edge in self
+                .ir
+                .function_overrides
+                .get(&self.ir.classes[owner as usize].fq_name)
+                .into_iter()
+                .flatten()
+            {
+                if !matches!(
+                    edge.overridden,
+                    krusty::fir::ResolvedFunctionOverrideTarget::External(_)
+                ) || edge.name != "get"
+                    || self.collection_shape(edge.overridden_owner) != Some(CollectionShape::Text)
+                {
+                    continue;
+                }
+                let Some(function) = edge.implementation_function.or_else(|| {
+                    let krusty::fir::ResolvedFunctionOverrideTarget::Module(callable) =
+                        edge.implementation
+                    else {
+                        return None;
+                    };
+                    self.ir.checked_callable_functions.get(&callable).copied()
+                }) else {
+                    continue;
+                };
+                let Some(implementation_owner) =
+                    self.ir.class_id_by_name(edge.implementation_owner)
+                else {
+                    continue;
+                };
+                let key = crate::classes::function_key(self.ir, implementation_owner, function);
+                return self.model.slot(class, &key).map_or(0, |slot| slot + 1);
+            }
+            at = self.model.layout(owner).superclass;
+        }
+        0
+    }
+
     /// The slot of a class's own nullary `name`, PLUS ONE so that 0 says it has none; see
     /// [`WalkSlots`].
     ///
@@ -330,14 +383,9 @@ impl FileLowering<'_> {
     /// from a base of this file rather than declare it — and a slot number assigned at the
     /// declaring class is valid for every subclass.
     fn walk_slot(&self, class: ClassId, name: &str) -> u32 {
-        self.walk_slot_of(class, name, 0)
-    }
-
-    /// The same for a member of the given ARITY.
-    fn walk_slot_of(&self, class: ClassId, name: &str, arity: usize) -> u32 {
         let mut current = Some(class);
         while let Some(id) = current {
-            if let Some((slot, _, _)) = self.member_slot(id, name, arity) {
+            if let Some((slot, _, _)) = self.member_slot(id, name, 0) {
                 return slot + 1;
             }
             current = self.model.layout(id).superclass;
@@ -483,10 +531,10 @@ impl FileLowering<'_> {
             Slot::AccessorBridge {
                 declared,
                 implemented,
-                receiver,
+                operands,
                 setter,
                 ..
-            } => *declared == Ty::Int && *implemented == Ty::Int && receiver.is_none() && !setter,
+            } => *declared == Ty::Int && *implemented == Ty::Int && operands.is_empty() && !setter,
             _ => false,
         };
         if !exact {

@@ -543,7 +543,19 @@ fn emit_primary_overloads(
     let hidden = class.is_sealed || ir.has_value_param_ctor(&class.fq_name());
     let prefix_count = class.constructor_prefix_count as usize;
     let physical = class_ctor_jvm_tys(ir, class);
-    let (prefix, source) = physical.split_at(prefix_count);
+    let (captured, source) = physical.split_at(prefix_count);
+    // An enum's constructors take the constant's name and ordinal first, and so do its overloads.
+    let owner_prefix = if class.is_enum {
+        OwnerConstructorPrefix::enum_class()
+    } else {
+        OwnerConstructorPrefix::none()
+    };
+    let prefix = owner_prefix
+        .types
+        .iter()
+        .chain(captured)
+        .copied()
+        .collect::<Vec<_>>();
     let formatter = JvmSignatureFormatter::new(ir, env);
     let source_parameters = primary_ctor_source_parameters(ir, class);
     let identities = crate::parameter_names::constructor_identities(&class.ctor_args);
@@ -561,7 +573,7 @@ fn emit_primary_overloads(
     let overloads = ConstructorOverloads {
         owner: primary.owner,
         access: primary.access,
-        prefix,
+        prefix: &prefix,
         source,
         has_default: defaults[prefix_count..]
             .iter()
@@ -570,9 +582,15 @@ fn emit_primary_overloads(
         checks: (prefix_count..class.ctor_args.len())
             .map(|index| class.ctor_args[index].check.clone())
             .collect(),
-        local_names: capture_order::physical(ir, class, (0..class.ctor_args.len()).collect())
-            .into_iter()
-            .map(|index| crate::parameter_names::local_variable(&identities[index], "<init>"))
+        local_names: owner_prefix
+            .identities()
+            .chain(
+                capture_order::physical(ir, class, (0..class.ctor_args.len()).collect())
+                    .into_iter()
+                    .map(|index| {
+                        crate::parameter_names::local_variable(&identities[index], "<init>")
+                    }),
+            )
             .collect(),
         nullability: source_parameters
             .iter()
@@ -583,6 +601,9 @@ fn emit_primary_overloads(
         annotations: &class.primary_ctor_annotations,
         signature: &signature,
         varargs: false,
+        annotations_ride_accessor: constructor_accessors::primary_annotations_ride_accessor(
+            ir, class,
+        ),
     };
     overloads.emit_all(phase, hidden, cw);
 }
@@ -675,6 +696,10 @@ fn emit_secondary_overloads(
         annotations: &constructor.annotations,
         signature: &signature,
         varargs: method_access::secondary_constructor_varargs(constructor) != 0,
+        annotations_ride_accessor: constructor_accessors::secondary_annotations_ride_accessor(
+            class,
+            constructor,
+        ),
     };
     overloads.emit_all(phase, hidden, cw);
 }
@@ -758,16 +783,11 @@ pub(super) fn emit_default_constructor(
                 // The convenience ctor STANDS IN for the declared primary, so kotlinc repeats the
                 // primary's declared annotations on it (the `$default` overload between them, being
                 // synthetic, gets none). Their descriptors already interned at the primary.
-                let annotations = &c.primary_ctor_annotations;
-                if !annotations.retains_none() {
-                    cw.set_method_annotations("<init>", "()V", annotations);
-                    if annotations.deprecated() {
-                        cw.mark_method_deprecated("<init>", "()V");
-                    }
-                    if function_annotations::hidden_realization_is_synthetic(annotations) {
-                        cw.set_method_synthetic("<init>", "()V");
-                    }
-                }
+                function_annotations::emit_constructor_declared(
+                    cw,
+                    &c.primary_ctor_annotations,
+                    "()V",
+                );
             }
         }
     }
@@ -797,6 +817,9 @@ struct ConstructorOverloads<'a> {
     signature: &'a dyn Fn(&[usize]) -> Option<String>,
     /// Whether the declaration ends in a `vararg` parameter.
     varargs: bool,
+    /// Whether the annotations belong on the marker accessor of each overload and not on the
+    /// private overload itself (a constructor taking a value class).
+    annotations_ride_accessor: bool,
 }
 
 impl ConstructorOverloads<'_> {
@@ -823,7 +846,23 @@ impl ConstructorOverloads<'_> {
             .chain(kept.iter().map(|&index| self.prefix.len() + index))
             .map(|position| self.local_names.get(position).cloned().flatten())
             .collect::<Vec<_>>();
-        constructor_defaults::emit_ctor_marker_accessor(self.owner, &physical, &identities, cw);
+        let parameters = kept
+            .iter()
+            .filter_map(|&index| self.parameter_annotations.get(index).cloned())
+            .collect::<Vec<_>>();
+        let attributes = self.annotations_ride_accessor.then_some(
+            constructor_defaults::MarkerAccessorAttributes {
+                annotations: self.annotations,
+                parameters: &parameters,
+            },
+        );
+        constructor_defaults::emit_ctor_marker_accessor(
+            self.owner,
+            &physical,
+            &identities,
+            attributes,
+            cw,
+        );
     }
 
     fn emit(&self, kept: &[usize], cw: &mut ClassWriter) {
@@ -863,12 +902,17 @@ impl ConstructorOverloads<'_> {
             })
             .map(|(_, parameter)| parameter.clone())
             .collect::<Vec<_>>();
+        let annotations = if self.annotations_ride_accessor {
+            &krusty::ir::DeclarationAnnotations::default()
+        } else {
+            self.annotations
+        };
         cw.reserve_method_pool_with_annotations(
             "<init>",
             &descriptor,
             signature.as_deref(),
             &nullability_types,
-            self.annotations,
+            annotations,
             &method_parameters,
         );
         let mut code = CodeBuilder::new(1 + physical.iter().map(|ty| slot_words(*ty)).sum::<u16>());
@@ -965,18 +1009,10 @@ impl ConstructorOverloads<'_> {
         if nullability.iter().any(Option::is_some) {
             cw.set_method_nullability("<init>", &descriptor, None, &nullability);
         }
-        if !parameter_annotations.is_empty() {
+        if !parameter_annotations.is_empty() && !self.annotations_ride_accessor {
             cw.set_method_param_annotations("<init>", &descriptor, &parameter_annotations);
         }
-        if !self.annotations.retains_none() {
-            cw.set_method_annotations("<init>", &descriptor, self.annotations);
-            if self.annotations.deprecated() {
-                cw.mark_method_deprecated("<init>", &descriptor);
-            }
-            if function_annotations::hidden_realization_is_synthetic(self.annotations) {
-                cw.set_method_synthetic("<init>", &descriptor);
-            }
-        }
+        function_annotations::emit_constructor_declared(cw, annotations, &descriptor);
     }
 }
 

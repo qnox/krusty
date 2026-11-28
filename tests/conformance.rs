@@ -25,6 +25,8 @@ mod box_jvm_compile;
 mod box_klib_bytes;
 #[path = "box_lane.rs"]
 mod box_lane;
+#[path = "box_lane_klib_route.rs"]
+mod box_lane_klib_route;
 #[path = "box_lane_profile.rs"]
 mod box_lane_profile;
 #[path = "box_ratchet.rs"]
@@ -38,6 +40,8 @@ mod box_vendored;
 #[path = "bytecode_corpus.rs"]
 mod bytecode_corpus;
 mod dependency_template_rejections;
+#[path = "diagnostic_markers.rs"]
+mod diagnostic_markers;
 #[path = "kotlin_box_ir_jvm_conformance.rs"]
 mod kotlin_box_ir_jvm_conformance;
 #[path = "kotlin_box_native_conformance.rs"]
@@ -52,6 +56,8 @@ mod kotlin_bytecode_text_conformance;
 mod kotlin_cli_jvm_conformance;
 #[path = "kotlin_diagnostics_jvm_conformance.rs"]
 mod kotlin_diagnostics_jvm_conformance;
+#[path = "kotlin_diagnostics_ledger_jvm_conformance.rs"]
+mod kotlin_diagnostics_ledger_jvm_conformance;
 #[path = "common/kotlin_native_multimodule.rs"]
 mod kotlin_native_multimodule_support;
 #[path = "kotlinc_argument_conformance.rs"]

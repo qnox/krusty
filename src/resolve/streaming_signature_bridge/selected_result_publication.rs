@@ -7,7 +7,7 @@
 use super::ProductionSignatureSemantics;
 use crate::resolve::selected_result_aliases::{rebind_to_published, SelectionInputs};
 use crate::resolve::selected_result_publication::{
-    whole_array_arguments, CompactSelectedResultPublication,
+    whole_array_arguments, CompactSelectedResultPublication, SelectedMember,
 };
 use crate::types::{Ty, TyKind};
 
@@ -98,59 +98,21 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         origin: crate::fir::OriginId,
-        receiver: crate::fir::ResolvedTy,
         type_arguments: &[Ty],
         expected: Option<crate::fir::ResolvedTy>,
-        result: Ty,
-        member: Option<crate::libraries::LibraryMember>,
-        source: Option<(u32, u32)>,
-        source_declaration: Option<crate::fir::DeclarationId>,
-        argument_types: Vec<Ty>,
-        publication: CompactSelectedResultPublication,
+        selected: SelectedMember,
         demand: &mut crate::fir::SignatureDemand<'_>,
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
+        let SelectedMember {
+            receiver,
+            result,
+            member,
+            source_declaration,
+            argument_types,
+            publication,
+        } = selected;
         let inputs = SelectionInputs::new(Some(receiver.get()), &argument_types);
         if let Some(member) = member.as_ref() {
-            if let Some(declaration) = member.stable_declaration {
-                if self
-                    .headers
-                    .stub(declaration)
-                    .is_some_and(|stub| stub.signature_inference.is_some())
-                {
-                    let signature = demand(declaration)?;
-                    let parameters = signature
-                        .parameters
-                        .iter()
-                        .map(|parameter| parameter.get())
-                        .collect::<Vec<_>>();
-                    self.record_scoped_member_constraints(
-                        scope,
-                        receiver.get(),
-                        member,
-                        &parameters,
-                        &argument_types,
-                    );
-                    let ty = self.apply_demanded_member_expecting(
-                        receiver.get(),
-                        member,
-                        &signature,
-                        &argument_types,
-                        type_arguments,
-                        expected.map(crate::fir::ResolvedTy::get),
-                    )?;
-                    self.record_source_selected_publication(
-                        origin,
-                        publication,
-                        &signature,
-                        ty,
-                        inputs,
-                    );
-                    return Ok(crate::fir::ResolvedMemberCall {
-                        ty: Some(ty),
-                        declaration: Some(declaration),
-                    });
-                }
-            }
             if let Some(signature) =
                 self.demanded_member_signature(member.stable_declaration, demand)?
             {
@@ -199,31 +161,24 @@ impl ProductionSignatureSemantics<'_> {
                 &argument_types,
             );
         }
-        if let Some(source) = source {
-            if let Some(signature) =
-                self.demanded_source_signature(None, source_declaration, demand)?
-            {
-                let ty = self.apply_demanded_source_callable(
-                    source,
-                    Some(receiver.get()),
-                    &signature,
-                    &argument_types,
-                    None,
-                    type_arguments,
-                    expected.map(crate::fir::ResolvedTy::get),
-                )?;
-                self.record_source_selected_publication(
-                    origin,
-                    publication,
-                    &signature,
-                    ty,
-                    inputs,
-                );
-                return Ok(crate::fir::ResolvedMemberCall {
-                    ty: Some(ty),
-                    declaration: source_declaration,
-                });
-            }
+        if let Some(declaration) = source_declaration {
+            // A selected source extension is typed from its own demanded signature, located by its
+            // stable identity: a member extension imported from an object has no top-level key.
+            let signature = demand(declaration)?;
+            let call = super::demanded_source_call::DemandedSourceCall {
+                receiver: Some(receiver.get()),
+                signature: &signature,
+                arguments: &argument_types,
+                argument_kinds: None,
+                explicit_type_arguments: type_arguments,
+                expected: expected.map(crate::fir::ResolvedTy::get),
+            };
+            let ty = self.apply_demanded_declared_callable(declaration, call)?;
+            self.record_source_selected_publication(origin, publication, &signature, ty, inputs);
+            return Ok(crate::fir::ResolvedMemberCall {
+                ty: Some(ty),
+                declaration: Some(declaration),
+            });
         }
         let declaration = member.and_then(|member| member.stable_declaration);
         let ty = crate::fir::ResolvedTy::new(result).ok();

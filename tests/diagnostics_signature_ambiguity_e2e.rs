@@ -12,7 +12,7 @@ use super::diagnostics_parity_support::complete_errors;
 fn assert_one_identical_ambiguity(source: &str) {
     let stdlib = common::stdlib_jar();
     let result = common::compiler_diagnostics(&[("Ambiguity.kt", source)], &[stdlib]);
-    let krusty = complete_errors(&result.krusty_stderr, false);
+    let krusty = complete_errors(&result.krusty_stderr, true);
     let reference = complete_errors(&result.reference_stderr, true);
     assert_eq!(
         result.reference_code, 1,
