@@ -25608,7 +25608,7 @@ struct Checker<'a> {
     /// Per callable-reference argument, the inputs its selected parameter declares as call type
     /// variables, as `reference_type_variable_inputs` records them.
     reference_type_variable_inputs:
-        HashMap<ExprId, callable_reference_selection::TypeVariableInputs>,
+        HashMap<ExprId, reference_type_variable_inputs::ReferenceInputOrigins>,
     /// The callable-reference expression whose concrete postponed shape is being rechecked.
     /// Candidate selection uses this semantic ownership marker to leave a shape mismatch to the
     /// enclosing call without suppressing diagnostics produced inside the reference itself.

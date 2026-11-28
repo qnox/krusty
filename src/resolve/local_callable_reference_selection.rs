@@ -87,7 +87,8 @@ impl Checker<'_> {
                 params: Some(expected_params),
                 ret: Some(expected_ret),
                 bound_contexts,
-                type_variable_inputs: self.active_reference_type_variable_inputs(),
+                type_variable_inputs: self
+                    .reference_type_variable_inputs_resolving(expected_params),
                 quirks: self.file.reference.quirks(),
             },
             |actual, bound| self.generic_bound_admits(actual, bound),
