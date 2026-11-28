@@ -2208,6 +2208,8 @@ regressions/observableDelegateMember.kt
 regressions/ordinaryAndSecondaryConstructorRoles.kt
 regressions/ordinaryClassCompanionBlockValueResult.kt
 regressions/overloadedExtensionReferenceArgument.kt
+regressions/polymorphicSignatureComplexExpression.kt
+regressions/polymorphicSignatureUnitArgument.kt
 regressions/primitiveArrayStorage.kt
 regressions/primitiveTypeTests.kt
 regressions/propertyInitializedByFunctionOfSameName.kt
