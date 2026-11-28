@@ -107,7 +107,6 @@ boxingOptimization/kt5844.kt
 boxingOptimization/safeCallWithElvis.kt
 boxingOptimization/safeCallWithElvisMultipleFiles.kt
 boxingOptimization/unsignedArrayForEach.kt
-branching/when_with_try1.kt
 bridges/delegationComplex.kt
 bridges/delegationComplexWithList.kt
 bridges/fakeCovariantOverride.kt
@@ -1593,7 +1592,6 @@ localClasses/inLocalExtensionProperty.kt
 localClasses/kt10835.kt
 localClasses/kt10835a.kt
 localClasses/kt2700.kt
-localClasses/kt3389.kt
 localClasses/kt3584.kt
 localClasses/kt4174.kt
 localClasses/kt45383.kt
@@ -2095,7 +2093,6 @@ regressions/crossFileInlineWhenMapping.kt
 regressions/crossFileNominalBoxTests.kt
 regressions/crossinlineReferenceToPrivateFunctionAcrossModules.kt
 regressions/dataClassEqualsAndHashCode.kt
-regressions/dataClassInInlineFunctionWithTypeParameters.kt
 regressions/dataClassInRegularFunctionWithTypeParameters.kt
 regressions/deepInnerClassInEnumEntryClass2.kt
 regressions/delegatedBuiltinInterfaceMembers.kt
@@ -2239,7 +2236,6 @@ regressions/propertySmartCastKeepsDeclaredType.kt
 regressions/rangeEqualityThroughProgression.kt
 regressions/referenceArrayStoreEvaluatesValueBeforeBoundsCheck.kt
 regressions/runtimeArrayListInterfaceTests.kt
-regressions/runtimeExceptionConstructors.kt
 regressions/safeCallLambdaImplicitLabel.kt
 regressions/samConvertedReference.kt
 regressions/scalarTypeTests.kt
@@ -2328,8 +2324,6 @@ secondaryConstructors/enums.kt
 secondaryConstructors/localClasses.kt
 serialization/deserializedMembers.kt
 serialization/serializedDefaultArgs.kt
-smartCasts/avoidSmartCastToDerivedForPrivate.kt
-smartCasts/falseSmartCast.kt
 smartCasts/genericSet.kt
 smartCasts/implicitMemberReceiver.kt
 smartCasts/invokeRecieverSmartcastK2.kt

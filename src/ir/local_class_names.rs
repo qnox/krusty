@@ -1953,6 +1953,13 @@ fn property_override(edge: &mut super::IrPropertyOverride, names: &IdentityRemap
     edge.implementation_type = ty(edge.implementation_type, names);
     edge.declared_receiver = edge.declared_receiver.map(|value| ty(value, names));
     edge.implementation_receiver = edge.implementation_receiver.map(|value| ty(value, names));
+    for context in edge
+        .declared_contexts
+        .iter_mut()
+        .chain(&mut edge.implementation_contexts)
+    {
+        *context = ty(*context, names);
+    }
 }
 
 fn function_override(edge: &mut super::IrFunctionOverride, names: &IdentityRemap<'_>) {

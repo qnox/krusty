@@ -423,7 +423,7 @@ impl<'a> FileLowering<'a> {
             }
             if let Slot::AccessorBridge {
                 declared,
-                receiver,
+                operands,
                 setter,
                 ..
             } = &slot
@@ -432,7 +432,7 @@ impl<'a> FileLowering<'a> {
                 // reading this number through the interface reads what the interface declares.
                 let (params, ret) = super::object_entries::accessor_signature(
                     *declared,
-                    receiver.map(|(declared, _)| declared),
+                    operands.iter().map(|&(declared, _)| declared),
                     *setter,
                 );
                 // Named by position rather than by what it bridges: neither end need be a source
@@ -1415,7 +1415,7 @@ impl<'a> FileLowering<'a> {
         if let Slot::AccessorBridge {
             declared,
             implemented,
-            receiver,
+            operands,
             setter,
             target_slot,
         } = slot
@@ -1423,7 +1423,7 @@ impl<'a> FileLowering<'a> {
             return self.define_accessor_bridge(
                 *declared,
                 *implemented,
-                *receiver,
+                operands,
                 *setter,
                 *target_slot,
                 id,

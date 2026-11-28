@@ -9,7 +9,7 @@
 //! ([`BoundQualifierSegment`]); the checks that later visit the chain, and the member selection
 //! through it, read that record instead of walking the chain again.
 
-use super::classifier_binding::SelectedTypeAlias;
+use super::classifier_binding::{QualifiedRoot, SelectedTypeAlias};
 use super::qualifiers::subpackage;
 use super::*;
 use crate::symbol_source::SymbolNamespace;
@@ -269,7 +269,8 @@ impl Checker<'_> {
         expression: Option<ExprId>,
         name: &str,
     ) -> Result<QualifierStep, QualifierError> {
-        let (selection, _, alias, _) = self.select_classifier_binding(scope, name);
+        let (selection, _, alias, _) =
+            self.select_classifier_binding_with(scope, name, QualifiedRoot::ReceiverRoot);
         let unresolved = || QualifierError::UnresolvedSegment {
             expression,
             name: name.to_string(),

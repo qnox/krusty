@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// The receiver, the name, the lexical classes and whether `@Suppress` exempts invisible members:
+/// a receiver inventory keeps only the callables its scope may see, so that scope is the key.
+pub(super) type StableReceiverCallableKey = (Ty, String, Vec<TypeName>, bool);
+
 impl Checker<'_> {
     pub(super) fn resolver(&self) -> crate::symbol_resolver::SymbolResolver<'_> {
         self.with_stable_symbol_records(
@@ -17,7 +21,19 @@ impl Checker<'_> {
             self.access_context_class_names(),
         )
         .with_eager_lambda_results(self.file.language.eager_lambda_analysis)
-        .with_member_access(self)
+        .with_visibility_suppression(self.visibility_access_suppressed())
+        .with_callable_access(self)
+    }
+
+    /// How a reference to `classifier` is invisible here, if it is. A classifier reference is
+    /// exempted by `INVISIBLE_REFERENCE` alone; `INVISIBLE_MEMBER` exempts members.
+    pub(super) fn inaccessible_classifier_reference(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::symbol_source::ClassifierAccess> {
+        self.resolver()
+            .with_visibility_suppression(self.suppresses_diagnostic("INVISIBLE_REFERENCE"))
+            .inaccessible_classifier_access(classifier)
     }
 
     pub(super) fn resolver_in_scope<'s>(
@@ -37,7 +53,7 @@ impl Checker<'_> {
             self.lexical_source_class_names(),
         )
         .with_visibility_suppression(self.visibility_access_suppressed())
-        .with_member_access(self)
+        .with_callable_access(self)
     }
 
     /// A resolver over this checker's own federation (the module over the platform) shares the
@@ -86,7 +102,12 @@ impl Checker<'_> {
         if self.resolved_index.is_none() {
             return self.resolver().receiver_callables(receiver, name);
         }
-        let key = (receiver, name.to_owned(), self.lexical_source_class_names());
+        let key = (
+            receiver,
+            name.to_owned(),
+            self.lexical_source_class_names(),
+            self.visibility_access_suppressed(),
+        );
         if let Some(callables) = self.stable_receiver_callable_cache.borrow().get(&key) {
             return callables.clone();
         }

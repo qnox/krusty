@@ -2135,6 +2135,7 @@ impl BodyFirChecker<'_> {
         receiver: FirReceiver,
     ) -> Result<FirExprKind, BodyCheckFailure> {
         let cause = self.expression_origin(expression)?;
+        let receiver = self.unnarrowed_receiver(expression, receiver)?;
         let receiver = FirReceiver {
             value: receiver.value,
             conversion: self.receiver_conversion(
@@ -2169,6 +2170,48 @@ impl BodyFirChecker<'_> {
             )?,
             substitutions,
         }))
+    }
+
+    /// `receiver` without the smart cast that narrowed it, when the checker selected the call's
+    /// member on the type the receiver had before that cast (`resolve::unnarrowed_member_receiver`):
+    /// the call dispatches on the unnarrowed value, so no cast is emitted.
+    pub(super) fn unnarrowed_receiver(
+        &mut self,
+        expression: ExprId,
+        receiver: FirReceiver,
+    ) -> Result<FirReceiver, BodyCheckFailure> {
+        let Some(selected) = self
+            .info
+            .unnarrowed_dispatch_calls
+            .get(&expression)
+            .copied()
+        else {
+            return Ok(receiver);
+        };
+        let value = match self.body.expr(receiver.value).map(|value| &value.kind) {
+            // A narrowed read is its unnarrowed value under a smart cast.
+            Some(FirExprKind::ImplicitConversion {
+                value,
+                conversion:
+                    FirConversion {
+                        kind: FirConversionKind::SmartCast { .. },
+                        ..
+                    },
+            }) if receiver.conversion.is_none() => *value,
+            _ => receiver.value,
+        };
+        // A receiver or property read whose own node carries the narrowed type reads the same
+        // runtime value as its declared type.
+        let span = self.file.expr_span(expression);
+        let unnarrowed = ResolvedTy::new(selected)
+            .map_err(|error| self.failure(span, BodyCheckFailureKind::UnpublishableType(error)))?;
+        if let Some(read) = self.body.expr_mut(value) {
+            read.ty = unnarrowed;
+        }
+        Ok(FirReceiver {
+            value,
+            conversion: None,
+        })
     }
 
     /// Statement-form property setter call. There is no source call expression to use for argument

@@ -15,6 +15,8 @@ pub struct IrFunctionPosition {
     /// The line of the declaration itself, never rewritten by the body. A `$default` stub maps here;
     /// it differs from [`Self::decl_line`] exactly when an expression body starts on a later line.
     pub signature_line: Option<u32>,
+    /// The line of the `context` keyword opening the declaration's context clause.
+    pub context_line: Option<u32>,
     /// The line of a block body's closing `}`, where kotlinc maps a `Unit` function's implicit
     /// `return`.
     pub close_line: Option<u32>,
@@ -98,6 +100,7 @@ mod tests {
         let source = IrFunctionPosition {
             decl_line: Some(4),
             signature_line: Some(3),
+            context_line: Some(2),
             close_line: Some(9),
             end_line: Some(9),
             signature_offset: Some(41),

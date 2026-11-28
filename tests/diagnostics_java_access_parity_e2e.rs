@@ -486,3 +486,70 @@ fn package_private_java_classifier_public_constructor_diagnostics_match_kotlinc(
     assert_eq!(krusty_errors, expected);
     assert_eq!(kotlinc_errors, expected);
 }
+
+/// A Java method realizing a builtin under its JVM name (`charAt` for `CharSequence.get`) is a
+/// member under the Kotlin name only. kotlinc does not resolve the JVM name, whether the class
+/// declares `get` beside it or not.
+#[test]
+fn java_builtin_jvm_name_is_not_a_kotlin_member() {
+    let (java_dir, _) = common::javac_compile(
+        &[
+            (
+                "fixtures/JvmNameOnly.java".to_string(),
+                "package fixtures; public abstract class JvmNameOnly implements CharSequence {\n\
+                     public int length() { return 1; }\n\
+                     public char charAt(int index) { return 'j'; }\n\
+                 }"
+                .to_string(),
+            ),
+            (
+                "fixtures/Both.java".to_string(),
+                "package fixtures; public abstract class Both implements CharSequence {\n\
+                     public int length() { return 1; }\n\
+                     public char charAt(int index) { return 'c'; }\n\
+                     public char get(int index) { return 'g'; }\n\
+                 }"
+                .to_string(),
+            ),
+        ],
+        &[],
+    )
+    .expect("JDK javac must compile the CharSequence fixtures");
+    let source = "import fixtures.Both\n\
+                  import fixtures.JvmNameOnly\n\
+                  fun rejected(jvmNameOnly: JvmNameOnly, both: Both) {\n\
+                      jvmNameOnly.charAt(0)\n\
+                      both.charAt(0)\n\
+                  }\n";
+    let result = common::compiler_diagnostics(
+        &[("BuiltinJvmNames.kt", source)],
+        std::slice::from_ref(&java_dir),
+    );
+    if let Some(root) = java_dir.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc unexpectedly accepted source"
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let expected = vec![
+        ObservedError {
+            file: "BuiltinJvmNames.kt".to_string(),
+            line: 4,
+            column: 13,
+            message: "unresolved reference 'charAt' on receiver of type 'JvmNameOnly'.".to_string(),
+        },
+        ObservedError {
+            file: "BuiltinJvmNames.kt".to_string(),
+            line: 5,
+            column: 6,
+            message: "unresolved reference 'charAt' on receiver of type 'Both'.".to_string(),
+        },
+    ];
+    assert_eq!(krusty_errors, expected);
+    assert_eq!(errors(&result.reference_stderr), expected);
+}

@@ -158,15 +158,24 @@ impl SourceMemberSite for Checker<'_> {
     }
 }
 
-/// The checker's member visibility, read by the resolver's overload selection so a member this
-/// site cannot see ranks below every accessible applicable candidate.
+/// The checker's callable visibility, read by the resolver's overload selection so a candidate
+/// this site cannot see ranks below every visible applicable candidate.
 ///
 /// A `@Suppress` of the visibility errors silences the diagnostic of a call that resolved to an
-/// invisible member; it does not make that member visible, so the ranking reads the real
+/// invisible candidate; it does not make that candidate visible, so the ranking reads the real
 /// visibility. Without it a protected `Object.clone` would outrank a visible `T.clone()` extension.
-impl crate::symbol_resolver::MemberAccessSite for Checker<'_> {
-    fn member_accessible(&self, member: &crate::libraries::FunctionInfo, receiver: Ty) -> bool {
-        self.member_candidate_accessible(member, Some(receiver))
+impl crate::symbol_resolver::CallableAccessSite for Checker<'_> {
+    fn callable_visible(&self, candidate: &crate::libraries::FunctionInfo, receiver: Ty) -> bool {
+        self.candidate_visible(candidate, Some(receiver))
+    }
+
+    fn invisible_candidates_share_one_level(&self) -> bool {
+        !self
+            .file
+            .language
+            .reference
+            .quirks()
+            .has(crate::kotlin_version::Quirk::InvisibleCandidatesKeepScopeLevels)
     }
 }
 
@@ -220,11 +229,13 @@ impl<'a> Checker<'a> {
         &self,
         candidate: &crate::libraries::FunctionInfo,
     ) -> bool {
-        if self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+        self.suppresses_diagnostic("INVISIBLE_REFERENCE")
             || self.suppresses_diagnostic("INVISIBLE_MEMBER")
-        {
-            return true;
-        }
+            || self.source_callable_declared_visible(candidate)
+    }
+
+    /// [`Self::source_callable_visible`] with a `@Suppress` of the visibility errors ignored.
+    fn source_callable_declared_visible(&self, candidate: &crate::libraries::FunctionInfo) -> bool {
         // A constructor's access is owned by its classifier and checked when it is committed.
         if candidate.constructor.is_some()
             || !matches!(
@@ -377,6 +388,19 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether this site can see a candidate of any kind, a `@Suppress` of the visibility errors
+    /// ignored. Kotlin ranks a visibility error below every resolved candidate, so overload
+    /// selection keeps the visible applicable candidates when any exists; the suppression only lets
+    /// an invisible candidate stand, at its own tower level, when none does.
+    pub(super) fn candidate_visible(
+        &self,
+        candidate: &crate::libraries::FunctionInfo,
+        receiver: Option<Ty>,
+    ) -> bool {
+        self.member_candidate_accessible(candidate, receiver)
+            && self.source_callable_declared_visible(candidate)
+    }
+
     /// [`Self::selected_member_accessible`] with a `@Suppress` of the visibility errors ignored.
     /// The suppression silences the diagnostic of a call that resolved to an invisible member; it
     /// does not make that member rank with the visible candidates of a nearer tower rung.
@@ -427,10 +451,8 @@ impl<'a> Checker<'a> {
         site_receiver_callable_accessible(self, vis, owner, receiver, callable)
     }
 
-    /// Property-only visibility exception controlled by Kotlin's
-    /// `AllowAccessToProtectedFieldFromSuperCompanion` language feature. Despite that historical
-    /// feature name, this is a semantic property access: FIR records the resolved property and the
-    /// target backend alone decides whether it becomes a field load or an accessor call.
+    /// Whether the site may access a receiver's property: [`Self::receiver_property_visible`], or
+    /// any property under a `@Suppress` of the visibility errors.
     pub(super) fn receiver_property_accessible(
         &self,
         visibility: Visibility,
@@ -438,10 +460,31 @@ impl<'a> Checker<'a> {
         receiver: Ty,
         callable: Option<crate::fir::ExternalCallableId>,
     ) -> bool {
-        if self.visibility_access_suppressed() {
-            return true;
-        }
-        if self.receiver_callable_accessible(visibility, owner, receiver, callable) {
+        self.visibility_access_suppressed()
+            || self.receiver_property_visible(visibility, owner, receiver, callable)
+    }
+
+    /// A receiver property's visibility, a `@Suppress` of the visibility errors ignored: what a
+    /// property read ranks by, so an invisible member property yields to a visible extension
+    /// property whether or not its access error is suppressed. Includes the property-only exception
+    /// controlled by Kotlin's `AllowAccessToProtectedFieldFromSuperCompanion` language feature.
+    /// Despite that historical feature name, this is a semantic property access: FIR records the
+    /// resolved property and the target backend alone decides whether it becomes a field load or
+    /// an accessor call.
+    pub(super) fn receiver_property_visible(
+        &self,
+        visibility: Visibility,
+        owner: TypeName,
+        receiver: Ty,
+        callable: Option<crate::fir::ExternalCallableId>,
+    ) -> bool {
+        if site_receiver_callable_accessible(
+            &UnsuppressedVisibility(self),
+            visibility,
+            owner,
+            receiver,
+            callable,
+        ) {
             return true;
         }
         if visibility != Visibility::Protected
