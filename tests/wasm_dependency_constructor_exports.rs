@@ -420,6 +420,18 @@ fn wasm_official_dependency_anonymous_object_runs_its_inherited_interface_defaul
     );
 }
 
+/// An official producer's lambda calls an abstract member of its receiver's class before anything
+/// constructs the class: the call dispatches to the private subclass's override.
+#[test]
+fn wasm_official_dependency_abstract_member_called_before_construction_dispatches() {
+    run_against_official_producer(
+        include_str!(
+            "box_regressions/multimodule/dependencyAbstractMemberCalledBeforeConstruction.kt"
+        ),
+        "DependencyAbstractMemberCalledBeforeConstruction",
+    );
+}
+
 /// An official producer's lambda takes a value of a class private to the library's file: the
 /// lambda's header names the class as the body that creates it does.
 #[test]

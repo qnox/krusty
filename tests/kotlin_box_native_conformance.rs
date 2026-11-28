@@ -611,6 +611,21 @@ fn native_official_dependency_interfaces_installed_by_two_files_keep_distinct_nu
 // PLATFORM-SPECIFIC: official Kotlin/Native KLIB production and linking, as above. The complete
 // portable Kotlin input is the shared multi-module regression.
 //
+/// A library lambda calls an abstract member of its receiver's class before anything constructs
+/// the class: the call is the class's dispatch slot, which the private subclass implements.
+#[test]
+fn native_official_dependency_abstract_member_called_before_construction_dispatches() {
+    run_native_against_official_producer(
+        include_str!(
+            "box_regressions/multimodule/dependencyAbstractMemberCalledBeforeConstruction.kt"
+        ),
+        "dependencyAbstractMemberCalledBeforeConstruction",
+    );
+}
+
+// PLATFORM-SPECIFIC: official Kotlin/Native KLIB production and linking, as above. The complete
+// portable Kotlin input is the shared multi-module regression.
+//
 /// A library lambda's parameter is a class private to the library's file: the lambda's header
 /// names the class as the body that creates it does.
 #[test]
