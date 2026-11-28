@@ -95,7 +95,6 @@ mapGetOrDefault.kt
 nullCheckOptimization/localLateinit/checkedOnce.kt
 nullCheckOptimization/safeCallAndElvisChains.kt
 optimizedDelegatedProperties/definedInSources.kt
-optimizedDelegatedProperties/inSeparateModule.kt
 optimizedDelegatedProperties/withNonNullMetadataParameter.kt
 properties/lateinit/companionObject.kt
 properties/lateinit/companionObjectFromLambda.kt

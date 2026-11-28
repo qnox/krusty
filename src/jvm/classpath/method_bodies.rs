@@ -120,6 +120,15 @@ impl crate::jvm::inline::MethodBodies for Classpath {
                     .any(|f| f.name == name && f.descriptor == descriptor && f.is_private())
         })
     }
+    fn member_is_package_scoped(&self, owner: &str, name: &str, descriptor: &str) -> bool {
+        self.find(owner).is_some_and(|ci| {
+            ci.methods.iter().any(|m| {
+                m.name == name && m.descriptor == descriptor && !m.is_public() && !m.is_private()
+            }) || ci.fields.iter().any(|f| {
+                f.name == name && f.descriptor == descriptor && !f.is_public() && !f.is_private()
+            })
+        })
+    }
     fn member_is_publicly_reachable(&self, owner: &str, name: &str, descriptor: &str) -> bool {
         self.find(owner).is_some_and(|ci| {
             // The OWNER must be public too. A public member of a package-private class is

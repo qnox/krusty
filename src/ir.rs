@@ -2516,6 +2516,9 @@ pub struct IrFile {
     /// function/property override identities; emission never scans source/member spellings.
     pub jvm_overridden_call_realizations:
         crate::fx_hash::HashMap<ExprId, crate::libraries::OverriddenCallRealization>,
+    /// JVM call to a public inline member, realized as its inline handle → the virtual call its
+    /// dispatch-owner selection realized, which the call is when the splicer declines the body.
+    pub jvm_inline_member_dispatch: crate::fx_hash::HashMap<ExprId, Callee>,
     /// Exact provider-selected language-member roles retained on their call expressions. This is
     /// declaration identity data, not a spelling-based backend lookup.
     pub semantic_call_roles: crate::fx_hash::HashMap<ExprId, crate::types::SemanticCallRole>,

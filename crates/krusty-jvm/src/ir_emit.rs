@@ -152,6 +152,7 @@ mod numeric_comparison;
 mod object_static_initialization;
 mod operand_representation;
 mod operand_stack;
+mod outer_instance_accessor;
 mod override_result_emission;
 use method_signatures::method_signature;
 use override_result_emission::{declared_method_desc, declared_method_signature};

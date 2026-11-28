@@ -396,6 +396,8 @@ struct MethodInfo {
     /// The method's own source map, which its `lnt` lines are numbered against until the class map
     /// takes them in (`None` when nothing was inlined into it). See [`ClassWriter::copy_method_source_maps`].
     source_map: Option<crate::jvm::source_map::SourceMap>,
+    /// Inlined lines whose code was dead, each with the count of `lnt` entries before it.
+    dropped_lines: Vec<(usize, u16)>,
     /// `LocalVariableTable` entries `(name_index, descriptor_index, slot, start_pc)`. `start_pc` is
     /// `None` for a local live for the whole method (the shape of every synthesized member's `this` +
     /// params) — written as `start_pc=0, length=code_len`. `Some(pc)` is a local that becomes live
@@ -764,6 +766,7 @@ impl ClassWriter {
             signature: sig,
             lnt: Vec::new(),
             source_map: None,
+            dropped_lines: Vec::new(),
             lvt: Vec::new(),
             visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
@@ -1203,6 +1206,7 @@ impl ClassWriter {
                 code.line_marks().to_vec()
             },
             source_map,
+            dropped_lines: code.dropped_inlined_lines.clone(),
             lvt,
             visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
@@ -1943,6 +1947,8 @@ pub struct CodeBuilder {
     /// class initializers curate their final table, so they retain this provenance separately from
     /// ordinary nested-expression marks.
     inlined_line_marks: Vec<(u16, u16)>,
+    /// Inlined lines met in dead code, each with the count of `line_marks` before it.
+    dropped_inlined_lines: Vec<(usize, u16)>,
     /// `(start_pc, length, slot, name, descriptor)` entries in scope-close order.
     local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
     /// Semantic inline-frame placement parallel to `local_entries`. This never reaches the class
@@ -2017,6 +2023,7 @@ impl CodeBuilder {
             exceptions: Vec::new(),
             line_marks: Vec::new(),
             inlined_line_marks: Vec::new(),
+            dropped_inlined_lines: Vec::new(),
             local_entries: Vec::new(),
             local_entry_placements: Vec::new(),
             inline_scope_frames: Vec::new(),

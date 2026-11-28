@@ -10,15 +10,15 @@
 use super::body_encoding::BodyEncoder;
 use super::body_tree::{BodyScope, CallTarget, FunctionBody};
 use super::ir_tables::{
-    declaration_table, entry_table, lattice, per_file, symbol, IrTables, CONSTRUCTOR_SYMBOL,
-    FUNCTION_SYMBOL, RECEIVER_PARAMETER_SYMBOL, TYPE_PARAMETER_SYMBOL, VALUE_PARAMETER_SYMBOL,
+    declaration_table, entry_table, lattice, per_file, symbol, IrTables, FUNCTION_SYMBOL,
+    RECEIVER_PARAMETER_SYMBOL, TYPE_PARAMETER_SYMBOL, VALUE_PARAMETER_SYMBOL,
 };
 use crate::fx_hash::HashMap;
 use crate::ir::{FunId, IrExpr, IrFile, IrParameterRole, IrTypeOp};
 use crate::klib_lowering::ir_builtins::IrBuiltinOperators;
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::protobuf::Pb;
-use crate::types::{Ty, TypeName, TypeVariance};
+use crate::types::{Ty, TyKind, TypeName, TypeVariance};
 
 const MAIN_PREFIX: &str = "default/ir/";
 const PREPARED_PREFIX: &str = "default/ir_inlinable_functions/";
@@ -28,6 +28,14 @@ const PREPARED_PREFIX: &str = "default/ir_inlinable_functions/";
 #[derive(Default)]
 pub(super) struct DeclarationSignatures {
     functions: HashMap<FunId, (KlibPublicIdSignature, Option<Ty>)>,
+    /// The identity of each inline function's prepared copy, signed from the copy's own shape.
+    prepared: HashMap<FunId, KlibPublicIdSignature>,
+    /// The default accessors of the private member properties this file declares. No other
+    /// module names them, so they are not exported, but the file's own IR declares and calls them.
+    private_accessors: Vec<(
+        crate::backend::ExportedPropertyAccessor,
+        crate::metadata::id_signature::KlibAccessorIdSignature,
+    )>,
 }
 
 impl DeclarationSignatures {
@@ -49,6 +57,42 @@ impl DeclarationSignatures {
     pub(super) fn get(&self, function: FunId) -> Option<&(KlibPublicIdSignature, Option<Ty>)> {
         self.functions.get(&function)
     }
+
+    pub(super) fn record_prepared(&mut self, function: FunId, signature: KlibPublicIdSignature) {
+        let previous = self.prepared.insert(function, signature);
+        assert!(
+            previous.is_none(),
+            "one inline function has one prepared copy"
+        );
+    }
+
+    pub(super) fn record_private_accessor(
+        &mut self,
+        accessor: crate::backend::ExportedPropertyAccessor,
+        signature: crate::metadata::id_signature::KlibAccessorIdSignature,
+    ) {
+        assert!(
+            self.private_accessor(accessor).is_none(),
+            "one private accessor has one KLIB declaration identity"
+        );
+        self.private_accessors.push((accessor, signature));
+    }
+
+    /// The identity of a private member property's default accessor this file declares.
+    pub(super) fn private_accessor(
+        &self,
+        accessor: crate::backend::ExportedPropertyAccessor,
+    ) -> Option<&crate::metadata::id_signature::KlibAccessorIdSignature> {
+        self.private_accessors
+            .iter()
+            .find(|(recorded, _)| *recorded == accessor)
+            .map(|(_, signature)| signature)
+    }
+
+    /// The identity of `function`'s prepared copy, when its shape is one that is signed.
+    pub(super) fn prepared(&self, function: FunId) -> Option<&KlibPublicIdSignature> {
+        self.prepared.get(&function)
+    }
 }
 
 #[derive(Clone)]
@@ -60,8 +104,8 @@ pub(super) struct PreparedFunction {
     pub(super) file_name: String,
     pub(super) flags: u64,
     pub(super) inline_only: bool,
-    /// Whether the declaration is `inline`, and so also owns a prepared copy.
-    pub(super) inline: bool,
+    /// The prepared copy an `inline` declaration also owns.
+    pub(super) prepared: Option<Box<PreparedCopy>>,
     pub(super) dispatch_receiver: Option<Ty>,
     pub(super) parameters: Vec<PreparedParameter>,
     pub(super) context_count: usize,
@@ -76,11 +120,22 @@ pub(super) struct PreparedFunction {
     pub(super) body: Option<FunctionBody>,
 }
 
+/// What a prepared inline copy writes differently from its declaration.
+#[derive(Clone)]
+pub(super) struct PreparedCopy {
+    /// The copy's own identity, beneath its file in the copy's composite symbol.
+    pub(super) signature: KlibPublicIdSignature,
+    /// The non-reified type parameters the copy erases, by name, each with its bound.
+    pub(super) erasures: Vec<(String, Ty)>,
+}
+
 #[derive(Clone)]
 pub(super) struct PreparedParameter {
     pub(super) name: String,
     pub(super) ty: Ty,
     pub(super) default_null: bool,
+    /// The element type of a `vararg` parameter, whose own type is its array type.
+    pub(super) vararg_element: Option<Ty>,
 }
 
 #[derive(Clone)]
@@ -164,14 +219,13 @@ pub(super) fn prepared_function(
     if ir.suspend_funs.contains(&function) {
         return None;
     }
-    if ir.declared_parameters(function).vararg.is_some()
-        || ir
-            .declared_inline_modifiers(function)
-            .iter()
-            .any(|modifier| *modifier != crate::types::InlineParameterModifier::None)
+    if ir
+        .declared_inline_modifiers(function)
+        .iter()
+        .any(|modifier| *modifier != crate::types::InlineParameterModifier::None)
     {
-        // Vararg element types and noinline/crossinline flags are declaration facts the narrow
-        // parameter writer does not yet encode.
+        // Noinline/crossinline flags are declaration facts the narrow parameter writer does not
+        // yet encode.
         return None;
     }
     let overridden = overridden_members(ir, declarations, facts, function, *dispatch_receiver)?;
@@ -190,15 +244,48 @@ pub(super) fn prepared_function(
             &own_signature
         }
     };
-    // Inline bodies beyond a reified type test need the prepared copy's inlining contract, which
-    // this writer does not record yet.
-    if inline && !is_reified_type_test(ir, function, declaration.body?, generic) {
+    // An inline function also owns a prepared copy, signed from the copy's own shape. Erasing a
+    // type parameter whose bound names a type parameter would need the bound erased in turn.
+    let prepared = if inline {
+        if generic.type_params.iter().any(|parameter| {
+            !parameter.reified
+                && parameter
+                    .bounds
+                    .iter()
+                    .any(|(bound, _)| bound.mentions_ty_param())
+        }) {
+            return None;
+        }
+        Some(Box::new(PreparedCopy {
+            signature: declarations.prepared(function)?.clone(),
+            erasures: super::prepared_inline::erasures(&generic.type_params),
+        }))
+    } else {
+        None
+    };
+    let identities = ir.function_parameter_identities(function)?;
+    if identities.len() != generic.params.len() || generic.params.len() != declaration.params.len()
+    {
         return None;
     }
+    let vararg = vararg_parameter(ir, function, identities, &generic.params)?;
+    // Kotlin declares a `vararg` of a reference element `Array<out E>`, which common IR records
+    // as the invariant array its body reads.
+    let declared = generic
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, &ty)| match vararg {
+            Some((at, element)) if at == index && ty.is_reference_array() => {
+                Ty::obj_args_name(crate::types::wk::array(), &[Ty::out_projection(element)])
+            }
+            _ => ty,
+        })
+        .collect::<Vec<_>>();
     let slots = dispatch_receiver
         .iter()
         .copied()
-        .chain(generic.params.iter().copied())
+        .chain(declared.iter().copied())
         .collect::<Vec<_>>();
     // A member without a body is abstract; any other function writes its body.
     let body = match declaration.body {
@@ -217,14 +304,9 @@ pub(super) fn prepared_function(
         None if dispatch_receiver.is_some() && !inline => None,
         None => return None,
     };
-    let identities = ir.function_parameter_identities(function)?;
-    if identities.len() != generic.params.len() || generic.params.len() != declaration.params.len()
-    {
-        return None;
-    }
     let parameters = identities
         .iter()
-        .zip(&generic.params)
+        .zip(&declared)
         .enumerate()
         .map(|(index, (identity, &ty))| {
             let name = match (&identity.source_name, identity.role) {
@@ -242,11 +324,15 @@ pub(super) fn prepared_function(
                 Some(default) if is_null_default(ir, default) => true,
                 Some(_) => return None,
             };
+            let vararg_element = vararg
+                .filter(|(at, _)| *at == index)
+                .map(|(_, element)| element);
             super::body_tree::supported_type(ty, &generic.type_params).then_some(
                 PreparedParameter {
                     name,
                     ty,
                     default_null,
+                    vararg_element,
                 },
             )
         })
@@ -309,7 +395,7 @@ pub(super) fn prepared_function(
         file_name: file_name.to_owned(),
         flags,
         inline_only,
-        inline,
+        prepared,
         dispatch_receiver: *dispatch_receiver,
         parameters,
         context_count,
@@ -321,7 +407,12 @@ pub(super) fn prepared_function(
             .map(|parameter| PreparedTypeParameter {
                 name: parameter.name.clone(),
                 ty: parameter.ty(),
-                bounds: parameter.bounds.iter().map(|(bound, _)| *bound).collect(),
+                // Kotlin IR declares an unbounded type parameter's implicit `Any?` bound.
+                bounds: if parameter.bounds.is_empty() {
+                    vec![parameter.upper_bound()]
+                } else {
+                    parameter.bounds.iter().map(|(bound, _)| *bound).collect()
+                },
                 variance: parameter.variance,
                 reified: parameter.reified,
             })
@@ -454,42 +545,31 @@ fn is_null_default(ir: &IrFile, expression: u32) -> bool {
     }
 }
 
-/// Whether an inline body is `return value is T` (or `!is`) over one of the function's own
-/// parameters and a reified type parameter: the inline shape whose prepared copy this writer
-/// records.
-fn is_reified_type_test(
+/// The position among `params` of the function's `vararg` parameter and its element type, or
+/// `None` without one; the outer `None` declines a vararg whose element is a projection. A vararg's
+/// declared index counts the declared parameters, which the extension receiver is not.
+fn vararg_parameter(
     ir: &IrFile,
     function: FunId,
-    body: u32,
-    generic: &crate::ir::IrGenericSig,
-) -> bool {
-    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
-        return false;
+    identities: &[crate::ir::IrParameterIdentity],
+    params: &[Ty],
+) -> Option<Option<(usize, Ty)>> {
+    let Some(vararg) = ir.declared_parameters(function).vararg else {
+        return Some(None);
     };
-    let [returned] = stmts.as_slice() else {
-        return false;
+    let position = identities
+        .iter()
+        .enumerate()
+        .filter(|(_, identity)| identity.role != IrParameterRole::ExtensionReceiver)
+        .nth(vararg.index)?
+        .0;
+    let element = params.get(position)?.array_elem()?;
+    let element = match element.kind() {
+        TyKind::OutProjection(inner) => inner,
+        TyKind::InProjection(_) | TyKind::StarProjection(_) => return None,
+        _ => element,
     };
-    let IrExpr::Return(Some(operation)) = ir.expr(*returned) else {
-        return false;
-    };
-    let IrExpr::TypeOp {
-        op: IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf,
-        arg,
-        type_operand,
-    } = ir.expr(*operation)
-    else {
-        return false;
-    };
-    let IrExpr::GetValue(value_slot) = ir.expr(*arg) else {
-        return false;
-    };
-    let physical_arity = generic.params.len()
-        + usize::from(ir.functions[function as usize].dispatch_receiver.is_some());
-    usize::try_from(*value_slot).is_ok_and(|slot| slot < physical_arity)
-        && generic
-            .type_params
-            .iter()
-            .any(|parameter| parameter.reified && parameter.ty() == *type_operand)
+    Some(Some((position, element)))
 }
 
 #[derive(Clone, Copy)]
@@ -531,7 +611,7 @@ pub(super) fn artifacts(
 ) -> Vec<(String, Vec<u8>)> {
     let inline = functions
         .iter()
-        .filter(|function| function.inline)
+        .filter(|function| function.prepared.is_some())
         .cloned()
         .collect::<Vec<_>>();
     let mut artifacts = Vec::new();
@@ -676,13 +756,24 @@ impl FileWriter {
             CallTarget::Public(signature) => self.tables.public_signature(signature),
             CallTarget::Accessor(signature) => self.tables.accessor_signature(signature),
         };
-        let symbol_signature = match component {
-            Component::Main => declaration_signature,
-            Component::Prepared => {
+        // A prepared copy is its own declaration beneath its file, signed from the copy's shape:
+        // every parameter is a regular one, the dispatch receiver `<this>` first, and each
+        // non-reified type parameter is written as its bound. Only its table key is the original
+        // identity.
+        let copy = match component {
+            Component::Main => None,
+            Component::Prepared => function.prepared.as_deref(),
+        };
+        let symbol_signature = match copy {
+            None => declaration_signature,
+            Some(copy) => {
+                let inner = self.tables.public_signature(&copy.signature);
                 let file = self.tables.file_signature();
-                self.tables.composite_signature(file, declaration_signature)
+                self.tables.composite_signature(file, inner)
             }
         };
+        let erasures = copy.map(|copy| copy.erasures.clone()).unwrap_or_default();
+        let outer_erasures = std::mem::replace(&mut self.tables.erasures, erasures);
         let declaration_symbol = symbol(symbol_signature, FUNCTION_SYMBOL);
         let type_parameters = function
             .type_parameters
@@ -707,10 +798,11 @@ impl FileWriter {
                 let signature = self.tables.local_signature();
                 let logical_slot =
                     slot.checked_sub(usize::from(function.dispatch_receiver.is_some()));
-                let receiver = function.dispatch_receiver.is_some_and(|_| slot == 0)
-                    || logical_slot.is_some_and(|logical_slot| {
-                        function.extension_parameter == Some(logical_slot)
-                    });
+                let receiver = copy.is_none()
+                    && (function.dispatch_receiver.is_some_and(|_| slot == 0)
+                        || logical_slot.is_some_and(|logical_slot| {
+                            function.extension_parameter == Some(logical_slot)
+                        }));
                 symbol(
                     signature,
                     if receiver {
@@ -772,18 +864,29 @@ impl FileWriter {
                 false,
                 &type_parameters,
             );
-            function_base.field_message(4, &parameter);
+            if copy.is_some() {
+                function_base.repeated_message(6, &parameter);
+            } else {
+                function_base.field_message(4, &parameter);
+            }
             physical += 1;
         }
         for (index, parameter) in function.parameters.iter().enumerate() {
-            let encoded = self.parameter(
+            let mut encoded = self.parameter(
                 &parameter.name,
                 parameter.ty,
                 parameter_symbols[physical],
                 parameter.default_null,
                 &type_parameters,
             );
-            if index < function.context_count {
+            if let Some(element) = parameter.vararg_element {
+                let element = self.ty(element, &type_parameters);
+                encoded.field_varint(3, u64::from(element));
+            }
+            // A prepared copy declares every parameter a regular one.
+            if copy.is_some() {
+                function_base.repeated_message(6, &encoded);
+            } else if index < function.context_count {
                 function_base.repeated_message(9, &encoded);
             } else if function.extension_parameter == Some(index) {
                 function_base.field_message(5, &encoded);
@@ -819,6 +922,7 @@ impl FileWriter {
             let file_entry = self.tables.file_entry(&function.file_name);
             function_wrapper.field_varint(3, u64::from(file_entry));
         }
+        self.tables.erasures = outer_erasures;
         (declaration_signature, function_wrapper)
     }
 
@@ -846,40 +950,8 @@ impl FileWriter {
     }
 
     fn inline_only_annotation(&mut self) -> Pb {
-        use crate::metadata::id_signature::{
-            callable_signature, CallableShape, ClassScope, DeclarationContainer, Placement,
-        };
-        use crate::metadata::semantic::KotlinType;
-
-        let package = ["kotlin".to_owned(), "internal".to_owned()];
-        let classes = [ClassScope::<KotlinType> {
-            name: "InlineOnly",
-            type_parameters: Vec::new(),
-            expect: false,
-        }];
-        let signature = callable_signature(
-            DeclarationContainer {
-                package: &package,
-                classes: &classes,
-                native_interop_library: false,
-            },
-            &CallableShape::<KotlinType> {
-                name: "<init>",
-                contexts: Vec::new(),
-                receiver: None,
-                params: Vec::new(),
-                vararg: None,
-                type_parameters: Vec::new(),
-                expect: false,
-                placement: Placement::Ordinary,
-            },
-        )
-        .expect("InlineOnly has an empty signable constructor");
-        let constructor = symbol(self.tables.public_signature(&signature), CONSTRUCTOR_SYMBOL);
-        let mut annotation = Pb::new();
-        annotation.field_varint(1, constructor);
-        annotation.field_varint(2, 0);
-        annotation
+        self.tables
+            .marker_annotation(&["kotlin", "internal"], "InlineOnly")
     }
 
     /// One exact `null` default. Its expression type is Kotlin's `Nothing?`, not the receiving
@@ -1137,12 +1209,16 @@ mod tests {
                 file_name: "Probe.kt".to_owned(),
                 flags: 1030,
                 inline_only: false,
-                inline: true,
+                prepared: Some(Box::new(PreparedCopy {
+                    signature: signature.clone(),
+                    erasures: Vec::new(),
+                })),
                 dispatch_receiver: None,
                 parameters: vec![PreparedParameter {
                     name: "value".to_owned(),
                     ty: Ty::nullable(Ty::obj("kotlin/Any")),
                     default_null: true,
+                    vararg_element: None,
                 }],
                 context_count: 0,
                 extension_parameter: None,
@@ -1549,7 +1625,7 @@ mod tests {
         ];
         for (index, (body, constant)) in bodies.into_iter().enumerate() {
             let (mut function, signature) = fixture();
-            function.inline = false;
+            function.prepared = None;
             function.inline_only = false;
             function.type_parameters.clear();
             function.parameters[0].ty = Ty::obj("kotlin/Any");

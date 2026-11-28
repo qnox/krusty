@@ -2038,42 +2038,12 @@ fn wasm_links_a_library_s_interfaces_abstract_classes_and_objects_from_its_klib(
     }
 }
 
-/// The KLIB writer has no IR type for a function type yet, so a class storing one keeps its file
-/// metadata-only rather than reaching the type table with a type it cannot write.
 #[test]
-fn wasm_keeps_a_function_typed_property_s_class_out_of_its_klib_s_bodies() {
-    let source = include_str!("box_regressions/multimodule/libraryFunctionTypedProperty.kt");
-    let stem = "wasmLibraryFunctionTypedProperty";
-    super::box_reference_classes::checked_box(source, stem)
-        .expect("the exact Kotlin compiler must run the function-typed property program");
-    let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
-    let units = krusty::conformance::module_units(&modules);
-    for target in WasmTarget::ALL {
-        let lane = WasmLane { target };
-        assert!(focused_wasm_lane_available(&lane, stem));
-        assert_eq!(
-            lane.compile_klib_modules_and_run(&std::env::temp_dir(), stem, &units, source),
-            Outcome::Declined(
-                concat!(
-                    "a dependency callable whose target code was not emitted: `run`; ",
-                    r#"selected declaration KlibDependencyCallable { module: "lib", declaration: Public(KlibPublicIdSignature { package: KlibNamePath { segments: ["fixture"] }, declaration: KlibNamePath { segments: ["Holder", "run"] }, member_id: Some(17455565997157616742), mask: 0 }) }; "#,
-                    r#"owner Some(Classifier(TypeName("fixture/Holder"))); "#,
-                    "kind Member; ",
-                    "realization Dispatch; ",
-                    "checked parameters []; ",
-                    r#"checked result Obj(TypeName("kotlin/String"), []); "#,
-                    "provider parameters []; ",
-                    r#"provider result Obj(TypeName("kotlin/String"), []); "#,
-                    "declared parameters Some([]); ",
-                    "declared result None; ",
-                    "compiler operation None",
-                )
-                .to_owned()
-            ),
-            "{stem} on {}",
-            target.name(),
-        );
-    }
+fn wasm_links_a_library_s_function_typed_property_s_class_from_its_klib() {
+    expect_wasm_klib_route(
+        include_str!("box_regressions/multimodule/libraryFunctionTypedProperty.kt"),
+        "wasmLibraryFunctionTypedProperty",
+    );
 }
 
 /// The KLIB writer does not record a local call's type arguments yet, so a body calling a generic
@@ -2114,10 +2084,9 @@ fn wasm_keeps_a_generic_call_s_caller_out_of_its_klib_s_bodies() {
     }
 }
 
-#[test]
-fn wasm_links_a_library_s_top_level_function_bodies_from_its_klib() {
-    let source = include_str!("box_regressions/multimodule/libraryTopLevelFunctionBodies.kt");
-    let stem = "wasmLibraryTopLevelFunctionBodies";
+/// Every Wasm target runs `source`'s main module linked against the KLIB krusty writes for its
+/// library module, after the exact Kotlin compiler runs the whole program.
+fn expect_wasm_klib_route(source: &str, stem: &str) {
     super::box_reference_classes::checked_box(source, stem)
         .expect("the exact Kotlin compiler must run the whole library-bodies program");
     let modules = krusty::conformance::split_modules(source).expect("valid module fixture");
@@ -2132,4 +2101,62 @@ fn wasm_links_a_library_s_top_level_function_bodies_from_its_klib() {
             target.name(),
         );
     }
+}
+
+#[test]
+fn wasm_links_a_library_s_top_level_function_bodies_from_its_klib() {
+    expect_wasm_klib_route(
+        include_str!("box_regressions/multimodule/libraryTopLevelFunctionBodies.kt"),
+        "wasmLibraryTopLevelFunctionBodies",
+    );
+}
+
+#[test]
+fn wasm_links_a_library_s_loops_from_its_klib() {
+    expect_wasm_klib_route(
+        include_str!("box_regressions/multimodule/libraryLoopBodies.kt"),
+        "wasmLibraryLoopBodies",
+    );
+}
+
+#[test]
+fn wasm_links_a_library_s_try_and_throw_from_its_klib() {
+    expect_wasm_klib_route(
+        include_str!("box_regressions/multimodule/libraryTryBodies.kt"),
+        "wasmLibraryTryBodies",
+    );
+}
+
+#[test]
+fn wasm_links_a_library_s_varargs_and_arrays_from_its_klib() {
+    expect_wasm_klib_route(
+        include_str!("box_regressions/multimodule/libraryVarargBodies.kt"),
+        "wasmLibraryVarargBodies",
+    );
+}
+
+#[test]
+fn wasm_links_a_library_s_lambdas_from_its_klib() {
+    expect_wasm_klib_route(
+        include_str!("box_regressions/multimodule/libraryLambdaBodies.kt"),
+        "wasmLibraryLambdaBodies",
+    );
+}
+
+#[test]
+fn wasm_links_a_library_s_inline_function_bodies_from_its_klib() {
+    expect_wasm_klib_route(
+        include_str!("box_regressions/multimodule/libraryInlineFunctionBodies.kt"),
+        "wasmLibraryInlineFunctionBodies",
+    );
+}
+
+#[test]
+fn wasm_links_a_library_s_public_inline_members_from_its_klib() {
+    expect_wasm_klib_route(
+        include_str!(
+            "box_regressions/multimodule/publicInlineMemberNonLocalReturnAcrossModules.kt"
+        ),
+        "wasmPublicInlineMemberNonLocalReturn",
+    );
 }

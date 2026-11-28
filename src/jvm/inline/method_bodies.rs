@@ -91,6 +91,13 @@ pub trait MethodBodies {
         false
     }
 
+    /// Whether an instruction-level method or field reference is declared with package or
+    /// protected access: neither public nor private. Such a member is reachable from a destination
+    /// class only when it is in the owner's package (or a subclass).
+    fn member_is_package_scoped(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
+        false
+    }
+
     /// Whether a bootstrap dependency is provably reachable from any destination class.
     ///
     /// This is intentionally stronger than “not private”: unknown, protected, package-private, or

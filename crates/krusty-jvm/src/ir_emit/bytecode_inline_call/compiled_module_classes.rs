@@ -181,6 +181,11 @@ impl MethodBodies for ModuleClassBodies<'_> {
         self.dependencies.member_is_private(owner, name, descriptor)
     }
 
+    fn member_is_package_scoped(&self, owner: &str, name: &str, descriptor: &str) -> bool {
+        self.dependencies
+            .member_is_package_scoped(owner, name, descriptor)
+    }
+
     fn member_is_publicly_reachable(&self, owner: &str, name: &str, descriptor: &str) -> bool {
         self.dependencies
             .member_is_publicly_reachable(owner, name, descriptor)

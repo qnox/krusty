@@ -198,6 +198,7 @@ fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, action: Exp
         // plan and its language-member role. Operation relocation moves them with the call.
         jvm_member_targets,
         jvm_overridden_call_realizations,
+        jvm_inline_member_dispatch,
         semantic_call_roles,
         // Keyed by the property operation identity, which a copy keeps (`IrFile::add_expr`), not
         // by the expression.
@@ -526,6 +527,8 @@ fn expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId, action: Exp
         (value_class_null_safe_unbox_type_operation_edges, false),
         (jvm_member_targets, false),
         (jvm_overridden_call_realizations, false),
+        // A copied call still dispatches to the member its realization selected.
+        (jvm_inline_member_dispatch, true),
     ];
     for (facts, copy_on_clone) in operation_facts {
         match action {

@@ -1034,6 +1034,7 @@ fn realize_expressions(
             unreachable!()
         };
         let mut physical_result = callable.physical_ret;
+        let mut inline_member_dispatch = None;
         let selected_intrinsic = match callable.compiler_intrinsic {
             Some(krusty::libraries::CompilerIntrinsic::StringPlus) => {
                 unreachable!("a String.plus call is realized as a concatenation above")
@@ -1224,8 +1225,9 @@ fn realize_expressions(
                     // dispatch receiver, but route the selected physical handle through the JVM
                     // bytecode splicer. `Callee::Static` is the common IR's existing opaque inline
                     // handle; with a dispatch receiver the emitter prepends `this` to the splice-local
-                    // descriptor and emits no static invocation on success. Public inline members keep
-                    // ordinary virtual dispatch as their legal fallback.
+                    // descriptor and emits no static invocation on success. A public inline member is
+                    // inlined as well, as kotlinc does (a lambda that returns non-locally has no
+                    // function-object realization); it is realized below.
                     if let krusty::ir::IrPropertyDispatch::Super { owner, interface } =
                         property_dispatch
                     {
@@ -1316,14 +1318,28 @@ fn realize_expressions(
                                 classifier: missing.0,
                             }
                         })?;
-                        **callee = Callee::Virtual {
+                        let dispatch = Callee::Virtual {
                             owner,
                             name: physical_name.clone(),
-                            descriptor,
+                            descriptor: descriptor.clone(),
                             params: None,
                             interface,
                             module_target: None,
                             target: Some(selected),
+                        };
+                        // A public inline member is the inline handle the splicer reads its body
+                        // through; the call it is when the splicer declines that body is this
+                        // ordinary dispatch, emitted by the virtual call's own path.
+                        **callee = if callable.inline.can_inline() {
+                            inline_member_dispatch = Some(dispatch);
+                            Callee::Static {
+                                owner: callable.physical_owner,
+                                name: physical_name.clone(),
+                                descriptor,
+                                inline: callable.inline,
+                            }
+                        } else {
+                            dispatch
                         };
                     }
                 }
@@ -1535,6 +1551,10 @@ fn realize_expressions(
             inline_modifiers,
         )?;
         let realized_call = bridge_external_result(ir, index, physical_result, semantic_ret);
+        if let Some(dispatch) = inline_member_dispatch {
+            ir.jvm_inline_member_dispatch
+                .insert(realized_call, dispatch);
+        }
         record_protected_dependency_call(ir, realized_call, &callable);
         if let Some(role) = semantic_role {
             ir.semantic_call_roles.insert(realized_call, role);

@@ -33,6 +33,7 @@ mod body_tree;
 mod class_ir;
 mod inline_ir;
 mod ir_tables;
+mod prepared_inline;
 pub mod write;
 
 use std::collections::BTreeMap;

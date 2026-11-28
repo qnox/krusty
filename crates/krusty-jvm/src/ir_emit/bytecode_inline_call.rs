@@ -172,7 +172,15 @@ impl Emitter<'_> {
             && !inline.must_inline()
             && !self.default_call_operands.contains(call_expression);
         if let Some(recv) = dispatch_receiver {
-            let recv_desc = type_descriptor(self.value_ty(recv));
+            // kotlinc generates an inlined member's dispatch receiver as its declaring class: a
+            // receiver of a subclass is cast to it where it is stored (`this_$iv`).
+            let receiver = self.value_ty(recv);
+            let receiver = if receiver.obj_internal().is_some() {
+                Ty::obj(owner)
+            } else {
+                receiver
+            };
+            let recv_desc = type_descriptor(receiver);
             let splice_desc = format!("({}{}", recv_desc, &descriptor[1..]);
             let mut all = Vec::with_capacity(args.len() + 1);
             all.push(recv);
@@ -262,7 +270,15 @@ impl Emitter<'_> {
             &body.code,
             &body.source_cp,
             &body.bootstrap_methods,
-            &mut |o, n, d| self.bodies.member_is_private(o, n, d),
+            &mut |o, n, d| {
+                // A package-scoped member (`this$0` of an inner class, a package-private helper)
+                // is legal only from its owner's own package: relocated into a caller elsewhere
+                // it is an `IllegalAccessError`, which kotlinc's inliner never produces for a
+                // body it accepts.
+                self.bodies.member_is_private(o, n, d)
+                    || (self.bodies.member_is_package_scoped(o, n, d)
+                        && internal_package(o) != internal_package(&self.facade))
+            },
             &mut |o, n, d| self.bodies.member_is_publicly_reachable(o, n, d),
             &mut |class| self.bodies.class_is_publicly_reachable(class),
         ) {
@@ -1030,6 +1046,9 @@ impl Emitter<'_> {
                 index,
                 code,
             );
+            if index < leading_non_argument_operands {
+                self.cast_dispatch_receiver(args[index], physical[index], code);
+            }
             self.frame.rewind_to(operand_frame);
             let entered = self
                 .frame
@@ -1502,6 +1521,21 @@ impl Emitter<'_> {
         }
     }
 
+    /// Cast a dispatch receiver of a subclass to the inlined member's declaring class, which the
+    /// splice descriptor names for it.
+    fn cast_dispatch_receiver(&mut self, receiver: u32, declaring: Ty, code: &mut CodeBuilder) {
+        let (Some(source), Some(target)) = (
+            self.value_ty(receiver).obj_internal(),
+            declaring.obj_internal(),
+        ) else {
+            return;
+        };
+        if source != target {
+            let class = self.cw.class_ref(&target.render());
+            code.checkcast(class);
+        }
+    }
+
     /// Evaluate one call operand and adapt it to its descriptor type, as
     /// [`Self::emit_call_descriptor_operands`] does for every operand in turn.
     fn emit_call_operand(
@@ -1971,6 +2005,11 @@ fn methodref_owner<'a>(body: &'a MethodCode, name: &str, descriptor: &str) -> Op
         let (n, d) = name_and_desc(&body.source_cp, *nt_idx)?;
         (n == name && d == descriptor).then(|| class_name(&body.source_cp, *class_idx))?
     })
+}
+
+/// The package of an internal class name (`a/b/C` is `a/b`; a class in the root package is ``).
+fn internal_package(internal: &str) -> &str {
+    internal.rsplit_once('/').map_or("", |(package, _)| package)
 }
 
 #[cfg(test)]

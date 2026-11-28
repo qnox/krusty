@@ -202,11 +202,23 @@ impl CodeBuilder {
     /// inliner copies with an inline body, or the caller's line kotlinc registers again after an
     /// inlined call inside a condition (`markLineNumberAfterInlineIfNeeded`). The line the mapper
     /// last marked is unchanged.
+    ///
+    /// A line of dead code is not written, but kotlinc's source-map copier reads the inlined body
+    /// before its dead code is removed, so the line is kept for [`Self::copier_lines`].
     pub fn inlined_line(&mut self, line: u16) {
         if self.push_line_entry(line) {
             let pc = self.bytes.len() as u16;
             self.inlined_line_marks.push((pc, line));
+        } else if self.dead {
+            self.dropped_inlined_lines
+                .push((self.line_marks.len(), line));
         }
+    }
+
+    /// The method's lines in the order kotlinc's source-map copier reads them: the table's marks,
+    /// with the inlined lines of dead code in their places.
+    pub(crate) fn copier_lines(&self) -> Vec<u16> {
+        interleave_dropped_lines(&self.line_marks, &self.dropped_inlined_lines)
     }
 
     fn push_line_entry(&mut self, line: u16) -> bool {
@@ -327,6 +339,20 @@ impl CodeBuilder {
     }
 }
 
+/// `marks`' lines with each `(before, line)` of `dropped` placed after its first `before` marks.
+pub(super) fn interleave_dropped_lines(marks: &[(u16, u16)], dropped: &[(usize, u16)]) -> Vec<u16> {
+    let mut lines = Vec::with_capacity(marks.len() + dropped.len());
+    let mut dropped = dropped.iter().peekable();
+    for (index, &(_, line)) in marks.iter().enumerate() {
+        while let Some(&(_, dead)) = dropped.next_if(|&&(before, _)| before <= index) {
+            lines.push(dead);
+        }
+        lines.push(line);
+    }
+    lines.extend(dropped.map(|&(_, dead)| dead));
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{ClassWriter, CodeBuilder, ACC_PUBLIC, ACC_STATIC};
@@ -340,6 +366,19 @@ mod tests {
         assert!(!code.line_anchored_by_trailing_nop(5));
         code.dup();
         assert!(!code.line_anchored_by_trailing_nop(4));
+    }
+
+    /// kotlinc copies an inlined body's lines into the source map before removing dead code, so
+    /// a line left behind a non-local return still takes its place among the copier's lines.
+    #[test]
+    fn an_inlined_line_of_dead_code_is_kept_for_the_source_map_copier() {
+        let mut code = CodeBuilder::new(0);
+        code.mark_line(3);
+        code.inlined_line(44);
+        code.ret_void();
+        code.inlined_line(45);
+        assert_eq!(code.line_marks(), &[(0, 3), (0, 44)]);
+        assert_eq!(code.copier_lines(), vec![3, 44, 45]);
     }
 
     #[test]
