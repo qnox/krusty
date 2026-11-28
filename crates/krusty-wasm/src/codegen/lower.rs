@@ -396,7 +396,7 @@ pub(super) fn lower_file(
     } else if !member_property_definitions.is_empty() {
         return Err("a member property definition without its class layout".to_string());
     }
-    accessor_property_entries::define(&context, &accessor_property_definitions, module)?;
+    accessor_property_entries::define(&context, &accessor_property_definitions, module, runtime)?;
     class_initializers.define(&context, module, runtime)?;
     let file_statics = || {
         ir.statics
