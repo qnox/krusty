@@ -543,7 +543,19 @@ fn emit_primary_overloads(
     let hidden = class.is_sealed || ir.has_value_param_ctor(&class.fq_name());
     let prefix_count = class.constructor_prefix_count as usize;
     let physical = class_ctor_jvm_tys(ir, class);
-    let (prefix, source) = physical.split_at(prefix_count);
+    let (captured, source) = physical.split_at(prefix_count);
+    // An enum's constructors take the constant's name and ordinal first, and so do its overloads.
+    let owner_prefix = if class.is_enum {
+        OwnerConstructorPrefix::enum_class()
+    } else {
+        OwnerConstructorPrefix::none()
+    };
+    let prefix = owner_prefix
+        .types
+        .iter()
+        .chain(captured)
+        .copied()
+        .collect::<Vec<_>>();
     let formatter = JvmSignatureFormatter::new(ir, env);
     let source_parameters = primary_ctor_source_parameters(ir, class);
     let identities = crate::parameter_names::constructor_identities(&class.ctor_args);
@@ -561,7 +573,7 @@ fn emit_primary_overloads(
     let overloads = ConstructorOverloads {
         owner: primary.owner,
         access: primary.access,
-        prefix,
+        prefix: &prefix,
         source,
         has_default: defaults[prefix_count..]
             .iter()
@@ -570,9 +582,15 @@ fn emit_primary_overloads(
         checks: (prefix_count..class.ctor_args.len())
             .map(|index| class.ctor_args[index].check.clone())
             .collect(),
-        local_names: capture_order::physical(ir, class, (0..class.ctor_args.len()).collect())
-            .into_iter()
-            .map(|index| crate::parameter_names::local_variable(&identities[index], "<init>"))
+        local_names: owner_prefix
+            .identities()
+            .chain(
+                capture_order::physical(ir, class, (0..class.ctor_args.len()).collect())
+                    .into_iter()
+                    .map(|index| {
+                        crate::parameter_names::local_variable(&identities[index], "<init>")
+                    }),
+            )
             .collect(),
         nullability: source_parameters
             .iter()
@@ -758,16 +776,11 @@ pub(super) fn emit_default_constructor(
                 // The convenience ctor STANDS IN for the declared primary, so kotlinc repeats the
                 // primary's declared annotations on it (the `$default` overload between them, being
                 // synthetic, gets none). Their descriptors already interned at the primary.
-                let annotations = &c.primary_ctor_annotations;
-                if !annotations.retains_none() {
-                    cw.set_method_annotations("<init>", "()V", annotations);
-                    if annotations.deprecated() {
-                        cw.mark_method_deprecated("<init>", "()V");
-                    }
-                    if function_annotations::hidden_realization_is_synthetic(annotations) {
-                        cw.set_method_synthetic("<init>", "()V");
-                    }
-                }
+                function_annotations::emit_constructor_declared(
+                    cw,
+                    &c.primary_ctor_annotations,
+                    "()V",
+                );
             }
         }
     }
@@ -968,15 +981,7 @@ impl ConstructorOverloads<'_> {
         if !parameter_annotations.is_empty() {
             cw.set_method_param_annotations("<init>", &descriptor, &parameter_annotations);
         }
-        if !self.annotations.retains_none() {
-            cw.set_method_annotations("<init>", &descriptor, self.annotations);
-            if self.annotations.deprecated() {
-                cw.mark_method_deprecated("<init>", &descriptor);
-            }
-            if function_annotations::hidden_realization_is_synthetic(self.annotations) {
-                cw.set_method_synthetic("<init>", &descriptor);
-            }
-        }
+        function_annotations::emit_constructor_declared(cw, self.annotations, &descriptor);
     }
 }
 

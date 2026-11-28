@@ -207,6 +207,10 @@ impl PropertyAnnotationSites {
         self.0 & (1 << site as u8) != 0
     }
 
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
     fn insert(&mut self, site: PropertyAnnotationSite) {
         self.0 |= 1 << site as u8;
     }

@@ -207,6 +207,7 @@ const MODELED_FEATURES: &[&str] = &[
     "AnnotationsInMetadata",
     "BareArrayClassLiteral",
     "CallableReferencesToContextual",
+    "CheckOptInOnPureEnumEntries",
     "ContextParameters",
     "ContextReceivers",
     "ContextSensitiveResolutionUsingExpectedType",

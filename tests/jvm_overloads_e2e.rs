@@ -119,6 +119,14 @@ fn sealed_constructor_overloads_get_their_marker_accessors_like_kotlinc() {
 
 const ENUMS: &str = "package p
 
+enum class WithPrimary @JvmOverloads constructor(val n: Int = 1, val s: String = \"s\") {
+    A, B(2)
+}
+
+enum class Marked @Deprecated(\"d\") constructor(val n: Int = 1) { X }
+
+enum class Hidden private constructor(val n: Int = 1) { X }
+
 enum class WithSecondary(val n: Int) {
     X(1), Y(\"s\");
     @JvmOverloads constructor(s: String, a: Int = 3, b: Int = 4) : this(a + b)
@@ -127,7 +135,11 @@ enum class WithSecondary(val n: Int) {
 
 #[test]
 fn enum_constructor_overloads_keep_the_name_and_ordinal_prefix_like_kotlinc() {
-    common::assert_classes_identical_to_kotlinc("JvmOverloadsEnums", ENUMS, &["p/WithSecondary"]);
+    common::assert_classes_identical_to_kotlinc(
+        "JvmOverloadsEnums",
+        ENUMS,
+        &["p/WithPrimary", "p/Marked", "p/Hidden", "p/WithSecondary"],
+    );
 }
 
 // PLATFORM-SPECIFIC: kotlinc moves the annotations of a constructor hidden behind a value-class

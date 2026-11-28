@@ -6,6 +6,7 @@
 //! annotation class must list that target: kotlinc's WRONG_ANNOTATION_TARGET otherwise, at the
 //! application's `@`.
 
+use super::annotation_host_kind::AnnotationHostKind;
 use super::*;
 use crate::types::KotlinTarget;
 
@@ -52,7 +53,7 @@ impl Checker<'_> {
                 scope,
                 &entry.annotation,
                 &entry.arguments,
-                target.description(),
+                AnnotationHostKind::accessor(target),
             ) else {
                 continue;
             };

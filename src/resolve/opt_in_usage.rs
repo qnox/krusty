@@ -600,6 +600,25 @@ impl Checker<'_> {
             && marker == type_name("kotlin/ExperimentalCollectionLiteralsApi")
     }
 
+    /// The opt-in requirements of the constructor an enum entry selects, reported at its name. A
+    /// pure entry (no written call) only warns until `CheckOptInOnPureEnumEntries` makes it an
+    /// error.
+    pub(super) fn check_enum_entry_opt_in(
+        &mut self,
+        name: Span,
+        explicit_call: bool,
+        constructor: Option<crate::fir::DeclarationId>,
+    ) {
+        let mut requirements = Vec::new();
+        self.add_declaration_requirements(constructor, &[], &mut requirements);
+        if !explicit_call && !self.file.check_opt_in_on_pure_enum_entries {
+            for requirement in &mut requirements {
+                requirement.warning = true;
+            }
+        }
+        self.report_opt_in_requirements(name, &requirements);
+    }
+
     fn report_opt_in_requirements(&mut self, span: Span, requirements: &[OptInRequirement]) {
         for requirement in requirements {
             // kotlinc's factories: `OPT_IN_USAGE` warns and `OPT_IN_USAGE_ERROR` rejects.
