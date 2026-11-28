@@ -45,7 +45,6 @@ collectionStubs/stubsFromSuperclassNoBridges.kt
 collectionStubs/toArray/customNonGenericToArray.kt
 collectionStubs/toArray/internalGenericToArray.kt
 collectionStubs/toArray/noToArrayInJava.kt
-coroutines/privateAccessor.kt
 coroutines/spilling/booleanParameter.kt
 coroutines/spilling/select.kt
 coroutines/spilling/unreachable.kt
