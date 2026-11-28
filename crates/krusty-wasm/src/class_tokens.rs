@@ -147,8 +147,8 @@ pub(super) struct ClassTokens {
     pub(super) structure: u32,
     /// The global holding every token's dispatch table.
     table: u32,
-    /// For each classifier whose class literal this module evaluates, its record's global and the
-    /// function `(ref null eq) -> i32` testing a value against it: what `KClass.isInstance`
+    /// For each classifier whose class literal this module evaluates or whose class it declares,
+    /// its record's global and the function `(ref null eq) -> i32` testing a value against it: what `KClass.isInstance`
     /// reaches from a token alone.
     tests: Vec<(u32, u32)>,
     /// The function `(token, value) -> i32` choosing among [`Self::tests`], declared by the first
@@ -253,7 +253,8 @@ impl ClassTokens {
     }
 
     /// Write the function [`Self::is_instance`] declared: the test registered for the token's
-    /// record. A record no class literal of the module registered a test for carries no way to
+    /// record, by a class literal or by the declaration of a class with instances. A record of a
+    /// runtime representation (a string, a box, an array) no class literal named carries no way to
     /// test a value, so it traps rather than answer from a guess.
     pub(super) fn finalize(&self, module: &mut Module, objects: &ObjectRoot) {
         let Some(function) = self.is_instance else {

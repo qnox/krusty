@@ -21,5 +21,10 @@ fun box(): String {
     if (!accepts(Any::class, pet)) return "fail: any"
     if (!accepts(String::class, "text")) return "fail: string"
     if (accepts(String::class, 1)) return "fail: not a string"
+    val dog: Animal = Dog()
+    if (!accepts(dog::class, Dog())) return "fail: value token own class"
+    if (!accepts(dog::class, Dog())) return "fail: value token"
+    if (accepts(dog::class, Cat())) return "fail: value token sibling"
+    if (accepts(dog::class, Animal())) return "fail: value token supertype instance"
     return "OK"
 }

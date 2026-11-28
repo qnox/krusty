@@ -61,7 +61,7 @@ use krusty::ir::{ClassId, FunId, IrFile, IrLocalPropertyLayout};
 use krusty::types::{Ty, TypeName};
 
 use super::super::encode::{
-    Code, CompositeType, FieldType, HeapType, Module, StorageType, SubType, ValType,
+    Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, SubType, ValType,
 };
 use super::super::exception_transport::ExceptionTransport;
 use super::super::identity::PREFIX_FIELDS;
@@ -1122,6 +1122,24 @@ pub(super) fn declare(
                 class.fq_name,
                 &krusty::backend::class_names::declared_class(ir, id),
             );
+            if !runtime.class_tokens.has_test(info) {
+                // The class of a value is the one its table's record names, so `x::class` of an
+                // instance answers `isInstance` with the test of that class's struct.
+                let ty = module.func_type(vec![REFERENCE], vec![ValType::I32]);
+                let test = module.declare();
+                let mut code = Code::default();
+                code.local_get(0)
+                    .ref_test(false, HeapType::Concrete(ancestors[0]));
+                module.define(
+                    test,
+                    Function {
+                        ty,
+                        locals: Vec::new(),
+                        code,
+                    },
+                );
+                runtime.class_tokens.register_test(info, test);
+            }
             let mut init = Code::default();
             for (slot, function) in functions_here.iter().enumerate() {
                 if slot as u32 == ITABLE_FIELD {
