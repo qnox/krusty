@@ -1100,6 +1100,10 @@ pub(super) fn compact(file: &mut File) {
         &expressions,
     );
     file.anon_fun_lambdas = remap_u32_set(std::mem::take(&mut file.anon_fun_lambdas), &expressions);
+    file.anon_fun_expression_bodies = remap_u32_set(
+        std::mem::take(&mut file.anon_fun_expression_bodies),
+        &expressions,
+    );
     file.anon_fun_context_count = remap_u32_map(
         std::mem::take(&mut file.anon_fun_context_count),
         &expressions,

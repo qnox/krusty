@@ -392,11 +392,19 @@ impl Checker<'_> {
             .then_some(std::borrow::Cow::Borrowed(signature))
     }
 
-    /// Whether the call selected at `call` recorded no solution for its formal at `index`.
-    fn recorded_solution_is_absent(&self, call: ExprId, index: usize) -> bool {
+    /// Whether the call selected at `call` recorded no solution for its `formal` at `index`. A
+    /// record that is the formal itself, as a receiver lambda leaves it, is no solution either.
+    fn recorded_solution_is_absent(
+        &self,
+        call: ExprId,
+        index: usize,
+        formal: &crate::types::TyParamName,
+    ) -> bool {
         self.selected_call_type_arguments(call)
             .and_then(|arguments| arguments.get(index))
-            .is_some_and(Option::is_none)
+            .is_some_and(|argument| {
+                argument.is_none_or(|argument| argument.ty_param_name() == Some(formal.as_str()))
+            })
     }
 
     /// Whether a conditional branch's selected call still has a result formal without a recorded
@@ -408,7 +416,7 @@ impl Checker<'_> {
             .is_some_and(|signature| {
                 signature.formals.iter().enumerate().any(|(index, formal)| {
                     crate::types::ty_mentions_param(signature.ret, std::slice::from_ref(formal))
-                        && self.recorded_solution_is_absent(call, index)
+                        && self.recorded_solution_is_absent(call, index, formal)
                 })
             })
     }
@@ -584,7 +592,7 @@ impl Checker<'_> {
                     symbolic
                 } else {
                     crate::types::ty_mentions_param(signature.ret, formal)
-                        && self.recorded_solution_is_absent(branch, *index)
+                        && self.recorded_solution_is_absent(branch, *index, &formal[0])
                 }
             })
             .map(|(_, formal)| formal)

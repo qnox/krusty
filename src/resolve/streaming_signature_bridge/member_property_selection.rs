@@ -62,7 +62,7 @@ impl ProductionSignatureSemantics<'_> {
                 let Ok(extension) = extension else {
                     return Ok(None);
                 };
-                self.commit_postponed_property_receiver(scope, &extension, receiver);
+                self.commit_postponed_assignability(scope, extension.receiver, receiver);
                 let publication = publication_origin.map(|_| {
                     CompactSelectedResultPublication::callable(
                         &extension.getter,

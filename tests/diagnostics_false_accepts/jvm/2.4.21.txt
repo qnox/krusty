@@ -570,7 +570,6 @@ compiler/testData/diagnostics/tests/inference/nothingType/returnAsLastStatementI
 compiler/testData/diagnostics/tests/inference/nullableVsDnnVariationsDisabled.kt
 compiler/testData/diagnostics/tests/inference/pcla/assignmentOperatorAmbiguity.kt
 compiler/testData/diagnostics/tests/inference/pcla/bothReceiverAndValueParameterNotFixed.kt
-compiler/testData/diagnostics/tests/inference/pcla/doubleSquareBracketsInBuilderArgument.kt
 compiler/testData/diagnostics/tests/inference/pcla/fixationOnDemand/scopeNavigation/concreteScopeOwner/AnyReceiverFunctionCall.kt
 compiler/testData/diagnostics/tests/inference/pcla/fixationOnDemand/scopeNavigation/concreteScopeOwner/GenericPropertyAccess.kt
 compiler/testData/diagnostics/tests/inference/pcla/fixationOnDemand/scopeNavigation/concreteScopeOwner/GenericPropertyAssignment.kt
@@ -580,11 +579,6 @@ compiler/testData/diagnostics/tests/inference/pcla/fixationOnDemand/scopeNavigat
 compiler/testData/diagnostics/tests/inference/pcla/fixationOnDemand/syntaxForms/TypeCastExpression.kt
 compiler/testData/diagnostics/tests/inference/pcla/fixingTVForLambadaWithShallowDependencyToOuter2.kt
 compiler/testData/diagnostics/tests/inference/pcla/issues/kt43710b.kt
-compiler/testData/diagnostics/tests/inference/pcla/issues/kt47986Default.kt
-compiler/testData/diagnostics/tests/inference/pcla/issues/kt47986Disabled.kt
-compiler/testData/diagnostics/tests/inference/pcla/issues/kt47986Enabled.kt
-compiler/testData/diagnostics/tests/inference/pcla/issues/kt47986_2.kt
-compiler/testData/diagnostics/tests/inference/pcla/issues/kt47986_3.kt
 compiler/testData/diagnostics/tests/inference/pcla/issues/kt49263.kt
 compiler/testData/diagnostics/tests/inference/pcla/issues/kt51464.kt
 compiler/testData/diagnostics/tests/inference/pcla/issues/kt53422.kt
@@ -1131,7 +1125,6 @@ compiler/testData/diagnostics/tests/resolve/overloadConflicts/kt31670.kt
 compiler/testData/diagnostics/tests/resolve/overloadConflicts/kt31758.kt
 compiler/testData/diagnostics/tests/restrictsSuspensionDifference.kt
 compiler/testData/diagnostics/tests/returnFromDelegatedConstuctor.kt
-compiler/testData/diagnostics/tests/returnInExpressionBodies/returnInNestedCall.kt
 compiler/testData/diagnostics/tests/samConstructors/genericSam.kt
 compiler/testData/diagnostics/tests/samConversions/samConversionWithJavaFlexibleType.kt
 compiler/testData/diagnostics/tests/scopes/classHeader/companionObjectSuperConstructorArguments.kt

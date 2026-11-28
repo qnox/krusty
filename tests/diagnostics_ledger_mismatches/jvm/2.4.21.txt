@@ -2727,7 +2727,6 @@ compiler/testData/diagnostics/tests/inference/coercionToUnit/coercionWithExpecte
 compiler/testData/diagnostics/tests/inference/coercionToUnit/coercionWithExpectedTypeAndBound.kt
 compiler/testData/diagnostics/tests/inference/coercionToUnit/coercionWithoutExpectedType.kt
 compiler/testData/diagnostics/tests/inference/coercionToUnit/coersionWithAnonymousFunctionsAndUnresolved.kt
-compiler/testData/diagnostics/tests/inference/coercionToUnit/indirectCoercionWithExpectedType.kt
 compiler/testData/diagnostics/tests/inference/coercionToUnit/kt30242.kt
 compiler/testData/diagnostics/tests/inference/coercionToUnit/lastStatementInNonUnitLambda.kt
 compiler/testData/diagnostics/tests/inference/coercionToUnit/lastStatementInNonUnitLambdaWithRegularReturn.kt
@@ -3036,7 +3035,6 @@ compiler/testData/diagnostics/tests/inference/pcla/forceLambdaCompletionFromRetu
 compiler/testData/diagnostics/tests/inference/pcla/forceLambdaCompletionFromReturnStatement/multiLambdas20.kt
 compiler/testData/diagnostics/tests/inference/pcla/forceLambdaCompletionFromReturnStatement/noPostponedAtomForNestedLambda.kt
 compiler/testData/diagnostics/tests/inference/pcla/forceLambdaCompletionFromReturnStatement/noPostponedAtomForNestedLambda20.kt
-compiler/testData/diagnostics/tests/inference/pcla/incompleteCallInReturnArgumentsWithProperExpectType.kt
 compiler/testData/diagnostics/tests/inference/pcla/innerTvFixationFromLowerConstraints.kt
 compiler/testData/diagnostics/tests/inference/pcla/invalidateKeys.kt
 compiler/testData/diagnostics/tests/inference/pcla/invokeExtensionReceiverWithNotFixedVariables.kt
@@ -3074,7 +3072,6 @@ compiler/testData/diagnostics/tests/inference/pcla/issues/kt63648.kt
 compiler/testData/diagnostics/tests/inference/pcla/issues/kt63841.kt
 compiler/testData/diagnostics/tests/inference/pcla/issues/kt64077.kt
 compiler/testData/diagnostics/tests/inference/pcla/issues/kt64222.kt
-compiler/testData/diagnostics/tests/inference/pcla/issues/kt65300g.kt
 compiler/testData/diagnostics/tests/inference/pcla/issues/kt67875.kt
 compiler/testData/diagnostics/tests/inference/pcla/issues/kt67993.kt
 compiler/testData/diagnostics/tests/inference/pcla/issues/kt69170Original.kt
@@ -3091,7 +3088,6 @@ compiler/testData/diagnostics/tests/inference/pcla/noCompilerAssertionInAttemptT
 compiler/testData/diagnostics/tests/inference/pcla/noCompilerAssertionWithErrorTypes.kt
 compiler/testData/diagnostics/tests/inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/FunctionWithParameterToUnitImplicitLiteralsCase.kt
 compiler/testData/diagnostics/tests/inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/FunctionWithReceiverToUnitImplicitLiteralsCase.kt
-compiler/testData/diagnostics/tests/inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/typeInfoSources/UnitReturnTypeOfBuilderParametersLastStatementReturnCase.kt
 compiler/testData/diagnostics/tests/inference/pcla/overloadResolutionByLambdaReturnType.kt
 compiler/testData/diagnostics/tests/inference/pcla/overloadResolutionWithTypeVariables.kt
 compiler/testData/diagnostics/tests/inference/pcla/propertySubstitution.kt
@@ -6680,7 +6676,6 @@ compiler/testData/diagnostics/testsWithStdLib/coroutines/inference/kt15516.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/inference/kt33542.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/inference/kt35684.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/inference/kt41308.kt
-compiler/testData/diagnostics/testsWithStdLib/coroutines/inference/nestedSuspendCallInsideLambda.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/inference/plusAssignInCoroutineContext.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/inference/plusAssignWithLambda.kt
 compiler/testData/diagnostics/testsWithStdLib/coroutines/inference/plusAssignWithLambda2.kt

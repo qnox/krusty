@@ -394,6 +394,41 @@ impl Checker<'_> {
         }
     }
 
+    /// Check an anonymous function's expression body against its declared return type
+    /// (`fun(): T = e`). A block body states its results with `return`, which is checked there.
+    pub(super) fn expect_anonymous_expression_body(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        lambda: ExprId,
+        body: ExprId,
+        tail: Ty,
+    ) {
+        if !self.file.anon_fun_expression_bodies.contains(&lambda.0) {
+            return;
+        }
+        if let Some(reference) = self.file.anon_fun_ret.get(&lambda.0).cloned() {
+            let declared = self.type_ref_ty(scope, &reference);
+            self.expect_lambda_result(body, declared, tail);
+        }
+    }
+
+    /// kotlinc forbids `return` as the whole body of an anonymous function that has an expression
+    /// body and no declared return type.
+    fn report_return_in_implicit_expression_body(&mut self, lambda: ExprId, body: ExprId) {
+        if !self.file.anon_fun_expression_bodies.contains(&lambda.0)
+            || self.file.anon_fun_ret.contains_key(&lambda.0)
+        {
+            return;
+        }
+        let result = super::conditional_branch::branch_value_expression(self.file, body);
+        if matches!(self.file.expr(result), Expr::Return { .. }) {
+            self.diags.error(
+                self.span(result),
+                "returns are prohibited in functions with expression body and without explicit return type. Use block body '{...}' or add an explicit return type.".to_string(),
+            );
+        }
+    }
+
     /// Type the lambda body once. Labelled exits are resolved and recorded by that ordinary
     /// checker traversal; the owning block uses those records immediately before checking its
     /// trailing expression.
@@ -405,6 +440,7 @@ impl Checker<'_> {
         coerce_return_to_unit: bool,
         result_constraint: LambdaResultConstraint,
     ) -> (Ty, bool) {
+        self.report_return_in_implicit_expression_body(lambda, body);
         let checked = self.check_lambda_body(scope, body, coerce_return_to_unit, result_constraint);
         let unit_from_exits = self.lambda_returns.take_unit_from_exits(lambda);
         self.record_lambda_result_enhancement(
@@ -480,7 +516,14 @@ impl Checker<'_> {
         self.lambda_body_results.insert(lambda, inferred);
         match result_constraint {
             LambdaResultConstraint::Fixed(expected) => {
-                self.expect_lambda_result(body, expected, inferred);
+                // An anonymous function's declared return type is its result type, so only its
+                // expression body is a value that must conform to it.
+                let produced = if self.file.anon_fun_expression_bodies.contains(&lambda.0) {
+                    tail
+                } else {
+                    inferred
+                };
+                self.expect_lambda_result(body, expected, produced);
                 // A lambda whose every result is `Unit` (a statement tail such as an assignment or
                 // a declaration, an `else`-less `if`, a `Unit` call) returns `Unit` itself, a
                 // subtype of the expected function type, as kotlinc infers it.
@@ -560,7 +603,18 @@ impl Checker<'_> {
         result_constraint: LambdaResultConstraint,
     ) -> Ty {
         if coerce_return_to_unit {
-            return match self.expr_statement(scope, body) {
+            let result = super::conditional_branch::branch_value_expression(self.file, body);
+            let inserted = self.unit_coerced_tails.insert(result);
+            let tail = self.expr_statement(scope, body);
+            if inserted {
+                self.unit_coerced_tails.remove(&result);
+            }
+            // kotlinc still relates a tail that is itself a call-owned variable to the `Unit` result, so
+            // `build { get() }` constrains the builder variable although the value is discarded.
+            if tail.ty_param_name().is_some() && self.postponed_call_mentions(tail) {
+                self.expect_assignable(Ty::Unit, tail, self.span(result), "return");
+            }
+            return match tail {
                 Ty::Nothing => Ty::Nothing,
                 Ty::Error => Ty::Error,
                 _ => Ty::Unit,

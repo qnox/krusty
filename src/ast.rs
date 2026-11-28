@@ -1815,6 +1815,10 @@ pub struct File {
     /// a LOCAL return (from the anonymous function itself), so the lowerer must compile its body's
     /// `return` as the closure method's own return rather than a non-local return of the enclosing fn.
     pub anon_fun_lambdas: crate::fx_hash::HashSet<u32>,
+    /// The subset of [`Self::anon_fun_lambdas`] written with an expression body (`fun (): T = e`).
+    /// Its value is the function's result, so it must conform to the declared return type; a block
+    /// body states its results with `return`.
+    pub anon_fun_expression_bodies: crate::fx_hash::HashSet<u32>,
     /// Number of leading named context parameters on an anonymous function expression
     /// (`context(x: C) fun () = …`). They are physical leading parameters and ordinary named values
     /// in the body, while this count preserves the function type's context-receiver shape.
@@ -2133,6 +2137,7 @@ impl File {
         self.lambda_parameter_roles = Default::default();
         self.lambda_explicit_arrows = Default::default();
         self.anon_fun_lambdas = Default::default();
+        self.anon_fun_expression_bodies = Default::default();
         self.anon_fun_context_count = Default::default();
         self.callable_reference_provenance = Default::default();
         self.generated_class_sequence_starts = Default::default();

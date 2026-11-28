@@ -81,6 +81,15 @@ impl ProductionSignatureSemantics<'_> {
         expected: crate::fir::ResolvedTy,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         if expected.get() == Ty::Unit {
+            // kotlinc relates a discarded tail that is a postponed variable to the `Unit` result.
+            if let Some(anchor) = self.headers.declarations.anchor(declaration) {
+                let scope = crate::fir::SignatureScope {
+                    owner: declaration,
+                    source: anchor.source,
+                };
+                let tail = actual.get().ty_param_name().map(|_| Ty::Unit);
+                self.commit_postponed_assignability(scope, tail, actual.get());
+            }
             return Ok(expected);
         }
         if expected.get().mentions_ty_param() {
