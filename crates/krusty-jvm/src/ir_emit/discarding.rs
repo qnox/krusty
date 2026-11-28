@@ -41,6 +41,9 @@ impl Emitter<'_> {
         if self.emit_discarded_safe_call(expression, node, code) {
             return;
         }
+        if self.emit_discarded_polymorphic_call(expression, node, code) {
+            return;
+        }
         // An in-place delegate evaluated where its field was initialized keeps its property's
         // line even when the evaluation leaves no instruction (`Unit`): the line owns a `nop`,
         // which the redundant-nop pass removes once another instruction follows on that line.
@@ -262,6 +265,71 @@ impl Emitter<'_> {
             },
             code,
         );
+    }
+}
+
+impl Emitter<'_> {
+    /// Whether the value of `expression` is, however nested in blocks, branches, and `try`s, that
+    /// of a signature-polymorphic call with an `Object` result.
+    pub(super) fn ends_in_polymorphic_call(&self, expression: u32) -> bool {
+        match self.ir.expr(expression) {
+            IrExpr::Call { .. } => self
+                .default_call_operands
+                .has_polymorphic_object_result(expression),
+            IrExpr::TypeOp {
+                op: krusty::ir::IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => self.ends_in_polymorphic_call(*arg),
+            IrExpr::Block { stmts, value } => value
+                .or_else(|| stmts.last().copied())
+                .is_some_and(|tail| self.ends_in_polymorphic_call(tail)),
+            IrExpr::When { branches } => branches
+                .iter()
+                .any(|(_, body)| self.ends_in_polymorphic_call(*body)),
+            IrExpr::Try { body, catches, .. } => {
+                self.ends_in_polymorphic_call(*body)
+                    || catches
+                        .iter()
+                        .any(|catch| self.ends_in_polymorphic_call(catch.body))
+            }
+            _ => false,
+        }
+    }
+
+    /// Emit a discarded signature-polymorphic call, or the cast-free coercion of its `Object`
+    /// result, invoked as returning `void`: nothing is left to pop. `false`, having emitted
+    /// nothing, for anything else.
+    fn emit_discarded_polymorphic_call(
+        &mut self,
+        expression: u32,
+        node: &IrExpr,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        let mut call = node;
+        let mut call_id = Some(expression);
+        while let IrExpr::TypeOp {
+            op: krusty::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            ..
+        } = call
+        {
+            call_id = Some(*arg);
+            call = self.ir.expr(*arg);
+        }
+        let Some(call_id) = call_id.filter(|_| matches!(call, IrExpr::Call { .. })) else {
+            return false;
+        };
+        if !self
+            .default_call_operands
+            .has_polymorphic_object_result(call_id)
+        {
+            return false;
+        }
+        self.discarded_polymorphic_calls.insert(call_id);
+        self.emit_value(call_id, code);
+        self.discarded_polymorphic_calls.remove(&call_id);
+        true
     }
 }
 

@@ -301,6 +301,7 @@ impl JvmLibraries {
                         );
                         let callable = LibraryCallable {
                             annotations: m.annotations.clone(),
+                            signature_polymorphic: m.is_signature_polymorphic(),
                             deprecation: m.deprecation.clone(),
                             reflection_name: Some(m.name.clone()),
                             physical_name: m.physical_name.clone(),

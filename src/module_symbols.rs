@@ -1026,6 +1026,7 @@ fn fn_info(
     let callable = LibraryCallable {
         deprecation: None,
         annotations: sig.annotations.clone(),
+        signature_polymorphic: false,
         external_identity: None,
         external_default_provider: None,
         external_property_identity: None,
@@ -1165,6 +1166,7 @@ fn source_callable(
         deprecation: None,
         external_identity: None,
         annotations: Vec::new(),
+        signature_polymorphic: false,
         external_default_provider: None,
         external_property_identity: None,
         declaration_owner: None,

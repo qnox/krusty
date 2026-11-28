@@ -67,6 +67,11 @@ impl Emitter<'_> {
 
     /// `descriptor` of call `e`, naming the wrapper result its callee is declared with.
     pub(super) fn physical_call_descriptor(&self, e: ExprId, descriptor: &str) -> String {
+        if self.discarded_polymorphic_calls.contains(&e) {
+            let parameters = parse_descriptor_params(descriptor)
+                .unwrap_or_else(|| panic!("a call descriptor is valid: {descriptor}"));
+            return method_descriptor(&parameters, Ty::Unit);
+        }
         let Some(primitive) = self.boxed_call_result(e) else {
             return descriptor.to_string();
         };

@@ -89,6 +89,7 @@ mod runtime_capabilities;
 mod sam_projected_adapters;
 mod sam_wrappers;
 mod shared_captures;
+mod signature_polymorphic_calls;
 mod singleton_storage;
 pub mod suspend;
 pub(crate) mod suspend_impls;

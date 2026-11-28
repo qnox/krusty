@@ -98,6 +98,9 @@ pub(crate) struct DefaultCallOperands {
     continuation_positions: HashMap<ExprId, usize>,
     /// The calls JVM realization made with one of kotlinc's intrinsic methods.
     intrinsic_calls: HashSet<ExprId>,
+    /// The signature-polymorphic calls whose descriptor returns `Object`: one whose value is
+    /// discarded is invoked as returning `void`, as kotlinc does.
+    polymorphic_object_results: HashSet<ExprId>,
 }
 
 impl DefaultCallOperands {
@@ -158,6 +161,16 @@ impl DefaultCallOperands {
     /// Whether JVM realization implemented `call` with one of kotlinc's intrinsic methods.
     pub(crate) fn is_intrinsic_call(&self, call: ExprId) -> bool {
         self.intrinsic_calls.contains(&call)
+    }
+
+    /// Record that `call` is signature-polymorphic with an `Object` result.
+    pub(super) fn record_polymorphic_object_result(&mut self, call: ExprId) {
+        self.polymorphic_object_results.insert(call);
+    }
+
+    /// Whether `call` is signature-polymorphic with an `Object` result.
+    pub(crate) fn has_polymorphic_object_result(&self, call: ExprId) -> bool {
+        self.polymorphic_object_results.contains(&call)
     }
 
     pub(super) fn contains(&self, call: ExprId) -> bool {
@@ -274,6 +287,9 @@ impl DefaultCallOperands {
         let declaration = self.declarations.get(&source).cloned();
         if self.intrinsic_calls.contains(&source) {
             self.intrinsic_calls.insert(target);
+        }
+        if self.polymorphic_object_results.contains(&source) {
+            self.polymorphic_object_results.insert(target);
         }
         if source_plan.is_none() && continuation_position.is_none() {
             return true;
