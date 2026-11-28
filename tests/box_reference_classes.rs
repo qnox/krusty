@@ -31,7 +31,7 @@ use super::common::{self, byte_dump};
 
 #[path = "box_reference_classes/reference_verdict.rs"]
 mod reference_verdict;
-pub use reference_verdict::ReferenceFailure;
+pub use reference_verdict::{refusals, ReferenceFailure};
 
 /// The stable module identity for every single-module topology (ordinary, `// FILE:` multi-file,
 /// and mixed Java). It matches the module name krusty emits those cases under.
@@ -939,8 +939,19 @@ fn compile_unit(
         let sources = join(&mut java_paths.iter());
         let output_dir = output.to_path_buf();
         let classpath = join(&mut unit.classpath.iter().chain(std::iter::once(&output_dir)));
-        let outcome =
-            common::javac_run_proc(&sources, &classpath, &output.to_string_lossy(), "", "");
+        let outcome = common::javac_run_on(
+            &super::box_jvm_compile::javac_target(
+                jdk.classpath_root(),
+                unit.arguments
+                    .iter()
+                    .any(|argument| argument == "-Xjvm-enable-preview"),
+            ),
+            &sources,
+            &classpath,
+            &output.to_string_lossy(),
+            "",
+            "",
+        );
         reference_verdict::javac_outcome(unit.module, outcome)?;
     }
 

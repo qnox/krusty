@@ -2,6 +2,19 @@
 
 use super::{InnerClassResolver, JvmDefaultMode, LambdaModes};
 
+/// kotlinc's `-Xstring-concat`. The default is `indy-with-constants` from JVM 9 on, where the
+/// `StringConcatFactory` bootstrap exists, and `inline` below it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StringConcatMode {
+    /// Build with `StringBuilder`, whatever the JVM target.
+    Inline,
+    /// `invokedynamic makeConcatWithConstants`, literal text in the recipe.
+    #[default]
+    IndyWithConstants,
+    /// `invokedynamic makeConcat`: every part, literals included, is a call argument.
+    Indy,
+}
+
 /// Per-file emission configuration passed explicitly down the emit callgraph and stamped onto every
 /// `ClassWriter` so synthetic serializer/companion/DefaultImpls classes inherit it too. The
 /// `Default` is v52 with no `SourceFile`; shipping paths build their options through
@@ -30,8 +43,8 @@ pub struct EmitOptions {
         std::rc::Rc<krusty::jvm::bytecode_passes::redundant_boxing::ValueClassDescriptors>,
     /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
     pub java_parameters: bool,
-    /// `-Xstring-concat=inline`: always use `StringBuilder`, regardless of class-file version.
-    pub inline_string_concat: bool,
+    /// `-Xstring-concat`: how a multi-part string is built.
+    pub string_concat: StringConcatMode,
     /// `-Xuse-inline-scopes-numbers`: name inlined locals by their inline scope's number.
     pub inline_scopes_numbers: bool,
     /// `-language-version X.Y`: the `@kotlin.Metadata` and `.kotlin_module` version stamp.
@@ -97,8 +110,8 @@ impl EmitOptions {
         self
     }
 
-    pub fn with_inline_string_concat(mut self, inline: bool) -> Self {
-        self.inline_string_concat = inline;
+    pub fn with_string_concat(mut self, mode: StringConcatMode) -> Self {
+        self.string_concat = mode;
         self
     }
 
@@ -133,7 +146,7 @@ impl Default for EmitOptions {
             jvm_default: JvmDefaultMode::Enable,
             param_assertions: true,
             java_parameters: false,
-            inline_string_concat: false,
+            string_concat: StringConcatMode::default(),
             inline_scopes_numbers: false,
             lambda_modes: LambdaModes::default(),
             inner_class_resolver: None,

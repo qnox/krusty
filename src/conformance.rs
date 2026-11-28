@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 mod box_jdk;
+mod box_modern_jdk;
 mod codegen_modes;
 mod compiler_arguments;
 mod coroutine_support;
@@ -17,6 +18,10 @@ mod wasm_options;
 pub use wasm_options::WasmCompilerOptions;
 
 pub use box_jdk::{box_jdk_kind, BoxJdk, BoxJdkKind, BoxJdkRoots};
+pub use box_modern_jdk::{
+    is_modern_jdk_case, modern_jdk, needs_preview, with_default_directives, ModernJdk,
+    DIRECTORY as MODERN_JDK_DIRECTORY,
+};
 pub use codegen_modes::{unsupported_codegen_mode_directive, UnitCodegenModes};
 pub use compiler_arguments::{
     case_kotlinc_arguments, platform_compiler_configuration, reference_only_kotlinc_arguments,

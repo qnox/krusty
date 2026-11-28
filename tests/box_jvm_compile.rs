@@ -27,6 +27,9 @@ pub(super) enum CompileFailure {
     /// krusty reported errors: their messages, in the order it reported them, and the complete
     /// rendered report of every diagnostic.
     Rejected { errors: Vec<String>, report: String },
+    /// krusty refused the command line the case selects before reading a source: its messages, in
+    /// the order it reported them, as kotlinc's `error: <message>` lines.
+    CommandLineRefused(Vec<String>),
     /// The harness could not set up or finish the compilation: a command line krusty refuses, a
     /// `// MODULE:` shape it cannot split, javac refusing the case's Java, or a scratch write.
     Harness(String),
@@ -209,7 +212,21 @@ pub(super) fn unit_options<'a>(
     case: &str,
     unit: impl IntoIterator<Item = &'a str>,
 ) -> Result<krusty_cli::cli::Options, String> {
-    let configuration = krusty::conformance::unit_compiler_configuration(case, unit)?;
+    command_line(case, unit).map_err(|failure| match failure {
+        CompileFailure::CommandLineRefused(refusals) => refusals.join("\n"),
+        CompileFailure::Harness(reason) => reason,
+        CompileFailure::Rejected { report, .. } => report,
+    })
+}
+
+/// [`unit_options`], telling a command line krusty refuses
+/// ([`CompileFailure::CommandLineRefused`]) from a case the harness cannot configure.
+fn command_line<'a>(
+    case: &str,
+    unit: impl IntoIterator<Item = &'a str>,
+) -> Compiled<krusty_cli::cli::Options> {
+    let configuration =
+        krusty::conformance::unit_compiler_configuration(case, unit).map_err(harness)?;
     let mut options = krusty_cli::cli::parse(configuration.arguments.clone());
     let refusals: Vec<&str> = options
         .argument_errors
@@ -218,7 +235,14 @@ pub(super) fn unit_options<'a>(
         .map(String::as_str)
         .collect();
     if !refusals.is_empty() {
-        return Err(refusals.join("\n"));
+        return Err(CompileFailure::CommandLineRefused(
+            refusals.into_iter().map(str::to_string).collect(),
+        ));
+    }
+    if !options.configuration_errors.is_empty() {
+        return Err(CompileFailure::CommandLineRefused(
+            options.configuration_errors.clone(),
+        ));
     }
     options.inline_scopes_numbers = configuration.inline_scopes_numbers;
     if configuration.language_version.is_some() || configuration.api_version.is_some() {
@@ -233,7 +257,9 @@ pub(super) fn unit_options<'a>(
         });
         // The command line already read the feature settings; only the levels change.
         let feature_settings = options.language_settings.feature_settings();
-        options.override_language_versions(language_version, api_version, &feature_settings)?;
+        options
+            .override_language_versions(language_version, api_version, &feature_settings)
+            .map_err(|refusal| CompileFailure::CommandLineRefused(vec![refusal]))?;
     }
     Ok(options)
 }
@@ -262,6 +288,18 @@ fn jvm_libraries(
         .with_api_version(options.language_settings.api_version)
 }
 
+/// The JDK installation whose bootclasspath root is `modules` (`<home>/lib/modules`), which kotlinc
+/// is told as `-jdk-home` and which `-Xjdk-release` reads `lib/ct.sym` from. A root of another
+/// shape (the mock JDK's `rt.jar`) names no installation.
+pub(super) fn jdk_home_of(modules: &Path) -> Option<&Path> {
+    Some(modules)
+        .filter(|modules| modules.file_name().is_some_and(|name| name == "modules"))
+        .and_then(Path::parent)
+        .filter(|lib| lib.file_name().is_some_and(|name| name == "lib"))
+        .and_then(Path::parent)
+        .filter(|home| home.join("release").is_file())
+}
+
 fn compile_source(
     src: &str,
     stem: &str,
@@ -270,7 +308,11 @@ fn compile_source(
     progress: &dyn Fn(&str),
 ) -> Compiled<Vec<(String, Vec<u8>)>> {
     let mut diags = DiagSink::new();
-    let options = unit_options(src, [src]).map_err(harness)?;
+    let mut options = command_line(src, [src])?;
+    options.jdk_home = jdk_modules.and_then(jdk_home_of).map(Path::to_path_buf);
+    options.check_jdk_release().map_err(|errors| {
+        CompileFailure::CommandLineRefused(errors.iter().map(ToString::to_string).collect())
+    })?;
     // The stdlib is on krusty's classpath only for `// WITH_STDLIB` tests — the caller passes the
     // located jar (or `None`), exactly as a drop-in `kotlinc` user supplies `-classpath`.
     // Explicit classpath: the kotlin-stdlib jar (for `// WITH_STDLIB`) plus the JDK `lib/modules`
@@ -366,7 +408,12 @@ pub(super) fn compile_multifile(
     // real javac.
     let mut java_classes: Vec<(String, Vec<u8>)> = Vec::new();
     if !java_blocks.is_empty() {
-        match common::javac_compile(&java_blocks, cp_jars) {
+        match common::javac_compile_on(
+            &javac_target(jdk_modules, krusty::conformance::needs_preview(src)),
+            &java_blocks,
+            cp_jars,
+            &[],
+        ) {
             Some((javadir, classes)) => {
                 // The classes were read into memory (BoxRunner loads from bytes, and krusty sees
                 // them as an overlay on the shared jar classpath), so the scratch tree can go now.
@@ -430,8 +477,13 @@ fn compile_kotlin_first(
         write_classes_to_dir(&kotlin_classes, &kotlindir)?;
         let mut javac_cp = cp_jars.to_vec();
         javac_cp.push(kotlindir);
-        let (javadir, java_classes) = common::javac_compile(java_blocks, &javac_cp)
-            .ok_or_else(|| harness("javac rejected the Java sources against krusty's classes"))?;
+        let (javadir, java_classes) = common::javac_compile_on(
+            &javac_target(jdk_modules, krusty::conformance::needs_preview(src)),
+            java_blocks,
+            &javac_cp,
+            &[],
+        )
+        .ok_or_else(|| harness("javac rejected the Java sources against krusty's classes"))?;
         if let Some(jroot) = javadir.parent() {
             let _ = fs::remove_dir_all(jroot);
         }
@@ -515,7 +567,11 @@ fn compile_blocks_mixed(
         .chain(java_blocks)
         .chain(compiled_java)
         .map(|(_, source)| source.as_str());
-    let mut options = unit_options(case, unit).map_err(harness)?;
+    let mut options = command_line(case, unit)?;
+    options.jdk_home = jdk_modules.and_then(jdk_home_of).map(Path::to_path_buf);
+    options.check_jdk_release().map_err(|errors| {
+        CompileFailure::CommandLineRefused(errors.iter().map(ToString::to_string).collect())
+    })?;
     // A folded `dependsOn` chain is a multiplatform compilation even when the fixture does not
     // repeat the feature as a `// LANGUAGE:` directive. The common/platform source roles already
     // carry that topology into the frontend; enable the matching project feature on the exact
@@ -733,7 +789,12 @@ fn compile_module_units(
                 &[],
             )?
         } else {
-            match common::javac_compile(java_files, &cp) {
+            match common::javac_compile_on(
+                &javac_target(jdk_modules, krusty::conformance::needs_preview(src)),
+                java_files,
+                &cp,
+                &[],
+            ) {
                 Some((javadir, java_classes)) => {
                     if let Some(root) = javadir.parent() {
                         let _ = fs::remove_dir_all(root);
@@ -787,6 +848,37 @@ fn compile_module_units(
         flat: all,
         module_ranges,
     })
+}
+
+/// The JDK a case's Java sources compile on. A case that runs on an installed JDK names it through
+/// that JDK's `lib/modules`; its `release` file gives the feature release javac is told next to
+/// `--enable-preview`. Every other case compiles on the harness JDK.
+pub(super) fn javac_target(jdk_modules: Option<&Path>, preview: bool) -> common::JavacTarget {
+    let home = jdk_modules
+        .filter(|modules| modules.file_name().is_some_and(|name| name == "modules"))
+        .and_then(Path::parent)
+        .filter(|lib| lib.file_name().is_some_and(|name| name == "lib"))
+        .and_then(Path::parent)
+        .filter(|home| home.join("release").is_file());
+    let Some(home) = home else {
+        return common::JavacTarget {
+            preview,
+            ..common::JavacTarget::default()
+        };
+    };
+    let release = fs::read_to_string(home.join("release"))
+        .ok()
+        .and_then(|text| {
+            let version = text
+                .lines()
+                .find_map(|line| line.strip_prefix("JAVA_VERSION=\""))?;
+            version.split(['.', '"', '-']).next()?.parse::<u32>().ok()
+        });
+    common::JavacTarget {
+        home: Some(home.to_path_buf()),
+        release,
+        preview,
+    }
 }
 
 /// Compile one box case with krusty through the topology its markers select: `// MODULE:` builds,
