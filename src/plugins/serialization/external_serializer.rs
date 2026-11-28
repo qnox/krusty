@@ -34,6 +34,9 @@ pub enum ExternalSerializer {
         companion: TypeName,
         type_parameters: usize,
     },
+    /// An interface with no serializer of its own: kotlinx.serialization serializes it
+    /// polymorphically, as `PolymorphicSerializer(<interface>::class)`.
+    Polymorphic,
 }
 
 /// The serializer kotlinc's plugin generated for `classifier`, a `@Serializable` declaration with no

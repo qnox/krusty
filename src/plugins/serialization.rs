@@ -954,30 +954,6 @@ fn contextual_kclass(ir: &mut IrFile, classifier: TypeName) -> ExprId {
     })
 }
 
-/// `new PolymorphicSerializer(<base>::class)` — the element serializer for a star-projection / erased
-/// `Any` type argument (`Box<*>` with `Box<T : E>` → `PolymorphicSerializer(E::class)`); its descriptor
-/// `serialName` is `kotlinx.serialization.Polymorphic<E>`.
-fn build_polymorphic_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId {
-    let classlit = ir.add_expr(IrExpr::ClassConst {
-        internal: Some(classifier),
-    });
-    let kclass = ir.add_expr(IrExpr::Call {
-        callee: Box::new(Callee::Static {
-            owner: type_name("kotlin/jvm/internal/Reflection"),
-            name: "getOrCreateKotlinClass".to_string(),
-            descriptor: "(Ljava/lang/Class;)Lkotlin/reflect/KClass;".to_string(),
-            inline: InlineKind::None,
-        }),
-        dispatch_receiver: None,
-        args: vec![classlit],
-    });
-    ir.new_external(
-        "kotlinx/serialization/PolymorphicSerializer",
-        "(Lkotlin/reflect/KClass;)V",
-        vec![kclass],
-    )
-}
-
 /// The frontend-selected construction of `class_fq`'s `@Serializable(with = custom)` serializer
 /// class, or `None` when no source construction was selected (an object serializer, or a class
 /// serializer from the dependency/runtime class path).
