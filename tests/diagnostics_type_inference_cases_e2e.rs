@@ -50,6 +50,9 @@ fn type_and_inference_errors_match_kotlinc_exactly() {
         "class C<T>(val consume: (T) -> Unit)\nfun bad() { val consumeString: (String) -> Unit = { }; val c = C(consumeString); c.consume(1) }",
         "class C<T>(val consume: ((T) -> Unit)?)\nfun bad() { val consumeString: (String) -> Unit = { }; val c = C(consumeString); c.consume!!(1) }",
         "fun <T> inferred(x: T) = x\nfun g(): Int = inferred(1, 2)",
+        // A nested call's input solution `Any` is evidence: `listOf(x as Any)` is `List<Any>`, not
+        // a `List<String>` the parameter could complete it to.
+        "fun f(xs: List<String>) {}\nfun g(x: Any) { f(listOf(x as Any)) }",
     ];
     assert_error_parity(&cases);
 }
