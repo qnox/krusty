@@ -101,15 +101,7 @@ impl Body<'_> {
         let suspend_conversion = function.suspend && !reference.declaration_suspend;
         let mut flags = u8::from(suspend_conversion) << 1;
         if let Some(adaptation) = reference.adaptation.as_deref() {
-            let vararg_conversion = adaptation.arguments.iter().any(|argument| {
-                matches!(
-                    argument,
-                    krusty::fir::FirAdaptedReferenceArgument::Vararg {
-                        whole_array: false,
-                        ..
-                    }
-                )
-            });
+            let vararg_conversion = adaptation.vararg_conversion();
             let unit_conversion = adaptation.result_type.get() == Ty::Unit
                 && reference.declaration_result != Ty::Unit;
             flags |= u8::from(vararg_conversion)

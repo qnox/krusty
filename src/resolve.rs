@@ -1445,9 +1445,9 @@ pub struct TypeInfo {
     /// carries this boundary explicitly so lowering never repeats constant-expression inference.
     pub(crate) selected_numeric_conversions: HashMap<ExprId, Ty>,
     /// Exact regular callable constituent selected for a function-value conversion (suspend and/or
-    /// `Unit` result), with its target. The nominal expression may implement several callable
-    /// supertypes, so checked FIR must consume this pair instead of selecting a constituent again.
-    pub(crate) selected_function_value_conversions: HashMap<ExprId, (Ty, Ty)>,
+    /// `Unit` result), with its target and whether a `null` value stays `null`. The nominal value
+    /// may implement several callable supertypes, so checked FIR consumes this selection.
+    pub(crate) selected_function_value_conversions: HashMap<ExprId, (Ty, Ty, bool)>,
     /// Generated-class names settled against the selected function-value conversions.
     pub(crate) generated_class_names: crate::frontend::SettledGeneratedClassNames,
     /// A bare-member read (`Expr::Name`) or unqualified call that resolved against a FLOW-NARROWED
@@ -21226,7 +21226,7 @@ fun use() {
             } if member.name == "exists"
                 && matches!(
                     argument_mapping.as_slice(),
-                    [AdaptedRefArgument::Value(0), AdaptedRefArgument::Vararg { values, whole_array: false }]
+                    [AdaptedRefArgument::Value(0), AdaptedRefArgument::Vararg { values, whole_array: false, .. }]
                         if values.is_empty()
                 )
         )));
@@ -24677,7 +24677,8 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     c.narrow_script_template_receivers();
     c.publish_member_declaring_receivers();
     c.report_operator_of_overloads();
-    let enhanced_values = c.enhanced_value_heads();
+    let (enhanced_values, contract_descriptions) =
+        (c.enhanced_value_heads(), c.contract_description_calls());
     let builtin_implementations = match builtin_implementation::for_checked_unit(&c) {
         Ok(implementations) => implementations,
         Err(error) => {
@@ -25003,13 +25004,12 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_sam_conversions.keys().collect::<Vec<_>>(),
         resolved_constructors.keys().collect::<Vec<_>>(),
     );
-    let generated_class_names = crate::frontend::settle_generated_class_names(
-        file,
-        &selected_function_value_conversions
-            .keys()
-            .copied()
-            .collect(),
-    );
+    let converted = HashSet::from_iter(selected_function_value_conversions.keys().copied());
+    let naming = crate::frontend::ResolvedNamingFacts {
+        converted,
+        contract_descriptions,
+    };
+    let generated_class_names = crate::frontend::settle_generated_class_names(file, naming);
     TypeInfo {
         expr_types,
         callable_reference_types,
@@ -25818,7 +25818,7 @@ struct Checker<'a> {
     /// A qualified call's inapplicable nested-constructor rung, kept while its later rungs select.
     deferred_constructor_failures:
         HashMap<ExprId, constructor_rung_failure::DeferredConstructorFailure>,
-    selected_function_value_conversions: HashMap<ExprId, (Ty, Ty)>,
+    selected_function_value_conversions: HashMap<ExprId, (Ty, Ty, bool)>,
     narrowed_this_member: HashMap<ExprId, TypeName>,
     /// Bare member reads and calls whose implicit receiver is a script's own instance. Once their
     /// targets are settled, those not declared by the script are template members (see
@@ -27986,10 +27986,9 @@ impl<'a> Checker<'a> {
                 }
                 let direct_prefix = plan.iter().enumerate().all(|(target, argument)| match argument {
                     AdaptedRefArgument::Value(value) => *value == target,
-                    AdaptedRefArgument::Vararg {
-                        values,
-                        whole_array: true,
-                    } => values.as_slice() == [target],
+                    AdaptedRefArgument::Vararg { values, whole_array: true, .. } => {
+                        values.as_slice() == [target]
+                    }
                     AdaptedRefArgument::Context
                     | AdaptedRefArgument::Default
                     | AdaptedRefArgument::Vararg {
@@ -28000,7 +27999,7 @@ impl<'a> Checker<'a> {
                 let vararg_collect = vararg.and_then(|index| {
                     (index + 1 == declared
                         && plan.get(index).is_some_and(|argument| {
-                            matches!(argument, AdaptedRefArgument::Vararg { values, whole_array: false }
+                            matches!(argument, AdaptedRefArgument::Vararg { values, whole_array: false, .. }
                                 if !values.is_empty())
                         })
                         && plan[..index].iter().enumerate().all(|(target, argument)| {
@@ -28014,10 +28013,9 @@ impl<'a> Checker<'a> {
                     } else {
                         match argument {
                             AdaptedRefArgument::Default => true,
-                            AdaptedRefArgument::Vararg {
-                                values,
-                                whole_array: false,
-                            } => values.is_empty(),
+                            AdaptedRefArgument::Vararg { values, whole_array: false, .. } => {
+                                values.is_empty()
+                            }
                             _ => false,
                         }
                     }

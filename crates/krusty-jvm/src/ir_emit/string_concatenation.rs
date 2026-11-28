@@ -6,6 +6,10 @@
 use super::*;
 use krusty::types::TyKind;
 
+/// How many parts kotlinc appends to a `StringBuilder` in one chain. A concatenation of at least
+/// this many parts keeps its builder in a local and appends in chains of this many.
+const APPEND_CHUNK: usize = 23;
+
 impl Emitter<'_> {
     pub(super) fn emit_string_concat(
         &mut self,
@@ -75,8 +79,27 @@ impl Emitter<'_> {
             code.new_obj(builder);
             code.dup();
             code.invokespecial(constructor, 0, 0);
-            for &part in parts {
-                self.append_part(concat, part, code);
+            if parts.len() < APPEND_CHUNK {
+                for &part in parts {
+                    self.append_part(concat, part, code);
+                }
+            } else {
+                // kotlinc keeps a long concatenation's builder in a local and appends to it in
+                // chunks, each one a statement whose result it drops, rather than in one chain.
+                let builder_ty = Ty::obj("java/lang/StringBuilder");
+                let temp = self.frame.enter_temp(TempRole::StringBuilder, builder_ty);
+                let slot = temp.slot();
+                store(builder_ty, slot, code);
+                let lease = self.lease_frame_temporary(temp, builder_ty);
+                for chunk in parts.chunks(APPEND_CHUNK) {
+                    load(builder_ty, slot, code);
+                    for &part in chunk {
+                        self.append_part(concat, part, code);
+                    }
+                    code.pop();
+                }
+                load(builder_ty, slot, code);
+                self.release_temporary(lease);
             }
         }
         let to_string = self.cw.methodref(

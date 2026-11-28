@@ -1224,7 +1224,8 @@ jobs:
           KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: "1"
         run: just conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
       # kotlinc's diagnostics test data, scored by false accepts against
-      # tests/diagnostics_false_accepts. Its kotlinc results are box reference compiles, restored
+      # tests/diagnostics_false_accepts and by reported diagnostics against
+      # tests/diagnostics_ledger_mismatches. Its kotlinc results are box reference compiles, restored
       # with the box references and saved with them after the JVM steps that fill that cache.
       # This job runs only on merge-queue branches and dispatched master runs, like the other lanes.
       # It runs after non-box conformance, and also when that step failed, so neither lane's

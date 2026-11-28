@@ -147,7 +147,10 @@ fn splits(ir: &IrFile, class: &IrClass, fid: u32) -> bool {
             && (class.is_open || class.is_abstract || class.is_sealed)
             && !class.is_value
     };
+    // kotlinc gives a delegation forwarder no `$suspendImpl`: it is generated, and its body is the
+    // delegate's call, not a source declaration.
     !function.is_static
+        && !ir.interface_delegation_forwarders.contains(&fid)
         && function.body.is_some()
         && ir.suspend_funs.contains(&fid)
         && !ir.method_visibility(fid).is_private()

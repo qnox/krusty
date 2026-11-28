@@ -10,11 +10,7 @@ struct IntsAndReferences;
 
 impl Representation for IntsAndReferences {
     fn same(&self, a: Ty, b: Ty) -> bool {
-        self.is_reference(a) == self.is_reference(b)
-    }
-
-    fn is_reference(&self, ty: Ty) -> bool {
-        ty != Ty::Int
+        (a != Ty::Int) == (b != Ty::Int)
     }
 
     fn owns_base(&self, _: TypeName) -> bool {
@@ -33,7 +29,7 @@ fn tables(ir: &IrFile) -> Result<NumberedClassTables, Unsupported> {
 }
 
 #[test]
-fn a_root_table_is_kotlin_any_by_role_then_the_reserved_function_slot() {
+fn a_root_table_is_kotlin_any_by_role() {
     let mut ir = IrFile::default();
     let point = class(&mut ir, "Point", "kotlin/Any", 0);
     let tables = tables(&ir).expect("tables");
@@ -43,7 +39,6 @@ fn a_root_table_is_kotlin_any_by_role_then_the_reserved_function_slot() {
             Slot::AnyMember(AnyMember::Equals),
             Slot::AnyMember(AnyMember::HashCode),
             Slot::AnyMember(AnyMember::ToString),
-            Slot::Abstract,
         ]
     );
     assert_eq!(tables.table(point).superclass, None);
@@ -96,18 +91,17 @@ fn an_override_carried_differently_takes_its_own_slot_and_bridges_the_base_slot(
             Slot::AnyMember(AnyMember::Equals),
             Slot::AnyMember(AnyMember::HashCode),
             Slot::AnyMember(AnyMember::ToString),
-            Slot::Abstract,
             Slot::Bridge {
                 declared,
-                target_slot: Some(6),
+                target_slot: Some(5),
                 target: narrowed,
             },
             Slot::Function(kept),
             Slot::Function(narrowed),
         ]
     );
-    assert_eq!(tables.slot(b, &SlotKey::Function(narrowed)), Some(6));
-    assert_eq!(tables.slot(b, &SlotKey::Function(kept)), Some(5));
+    assert_eq!(tables.slot(b, &SlotKey::Function(narrowed)), Some(5));
+    assert_eq!(tables.slot(b, &SlotKey::Function(kept)), Some(4));
 }
 
 #[test]
@@ -116,9 +110,6 @@ fn a_superclass_no_file_declares_is_declined_unless_the_target_owns_it() {
     impl Representation for OwnsEverything {
         fn same(&self, a: Ty, b: Ty) -> bool {
             a == b
-        }
-        fn is_reference(&self, _: Ty) -> bool {
-            true
         }
         fn owns_base(&self, _: TypeName) -> bool {
             true
@@ -311,7 +302,7 @@ fn a_value_classs_member_implementing_a_dependency_interface_keeps_its_slot() {
     record_external_interface_override(&mut value, boxed, implemented);
     let tables = tables(&value).expect("tables");
     let vtable = &tables.table(boxed).vtable;
-    assert_eq!(vtable.len(), 5);
-    assert_eq!(vtable[4], Slot::Function(implemented));
+    assert_eq!(vtable.len(), 4);
+    assert_eq!(vtable[3], Slot::Function(implemented));
     assert!(!vtable.contains(&Slot::Function(own)));
 }

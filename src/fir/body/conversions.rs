@@ -30,10 +30,12 @@ pub enum FirConversionKind {
     },
     /// A regular function value converted to a suspend and/or `Unit`-returning function type, both
     /// shapes selected by the frontend; `ordinal` is its source-order place in its innermost callable.
+    /// With `keeps_null`, a `null` value stays `null` and only a present one is converted.
     FunctionValue {
         from: ResolvedTy,
         to: ResolvedTy,
         ordinal: u32,
+        keeps_null: bool,
     },
     CoerceToUnit,
 }

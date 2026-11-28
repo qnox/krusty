@@ -532,6 +532,90 @@ pub fn analyze_module(
     Ok((analysis, stems, native_imports))
 }
 
+#[derive(Clone)]
+struct GeneratedDependency {
+    archive: PathBuf,
+    transitive: Vec<PathBuf>,
+}
+
+struct GeneratedRoot(PathBuf);
+
+impl Drop for GeneratedRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn diagnostic_outcome(diags: &DiagSink, decline_prefix: &str) -> Option<Outcome> {
+    if let Some(decline) = diags
+        .diags
+        .iter()
+        .find_map(|diagnostic| diagnostic.msg.strip_prefix(decline_prefix))
+    {
+        return Some(Outcome::Declined(
+            decline.trim_end_matches(" yet").to_string(),
+        ));
+    }
+    first_error(diags, 0).map(|first| Outcome::Frontend(first.msg.clone()))
+}
+
+fn write_dependency_archive(
+    root: &Path,
+    ordinal: usize,
+    artifacts: &[Artifact],
+) -> Result<PathBuf, Outcome> {
+    let archive = root.join(format!("module-{ordinal}"));
+    for (name, bytes) in artifacts {
+        let relative = Path::new(name);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(Outcome::Harness(format!(
+                "generated KLIB contains an unsafe artifact path {name:?}"
+            )));
+        }
+        let output = archive.join(relative);
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                Outcome::Failed(format!("creating generated KLIB directory: {error}"))
+            })?;
+        }
+        std::fs::write(&output, bytes).map_err(|error| {
+            Outcome::Failed(format!("writing generated KLIB artifact {name}: {error}"))
+        })?;
+    }
+    Ok(archive)
+}
+
+/// The KLIBs one module is analyzed against, its dependencies first and then their transitive
+/// closure in link order, and the subset of those archives that are friends.
+fn dependency_closure(
+    unit: &krusty::conformance::ModuleUnit,
+    generated: &BTreeMap<String, GeneratedDependency>,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), Outcome> {
+    let mut dependency_klibs = Vec::new();
+    let mut friend_klibs = Vec::new();
+    let mut seen = BTreeSet::new();
+    for dependency in &unit.deps {
+        let Some(archive) = generated.get(dependency) else {
+            return Err(Outcome::Harness(format!(
+                "module dependency {dependency} was not built"
+            )));
+        };
+        for path in std::iter::once(&archive.archive).chain(&archive.transitive) {
+            if seen.insert(path.clone()) {
+                dependency_klibs.push(path.clone());
+            }
+        }
+        if unit.friends.contains(dependency) {
+            friend_klibs.push(archive.archive.clone());
+        }
+    }
+    Ok((dependency_klibs, friend_klibs))
+}
+
 /// One multi-module corpus case: where its generated KLIBs live, the case name, and its source
 /// modules in dependency order.
 pub struct ModuleCase<'a> {
@@ -557,63 +641,6 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
         stem,
         modules,
     } = case;
-    #[derive(Clone)]
-    struct GeneratedDependency {
-        archive: PathBuf,
-        transitive: Vec<PathBuf>,
-    }
-
-    struct GeneratedRoot(PathBuf);
-
-    impl Drop for GeneratedRoot {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn diagnostic_outcome(diags: &DiagSink, decline_prefix: &str) -> Option<Outcome> {
-        if let Some(decline) = diags
-            .diags
-            .iter()
-            .find_map(|diagnostic| diagnostic.msg.strip_prefix(decline_prefix))
-        {
-            return Some(Outcome::Declined(
-                decline.trim_end_matches(" yet").to_string(),
-            ));
-        }
-        first_error(diags, 0).map(|first| Outcome::Frontend(first.msg.clone()))
-    }
-
-    fn write_dependency_archive(
-        root: &Path,
-        ordinal: usize,
-        artifacts: &[Artifact],
-    ) -> Result<PathBuf, Outcome> {
-        let archive = root.join(format!("module-{ordinal}"));
-        for (name, bytes) in artifacts {
-            let relative = Path::new(name);
-            if relative.is_absolute()
-                || relative
-                    .components()
-                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
-            {
-                return Err(Outcome::Harness(format!(
-                    "generated KLIB contains an unsafe artifact path {name:?}"
-                )));
-            }
-            let output = archive.join(relative);
-            if let Some(parent) = output.parent() {
-                std::fs::create_dir_all(parent).map_err(|error| {
-                    Outcome::Failed(format!("creating generated KLIB directory: {error}"))
-                })?;
-            }
-            std::fs::write(&output, bytes).map_err(|error| {
-                Outcome::Failed(format!("writing generated KLIB artifact {name}: {error}"))
-            })?;
-        }
-        Ok(archive)
-    }
-
     let compilation_target = backend.compilation_target();
     if compilation_target != target.compilation_target() {
         return Err(Outcome::Harness(format!(
@@ -642,24 +669,7 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
     let mut generated = BTreeMap::<String, GeneratedDependency>::new();
     let mut native_imports = Vec::new();
     for (ordinal, unit) in modules.iter().enumerate() {
-        let mut dependency_klibs = Vec::new();
-        let mut friend_klibs = Vec::new();
-        let mut seen = BTreeSet::new();
-        for dependency in &unit.deps {
-            let Some(archive) = generated.get(dependency) else {
-                return Err(Outcome::Harness(format!(
-                    "module dependency {dependency} was not built"
-                )));
-            };
-            for path in std::iter::once(&archive.archive).chain(&archive.transitive) {
-                if seen.insert(path.clone()) {
-                    dependency_klibs.push(path.clone());
-                }
-            }
-            if unit.friends.contains(dependency) {
-                friend_klibs.push(archive.archive.clone());
-            }
-        }
+        let (dependency_klibs, friend_klibs) = dependency_closure(unit, &generated)?;
         let (analysis, stems, module_imports) = analyze_module(
             unit,
             ModuleDependencies {
@@ -693,6 +703,99 @@ pub fn compile_modules<B: Backend, M: krusty::backend::DependencyMetadata>(
     let artifacts = session.finish("box", &mut diags);
     let outcome = diagnostic_outcome(&diags, decline_prefix);
     if let Some(outcome) = outcome {
+        return Err(outcome);
+    }
+    Ok(CompiledProgram {
+        artifacts,
+        native_imports,
+    })
+}
+
+/// Link a module graph the way kotlinc links it: every module but the last is compiled into a
+/// KLIB only, and the program is the last module's source compiled against those KLIBs, so every
+/// other module's code reaches the program from the bodies its KLIB records.
+pub fn compile_modules_from_klibs<B: Backend>(
+    case: ModuleCase<'_>,
+    directive_source: &str,
+    target: TestTarget,
+    backend: &B,
+    library: &krusty::klib::backend::KlibBackend,
+    decline_prefix: &str,
+) -> Result<CompiledProgram, Outcome> {
+    let ModuleCase {
+        scratch,
+        stem,
+        modules,
+    } = case;
+    let compilation_target = backend.compilation_target();
+    if compilation_target != target.compilation_target()
+        || Backend::compilation_target(library) != compilation_target
+    {
+        return Err(Outcome::Harness(format!(
+            "the {target:?} corpus lane received a backend of another target"
+        )));
+    }
+    let Some((program, libraries)) = modules.split_last() else {
+        return Err(Outcome::Harness(
+            "a module graph has no final source module".to_string(),
+        ));
+    };
+    let generated_root = GeneratedRoot(scratch.join(format!(
+        ".krusty-klib-route-{stem}-{}-{}",
+        std::process::id(),
+        rayon::current_thread_index().unwrap_or(0)
+    )));
+    if let Err(error) = std::fs::create_dir_all(&generated_root.0) {
+        return Err(Outcome::Failed(format!(
+            "creating generated KLIB root: {error}"
+        )));
+    }
+    let mut diags = DiagSink::new();
+    let mut generated = BTreeMap::<String, GeneratedDependency>::new();
+    let mut native_imports = Vec::new();
+    for (ordinal, unit) in libraries.iter().enumerate() {
+        let (dependency_klibs, friend_klibs) = dependency_closure(unit, &generated)?;
+        let (analysis, stems, module_imports) = analyze_module(
+            unit,
+            ModuleDependencies {
+                klibs: &dependency_klibs,
+                friends: &friend_klibs,
+            },
+            directive_source,
+            target,
+            compilation_target,
+            &mut diags,
+        )?;
+        native_imports.extend(module_imports);
+        let artifacts =
+            krusty::compiler::emit_analyzed(analysis, &stems, library, &unit.name, &mut diags);
+        if let Some(outcome) = diagnostic_outcome(&diags, decline_prefix) {
+            return Err(outcome);
+        }
+        let archive = write_dependency_archive(&generated_root.0, ordinal, &artifacts)?;
+        generated.insert(
+            unit.name.clone(),
+            GeneratedDependency {
+                archive,
+                transitive: dependency_klibs,
+            },
+        );
+    }
+    let (dependency_klibs, friend_klibs) = dependency_closure(program, &generated)?;
+    let (analysis, stems, module_imports) = analyze_module(
+        program,
+        ModuleDependencies {
+            klibs: &dependency_klibs,
+            friends: &friend_klibs,
+        },
+        directive_source,
+        target,
+        compilation_target,
+        &mut diags,
+    )?;
+    native_imports.extend(module_imports);
+    let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, backend, "box", &mut diags);
+    if let Some(outcome) = diagnostic_outcome(&diags, decline_prefix) {
         return Err(outcome);
     }
     Ok(CompiledProgram {

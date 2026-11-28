@@ -47,6 +47,23 @@ impl Checker<'_> {
         )
     }
 
+    /// The calls that selected the contract intrinsic. kotlinc lifts each into its function's
+    /// contract description, so nothing written inside one is lowered or named.
+    ///
+    /// Only a complete file is renumbered: a restricted fragment has released its neighboring
+    /// bodies, so a walk over it cannot replay the file's sequence, and it keeps the names the
+    /// naming walk gave the complete file.
+    pub(super) fn contract_description_calls(&self) -> HashSet<ExprId> {
+        if self.fragment != SourceFragmentMode::Complete {
+            return HashSet::default();
+        }
+        self.resolved_calls
+            .keys()
+            .copied()
+            .filter(|&call| self.selects_contract_intrinsic(call))
+            .collect()
+    }
+
     /// The contract of the function a call resolved to: the Pass-1 contract or the metadata contract
     /// attached to the selected callable.
     pub(super) fn contract_for_call(

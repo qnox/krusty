@@ -580,6 +580,30 @@ the test; `just diagnostics-conformance` first checks that the binary lists the 
 binary would select none and pass), then runs it under `KRUSTY_DIAGNOSTICS_TIMEOUT_SECONDS`. CI runs
 it in the newest supported version's JVM conformance row after the box conformance run, and saves the
 references even when the run fails.
+
+## Diagnostics Ledger Ratchet
+
+`tests/kotlin_diagnostics_ledger_jvm_conformance.rs` compiles the same diagnostics test data in the
+same worker pool and compares what krusty reports with each case's markers (`<!NAME!>` … `<!>`),
+which JetBrains' runner holds kotlinc's own report to: every error and warning, by factory name and
+source range, with the factory's severity. It needs no reference compile. A ledger leaves out what
+the case's `// DIAGNOSTICS:` directive disables (`-NAME`, or `-warnings`), names the release does
+not declare (the runner's `DEBUG_INFO_*`), and `INFO` factories, none of which the command line
+prints. krusty's diagnostics are located by position, never by searching for a file's text: the
+harness lays each compiled `// FILE:` section or `// MODULE:` unit over the prepared case line for
+line, and the prepared case records which case line each of its lines is, so two identical
+sections stay apart and the lines a directive's helpers add are left out. A diagnostic krusty
+reports without a name, with a severity other than its factory's, or on a line the JVM corpus
+placeholders rewrote never matches.
+
+`tests/diagnostics_ledger_mismatches/jvm/<version>.txt` lists the cases whose ledgers differ; any
+case joining or leaving it fails, and `scripts/check-outcome-lists.sh` guards it like the other
+lists. A case krusty gives no ledger on (a crash, a timeout, a topology its compile path cannot
+build) is a mismatch and must be listed; a case the harness cannot observe at all (its source or a
+helper unreadable) fails the run whatever the list says and refuses blessing. The run prints the diagnostic totals and the names krusty misses or adds most.
+`just diagnostics-conformance` runs it after the false-accept lane, and blessing rewrites it with
+the same `KRUSTY_BLESS_DIAGNOSTICS_EXPECTATIONS=1`.
+
 ## Bytecode Text Ratchet
 
 `kotlin_bytecode_text_conformance` (in the `conformance` binary) compiles Kotlin's bytecode-text

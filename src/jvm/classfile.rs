@@ -1992,6 +1992,9 @@ pub struct CodeBuilder {
     /// stand in, which a bytecode rewrite that inserts an instruction between them needs.
     bind_sequence: Vec<u32>,
     next_bind: u32,
+    /// The bind count when an offset received its first line entry: a label bound there later
+    /// stands after that line number, as kotlinc's label follows a `LineNumberNode` it emits next.
+    line_binds: std::collections::BTreeMap<u16, u32>,
     /// kotlinc's `LineNumberMapper` state for this body (see [`line_numbers::LineNumberMapper`]).
     lines: line_numbers::LineNumberMapper,
     /// This method expanded an inline body. kotlinc sorts that method's whole exception table by
@@ -2024,6 +2027,7 @@ impl CodeBuilder {
             dead_bound: Vec::new(),
             bind_sequence: Vec::new(),
             next_bind: 0,
+            line_binds: std::collections::BTreeMap::new(),
             lines: Default::default(),
             inlined_bytecode: false,
         }

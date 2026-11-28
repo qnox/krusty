@@ -28,6 +28,8 @@
 //! entries as bytes and stops there.
 
 pub mod backend;
+mod body_encoding;
+mod body_tree;
 mod inline_ir;
 mod ir_tables;
 pub mod write;

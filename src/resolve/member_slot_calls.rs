@@ -272,9 +272,19 @@ impl Checker<'_> {
             // that value unchanged.
             .selected_intersection_member_receiver(member_receiver, &selected)
             .unwrap_or(rt);
-        let mut member = self
-            .resolver()
-            .commit_selected_member_function(member_receiver, selected);
+        let flow_result = tower_rung
+            .explicit_receiver
+            .and_then(|receiver| self.flow_intersection_member_result(scope, receiver, &selected));
+        let mut member = match flow_result {
+            Some(ret) => self.resolver().commit_selected_member_function_result(
+                member_receiver,
+                selected,
+                ret,
+            ),
+            None => self
+                .resolver()
+                .commit_selected_member_function(member_receiver, selected),
+        };
         // Candidate lookup may have reached an inherited body-local rung (`E.foo` for a receiver
         // of type `F`). That rung owns generic specialization and declaration selection, but the
         // checked call still dispatches on the source receiver `F`. In particular, Kotlin protected

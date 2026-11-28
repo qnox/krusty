@@ -1993,11 +1993,12 @@ pub struct IrFile {
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
     pub default_entries: crate::fx_hash::HashMap<FunId, FunId>,
-    /// Each checked constructor another file may build through with arguments left out, by its
-    /// declaration: the constructor of its class that the shared default-argument lowering
-    /// realized as that constructor's entry. See [`crate::backend::construction_entries`].
-    pub constructor_default_entries:
-        crate::fx_hash::HashMap<crate::fir::DeclarationId, IrConstructorTarget>,
+    /// Each constructor another module or file may build through with arguments left out, by its
+    /// class and ordinal (0 the primary, `n` the `n`th secondary): the constructor of the class
+    /// that the shared default-argument lowering realized as that constructor's entry. A checked
+    /// constructor and one a library exports under a KLIB identity share it. See
+    /// [`crate::backend::construction_entries`].
+    pub constructor_default_entries: crate::fx_hash::HashMap<(ClassId, u32), IrConstructorTarget>,
     /// Each entry another module constructs a class of this file, or reads its object, through,
     /// by the entry's `FunId`: the class it answers. See [`crate::backend::construction_entries`].
     pub(crate) construction_entries: crate::fx_hash::HashMap<FunId, ClassId>,

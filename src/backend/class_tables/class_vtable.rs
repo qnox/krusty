@@ -14,8 +14,8 @@ use super::members::{
 use super::module_interfaces::ModuleInterfaces;
 use super::module_slots::PlanKey;
 use super::{
-    any_vtable, ClassTable, LaidOutSuperclass, Representation, Slot, SlotKey, TabledClass,
-    Unsupported, FUNCTION_SLOT,
+    any_vtable, ClassTable, FunctionInvoke, LaidOutSuperclass, Representation, Slot, SlotKey,
+    TabledClass, Unsupported,
 };
 
 /// Build the table of `tabled`, whose superclass in this file (already tabled) is its `parent`.
@@ -52,20 +52,21 @@ pub(super) fn class_table(
         (None, Some((_, superclass))) => inherited_vtable(superclass),
         (None, None) => any_vtable(),
     };
-    // The FUNCTION SLOT follows `kotlin.Any`'s three in every table, whether or not the class is a
-    // function. A class that becomes one lower in the hierarchy — `class B : A(), () -> String` —
-    // inherits its superclass's table, and a member of `A` already standing at that number would be
-    // overwritten by `invoke` while every call through `A` still expected it there. Reserved at the
-    // root, the number is never anyone else's.
-    if vtable.len() <= FUNCTION_SLOT as usize {
-        vtable.resize(FUNCTION_SLOT as usize + 1, Slot::Abstract);
-    }
+    // The function types this class implements, with the slot each one's bridge stands in:
+    // its superclass's, then its own below.
+    let mut function_invokes: Vec<FunctionInvoke> = match (parent, laid_out) {
+        (Some(parent), _) => parent.function_invokes.clone(),
+        (None, Some((_, superclass))) => superclass.function_invokes.clone(),
+        (None, None) => Vec::new(),
+    };
 
-    // A class implementing MORE THAN ONE function type has more `invoke`s than there are fixed
-    // numbers to put them in. `KT_SLOT_INVOKE` is one number, and `object Test : () -> Unit,
-    // (Boolean) -> Unit` declares two bodies that both belong there — whichever took it, a call
-    // through the other function type would reach the wrong one (`intersectionTypeToFun`
-    // `InterfaceConversion.kt` answered `KK` for `OK`). Decline rather than pick.
+    // A class implementing MORE THAN ONE function type has more `invoke`s than one. A call through
+    // a function type is keyed by its physical operand count, so `object Test : () -> Unit,
+    // (Boolean) -> Unit` answers each where the callers of its own function type look. Two of the
+    // types carrying the same number of physical operands (`suspend (Int) -> Unit` beside `(Int,
+    // Continuation) -> Unit`) share a key, and whichever took it would be reached by a call
+    // through the other type (`intersectionTypeToFun` answered `KK` for `OK`). Decline rather
+    // than pick.
     {
         let invokes = ir
             .function_overrides
@@ -77,9 +78,26 @@ pub(super) fn class_table(
                     == Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
                     && matches!(edge.overridden, ResolvedFunctionOverrideTarget::External(_))
             })
-            .map(|edge| edge.overridden_owner)
+            .map(|edge| {
+                let operands = edge
+                    .implementation_function
+                    .or_else(|| match &edge.implementation {
+                        ResolvedFunctionOverrideTarget::Module(callable) => {
+                            ir.checked_callable_functions.get(callable).copied()
+                        }
+                        ResolvedFunctionOverrideTarget::External(_) => None,
+                    })
+                    .map(|function| ir.functions[function as usize].params.len());
+                (edge.overridden_owner, operands)
+            })
+            .collect::<crate::fx_hash::HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let distinct_operands = invokes
+            .iter()
+            .map(|&(_, operands)| operands)
             .collect::<crate::fx_hash::HashSet<_>>();
-        if invokes.len() > 1 {
+        if invokes.len() > 1 && distinct_operands.len() != invokes.len() {
             return Err(format!(
                 "a class implementing {} function types at once (`{}`)",
                 invokes.len(),
@@ -182,8 +200,6 @@ pub(super) fn class_table(
         }
         let any_replaces = generated_any_replaces.or(override_any_replaces);
         // The edge by which this method overrides a function classifier's `invoke`, if it does.
-        // Read once, because both the fixed slot below and the stand-in that covers a representation
-        // mismatch are the same question about the same exact edge.
         // Before the search below consumes them.
         let edges = override_edges.clone();
         let has_override_edge = edges.clone().next().is_some();
@@ -191,23 +207,7 @@ pub(super) fn class_table(
             edge.overridden_semantic_role
                 == Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
         });
-        let replaces = match any_replaces {
-            Some(slot) => Some(slot),
-            // `invoke` on a class implementing a FUNCTION TYPE takes the one other fixed slot this
-            // target has: the runtime names it (`KT_SLOT_INVOKE`) and every caller through a
-            // function type reads it, a lambda's body included.
-            None => {
-                invoke_edge.and_then(|edge| external_invoke_slot(representation, edge, function))
-            }
-        };
-        // Whether the FUNCTION SLOT needs a stand-in for this method: it is an `invoke` over a
-        // function type that could not take the slot outright, because it does not carry
-        // references throughout. `replaces` is `None` for it, so the method takes a slot of its
-        // own below and the fixed number gets the converting entry once that slot is known.
-        let function_bridge = match (replaces, invoke_edge) {
-            (None, Some(_)) => Some(function.params.len()),
-            _ => None,
-        };
+        let replaces = any_replaces;
         // What this method overrides, split by what each target owns: a class base owns a slot in
         // this vtable to replace, while an interface base owns a number in the program-wide
         // interface region, which is pointed at this method's slot once that slot is known.
@@ -295,6 +295,14 @@ pub(super) fn class_table(
                 },
             },
         };
+        // The first method to implement a function type's `invoke` is answered through a bridge of
+        // its own, which a call through the function type reaches by its operand count and which
+        // forwards by dispatch, so a subclass overriding the method is reached too. A method
+        // replacing a class member's slot is already behind that member's bridge.
+        let function_bridge = match (replaces, invoke_edge) {
+            (None, Some(_)) => Some(function.params.len()),
+            _ => None,
+        };
         // A value class's own member that overrides nothing is called directly: no table slot
         // carries it, so every unit that emits some of the class's members lays its table out as
         // the others do. A recorded override edge is an override too, a dependency interface's
@@ -321,18 +329,16 @@ pub(super) fn class_table(
             }
         };
         slots.insert(own_key, slot);
-        // The FUNCTION SLOT, once this method's own is known — reserved when the table began, so
-        // the two are never the same number.
         if let Some(arity) = function_bridge {
-            debug_assert_ne!(
-                slot, FUNCTION_SLOT,
-                "the stand-in forwards through its own number"
-            );
-            vtable[FUNCTION_SLOT as usize] = Slot::FunctionBridge {
+            vtable.push(Slot::FunctionBridge {
                 arity,
                 target_slot: slot,
                 target: fid,
-            };
+            });
+            function_invokes.push(FunctionInvoke {
+                operands: arity,
+                slot: (vtable.len() - 1) as u32,
+            });
         }
         register_interface_keys(
             class,
@@ -473,6 +479,7 @@ pub(super) fn class_table(
         slots,
         interface_bridges,
         direct_methods: Default::default(),
+        function_invokes,
     })
 }
 
@@ -715,22 +722,6 @@ pub(super) fn register_interface_keys(
         }
         slots.insert(key, slot);
     }
-}
-
-fn external_invoke_slot(
-    representation: &dyn Representation,
-    edge: &crate::ir::IrFunctionOverride,
-    function: &IrFunction,
-) -> Option<u32> {
-    if edge.overridden_semantic_role != Some(crate::types::SemanticCallRole::KotlinFunctionInvoke) {
-        return None;
-    }
-    (function
-        .params
-        .iter()
-        .all(|param| representation.is_reference(*param))
-        && representation.is_reference(function.ret))
-    .then_some(FUNCTION_SLOT)
 }
 
 /// Whether an override is callable through the overridden slot's signature as it stands.

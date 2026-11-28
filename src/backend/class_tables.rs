@@ -16,8 +16,11 @@
 //! with overridden slots replaced and newly declared members appended. Slot numbers are assigned
 //! at the declaring class and stay valid down the hierarchy, which is what lets a call through an
 //! `A`-typed value reach `B`'s override with one indexed read. Every table begins with
-//! `kotlin.Any`'s three slots — `equals`, `hashCode`, `toString`, in that order — and reserves the
-//! next one for a function value's `invoke` ([`FUNCTION_SLOT`]). Interface members are numbered
+//! `kotlin.Any`'s three slots — `equals`, `hashCode`, `toString`, in that order. A function value's
+//! `invoke` takes no slot number: a class implementing a function type holds an ordinary
+//! [`Slot::FunctionBridge`] slot for each, listed in [`ClassTable::function_invokes`], and the
+//! target dispatches a call through a function type by the call's physical operand count rather
+//! than by a table number, so no module-wide count of function slots exists. Interface members are numbered
 //! once for the whole MODULE ([`module_interfaces`]) and held in a separate interface table per
 //! class ([`planned_itable`]), so a call through an interface of another file needs only the
 //! number: the layout [`build_numbered`] answers.
@@ -69,9 +72,6 @@ pub trait Representation {
     /// Whether a value of type `a` and one of type `b` are carried alike, so a member declared
     /// with one can be implemented with the other and called through the same slot.
     fn same(&self, a: Ty, b: Ty) -> bool;
-    /// Whether `ty` is carried as a reference: what every operand of a function value's `invoke`
-    /// is, so an `invoke` override carrying only references can stand in [`FUNCTION_SLOT`].
-    fn is_reference(&self, ty: Ty) -> bool;
     /// Whether a class may extend `superclass` although no class of the file declares it: a base
     /// whose storage and `kotlin.Any` members the target's runtime owns.
     fn owns_base(&self, superclass: TypeName) -> bool;
@@ -148,14 +148,14 @@ pub enum Slot {
         target_slot: u32,
         target: FunId,
     },
-    /// [`FUNCTION_SLOT`]'s own stand-in: `invoke` overriding `kotlin.Function{N}.invoke` where
-    /// the override does not carry references throughout.
+    /// The stand-in for a function type's `invoke`: `invoke` overriding `kotlin.Function{N}.invoke`,
+    /// which every function value answers through one signature whatever the override carries.
     ///
-    /// A caller through a function type reads that fixed number and passes and reads references
-    /// there, because that is the one signature every function value shares. `class A : (Int) ->
-    /// Int { override fun invoke(p: Int) = p + 1 }` carries machine integers instead, so its body
-    /// cannot stand in that number. This stands there and converts, forwarding to the method's
-    /// own slot.
+    /// A caller through a function type passes and reads references, because that is the one
+    /// signature every function value shares. `class A : (Int) -> Int { override fun invoke(p:
+    /// Int) = p + 1 }` carries machine integers instead, so its body cannot be what a caller
+    /// reaches. This is, and converts, forwarding to the method's own slot. It is recorded in
+    /// [`ClassTable::function_invokes`] under the physical operand count.
     ///
     /// It carries an ARITY rather than a declaration id, which is what separates it from
     /// [`Slot::Bridge`]: the signature it wears belongs to `kotlin.Function{N}`, which is declared
@@ -228,6 +228,8 @@ pub struct LaidOutSuperclass {
     /// module-wide identity: where a local class of another file, which no module plan numbers,
     /// finds the member it overrides.
     pub members: HashMap<module_slots::PlanKey, u32>,
+    /// The function types its instances implement, by the slot of each one's bridge.
+    pub function_invokes: Vec<FunctionInvoke>,
 }
 
 /// One class's place in the hierarchy and its dispatch table.
@@ -253,13 +255,23 @@ pub struct ClassTable {
     /// or a final member: the plan numbers only what a subclass can override, so a call of one of
     /// these runs the method itself.
     pub direct_methods: crate::fx_hash::HashSet<FunId>,
+    /// The function types this class implements, inherited ones included, each with the slot of
+    /// its [`Slot::FunctionBridge`].
+    pub function_invokes: Vec<FunctionInvoke>,
+}
+
+/// One function type a class implements: the slot of the bridge that answers a call through it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FunctionInvoke {
+    /// How many physical operands the `invoke` takes, a `suspend` one's continuation included:
+    /// what a call through the function type is keyed by.
+    pub operands: usize,
+    /// The slot of the [`Slot::FunctionBridge`] answering a call with that many operands.
+    pub slot: u32,
 }
 
 /// How many slots `kotlin.Any` occupies at the front of every table.
 pub const ANY_SLOTS: u32 = 3;
-
-/// The table number every function value's body occupies: right after `kotlin.Any`'s three.
-pub const FUNCTION_SLOT: u32 = 3;
 
 /// `kotlin.Any`'s table, the prefix of every class's.
 fn any_vtable() -> (Vec<Slot>, HashMap<SlotKey, u32>) {
@@ -273,7 +285,7 @@ fn any_vtable() -> (Vec<Slot>, HashMap<SlotKey, u32>) {
 
 /// The class tables of every class in `ir`, with the interface members' module-wide numbers in a
 /// table of each class's own ([`planned_itable`]) rather than in its class table. An interface's
-/// class table keeps only `kotlin.Any`'s slots and the function slot.
+/// class table keeps only `kotlin.Any`'s slots.
 ///
 /// `laid_out` answers, for a superclass no class of `ir` declares, the table another file of the
 /// module built for it, if one did.
@@ -300,8 +312,9 @@ pub fn build_numbered(
             continue;
         }
         let table = &mut tables[id];
-        table.vtable.truncate(FUNCTION_SLOT as usize + 1);
-        table.slots.retain(|_, slot| *slot <= FUNCTION_SLOT);
+        table.vtable.truncate(ANY_SLOTS as usize);
+        table.slots.retain(|_, slot| *slot < ANY_SLOTS);
+        table.function_invokes.clear();
         table.interface_bridges.clear();
     }
     let members = tables

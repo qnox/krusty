@@ -12,9 +12,10 @@
 //! check runs where the host links Native programs, as every Native test does. A Kotlin/Wasm
 //! program runs under the exact kotlinc-wasm and Node.js.
 //!
-//! GAP: krusty's Wasm runtime lays out its own `ArrayList`, which reads `addAll`'s argument before it
-//! grows, so krusty's Wasm programs are not checked here yet. They will be once the target stdlib's
-//! `ArrayList` body replaces that runtime list (#3836).
+//! krusty compiles Kotlin/Wasm programs in process only, under the default defect mode, so its
+//! Wasm programs are checked by the Wasm lane's own test (`tests/wasm_kotlinc_defects.rs`), which
+//! requires them to give what kotlinc-wasm gives. No krusty entry point compiles Kotlin/Wasm under
+//! `-Xfix-kotlinc-defects` yet.
 
 use std::path::Path;
 
@@ -67,6 +68,44 @@ const UNIT_CONVERSION: &str = "// LANGUAGE: +UnitConversionsOnArbitraryExpressio
 const VARARG_REFERENCE: &str = "fun <E> countG(vararg xs: E): Int = xs.size\n\
     fun box(): String { val arr = arrayOf(\"a\", \"b\"); return \"\" + arr.let(::countG) }\n";
 
+/// KT-89451: a `null` function value converted to a nullable suspend function type becomes an
+/// adapter, so the callee sees a non-null value.
+const NULL_FUNCTION_VALUE_CONVERSION: &str = "import kotlin.coroutines.*\n\
+    suspend fun observe(f: (suspend () -> String?)?): String = if (f == null) \"null\" else \"adapter:\" + f()\n\
+    suspend fun pass(f: (() -> String?)?) = observe(f)\n\
+    fun box(): String {\n\
+    \x20   var answer = \"unset\"\n\
+    \x20   suspend { pass(null) }.startCoroutine(Continuation(EmptyCoroutineContext) { answer = it.getOrThrow() })\n\
+    \x20   return answer\n\
+    }\n";
+
+/// A `null` function value held by a type parameter with a nullable function bound, converted to a
+/// nullable suspend function type: the adapter invokes it, so completing the coroutine throws.
+const NULL_TYPE_PARAMETER_FUNCTION_VALUE_CONVERSION: &str = "import kotlin.coroutines.*\n\
+    suspend fun observe(f: (suspend () -> String?)?): String = if (f == null) \"null\" else \"adapter:\" + f()\n\
+    suspend fun <F : (() -> String?)?> pass(f: F) = observe(f)\n\
+    fun box(): String {\n\
+    \x20   var answer = \"unset\"\n\
+    \x20   suspend { pass(null) }.startCoroutine(Continuation(EmptyCoroutineContext) {\n\
+    \x20       answer = it.fold({ r -> r }, { e -> if (e is NullPointerException) \"NPE\" else \"other\" })\n\
+    \x20   })\n\
+    \x20   return answer\n\
+    }\n";
+
+/// A function value held by a type parameter with a nullable function bound, passed where a
+/// suspend function type is expected: the value is cast to the suspend function's class instead of
+/// converted, so a lambda throws `ClassCastException`.
+const TYPE_PARAMETER_FUNCTION_VALUE_CAST: &str = "import kotlin.coroutines.*\n\
+    suspend fun observe(f: (suspend () -> String?)?): String = if (f == null) \"null\" else \"adapter:\" + f()\n\
+    suspend fun <F : (() -> String?)?> pass(f: F) = observe(f)\n\
+    fun box(): String {\n\
+    \x20   var answer = \"unset\"\n\
+    \x20   suspend { pass { \"y\" } }.startCoroutine(Continuation(EmptyCoroutineContext) {\n\
+    \x20       answer = it.fold({ r -> r }, { e -> if (e is ClassCastException) \"CCE\" else \"other\" })\n\
+    \x20   })\n\
+    \x20   return answer\n\
+    }\n";
+
 /// `ContextArgumentEvaluatedBeforeExtensionReceiver`: a context argument written after the
 /// receiver; `box()` reports the order the operands were evaluated in.
 const CONTEXT_ARGUMENT_ORDER: &str = r#"// LANGUAGE: +ContextParameters +ExplicitContextArguments
@@ -92,19 +131,7 @@ fun box(): String {
 "#;
 
 /// `ArrayListAddAllGrowsBeforeReadingItsArgument`: a list appends a range of itself.
-const LIST_ADD_ALL_OF_ITS_RANGE: &str = "fun box(): String {\n\
-    \x20   val list = ArrayList<Int>()\n\
-    \x20   list.add(1)\n\
-    \x20   list.add(2)\n\
-    \x20   list.add(3)\n\
-    \x20   val answer = try {\n\
-    \x20       list.addAll((list as List<Int>).subList(0, 2))\n\
-    \x20       \"appended\"\n\
-    \x20   } catch (e: ConcurrentModificationException) {\n\
-    \x20       \"raised\"\n\
-    \x20   }\n\
-    \x20   return \"$answer $list\"\n\
-    }\n";
+const LIST_ADD_ALL_OF_ITS_RANGE: &str = include_str!("kotlinc_defects/listAddAllOfItsRange.kt");
 
 /// A platform module's class over the class of a library its common module depends on. Compiled
 /// with `-Xseparate-kmp-compilation`, kotlinc-native crashes actualizing the application's
@@ -156,6 +183,27 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             source: VARARG_REFERENCE,
             with_defect: Outcome::Answer("1".to_string()),
             fixed: Outcome::Answer("2".to_string()),
+        }),
+        Quirk::NullFunctionValueConvertsToAdapter => Some(Defect {
+            platforms: &[Platform::Jvm],
+            fixed_on: &[],
+            source: NULL_FUNCTION_VALUE_CONVERSION,
+            with_defect: Outcome::Answer("adapter:null".to_string()),
+            fixed: Outcome::Answer("null".to_string()),
+        }),
+        Quirk::NullTypeParameterFunctionValueIsDereferenced => Some(Defect {
+            platforms: &[Platform::Jvm],
+            fixed_on: &[],
+            source: NULL_TYPE_PARAMETER_FUNCTION_VALUE_CONVERSION,
+            with_defect: Outcome::Answer("NPE".to_string()),
+            fixed: Outcome::Answer("null".to_string()),
+        }),
+        Quirk::TypeParameterFunctionValueSkipsSuspendConversion => Some(Defect {
+            platforms: &[Platform::Jvm],
+            fixed_on: &[],
+            source: TYPE_PARAMETER_FUNCTION_VALUE_CAST,
+            with_defect: Outcome::Answer("CCE".to_string()),
+            fixed: Outcome::Answer("adapter:y".to_string()),
         }),
         Quirk::ContextArgumentEvaluatedBeforeExtensionReceiver => Some(Defect {
             platforms: &[Platform::Jvm],
@@ -302,8 +350,8 @@ fn kotlinc_wasm_outcome(target: CompilationTarget, source: &str) -> Option<Outco
 }
 
 /// Compile `source` for `platform` with the krusty CLI under `arguments` and run its `box()`;
-/// `None` for Native where this host links no Native program, and for Kotlin/Wasm (the GAP in the
-/// module documentation).
+/// `None` for Native where this host links no Native program, and for Kotlin/Wasm, which the Wasm
+/// lane checks (see the module documentation).
 fn krusty_outcome(platform: Platform, source: &str, arguments: &[&str]) -> Option<Outcome> {
     match platform {
         Platform::Jvm => Some(krusty_jvm_outcome(source, arguments)),

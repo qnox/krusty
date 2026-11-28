@@ -454,24 +454,19 @@ void kt_throw_index_overflow(void) {
    branches on the condition and reaches this only when it is false, which is what keeps the message
    from being computed on the passing path — Kotlin's `lazyMessage` is lazy exactly there.
 
-   The message arrives as the FUNCTION rather than as text, and is invoked here through the one slot
-   every function value declares, as `kt_lazy_value` invokes an initializer. NULL is the form that
+   The message arrives as the FUNCTION rather than as text, and is invoked here through the function
+   protocol, as `kt_lazy_value` invokes an initializer. NULL is the form that
    wrote no message, whose text Kotlin fixes as "Assertion failed". */
 void kt_assertion_failed(KRef lazy_message) {
     if (lazy_message == NULL) {
         KT_THROW(kt_type_assertion_error, KT_MESSAGE("Assertion failed"));
         return;
     }
-    if (lazy_message->header.type->vtable == NULL ||
-        lazy_message->header.type->vtable_length <= KT_SLOT_INVOKE) {
-        KT_FAIL("krusty: an assertion message is not a function value\n");
-    }
     /* A message lambda that THROWS -- `assert(false) { error("boom") }` -- propagates what it
        threw, and so does a message whose `toString` throws: Kotlin computes the message before it
        constructs the `AssertionError`, so it never gets that far. `kt_throw` overwrites the pending
        slot, so each step returns rather than raising over it. */
-    KRef message =
-        ((KRef(*)(KRef))lazy_message->header.type->vtable[KT_SLOT_INVOKE])(lazy_message);
+    KRef message = kt_itf__1_function_0(lazy_message);
     if (kt_pending_exception() != NULL) {
         return;
     }

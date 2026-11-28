@@ -24,7 +24,6 @@ annotations/instances/multimoduleTypeParams.kt
 annotations/instances/nested.kt
 annotations/instances/repeatableInstantiation.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
-annotations/instances/unsignedAndBooleanArrays.kt
 annotations/instances/varargInAnnotationParameterInstantiation.kt
 annotations/intrinsicConstEvaluationInSources.kt
 annotations/parameters.kt
@@ -113,7 +112,6 @@ bridges/delegationComplex.kt
 bridges/delegationComplexWithList.kt
 bridges/fakeCovariantOverride.kt
 bridges/fakeGenericCovariantOverride.kt
-bridges/fakeGenericCovariantOverrideWithDelegation.kt
 bridges/fakeOverride/abstractFakeOverride.kt
 bridges/fakeOverride/fakeOverrideAbstractAndConcreteDeclarations.kt
 bridges/fakeOverride/fakeOverrideInheritsBridgeFromFakeOverride.kt
@@ -183,7 +181,6 @@ callableReference/adaptedReferences/varargViewedAsPrimitiveArray.kt
 callableReference/adaptedReferences/varargWithDefaultValue.kt
 callableReference/arrayConstructor.kt
 callableReference/arrayConstructorArgument.kt
-callableReference/arrayOfNulls.kt
 callableReference/bound/arrayConstructorArgument.kt
 callableReference/bound/arrayGetIntrinsic.kt
 callableReference/bound/captureVarInPropertyInit.kt
@@ -274,16 +271,13 @@ casts/mutableCollections/weirdMutableCasts.kt
 casts/unitAsSafeAny.kt
 classDelegation/generic.kt
 classDelegation/method.kt
-classDelegation/withBridge.kt
 classLiteral/bound/primitives.kt
 classLiteral/bound/sideEffect.kt
 classes/comanionObjectFieldVsClassField.kt
 classes/defaultObjectSameNamesAsInOuter.kt
-classes/delegation4.kt
 classes/delegationGenericArg.kt
 classes/delegationGenericArgUpperBound.kt
 classes/delegationGenericLongArg.kt
-classes/delegationMethodsWithArgs.kt
 classes/inheritSetAndHashSet.kt
 classes/kt1120.kt
 classes/kt1157.kt
@@ -293,9 +287,7 @@ classes/kt2390.kt
 classes/kt2417.kt
 classes/kt2477.kt
 classes/kt2566_2.kt
-classes/kt285.kt
 classes/kt343.kt
-classes/kt3546.kt
 classes/kt471.kt
 classes/kt496.kt
 classes/kt500.kt
@@ -408,7 +400,6 @@ contextParameters/suspendContextualWithExtension.kt
 contextParameters/unaryOperators.kt
 contextParameters/useFromAnotherModuleSuspending.kt
 contracts/contractOnContextParameter.kt
-contracts/kt39374.kt
 contracts/kt45236.kt
 contracts/kt47300.kt
 contracts/listAppend.kt
@@ -847,7 +838,6 @@ coroutines/varargCallFromSuspend.kt
 coroutines/withReceiver.kt
 cycles/cycle_for.kt
 dataClasses/components/kt49812.kt
-dataClasses/dataClassWithManyFields.kt
 dataClasses/dnnInPropertyType.kt
 dataClasses/propertyOfDnnType.kt
 dataClasses/toString/arrayParams.kt
@@ -856,13 +846,8 @@ dataClasses/unitComponent.kt
 deadCodeElimination/intersectingVariableRange.kt
 defaultArguments/captureInTailrec.kt
 defaultArguments/constructor/anonymousObjectAsDefaultParam.kt
-defaultArguments/constructor/innerClass32Args.kt
 defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
 defaultArguments/function/defaultLambdaInline.kt
-defaultArguments/function/extensionFunctionManyArgs.kt
-defaultArguments/function/innerExtentionFunctionManyArgs.kt
-defaultArguments/function/memberFunctionManyArgs.kt
-defaultArguments/function/topLevelManyArgs.kt
 defaultArguments/implementedByFake.kt
 defaultArguments/implementedByFake2.kt
 defaultArguments/implementedByFake3.kt
@@ -941,7 +926,6 @@ delegation/ifWithCallableReferenceInLazy.kt
 delegation/kt30102_comparable.kt
 delegation/kt44199.kt
 delegation/smartCastedDelegation.kt
-delegation/withDefaultsMultipleFilesOrder.kt
 destructuringDeclInLambdaParam/extensionComponents.kt
 destructuringDeclInLambdaParam/stdlibUsages.kt
 destructuringDeclInLambdaParam/withIndexed.kt
@@ -2100,7 +2084,6 @@ regressions/captureStorageDefaultMetadata.kt
 regressions/closureWriteConformingSmartCast.kt
 regressions/closureWriteConformingSmartCastStringBuilder.kt
 regressions/collectionLiteralForTypeVariableBuiltFromOtherBound.kt
-regressions/collectionSizeInInlineBody.kt
 regressions/commonSupertypeContravariant.kt
 regressions/companionBlockFunctionValueClassResult.kt
 regressions/conditionalArgumentBranchView.kt
@@ -2133,7 +2116,6 @@ regressions/functionLiteralAsLastExpressionInBlock.kt
 regressions/functionTypeMemberInvoke.kt
 regressions/generatedValueClassMembers.kt
 regressions/genericExtensionPropertyLosesToConcrete.kt
-regressions/genericVarargReferenceArrayKinds.kt
 regressions/hashCodeNPE.kt
 regressions/immediateFunctionLiteralOperands.kt
 regressions/immediateLambdaEscapingOperands.kt
@@ -2199,7 +2181,6 @@ regressions/memberExtensionLambdaResultsJoin.kt
 regressions/memberExtensionNullableReceiverOverload.kt
 regressions/memberExtensionRecursiveOpenBound.kt
 regressions/memberLocalFunctions.kt
-regressions/moduleDelegationForwarderSlots.kt
 regressions/multimodule/boundExtensionReferences.kt
 regressions/multimodule/delegatedPropertiesExpandInlineLibraryConventions.kt
 regressions/multimodule/dependencyArrayView.kt
@@ -2289,7 +2270,6 @@ regressions/valueClassMemberCallBoundaries.kt
 regressions/valueClassNullableNestedToString.kt
 regressions/valueClassWritableComputedProperty.kt
 regressions/valueClassWritablePropertyAcrossFiles.kt
-regressions/varargReferenceTypeVariableInput.kt
 regressions/wasmClassLiterals.kt
 regressions/wasmErasedAnyToString.kt
 reified/arraysReification/jaggedArray.kt
@@ -2372,8 +2352,6 @@ specialBuiltins/removeSetInt.kt
 statics/incInClassObject.kt
 strings/charSequenceGet.kt
 strings/charSequenceSubSequence.kt
-strings/concatDynamicWithConstants.kt
-strings/concatDynamicWithSpecialSymbols.kt
 strings/kt3571.kt
 strings/rawStringsWithManyQuotes.kt
 strings/trimOptimization.kt
@@ -2394,7 +2372,6 @@ super/superConstructor/kt18356_2.kt
 super/superConstructor/objectExtendsInner.kt
 super/superConstructor/objectExtendsLocalInner.kt
 suspendConversion/chainedFunSuspendConversionForSimpleExpression.kt
-suspendConversion/conversionOfInterfaceInheritingFunctionN.kt
 suspendConversion/suspendAndFunConversionInDisabledMode.kt
 suspendConversion/suspendConversionNullableCCE.kt
 suspendConversion/suspendConversionWithFunInterfaces.kt
