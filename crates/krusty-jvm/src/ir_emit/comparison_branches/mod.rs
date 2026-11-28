@@ -42,7 +42,7 @@ impl Emitter<'_> {
                     || self.emits_control_flow(*lhs)
                     || self.emits_control_flow(*rhs)
             }
-            IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
+            IrExpr::PrimitiveBinOp { op, lhs, rhs, .. } => {
                 (matches!(op, Lt | Le | Gt | Ge | Eq | Ne) && self.value_ty(*lhs).is_jvm_scalar())
                     || matches!(op, RefEq | RefNe)
                     || (matches!(op, Eq | Ne)
@@ -143,7 +143,7 @@ impl Emitter<'_> {
         expression: ExprId,
     ) -> (IrBinOp, ExprId, ExprId, Option<krusty::ir::EqualityMode>) {
         match *self.ir.expr(expression) {
-            IrExpr::PrimitiveBinOp { op, lhs, rhs } => (op, lhs, rhs, None),
+            IrExpr::PrimitiveBinOp { op, lhs, rhs, .. } => (op, lhs, rhs, None),
             IrExpr::Equality { op, mode, lhs, rhs } => (op, lhs, rhs, Some(mode)),
             ref other => panic!("a comparison is a primitive binary operation, not {other:?}"),
         }

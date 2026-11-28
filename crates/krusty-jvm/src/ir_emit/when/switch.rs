@@ -150,6 +150,7 @@ impl Emitter<'_> {
                 op: IrBinOp::Eq,
                 lhs,
                 rhs,
+                ..
             } => (*lhs, *rhs),
             IrExpr::Equality {
                 op: IrBinOp::Eq,

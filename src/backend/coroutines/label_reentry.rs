@@ -404,7 +404,7 @@ fn bool_const(ir: &mut IrFile, value: bool) -> ExprId {
 }
 
 fn binary(ir: &mut IrFile, op: IrBinOp, lhs: ExprId, rhs: ExprId) -> ExprId {
-    ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs })
+    ir.add_expr(IrExpr::primitive_bin_op(op, lhs, rhs))
 }
 
 /// `lhs && rhs`, evaluating `rhs` only when `lhs` holds.

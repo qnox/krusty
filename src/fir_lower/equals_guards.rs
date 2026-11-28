@@ -19,11 +19,11 @@ pub(super) fn identity_and_type_guards(
     if identity {
         let this_value = ir.add_expr(IrExpr::GetValue(this_slot));
         let other_value = ir.add_expr(IrExpr::GetValue(other_slot));
-        let identical = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::RefEq,
-            lhs: this_value,
-            rhs: other_value,
-        });
+        let identical = ir.add_expr(IrExpr::primitive_bin_op(
+            IrBinOp::RefEq,
+            this_value,
+            other_value,
+        ));
         guards.push(return_guard(ir, identical, true));
     }
     let other_value = ir.add_expr(IrExpr::GetValue(other_slot));

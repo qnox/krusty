@@ -32,11 +32,9 @@ impl BodyLowering<'_> {
             .expect("the Elvis temporary was declared");
         let condition_read = self.elvis_read(local.index);
         let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-        let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Eq,
-            lhs: condition_read,
-            rhs: null,
-        });
+        let condition =
+            self.ir
+                .add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, condition_read, null));
         let fallback = self.expression(shape.fallback)?;
         let fallback_type = self.lowered_type(fallback);
         let fallback = self.elvis_result(fallback, fallback_type, ty)?;

@@ -109,11 +109,7 @@ impl Realizer<'_> {
             // comparing the loop variable with `last` before stepping, and the entry test guards
             // the whole loop.
             let current = self.add(IrExpr::GetValue(loop_variable));
-            let at_last = self.add(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Eq,
-                lhs: current,
-                rhs: last,
-            });
+            let at_last = self.add(IrExpr::primitive_bin_op(IrBinOp::Eq, current, last));
             let leave = self.add(IrExpr::Break {
                 label: Some(label.clone()),
             });
@@ -205,11 +201,7 @@ impl Realizer<'_> {
     /// `inductionVar += step`; a `Char` induction variable is narrowed back after the `Int` add.
     fn increment_induction_variable(&mut self, variables: &LoopVariables, ty: Ty) -> ExprId {
         let current = self.add(IrExpr::GetValue(variables.induction));
-        let step = IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Add,
-            lhs: current,
-            rhs: variables.step,
-        };
+        let step = IrExpr::primitive_bin_op(IrBinOp::Add, current, variables.step);
         // The signed addition Kotlin promotes the variable to: an unsigned progression steps its
         // signed carrier, as `UInt.plus` adds the `Int` it wraps.
         let sum = match ty {

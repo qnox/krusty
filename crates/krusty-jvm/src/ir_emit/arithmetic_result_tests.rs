@@ -20,11 +20,7 @@ fn mixed_sum(recorded: bool) -> IrFile {
     let sum = if recorded {
         ir.add_arithmetic(IrBinOp::Add, widened, long, Ty::Long)
     } else {
-        ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Add,
-            lhs: widened,
-            rhs: long,
-        })
+        ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Add, widened, long))
     };
     let returned = ir.add_expr(IrExpr::Return(Some(sum)));
     ir.add_fun(IrFunction {

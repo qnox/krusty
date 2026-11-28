@@ -216,11 +216,11 @@ impl IrFile {
         };
         let nullable_read = self.add_expr(IrExpr::GetValue(slot));
         let null = self.add_expr(IrExpr::Const(IrConst::Null));
-        let null_test = self.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::RefEq,
-            lhs: nullable_read,
-            rhs: null,
-        });
+        let null_test = self.add_expr(IrExpr::primitive_bin_op(
+            IrBinOp::RefEq,
+            nullable_read,
+            null,
+        ));
         let instance_read = self.add_expr(IrExpr::GetValue(slot));
         let instance_test = self.instance_check(false, instance_read, target);
         // `JvmBackendContext.oror` is a plain `when`, not a source `||`: its true branch is a

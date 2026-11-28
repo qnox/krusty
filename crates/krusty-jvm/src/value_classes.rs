@@ -1923,11 +1923,11 @@ pub(crate) fn lower_value_classes(
                         if repr_ctx.unboxed_value_class(argument_value, &callable_under)
                             == Some(*owner)
                         {
-                            Some(Rw::Ctor(IrExpr::PrimitiveBinOp {
-                                op: krusty::ir::IrBinOp::Eq,
-                                lhs: *receiver,
-                                rhs: argument_value,
-                            }))
+                            Some(Rw::Ctor(IrExpr::primitive_bin_op(
+                                krusty::ir::IrBinOp::Eq,
+                                *receiver,
+                                argument_value,
+                            )))
                         } else {
                             let underlying = callable_under
                                 .get(owner)
@@ -2097,6 +2097,7 @@ pub(crate) fn lower_value_classes(
                 op: op @ (krusty::ir::IrBinOp::Eq | krusty::ir::IrBinOp::Ne),
                 lhs,
                 rhs,
+                ..
             }
             | IrExpr::Equality {
                 op: op @ (krusty::ir::IrBinOp::Eq | krusty::ir::IrBinOp::Ne),
@@ -2821,6 +2822,7 @@ pub(crate) fn lower_value_classes(
                 op: op @ (krusty::ir::IrBinOp::Eq | krusty::ir::IrBinOp::Ne),
                 lhs,
                 rhs,
+                ..
             }
             | IrExpr::Equality {
                 op: op @ (krusty::ir::IrBinOp::Eq | krusty::ir::IrBinOp::Ne),

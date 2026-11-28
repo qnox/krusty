@@ -166,7 +166,7 @@ impl IrFile {
             !op.yields_boolean(),
             "{op:?} answers a Boolean; it has no selected result type to record"
         );
-        let id = self.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs });
+        let id = self.add_expr(IrExpr::primitive_bin_op(op, lhs, rhs));
         self.set_logical_type(id, result);
         id
     }

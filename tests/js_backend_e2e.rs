@@ -57,7 +57,7 @@ fn add_ulong_shift<'a>(
 ) -> (&'a str, &'a str) {
     let lhs = ir.add_expr(IrExpr::Const(IrConst::ULong(lhs)));
     let rhs = ir.add_expr(IrExpr::Const(IrConst::Int(rhs)));
-    let value = ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs });
+    let value = ir.add_expr(IrExpr::primitive_bin_op(op, lhs, rhs));
     ir.set_logical_type(value, Ty::ULong);
     add_ir_function(ir, name, value, Ty::ULong);
     (name, expected)
@@ -131,29 +131,17 @@ fn ulong_backend_ir_uses_one_node_carrier() {
     let present_zero = ir.add_expr(IrExpr::Const(IrConst::ULong(0)));
     ir.set_logical_type(present_zero, Ty::nullable(Ty::ULong));
     let null = ir.add_expr(IrExpr::Const(IrConst::Null));
-    let present_is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Eq,
-        lhs: present_zero,
-        rhs: null,
-    });
+    let present_is_null = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, present_zero, null));
     add_ir_function(&mut ir, "presentIsNull", present_is_null, Ty::Boolean);
     let absent = ir.add_expr(IrExpr::Const(IrConst::Null));
     ir.set_logical_type(absent, Ty::nullable(Ty::ULong));
     let null = ir.add_expr(IrExpr::Const(IrConst::Null));
-    let absent_is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Eq,
-        lhs: absent,
-        rhs: null,
-    });
+    let absent_is_null = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, absent, null));
     add_ir_function(&mut ir, "absentIsNull", absent_is_null, Ty::Boolean);
     let null = ir.add_expr(IrExpr::Const(IrConst::Null));
     let absent = ir.add_expr(IrExpr::Const(IrConst::Null));
     ir.set_logical_type(absent, Ty::nullable(Ty::ULong));
-    let null_is_absent = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Eq,
-        lhs: null,
-        rhs: absent,
-    });
+    let null_is_absent = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, null, absent));
     add_ir_function(&mut ir, "nullIsAbsent", null_is_absent, Ty::Boolean);
 
     let size = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
@@ -236,11 +224,7 @@ fn ulong_backend_ir_uses_one_node_carrier() {
         type_operand: Ty::Long,
     });
     let zero = ir.add_expr(IrExpr::Const(IrConst::Long(0)));
-    let long_is_negative = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Lt,
-        lhs: as_long,
-        rhs: zero,
-    });
+    let long_is_negative = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Lt, as_long, zero));
     add_ir_function(
         &mut ir,
         "ulongToLongIsNegative",

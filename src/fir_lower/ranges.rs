@@ -213,11 +213,8 @@ impl BodyLowering<'_> {
                 value_slot,
                 high,
             );
-            self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Or,
-                lhs: below,
-                rhs: above,
-            })
+            self.ir
+                .add_expr(IrExpr::primitive_bin_op(IrBinOp::Or, below, above))
         } else {
             let above_low = self.comparison(IrBinOp::Le, comparison_ty, low, value_slot);
             let below_high = self.comparison(
@@ -230,11 +227,11 @@ impl BodyLowering<'_> {
                 value_slot,
                 high,
             );
-            self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::And,
-                lhs: above_low,
-                rhs: below_high,
-            })
+            self.ir.add_expr(IrExpr::primitive_bin_op(
+                IrBinOp::And,
+                above_low,
+                below_high,
+            ))
         }
     }
 
@@ -261,10 +258,7 @@ impl BodyLowering<'_> {
         // targets choose only its representation.
         self.ir.set_logical_type(lhs, ty);
         self.ir.set_logical_type(rhs, ty);
-        self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: operation,
-            lhs,
-            rhs,
-        })
+        self.ir
+            .add_expr(IrExpr::primitive_bin_op(operation, lhs, rhs))
     }
 }

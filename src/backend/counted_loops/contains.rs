@@ -304,11 +304,7 @@ impl Realizer<'_> {
         let zero = self.add_checked(IrExpr::Const(IrConst::Int(0)), Ty::Int);
         let ordering = self.unsigned_ordering(ty, value, lower);
         self.add_checked(
-            IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Le,
-                lhs: zero,
-                rhs: ordering,
-            },
+            IrExpr::primitive_bin_op(IrBinOp::Le, zero, ordering),
             Ty::Boolean,
         )
     }
@@ -321,11 +317,7 @@ impl Realizer<'_> {
         let ordering = self.unsigned_ordering(ty, value, upper);
         let zero = self.add_checked(IrExpr::Const(IrConst::Int(0)), Ty::Int);
         self.add_checked(
-            IrExpr::PrimitiveBinOp {
-                op: operation,
-                lhs: ordering,
-                rhs: zero,
-            },
+            IrExpr::primitive_bin_op(operation, ordering, zero),
             Ty::Boolean,
         )
     }
@@ -370,14 +362,7 @@ impl Realizer<'_> {
         // The operands are compared in the selected type; targets choose only its representation.
         self.ir.set_logical_type(lhs, ty);
         self.ir.set_logical_type(rhs, ty);
-        self.add_checked(
-            IrExpr::PrimitiveBinOp {
-                op: operation,
-                lhs,
-                rhs,
-            },
-            Ty::Boolean,
-        )
+        self.add_checked(IrExpr::primitive_bin_op(operation, lhs, rhs), Ty::Boolean)
     }
 }
 

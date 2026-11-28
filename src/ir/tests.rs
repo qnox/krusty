@@ -271,11 +271,7 @@ fn for_each_child_visits_every_direct_operand() {
     let mut f = IrFile::default();
     let lhs = f.add_expr(IrExpr::Const(IrConst::Int(1)));
     let rhs = f.add_expr(IrExpr::Const(IrConst::Int(2)));
-    let bin = f.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Add,
-        lhs,
-        rhs,
-    });
+    let bin = f.add_expr(IrExpr::primitive_bin_op(IrBinOp::Add, lhs, rhs));
     let mut kids = Vec::new();
     for_each_child(&f.exprs, bin, &mut |c| kids.push(c));
     assert_eq!(kids, vec![lhs, rhs]);

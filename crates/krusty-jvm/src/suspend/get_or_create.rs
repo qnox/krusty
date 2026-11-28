@@ -105,14 +105,7 @@ pub(super) fn build_get_or_create(
     let min_value = k(ir, IrExpr::Const(IrConst::Int(I32_MIN)));
     let masked = ir.add_arithmetic(IrBinOp::BitAnd, label, min_value, Ty::Int);
     let zero = k(ir, IrExpr::Const(IrConst::Int(0)));
-    let resume_bit_set = k(
-        ir,
-        IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Ne,
-            lhs: masked,
-            rhs: zero,
-        },
-    );
+    let resume_bit_set = k(ir, IrExpr::primitive_bin_op(IrBinOp::Ne, masked, zero));
 
     // `cont.label -= MIN_VALUE; cont`.
     let receiver = reused_value(ir);

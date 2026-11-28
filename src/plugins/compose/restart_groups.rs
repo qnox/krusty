@@ -1436,11 +1436,7 @@ fn update_scope(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableFu
     });
     let null = ir.add_expr(IrExpr::Const(IrConst::Null));
     let tested = ir.add_expr(IrExpr::GetValue(temporary));
-    let condition = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Eq,
-        lhs: tested,
-        rhs: null,
-    });
+    let condition = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, tested, null));
     let lambda = recompose_lambda(ir, runtime, facts);
     let update = runtime::call(ir, &runtime.update_scope, Some(receiver), vec![lambda]);
     let null_result = ir.add_expr(IrExpr::UnitInstance);

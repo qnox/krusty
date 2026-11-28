@@ -470,11 +470,7 @@ impl DeserializeBody<'_> {
             // `UnknownFieldException`, which krusty previously ignored in silence.
             let iref = ir.add_expr(IrExpr::GetValue(index_local));
             let neg1 = ir.add_expr(IrExpr::Const(IrConst::Int(-1)));
-            let is_done = ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: crate::ir::IrBinOp::Eq,
-                lhs: iref,
-                rhs: neg1,
-            });
+            let is_done = ir.add_expr(IrExpr::primitive_bin_op(crate::ir::IrBinOp::Eq, iref, neg1));
             let stop = ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
             let clear_flag = ir.add_expr(IrExpr::SetValue {
                 var: flag_local,
@@ -488,11 +484,7 @@ impl DeserializeBody<'_> {
             for (k, _) in fields.iter().enumerate() {
                 let iref = ir.add_expr(IrExpr::GetValue(index_local));
                 let kc = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
-                let is_k = ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: crate::ir::IrBinOp::Eq,
-                    lhs: iref,
-                    rhs: kc,
-                });
+                let is_k = ir.add_expr(IrExpr::primitive_bin_op(crate::ir::IrBinOp::Eq, iref, kc));
                 let setk_blk = elements.block(ir, ctx, k);
                 branches.push((Some(is_k), setk_blk));
             }

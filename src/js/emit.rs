@@ -655,7 +655,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 a.join(", ")
             )
         }
-        IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
+        IrExpr::PrimitiveBinOp { op, lhs, rhs, .. } => {
             let left = emit_expr(ir, *lhs, inst);
             let right = emit_expr(ir, *rhs, inst);
             let left_ty = ir.checked_type(*lhs);

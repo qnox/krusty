@@ -539,11 +539,11 @@ fn build_resume_with(ir: &mut IrFile, contract: ResumeContract) -> Result<u32, R
         },
     )));
     let value = ir.add_expr(IrExpr::GetValue(returned_index));
-    let pending = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: crate::ir::IrBinOp::RefEq,
-        lhs: value,
-        rhs: marker,
-    });
+    let pending = ir.add_expr(IrExpr::primitive_bin_op(
+        crate::ir::IrBinOp::RefEq,
+        value,
+        marker,
+    ));
     let pending_body = ir.add_expr(IrExpr::Block {
         stmts: Vec::new(),
         value: None,

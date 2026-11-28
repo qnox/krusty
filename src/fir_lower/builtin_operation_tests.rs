@@ -81,7 +81,8 @@ fn consuming_lowering_materializes_common_ir_roots() {
         IrExpr::PrimitiveBinOp {
             op: IrBinOp::Add,
             lhs: 2,
-            rhs: 3
+            rhs: 3,
+            ..
         }
     ));
     assert!(matches!(

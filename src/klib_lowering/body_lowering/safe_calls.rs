@@ -126,11 +126,9 @@ impl BodyLowering<'_> {
             .expect("the safe-call temporary was declared");
         let condition_read = self.ir.add_expr(IrExpr::GetValue(local.index));
         let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
-        let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Eq,
-            lhs: condition_read,
-            rhs: null,
-        });
+        let condition =
+            self.ir
+                .add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, condition_read, null));
         let null_result = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let proof = NullProvenRead::Value(symbol.clone());
         self.null_proven.insert(proof.clone());

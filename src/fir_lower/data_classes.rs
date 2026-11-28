@@ -494,11 +494,7 @@ fn field_hash(class: ClassId, field: &DataField, ir: &mut IrFile) -> ExprId {
         );
     }
     let null = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
-    let is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::RefEq,
-        lhs: value,
-        rhs: null,
-    });
+    let is_null = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::RefEq, value, null));
     let zero = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
     let non_null = read(ir);
     let hash = intrinsic(
@@ -573,11 +569,7 @@ fn synthesize_equals(
             field.ty,
             Ty::Int | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean | Ty::Long
         ) {
-            ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Eq,
-                lhs: left,
-                rhs: right,
-            })
+            ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, left, right))
         } else {
             intrinsic(
                 ir,

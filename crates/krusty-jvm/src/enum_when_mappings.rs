@@ -89,11 +89,7 @@ impl EnumWhenLowering {
             // `irIfNull(subject, -1, <mapping>[subject.ordinal()])`.
             let read = ir.add_expr(IrExpr::GetValue(subject_when.subject));
             let null = ir.add_expr(IrExpr::Const(IrConst::Null));
-            let is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Eq,
-                lhs: read,
-                rhs: null,
-            });
+            let is_null = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Eq, read, null));
             let absent = ir.add_expr(IrExpr::Const(IrConst::Int(-1)));
             let when = ir.add_expr(IrExpr::When {
                 branches: vec![(Some(is_null), absent), (None, mapped)],
@@ -198,10 +194,6 @@ impl EnumWhenLowering {
         ir.take_logical_type(lhs);
         ir.take_logical_type(rhs);
         // The checked enum equality is now a generated integer-key comparison.
-        ir.exprs[expression as usize] = IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Eq,
-            lhs,
-            rhs,
-        };
+        ir.exprs[expression as usize] = IrExpr::primitive_bin_op(IrBinOp::Eq, lhs, rhs);
     }
 }

@@ -433,11 +433,7 @@ pub(super) fn fills(
         let bit = ir.add_expr(IrExpr::Const(IrConst::Int(omission_bit(ordinal))));
         let masked = ir.add_arithmetic(IrBinOp::BitAnd, mask, bit, Ty::Int);
         let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-        let omitted = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Ne,
-            lhs: masked,
-            rhs: zero,
-        });
+        let omitted = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Ne, masked, zero));
         let fill = ir.add_expr(IrExpr::SetValue {
             var: u32::try_from(first + ordinal).expect("too many parameters"),
             value,

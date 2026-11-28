@@ -517,11 +517,7 @@ impl SerializeBody<'_> {
                         def
                     }
                 };
-                let neq = ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: crate::ir::IrBinOp::Ne,
-                    lhs: cur,
-                    rhs: def,
-                });
+                let neq = ir.add_expr(IrExpr::primitive_bin_op(crate::ir::IrBinOp::Ne, cur, def));
                 // SHORT-CIRCUIT, as kotlinc shapes it: ask the encoder first and answer
                 // `true` without reading the property at all, otherwise fall through to the
                 // comparison. `IrBinOp::Or` here is the EAGER form — it holds the left operand

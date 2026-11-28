@@ -23,11 +23,9 @@ impl BodyLowering<'_> {
         let length_receiver = self.char_sequence_receiver(indexing, receiver, receiver_ty)?;
         let length = self.member_property_read(&indexing.length, length_receiver)?;
         let index_read = self.ir.add_expr(IrExpr::GetValue(index));
-        let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Lt,
-            lhs: index_read,
-            rhs: length,
-        });
+        let condition = self
+            .ir
+            .add_expr(IrExpr::primitive_bin_op(IrBinOp::Lt, index_read, length));
         let get_receiver = self.char_sequence_receiver(indexing, receiver, receiver_ty)?;
         let index_read = self.ir.add_expr(IrExpr::GetValue(index));
         let element = self.loop_call(

@@ -127,11 +127,7 @@ pub(super) fn linearize_suspending_finally(
     });
     let pending_read = ir.add_expr(IrExpr::GetValue(pending));
     let null = ir.add_expr(IrExpr::Const(IrConst::Null));
-    let has_exception = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Ne,
-        lhs: pending_read,
-        rhs: null,
-    });
+    let has_exception = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Ne, pending_read, null));
     let exception = ir.add_expr(IrExpr::GetValue(pending));
     let throw = ir.add_expr(IrExpr::Throw { operand: exception });
     let throw_block = ir.add_expr(IrExpr::Block {
@@ -235,11 +231,7 @@ pub(super) fn linearize_finally_returns(ir: &mut IrFile, expression: ExprId, ret
     });
     let completion_read = ir.add_expr(IrExpr::GetValue(completion));
     let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-    let has_return = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Ne,
-        lhs: completion_read,
-        rhs: zero,
-    });
+    let has_return = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Ne, completion_read, zero));
     let return_value = ir.add_expr(IrExpr::GetValue(pending_value));
     let perform_return = ir.add_expr(IrExpr::Return(Some(return_value)));
     let return_block = ir.add_expr(IrExpr::Block {

@@ -138,11 +138,11 @@ pub(super) fn unbox_wrap_nullable(
     let null1 = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::Const(krusty::ir::IrConst::Null));
     let is_null = ir.exprs.len() as ExprId;
-    ir.exprs.push(IrExpr::PrimitiveBinOp {
-        op: krusty::ir::IrBinOp::Eq,
-        lhs: get_for_test,
-        rhs: null1,
-    });
+    ir.exprs.push(IrExpr::primitive_bin_op(
+        krusty::ir::IrBinOp::Eq,
+        get_for_test,
+        null1,
+    ));
     let null2 = ir.exprs.len() as ExprId;
     ir.exprs.push(IrExpr::Const(krusty::ir::IrConst::Null));
     let get_for_unbox = ir.exprs.len() as ExprId;

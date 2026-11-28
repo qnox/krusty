@@ -10,6 +10,7 @@ fn primitive_operands(ir: &IrFile, op: IrBinOp) -> Vec<(Option<Ty>, Option<Ty>)>
                 op: found,
                 lhs,
                 rhs,
+                ..
             } = expression
             else {
                 return None;

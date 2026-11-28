@@ -159,11 +159,11 @@ impl ValueClassBody<'_> {
         });
         let tested = ir.add_expr(IrExpr::GetValue(temporary));
         let null = ir.add_expr(IrExpr::Const(IrConst::Null));
-        let absent = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: crate::ir::IrBinOp::Eq,
-            lhs: tested,
-            rhs: null,
-        });
+        let absent = ir.add_expr(IrExpr::primitive_bin_op(
+            crate::ir::IrBinOp::Eq,
+            tested,
+            null,
+        ));
         let receiver = ir.add_expr(IrExpr::GetValue(temporary));
         let (method, method_descriptor, args, encoded_parameters) = match coding {
             Coding::Direct {

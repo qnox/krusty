@@ -224,6 +224,7 @@ impl Emitter<'_> {
                 op: IrBinOp::Sub,
                 lhs,
                 rhs,
+                ..
             } => match (self.ir.expr(receiver), self.ir.expr(*lhs)) {
                 (
                     IrExpr::GetValue(write_receiver),

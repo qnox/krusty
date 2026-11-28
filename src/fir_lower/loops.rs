@@ -460,11 +460,9 @@ impl BodyLowering<'_> {
                 });
                 let index_read = self.ir.add_expr(IrExpr::GetValue(index_slot));
                 let size_read = self.ir.add_expr(IrExpr::GetValue(size_slot));
-                let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::Lt,
-                    lhs: index_read,
-                    rhs: size_read,
-                });
+                let condition =
+                    self.ir
+                        .add_expr(IrExpr::primitive_bin_op(IrBinOp::Lt, index_read, size_read));
                 let receiver = self.ir.add_expr(self.ir.expr(receiver_leaf).clone());
                 let index_read = self.ir.add_expr(IrExpr::GetValue(index_slot));
                 let element = self.ir.add_expr(IrExpr::Call {

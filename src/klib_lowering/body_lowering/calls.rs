@@ -469,11 +469,9 @@ impl BodyLowering<'_> {
         let (lhs, rhs) = binary_operands(access, ty)?;
         let lhs = self.operand(lhs, relation.operand)?;
         let rhs = self.operand(rhs, relation.operand)?;
-        Ok(self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: relation.operator,
-            lhs,
-            rhs,
-        }))
+        Ok(self
+            .ir
+            .add_expr(IrExpr::primitive_bin_op(relation.operator, lhs, rhs)))
     }
 
     /// `==` (`EQEQ`, or `ieee754equals` on two floating-point operands) or `===` (`EQEQEQ`), or
@@ -500,7 +498,7 @@ impl BodyLowering<'_> {
         };
         match (operator, mode) {
             (BuiltinOperator::Identical, _) => {
-                Ok(self.ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs }))
+                Ok(self.ir.add_expr(IrExpr::primitive_bin_op(op, lhs, rhs)))
             }
             (BuiltinOperator::Equals, EqualityMode::Ieee754) => Err(mismatch(
                 "`EQEQ` compares two operands of one floating-point type",

@@ -133,18 +133,10 @@ fn an_arithmetic_node_without_a_recorded_result_is_an_incomplete_fact() {
     let mut ir = IrFile::default();
     let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
     let two = ir.add_expr(IrExpr::Const(IrConst::Long(2)));
-    ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Lt,
-        lhs: one,
-        rhs: two,
-    });
+    ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Lt, one, two));
     ir.add_arithmetic(IrBinOp::Add, one, two, Ty::Long);
     assert_eq!(ir.unrecorded_arithmetic_result(), None);
-    let unrecorded = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Sub,
-        lhs: one,
-        rhs: two,
-    });
+    let unrecorded = ir.add_expr(IrExpr::primitive_bin_op(IrBinOp::Sub, one, two));
     assert_eq!(ir.unrecorded_arithmetic_result(), Some(unrecorded));
     assert_eq!(
         ir.validate_complete_facts(crate::fir::SourceFileId::from_raw(0)),
