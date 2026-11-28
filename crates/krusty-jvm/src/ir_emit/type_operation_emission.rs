@@ -749,7 +749,11 @@ impl Emitter<'_> {
     /// `Object` slot, as kotlinc's cast consumes it: the cast names the only class, never the
     /// function type's result first. That result is a value class's box (`kotlin/UIntArray`),
     /// whose class a primitive-array value class's own JVM type (`[I`, its carrier) cannot name.
+    ///
+    /// A smart cast of the operand is kotlinc's implicit cast, which the cast materializes at its own
+    /// target: only the cast's `checkcast` is written.
     fn emit_cast_operand(&mut self, operand: ExprId, code: &mut CodeBuilder) -> (Ty, Ty) {
+        let operand = self.slot_operand(operand);
         let IrExpr::InvokeFunction { ret, .. } = *self.ir.expr(operand) else {
             return self.emit_type_op_operand(operand, code);
         };

@@ -109,7 +109,6 @@ boxingOptimization/safeCallWithElvisMultipleFiles.kt
 boxingOptimization/unsignedArrayForEach.kt
 bridges/delegationComplex.kt
 bridges/delegationComplexWithList.kt
-bridges/fakeCovariantOverride.kt
 bridges/fakeGenericCovariantOverride.kt
 bridges/fakeOverride/abstractFakeOverride.kt
 bridges/fakeOverride/fakeOverrideAbstractAndConcreteDeclarations.kt
@@ -569,7 +568,6 @@ coroutines/featureIntersection/tailrec/infixRecursiveCall.kt
 coroutines/featureIntersection/tailrec/kt38920_localTailrec.kt
 coroutines/featureIntersection/tailrec/realStringEscape.kt
 coroutines/featureIntersection/tailrec/whenWithIs.kt
-coroutines/functionReference_Function_SuspendFunction_casts.kt
 coroutines/functionReference_simple.kt
 coroutines/generate.kt
 coroutines/handleException.kt
@@ -1643,7 +1641,6 @@ multiplatform/k2/basic/nameBasedDestructuringShortForm.kt
 multiplatform/k2/basic/removeExpectDeclarationsFromMetadata.kt
 multiplatform/k2/basic/substitutionOverrideInCommonModule.kt
 multiplatform/k2/complexMatchings/expectCtorlessFinalToActualUnit.kt
-multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/constructor.kt
 multiplatform/k2/defaultArguments/delegatedExpectedInterface.kt
 multiplatform/k2/defaultArguments/dispatchReceiverValue.kt
@@ -1820,8 +1817,6 @@ ranges/forInFloatRangeWithCustomIterator.kt
 ranges/forInIndices/forInArrayListIndices.kt
 ranges/forInIndices/forNullableIntInArrayIndices.kt
 ranges/forInIndices/forNullableIntInCollectionIndices.kt
-ranges/forInIndices/kt13241_CharSequence.kt
-ranges/forInIndices/kt13241_Collection.kt
 ranges/forInIndices/kt43159_GenericArray.kt
 ranges/forInRangeLiteralWithMixedTypeBounds.kt
 ranges/forInUntil/forInUntilChar.kt
@@ -2216,7 +2211,6 @@ regressions/propertyReferenceIdentityAcrossModules.kt
 regressions/propertySmartCastKeepsDeclaredType.kt
 regressions/rangeEqualityThroughProgression.kt
 regressions/referenceArrayStoreEvaluatesValueBeforeBoundsCheck.kt
-regressions/runtimeArrayListInterfaceTests.kt
 regressions/safeCallLambdaImplicitLabel.kt
 regressions/samConvertedReference.kt
 regressions/scalarTypeTests.kt
