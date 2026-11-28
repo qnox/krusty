@@ -47908,10 +47908,12 @@ impl<'a> Checker<'a> {
                 signature,
                 specialized_params,
                 has_receiver,
-                result_constraint: if signature.ret.mentions_ty_param() {
-                    LambdaResultConstraint::Open
-                } else {
+                // A result that mentions only the enclosing declarations' own type parameters is
+                // as fixed as a concrete one; only a callee's open formal leaves it to inference.
+                result_constraint: if Self::type_is_lexically_fixed(scope, signature.ret) {
                     LambdaResultConstraint::Fixed(signature.ret)
+                } else {
+                    LambdaResultConstraint::Open
                 },
             },
             label,
