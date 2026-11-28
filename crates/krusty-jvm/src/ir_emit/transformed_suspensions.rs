@@ -46,6 +46,9 @@ pub(super) struct TransformedSuspensions {
     /// The body is kept for an inlining caller: no transformer runs over it, so the markers it
     /// keeps are written as the `InlineMarker` calls the class file holds.
     kept_for_inlining: bool,
+    /// The first invoke of an inline lambda parameter in a body kept for inlining: kotlinc marks
+    /// the start of every later one, `Unit`-returning or not, as a suspension point.
+    first_inlined_invoke: Option<ExprId>,
 }
 
 /// What a suspension point leaves on the stack after its invoke.
@@ -285,9 +288,17 @@ impl Emitter<'_> {
     /// kotlinc's codegen writes right before the invoke, after the arguments.
     pub(super) fn mark_call_start(&mut self, e: ExprId, code: &mut CodeBuilder) {
         self.mark_dispatch_line(e, code);
-        let Some(result) = self.transformed_result(e).filter(|_| self.is_marked(e)) else {
+        let Some(result) = self.transformed_result(e) else {
             return;
         };
+        if !self.is_marked(e) {
+            let later = self.transformed_suspensions.first_inlined_invoke != Some(e);
+            if later && result == Ty::Unit {
+                self.written_suspend_marker(SuspendMarker::BeforeInlineSuspend, code);
+                self.written_suspend_marker(SuspendMarker::BeforeSuspendUnitCall, code);
+            }
+            return;
+        }
         code.suspend_marker(SuspendMarker::BeforeSuspend as i32, self.cw);
         if result == Ty::Unit {
             code.suspend_marker(SuspendMarker::BeforeSuspendUnitCall as i32, self.cw);
@@ -332,6 +343,10 @@ impl Emitter<'_> {
                 self.unbox_on_resume(value_class, carrier, code);
             }
             code.inline_call_marker(false);
+        } else if self.transformed_suspensions.kept_for_inlining && result == Ty::Unit {
+            // The invoke of an inline lambda parameter returning `Unit` in a body kept for
+            // inlining: the lambda replaces it, and kotlinc marks where its result is on the stack.
+            self.written_suspend_marker(SuspendMarker::AfterInlineSuspend, code);
         }
         let block = self.is_transformed_block(e);
         if block {
@@ -429,6 +444,7 @@ impl Emitter<'_> {
             placed_lambda: false,
             inline_lambda_frames: None,
             kept_for_inlining: false,
+            first_inlined_invoke: None,
         };
         self.suspend_lambda_parameter_reads = machine
             .lambda
@@ -512,6 +528,7 @@ impl Emitter<'_> {
     /// Leave `calls`, points of the machine just armed, unmarked: the body is kept for inlining
     /// and they are invokes of inline lambda parameters.
     pub(super) fn leave_inlined_invokes_unmarked(&mut self, calls: Vec<ExprId>) {
+        self.transformed_suspensions.first_inlined_invoke = calls.first().copied();
         self.transformed_suspensions.inlined = calls.into_iter().collect();
         self.transformed_suspensions.kept_for_inlining = true;
     }
