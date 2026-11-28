@@ -18,7 +18,9 @@ use super::restart_groups::SLOTS_PER_INT;
 use super::runtime::ComposeRuntime;
 use super::{ComposeOptions, COMPOSABLE};
 
+mod call_values;
 mod inline_library_calls;
+use call_values::{argument_state, capture_kind, CallValues, CaptureKind};
 use inline_library_calls::LambdaPlacement;
 
 /// The Compose facts of one file.
@@ -608,6 +610,7 @@ refusal: true,
             package: &package,
             file_name: source.file_name,
             within: None,
+            class: None,
         };
         scope.register_lambdas(
             ir,
@@ -775,6 +778,7 @@ refusal: true,
             package: &package,
             file_name: source.file_name,
             within: None,
+            class: None,
         };
         scope.register_lambdas(
             ir,
@@ -791,6 +795,78 @@ refusal: true,
             rejections,
             &mut composable_lambdas,
         );
+    }
+    // A member of a top-level class that is not composable passes composable lambdas as a function
+    // of the file does (an activity's `onCreate` calls `setContent { Screen() }`).
+    for class in &ir.classes {
+        let simple = class.fq_name.nested_segment_ref();
+        if !class.is_source_declared
+            || class.is_local_class
+            || class.is_anonymous_object
+            || class.fq_name.nested_owner().is_some()
+        {
+            continue;
+        }
+        for &function in &class.methods {
+            if composable_functions.contains(&function) {
+                continue;
+            }
+            let declared = &ir.functions[function as usize];
+            let direct = function_body(ir, function)
+                .map(|body| body.statements)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|&statement| matches!(ir.exprs[statement as usize], IrExpr::Call { .. }))
+                .collect::<Vec<_>>();
+            let lambda_arguments = lambda_arguments(ir, source, &direct, composable);
+            if lambda_arguments.is_empty() {
+                continue;
+            }
+            answered_lambdas.extend(lambda_arguments.iter().map(|argument| argument.lambda));
+            let name = ir
+                .fn_source_names
+                .get(&function)
+                .cloned()
+                .unwrap_or_else(|| declared.name.clone());
+            // An extension receiver leads the physical parameters; the declared values follow it.
+            let receiver = usize::from(ir.extension_receiver_fns.contains(&function));
+            let signature = signature_string(
+                &name,
+                declared.params[..receiver].first().copied(),
+                declared.params[receiver..]
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &ty)| (ty, composable_arity(ir, function, index, composable))),
+                declared.ret,
+            );
+            let qualified = if package.is_empty() {
+                format!("{simple}.{name}")
+            } else {
+                format!("{package}.{simple}.{name}")
+            };
+            let path = KeyPath {
+                signature: &signature,
+                package: &package,
+                file_name: source.file_name,
+                within: None,
+                class: Some(simple),
+            };
+            scope.register_lambdas(
+                ir,
+                LambdaOwner {
+                    path: &path,
+                    qualified: &qualified,
+                    caller: function,
+                    caller_parameters: declared.params.len() as u32,
+                    direct: &direct,
+                    arguments: &lambda_arguments,
+                    composable: false,
+                },
+                &mut direct_calls,
+                rejections,
+                &mut composable_lambdas,
+            );
+        }
     }
     // A lambda passed to a rejected function constrains nothing the file still compiles.
     let constrained = targets
@@ -1712,23 +1788,15 @@ impl FunctionNames {
         } else {
             format!("{package}.{name}")
         };
-        let signature = format!(
-            "{}{name}({}){}",
-            declaration
-                .receiver
-                .map(|receiver| format!("{}.", simple_type_name(receiver)))
-                .unwrap_or_default(),
+        let signature = signature_string(
+            &name,
+            declaration.receiver,
             declaration
                 .params
                 .iter()
-                .zip(lambdas)
-                .map(|((_, ty), lambda)| match lambda {
-                    Some(arity) => format!("ComposableFunction{arity}"),
-                    None => simple_type_name(*ty),
-                })
-                .collect::<Vec<_>>()
-                .join(","),
-            simple_type_name(declaration.ret)
+                .map(|&(_, ty)| ty)
+                .zip(lambdas.iter().copied()),
+            declaration.ret,
         );
         FunctionNames {
             name,
@@ -1736,6 +1804,31 @@ impl FunctionNames {
             signature,
         }
     }
+}
+
+/// kotlinc's `signatureString` of a function named `name`: its extension receiver ahead of the
+/// name, then each value parameter (a composable function type spelled `ComposableFunction<arity>`)
+/// and the return type.
+fn signature_string(
+    name: &str,
+    receiver: Option<Ty>,
+    values: impl Iterator<Item = (Ty, Option<u32>)>,
+    ret: Ty,
+) -> String {
+    format!(
+        "{}{name}({}){}",
+        receiver
+            .map(|receiver| format!("{}.", simple_type_name(receiver)))
+            .unwrap_or_default(),
+        values
+            .map(|(ty, lambda)| match lambda {
+                Some(arity) => format!("ComposableFunction{arity}"),
+                None => simple_type_name(ty),
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        simple_type_name(ret)
+    )
 }
 
 /// The function whose body passes composable lambdas: its durable key path, qualified name and id.
@@ -2103,11 +2196,18 @@ impl BodyScope<'_> {
             .iter()
             .map(
                 |&capture| match (&ir.exprs[capture as usize], memoization) {
-                    (
-                        &IrExpr::GetValue(index),
-                        Memoization::Remembered { caller } | Memoization::Instance { caller },
-                    ) => index as usize >= ir.functions[caller as usize].params.len(),
-                    _ => false,
+                    // A composable caller's local is refused: kotlinc's state of it is not pinned.
+                    (&IrExpr::GetValue(index), Memoization::Remembered { caller }) => {
+                        if (index as usize) < ir.functions[caller as usize].params.len() {
+                            CaptureKind::Parameter
+                        } else {
+                            CaptureKind::Opaque
+                        }
+                    }
+                    (&IrExpr::GetValue(index), Memoization::Instance { caller }) => {
+                        capture_kind(ir, caller, index)
+                    }
+                    _ => CaptureKind::Parameter,
                 },
             )
             .collect::<Vec<_>>();
@@ -2185,6 +2285,7 @@ impl BodyScope<'_> {
             package: "",
             file_name: "",
             within: Some(&path),
+            class: None,
         };
         self.register_lambdas(
             ir,
@@ -2478,95 +2579,6 @@ fn lambda_parameters(
             })
         })
         .collect()
-}
-
-/// The values a body's composable calls read: a function's parameters, or a lambda's captures.
-#[derive(Clone, Copy)]
-enum CallValues<'a> {
-    /// A function with this many value parameters.
-    Parameters(u32),
-    /// A lambda's captures, each flagged when it captures a local variable, not a parameter, and
-    /// the number of values it is itself called with, which follow them.
-    Captures(&'a [bool], u32),
-}
-
-impl CallValues<'_> {
-    fn count(self) -> u32 {
-        match self {
-            CallValues::Parameters(count) => count,
-            CallValues::Captures(locals, parameters) => locals.len() as u32 + parameters,
-        }
-    }
-
-    /// The ordinal of the parameter value `index` is, whose state the body's `$dirty` bits hold: a
-    /// function's parameter, or a value its lambda is called with, which follows the captures.
-    fn tracked(self, index: u32) -> Option<u32> {
-        match self {
-            CallValues::Parameters(count) => (index < count).then_some(index),
-            CallValues::Captures(locals, parameters) => {
-                let captures = locals.len() as u32;
-                (captures..captures + parameters)
-                    .contains(&index)
-                    .then(|| index - captures)
-            }
-        }
-    }
-
-    /// Whether `expression` reads a captured local, whose static-ness kotlinc takes from the
-    /// local's declaration (a `val` with a static initializer is static).
-    fn reads_captured_local(self, ir: &IrFile, expression: ExprId) -> bool {
-        let CallValues::Captures(locals, _) = self else {
-            return false;
-        };
-        let mut pending = vec![expression];
-        while let Some(expression) = pending.pop() {
-            if let IrExpr::GetValue(index) = ir.exprs[expression as usize] {
-                if locals.get(index as usize) == Some(&true) {
-                    return true;
-                }
-            }
-            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-        }
-        false
-    }
-}
-
-/// kotlinc's `argumentMetaOf` for an argument of a call in a function with `parameters` value
-/// parameters, or `None` when its answer depends on more than krusty classifies yet.
-fn argument_state(ir: &IrFile, argument: ExprId, values: CallValues<'_>) -> Option<ArgumentState> {
-    match ir.exprs[argument as usize] {
-        IrExpr::Const(_) => Some(ArgumentState::Static),
-        // A captured value is not a parameter: its callee compares it itself.
-        IrExpr::GetValue(index) if index < values.count() => Some(
-            values
-                .tracked(index)
-                .map_or(ArgumentState::Uncertain, ArgumentState::Forwarded),
-        ),
-        _ => reads_parameter(ir, argument, values.count()).then_some(ArgumentState::Uncertain),
-    }
-}
-
-/// Whether `expression` is an operation over a value parameter. `isStatic` asks every operand of
-/// a call, an operator or a conversion to be static, and a parameter never is, so such an
-/// expression is never static whatever the operation.
-fn reads_parameter(ir: &IrFile, expression: ExprId, parameters: u32) -> bool {
-    match &ir.exprs[expression as usize] {
-        IrExpr::GetValue(index) => *index < parameters,
-        IrExpr::Call { .. }
-        | IrExpr::MethodCall { .. }
-        | IrExpr::PrimitiveBinOp { .. }
-        | IrExpr::PrimitiveNeg { .. }
-        | IrExpr::Equality { .. }
-        | IrExpr::StringConcat(_)
-        | IrExpr::TypeOp { .. } => {
-            let mut reads = false;
-            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                reads |= reads_parameter(ir, child, parameters);
-            });
-            reads
-        }
-        _ => false,
-    }
 }
 
 /// A function's source block and its statements, the value-less last expression included.

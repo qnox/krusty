@@ -71,6 +71,14 @@ pub(super) fn memoize(
             &lambda.parameter_types(),
         ));
         declaration.methods.push(lambda.implementation);
+        // A lambda a class's member wrote was lifted into that class, which no longer holds it.
+        for (id, other) in ir.classes.iter_mut().enumerate() {
+            if id as u32 != class_id {
+                other
+                    .methods
+                    .retain(|&method| method != lambda.implementation);
+            }
+        }
         read_from_singletons(ir, lambda, singletons, &name);
         let (written, _) = &ir.lifted_functions[&lambda.implementation];
         let sequence = IrLiftingSequence {

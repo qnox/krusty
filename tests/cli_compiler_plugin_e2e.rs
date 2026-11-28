@@ -699,10 +699,10 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         2,
     );
     assert_compose_rejects(
-        "compose-plain-method-lambda",
-        "fun keep(content: @Composable () -> Unit) {}\nclass C {\nfun f() {\nkeep {}\n}\n}\n",
+        "compose-plain-nested-class-method-lambda",
+        "fun keep(content: @Composable () -> Unit) {}\nclass C {\nclass D {\nfun f() {\nkeep {}\n}\n}\n}\n",
         &[],
-        "6:6: error: krusty's Compose compiler plugin does not support a composable lambda passed other \
+        "7:6: error: krusty's Compose compiler plugin does not support a composable lambda passed other \
          than by a statement of a function body yet",
         2,
     );
