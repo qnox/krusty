@@ -233,7 +233,6 @@ module=6:kotlin public package=2[6:kotlin,6:native] declaration=2[8:ObjCName,6:<
 module=6:kotlin public package=2[6:kotlin,6:native] declaration=3[8:ObjCEnum,9:EntryName,6:<init>] member=9140439783797628932 mask=1
 module=6:kotlin public package=2[6:kotlin,6:random] declaration=2[6:Random,8:nextBits] member=15623850409624483333 mask=0
 module=6:kotlin public package=2[6:kotlin,6:ranges] declaration=2[24:ClosedFloatingPointRange,16:lessThanOrEquals] member=2191610329992210670 mask=0
-module=6:kotlin public package=2[6:kotlin,7:reflect] declaration=2[6:KClass,10:isInstance] member=2325648755598100529 mask=0
 module=6:kotlin public package=2[6:kotlin,7:reflect] declaration=2[6:KClass,6:equals] member=4638265728071529943 mask=0
 module=6:kotlin public package=2[6:kotlin,7:reflect] declaration=2[6:KClass,8:hashCode] member=3409210261493131192 mask=0
 module=6:kotlin public package=2[6:kotlin,9:contracts] declaration=2[12:SimpleEffect,7:implies] member=12623418141033720606 mask=0
