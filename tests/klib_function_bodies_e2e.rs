@@ -25,6 +25,8 @@ const LAMBDAS: &str = include_str!("box_regressions/multimodule/libraryLambdaBod
 const VARARGS: &str = include_str!("box_regressions/multimodule/libraryVarargBodies.kt");
 const INLINE_FUNCTIONS: &str =
     include_str!("box_regressions/multimodule/libraryInlineFunctionBodies.kt");
+const INLINE_MEMBERS: &str =
+    include_str!("box_regressions/multimodule/publicInlineMemberNonLocalReturnAcrossModules.kt");
 const REIFIED_INLINE_FUNCTIONS: &str =
     include_str!("box_regressions/multimodule/multimoduleReifiedCallableOrigins.kt");
 
@@ -447,6 +449,32 @@ fn kotlinc_reads_krusty_written_inline_copies_of_every_parameter_kind() {
     assert_eq!(
         dump_inlinable(&native_root, &krusty_library),
         dump_inlinable(&native_root, &kotlinc_library),
+    );
+    std::fs::remove_dir_all(work).expect("remove the dump directory");
+}
+
+#[test]
+fn kotlinc_native_inlines_krusty_written_public_inline_members() {
+    kotlinc_native_runs(INLINE_MEMBERS, "inline-members");
+}
+
+/// A class's public inline members are written with the prepared copies kotlinc-native writes,
+/// including a receiver lambda that returns non-locally with a value and with Unit.
+#[test]
+fn kotlinc_reads_krusty_written_inline_members_as_it_writes_them() {
+    let native_root = kotlin_native_root();
+    let (library_source, _) = program_sources(INLINE_MEMBERS);
+    let work = scratch("krusty-inline-members-dump");
+    let krusty_library = write_library(&work, &library_source);
+    let kotlinc_library = kotlinc_library(&native_root, &work, &library_source);
+    let implicit = |dump: String| dump.replace("origin=IMPLICIT_ARGUMENT", "origin=null");
+    assert_eq!(
+        dump_inlinable(&native_root, &krusty_library),
+        implicit(dump_inlinable(&native_root, &kotlinc_library)),
+    );
+    assert_eq!(
+        dump_ir(&native_root, &krusty_library),
+        implicit(dump_ir(&native_root, &kotlinc_library)),
     );
     std::fs::remove_dir_all(work).expect("remove the dump directory");
 }

@@ -2150,3 +2150,13 @@ fn wasm_links_a_library_s_inline_function_bodies_from_its_klib() {
         "wasmLibraryInlineFunctionBodies",
     );
 }
+
+#[test]
+fn wasm_links_a_library_s_public_inline_members_from_its_klib() {
+    expect_wasm_klib_route(
+        include_str!(
+            "box_regressions/multimodule/publicInlineMemberNonLocalReturnAcrossModules.kt"
+        ),
+        "wasmPublicInlineMemberNonLocalReturn",
+    );
+}

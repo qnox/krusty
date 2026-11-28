@@ -1,6 +1,6 @@
 //! A public inline member of a library class built by kotlinc, called from krusty-compiled code.
-//! The portable program is `tests/box_regressions/publicInlineMemberAcrossModules.kt`; its
-//! non-local returns join it once KLIB inline bodies are serialized.
+//! The portable programs are `tests/box_regressions/publicInlineMemberAcrossModules.kt` and
+//! `tests/box_regressions/multimodule/publicInlineMemberNonLocalReturnAcrossModules.kt`.
 //!
 //! PLATFORM-SPECIFIC: these cases pin JVM facts the shared program cannot: a library compiled by
 //! kotlinc to class files (with `java.io.Closeable`), and the synthetic accessor through which a
