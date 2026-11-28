@@ -314,8 +314,9 @@ pub(super) fn apply(
                 "indy" => LambdaMode::Indy,
                 "class" => LambdaMode::Class,
                 _ => {
+                    // kotlinc's words, including the stray dot that begins its second line.
                     opts.errors.push(format!(
-                        "{name}={text} selects an output shape krusty does not emit"
+                        "unknown `{name}` argument: {text}\n.Supported arguments: class, indy"
                     ));
                     return;
                 }

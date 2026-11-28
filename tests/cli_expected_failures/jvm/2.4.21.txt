@@ -10,8 +10,6 @@ XeagerLambdaAnalysis/executorSubmitDefault.args
 XeagerLambdaAnalysis/executorSubmitEnabled.args
 XeagerLambdaAnalysis/unitConversionWithEla.args
 XjdkRelease/jdkRelease6WithJvmTarget8Jdk11.args
-XjdkRelease/jdkRelease6WithJvmTarget9.args
-XjdkRelease/jdkRelease6WithoutExplicitJvmTarget.args
 XjdkRelease/jdkRelease7WithJvmTarget8Jdk11.args
 XjspecifyAnnotation/jspecifyDefault.args
 XjspecifyAnnotation/jspecifyFileRootsProgressive.args
@@ -54,13 +52,10 @@ annotationDefaultTargetWithOptInFirstOnly.args
 annotationDefaultTargetWithOptInParamProperty.args
 annotationDefaultTargetWithSuppressedOptInFirstOnly.args
 annotationDefaultTargetWithSuppressedOptInParamProperty.args
-apiAndLanguageVersionsUnsupported.args
 apiVersion/apiVersionAndSinceNewerKotlin.args
 apiVersion/apiVersionGreaterThanLanguage.args
 apiVersion/apiVersionGreaterThanLanguageSuppress.args
 apiVersion/apiVersionGreaterThanLanguageSuppressUseless.args
-apiVersion/apiVersionInvalid.args
-apiVersion/apiVersionUnsupported.args
 argFileCommonChecks/argfileWithEmptyArgument.args
 argFileCommonChecks/argfileWithUnfinishedQuoteAndEscape.args
 argumentPassedMultipleTimes.args
@@ -109,8 +104,6 @@ errorSuppressionWarning.args
 experimentalCheckers.args
 explicitContextArguments.args
 expression1.args
-extraArgCommonChecks/extraArgumentEmpty.args
-extraArgCommonChecks/extraArgumentInvalidValue.args
 extraArgCommonChecks/extraArgumentMultiple.args
 extraArgCommonChecks/extraArgumentPassedInObsoleteForm.args
 extraArgCommonChecks/extraBooleanArgOverrideReversed.args
@@ -145,7 +138,6 @@ jdkHome/invalidMultipleJdkHome.args
 jdkHome/jdkPathDoesNotExist.args
 jdkHome/warningJdkWithNoJdk.args
 jdkHome/wrongJdkPath.args
-jvm6Target.args
 jvmDefaultIncorrectValue.args
 jvmDefaultIncorrectValueOld.args
 jvmRecordWrongTarget.args
@@ -153,15 +145,11 @@ k2SimpleMultiplatformGenericClass.args
 kmpDifferentAnnotationsSuppressed.args
 kmpMissingActual.args
 kotlinHomeWithoutStdlib.args
-kt48833_doNotSuppressVersionErrors.args
 kt51846_backendThreadsValidation1.args
 kt51846_backendThreadsValidation2.args
 kt51846_backendThreadsValidation3.args
-languageVersion/deprecatedLanguageUnsupportedApi.args
 languageVersion/deprecatedLanguageVersion.args
 languageVersion/languageVersion.args
-languageVersion/languageVersionInvalid.args
-languageVersion/languageVersionUnsupported.args
 legacySmartCastsAfterTry.args
 localTypeAliasesEnabled.args
 localTypeAliasesError.args
@@ -225,7 +213,6 @@ syntheticAccessorForPropertiesSignatureClash.args
 syntheticAccessorPropertyAndFunSignatureClash.args
 syntheticAccessorSignatureClash.args
 twoDiagnosticsOnSingleElement.args
-unknownReleaseVersion.args
 version.args
 warningLevels_correct.args
 warningLevels_duplicated.args
@@ -235,7 +222,6 @@ werrorWithExplicitError.args
 werrorWithNoWarn.args
 werrorWithStrongWarning.args
 wrongAbiVersion.args
-wrongJvmTargetVersion.args
 wrongScriptWithDirectory.args
 wrongScriptWithKtSource.args
 wrongScriptWithNoSource.args

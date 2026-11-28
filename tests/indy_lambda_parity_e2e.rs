@@ -241,7 +241,7 @@ fn indy_rejects_a_pre_java_8_target_in_kotlincs_words() {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "");
     assert_eq!(
         String::from_utf8_lossy(&result.stderr),
-        reference_stderr.replace("error: ", "krusty: error: "),
+        reference_stderr,
         "the rejection differs from kotlinc's"
     );
     let emitted = output.exists()
