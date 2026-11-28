@@ -6271,7 +6271,7 @@ fun conditional(r: Runtime?, flag: Boolean) = run {
         vec![
             (
                 0,
-                crate::diag::Span::new(124, 131),
+                crate::diag::Span::new(124, 125),
                 None,
                 crate::diag::Severity::Error,
                 crate::diag::DiagnosticKind::Compiler,
