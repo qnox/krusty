@@ -15,7 +15,8 @@
 use super::wire::{message, unique_bytes, unique_varint};
 use super::KlibIrDecodeError;
 use crate::metadata::id_signature::{
-    decode_public_id_signature, KlibAccessorIdSignature, KlibPublicIdSignature,
+    decode_public_id_signature, KlibAccessorIdSignature, KlibDeclarationSignature,
+    KlibPublicIdSignature,
 };
 
 const ENTRY: &str = "signatures.knt";
@@ -107,9 +108,10 @@ pub(super) struct SignatureTable<'a> {
     decoded: Vec<Option<KlibIrSignature>>,
     prepared_inline: bool,
     origins: std::collections::HashMap<KlibIrSignature, KlibFileLocalOrigin>,
-    /// The public identity inside each file-local `Composite(File, Public)` signature decoded so
-    /// far, by the file-local signature it decodes to.
-    file_private: std::collections::HashMap<KlibIrSignature, KlibPublicIdSignature>,
+    /// The public or accessor identity inside each file-local `Composite(File, Public)` or
+    /// `Composite(File, Accessor)` signature decoded so far, by the file-local signature it
+    /// decodes to.
+    file_private: std::collections::HashMap<KlibIrSignature, KlibDeclarationSignature>,
     /// The slot the next decoder-synthesized local declaration takes, counting down from the top
     /// of the slot space so it never meets a serialized slot.
     synthetic: u32,
@@ -175,7 +177,7 @@ impl<'a> SignatureTable<'a> {
     /// ([`KlibIrModuleTrees::file_private_identity`](super::KlibIrModuleTrees)).
     pub(super) fn take_file_private_identities(
         &mut self,
-    ) -> std::collections::HashMap<KlibIrSignature, KlibPublicIdSignature> {
+    ) -> std::collections::HashMap<KlibIrSignature, KlibDeclarationSignature> {
         std::mem::take(&mut self.file_private)
     }
 
@@ -260,16 +262,17 @@ impl<'a> SignatureTable<'a> {
         }
         // kotlinc gives a declaration private to its file, and a member of a class private to its
         // file, a `Composite(File, Public)` signature: the public identity it would have, scoped
-        // to its file. Kotlin 2.4's prepared-inline component gives its private copied function
-        // the same shape. Project the exact inner identity only for references inside that
-        // component; `irDeclarations.knd` independently carries the original public declaration
-        // key used across components. In ordinary IR the declaration stays file-local, and its
-        // inner identity is kept beside it: a fake override of a file-private class, which no
-        // declaration defines, is linked by it to the member it inherits. Neither path
-        // reconstructs an identity from a spelling.
+        // to its file. A property accessor of such a class is `Composite(File, Accessor)`, the
+        // accessor identity it would have. Kotlin 2.4's prepared-inline component gives its
+        // private copied function the same shape. Project the exact inner public identity only
+        // for references inside that component; `irDeclarations.knd` independently carries the
+        // original public declaration key used across components. In ordinary IR the declaration
+        // stays file-local, and its inner identity is kept beside it: a fake override of a
+        // file-private class, which no declaration defines, is linked by it to the member it
+        // inherits. Neither path reconstructs an identity from a spelling.
         let inner = self.file_composite_identity(&fields, slot)?;
         if self.prepared_inline {
-            if let Some(public) = inner {
+            if let Some(KlibDeclarationSignature::Public(public)) = inner {
                 return Ok(KlibIrSignature::Public(public));
             }
         }
@@ -305,12 +308,13 @@ impl<'a> SignatureTable<'a> {
         Ok(local)
     }
 
-    /// The public identity a `Composite(File, Public)` signature scopes to its file.
+    /// The public or accessor identity a `Composite(File, Public)` or `Composite(File, Accessor)`
+    /// signature scopes to its file.
     fn file_composite_identity(
-        &self,
+        &mut self,
         fields: &[super::wire::WireField<'_>],
         slot: usize,
-    ) -> Result<Option<KlibPublicIdSignature>, KlibIrDecodeError> {
+    ) -> Result<Option<KlibDeclarationSignature>, KlibIrDecodeError> {
         let Some(composite) = unique_bytes(fields, 5, "composite signature", ENTRY)? else {
             return Ok(None);
         };
@@ -330,7 +334,21 @@ impl<'a> SignatureTable<'a> {
         if !self.is_file_signature(container)? {
             return Ok(None);
         }
-        self.direct_public_signature(inner)
+        // The inner signature never contains the composite: it is a public or accessor identity.
+        if inner == slot {
+            return Err(KlibIrDecodeError::malformed(
+                ENTRY,
+                composite_offset,
+                format!("composite signature {slot} contains itself"),
+            ));
+        }
+        Ok(match self.signature(inner)? {
+            KlibIrSignature::Public(public) => Some(KlibDeclarationSignature::Public(public)),
+            KlibIrSignature::Accessor(accessor) => {
+                Some(KlibDeclarationSignature::Accessor(accessor))
+            }
+            KlibIrSignature::FileLocal { .. } | KlibIrSignature::TypeParameter { .. } => None,
+        })
     }
 
     /// `Composite(Public(owner), Local(<TP>, index))`, the identity Kotlin gives the type
@@ -622,7 +640,11 @@ mod tests {
         // the composite in another container scopes no public identity to a file.
         let identities = table.take_file_private_identities();
         assert_eq!(identities.len(), 1);
-        let identity = &identities[&KlibIrSignature::FileLocal { file: 7, slot: 3 }];
+        let KlibDeclarationSignature::Public(identity) =
+            &identities[&KlibIrSignature::FileLocal { file: 7, slot: 3 }]
+        else {
+            panic!("the file composite scopes a public identity");
+        };
         assert_eq!(identity.package().segments(), ["fixture"]);
         assert_eq!(identity.declaration().segments(), ["probe"]);
         assert_eq!(identity.member_id(), Some(0x14ab_8f30_859f_59a9));

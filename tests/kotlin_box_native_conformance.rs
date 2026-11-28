@@ -623,6 +623,19 @@ fn native_official_dependency_lambda_over_file_private_class_runs() {
     );
 }
 
+// PLATFORM-SPECIFIC: official Kotlin/Native KLIB production and linking, as above. The complete
+// portable Kotlin input is the shared multi-module regression.
+//
+/// A library body reads and writes a property a class private to its file inherits: the
+/// accessors link to the inherited property's.
+#[test]
+fn native_official_dependency_file_private_class_inherited_property_runs() {
+    run_native_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyFilePrivateClassInheritedProperty.kt"),
+        "dependencyFilePrivateClassInheritedProperty",
+    );
+}
+
 /// Run the shared two-module program's consumer against the library the pinned kotlinc-native
 /// produces, after kotlinc has established the program's result.
 fn run_native_against_official_producer(source: &str, stem: &str) {

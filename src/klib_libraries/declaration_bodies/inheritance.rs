@@ -392,7 +392,9 @@ impl KlibDeclarationBodies {
     /// that owns it and the member's public identity in that class: the one class serializing the
     /// member's owner, or, for a fake override of a class private to its file, that class. kotlinc
     /// names such a fake override `Composite(File, Public)` with the public identity it would have
-    /// in a public class, so its member id is the one of the member it inherits.
+    /// in a public class, so its member id is the one of the member it inherits; a fake override
+    /// of a property accessor is `Composite(File, Accessor)` with the accessor identity it would
+    /// have.
     fn member_class(
         &self,
         body_module: &str,
@@ -418,18 +420,19 @@ impl KlibDeclarationBodies {
         let Some(member) = library.file_private_identity(&signature) else {
             return Ok(None);
         };
-        let Some(owner) = member.owner_path().filter(|_| member.member_id().is_some()) else {
+        // A member function names its class through its own identity; an accessor through its
+        // property's.
+        let owner = match member {
+            KlibDeclarationSignature::Public(function) => function,
+            KlibDeclarationSignature::Accessor(accessor) => accessor.property(),
+            KlibDeclarationSignature::FileLocal { .. } => return Ok(None),
+        };
+        let Some(owner) = owner.owner_path().filter(|_| owner.member_id().is_some()) else {
             return Ok(None);
         };
         Ok(library
             .file_private_class_at(*file, &owner)
-            .map(|(arena, class)| {
-                (
-                    arena,
-                    class,
-                    KlibDeclarationSignature::Public(member.clone()),
-                )
-            }))
+            .map(|(arena, class)| (arena, class, member.clone())))
     }
 
     /// The one class in the producer graph rooted at `body_module` that declares `member`.
