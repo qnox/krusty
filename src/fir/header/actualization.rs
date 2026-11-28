@@ -97,6 +97,20 @@ pub struct ActualizationTypeBindings {
     /// Per source classifier, the members its dependency supertypes declare.
     inherited_dependency_members:
         crate::fx_hash::HashMap<DeclarationId, Vec<InheritedDependencyMember>>,
+    /// The `actual typealias`es whose dependency target's member scope was published, even when it
+    /// holds none of the names asked for. A target with type arguments, or one that did not
+    /// resolve, publishes nothing, and an alias without a published scope proves no member
+    /// missing.
+    dependency_scopes: crate::fx_hash::HashSet<DeclarationId>,
+    /// Per such alias, the members of its target the resolver found but could not project into a
+    /// record (a Java accessor property, or a generic or `vararg` member), by
+    /// kind and name. Their presence leaves a same-named `expect` member unproven.
+    unprojected_members:
+        crate::fx_hash::HashMap<DeclarationId, crate::fx_hash::HashSet<(DeclarationKind, String)>>,
+    /// Per such alias, the classifiers of this module among its target's supertypes, whose
+    /// headers belong to the alias's member scope.
+    dependency_target_source_supertypes:
+        crate::fx_hash::HashMap<DeclarationId, Vec<crate::types::TypeName>>,
 }
 
 impl ActualizationTypeBindings {
@@ -115,6 +129,39 @@ impl ActualizationTypeBindings {
         classifier: crate::types::TypeName,
     ) {
         self.by_declaration.insert(declaration, classifier);
+    }
+
+    pub(crate) fn publish_dependency_scope(&mut self, alias: DeclarationId) {
+        self.dependency_scopes.insert(alias);
+    }
+
+    pub(crate) fn bind_unprojected_member(
+        &mut self,
+        alias: DeclarationId,
+        kind: DeclarationKind,
+        name: String,
+    ) {
+        self.unprojected_members
+            .entry(alias)
+            .or_default()
+            .insert((kind, name));
+    }
+
+    fn unprojected_member(&self, alias: DeclarationId, kind: DeclarationKind, name: &str) -> bool {
+        self.unprojected_members
+            .get(&alias)
+            .is_some_and(|members| members.contains(&(kind, name.to_owned())))
+    }
+
+    pub(crate) fn bind_dependency_target_source_supertypes(
+        &mut self,
+        alias: DeclarationId,
+        supertypes: Vec<crate::types::TypeName>,
+    ) {
+        if !supertypes.is_empty() {
+            self.dependency_target_source_supertypes
+                .insert(alias, supertypes);
+        }
     }
 
     pub(crate) fn bind_inherited_dependency_members(
@@ -178,6 +225,44 @@ fn actual_member_owners(
         }
         ordinary
     };
+    // An `actual typealias` has no members of its own: its member scope is its target's. A target
+    // declared in this module contributes its headers; a dependency or Java target has none, so
+    // the resolver publishes its selected members under the alias itself.
+    if let Some(HeaderDeclarationKind::TypeAlias { target, .. }) =
+        headers.syntax.declaration(actual).map(|value| value.kind)
+    {
+        let source = headers
+            .declarations
+            .anchor(actual)
+            .map(|anchor| anchor.source);
+        return match source
+            .and_then(|source| bindings.type_classifier(source, target))
+            .and_then(implementation_classifier)
+        {
+            Some(class) => actual_member_owners(headers, bindings, class),
+            // A dependency or Java target can extend classifiers of this module, whose members
+            // are part of its scope and have headers of their own.
+            None => {
+                let mut owners = vec![actual];
+                for supertype in bindings
+                    .dependency_target_source_supertypes
+                    .get(&actual)
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(class) = implementation_classifier(*supertype) else {
+                        continue;
+                    };
+                    for owner in actual_member_owners(headers, bindings, class) {
+                        if !owners.contains(&owner) {
+                            owners.push(owner);
+                        }
+                    }
+                }
+                owners
+            }
+        };
+    }
     let mut owners = vec![actual];
     let mut next = 0;
     while next < owners.len() {
@@ -1163,11 +1248,18 @@ pub fn actualization(
         bindings: &ActualizationTypeBindings,
         actualized_aliases: &[ActualizedAlias],
     ) -> Option<(DeclarationKind, String, ReceiverKey, usize)> {
-        let name = stub
-            .lookup_name
-            .and_then(|name| headers.lookup_names.get(name))
-            .unwrap_or_default()
-            .to_string();
+        // A nested classifier's lookup path runs through its owner (`Outer.Nested`), and an owner
+        // an `actual typealias` stands for is spelled differently on the two sides (`Outer`,
+        // `OuterImpl`). Within one owner's children a classifier is identified by its own
+        // declared name.
+        let name = if stub.kind == DeclarationKind::Classifier {
+            headers.classifier_source_spelling(stub.id)?
+        } else {
+            stub.lookup_name
+                .and_then(|name| headers.lookup_names.get(name))
+                .unwrap_or_default()
+        }
+        .to_string();
         // The receiver a member extension declares, as the CLASSIFIER it identifies. The two sides
         // of a pair may write it differently — one imports it, the other qualifies it, and an
         // `expect class` actualized by a `typealias` is written as the alias's target on the
@@ -1272,6 +1364,49 @@ pub fn actualization(
                 visible.extend(inherited);
             }
         }
+        // An `actual typealias` answers from its target's member scope. For a dependency class
+        // that is what the provider publishes, which is not everything the class declares: a
+        // dependency's `internal` members are not published, and the members the compiler
+        // generates for a class of its kind (`equals`/`hashCode`/`toString` of a data or value
+        // class) are members every such class has. Neither is evidence that the class lacks the
+        // member, so neither is owed, and an alias whose scope was not published owes nothing.
+        // kotlinc does not match an enum class's constructors at all: an enum's constructors are
+        // private to it.
+        let alias_owners = actual_member_owners(headers, bindings, pair.actual)
+            .into_iter()
+            .filter(|owner| {
+                headers
+                    .stub(*owner)
+                    .is_some_and(|stub| stub.kind == DeclarationKind::TypeAlias)
+            })
+            .collect::<Vec<_>>();
+        let dependency_alias_target = !alias_owners.is_empty();
+        let unpublished_scope = alias_owners
+            .iter()
+            .any(|alias| !bindings.dependency_scopes.contains(alias));
+        // The record states functions, properties and constructors; an enum entry or a nested
+        // classifier of a dependency target is not in it, so its absence proves nothing.
+        let expect_is_enum = headers
+            .stub(pair.expect)
+            .is_some_and(|stub| stub.flags.has(DeclarationFlags::ENUM));
+        let owes = |child: &DeclarationStub| {
+            !(unpublished_scope
+                || dependency_alias_target
+                    && (child
+                        .flags
+                        .has(crate::fir::DeclarationFlags::GENERATED_STRUCTURAL_MEMBER)
+                        || child
+                            .flags
+                            .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
+                        || child.kind == DeclarationKind::Constructor && expect_is_enum
+                        || child.visibility == crate::types::Visibility::Internal
+                        || !matches!(
+                            child.kind,
+                            DeclarationKind::Function
+                                | DeclarationKind::Property
+                                | DeclarationKind::Constructor
+                        )))
+        };
         let mut owed = Vec::new();
         for child in expect_children {
             let Some(key) = child_key(headers, child, bindings, &actualized_aliases) else {
@@ -1280,20 +1415,34 @@ pub fn actualization(
             // A source member nearer than a dependency supertype hides an inherited one only when
             // it implements the `expect` member itself, so the dependency candidates are
             // consulted whenever no source member does, not only when no source bucket exists.
+            // An alias's dependency target proves a member missing only from evidence the record
+            // states in full: a candidate it cannot compare, or one the resolver could not
+            // project, leaves the member unproven rather than owed.
             let discharged_by_dependency = || {
-                dependency_members::implementations(
+                let owners = actual_member_owners(headers, bindings, pair.actual);
+                match dependency_members::implementations(
                     headers,
                     bindings,
+                    &actualized_aliases,
                     child,
                     &key.1,
-                    actual_member_owners(headers, bindings, pair.actual)
-                        .into_iter()
-                        .filter_map(|owner| bindings.inherited_dependency_members.get(&owner))
+                    owners
+                        .iter()
+                        .filter_map(|owner| bindings.inherited_dependency_members.get(owner))
                         .flatten(),
-                ) == 1
+                ) {
+                    dependency_members::Discharge::Implemented => true,
+                    dependency_members::Discharge::Unprovable => dependency_alias_target,
+                    dependency_members::Discharge::Owed => {
+                        dependency_alias_target
+                            && alias_owners.iter().any(|alias| {
+                                bindings.unprojected_member(*alias, child.kind, &key.1)
+                            })
+                    }
+                }
             };
             let Some(candidates) = actual_children.get(&key) else {
-                if !discharged_by_dependency() {
+                if !discharged_by_dependency() && owes(child) {
                     owed.push(child.id);
                 }
                 continue;
@@ -1327,7 +1476,7 @@ pub fn actualization(
                     TypeParameterScope::Positional,
                 ) {
                     incompatible_members.insert(renamed);
-                } else if !discharged_by_dependency() {
+                } else if !discharged_by_dependency() && owes(child) {
                     owed.push(child.id);
                 }
                 continue;
@@ -1785,6 +1934,9 @@ mod tests {
             parameters: parameters.into(),
             result,
             mutable: false,
+            operator: false,
+            infix: false,
+            inline: false,
         }
     }
 
@@ -1799,6 +1951,9 @@ mod tests {
             parameters: Box::default(),
             result,
             mutable,
+            operator: false,
+            infix: false,
+            inline: false,
         }
     }
 
@@ -1886,5 +2041,28 @@ mod tests {
             vec![inherited_function("ping", &[], crate::types::Ty::Unit)]
         });
         assert_eq!(owed, 1);
+    }
+
+    /// kotlinc requires an implementation to state the `operator`, `infix` and `inline` its `expect`
+    /// member states, and lets it state more: the rule is a subset, not an agreement.
+    #[test]
+    fn an_inherited_member_states_at_least_the_expect_members_function_modifiers() {
+        let stating = |token: crate::types::Ty| InheritedDependencyMember {
+            operator: true,
+            infix: true,
+            inline: true,
+            ..inherited_function("plus", &[token], token)
+        };
+        let plain = |token: crate::types::Ty| inherited_function("plus", &[token], token);
+        for modifier in ["operator", "infix", "inline"] {
+            let expect = format!("{modifier} fun plus(other: Token): Token");
+            let matched = owed_with_inherited(&expect, |token, _| vec![stating(token)]);
+            let actual_lacks = owed_with_inherited(&expect, |token, _| vec![plain(token)]);
+            assert_eq!((matched, actual_lacks), (0, 1), "{modifier}");
+        }
+        let expect_lacks = owed_with_inherited("fun plus(other: Token): Token", |token, _| {
+            vec![stating(token)]
+        });
+        assert_eq!(expect_lacks, 0);
     }
 }

@@ -1757,3 +1757,297 @@ fn a_complete_nested_header_path_outranks_the_imported_type() {
     );
     assert_eq!(krusty, reference, "file, line, column, and message agree");
 }
+
+/// An `expect class` actualized by a `typealias` owes its members to the alias's TARGET, whichever
+/// side of the module boundary that class is on: a Java class, or a class in the same module.
+/// The reference compiler names the alias once and lists what the target does not implement.
+#[test]
+fn an_actual_typealias_owes_the_members_its_target_class_lacks() {
+    let common_source = "\
+expect class FromJava {
+    fun present(): Int
+    fun missing(): Int
+}
+expect class FromKotlin {
+    fun present(): Int
+    fun missing(): Int
+}
+";
+    let java = "\
+public class JavaTarget {
+    public int present() {
+        return 1;
+    }
+}
+";
+    let platform = "\
+class KotlinTarget {
+    fun present(): Int = 1
+}
+actual typealias FromJava = JavaTarget
+actual typealias FromKotlin = KotlinTarget
+";
+    let (reference, krusty) = both_split(
+        "alias_owes_members",
+        &[("Common.kt", common_source)],
+        &[("JavaTarget.java", java), ("Platform.kt", platform)],
+    );
+    assert_eq!(
+        reference.len(),
+        2,
+        "the reference compiler names each alias once: {reference:#?}"
+    );
+    assert_eq!(krusty, reference);
+}
+
+/// An alias whose target implements every `expect` member is silent, for either kind of target.
+#[test]
+fn an_actual_typealias_whose_target_implements_every_member_is_silent() {
+    let common_source = "\
+expect class FromJava() {
+    fun present(): Int
+}
+expect class FromKotlin() {
+    fun present(): Int
+}
+";
+    let java = "\
+public class JavaTarget {
+    public int present() {
+        return 1;
+    }
+}
+";
+    let platform = "\
+class KotlinTarget {
+    fun present(): Int = 1
+}
+actual typealias FromJava = JavaTarget
+actual typealias FromKotlin = KotlinTarget
+";
+    let (reference, krusty) = both_split(
+        "alias_implements_members",
+        &[("Common.kt", common_source)],
+        &[("JavaTarget.java", java), ("Platform.kt", platform)],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}
+
+/// An alias to a builtin class answers for the members it declares and the ones it overrides: the
+/// hierarchy lists `String.length` beside the `CharSequence.length` it overrides, and the pair is
+/// one implementation of the `expect` member, not two competing ones.
+#[test]
+fn an_actual_typealias_to_a_class_that_overrides_its_supertypes_members_is_silent() {
+    let common_source = "\
+expect class Text {
+    val length: Int
+    fun subSequence(startIndex: Int, endIndex: Int): CharSequence
+}
+";
+    let (reference, krusty) = both_split(
+        "alias_overridden_members",
+        &[("Common.kt", common_source)],
+        &[("Platform.kt", "actual typealias Text = String\n")],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}
+
+/// An `expect value class` actualized by an alias to a dependency class owes nothing for what the
+/// compiler generates (`equals`, `hashCode`, `toString`) or for the `internal` members the
+/// dependency does not publish, and its constructor parameter, an `expect` class actualized by
+/// another alias, is that alias's target.
+#[test]
+fn an_actual_typealias_to_a_dependency_value_class_is_silent() {
+    let common_source = "\
+expect class Signed
+expect value class Unsigned internal constructor(internal val data: Signed)
+";
+    let platform = "\
+actual typealias Signed = Int
+actual typealias Unsigned = UInt
+";
+    let (reference, krusty) = both_split(
+        "alias_dependency_value_class",
+        &[("Common.kt", common_source)],
+        &[("Platform.kt", platform)],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}
+
+/// kotlinc requires an implementation to state the `operator`, `infix` and `inline` its `expect`
+/// member states, and lets it state more: `Int.plus` is `operator` and `Int.shl` is `infix`, and
+/// each implements an `expect` member that is neither.
+#[test]
+fn an_actual_typealias_target_may_state_more_function_modifiers_than_the_expect_member() {
+    let common_source = "\
+expect class Number {
+    fun plus(other: Number): Number
+    fun shl(bitCount: Int): Number
+}
+";
+    let (reference, krusty) = both_split(
+        "alias_target_states_more_modifiers",
+        &[("Common.kt", common_source)],
+        &[("Platform.kt", "actual typealias Number = Int\n")],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}
+
+/// `UInt.compareTo` is an `inline operator`: an inline dependency member implements an `expect`
+/// operator that does not state `inline`.
+#[test]
+fn an_inline_dependency_member_implements_an_expect_operator() {
+    let common_source = "\
+expect class Signed
+expect value class Unsigned internal constructor(internal val data: Signed) {
+    operator fun compareTo(other: Unsigned): Int
+}
+";
+    let platform = "\
+actual typealias Signed = Int
+actual typealias Unsigned = UInt
+";
+    let (reference, krusty) = both_split(
+        "alias_inline_operator",
+        &[("Common.kt", common_source)],
+        &[("Platform.kt", platform)],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}
+
+/// An `expect` member that states `inline` is implemented by an inline dependency member
+/// (`UInt.plus`).
+#[test]
+fn an_inline_dependency_member_implements_an_expect_inline_member() {
+    let common_source = "\
+expect class Signed
+expect value class Unsigned internal constructor(internal val data: Signed) {
+    inline operator fun plus(other: Unsigned): Unsigned
+}
+";
+    let platform = "\
+actual typealias Signed = Int
+actual typealias Unsigned = UInt
+";
+    let (reference, krusty) = both_split(
+        "alias_inline_member",
+        &[("Common.kt", common_source)],
+        &[("Platform.kt", platform)],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}
+
+/// A Java target's member scope is the one Kotlin sees: members it inherits from this module's
+/// Kotlin supertypes, a Java getter overriding a Kotlin property, a `void` method for `: Unit`,
+/// generic and platform-typed members, a Java enum (whose constructors are not matched) and a Java
+/// annotation's elements as its properties and constructor. None of these is a missing member.
+#[test]
+fn an_actual_typealias_to_a_java_class_sees_the_scope_kotlin_sees() {
+    let common_source = "\
+expect class Members {
+    val foo: Int
+    fun bar(): Int
+    fun run(i: Int): Unit
+    fun names(list: List<String>?): MutableMap<Boolean?, Members>
+    fun <T : Set<Number>> pick(t: T): T?
+}
+expect enum class Mode {
+    FAST, SLOW
+}
+expect annotation class Mark(val value: Int, val label: String = \"\")
+expect annotation class Empty()
+";
+    let platform = "\
+interface WithFoo {
+    val foo: Int
+}
+interface WithBar {
+    fun bar(): Int = 1
+}
+actual typealias Members = JavaMembers
+actual typealias Mode = JavaMode
+actual typealias Mark = JavaMark
+actual typealias Empty = JavaEmpty
+";
+    let members = "\
+import java.util.*;
+public class JavaMembers implements WithFoo, WithBar {
+    @Override
+    public int getFoo() {
+        return 0;
+    }
+    public void setFoo(int value) {}
+    public void run(int i) {}
+    public Map<Boolean, JavaMembers> names(List<String> list) {
+        return null;
+    }
+    public <T extends Set<Number>> T pick(T t) {
+        return t;
+    }
+}
+";
+    let (reference, krusty) = both_split(
+        "alias_java_scope",
+        &[("Common.kt", common_source)],
+        &[
+            ("JavaMembers.java", members),
+            (
+                "JavaMode.java",
+                "public enum JavaMode { FAST, SLOW; JavaMode() {} }\n",
+            ),
+            (
+                "JavaMark.java",
+                "public @interface JavaMark { int value(); String label() default \"\"; }\n",
+            ),
+            ("JavaEmpty.java", "public @interface JavaEmpty {}\n"),
+            ("Platform.kt", platform),
+        ],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}
+
+/// What a Java target does lack is still owed: a method it does not declare, a `var` only a Java
+/// field could answer for (kotlinc does not match fields), and an annotation constructor whose
+/// element has no default.
+#[test]
+fn an_actual_typealias_to_a_java_class_owes_what_kotlin_does_not_see() {
+    let common_source = "\
+expect class Lacking {
+    fun missing(): Int
+    var count: Int
+}
+expect annotation class Required()
+";
+    let platform = "\
+actual typealias Lacking = JavaLacking
+actual typealias Required = JavaRequired
+";
+    let (reference, krusty) = both_split(
+        "alias_java_owes",
+        &[("Common.kt", common_source)],
+        &[
+            (
+                "JavaLacking.java",
+                "public class JavaLacking { public int count = 0; }\n",
+            ),
+            (
+                "JavaRequired.java",
+                "public @interface JavaRequired { String path(); }\n",
+            ),
+            ("Platform.kt", platform),
+        ],
+    );
+    assert_eq!(
+        reference.len(),
+        2,
+        "the reference compiler names each alias once: {reference:#?}"
+    );
+    assert_eq!(krusty, reference);
+}
