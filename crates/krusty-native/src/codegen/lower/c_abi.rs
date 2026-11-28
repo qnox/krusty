@@ -135,14 +135,19 @@ impl<'a> FileLowering<'a> {
         else {
             return Err(declined!("`{symbol}` has no default-argument entry"));
         };
-        let mut params = export.signature.parameters().to_vec();
         // One mask word per 32 of the declaration's own parameters: a member's receiver, which
         // leads the export's operands, is not one of them.
-        let declared = self.ir.functions[function as usize].params.len();
-        params.extend(std::iter::repeat_n(
-            Ty::Int,
-            krusty::backend::default_arguments::mask_words(declared),
-        ));
+        // A suspend declaration's continuation is not one either.
+        let coroutine = export.signature.has_coroutine_abi();
+        let declared = self.ir.functions[function as usize].params.len() - usize::from(coroutine);
+        let params = krusty::backend::default_arguments::entry_frame(
+            export.signature.parameters(),
+            coroutine,
+            std::iter::repeat_n(
+                Ty::Int,
+                krusty::backend::default_arguments::mask_words(declared),
+            ),
+        );
         self.define_trampoline(file_init, entry, function, symbol, params)
     }
 
