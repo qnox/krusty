@@ -17,6 +17,15 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.language
         .allow_protected_super_companion_property_access =
         features.has("AllowAccessToProtectedFieldFromSuperCompanion");
+    file.language
+        .enforce_missing_named_arguments_on_java_annotation =
+        features.has("EnforceMissingNamedArgumentsOnJavaAnnotation");
+    file.language
+        .positional_java_annotation_call_argument_warning = features
+        .labelled_deprecation_warning_message(
+            "EnforceMissingNamedArgumentsOnJavaAnnotation",
+            "only named arguments are available for Java annotations.",
+        );
     file.language.bare_array_class_literal = features.has("BareArrayClassLiteral");
     file.language
         .forbid_array_of_nothing_in_lhs_of_class_literal =
