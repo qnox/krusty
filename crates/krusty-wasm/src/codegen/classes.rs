@@ -1076,6 +1076,10 @@ pub(super) fn declare(
         if let Some(superclass) = laid_out_superclass(root) {
             ancestors.extend(superclass.ancestors.iter().copied());
         }
+        // Every enum class's struct extends the runtime's `kotlin.Enum` base.
+        if bases[root as usize] == OwnedBase::Enum {
+            ancestors.push(runtime.objects.enum_base);
+        }
         let table = tables.table(id);
         let resolved = TableEntries {
             ir,

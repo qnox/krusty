@@ -14,6 +14,9 @@ use krusty::libraries::RuntimeExceptionKind;
 use super::*;
 use crate::objects::ENUM_NAME_FIELD;
 
+/// `i32.sub`.
+const I32_SUB: u8 = 0x6b;
+
 impl Body<'_> {
     /// One enum constant: its construction, whose allocation fills `kotlin.Enum`'s fields so a
     /// constructor reading `name` or `ordinal` finds them.
@@ -104,6 +107,18 @@ impl Body<'_> {
                 BaseMember::Ordinal => ENUM_NAME_FIELD + 1,
             },
         );
+        Ok(())
+    }
+
+    /// `compareTo` of two constants of one enum: the difference of their `$Enum` ordinals.
+    pub(super) fn enum_ordinal_compare(
+        &mut self,
+        receiver: u32,
+        other: u32,
+    ) -> Result<(), Unsupported> {
+        self.enum_member(BaseMember::Ordinal, receiver)?;
+        self.enum_member(BaseMember::Ordinal, other)?;
+        self.code.op(I32_SUB);
         Ok(())
     }
 

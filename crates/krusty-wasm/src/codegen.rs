@@ -171,9 +171,13 @@ impl Backend for WasmBackend {
     }
 
     /// The runtime's `StringBuilder` answers the `Appendable` and `CharSequence` members it
-    /// overrides (`crate::builtin_members`).
+    /// overrides, and every enum constant the `Comparable` member `kotlin.Enum` overrides
+    /// (`crate::builtin_members`).
     fn dispatched_dependency_classes(&self) -> Vec<krusty::backend::DependencyClassifier> {
-        vec![crate::string_builders::class()]
+        vec![
+            crate::string_builders::class(),
+            krusty::types::wk::kotlin_enum(),
+        ]
     }
 
     /// Both stdlibs read an appended sequence's `length`: the WASI one copies that many indexed

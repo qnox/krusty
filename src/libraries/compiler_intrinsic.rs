@@ -174,6 +174,9 @@ pub enum CompilerIntrinsic {
     /// The Wasm stdlib's `set(index, value)` of a `@WasmArrayOf` GC array class,
     /// `@WasmOp(ARRAY_SET)`: one `array.set`.
     ArrayStorageSet,
+    /// `kotlin.Enum.compareTo(other)`, which the Wasm stdlib declares over its own enum layout. A
+    /// target whose enum constants carry their `ordinal` answers it as the difference of the two.
+    EnumOrdinalCompare,
     /// The Wasm stdlib's `WasmCharArray.createString()`, the one place its code units become a
     /// `String`. A target that lays out strings itself builds its own from the units.
     StringFromCharArrayStorage,

@@ -89,6 +89,21 @@ struct Member {
     protocol_arity: Option<usize>,
 }
 
+impl Member {
+    /// Whether an instance of the class numbered `class`, which `record` describes, reaches an
+    /// implementation of this member: its own, or its representation's, which a struct the class
+    /// is a subtype of stands for.
+    fn reaches(&self, class: usize, record: &ClassRecord) -> bool {
+        self.implementations
+            .iter()
+            .any(|(known, _)| known.0 as usize == class)
+            || self
+                .representations
+                .iter()
+                .any(|(structure, _)| record.ancestors.contains(structure))
+    }
+}
+
 struct ClassRecord {
     /// The class's struct, then each struct it is declared a subtype of, nearest first.
     ancestors: Vec<u32>,
@@ -391,11 +406,7 @@ impl InterfaceDispatch {
                         .declaring_owners
                         .iter()
                         .any(|owner| record.interfaces.contains(owner));
-                advertised
-                    && !member
-                        .implementations
-                        .iter()
-                        .any(|(known, _)| known.0 as usize == *class)
+                advertised && !member.reaches(*class, record)
             })
             .map(|(class, _)| ClassRef(class as u32))
     }
@@ -422,11 +433,7 @@ impl InterfaceDispatch {
             }
             if let Some(arity) = member.protocol_arity {
                 let unimplemented = self.classes.iter().enumerate().any(|(class, record)| {
-                    record.function_arities.contains(&arity)
-                        && !member
-                            .implementations
-                            .iter()
-                            .any(|(known, _)| known.0 as usize == class)
+                    record.function_arities.contains(&arity) && !member.reaches(class, record)
                 });
                 if unimplemented {
                     return Some(format!(
@@ -436,11 +443,7 @@ impl InterfaceDispatch {
             }
             for owner in &member.declaring_owners {
                 let unimplemented = self.classes.iter().enumerate().any(|(class, record)| {
-                    record.interfaces.contains(owner)
-                        && !member
-                            .implementations
-                            .iter()
-                            .any(|(known, _)| known.0 as usize == class)
+                    record.interfaces.contains(owner) && !member.reaches(class, record)
                 });
                 if unimplemented {
                     return Some(format!(

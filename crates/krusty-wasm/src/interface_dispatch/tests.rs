@@ -144,3 +144,40 @@ fn advertised_callable_membership_does_not_depend_on_emitting_its_body() {
     dispatch.implement(class, member, function).unwrap();
     assert_eq!(dispatch.declined(), None);
 }
+
+#[test]
+fn a_representation_implements_a_member_for_every_class_below_its_struct() {
+    let mut module = Module::default();
+    let mut interfaces = InterfaceDispatch::default();
+    let owner = type_name("producer/Root");
+    let member = interfaces
+        .numbered(&mut module, "producer", 0, signature())
+        .unwrap();
+    interfaces.publish(vec![1], owner, member).unwrap();
+    let itable = module.ty(CompositeType::Array(immutable(ValType::Ref {
+        nullable: true,
+        heap: HeapType::Func,
+    })));
+    let base = module.subtype(SubType {
+        composite: CompositeType::Struct(Vec::new()),
+        supertype: None,
+        open: true,
+    });
+    let derived = module.subtype(SubType {
+        composite: CompositeType::Struct(Vec::new()),
+        supertype: Some(base),
+        open: false,
+    });
+    let (class, _) = interfaces.class(&mut module, itable, vec![derived, base]);
+    interfaces.instance_of(class, owner);
+    interfaces.stub(&mut module, member);
+    assert_eq!(
+        interfaces.declined(),
+        Some("a call of a `producer/Root` member on an instance that does not implement it".into())
+    );
+    let body = module.declare();
+    interfaces
+        .implement_representation(member, base, body)
+        .unwrap();
+    assert_eq!(interfaces.declined(), None);
+}

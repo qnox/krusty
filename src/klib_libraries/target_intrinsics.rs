@@ -479,6 +479,28 @@ fn wasm_array_member(owner: TypeName, declaration: &KotlinFunction) -> Option<Kl
     })
 }
 
+/// `kotlin.Enum.compareTo(other: E): Int`, the one member of the enum base the Wasm stdlib
+/// declares with a body over its own layout (`ordinal.compareTo(other.ordinal)`). The target's
+/// constants carry the ordinal, so it answers the member itself.
+fn wasm_enum_member(owner: TypeName, declaration: &KotlinFunction) -> Option<KlibIntrinsicShape> {
+    if owner != crate::types::wk::kotlin_enum()
+        || declaration.name != "compareTo"
+        || declaration.receiver.is_some()
+        || declaration.is_suspend
+        || declaration.params.len() != 1
+        || !exact_type(&declaration.ret, "kotlin/Int")
+    {
+        return None;
+    }
+    Some(KlibIntrinsicShape {
+        operation: CompilerIntrinsic::EnumOrdinalCompare,
+        kind: ExternalCallableKind::Member,
+        receiver: Some(Ty::obj_name(owner)),
+        params: vec![Ty::obj_name(owner)],
+        ret: Ty::Int,
+    })
+}
+
 /// The two functions of `kotlin` through which the Wasm stdlib moves between a `String` and the
 /// code units of a `WasmCharArray`: `WasmCharArray.createString(): String` and
 /// `String.getChars(): WasmCharArray`, each an internal extension with no other operand. The
@@ -1754,7 +1776,8 @@ fn wasm(
     declaration: &KotlinFunction,
 ) -> Option<KlibIntrinsicShape> {
     if let crate::libraries::CallablePlacement::Member { owner, .. } = placement {
-        return wasm_array_member(owner, declaration);
+        return wasm_array_member(owner, declaration)
+            .or_else(|| wasm_enum_member(owner, declaration));
     }
     let crate::libraries::CallablePlacement::Package(package) = placement else {
         return None;
@@ -2850,6 +2873,49 @@ mod tests {
             gc_unsafe("Kotlin_Int_toStringRadix"),
         );
         assert!(authenticate(native, text, &swapped).is_none());
+    }
+
+    #[test]
+    fn the_enum_base_compare_to_is_the_wasm_ordinal_comparison() {
+        let wasm = Some(TargetIntrinsicPlatform::Wasm);
+        let member = |owner: &str| crate::libraries::CallablePlacement::Member {
+            owner: type_name(owner),
+            owner_is_interface: false,
+        };
+        let plain = |name: &str, params: &[&str], ret: &str| {
+            let mut function = declaration(name, params, ret, wasm_annotation("UNRELATED"));
+            function.annotations.clear();
+            function.annotation_applications.clear();
+            function
+        };
+        let compare = plain("compareTo", &["kotlin/Any"], "kotlin/Int");
+        assert_eq!(
+            authenticate(wasm, member("kotlin/Enum"), &compare),
+            Some(KlibIntrinsicShape {
+                operation: CompilerIntrinsic::EnumOrdinalCompare,
+                kind: ExternalCallableKind::Member,
+                receiver: Some(Ty::obj("kotlin/Enum")),
+                params: vec![Ty::obj("kotlin/Enum")],
+                ret: Ty::Int,
+            })
+        );
+        // Another classifier, platform, name, arity or result is no enum comparison.
+        assert_eq!(authenticate(wasm, member("sample/Enum"), &compare), None);
+        assert_eq!(
+            authenticate(
+                Some(TargetIntrinsicPlatform::Native),
+                member("kotlin/Enum"),
+                &compare
+            ),
+            None
+        );
+        for other in [
+            plain("compare", &["kotlin/Any"], "kotlin/Int"),
+            plain("compareTo", &[], "kotlin/Int"),
+            plain("compareTo", &["kotlin/Any"], "kotlin/Long"),
+        ] {
+            assert_eq!(authenticate(wasm, member("kotlin/Enum"), &other), None);
+        }
     }
 
     #[test]

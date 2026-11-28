@@ -69,6 +69,7 @@ pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerInt
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageLength
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageGet
         || operation == krusty::backend::BackendCompilerIntrinsic::ArrayStorageSet
+        || operation == krusty::backend::BackendCompilerIntrinsic::EnumOrdinalCompare
         || operation == krusty::backend::BackendCompilerIntrinsic::StringFromCharArrayStorage
         || operation == krusty::backend::BackendCompilerIntrinsic::StringCharArrayStorage
         || operation == krusty::backend::BackendCompilerIntrinsic::PrimitiveHashCode
@@ -1521,6 +1522,27 @@ impl<'a> Body<'a> {
                     return Err("an authenticated array length with operands".into());
                 }
                 self.array_storage_length(receiver)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver: Some(receiver),
+                args,
+            } if let Callee::External {
+                target,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.is_array_storage_operation(
+                    *target,
+                    krusty::backend::BackendCompilerIntrinsic::EnumOrdinalCompare,
+                ) =>
+            {
+                let [other] = args.as_slice() else {
+                    return Err("an authenticated enum comparison with malformed operands".into());
+                };
+                self.enum_ordinal_compare(receiver, *other)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,

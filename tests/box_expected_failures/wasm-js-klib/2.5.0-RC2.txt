@@ -449,7 +449,6 @@ enum/enumValueOf.kt
 enum/sortEnumEntries.kt
 evaluate/intrinsicConst/charConstructor.kt
 evaluate/intrinsicConst/constTrim.kt
-evaluate/intrinsicConst/lowerAndUpperCase.kt
 evaluate/ubyteOperations.kt
 evaluate/uintOperations.kt
 evaluate/ulongOperations.kt
@@ -728,7 +727,6 @@ ranges/contains/userDefinedContainsExtension.kt
 ranges/forInCharSequenceLengthDecreasedInLoopBody.kt
 ranges/forInCharSequenceWithCustomIterator.kt
 ranges/forInDownTo/forNullableIntInDownTo.kt
-ranges/forInIndices/forInArrayListIndices.kt
 ranges/forInIndices/forNullableIntInArrayIndices.kt
 ranges/forInIndices/forNullableIntInCollectionIndices.kt
 ranges/forInUntil/forInUntilChar.kt
