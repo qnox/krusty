@@ -2101,3 +2101,34 @@ public class Target {
     );
     assert_eq!(krusty, reference);
 }
+/// Java primitives discharge the `expect` members they implement: an alias to a JDK class or to a
+/// Java source class whose methods take and return `int` answers `Int` members, and the reference
+/// compiler reports nothing.
+#[test]
+fn an_actual_typealias_to_java_primitive_members_is_silent() {
+    let java = "\
+public class Target {
+    public int twice(int value) {
+        return value * 2;
+    }
+}
+";
+    let (reference, krusty) = both_split_full(
+        "alias_java_primitive_members",
+        &[(
+            "Common.kt",
+            "expect class Doubler {\n    fun twice(value: Int): Int\n}\n\
+             expect class Counter {\n    fun addAndGet(delta: Int): Int\n    fun get(): Int\n}\n",
+        )],
+        &[
+            ("Target.java", java),
+            (
+                "Platform.kt",
+                "actual typealias Doubler = Target\n\
+                 actual typealias Counter = java.util.concurrent.atomic.AtomicInteger\n",
+            ),
+        ],
+    );
+    assert_eq!(reference, Vec::new(), "the reference compiler is silent");
+    assert_eq!(krusty, reference);
+}

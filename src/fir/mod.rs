@@ -61,6 +61,10 @@ pub use dependency_superclasses::*;
 pub use entry_point::{MainEntryShape, ResolvedEntryPoint};
 pub use enum_entries_factory::EnumEntriesFactory;
 pub use header::*;
+// The candidate facts an unactualized declaration's report lists, for the frontend's renderer.
+pub(crate) use header::actualization::{
+    IncompatibilityReason, IncompatibleCandidate, InheritedDependencyMember,
+};
 pub use inherited_defaults::*;
 pub use inline_body::*;
 pub use interface_delegation::*;
