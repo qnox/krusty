@@ -18,7 +18,8 @@ pub(super) fn factory_call(
     enums: ExprId,
 ) -> ExprId {
     let entry_serial_names = entry_serial_names(ir, class_id);
-    factory_call_with_names(ir, &entry_serial_names, false, name, enums)
+    let declares_serial_name = super::annotations::class_declares_serial_name(ir, class_id);
+    factory_call_with_names(ir, &entry_serial_names, declares_serial_name, name, enums)
 }
 
 /// The serializer kotlinc builds for an element whose type is a source enum WITHOUT a generated

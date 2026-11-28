@@ -5,6 +5,10 @@
 //! over the enum's entries and each entry's `@SerialName`. krusty knew an entry's annotations only
 //! for an enum of the same file, so such a file was rejected as "not yet supported by the IR
 //! backend".
+//!
+//! PLATFORM-SPECIFIC: krusty's serialization plugin builds JVM runtime calls against the ABI of
+//! `kotlinx-serialization-core-jvm`, and no box lane provides a serialization runtime KLIB, so
+//! these programs run here and not from `tests/box_regressions/`.
 use super::common::compare_with_kotlinc_plugin;
 use super::serialization_companion_byte_parity_e2e::{member_body, plugin_and_runtime};
 use super::serialization_test_support::{
@@ -78,19 +82,14 @@ fn a_dependency_plain_enum_serializes_like_kotlinc() {
 /// Each slot's factory is the call kotlinc builds, with the entry names the dependency states.
 #[test]
 fn a_dependency_plain_enum_element_is_built_the_way_kotlinc_builds_it() {
-    let Some((plugin, runtime)) = plugin_and_runtime() else {
-        eprintln!("skipping: serialization plugin or runtime jar not available locally");
-        return;
-    };
+    let (plugin, runtime) = plugin_and_runtime()
+        .expect("the serialization plugin and runtime must be available to this regression");
     let extra = vec![format!("-Xplugin={}", plugin.display())];
     let mut classpath = vec![reference_dependency(DEPENDENCY, "external_enum_bytes")];
     classpath.extend(runtime);
-    let Some(built) =
+    let built =
         compare_with_kotlinc_plugin("Consumer", CONSUMER, "Holder", &classpath, "25", &extra)
-    else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+            .expect("the reference compiler and javap must be available to this regression");
     for member in [
         "_childSerializers$_anonymous_()",
         "_childSerializers$_anonymous_$0()",
