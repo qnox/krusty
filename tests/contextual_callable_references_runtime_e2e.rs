@@ -70,3 +70,29 @@ fn function_reference_equality_includes_bound_context_arguments() {
     let source = include_str!("contextual_references/contextualFunctionReferenceEquality.kt");
     expect_same_as_kotlinc_release(source, "ContextualFunctionReferenceEquality");
 }
+
+/// References to local functions with context parameters bind the context arguments where the
+/// reference is written, beside the locals the function captures.
+#[test]
+fn local_function_references_bind_their_context_arguments() {
+    let source =
+        include_str!("box_regressions/contextParameters/localFunctionContextReferences.kt");
+    expect_same_as_kotlinc_release(source, "LocalFunctionContextReferences");
+}
+
+/// A local function capturing a mutable local, an outer context parameter and its own context
+/// parameter, referenced as a function value.
+#[test]
+fn local_function_references_mix_captures_and_context_arguments() {
+    let source =
+        include_str!("box_regressions/contextParameters/localFunctionMixedCaptureReferences.kt");
+    expect_same_as_kotlinc_release(source, "LocalFunctionMixedCaptureReferences");
+}
+
+/// The JVM carrier of that reference stores the captured `Ref` and the outer context value as
+/// fields and hands the bound context argument over as `boundContextArguments`.
+#[test]
+fn local_function_reference_carrier_matches_kotlinc() {
+    let source = include_str!("contextual_references/localFunctionMixedCaptureCarrier.kt");
+    expect_same_as_kotlinc_release(source, "LocalFunctionMixedCaptureCarrier");
+}
