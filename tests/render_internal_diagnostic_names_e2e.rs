@@ -526,6 +526,32 @@ fun use(c: C) { tie(1); c.m(1); c(1) }
             ],
             errors: 3,
         },
+        // Declarations sharing one identity: each lists the others with their resolved results.
+        Case {
+            file: "Conflicts.kt",
+            source: "\
+fun f(a: Int) {}
+fun f(a: Int) {}
+class D { fun m(a: Int): Int = 1; fun m(a: Int) {}; fun m(a: Int): String = \"\" }
+",
+            arguments: &[],
+            diagnostics: &[
+                "Conflicts.kt:1:1: error: [CONFLICTING_OVERLOADS] Conflicting overloads:",
+                "fun f(a: Int): Unit",
+                "Conflicts.kt:2:1: error: [CONFLICTING_OVERLOADS] Conflicting overloads:",
+                "fun f(a: Int): Unit",
+                "Conflicts.kt:3:11: error: [CONFLICTING_OVERLOADS] Conflicting overloads:",
+                "fun m(a: Int): Unit",
+                "fun m(a: Int): String",
+                "Conflicts.kt:3:35: error: [CONFLICTING_OVERLOADS] Conflicting overloads:",
+                "fun m(a: Int): Int",
+                "fun m(a: Int): String",
+                "Conflicts.kt:3:53: error: [CONFLICTING_OVERLOADS] Conflicting overloads:",
+                "fun m(a: Int): Int",
+                "fun m(a: Int): Unit",
+            ],
+            errors: 5,
+        },
         Case {
             file: "Forbidden.kt",
             source: "\

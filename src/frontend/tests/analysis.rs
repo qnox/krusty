@@ -533,7 +533,7 @@ fn checked_prefix_reports_cross_file_conflicting_overloads_and_candidates() {
             .map(|diagnostic| diagnostic.msg.as_str())
             .collect::<Vec<_>>(),
         [
-            "conflicting overloads:\n\
+            "Conflicting overloads:\n\
                  fun namedPair(left: Int, right: String): String\n\
                  fun namedPair(left: Int, right: String): String",
             "no value passed for parameter 'right'.",
@@ -585,8 +585,8 @@ fn conflicting_top_level_bodies_use_their_own_declared_return_types() {
             .map(|diagnostic| diagnostic.msg.as_str())
             .collect::<Vec<_>>(),
         [
-            "conflicting overloads:\nfun choose(value: Int): String",
-            "conflicting overloads:\nfun choose(value: Int): Int",
+            "Conflicting overloads:\nfun choose(value: Int): String",
+            "Conflicting overloads:\nfun choose(value: Int): Int",
         ]
     );
 }
@@ -620,7 +620,7 @@ fn backend_names_and_erasure_do_not_change_frontend_overload_identity() {
         diagnostics
             .diags
             .iter()
-            .filter(|diagnostic| diagnostic.msg.starts_with("conflicting overloads:"))
+            .filter(|diagnostic| diagnostic.msg.starts_with("Conflicting overloads:"))
             .count()
     };
     assert_eq!(
@@ -669,8 +669,8 @@ fn inferred_conflict_displays_its_inferred_result_as_kotlinc_does() {
             .map(|diagnostic| diagnostic.msg.as_str())
             .collect::<Vec<_>>(),
         [
-            "conflicting overloads:\nfun choose(value: Int): Result",
-            "conflicting overloads:\nfun choose(value: Int): Result",
+            "Conflicting overloads:\nfun choose(value: Int): Result",
+            "Conflicting overloads:\nfun choose(value: Int): Result",
         ]
     );
 }
@@ -770,7 +770,7 @@ fn conflicting_overload_diagnostics_sort_candidate_displays_stably() {
             .map(|diagnostic| diagnostic.msg.as_str())
             .collect::<Vec<_>>(),
         [
-            "conflicting overloads:\n\
+            "Conflicting overloads:\n\
                  fun namedPair(left: Int, right: String): Int\n\
                  fun namedPair(left: Int, right: String): String",
             "no parameter with name 'unknown' found.",
@@ -854,7 +854,7 @@ fn conflicting_overload_diagnostics_are_deterministic_and_bounded() {
     let conflicts = diagnostics
         .diags
         .iter()
-        .filter(|diagnostic| diagnostic.msg.starts_with("conflicting overloads:"))
+        .filter(|diagnostic| diagnostic.msg.starts_with("Conflicting overloads:"))
         .collect::<Vec<_>>();
     assert_eq!(conflicts.len(), 70);
     assert_eq!(
@@ -970,7 +970,7 @@ fn cross_file_private_top_level_function_conflicts_with_public_but_does_not_esca
             .filter(|diagnostic| diagnostic.file == 1)
             .map(|diagnostic| diagnostic.msg.as_str())
             .collect::<Vec<_>>(),
-        ["conflicting overloads:\nfun namedPair(left: Int, right: String): Int"]
+        ["Conflicting overloads:\nfun namedPair(left: Int, right: String): Int"]
     );
 }
 
@@ -1028,8 +1028,8 @@ fn unavailable_context_of_the_only_mapped_candidate_is_reported() {
             .map(|diagnostic| diagnostic.msg.as_str())
             .collect::<Vec<_>>(),
         [
-            "conflicting overloads:\ncontext(scope: Scope) fun choose(other: Int): String",
-            "conflicting overloads:\ncontext(scope: Scope) fun choose(value: Int): Int",
+            "Conflicting overloads:\ncontext(scope: Scope) fun choose(other: Int): String",
+            "Conflicting overloads:\ncontext(scope: Scope) fun choose(value: Int): Int",
             "no context argument for 'scope: Scope' found.",
         ]
     );
