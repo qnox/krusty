@@ -236,13 +236,19 @@ struct FoundMember {
     declared_parameter_names: Option<Vec<String>>,
 }
 
-/// The value parameter names `info`'s Kotlin metadata, or else `method`'s own `MethodParameters`,
-/// declares for `method`: every parameter named, none synthesized.
+/// The value parameter names `info`'s Kotlin metadata declares for `method`, or, for a class with
+/// no Kotlin metadata, `method`'s own `MethodParameters`: every parameter named, none synthesized.
+/// A Kotlin class's metadata is authoritative; a method it does not list keeps generated names.
 fn declared_parameter_names(
     classpath: &Classpath,
     info: &ClassInfo,
     method: &MethodSig,
 ) -> Option<Vec<String>> {
+    if !info.meta.is_present() {
+        return (!method.parameter_names.is_empty())
+            .then(|| method.parameter_names.iter().cloned().collect())
+            .flatten();
+    }
     classpath
         .class_members(info)
         .class_functions
@@ -257,11 +263,6 @@ fn declared_parameter_names(
                 .iter()
                 .map(|parameter| parameter.name.clone())
                 .collect()
-        })
-        .or_else(|| {
-            (!method.parameter_names.is_empty())
-                .then(|| method.parameter_names.iter().cloned().collect())
-                .flatten()
         })
 }
 
