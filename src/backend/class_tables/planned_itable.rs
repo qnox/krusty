@@ -507,11 +507,15 @@ impl Filler<'_> {
                     let ResolvedPropertyOverrideTarget::Module(overridden) = edge.overridden else {
                         continue;
                     };
-                    let receiver = edge.declared_receiver.zip(edge.implementation_receiver);
+                    let operands = super::accessor_operands(
+                        &edge.declared_contexts,
+                        &edge.implementation_contexts,
+                        edge.declared_receiver.zip(edge.implementation_receiver),
+                    );
                     let bridged = !self
                         .representation
                         .same(edge.implementation_type, edge.declared_type)
-                        || receiver.is_some_and(|(declared, implemented)| {
+                        || operands.iter().any(|&(declared, implemented)| {
                             !self.representation.same(declared, implemented)
                         });
                     for setter in [false, true] {
@@ -536,7 +540,7 @@ impl Filler<'_> {
                             Implementation::Bridged(Slot::AccessorBridge {
                                 declared: edge.declared_type,
                                 implemented: edge.implementation_type,
-                                receiver,
+                                operands: operands.clone(),
                                 setter,
                                 target_slot: slot,
                             })
