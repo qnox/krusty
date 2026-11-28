@@ -100,3 +100,36 @@ fn an_expected_bound_property_type_selects_the_unsupported_synthetic_property() 
     assert_eq!(krusty_errors, expected, "krusty's diagnostics");
     assert_ne!(result.krusty_code, 0, "krusty accepted the reference");
 }
+
+/// A Java getter that overrides a Kotlin property's accessor is that property's override, not a
+/// synthetic Java property, so kotlinc accepts the reference without
+/// `ReferencesToSyntheticJavaProperties`.
+#[test]
+fn a_java_override_of_a_kotlin_property_getter_is_an_ordinary_property_reference() {
+    const JAVA: &str = "public class Foo extends Base {\n\
+                        \x20   @Override\n\
+                        \x20   public int getFoo() {\n\
+                        \x20       return super.getFoo();\n\
+                        \x20   }\n\
+                        }\n";
+    const KOTLIN: &str = "open class Base {\n\
+                          \x20   open val foo: Int = 904\n\
+                          }\n\
+                          \n\
+                          val prop = Foo::foo\n";
+    let result = common::compiler_diagnostics(&[("Foo.java", JAVA), ("Main.kt", KOTLIN)], &[]);
+    assert_eq!(
+        errors(&result.reference_stderr),
+        Vec::<ObservedError>::new(),
+        "kotlinc's diagnostics"
+    );
+    assert_eq!(result.reference_code, 0, "kotlinc rejected the reference");
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    assert_eq!(
+        krusty_errors,
+        Vec::<ObservedError>::new(),
+        "krusty's diagnostics"
+    );
+    assert_eq!(result.krusty_code, 0, "krusty rejected the reference");
+}

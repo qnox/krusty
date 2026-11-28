@@ -1634,7 +1634,12 @@ impl<'a> SymbolResolver<'a> {
                     .as_ref()
                     .filter(|_| ty.kotlin_class_internal() != Some(crate::types::wk::any()))
                     .and_then(|property| {
-                        build_property_reference_from_declaration(ty, name, property)
+                        build_property_reference_from_declaration(
+                            ty,
+                            name,
+                            property,
+                            callables.properties(),
+                        )
                     });
                 // The classpath EXTENSION callable for `recv.name(args)`: one extension selection (admits
                 // `@InlineOnly` splice candidates — a plain and an inline call resolve identically, only the

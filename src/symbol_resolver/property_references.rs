@@ -90,6 +90,7 @@ pub(super) fn build_property_reference_from_declaration(
     recv: Ty,
     name: &str,
     property: &PropertyInfo,
+    family: &[PropertyInfo],
 ) -> Option<ResolvedPropertyRef> {
     if property.getter.suspend {
         crate::trace_compiler!(
@@ -128,6 +129,19 @@ pub(super) fn build_property_reference_from_declaration(
         extension_facade: None,
         context_count: property.context_count,
         context_names: property.context_param_names.clone(),
-        java_synthetic: property.accessor_derived(),
+        java_synthetic: is_java_synthetic(property, family),
     })
+}
+
+/// Whether a getter-derived property is a Java bean property of its own. A Java getter that
+/// overrides the accessor of a Kotlin property declared in a supertype is that property's override,
+/// as in kotlinc's Java use-site scope, so a reference to it is an ordinary property reference.
+fn is_java_synthetic(property: &PropertyInfo, family: &[PropertyInfo]) -> bool {
+    property.accessor_derived()
+        && !family.iter().any(|declared| {
+            !declared.accessor_derived()
+                && declared.kind == PropKind::Member
+                && declared.name == property.name
+                && declared.getter.name == property.getter.name
+        })
 }
