@@ -1662,6 +1662,14 @@ impl Body<'_> {
                         .exception_class(self.module, self.classifiers, name)?;
                 self.code.ref_test(nullable, HeapType::Concrete(structure));
             }
+            // `Unit` has no carrier, so its one instance is a struct of its own, boxed as the
+            // primitives are.
+            _ if tested == Ty::Unit
+                || matches!(tested.kind(), TyKind::Obj(name, _) if name == krusty::types::wk::unit()) =>
+            {
+                let structure = self.runtime.unit_structure(self.module);
+                self.code.ref_test(nullable, HeapType::Concrete(structure));
+            }
             // Each array classifier is an object type of its own, so the test is its type's:
             // `UIntArray` is not an `IntArray`, though one wraps the other's storage.
             _ if tested.is_array() => {

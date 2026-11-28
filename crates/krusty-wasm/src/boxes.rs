@@ -136,8 +136,9 @@ pub(super) fn is_boxed_scalar(ty: Ty) -> bool {
 pub(super) struct Boxes {
     /// By the boxed classifier's identity.
     forms: HashMap<TypeName, BoxForm>,
-    /// The global holding `kotlin.Unit`, once something reads it as a reference.
-    unit: Option<u32>,
+    /// The global holding `kotlin.Unit`, once something reads it as a reference, and the struct
+    /// type that global's one instance has.
+    unit: Option<(u32, u32)>,
 }
 
 impl Runtime {
@@ -230,6 +231,17 @@ impl Runtime {
     /// (a lambda's result, a type parameter's value). `Unit` has no carrier of its own, so it is
     /// boxed like a primitive is, into the one instance it has.
     pub(super) fn unit_object(&mut self, module: &mut Module) -> u32 {
+        self.unit_instance(module).0
+    }
+
+    /// The struct type of `kotlin.Unit`'s one instance: what a test of a reference against
+    /// `Unit` asks for, as every other class's instances are tested against their own type.
+    pub(super) fn unit_structure(&mut self, module: &mut Module) -> u32 {
+        self.unit_instance(module).1
+    }
+
+    /// `kotlin.Unit`'s global and its instance's struct type, declared on first use.
+    fn unit_instance(&mut self, module: &mut Module) -> (u32, u32) {
         if let Some(unit) = self.boxes.unit {
             return unit;
         }
@@ -263,8 +275,8 @@ impl Runtime {
         let mut init = Code::default();
         init.global_get(table).struct_new(structure);
         let unit = module.constant_global(ValType::reference(structure), init);
-        self.boxes.unit = Some(unit);
-        unit
+        self.boxes.unit = Some((unit, structure));
+        (unit, structure)
     }
 }
 

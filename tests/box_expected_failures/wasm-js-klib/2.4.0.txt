@@ -36,7 +36,6 @@ arithmetic/division.kt
 arrays/forInUnsignedArray/forInUnsignedArrayReversed.kt
 arrays/kt47483.kt
 arrays/kt503.kt
-arrays/primitiveArrays.kt
 associatedObjects/associatedObjectNested.kt
 associatedObjects/findAssociatedObject.kt
 associatedObjects/findAssociatedObjectAndDCE.kt
@@ -136,7 +135,6 @@ callableReference/property/extensionPropertyWithExtensionReceiver.kt
 callableReference/property/nullableExtensionProperty.kt
 casts/asForConstants.kt
 casts/asToNothing.kt
-casts/asUnit.kt
 casts/functions/asFunKBig.kt
 casts/functions/reifiedAsFunKBig.kt
 casts/kt65197.kt
