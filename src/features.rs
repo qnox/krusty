@@ -206,6 +206,7 @@ const MODELED_FEATURES: &[&str] = &[
     "ForbidAnnotationsTypeArgumentsAndParenthesesForPackageQualifier",
     "ForbidArrayOfNothingInLhsOfClassLiteral",
     "ForbidExternalEnumEntriesAndPrimaryConstructorProperties",
+    "ForbidJavaClassPropertyReferences",
     "ForbidOperatorEqualsInEnumEntriesAndAnonymousObjects",
     "ForbidSamConstructorCallsWithMissingDependencySupertype",
     "ForbidUpperBoundsViolationOnTypeOperatorAndParameterBounds",
@@ -330,6 +331,19 @@ impl LangFeatures {
         message: &str,
     ) -> Option<String> {
         self.deprecation_warning_format(feature)
+            .map(|format| format.message(message))
+    }
+
+    /// [`Self::deprecation_warning_message`] for a diagnostic worded `See: <url>` with no closing
+    /// period.
+    pub fn labelled_deprecation_warning_message(
+        &self,
+        feature: &str,
+        message: &str,
+    ) -> Option<String> {
+        self.table()
+            .get(feature)
+            .map(LanguageFeature::labelled_deprecation_warning_format)
             .map(|format| format.message(message))
     }
 

@@ -138,18 +138,31 @@ impl LanguageFeature {
         }
     }
 
+    /// [`Self::deprecation_warning_format`] for a diagnostic whose message names the issue as
+    /// `See: <url>` with no closing period, as kotlinc words `JAVA_CLASS_PROPERTY_REFERENCE`.
+    pub(super) fn labelled_deprecation_warning_format(&self) -> DeprecationWarningFormat {
+        DeprecationWarningFormat {
+            suffix: self
+                .deprecation_warning_suffix_with(" See: https://youtrack.jetbrains.com/issue/"),
+        }
+    }
+
     /// The release-selected suffix of kotlinc's `toDeprecationWarningMessage`. Keeping this
     /// separate lets a later checker attach the policy to a message containing resolved types
     /// without looking the language feature up again.
     pub fn deprecation_warning_suffix(&self) -> String {
+        self.deprecation_warning_suffix_with(" See https://youtrack.jetbrains.com/issue/")
+            + if self.issue.is_some() { "." } else { "" }
+    }
+
+    fn deprecation_warning_suffix_with(&self, hint: &str) -> String {
         let mut suffix = match self.since_version {
             Some(since) => format!("This will become an error in language version {since}."),
             None => "This will become an error in a future release.".to_string(),
         };
         if let Some(issue) = &self.issue {
-            suffix.push_str(&format!(
-                " See https://youtrack.jetbrains.com/issue/{issue}."
-            ));
+            suffix.push_str(hint);
+            suffix.push_str(issue);
         }
         suffix
     }
@@ -316,6 +329,20 @@ mod tests {
         assert_eq!(
             unissued.deprecation_warning_message("message."),
             "message. This will become an error in language version 1.1."
+        );
+    }
+
+    /// A diagnostic worded `See: <url>` names the issue without a closing period.
+    #[test]
+    fn a_labelled_deprecation_warning_names_the_issue_without_a_period() {
+        let table = FeatureTable::for_version(KotlinVersion::V2_5_0_RC).unwrap();
+        let feature = table.get("ForbidJavaClassPropertyReferences").unwrap();
+        assert_eq!(
+            feature
+                .labelled_deprecation_warning_format()
+                .message("message."),
+            "message. This will become an error in language version 2.6. \
+             See: https://youtrack.jetbrains.com/issue/KTLC-375"
         );
     }
 

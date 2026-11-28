@@ -114,6 +114,12 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
         useless_type_arguments,
         "Object access cannot have explicit type arguments.",
     );
+    file.language.forbid_java_class_property_references =
+        features.has("ForbidJavaClassPropertyReferences");
+    file.language.java_class_property_reference_warning = features.labelled_deprecation_warning_message(
+        "ForbidJavaClassPropertyReferences",
+        "'::javaClass' returns a property reference and is error-prone. Use '.javaClass' or '::class.java' to access the Java class of the receiver.",
+    );
     file.language.error_about_data_class_copy_visibility_change =
         features.has("ErrorAboutDataClassCopyVisibilityChange");
     file.language.data_class_copy_visibility_change_warning = features.deprecation_warning_message(
