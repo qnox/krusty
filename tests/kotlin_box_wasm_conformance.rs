@@ -880,6 +880,14 @@ fun box(): String = if (2.0.pow(3.0) == 8.0) "OK" else "pow"
     );
 }
 
+#[test]
+fn wasm_a_hash_set_copies_the_collection_it_is_given() {
+    expect_wasm_box(
+        include_str!("box_regressions/hashSetCopyConstructor.kt"),
+        "hashSetCopyConstructor",
+    );
+}
+
 /// A discarded value-class result is popped as the generic slot holds it. The program builds
 /// that slot with `arrayListOf`, whose private collection overrides `Collection.size`.
 #[test]
