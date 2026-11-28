@@ -95,12 +95,9 @@ pub(crate) fn carried_parameters(ir: &IrFile, id: krusty::ir::FunId) -> Vec<Ty> 
     // `this` occupies slot 0 when there is one, so a parameter's slot is offset by it.
     let first = usize::from(function.dispatch_receiver.is_some());
     let mut holders = vec![false; function.params.len() + first];
-    let mut pending = vec![body];
-    let mut seen = krusty::fx_hash::HashSet::default();
-    while let Some(id) = pending.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
+    // Only this body's own value namespace: a nested lambda's `inline_body` reads the LAMBDA's
+    // slots, so its `GetValue(0)` holder is the lambda's capture, not this function's parameter 0.
+    for id in krusty::ir::value_namespace_expressions(ir, body) {
         if let IrExpr::RefGet { holder, .. } | IrExpr::RefSet { holder, .. } = ir.expr(id) {
             if let IrExpr::GetValue(slot) = ir.expr(*holder) {
                 if let Some(flag) = holders.get_mut(*slot as usize) {
@@ -108,7 +105,6 @@ pub(crate) fn carried_parameters(ir: &IrFile, id: krusty::ir::FunId) -> Vec<Ty> 
                 }
             }
         }
-        krusty::ir::for_each_child(&ir.exprs, id, &mut |child| pending.push(child));
     }
     function
         .params

@@ -378,7 +378,6 @@ inline/crossinlineLambdaAllocation.kt
 inline/defaultArgsLateinitLowering.kt
 inline/inline5.kt
 inline/lateinitProperty.kt
-inline/sharedVar.kt
 inline/typeParameterSymbolIsUnbound.kt
 inlineArgsInPlace/arrayDequeRemoveAll.kt
 inlineArgsInPlace/kt49370.kt
@@ -620,7 +619,6 @@ regressions/floatingRangeContainsMixedWidths.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
 regressions/kt2246.kt
-regressions/kt344.kt
 regressions/kt5056.kt
 regressions/kt6434.kt
 regressions/multimodule/inlineAssertFailsWithBlock.kt

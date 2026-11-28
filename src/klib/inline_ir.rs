@@ -18,7 +18,7 @@ use crate::ir::{FunId, IrExpr, IrFile, IrParameterRole, IrTypeOp};
 use crate::klib_lowering::ir_builtins::IrBuiltinOperators;
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::protobuf::Pb;
-use crate::types::{Ty, TypeName, TypeVariance};
+use crate::types::{Ty, TyKind, TypeName, TypeVariance};
 
 const MAIN_PREFIX: &str = "default/ir/";
 const PREPARED_PREFIX: &str = "default/ir_inlinable_functions/";
@@ -81,6 +81,8 @@ pub(super) struct PreparedParameter {
     pub(super) name: String,
     pub(super) ty: Ty,
     pub(super) default_null: bool,
+    /// The element type of a `vararg` parameter, whose own type is its array type.
+    pub(super) vararg_element: Option<Ty>,
 }
 
 #[derive(Clone)]
@@ -164,14 +166,13 @@ pub(super) fn prepared_function(
     if ir.suspend_funs.contains(&function) {
         return None;
     }
-    if ir.declared_parameters(function).vararg.is_some()
-        || ir
-            .declared_inline_modifiers(function)
-            .iter()
-            .any(|modifier| *modifier != crate::types::InlineParameterModifier::None)
+    if ir
+        .declared_inline_modifiers(function)
+        .iter()
+        .any(|modifier| *modifier != crate::types::InlineParameterModifier::None)
     {
-        // Vararg element types and noinline/crossinline flags are declaration facts the narrow
-        // parameter writer does not yet encode.
+        // Noinline/crossinline flags are declaration facts the narrow parameter writer does not
+        // yet encode.
         return None;
     }
     let overridden = overridden_members(ir, declarations, facts, function, *dispatch_receiver)?;
@@ -195,10 +196,29 @@ pub(super) fn prepared_function(
     if inline && !is_reified_type_test(ir, function, declaration.body?, generic) {
         return None;
     }
+    let identities = ir.function_parameter_identities(function)?;
+    if identities.len() != generic.params.len() || generic.params.len() != declaration.params.len()
+    {
+        return None;
+    }
+    let vararg = vararg_parameter(ir, function, identities, &generic.params)?;
+    // Kotlin declares a `vararg` of a reference element `Array<out E>`, which common IR records
+    // as the invariant array its body reads.
+    let declared = generic
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, &ty)| match vararg {
+            Some((at, element)) if at == index && ty.is_reference_array() => {
+                Ty::obj_args_name(crate::types::wk::array(), &[Ty::out_projection(element)])
+            }
+            _ => ty,
+        })
+        .collect::<Vec<_>>();
     let slots = dispatch_receiver
         .iter()
         .copied()
-        .chain(generic.params.iter().copied())
+        .chain(declared.iter().copied())
         .collect::<Vec<_>>();
     // A member without a body is abstract; any other function writes its body.
     let body = match declaration.body {
@@ -217,14 +237,9 @@ pub(super) fn prepared_function(
         None if dispatch_receiver.is_some() && !inline => None,
         None => return None,
     };
-    let identities = ir.function_parameter_identities(function)?;
-    if identities.len() != generic.params.len() || generic.params.len() != declaration.params.len()
-    {
-        return None;
-    }
     let parameters = identities
         .iter()
-        .zip(&generic.params)
+        .zip(&declared)
         .enumerate()
         .map(|(index, (identity, &ty))| {
             let name = match (&identity.source_name, identity.role) {
@@ -242,11 +257,15 @@ pub(super) fn prepared_function(
                 Some(default) if is_null_default(ir, default) => true,
                 Some(_) => return None,
             };
+            let vararg_element = vararg
+                .filter(|(at, _)| *at == index)
+                .map(|(_, element)| element);
             super::body_tree::supported_type(ty, &generic.type_params).then_some(
                 PreparedParameter {
                     name,
                     ty,
                     default_null,
+                    vararg_element,
                 },
             )
         })
@@ -452,6 +471,33 @@ fn is_null_default(ir: &IrFile, expression: u32) -> bool {
         } => matches!(ir.expr(*arg), IrExpr::Const(crate::ir::IrConst::Null)),
         _ => false,
     }
+}
+
+/// The position among `params` of the function's `vararg` parameter and its element type, or
+/// `None` without one; the outer `None` declines a vararg whose element is a projection. A vararg's
+/// declared index counts the declared parameters, which the extension receiver is not.
+fn vararg_parameter(
+    ir: &IrFile,
+    function: FunId,
+    identities: &[crate::ir::IrParameterIdentity],
+    params: &[Ty],
+) -> Option<Option<(usize, Ty)>> {
+    let Some(vararg) = ir.declared_parameters(function).vararg else {
+        return Some(None);
+    };
+    let position = identities
+        .iter()
+        .enumerate()
+        .filter(|(_, identity)| identity.role != IrParameterRole::ExtensionReceiver)
+        .nth(vararg.index)?
+        .0;
+    let element = params.get(position)?.array_elem()?;
+    let element = match element.kind() {
+        TyKind::OutProjection(inner) => inner,
+        TyKind::InProjection(_) | TyKind::StarProjection(_) => return None,
+        _ => element,
+    };
+    Some(Some((position, element)))
 }
 
 /// Whether an inline body is `return value is T` (or `!is`) over one of the function's own
@@ -776,13 +822,17 @@ impl FileWriter {
             physical += 1;
         }
         for (index, parameter) in function.parameters.iter().enumerate() {
-            let encoded = self.parameter(
+            let mut encoded = self.parameter(
                 &parameter.name,
                 parameter.ty,
                 parameter_symbols[physical],
                 parameter.default_null,
                 &type_parameters,
             );
+            if let Some(element) = parameter.vararg_element {
+                let element = self.ty(element, &type_parameters);
+                encoded.field_varint(3, u64::from(element));
+            }
             if index < function.context_count {
                 function_base.repeated_message(9, &encoded);
             } else if function.extension_parameter == Some(index) {
@@ -1143,6 +1193,7 @@ mod tests {
                     name: "value".to_owned(),
                     ty: Ty::nullable(Ty::obj("kotlin/Any")),
                     default_null: true,
+                    vararg_element: None,
                 }],
                 context_count: 0,
                 extension_parameter: None,
