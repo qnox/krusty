@@ -37,10 +37,6 @@ pub enum SemanticCallRole {
     KotlinPropertyReferenceGet(u8),
     /// A mutable property-reference write with this many unbound receivers.
     KotlinPropertyReferenceSet(u8),
-    /// The standard property-reference delegation read with this many forwarded receivers.
-    KotlinPropertyReferenceDelegateGet(u8),
-    /// The standard property-reference delegation write with this many forwarded receivers.
-    KotlinPropertyReferenceDelegateSet(u8),
     /// The standard library iterator declaration whose selected receiver is indexed as a
     /// `CharSequence` by Kotlin's for-loop lowering.
     KotlinCharSequenceIterator,

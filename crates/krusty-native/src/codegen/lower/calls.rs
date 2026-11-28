@@ -684,11 +684,6 @@ impl BodyLowering<'_, '_, '_> {
                             return realized;
                         }
                         if let Some(realized) =
-                            self.reference_delegate(realization.semantic_role, receiver, args, *ret)
-                        {
-                            return realized;
-                        }
-                        if let Some(realized) =
                             self.iteration_member(signature, receiver, args, *ret)
                         {
                             return realized;

@@ -156,6 +156,7 @@ pub(super) fn materialize_top_level_delegate(
         .set_value
         .as_ref()
         .map(|set_value| {
+            let setter_body = ir.exprs.len();
             let receiver = delegate_storage_read(
                 ir,
                 IrExpr::GetStatic(delegate_static),
@@ -181,9 +182,10 @@ pub(super) fn materialize_top_level_delegate(
                     (value, property.ty),
                 ],
             )?;
+            at_property_line(ir, setter_body, write, property.decl_line);
             Ok(add_accessor_function(
                 ir,
-                AccessorFunctionInput::setter(
+                AccessorFunctionInput::delegated_setter(
                     crate::names::property_setter_name(&property.name),
                     extension_receiver
                         .into_iter()
@@ -369,6 +371,7 @@ pub(super) fn materialize_member_delegate(
         .set_value
         .as_ref()
         .map(|set_value| {
+            let setter_body = ir.exprs.len();
             let this_ref = ir.add_expr(IrExpr::GetValue(0));
             let receiver = delegate_storage_read(
                 ir,
@@ -395,9 +398,10 @@ pub(super) fn materialize_member_delegate(
                     (value, property.ty),
                 ],
             )?;
+            at_property_line(ir, setter_body, write, property.decl_line);
             Ok(add_accessor_function(
                 ir,
-                AccessorFunctionInput::setter(
+                AccessorFunctionInput::delegated_setter(
                     crate::names::property_setter_name(&property.name),
                     vec![property.ty],
                     write,
@@ -641,6 +645,7 @@ pub(super) fn materialize_member_extension_delegate(
         .set_value
         .as_ref()
         .map(|set_value| {
+            let setter_body = ir.exprs.len();
             let dispatch = ir.add_expr(IrExpr::GetValue(0));
             let delegate = delegate_storage_read(
                 ir,
@@ -667,9 +672,10 @@ pub(super) fn materialize_member_extension_delegate(
                     (value, property.ty),
                 ],
             )?;
+            at_property_line(ir, setter_body, write, property.decl_line);
             Ok(add_accessor_function(
                 ir,
-                AccessorFunctionInput::setter(
+                AccessorFunctionInput::delegated_setter(
                     crate::names::property_setter_name(&property.name),
                     vec![extension_receiver, property.ty],
                     write,
@@ -838,7 +844,7 @@ fn push_delegate_static(
 /// reports it: the external arms have no callable identity to name, and `property`
 /// is not a spare sentinel — it is whichever declaration was allocated first, so a failure here used
 /// to be attributed to an unrelated one.
-/// kotlinc states a delegated getter's convention call at the property's line, the call site an
+/// kotlinc states a delegated accessor's convention call at the property's line, the call site an
 /// inlined operator's lines are mapped against.
 ///
 /// fir2ir builds the whole generated accessor body at the property's offsets, so every node built
@@ -924,28 +930,9 @@ pub(super) fn delegated_call_with_dispatch(
             let arguments =
                 materialize_delegated_arguments(ir, arguments, &call.declared_parameters)?;
             let owner = index.enclosing_classifier(callable.declaration);
-            if let Some(dispatch) = &call.dispatch_receiver {
-                let dispatch = match selected_dispatch {
-                    Some(dispatch) => dispatch,
-                    None => match dispatch {
-                        FirDelegateDispatchReceiver::Scoped {
-                            current: true,
-                            depth: 0,
-                            ..
-                        } => ir.add_expr(IrExpr::GetValue(0)),
-                        FirDelegateDispatchReceiver::Singleton { classifier, .. } => {
-                            ir.add_expr(IrExpr::SingletonValue {
-                                classifier: *classifier,
-                            })
-                        }
-                        FirDelegateDispatchReceiver::Scoped { .. }
-                        | FirDelegateDispatchReceiver::ContextBinding { .. } => {
-                            return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
-                                callable.declaration,
-                            ));
-                        }
-                    },
-                };
+            if let Some(dispatch) =
+                convention_dispatch(ir, call, selected_dispatch, callable.declaration)?
+            {
                 let owner = owner.ok_or(FirFileLoweringFailure::MissingCallable(
                     callable.declaration,
                 ))?;
@@ -1142,124 +1129,63 @@ pub(super) fn delegated_call_with_dispatch(
                 call.result.get(),
             ))
         }
-        FirCallTarget::External {
-            declaration,
-            default_provider,
-            receiver: _,
-            declared_receiver,
-            parameters,
-            result,
-            declared_result,
-            semantic_role,
-            suspend,
-            inline,
-            inline_plan: _,
-            extension_receiver_parameter,
-            ..
-        } => {
-            let mut arguments =
-                materialize_delegated_arguments(ir, arguments, &call.declared_parameters)?;
-            if call.dispatch_receiver.is_none() {
-                let mut operands = Vec::with_capacity(arguments.len() + 1);
-                operands.push(match declared_receiver {
-                    Some(declared) => materialize_delegated_receiver(
-                        ir,
-                        receiver,
-                        call.receiver.get(),
-                        declared.get(),
-                    ),
-                    None => receiver,
-                });
-                operands.extend(arguments.iter().copied());
-                let expanded = super::delegate_inline::expand_dependency_convention(
-                    ir,
-                    templates,
-                    super::delegate_inline::DelegateConventionCall {
-                        target: *declaration,
-                        inline: *inline,
-                        extension: call.extension,
-                        operands,
-                    },
-                )
-                .map_err(|_| FirFileLoweringFailure::UnsupportedPropertyShape(property))?;
-                if let Some(expanded) = expanded {
-                    return Ok(materialize_delegated_result(
-                        ir,
-                        expanded,
-                        declared_result.map_or_else(|| result.get(), |declared| declared.get()),
-                        call.result.get(),
-                    ));
-                }
-            }
-            let dispatch_receiver = if let Some(dispatch) = &call.dispatch_receiver {
-                let dispatch = match selected_dispatch {
-                    Some(dispatch) => dispatch,
-                    None => match dispatch {
-                        FirDelegateDispatchReceiver::Scoped {
-                            current: true,
-                            depth: 0,
-                            ..
-                        } => ir.add_expr(IrExpr::GetValue(0)),
-                        FirDelegateDispatchReceiver::Singleton { classifier, .. } => {
-                            ir.add_expr(IrExpr::SingletonValue {
-                                classifier: *classifier,
-                            })
-                        }
-                        FirDelegateDispatchReceiver::Scoped { .. }
-                        | FirDelegateDispatchReceiver::ContextBinding { .. } => {
-                            return Err(FirFileLoweringFailure::UnsupportedPropertyShape(property));
-                        }
-                    },
-                };
-                let parameter = extension_receiver_parameter
-                    .ok_or(FirFileLoweringFailure::UnsupportedPropertyShape(property))?
-                    as usize;
-                if parameter > arguments.len() {
-                    return Err(FirFileLoweringFailure::UnsupportedPropertyShape(property));
-                }
-                arguments.insert(parameter, receiver);
-                dispatch
-            } else {
-                if extension_receiver_parameter.is_some() {
-                    return Err(FirFileLoweringFailure::UnsupportedPropertyShape(property));
-                }
-                receiver
-            };
-            let expression = ir.add_expr(IrExpr::Call {
-                callee: Box::new(Callee::External {
-                    target: *declaration,
-                    default_provider: *default_provider,
-                    params: parameters.iter().map(|ty| ty.get()).collect(),
-                    ret: result.get(),
-                    substitutions: Vec::new(),
-                    defaults: Vec::new(),
-                    extension_receiver_parameter: *extension_receiver_parameter,
-                }),
-                dispatch_receiver: Some(dispatch_receiver),
-                args: arguments,
-            });
-            // The convention call is checked at the selected call-site result, as an ordinary
-            // checked call is.
-            ir.set_logical_type_if_absent(expression, result.get());
-            if let Some(declared_receiver) = declared_receiver {
-                ir.ext_call_source_receiver
-                    .insert(expression, declared_receiver.get());
-            }
-            if let Some(declared_result) = declared_result {
-                ir.call_declared_ret
-                    .insert(expression, declared_result.get());
-            }
-            if let Some(role) = semantic_role {
-                ir.semantic_call_roles.insert(expression, *role);
-            }
-            if *suspend {
-                ir.suspend_calls.insert(expression, result.get());
-            }
-            Ok(expression)
+        // A dependency convention is the ordinary external call the checker selected, lowered
+        // through the one external-call path, which expands an inline declaration from its
+        // template exactly as at an ordinary call site.
+        FirCallTarget::External { .. } => {
+            let dispatch = convention_dispatch(ir, call, selected_dispatch, property)?;
+            let arguments = arguments
+                .into_iter()
+                .map(|(argument, _)| argument)
+                .collect::<Vec<_>>();
+            super::external_delegate_calls::generated_external_delegate_call(
+                index,
+                templates,
+                ir,
+                property,
+                call,
+                super::external_delegate_calls::DelegateOperands {
+                    delegate: receiver,
+                    dispatch,
+                    arguments: &arguments,
+                },
+            )
         }
         FirCallTarget::Intrinsic { .. }
         | FirCallTarget::Classifier { .. }
         | FirCallTarget::Super { .. } => {
+            Err(FirFileLoweringFailure::UnsupportedPropertyShape(property))
+        }
+    }
+}
+
+/// The implicit receiver owning a member-extension convention: the one the caller already
+/// evaluated, or the current instance or singleton the checker selected.
+fn convention_dispatch(
+    ir: &mut IrFile,
+    call: &FirDelegateCall,
+    selected: Option<ExprId>,
+    property: DeclarationId,
+) -> Result<Option<ExprId>, FirFileLoweringFailure> {
+    let Some(dispatch) = &call.dispatch_receiver else {
+        return Ok(None);
+    };
+    if let Some(selected) = selected {
+        return Ok(Some(selected));
+    }
+    match dispatch {
+        FirDelegateDispatchReceiver::Scoped {
+            current: true,
+            depth: 0,
+            ..
+        } => Ok(Some(ir.add_expr(IrExpr::GetValue(0)))),
+        FirDelegateDispatchReceiver::Singleton { classifier, .. } => {
+            Ok(Some(ir.add_expr(IrExpr::SingletonValue {
+                classifier: *classifier,
+            })))
+        }
+        FirDelegateDispatchReceiver::Scoped { .. }
+        | FirDelegateDispatchReceiver::ContextBinding { .. } => {
             Err(FirFileLoweringFailure::UnsupportedPropertyShape(property))
         }
     }

@@ -1592,6 +1592,7 @@ pub(super) struct AccessorFunctionInput {
     value: ExprId,
     result: AccessorResult,
     returns_value: bool,
+    returns_at_value_line: bool,
     dispatch_receiver: Option<TypeName>,
 }
 
@@ -1610,6 +1611,7 @@ impl AccessorFunctionInput {
             value,
             result,
             returns_value: true,
+            returns_at_value_line: true,
             dispatch_receiver: None,
         }
     }
@@ -1622,7 +1624,18 @@ impl AccessorFunctionInput {
             value,
             result: AccessorResult::AsDeclared,
             returns_value: false,
+            returns_at_value_line: false,
             dispatch_receiver: None,
+        }
+    }
+
+    /// A delegated setter: kotlinc states its whole body at the property's offsets, so its return
+    /// marks the line of the convention call, as a getter's does. A source-written setter returns
+    /// without restating a line.
+    pub(super) fn delegated_setter(name: String, params: Vec<Ty>, value: ExprId) -> Self {
+        Self {
+            returns_at_value_line: true,
+            ..Self::setter(name, params, value)
         }
     }
 
@@ -1640,6 +1653,7 @@ pub(super) fn add_accessor_function(ir: &mut IrFile, input: AccessorFunctionInpu
         value,
         result,
         returns_value,
+        returns_at_value_line,
         dispatch_receiver,
     } = input;
     // A delegated getter returns the PROPERTY's type while the operator it calls returns the
@@ -1647,10 +1661,12 @@ pub(super) fn add_accessor_function(ir: &mut IrFile, input: AccessorFunctionInpu
     // CHECKED types differ — so the accessor carries one adaptation node and never one wrapping
     // another. Whether the node costs an unbox, a `checkcast` or no instruction at all is the
     // backend's to decide from the physical types.
-    // A getter returns at the line its value is stated on: after an inlined call there, the return
-    // marks that line again, as kotlinc's does. An expression body's recorded exit (its end line)
-    // takes precedence, as a function's does.
-    let line = returns_value.then(|| ir.source_line(value)).flatten();
+    // A getter or delegated setter returns at the line its value or call is stated on: after an
+    // inlined call there, the return marks that line again, as kotlinc's does. An expression
+    // body's recorded exit (its end line) takes precedence, as a function's does.
+    let line = returns_at_value_line
+        .then(|| ir.source_line(value))
+        .flatten();
     let crosses_boundary = match result {
         AccessorResult::Delegated(checked) => returns_value && checked != ret,
         AccessorResult::AsDeclared => false,

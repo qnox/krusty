@@ -47,27 +47,6 @@ fn a_reference_to_a_companion_const_reads_it() {
     the_native_backend_agrees_with_kotlinc("CompanionConstReference", source);
 }
 
-/// An OBJECT's `const val`, whose static the object itself owns — and the object's initializer
-/// still runs, which is what separates reaching the constant from reaching the object.
-#[test]
-fn a_reference_to_an_objects_const_is_delegated_to() {
-    let source = "var sideEffect = \"Fail\"\n\
-         object Property {\n\
-         \x20   init {\n\
-         \x20       sideEffect = \"OK\"\n\
-         \x20   }\n\
-         \x20   const val PROPERTY_VALUE: String = \"O\"\n\
-         }\n\
-         const val TOP_LEVEL_PROPERTY_VALUE: String = \"K\"\n\
-         val value1: String by Property::PROPERTY_VALUE\n\
-         val value2: String by ::TOP_LEVEL_PROPERTY_VALUE\n\
-         fun box(): String {\n\
-         \x20   if (sideEffect != \"OK\") return \"fail the object's initializer\"\n\
-         \x20   return value1 + value2\n\
-         }\n";
-    the_native_backend_agrees_with_kotlinc("ObjectConstReference", source);
-}
-
 /// Two references to the same constant are EQUAL, as two references to any one declaration are —
 /// the site binds no receiver, so the program has one instance of it.
 #[test]

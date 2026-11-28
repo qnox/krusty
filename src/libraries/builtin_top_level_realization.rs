@@ -49,47 +49,10 @@ pub(crate) fn attach_dependency_function_realization(
         Some(
             crate::types::SemanticCallRole::KotlinCharSequenceIterator
             | crate::types::SemanticCallRole::IntrinsicConstNumeric(_)
-            | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateGet(_)
-            | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateSet(_)
             | crate::types::SemanticCallRole::KotlinSuspendCoroutine,
         ) if !compiler_builtin_owner => None,
         role => role,
     };
-}
-
-fn property_reference_receiver(receiver: Ty, mutable: bool) -> Option<(u8, &'static [Ty])> {
-    let receiver = receiver.non_null();
-    let internal = receiver.obj_internal()?;
-    let arity = [
-        (
-            if mutable {
-                "kotlin/reflect/KMutableProperty0"
-            } else {
-                "kotlin/reflect/KProperty0"
-            },
-            0,
-        ),
-        (
-            if mutable {
-                "kotlin/reflect/KMutableProperty1"
-            } else {
-                "kotlin/reflect/KProperty1"
-            },
-            1,
-        ),
-    ]
-    .into_iter()
-    .find_map(|(candidate, arity)| {
-        (internal == crate::types::type_name(candidate)).then_some(arity)
-    })?;
-    let arguments = receiver.type_args();
-    (arguments.len() == arity as usize + 1).then_some((arity, arguments))
-}
-
-fn property_reference_metadata_parameter(ty: Ty) -> bool {
-    let ty = ty.non_null();
-    ty.obj_internal() == Some(crate::types::type_name("kotlin/reflect/KProperty"))
-        && matches!(ty.type_args(), [argument] if argument.is_star_projection())
 }
 
 pub(crate) fn function_semantic_role(
@@ -114,50 +77,6 @@ pub(crate) fn function_semantic_role(
     }
     if suspend_coroutine(facts) {
         return Some(SemanticCallRole::KotlinSuspendCoroutine);
-    }
-    if facts.package != crate::types::wk::kotlin_package()
-        || facts.kind != FnKind::Extension
-        || facts.context_count != 0
-        || facts.is_suspend
-        || !facts.is_operator
-        || facts.is_infix
-        || facts.vararg.is_some()
-    {
-        return None;
-    }
-    let receiver = facts.receiver?;
-    if facts.name == "getValue" {
-        let (arity, arguments) = property_reference_receiver(receiver, false)?;
-        let [this_ref, property] = facts.params else {
-            return None;
-        };
-        let this_ref_matches = match arity {
-            0 => *this_ref == Ty::nullable(Ty::obj_name(crate::types::wk::any())),
-            1 => *this_ref == arguments[0],
-            _ => false,
-        };
-        return (facts.type_parameter_count == arity as usize + 1
-            && this_ref_matches
-            && property_reference_metadata_parameter(*property)
-            && facts.ret == arguments[arity as usize])
-            .then_some(SemanticCallRole::KotlinPropertyReferenceDelegateGet(arity));
-    }
-    if facts.name == "setValue" {
-        let (arity, arguments) = property_reference_receiver(receiver, true)?;
-        let [this_ref, property, value] = facts.params else {
-            return None;
-        };
-        let this_ref_matches = match arity {
-            0 => *this_ref == Ty::nullable(Ty::obj_name(crate::types::wk::any())),
-            1 => *this_ref == arguments[0],
-            _ => false,
-        };
-        return (facts.type_parameter_count == arity as usize + 1
-            && this_ref_matches
-            && property_reference_metadata_parameter(*property)
-            && *value == arguments[arity as usize]
-            && facts.ret == Ty::Unit)
-            .then_some(SemanticCallRole::KotlinPropertyReferenceDelegateSet(arity));
     }
     None
 }
@@ -1937,145 +1856,6 @@ mod tests {
             ),
         ] {
             assert_eq!(property_realization(declaration), None, "{why}");
-        }
-    }
-
-    #[test]
-    fn property_reference_delegate_roles_require_the_complete_extension_signature() {
-        let any = Ty::obj_name(crate::types::wk::any());
-        let value = Ty::ty_param("V", any);
-        let receiver = Ty::obj_args("kotlin/reflect/KProperty0", &[value]);
-        let property = Ty::obj_args(
-            "kotlin/reflect/KProperty",
-            &[Ty::star_projection(Ty::nullable(any))],
-        );
-        let params = [Ty::nullable(any), property];
-        let declaration = BuiltinFunctionDeclaration {
-            package: crate::types::wk::kotlin_package(),
-            name: "getValue",
-            kind: FnKind::Extension,
-            receiver: Some(receiver),
-            params: &params,
-            ret: value,
-            context_count: 0,
-            type_parameter_count: 1,
-            vararg: None,
-            is_suspend: false,
-            is_operator: true,
-            is_infix: false,
-        };
-        assert_eq!(
-            function_semantic_role(&declaration),
-            Some(crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateGet(0))
-        );
-
-        let lookalike = BuiltinFunctionDeclaration {
-            package: crate::types::type_name("fixture"),
-            ..declaration
-        };
-        assert_eq!(function_semantic_role(&lookalike), None);
-    }
-
-    #[test]
-    fn dependency_property_reference_roles_require_stdlib_ownership_and_the_exact_shape() {
-        use crate::libraries::{GenericSig, LibraryCallable};
-        use crate::types::SemanticCallRole;
-
-        fn declaration(arity: u8, mutable: bool) -> FunctionInfo {
-            let any = Ty::nullable(Ty::obj_name(crate::types::wk::any()));
-            let value = Ty::ty_param("V", any);
-            let owner = Ty::ty_param("T", any);
-            let arguments = if arity == 0 {
-                vec![value]
-            } else {
-                vec![owner, value]
-            };
-            let receiver = Ty::obj_args(
-                match (arity, mutable) {
-                    (0, false) => "kotlin/reflect/KProperty0",
-                    (1, false) => "kotlin/reflect/KProperty1",
-                    (0, true) => "kotlin/reflect/KMutableProperty0",
-                    (1, true) => "kotlin/reflect/KMutableProperty1",
-                    _ => unreachable!(),
-                },
-                &arguments,
-            );
-            let property = Ty::obj_args("kotlin/reflect/KProperty", &[Ty::star_projection(any)]);
-            let mut params = vec![if arity == 0 { any } else { owner }, property];
-            if mutable {
-                params.push(value);
-            }
-            let ret = if mutable { Ty::Unit } else { value };
-            let name = if mutable { "setValue" } else { "getValue" };
-            let callable = LibraryCallable::library("kotlin", name, params.clone(), ret, ret, "");
-            let mut function = FunctionInfo::plain(FnKind::Extension, Some(receiver), callable);
-            function.flags.operator = true;
-            function.generic_sig = Some(GenericSig {
-                formals: if arity == 0 {
-                    vec!["V".into()]
-                } else {
-                    vec!["T".into(), "V".into()]
-                },
-                formal_bounds: vec![vec![]; arity as usize + 1],
-                receiver: Some(receiver),
-                params,
-                ret,
-                return_policy: Default::default(),
-            });
-            function
-        }
-
-        for arity in [0, 1] {
-            for mutable in [false, true] {
-                let name = if mutable { "setValue" } else { "getValue" };
-                let expected = if mutable {
-                    SemanticCallRole::KotlinPropertyReferenceDelegateSet(arity)
-                } else {
-                    SemanticCallRole::KotlinPropertyReferenceDelegateGet(arity)
-                };
-                for compiler_builtin_owner in [false, true] {
-                    let mut function = declaration(arity, mutable);
-                    attach_dependency_function_realization(
-                        crate::types::wk::kotlin_package(),
-                        name,
-                        compiler_builtin_owner,
-                        &mut function,
-                        None,
-                    );
-                    assert_eq!(
-                        function.callable.semantic_role,
-                        compiler_builtin_owner.then_some(expected)
-                    );
-                    assert_eq!(function.callable.compiler_intrinsic, None);
-
-                    let mut wrong_shape = declaration(arity, mutable);
-                    wrong_shape.flags.operator = false;
-                    attach_dependency_function_realization(
-                        crate::types::wk::kotlin_package(),
-                        name,
-                        compiler_builtin_owner,
-                        &mut wrong_shape,
-                        None,
-                    );
-                    assert_eq!(wrong_shape.callable.semantic_role, None);
-
-                    let mut explicit_out = declaration(arity, mutable);
-                    explicit_out.generic_sig.as_mut().unwrap().params[1] = Ty::obj_args(
-                        "kotlin/reflect/KProperty",
-                        &[Ty::out_projection(Ty::nullable(Ty::obj_name(
-                            crate::types::wk::any(),
-                        )))],
-                    );
-                    attach_dependency_function_realization(
-                        crate::types::wk::kotlin_package(),
-                        name,
-                        compiler_builtin_owner,
-                        &mut explicit_out,
-                        None,
-                    );
-                    assert_eq!(explicit_out.callable.semantic_role, None);
-                }
-            }
         }
     }
 

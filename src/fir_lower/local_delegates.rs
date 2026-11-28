@@ -345,6 +345,25 @@ impl BodyLowering<'_> {
                 .ok_or(FirLoweringFailure::MissingCallable(target))??;
             return Ok(expression);
         }
+        if matches!(call.target, FirCallTarget::External { .. }) {
+            let arguments = arguments
+                .iter()
+                .map(|&(argument, _)| argument)
+                .collect::<Vec<_>>();
+            return self
+                .external_delegate_call(
+                    call,
+                    super::external_delegate_calls::DelegateOperands {
+                        delegate,
+                        dispatch,
+                        arguments: &arguments,
+                    },
+                    Some(source_line),
+                )
+                .ok_or(FirLoweringFailure::InvalidLocalDelegatePlan(
+                    self.body.owner(),
+                ));
+        }
         super::delegated_properties::delegated_call_with_dispatch(
             self.index,
             self.ir,
