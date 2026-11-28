@@ -47,10 +47,19 @@ impl BodyLowering<'_, '_, '_> {
         lhs: u32,
         rhs: u32,
     ) -> Result<Option<Value>, Unsupported> {
+        if let Some(equal) = self.value_class_equality(op, lhs, rhs)? {
+            return Ok(equal);
+        }
         let against_null = matches!(self.file.ir.expr(lhs), IrExpr::Const(IrConst::Null))
             || matches!(self.file.ir.expr(rhs), IrExpr::Const(IrConst::Null));
-        let left = self.reference(lhs)?;
-        let right = self.reference(rhs)?;
+        let (left, right) = if against_null {
+            (
+                self.null_tested_operand(lhs, self.checked_type(lhs))?,
+                self.null_tested_operand(rhs, self.checked_type(rhs))?,
+            )
+        } else {
+            (self.reference(lhs)?, self.reference(rhs)?)
+        };
         if self.terminated {
             return Ok(None);
         }
@@ -67,6 +76,51 @@ impl BodyLowering<'_, '_, '_> {
         } else {
             equal
         }))
+    }
+
+    /// `==` of two non-null occurrences of one value class that declares no `equals` of its own:
+    /// Kotlin's is the class's generated `equals`, which compares the values by THEIR type's
+    /// `equals` — so `NaN` equals itself and the two zeroes differ, as they do in a box. Each
+    /// operand is coerced to the class first, which opens one an erased result carried as a box,
+    /// and neither is boxed to ask. A class that declares its own `equals` answers by it, through
+    /// its box on the general path. `Ok(None)` leaves the comparison to that path;
+    /// `Ok(Some(None))` is a terminated body.
+    fn value_class_equality(
+        &mut self,
+        op: IrBinOp,
+        lhs: u32,
+        rhs: u32,
+    ) -> Result<Option<Option<Value>>, Unsupported> {
+        let unboxed = |ty: Option<Ty>| {
+            ty.filter(|ty| !ty.is_nullable())
+                .and_then(|ty| self.file.values.unboxed(ty))
+        };
+        let (Some(left), Some(right)) = (
+            unboxed(self.checked_type(lhs)),
+            unboxed(self.checked_type(rhs)),
+        ) else {
+            return Ok(None);
+        };
+        if left != right || self.declares_its_own_equals(left) {
+            return Ok(None);
+        }
+        let class = Ty::obj_name(left);
+        let Some(lhs) = self.coerce(lhs, class)? else {
+            return Ok(Some(None));
+        };
+        let Some(rhs) = self.coerce(rhs, class)? else {
+            return Ok(Some(None));
+        };
+        if self.terminated {
+            return Ok(Some(None));
+        }
+        let equal = self.values_equal(lhs, rhs, class)?;
+        Ok(Some(Some(if op == IrBinOp::Ne {
+            let one = self.builder.ins().iconst(types::I8, 1);
+            self.builder.ins().bxor(equal, one)
+        } else {
+            equal
+        })))
     }
 
     fn primitive_equality(
@@ -330,6 +384,28 @@ impl BodyLowering<'_, '_, '_> {
         }))
     }
 
+    /// An operand of `x == null`, as the reference the identity test reads: a nullable value class
+    /// carried as its (reference) value is that value, whose `null` is the class's own; any other
+    /// operand is the reference it is.
+    fn null_tested_operand(
+        &mut self,
+        operand: u32,
+        checked: Option<Ty>,
+    ) -> Result<Value, Unsupported> {
+        let carried_as_its_value = checked.is_some_and(|ty| {
+            ty.is_nullable()
+                && self.file.values.unboxed(ty).is_some()
+                && self.carrier(self.file.values.project(ty)) == Carrier::Ref
+        });
+        if !carried_as_its_value {
+            return self.reference(operand);
+        }
+        Ok(match self.expression(operand)? {
+            Some(value) => value,
+            None => self.builder.ins().iconst(types::I64, 0),
+        })
+    }
+
     /// Whether an operand is `null`, as a `Boolean`. A scalar one never is, and says so with a
     /// constant rather than a comparison against a pointer it is not.
     fn is_null_operand(&mut self, value: Value, ty: Option<Ty>) -> Value {
@@ -356,34 +432,8 @@ impl BodyLowering<'_, '_, '_> {
         let rhs_scalar = rhs_checked.and_then(scalar_bound);
 
         if matches!(op, IrBinOp::Eq | IrBinOp::Ne) {
-            // Two occurrences of one value class, both carried as the value: Kotlin's `==` on
-            // them is the class's `equals`, which compares the values by THEIR type's `equals` —
-            // so `NaN` equals itself and the two zeroes differ, as they do in a box.
-            let unboxed = |ty: Option<Ty>| {
-                ty.filter(|ty| !ty.is_nullable())
-                    .and_then(|ty| self.file.values.unboxed(ty))
-            };
-            if let (Some(left), Some(right)) = (unboxed(lhs_checked), unboxed(rhs_checked)) {
-                // A class that declares its own `equals` answers by it, through its box below.
-                if left == right && !self.declares_its_own_equals(left) {
-                    let class = Ty::obj_name(left);
-                    let Some(lhs) = self.coerce(lhs, class)? else {
-                        return Ok(None);
-                    };
-                    let Some(rhs) = self.coerce(rhs, class)? else {
-                        return Ok(None);
-                    };
-                    if self.terminated {
-                        return Ok(None);
-                    }
-                    let equal = self.values_equal(lhs, rhs, class)?;
-                    return Ok(Some(if op == IrBinOp::Ne {
-                        let one = self.builder.ins().iconst(types::I8, 1);
-                        self.builder.ins().bxor(equal, one)
-                    } else {
-                        equal
-                    }));
-                }
+            if let Some(equal) = self.value_class_equality(op, lhs, rhs)? {
+                return Ok(equal);
             }
             let against_null = matches!(self.file.ir.expr(lhs), IrExpr::Const(IrConst::Null))
                 || matches!(self.file.ir.expr(rhs), IrExpr::Const(IrConst::Null));
@@ -405,9 +455,12 @@ impl BodyLowering<'_, '_, '_> {
             let on_references =
                 reference_operand(lhs_physical) || reference_operand(rhs_physical) || own_equals;
             if against_null {
-                // `x == null` is `x === null` in Kotlin: no `equals` is ever called.
-                let left = self.reference(lhs)?;
-                let right = self.reference(rhs)?;
+                // `x == null` is `x === null` in Kotlin: no `equals` is ever called. A `V?` that
+                // is carried as its value has the value's own `null` for the absent one, so the
+                // test reads that value as it is: boxing it first would need a layout of `V` that
+                // a class carried as an address, such as `CPointer`, does not have.
+                let left = self.null_tested_operand(lhs, lhs_checked)?;
+                let right = self.null_tested_operand(rhs, rhs_checked)?;
                 let condition = comparison(op, true).expect("equality");
                 return Ok(Some(self.builder.ins().icmp(condition, left, right)));
             }

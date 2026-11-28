@@ -1126,6 +1126,7 @@ fn realize_expressions(
                 | krusty::libraries::CompilerIntrinsic::FloatingAdjacent { .. }
                 | krusty::libraries::CompilerIntrinsic::CountLeadingZeroBits { .. }
                 | krusty::libraries::CompilerIntrinsic::CharIsSurrogate(_)
+                | krusty::libraries::CompilerIntrinsic::NativePointer(_)
                 | krusty::libraries::CompilerIntrinsic::RadixToString { .. }
                 | krusty::libraries::CompilerIntrinsic::ArrayStorageCopy
                 | krusty::libraries::CompilerIntrinsic::StringRangeEquals

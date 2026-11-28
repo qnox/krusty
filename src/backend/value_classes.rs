@@ -190,6 +190,17 @@ impl ValueClassInventory {
         Ok(inventory)
     }
 
+    /// This inventory, also carrying each of `classes` as a value class of the type given: classes
+    /// the target holds as a value although their declaration is not a `value class`
+    /// ([`super::address_carriers`]). Nothing declares a class twice, so a class the inventory
+    /// already knows keeps its own declaration.
+    pub fn carrying(mut self, classes: impl IntoIterator<Item = (TypeName, Ty)>) -> Self {
+        for (classifier, underlying) in classes {
+            self.declarations.entry(classifier).or_insert(underlying);
+        }
+        self
+    }
+
     /// `ty` as a KLIB backend carries it: a value class projected to its underlying value wherever
     /// the policy says so, anything else unchanged. Still a SEMANTIC type — the carrier is read
     /// from it as from any other.

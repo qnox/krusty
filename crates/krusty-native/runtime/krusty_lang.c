@@ -1017,3 +1017,78 @@ KT_CONSOLE(ulong, kt_long, kt_box_ulong)
 #undef KT_CONSOLE
 
 void kt_println_unit(void) { kt_sys_write(1, "\n", 1); }
+
+/* ---- C strings ------------------------------------------------------------------------------ */
+
+/* The length of the well-formed UTF-8 sequence starting at `bytes[0]`, or 0 when the bytes there do
+   not start one: a stray continuation byte, an overlong form, a surrogate, a code point above
+   U+10FFFF, or a sequence the terminator cuts short. The second byte's range is what the Unicode
+   standard narrows for the lead bytes `E0`, `ED`, `F0` and `F4`. */
+static kt_int kt_utf8_sequence_length(const unsigned char *bytes) {
+    unsigned char lead = bytes[0];
+    if (lead < 0x80) {
+        return 1;
+    }
+    kt_int length;
+    unsigned char low = 0x80;
+    unsigned char high = 0xBF;
+    if (lead >= 0xC2 && lead <= 0xDF) {
+        length = 2;
+    } else if (lead >= 0xE0 && lead <= 0xEF) {
+        length = 3;
+        if (lead == 0xE0) {
+            low = 0xA0;
+        } else if (lead == 0xED) {
+            high = 0x9F;
+        }
+    } else if (lead >= 0xF0 && lead <= 0xF4) {
+        length = 4;
+        if (lead == 0xF0) {
+            low = 0x90;
+        } else if (lead == 0xF4) {
+            high = 0x8F;
+        }
+    } else {
+        return 0;
+    }
+    if (bytes[1] < low || bytes[1] > high) {
+        return 0;
+    }
+    for (kt_int index = 2; index < length; index++) {
+        if (bytes[index] < 0x80 || bytes[index] > 0xBF) {
+            return 0;
+        }
+    }
+    return length;
+}
+
+/* `CPointer<ByteVar>.toKStringFromUtf8Impl()`, which the standard library declares `external` with
+   `@GCUnsafeCall("Kotlin_CString_toKStringFromUtf8Impl")`: the zero-terminated UTF-8 text at an
+   address, as a `String` of its own. The bytes are copied, because the C string is not the
+   collector's to keep alive, and each ill-formed byte becomes U+FFFD as Kotlin decodes it. */
+KRef Kotlin_CString_toKStringFromUtf8Impl(const char *text) {
+    const unsigned char *bytes = (const unsigned char *)text;
+    kt_int length = 0;
+    while (bytes[length] != 0) {
+        length++;
+    }
+    KByteArray *buffer = kt_bytes_new(length * 3);
+    char *out = kt_bytes_of(buffer);
+    kt_int written = 0;
+    kt_int read = 0;
+    while (read < length) {
+        kt_int sequence = kt_utf8_sequence_length(bytes + read);
+        if (sequence == 0) {
+            out[written++] = (char)0xEF;
+            out[written++] = (char)0xBF;
+            out[written++] = (char)0xBD;
+            read++;
+            continue;
+        }
+        for (kt_int index = 0; index < sequence; index++) {
+            out[written++] = (char)bytes[read + index];
+        }
+        read += sequence;
+    }
+    return kt_string_of((KRef)buffer, out, written);
+}

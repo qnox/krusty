@@ -280,7 +280,7 @@ impl Filler<'_> {
         let ir = self.ir;
         let interface = || declaration.interface.render().replace('/', ".");
         let method = |fid: FunId| {
-            if ir.functions[fid as usize].body.is_some() {
+            if ir.has_implementation(fid) {
                 Slot::Function(fid)
             } else {
                 Slot::Abstract

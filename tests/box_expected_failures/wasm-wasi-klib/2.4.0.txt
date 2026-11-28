@@ -160,13 +160,11 @@ classes/nestedInitBlocksWithLambda.kt
 closures/captureInSuperConstructorCall/kt4174a.kt
 closures/closuresAsSingleton.kt
 closures/kt11634_4.kt
-collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collections/addCollectionStubWithCovariantOverride.kt
 collections/clashWithInternalMapMethod.kt
 collections/internalRemove.kt
 collections/removeClash.kt
-constants/comparisonFalse.kt
 constants/divisionByZero.kt
 constants/float.kt
 constants/kt9532.kt

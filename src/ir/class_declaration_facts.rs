@@ -15,6 +15,16 @@ pub enum IrDeclarationlessVisibility {
 }
 
 impl IrFile {
+    /// Whether `function` has an implementation a table slot can name: a body, or the entry a
+    /// runtime-bound member (`@GCUnsafeCall`) is realized by. Any other bodyless member is abstract.
+    pub(crate) fn has_implementation(&self, function: super::FunId) -> bool {
+        self.functions[function as usize].body.is_some()
+            || matches!(
+                self.runtime_bindings.get(&function),
+                Some(super::RuntimeBinding::Entry(_))
+            )
+    }
+
     /// The class and method index of `function` when it is a method of an open class, which a
     /// subclass may override, so a call reaches it through the class's dispatch table.
     pub(crate) fn overridable_method(

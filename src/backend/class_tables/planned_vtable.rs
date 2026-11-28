@@ -57,7 +57,7 @@ pub(super) fn planned_class_table(
             .ok_or_else(|| format!("a planned member this file did not lower (`{qualified}`)"))
     };
     let method = |fid: FunId| {
-        if ir.functions[fid as usize].body.is_some() {
+        if ir.has_implementation(fid) {
             Slot::Function(fid)
         } else {
             Slot::Abstract

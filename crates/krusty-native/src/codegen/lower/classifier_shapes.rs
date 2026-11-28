@@ -158,7 +158,7 @@ pub(super) fn runtime_member_classes() -> [(TypeName, &'static str); 1] {
 
 /// Whether the runtime, not a library class body, lays out `internal`: the root class, `Unit`, the
 /// companions of the built-in types, the bases a source class's layout extends (`Number` and the
-/// throwables), the shared empty set, text, the arrays, the unsigned integers (carried as the value
+/// throwables), the shared empty set, text, the arrays, the unsigned integers and the pointer classes (carried as the value
 /// they wrap), the builder it constructs, the integral ranges and progressions, and the standard
 /// collection implementations. A dependency body's call of such a member, or read of such an
 /// object, is lowered here as a source one is.
@@ -174,6 +174,8 @@ pub(in super::super) fn represents_dependency_classifier(internal: TypeName) -> 
         || is_string_builder(internal)
         || Ty::obj_name(internal).is_array()
         || Ty::obj_name(internal).is_unsigned()
+        // The pointer classes, carried as the address they hold.
+        || krusty::backend::address_carriers::is_address_class(internal)
         || super::super::super::intrinsics::throwable_descriptor(internal).is_some()
         // A base the runtime lays out a subclass of, such as `kotlin.Number`, is the runtime's.
         || super::super::super::classes::external_base(internal).is_some()

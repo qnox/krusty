@@ -132,7 +132,7 @@ pub(super) fn class_table(
         if function.dispatch_receiver.is_none() || function.is_static {
             continue;
         }
-        let entry = if function.body.is_some() {
+        let entry = if ir.has_implementation(fid) {
             Slot::Function(fid)
         } else {
             Slot::Abstract

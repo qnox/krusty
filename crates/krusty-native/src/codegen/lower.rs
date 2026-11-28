@@ -47,6 +47,7 @@ pub(super) use lists::realizes_dependency_getter;
 mod local_delegates;
 mod maps;
 mod module_abi;
+mod native_pointers;
 mod object_entries;
 mod objects;
 mod ranges;
@@ -2222,6 +2223,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     && self.is_array_size(*target) =>
             {
                 self.intrinsic(IrIntrinsic::ArraySize, *result, Some(*receiver), &[])
+            }
+            IrExpr::Checked(ref checked_op)
+                if let IrCheckedOperation::ExternalPropertyRead {
+                    target,
+                    receiver: Some(receiver),
+                    result,
+                    ..
+                } = &**checked_op
+                    && self.is_address_value_read(*target) =>
+            {
+                self.address_value_read(*receiver, *result)
             }
             IrExpr::Checked(ref checked_op)
                 if let IrCheckedOperation::ExternalPropertyRead {

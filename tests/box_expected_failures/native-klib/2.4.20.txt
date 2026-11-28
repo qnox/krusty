@@ -96,7 +96,6 @@ classes/kt1538.kt
 classes/kt2566_2.kt
 classes/kt3001.kt
 classes/typedDelegation.kt
-collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collections/clashWithInternalMapMethod.kt
 collections/inheritFromAbstractMutableListInt.kt
@@ -135,8 +134,6 @@ compileKotlinAgainstKotlin/privateSuperTypeDefaults.kt
 compileKotlinAgainstKotlin/privateSuperTypeDefaults2.kt
 compileKotlinAgainstKotlin/secondaryConstructors.kt
 compileKotlinAgainstKotlin/useDeserializedFunInterface.kt
-constants/comparisonFalse.kt
-constants/comparisonTrue.kt
 constants/float.kt
 contextParameters/contextPropertyInInterface.kt
 contextParameters/explicitPassing.kt
@@ -505,7 +502,6 @@ objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlock.kt
 objects/companionObjectAccess/multipleCompanionsWithAccessors/fromInitBlockOfNestedClass.kt
 operatorConventions/kt20387.kt
 operatorConventions/kt44647.kt
-operatorConventions/plusAssignWithComplexRHS.kt
 package/packageLocalClassNotImportedWithDefaultImport.kt
 primitiveTypes/equalsHashCodeToString.kt
 primitiveTypes/kt3517.kt
