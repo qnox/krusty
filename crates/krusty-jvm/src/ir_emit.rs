@@ -1953,16 +1953,16 @@ fn emit_class(
     // Computed once here: the pool seeder interns it and the `<init>` emission attaches it.
     let is_continuation = super::coroutine_classes::is_continuation_class(c);
     let state_machine = super::coroutine_classes::is_coroutine_state_machine(c);
-    let has_continuation_receiver = c.ctor_args.iter().any(|argument| {
+    let continuation_receiver = c.ctor_args.iter().find(|argument| {
         argument.provenance == krusty::ir::IrCtorParameterProvenance::ContinuationDispatchReceiver
     });
     let ctor_signature = continuation_metadata
-        .map(|metadata| {
-            if has_continuation_receiver {
-                format!(
-                    "(L{};Lkotlin/coroutines/Continuation<-L{fq_name};>;)V",
-                    metadata.enclosing_class
-                )
+        .map(|_| {
+            if let Some(receiver) = continuation_receiver {
+                let receiver = signature_formatter
+                    .parameter_ty(&receiver.ty)
+                    .expect("a continuation's receiver type has a signature form");
+                format!("({receiver}Lkotlin/coroutines/Continuation<-L{fq_name};>;)V")
             } else {
                 format!("(Lkotlin/coroutines/Continuation<-L{fq_name};>;)V")
             }

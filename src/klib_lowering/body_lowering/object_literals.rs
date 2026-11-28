@@ -231,6 +231,9 @@ impl<'a> BodyLowering<'a> {
             });
         }
         let class_id = self.ir.add_class(declared);
+        // The object is typed as its bare class wherever this lowering constructs or receives it.
+        self.ir
+            .record_declared_class_self_type(class_name, Ty::obj_name(class_name));
         if let Some(provenance) = self.anonymous_object_provenance() {
             self.ir
                 .local_class_name_provenance
