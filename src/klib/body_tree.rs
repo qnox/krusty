@@ -113,6 +113,9 @@ pub(super) enum TypeOperator {
 pub(super) enum BodyKind {
     Const(IrConst),
     GetValue(ValueRef),
+    /// A value read as the function an `invoke` calls, which Kotlin IR marks
+    /// `VARIABLE_AS_FUNCTION`.
+    GetFunctionValue(ValueRef),
     SetValue {
         local: u32,
         value: BodyExprId,
@@ -439,7 +442,20 @@ impl Translation<'_, '_> {
                 },
             }));
         }
-        self.expr(statement).map(BodyStatement::Expression)
+        let value = self.expr(statement)?;
+        // Kotlin IR coerces a statement's discarded value to `Unit`.
+        let value = match self.ty(value).kind() {
+            TyKind::Unit | TyKind::Nothing => value,
+            _ => self.push(
+                Ty::Unit,
+                BodyKind::TypeOperator {
+                    operator: TypeOperator::ImplicitCoercionToUnit,
+                    operand: Ty::Unit,
+                    argument: value,
+                },
+            )?,
+        };
+        Some(BodyStatement::Expression(value))
     }
 
     fn push(&mut self, ty: Ty, kind: BodyKind) -> Option<BodyExprId> {
@@ -1232,7 +1248,13 @@ impl Translation<'_, '_> {
         property: crate::fir::PropertyId,
         setter: bool,
     ) -> Option<CallTarget> {
-        property_accessor(self.scope.ir, self.scope.exports, property, setter)
+        property_accessor(
+            self.scope.ir,
+            self.scope.exports,
+            self.scope.declarations,
+            property,
+            setter,
+        )
     }
 
     /// `C(args)` of a class of this file, by the constructor checking selected.
@@ -1296,6 +1318,7 @@ impl Translation<'_, '_> {
 pub(super) fn property_accessor(
     ir: &IrFile,
     exports: &crate::backend::DependencyExportSignatures,
+    declarations: &super::inline_ir::DeclarationSignatures,
     property: crate::fir::PropertyId,
     setter: bool,
 ) -> Option<CallTarget> {
@@ -1327,11 +1350,19 @@ pub(super) fn property_accessor(
             } else {
                 crate::backend::ExportedPropertyAccessor::Getter(property)
             };
-            &exports
+            match exports
                 .property_accessors()
                 .iter()
-                .find(|(exported, _)| *exported == operation)?
-                .1
+                .find(|(exported, _)| *exported == operation)
+            {
+                Some((_, identity)) => identity,
+                // A private property's accessor is declared by this file and exported by none.
+                None => {
+                    return declarations
+                        .private_accessor(operation)
+                        .map(|signature| CallTarget::Accessor(signature.clone()));
+                }
+            }
         }
     };
     match &identity.declaration {

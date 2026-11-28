@@ -155,6 +155,12 @@ impl<'t> BodyEncoder<'t> {
                 operation.field_varint(1, self.value(*value));
                 6
             }
+            BodyKind::GetFunctionValue(value) => {
+                operation.field_varint(1, self.value(*value));
+                let origin = self.tables.string("VARIABLE_AS_FUNCTION");
+                operation.field_varint(2, u64::from(origin));
+                6
+            }
             BodyKind::SetValue { local, value } => {
                 operation.field_varint(1, self.value(ValueRef::Local(*local)));
                 let value = self.expression(body, *value);

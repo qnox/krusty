@@ -227,6 +227,124 @@ pub fn package_function_signature(
     with_container(container, |container| callable_signature(container, &shape))
 }
 
+/// The identity of the prepared copy Kotlin 2.4 serializes for the inline function `function` of
+/// `package`, a member of the class `dispatch` (its internal name) when that is given. The copy is
+/// a package-level function whose every parameter is a regular one, in Kotlin IR's order: the
+/// dispatch receiver, the context parameters, the extension receiver, then the value parameters.
+/// Its value types name each non-reified type parameter by its first upper bound. `None` for a
+/// function without a dispatch receiver inside a class, whose copy this shape does not describe.
+pub fn prepared_inline_signature(
+    package: &[String],
+    function: &KotlinFunction,
+    dispatch: Option<&str>,
+) -> Option<Result<KlibPublicIdSignature, ManglingError>> {
+    if function.is_static {
+        return None;
+    }
+    let Some((contexts, values)) = function.params.split_at_checked(function.context_count) else {
+        return Some(Err(ManglingError::new(format!(
+            "function {} has {} context parameters but {} parameters",
+            function.name,
+            function.context_count,
+            function.params.len()
+        ))));
+    };
+    let erase = |ty: &KotlinType| prepared_erasure(ty, &function.formals);
+    let params = dispatch
+        .map(KotlinType::class)
+        .into_iter()
+        .chain(contexts.iter().map(erase))
+        .chain(function.receiver.as_ref().map(erase))
+        .chain(values.iter().map(erase))
+        .collect::<Vec<_>>();
+    // A vararg is a value parameter; its index counts the context parameters already.
+    let leading = usize::from(dispatch.is_some()) + usize::from(function.receiver.is_some());
+    let shape = CallableShape {
+        name: &function.name,
+        contexts: Vec::new(),
+        receiver: None,
+        params: params.iter().collect(),
+        vararg: function.vararg.map(|index| index + leading),
+        type_parameters: type_parameters(&function.formals),
+        expect: function.is_expect,
+        placement: Placement::Ordinary,
+    };
+    Some(with_container(
+        MetadataContainer {
+            package,
+            classes: &[],
+            native_interop_library: false,
+        },
+        |container| callable_signature(container, &shape),
+    ))
+}
+
+/// `ty` with each non-reified type parameter of `formals` replaced by its first upper bound,
+/// `Any?` without one, nullable where the bound or the occurrence is.
+fn prepared_erasure(ty: &KotlinType, formals: &[KotlinTypeParameter]) -> KotlinType {
+    match ty {
+        KotlinType::Param { id, nullable, .. } => {
+            match formals.iter().find(|formal| formal.id == *id) {
+                Some(formal) if !formal.reified => {
+                    let bound = formal.bounds.first().map_or_else(
+                        || nullable_type(KotlinType::class("kotlin/Any")),
+                        |bound| prepared_erasure(bound, formals),
+                    );
+                    if *nullable {
+                        nullable_type(bound)
+                    } else {
+                        bound
+                    }
+                }
+                _ => ty.clone(),
+            }
+        }
+        KotlinType::Class {
+            internal,
+            args,
+            nullable,
+            shape,
+        } => KotlinType::Class {
+            internal: internal.clone(),
+            args: args
+                .iter()
+                .map(|arg| prepared_erasure(arg, formals))
+                .collect(),
+            nullable: *nullable,
+            shape: *shape,
+        },
+        KotlinType::InProjection(inner) => {
+            KotlinType::InProjection(Box::new(prepared_erasure(inner, formals)))
+        }
+        KotlinType::OutProjection(inner) => {
+            KotlinType::OutProjection(Box::new(prepared_erasure(inner, formals)))
+        }
+        KotlinType::Star => KotlinType::Star,
+    }
+}
+
+fn nullable_type(ty: KotlinType) -> KotlinType {
+    match ty {
+        KotlinType::Class {
+            internal,
+            args,
+            shape,
+            ..
+        } => KotlinType::Class {
+            internal,
+            args,
+            nullable: true,
+            shape,
+        },
+        KotlinType::Param { name, id, .. } => KotlinType::Param {
+            name,
+            id,
+            nullable: true,
+        },
+        other => other,
+    }
+}
+
 fn package_property_shape(
     property: &KotlinProperty,
 ) -> Result<PropertyShape<'_, KotlinType>, ManglingError> {

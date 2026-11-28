@@ -28,6 +28,11 @@ impl Translation<'_, '_> {
         // A lambda's value is a function of its implementation's own parameters.
         let function = ir.functions.get(implementation as usize)?;
         let ty = match ir.logical_type(expression) {
+            // A lambda with a receiver declares it as its local function's extension receiver,
+            // which the local function writer does not record.
+            Some(ty) if matches!(ty.kind(), TyKind::Fun(shape) if shape.has_receiver) => {
+                return None;
+            }
             Some(ty) => function_class(ty)?,
             None => Ty::obj_args_name(
                 crate::types::TypeName::from(format!("kotlin/Function{arity}").as_str()),
@@ -199,7 +204,13 @@ impl Translation<'_, '_> {
         if params.len() != args.len() || !self.supported(ret) {
             return None;
         }
-        let function = self.expr(function)?;
+        let function = match self.scope.ir.expr(function) {
+            IrExpr::GetValue(slot) => {
+                let (value, ty) = self.value(*slot)?;
+                self.push(ty, BodyKind::GetFunctionValue(value))?
+            }
+            _ => self.expr(function)?,
+        };
         let TyKind::Obj(class, _) = function_class(self.ty(function))?.kind() else {
             return None;
         };
@@ -287,13 +298,15 @@ pub(super) fn function_class(ty: Ty) -> Option<Ty> {
     }
 }
 
-/// `(P1, …, Pn) -> R` as the class type `kotlin.FunctionN<P1, …, Pn, R>` Kotlin IR writes; `None`
-/// for a function type with receivers, contexts or `suspend`, which carry more than the class.
+/// `(P1, …, Pn) -> R` as the class type `kotlin.FunctionN<P1, …, Pn, R>` Kotlin IR writes. A
+/// receiver is the class's first argument, and the type tables mark the class
+/// `@ExtensionFunctionType`. `None` for a function type with contexts or `suspend`, which carry
+/// more than the class.
 pub(in crate::klib) fn function_type_class(ty: Ty) -> Option<Ty> {
     let TyKind::Fun(shape) = ty.kind() else {
         return None;
     };
-    if shape.has_receiver || shape.context_count != 0 || shape.suspend {
+    if shape.context_count != 0 || shape.suspend {
         return None;
     }
     let arguments = shape

@@ -23,6 +23,10 @@ const LOOPS: &str = include_str!("box_regressions/multimodule/libraryLoopBodies.
 const TRIES: &str = include_str!("box_regressions/multimodule/libraryTryBodies.kt");
 const LAMBDAS: &str = include_str!("box_regressions/multimodule/libraryLambdaBodies.kt");
 const VARARGS: &str = include_str!("box_regressions/multimodule/libraryVarargBodies.kt");
+const INLINE_FUNCTIONS: &str =
+    include_str!("box_regressions/multimodule/libraryInlineFunctionBodies.kt");
+const REIFIED_INLINE_FUNCTIONS: &str =
+    include_str!("box_regressions/multimodule/multimoduleReifiedCallableOrigins.kt");
 
 /// The provisioned reference Kotlin/Native distribution, whose stdlib the library compiles against.
 /// A missing distribution fails the oracle rather than skipping it.
@@ -210,14 +214,23 @@ fn kotlinc_native_runs_a_program_against_krusty_written_varargs() {
 /// otherwise; the dump keeps only the declaration name before it, as the kotlinc consumer test
 /// proves each signature links.
 fn dump_ir(native_root: &Path, library: &Path) -> String {
+    dump(native_root, library, "dump-ir")
+}
+
+/// [`dump_ir`] of the prepared inline copies a library carries, by `klib dump-ir-inlinable-functions`.
+fn dump_inlinable(native_root: &Path, library: &Path) -> String {
+    dump(native_root, library, "dump-ir-inlinable-functions")
+}
+
+fn dump(native_root: &Path, library: &Path, command: &str) -> String {
     let output = Command::new(native_root.join("bin/klib"))
-        .arg("dump-ir")
+        .arg(command)
         .arg(library)
         .output()
         .expect("launch the pinned klib tool");
     assert!(
         output.status.success(),
-        "klib dump-ir rejected the library (status {}):\n{}",
+        "klib {command} rejected the library (status {}):\n{}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
@@ -225,17 +238,21 @@ fn dump_ir(native_root: &Path, library: &Path) -> String {
         .expect("klib dump-ir prints UTF-8")
         .lines()
         .filter(|line| !line.starts_with("Picked up "))
-        .map(
-            |line| match line.trim_start().strip_prefix("FILE fqName:") {
-                Some(file) => format!(
+        .map(|line| {
+            if let Some(file) = line.trim_start().strip_prefix("FILE fqName:") {
+                return format!(
                     "  FILE fqName:{}",
                     file.split(' ')
                         .next()
                         .expect("a FILE line names its package")
-                ),
-                None => without_signature_descriptions(line),
-            },
-        )
+                );
+            }
+            // `dump-ir-inlinable-functions` heads its dump with the library's path.
+            match line.split_once(" inlinable functions in ") {
+                Some((count, _)) if line.starts_with("// ") => count.to_owned(),
+                _ => without_signature_descriptions(line),
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -390,4 +407,46 @@ fn kotlinc_reads_krusty_written_varargs_as_it_writes_them() {
         "vararg-bodies",
         &["count", "listed", "spread", "spelled", "built"],
     );
+}
+
+#[test]
+fn kotlinc_native_inlines_krusty_written_inline_functions() {
+    kotlinc_native_runs(INLINE_FUNCTIONS, "inline-functions");
+}
+
+/// The prepared inline copies krusty writes are the ones kotlinc-native writes, as its own
+/// `klib dump-ir-inlinable-functions` prints them, and the library's declarations match too.
+#[test]
+fn kotlinc_reads_krusty_written_inline_functions_as_it_writes_them() {
+    let native_root = kotlin_native_root();
+    let (library_source, _) = program_sources(INLINE_FUNCTIONS);
+    let work = scratch("krusty-inline-functions-dump");
+    let krusty_library = write_library(&work, &library_source);
+    let kotlinc_library = kotlinc_library(&native_root, &work, &library_source);
+    let implicit = |dump: String| dump.replace("origin=IMPLICIT_ARGUMENT", "origin=null");
+    assert_eq!(
+        dump_inlinable(&native_root, &krusty_library),
+        implicit(dump_inlinable(&native_root, &kotlinc_library)),
+    );
+    assert_eq!(
+        dump_ir(&native_root, &krusty_library),
+        implicit(dump_ir(&native_root, &kotlinc_library)),
+    );
+    std::fs::remove_dir_all(work).expect("remove the dump directory");
+}
+
+/// A prepared copy declares every parameter a regular one: a dispatch receiver, context
+/// parameters and an extension receiver, in that order, as kotlinc-native writes them.
+#[test]
+fn kotlinc_reads_krusty_written_inline_copies_of_every_parameter_kind() {
+    let native_root = kotlin_native_root();
+    let (library_source, _) = program_sources(REIFIED_INLINE_FUNCTIONS);
+    let work = scratch("krusty-inline-parameter-kinds-dump");
+    let krusty_library = write_library(&work, &library_source);
+    let kotlinc_library = kotlinc_library(&native_root, &work, &library_source);
+    assert_eq!(
+        dump_inlinable(&native_root, &krusty_library),
+        dump_inlinable(&native_root, &kotlinc_library),
+    );
+    std::fs::remove_dir_all(work).expect("remove the dump directory");
 }

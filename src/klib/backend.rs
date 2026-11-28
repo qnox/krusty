@@ -18,7 +18,7 @@ use crate::metadata::class_declarations::{ClassTailOptions, FunctionOrigin, Prop
 use crate::metadata::declaration_records;
 use crate::metadata::id_signature::{
     constructor_signature, package_function_signature, package_property_accessor_signature,
-    MetadataAccessor, MetadataClass, MetadataContainer,
+    prepared_inline_signature, MetadataAccessor, MetadataClass, MetadataContainer,
 };
 use crate::metadata::klib_fragment::{
     package_fragment_with_classifier_applications, KlibClass, KlibFileMembers,
@@ -516,6 +516,19 @@ fn package_exports(
             }
         };
         declarations.record(source.function, signature.clone(), None);
+        if declaration.is_inline {
+            match prepared_inline_signature(&package, declaration, None) {
+                Some(Ok(prepared)) => declarations.record_prepared(source.function, prepared),
+                Some(Err(error)) => {
+                    diags.error(
+                        crate::diag::Span::new(0, 0),
+                        format!("internal error: cannot sign a prepared inline copy: {error}"),
+                    );
+                    return None;
+                }
+                None => {}
+            }
+        }
         // Metadata retains inline templates and bodyless declarations because a dependent
         // frontend needs their semantic declarations (and, for an inline function, its KLIB
         // body). The target registry is narrower: it may publish only code this source unit
@@ -818,6 +831,16 @@ fn record_class_function_exports(
             // root; do not publish a raw receiver that would erase that declaration contract.
             if source.type_params.is_empty() && source.captured_type_params.is_empty() {
                 declarations.record(function, signature.clone(), receiver);
+                if declaration.is_inline {
+                    let dispatch = (!declaration.is_static).then_some(name.as_str());
+                    if let Some(prepared) =
+                        prepared_inline_signature(package, declaration, dispatch)
+                    {
+                        let prepared = prepared
+                            .map_err(|error| format!("{name}.{}: {error}", declaration.name))?;
+                        declarations.record_prepared(function, prepared);
+                    }
+                }
             }
             if !declaration.is_static {
                 let identity = crate::libraries::KlibDependencyCallable {
@@ -855,6 +878,7 @@ fn record_class_function_exports(
             container,
             exports,
         )?;
+        record_private_property_accessors(ir, source, (record, class), container, declarations)?;
     }
     Ok(())
 }
@@ -1182,6 +1206,70 @@ fn record_class_property_exports(
                     declaration.name,
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Sign the default accessors of `source`'s private member properties with backing fields. No
+/// other module names them, so they are not exported; this file's IR declares and calls them.
+fn record_private_property_accessors(
+    ir: &IrFile,
+    source: &IrClass,
+    (record, class): (
+        &crate::metadata::class_declarations::ClassDeclarationRecord,
+        &crate::metadata::semantic::KotlinClass,
+    ),
+    container: MetadataContainer<'_>,
+    declarations: &mut super::inline_ir::DeclarationSignatures,
+) -> Result<(), String> {
+    let name = source.fq_name_id();
+    for (declaration, origin) in class.properties.iter().zip(&record.prop_origins) {
+        if declaration.visibility != crate::types::Visibility::Private {
+            continue;
+        }
+        let PropertyOrigin::Declared(index) = origin else {
+            continue;
+        };
+        let mut selected = ir
+            .local_property_layouts
+            .iter()
+            .filter_map(|(property, layout)| match layout {
+                crate::ir::IrLocalPropertyLayout::Member {
+                    owner,
+                    property: at,
+                    getter,
+                    setter,
+                    backing_field: Some(_),
+                    ..
+                } if *owner == name && *at as usize == *index => {
+                    Some((*property, *getter, *setter))
+                }
+                _ => None,
+            });
+        let (Some((property, getter, setter)), None) = (selected.next(), selected.next()) else {
+            continue;
+        };
+        for (written, role, present, operation) in [
+            (
+                getter,
+                MetadataAccessor::Getter,
+                true,
+                crate::backend::ExportedPropertyAccessor::Getter(property),
+            ),
+            (
+                setter,
+                MetadataAccessor::Setter,
+                declaration.is_var,
+                crate::backend::ExportedPropertyAccessor::Setter(property),
+            ),
+        ] {
+            if !present || written.is_some() {
+                continue;
+            }
+            let signature = package_property_accessor_signature(container, declaration, role)
+                .map_err(|error| format!("{}.{}: {error}", source.fq_name(), declaration.name))?;
+            declarations.record_private_accessor(operation, signature);
         }
     }
     Ok(())

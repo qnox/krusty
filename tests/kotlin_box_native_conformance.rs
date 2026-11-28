@@ -1253,3 +1253,19 @@ fn native_links_a_library_s_interfaces_abstract_classes_and_objects_from_its_kli
         "nativeLibraryClassForms",
     );
 }
+
+#[test]
+fn native_links_a_library_s_function_typed_property_s_class_from_its_klib() {
+    expect_native_klib_route(
+        include_str!("box_regressions/multimodule/libraryFunctionTypedProperty.kt"),
+        "nativeLibraryFunctionTypedProperty",
+    );
+}
+
+#[test]
+fn native_links_a_library_s_inline_function_bodies_from_its_klib() {
+    expect_native_klib_route(
+        include_str!("box_regressions/multimodule/libraryInlineFunctionBodies.kt"),
+        "nativeLibraryInlineFunctionBodies",
+    );
+}

@@ -30,16 +30,25 @@ pub(super) struct IrTables {
     /// Loops written so far. Kotlin IR identifies a loop, the target of its jumps, within its whole
     /// file.
     loops: u32,
+    /// The type parameters a prepared inline copy erases, each with the type it writes instead.
+    /// Empty outside such a copy.
+    pub(super) erasures: Vec<(String, Ty)>,
 }
 
 impl IrTables {
     /// `parameters` pairs each type parameter in scope with its symbol.
     pub(super) fn ty(&mut self, ty: Ty, parameters: &[(Ty, u64)]) -> u32 {
+        let erased = super::prepared_inline::erase(ty, &self.erasures);
+        if erased != ty {
+            return self.ty(erased, parameters);
+        }
         let (inner, nullability) = match ty.kind() {
             TyKind::Nullable(inner) => (inner, 0),
             _ => (ty, 1),
         };
-        // Kotlin IR writes a function type as its function class.
+        // Kotlin IR writes a function type as its function class, marked
+        // `@ExtensionFunctionType` when its first argument is the receiver.
+        let extension = matches!(inner.kind(), TyKind::Fun(shape) if shape.has_receiver);
         let inner = super::body_tree::function_type_class(inner).unwrap_or(inner);
         let (classifier, arguments) = match inner.kind() {
             TyKind::Unit => (self.class_symbol(TypeName::from("kotlin/Unit")), &[][..]),
@@ -58,6 +67,10 @@ impl IrTables {
             _ => unreachable!("unsupported types are filtered before serialization"),
         };
         let mut simple = Pb::new();
+        if extension {
+            let annotation = self.marker_annotation(&["kotlin"], "ExtensionFunctionType");
+            simple.repeated_message(1, &annotation);
+        }
         simple.field_varint(2, classifier);
         // `MARKED_NULLABLE` is protobuf zero, so omission does not mean non-null. Kotlin writes
         // `NOT_SPECIFIED` explicitly for an ordinary type-parameter occurrence.
@@ -84,6 +97,47 @@ impl IrTables {
         let index = u32::try_from(self.types.len()).expect("type table fits u32");
         self.types.push(bytes);
         index
+    }
+
+    /// A use of the annotation class `class` of `package` with no arguments, by its constructor.
+    pub(super) fn marker_annotation(&mut self, package: &[&str], class: &str) -> Pb {
+        use crate::metadata::id_signature::{
+            callable_signature, CallableShape, ClassScope, DeclarationContainer, Placement,
+        };
+        use crate::metadata::semantic::KotlinType;
+
+        let package = package
+            .iter()
+            .map(|segment| (*segment).to_owned())
+            .collect::<Vec<_>>();
+        let classes = [ClassScope::<KotlinType> {
+            name: class,
+            type_parameters: Vec::new(),
+            expect: false,
+        }];
+        let signature = callable_signature(
+            DeclarationContainer {
+                package: &package,
+                classes: &classes,
+                native_interop_library: false,
+            },
+            &CallableShape::<KotlinType> {
+                name: "<init>",
+                contexts: Vec::new(),
+                receiver: None,
+                params: Vec::new(),
+                vararg: None,
+                type_parameters: Vec::new(),
+                expect: false,
+                placement: Placement::Ordinary,
+            },
+        )
+        .expect("an annotation without arguments has an empty signable constructor");
+        let constructor = symbol(self.public_signature(&signature), CONSTRUCTOR_SYMBOL);
+        let mut annotation = Pb::new();
+        annotation.field_varint(1, constructor);
+        annotation.field_varint(2, 0);
+        annotation
     }
 
     pub(super) fn class_symbol(&mut self, classifier: TypeName) -> u64 {
