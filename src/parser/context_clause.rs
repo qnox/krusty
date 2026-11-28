@@ -55,11 +55,8 @@ impl Parser<'_> {
         self.bump(); // 'context'
         let named_parameters = self.context_clause_has_named_parameters(self.i);
         if named_parameters {
-            if !self.context_parameters {
-                self.diags.error(
-                    context_span,
-                    "the feature 'context parameters' is disabled".to_string(),
-                );
+            if let Some(report) = self.unsupported_context_parameters.clone() {
+                self.diags.report_error(context_span, report);
             }
             self.pending_context_params = self.parse_param_list();
             for parameter in &mut self.pending_context_params {

@@ -67,7 +67,12 @@ pub(super) fn validate(file: &File, diagnostics: &mut DiagSink) {
 
 /// These semantic errors do not invalidate the parsed declaration inventory or suppress body
 /// checking. Report them only after the caller records its parser-failure state.
-pub(super) fn validate_after_parsing(file: &File, parser_error: bool, diags: &mut DiagSink) {
+pub(super) fn validate_after_parsing(
+    file: &File,
+    features: &crate::features::LangFeatures,
+    parser_error: bool,
+    diags: &mut DiagSink,
+) {
     // The brackets were parsed. Report the language gate only after `parse_error` is captured,
     // so the file's declarations still join the module for every other file.
     for span in file
@@ -77,19 +82,16 @@ pub(super) fn validate_after_parsing(file: &File, parser_error: bool, diags: &mu
         .copied()
         .chain(file.destructuring.ungated_full_form_spans.iter().copied())
     {
-        diags.error(
-            span,
-            "the feature \"name based destructuring\" is only available since language version 2.5",
-        );
+        if let Some(report) = crate::diag::unsupported_feature(features, "NameBasedDestructuring") {
+            diags.report_error(span, report);
+        }
     }
     for span in file.destructuring.ungated_short_form_spans.iter().copied() {
-        diags.error(
-            span,
-            "the feature \"enable name based destructuring short form\" is experimental and \
-             should be enabled explicitly. This can be done by supplying the compiler \
-             argument '-Xname-based-destructuring=complete', but note that no stability \
-             guarantees are provided.",
-        );
+        if let Some(report) =
+            crate::diag::unsupported_feature(features, "EnableNameBasedDestructuringShortForm")
+        {
+            diags.report_error(span, report);
+        }
     }
     // The body check does not run for a syntax-error file. Members still owe the same body
     // requirement as a top-level function; only the sentence differs. The top-level sentence is
