@@ -1,3 +1,6 @@
+// KOTLINC_VERSION: [2.4.20,)
+// Earlier reference compilers reject an expect value class without a primary constructor even
+// under +AllowExpectValueClassesWithNoPrimaryConstructor.
 // LANGUAGE: +MultiPlatformProjects +AllowExpectValueClassesWithNoPrimaryConstructor
 // WITH_STDLIB
 // An `expect` operator is implemented by the dependency member an `actual typealias` reaches even
