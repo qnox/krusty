@@ -192,8 +192,11 @@ impl ModuleSlotPlan {
                     callable,
                     parameters,
                     result,
-                    ..
-                } => vec![(PlanKey::function(*callable), (parameters.clone(), *result))],
+                    suspend,
+                } => vec![(
+                    PlanKey::function(*callable),
+                    carried(parameters, *result, *suspend),
+                )],
                 ModuleMember::Property {
                     property,
                     accessor_parameters,
@@ -449,14 +452,17 @@ impl Planner<'_> {
                     callable,
                     parameters,
                     result,
-                    ..
-                } => self.function(
-                    class,
-                    *callable,
-                    (parameters, *result),
-                    &mut entries,
-                    &mut slots,
-                )?,
+                    suspend,
+                } => {
+                    let (parameters, result) = carried(parameters, *result, *suspend);
+                    self.function(
+                        class,
+                        *callable,
+                        (&parameters, result),
+                        &mut entries,
+                        &mut slots,
+                    )?
+                }
                 ModuleMember::Property {
                     property,
                     getter,
@@ -494,10 +500,9 @@ impl Planner<'_> {
                     .carriers
                     .get(&member)
                     .ok_or("a delegated class member with no module-wide signature")?;
-                if !self.same(
-                    (&forwarder.parameters, forwarder.result),
-                    (parameters, *result),
-                ) {
+                let (forwarded, forwarded_result) =
+                    carried(&forwarder.parameters, forwarder.result, forwarder.suspend);
+                if !self.same((&forwarded, forwarded_result), (parameters, *result)) {
                     return Err(format!(
                         "a delegated member carried differently from the class member it \
                          overrides (`{}`)",
