@@ -40,7 +40,7 @@ fn index_workspace_files_returns_exact_diagnostics_and_clears_the_latch() {
     assert_eq!(diagnostic.span, Span::new(41, 48));
     assert_eq!(diagnostic.severity, Severity::Error);
     assert_eq!(diagnostic.kind, DiagnosticKind::Compiler);
-    assert_eq!(diagnostic.msg, "unresolved reference 'Missing'.");
+    assert_eq!(diagnostic.msg, "Unresolved reference 'Missing'.");
 
     let interactive_source = "fun answer(): Int = 42\n";
     let interactive_documents = [(uri.as_str(), interactive_source)];

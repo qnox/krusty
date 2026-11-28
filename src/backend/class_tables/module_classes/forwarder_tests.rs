@@ -7,11 +7,8 @@ struct IntsAndReferences;
 
 impl Representation for IntsAndReferences {
     fn same(&self, left: Ty, right: Ty) -> bool {
-        left == right || (self.is_reference(left) && self.is_reference(right))
-    }
-
-    fn is_reference(&self, ty: Ty) -> bool {
-        ty != Ty::Int && ty != Ty::Unit
+        left == right
+            || (left != Ty::Int && left != Ty::Unit && right != Ty::Int && right != Ty::Unit)
     }
 
     fn owns_base(&self, _: TypeName) -> bool {
@@ -97,6 +94,34 @@ fn a_forwarder_reuses_the_exact_dependency_function_slot() {
         PlannedSlot::Member(key)
     );
     assert_eq!(derived.len(), base.len(), "the forwarder appends no slot");
+}
+
+#[test]
+fn a_suspend_forwarder_is_compared_by_its_continuation_carried_signature() {
+    let target = ResolvedFunctionOverrideTarget::External(ExternalCallableId::from_raw(42));
+    let plan = plan(
+        vec![ModuleMember::Function {
+            callable: target,
+            parameters: vec![Ty::obj("kotlin/Any")].into_boxed_slice(),
+            result: Ty::obj("kotlin/Any"),
+            suspend: true,
+        }],
+        vec![ModuleForwarder {
+            suspend: true,
+            ..forwarder(
+                vec![Ty::String],
+                Ty::String,
+                ForwardedMember::Function(target),
+            )
+        }],
+    );
+    let base = plan.table(TypeName::from("Base")).unwrap().unwrap();
+    let derived = plan.table(TypeName::from("Derived")).unwrap().unwrap();
+    let key = PlanKey::Forwarder {
+        class: TypeName::from("Derived"),
+        ordinal: 0,
+    };
+    assert_eq!(derived.slots[&key], base.slots[&PlanKey::function(target)]);
 }
 
 #[test]

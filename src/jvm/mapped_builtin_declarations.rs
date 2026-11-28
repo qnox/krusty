@@ -304,6 +304,9 @@ pub(super) struct MappedBuiltinMember {
     pub(super) physical_name: String,
     pub(super) descriptor: String,
     pub(super) kind: MappedBuiltinMemberKind,
+    /// The builtin declaration's value-parameter names. A Java method renamed to the builtin
+    /// takes them, as kotlinc's renamed copy does: the Java method's own may be absent.
+    pub(super) parameter_names: Box<[String]>,
 }
 
 impl MappedBuiltinMember {

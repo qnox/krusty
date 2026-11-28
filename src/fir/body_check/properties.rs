@@ -1133,6 +1133,7 @@ impl BodyFirChecker<'_> {
                 let Some(dispatch_receiver) = dispatch_receiver else {
                     return Ok(None);
                 };
+                let dispatch_receiver = self.unnarrowed_receiver(expression, dispatch_receiver)?;
                 if stable_declaration.is_none() {
                     stable_declaration = source_member.and_then(|source| {
                         self.session
@@ -2454,11 +2455,18 @@ impl BodyFirChecker<'_> {
                     let Some(receiver) = receiver else {
                         return Ok(None);
                     };
-                    let receiver_ty = self.info.semantic_ty(receiver);
+                    let receiver_ty = self
+                        .info
+                        .unnarrowed_dispatch_calls
+                        .get(&receiver)
+                        .copied()
+                        .unwrap_or_else(|| self.info.semantic_ty(receiver));
                     let dispatch_receiver = FirReceiver {
                         value: self.expression(receiver)?,
                         conversion: None,
                     };
+                    let dispatch_receiver =
+                        self.unnarrowed_receiver(receiver, dispatch_receiver)?;
                     if backing_field {
                         let declaration = stable_declaration.ok_or_else(|| {
                             self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget)

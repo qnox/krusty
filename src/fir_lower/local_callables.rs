@@ -724,18 +724,13 @@ impl BodyLowering<'_> {
                 crate::fir::FirAdaptedReferenceArgument::Vararg {
                     values,
                     whole_array,
+                    array_type,
+                    ..
                 } => {
-                    let declaration = parameter as usize;
-                    let physical = capture_count
-                        + declaration
-                        + declaration_parameter_slot_offset(realization, declaration);
-                    let Some(array_type) = self.ir.functions[realization.function as usize]
-                        .params
-                        .get(physical)
-                        .copied()
-                    else {
-                        return Ok(None);
-                    };
+                    // The array is built as the reference specialized the vararg (`Array<out
+                    // Array<String>>` for `vararg xs: E`), not as the lifted function's erased
+                    // parameter; the call converts it to that parameter like any other argument.
+                    let array_type = array_type.get();
                     let declared = if *whole_array {
                         array_type
                     } else {

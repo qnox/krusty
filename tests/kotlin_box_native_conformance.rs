@@ -137,41 +137,6 @@ fn library_backend(
 }
 
 impl NativeLane {
-    /// Compile every module but the last into a KLIB only, link the last module's program against
-    /// those KLIBs, and run it.
-    fn compile_klib_modules_and_run(
-        &self,
-        scratch: &Path,
-        stem: &str,
-        modules: &[krusty::conformance::ModuleUnit],
-        directive_source: &str,
-    ) -> Outcome {
-        let target = self.target.expect("checked by `unavailable`");
-        let backend = CraneliftBackend::new(target)
-            .with_entry(Entry::Box)
-            .verified();
-        let library = match library_backend(target, directive_source) {
-            Ok(library) => library,
-            Err(outcome) => return outcome,
-        };
-        let program = match box_lane::compile_modules_from_klibs(
-            ModuleCase {
-                scratch,
-                stem,
-                modules,
-            },
-            directive_source,
-            TestTarget::Native,
-            &backend,
-            &library,
-            DECLINE_PREFIX,
-        ) {
-            Ok(program) => program,
-            Err(outcome) => return outcome,
-        };
-        self.run_artifacts(scratch, stem, "klib-modules", directive_source, program)
-    }
-
     fn run_artifacts(
         &self,
         scratch: &Path,
@@ -242,6 +207,39 @@ impl NativeLane {
 }
 
 impl Lane for NativeLane {
+    fn compile_klib_modules_and_run(
+        &self,
+        scratch: &Path,
+        stem: &str,
+        modules: &[krusty::conformance::ModuleUnit],
+        directive_source: &str,
+    ) -> Outcome {
+        let target = self.target.expect("checked by `unavailable`");
+        let backend = CraneliftBackend::new(target)
+            .with_entry(Entry::Box)
+            .verified();
+        let library = match library_backend(target, directive_source) {
+            Ok(library) => library,
+            Err(outcome) => return outcome,
+        };
+        let program = match box_lane::compile_modules_from_klibs(
+            ModuleCase {
+                scratch,
+                stem,
+                modules,
+            },
+            directive_source,
+            TestTarget::Native,
+            &backend,
+            &library,
+            DECLINE_PREFIX,
+        ) {
+            Ok(program) => program,
+            Err(outcome) => return outcome,
+        };
+        self.run_artifacts(scratch, stem, "klib-modules", directive_source, program)
+    }
+
     fn platform(&self) -> Platform {
         Platform::Native
     }
@@ -455,6 +453,19 @@ fn native_library_suspend_coroutine_runs() {
     expect_native_klib_box(source, "nativeLibrarySuspendCoroutine");
 }
 
+#[test]
+fn native_dependency_interface_context_properties_pass_their_context_values() {
+    let source = include_str!("box_regressions/multimodule/dependencyInterfaceContextProperty.kt");
+    let stem = "dependencyInterfaceContextProperty";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the whole context property module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "interface accessors must receive their context values before the property value"
+    );
+}
+
 fn expect_native_klib_box(source: &str, stem: &str) {
     super::common::expect_box_ok_with_stdlib(source, &format!("{stem}Oracle"));
     let target = host().expect("Native KLIB/runtime is required for this test");
@@ -594,6 +605,19 @@ fn native_official_dependency_interfaces_installed_by_two_files_keep_distinct_nu
     run_native_against_official_producer(
         include_str!("box_regressions/multimodule/dependencyInstalledInterfacesInTwoFiles.kt"),
         "dependencyInstalledInterfacesInTwoFiles",
+    );
+}
+
+// PLATFORM-SPECIFIC: official Kotlin/Native KLIB production and linking, as above. The complete
+// portable Kotlin input is the shared multi-module regression.
+//
+/// A library lambda's parameter is a class private to the library's file: the lambda's header
+/// names the class as the body that creates it does.
+#[test]
+fn native_official_dependency_lambda_over_file_private_class_runs() {
+    run_native_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyLambdaOverFilePrivateClass.kt"),
+        "dependencyLambdaOverFilePrivateClass",
     );
 }
 

@@ -29,6 +29,7 @@ pub mod module_links;
 pub mod property_entries;
 pub mod property_reference_values;
 pub mod range_constructions;
+pub mod receiver_property_accessors;
 pub mod reference_names;
 mod source_class_members;
 pub use source_class_members::SourceMemberAnnotations;

@@ -63,38 +63,6 @@ impl WasmLane {
         .with_annotations_in_metadata(features.has("AnnotationsInMetadata"))
     }
 
-    /// Compile every module but the last into a KLIB only, link the last module's program against
-    /// those KLIBs, and run it.
-    fn compile_klib_modules_and_run(
-        &self,
-        scratch: &Path,
-        stem: &str,
-        modules: &[krusty::conformance::ModuleUnit],
-        directive_source: &str,
-    ) -> Outcome {
-        let backend = match self.backend(directive_source) {
-            Ok(backend) => backend,
-            Err(outcome) => return outcome,
-        };
-        let library = self.library_backend(directive_source);
-        let program = match box_lane::compile_modules_from_klibs(
-            ModuleCase {
-                scratch,
-                stem,
-                modules,
-            },
-            directive_source,
-            self.test_target(),
-            &backend,
-            &library,
-            DECLINE_PREFIX,
-        ) {
-            Ok(program) => program,
-            Err(outcome) => return outcome,
-        };
-        self.run_artifacts(scratch, stem, "klib-modules", directive_source, program)
-    }
-
     fn run_artifacts(
         &self,
         scratch: &Path,
@@ -167,6 +135,36 @@ fn node_unavailable() -> Option<String> {
 }
 
 impl Lane for WasmLane {
+    fn compile_klib_modules_and_run(
+        &self,
+        scratch: &Path,
+        stem: &str,
+        modules: &[krusty::conformance::ModuleUnit],
+        directive_source: &str,
+    ) -> Outcome {
+        let backend = match self.backend(directive_source) {
+            Ok(backend) => backend,
+            Err(outcome) => return outcome,
+        };
+        let library = self.library_backend(directive_source);
+        let program = match box_lane::compile_modules_from_klibs(
+            ModuleCase {
+                scratch,
+                stem,
+                modules,
+            },
+            directive_source,
+            self.test_target(),
+            &backend,
+            &library,
+            DECLINE_PREFIX,
+        ) {
+            Ok(program) => program,
+            Err(outcome) => return outcome,
+        };
+        self.run_artifacts(scratch, stem, "klib-modules", directive_source, program)
+    }
+
     fn platform(&self) -> Platform {
         match self.target {
             WasmTarget::Js => Platform::WasmJs,

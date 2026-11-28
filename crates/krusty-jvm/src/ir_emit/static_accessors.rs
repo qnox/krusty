@@ -1963,7 +1963,10 @@ impl Accessor<'_> {
         emit_return(result, &mut code);
         code.ensure_locals(words);
         code.link();
-        cw.add_method(self.flags, &name, &descriptor, &code);
+        // The accessor forwards the target's parameters unchanged, so a trailing `vararg` stays
+        // one, as kotlinc's accessor keeps it (`access$describe$count(String...)`).
+        let flags = self.flags | super::method_access::varargs_access(ir, function);
+        cw.add_method(flags, &name, &descriptor, &code);
         cw.set_method_debug(&name, &descriptor, None, &locals);
     }
 }

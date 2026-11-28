@@ -1616,7 +1616,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if self.file.is_imported_property(target)
                     && !self.has_property_layout_at(id, target)
                 {
-                    return self.module_property_write(target, *dispatch_receiver, *value);
+                    return self.module_property_write(target, *dispatch_receiver, &[], *value);
                 }
                 match self.checked_property_at(id, target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {
@@ -2336,6 +2336,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
             }
             IrExpr::Checked(ref checked_op)
+                if matches!(
+                    &**checked_op,
+                    IrCheckedOperation::ExternalPropertyRead { .. }
+                        | IrCheckedOperation::ExternalPropertyWrite { .. }
+                ) =>
+            {
+                self.dependency_interface_property(checked_op)
+                    .unwrap_or_else(|| Err(self.describe_declined(self.file.ir.expr(id)).into()))
+            }
+            IrExpr::Checked(ref checked_op)
                 if let IrCheckedOperation::PropertyRead {
                     target,
                     dispatch_receiver,
@@ -2356,7 +2366,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if self.file.is_imported_property(target)
                     && !self.has_property_layout_at(id, target)
                 {
-                    return self.module_property_read(target, *dispatch_receiver);
+                    return self.module_property_read(target, *dispatch_receiver, &[]);
                 }
                 match self.checked_property_at(id, target) {
                     Ok(objects::CheckedProperty::Member(class, index)) => {

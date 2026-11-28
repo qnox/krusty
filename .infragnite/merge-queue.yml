@@ -38,6 +38,14 @@ autoheal:
       file: '{list}'
       line: '{entry}'
       paths: ['tests/diagnostics_false_accepts/*/*.txt']
+    # A diagnostics ledger case krusty now reports exactly as kotlinc does: drop it from the mismatch
+    # list the lane printed. A case that newly differs would need a row added, so it is never healed.
+    - name: stale-diagnostics-ledger-mismatches
+      uses: remove-lines
+      match: '^  (?<entry>\S+): krusty now reports exactly kotlinc''s diagnostics; remove it from \S*?/(?<list>tests/diagnostics_ledger_mismatches/[^/\s]+/[^/\s]+\.txt)$'
+      file: '{list}'
+      line: '{entry}'
+      paths: ['tests/diagnostics_ledger_mismatches/*/*.txt']
 
 # Re-runs: a run whose only failed jobs failed for reasons outside its PRs runs those jobs again
 # instead of failing. The queue already knows a lost runner, a job GitHub could not set up, and a

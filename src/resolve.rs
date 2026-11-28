@@ -13,6 +13,7 @@ use std::fmt::Write;
 
 use crate::ast::*;
 use crate::diag::{DiagSink, DiagnosticIdentity, DiagnosticKind, Span};
+use crate::diagnostic_wording::unresolved_reference;
 use crate::libraries::{
     map_call_args, required_arity, AnnotationParameterPolicy, AnnotationPositionalPolicy,
     CallArgMappingError, CallArgMappingFailure, CallSig, EmptySymbolSource, GenericReturnPolicy,
@@ -270,6 +271,7 @@ mod intersection_inference;
 mod intersection_receiver_selection;
 mod invoke_selection;
 mod lexical_value_invoke;
+mod unnarrowed_member_receiver;
 use lexical_value_invoke::{DeferredInvokePeers, DeferredLexicalInvoke, LexicalInvokeSite};
 mod lambda_call_shapes;
 mod property_read_selection;
@@ -435,6 +437,7 @@ mod singleton_receivers;
 pub use singleton_receivers::SingletonValue;
 mod anonymous_capture_remap;
 mod constructor_receiver_frames;
+mod lexical_receivers;
 mod primary_constructor_arguments;
 mod source_constructors;
 mod source_package;
@@ -443,6 +446,7 @@ mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
 mod super_calls;
+use lexical_receivers::{lexical_context_receiver, lexical_receiver_declaration};
 use super_calls::is_super_qualifier;
 pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
@@ -542,35 +546,6 @@ const MAX_OVERLOAD_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const MAX_CONFLICTING_OVERLOAD_DIAGNOSTIC_BYTES: usize = 4 * 1024 * 1024;
 const CONFLICTING_OVERLOAD_PREFIX: &str = "conflicting overloads:";
 const INAPPLICABLE_OVERLOAD_PREFIX: &str = "none of the following candidates is applicable:";
-
-fn lexical_receiver_label(file: &File, reference: &TypeRef) -> String {
-    file.alias_spellings
-        .get(&reference.span)
-        .unwrap_or(reference)
-        .name
-        .rsplit(['.', '/'])
-        .next()
-        .unwrap_or(&reference.name)
-        .to_string()
-}
-
-fn lexical_receiver_declaration(file: &File, reference: &TypeRef) -> (Span, String) {
-    (reference.span, lexical_receiver_label(file, reference))
-}
-
-fn lexical_context_receiver(file: &File, parameter: &Param, ty: Ty) -> ContextReceiver {
-    let kind = match parameter.context_kind {
-        crate::types::ContextParameterKind::Named => {
-            return ContextReceiver::named(ty, parameter.name.clone())
-                .with_declaration(parameter.ty.span)
-        }
-        crate::types::ContextParameterKind::Anonymous => ContextReceiverKind::Anonymous,
-        crate::types::ContextParameterKind::LegacyReceiver => ContextReceiverKind::LegacyReceiver,
-        crate::types::ContextParameterKind::None => unreachable!("a context parameter has a kind"),
-    };
-    ContextReceiver::new(ty, kind, Some(lexical_receiver_label(file, &parameter.ty)))
-        .with_declaration(parameter.ty.span)
-}
 
 fn header_type_has_annotation(
     annotations: &[TypeRef],
@@ -1439,6 +1414,9 @@ pub struct TypeInfo {
     /// and ordinary stable-local smart casts. FIR publishes the selected target view as a checked
     /// conversion; lowering never reconstructs flow facts from the source condition.
     pub(crate) selected_value_smartcasts: HashMap<ExprId, Ty>,
+    /// Member accesses (an assignment by its receiver) that dispatch on their smart-cast receiver's
+    /// unnarrowed type, with that type; FIR drops the cast. See `unnarrowed_member_receiver`.
+    pub(crate) unnarrowed_dispatch_calls: HashMap<ExprId, Ty>,
     /// Context-selected conversion of a folded integer constant expression to its declaration or
     /// argument target. The expression itself may still be an `Int` operator tree; checked FIR
     /// carries this boundary explicitly so lowering never repeats constant-expression inference.
@@ -4901,7 +4879,7 @@ impl<'a> Checker<'a> {
                 _ => None,
             });
             let message = self.unresolved_property_read_diagnostic(scope, receiver, name, rt);
-            self.diags.error(diagnostic_span, message);
+            self.diags.report_error(diagnostic_span, message);
         }
         Ty::Error
     }
@@ -5286,14 +5264,13 @@ impl<'a> Checker<'a> {
         if self.settle_deferred_constructor_failure(scope, call, args, applicability) {
             return ClassifierValueCall::Checked(Ty::Error);
         }
-        self.diags.error(
-            self.call_callee_name_span(call),
-            if has_candidates {
-                INAPPLICABLE_OVERLOAD_PREFIX.to_string()
-            } else {
-                format!("unresolved reference '{name}'.")
-            },
-        );
+        let span = self.call_callee_name_span(call);
+        if has_candidates {
+            self.diags
+                .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+        } else {
+            self.diags.report_error(span, unresolved_reference(name));
+        }
         ClassifierValueCall::Checked(Ty::Error)
     }
 
@@ -6984,6 +6961,9 @@ impl<'a> Checker<'a> {
         let expected = expected
             .filter(|expected| *expected != Ty::Error)
             .map(Ty::non_null);
+        let Some(expected) = self.collection_literal_expectation(call, span, expected) else {
+            return Ty::Error;
+        };
 
         // Array literals are compiler-provided constructions, selected from the expected array
         // classifier rather than from the provisional parser spelling. Primitive and unsigned
@@ -8552,9 +8532,9 @@ impl<'a> Checker<'a> {
                                 ),
                             );
                         } else {
-                            self.diags.error(
+                            self.diags.report_error(
                                 self.call_callee_name_span(call),
-                                format!("unresolved reference '{name}'."),
+                                unresolved_reference(&name),
                             );
                         }
                         return Ty::Error;
@@ -9027,9 +9007,9 @@ impl<'a> Checker<'a> {
                     }
                     if !self.error_receiver_expression_flavored(scope, receiver, receiver_diag_mark)
                     {
-                        self.diags.error(
+                        self.diags.report_error(
                             self.member_name_span(callee, &name),
-                            format!("unresolved reference '{name}'."),
+                            unresolved_reference(&name),
                         );
                     } else {
                         self.silent_error_exprs.insert(call);
@@ -10303,8 +10283,9 @@ impl<'a> Checker<'a> {
                     self.postponed_context_sensitive_name(scope, argument)
                         .is_some()
                 });
-                let toplevel_partial: Option<Vec<Option<Ty>>> = if !self
-                    .lexical_value_declares(scope, &fname)
+                let lexical_value_claims_call =
+                    self.lexical_value_claims_call_with_arguments(scope, &fname, args);
+                let toplevel_partial: Option<Vec<Option<Ty>>> = if !lexical_value_claims_call
                     && (has_lambda_argument
                         || has_callable_ref_argument
                         || has_function_value_argument
@@ -10651,7 +10632,7 @@ impl<'a> Checker<'a> {
                 let top_level_sam = if (has_lambda_argument
                     || has_callable_ref_argument
                     || has_function_value_argument)
-                    && !self.lexical_value_declares(scope, &fname)
+                    && !lexical_value_claims_call
                 {
                     self.top_level_sam_selection(
                         scope,
@@ -10678,7 +10659,7 @@ impl<'a> Checker<'a> {
                     && top_level_functions
                         .top_level()
                         .any(|o| o.flags.inline.can_inline());
-                let toplevel_must_inline = !self.lexical_value_declares(scope, &fname)
+                let toplevel_must_inline = !lexical_value_claims_call
                     && !self.module_declares(&fname)
                     && known_sig.is_none()
                     && args
@@ -10710,10 +10691,8 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                let implicit_member_lambda_enabled = !self
-                    .lexical_value_claims_call_with_arguments(scope, &fname, args)
-                    && known_sig.is_none()
-                    && has_lambda_argument;
+                let implicit_member_lambda_enabled =
+                    !lexical_value_claims_call && known_sig.is_none() && has_lambda_argument;
                 let ordinary_this_member_lambda_shape = implicit_member_lambda_enabled
                     .then(|| {
                         self.implicit_source_member_lambda_shape(
@@ -10859,21 +10838,21 @@ impl<'a> Checker<'a> {
                     boxes_captures: selected_lambda_boxes_captures,
                     inline: selected_shape_inline,
                 } = lambda_call_shapes::SelectedLambdaInputs::of(selected_lambda_shape);
-                let constructor_expectations: Option<ConstructionExpectations> = if !self
-                    .lexical_value_declares(scope, &fname)
-                    && self.resolver().top_level_candidates(&fname).is_empty()
-                {
-                    bare_constructor_classifier.and_then(|internal| {
-                        self.construction_argument_expectations(
-                            internal,
-                            args.len(),
-                            arg_names.as_deref(),
-                            self.file.call_has_trailing_lambda.contains(&call.0),
-                        )
-                    })
-                } else {
-                    None
-                };
+                let constructor_expectations: Option<ConstructionExpectations> =
+                    if !lexical_value_claims_call
+                        && self.resolver().top_level_candidates(&fname).is_empty()
+                    {
+                        bare_constructor_classifier.and_then(|internal| {
+                            self.construction_argument_expectations(
+                                internal,
+                                args.len(),
+                                arg_names.as_deref(),
+                                self.file.call_has_trailing_lambda.contains(&call.0),
+                            )
+                        })
+                    } else {
+                        None
+                    };
                 let constructor_result_context_admitted = constructor_expectations
                     .as_ref()
                     .zip(bare_constructor_classifier)
@@ -10888,7 +10867,7 @@ impl<'a> Checker<'a> {
                 // the rule. Ordinary functions and extensions keep their established eager fallback
                 // (notably zero-parameter lambdas whose empty parameter vector is a real shape).
                 let defer_unshaped_constructor_lambdas = has_lambda_argument
-                    && !self.lexical_value_declares(scope, &fname)
+                    && !lexical_value_claims_call
                     && self.resolver().top_level_candidates(&fname).is_empty()
                     && bare_constructor_classifier
                         .and_then(|internal| self.resolved_type_name(internal))
@@ -12010,15 +11989,15 @@ impl<'a> Checker<'a> {
                     if self.expr_types[expression.0 as usize] != Ty::Error {
                         continue;
                     }
-                    let message = format!("unresolved reference '{name}'.");
+                    let message = unresolved_reference(&name);
                     let already_reported = self.postponed_diagnostics.contains(
                         self.diags,
                         self.file_index,
                         diagnostic_span,
-                        &message,
+                        &message.message,
                     );
                     if !already_reported {
-                        self.diags.error(diagnostic_span, message);
+                        self.diags.report_error(diagnostic_span, message);
                     }
                 }
                 if let Some(mark) = deferred_mark {
@@ -12658,6 +12637,7 @@ impl<'a> Checker<'a> {
                             bindings,
                             intersection_bindings: HashMap::default(),
                             candidate_index: None,
+                            ambiguous_literals: Vec::new(),
                         }))
                     })
                     .or(competing_function)
@@ -13293,16 +13273,17 @@ impl<'a> Checker<'a> {
                         return Ty::Error;
                     }
                 }
-                let (message, identity, diagnostic_span) = if had_rejected_callable {
-                    (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, span)
+                let (message, name, identity, diagnostic_span) = if had_rejected_callable {
+                    (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, None, span)
                 } else if let Some((internal, access)) = self.inaccessible_classifier(scope, &fname)
                 {
                     let reference = self.call_callee_name_span(call);
                     if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
-                        (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, span)
+                        (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, None, span)
                     } else {
                         (
                             inaccessible_classifier_message(&fname, access),
+                            None,
                             Some(DiagnosticIdentity::ClassifierAccess {
                                 reference,
                                 classifier: internal,
@@ -13324,18 +13305,12 @@ impl<'a> Checker<'a> {
                 } else {
                     // kotlinc has no "unresolved function" diagnostic: a callee that names nothing at
                     // all is UNRESOLVED_REFERENCE, the same diagnostic a bare unresolved name gets.
-                    (
-                        format!("unresolved reference '{fname}'."),
-                        None,
-                        self.call_callee_name_span(call),
-                    )
+                    let report = unresolved_reference(&fname);
+                    let span = self.call_callee_name_span(call);
+                    (report.message, Some(report.name), None, span)
                 };
-                if let Some(identity) = identity {
-                    self.diags
-                        .error_with_identity(diagnostic_span, identity, message);
-                } else {
-                    self.diags.error(diagnostic_span, message);
-                }
+                self.diags
+                    .error_with(diagnostic_span, name, identity, message);
                 Ty::Error
             }
             _ => self.check_arbitrary_callee(scope, call, callee, args, span, expected),
@@ -13802,6 +13777,10 @@ impl<'a> Checker<'a> {
             },
         );
         self.local_properties.record(flow_identity, is_var);
+        if stable_reference_val {
+            self.local_properties
+                .record_initializer_narrowing(flow_identity, bind);
+        }
         if deferred {
             self.local_initialization.declare_deferred(s, flow_identity);
         }
@@ -14008,9 +13987,9 @@ impl<'a> Checker<'a> {
                 PropertyWriteSelection::None
                 | PropertyWriteSelection::Implicit(_)
                 | PropertyWriteSelection::Receiverless(_)
-                | PropertyWriteSelection::ClassifierProperty(_) => self
-                    .diags
-                    .error(span, format!("unresolved reference '{name}'.")),
+                | PropertyWriteSelection::ClassifierProperty(_) => {
+                    self.diags.report_error(span, unresolved_reference(&name))
+                }
             },
         }
     }
@@ -14323,9 +14302,9 @@ impl<'a> Checker<'a> {
                         PropertyWriteSelection::AccessorAmbiguous(candidates) => {
                             self.report_accessor_ambiguity(target_span, candidates)
                         }
-                        PropertyWriteSelection::None => self
-                            .diags
-                            .error(span, format!("unresolved reference '{name}'.")),
+                        PropertyWriteSelection::None => {
+                            self.diags.report_error(span, unresolved_reference(&name))
+                        }
                     }
                 }
             }
@@ -14493,7 +14472,13 @@ impl<'a> Checker<'a> {
         if inferred_intersection.len() > 1 {
             receiver_ty = Ty::intersection(&inferred_intersection);
         }
-        if let Some(projected) = self
+        // A write has no access expression of its own: its receiver keys the decision.
+        let access = (receiver, receiver);
+        if let Some(declared) =
+            self.unnarrowed_explicit_property_receiver(scope, access, receiver_ty, &name, true)
+        {
+            receiver_ty = declared;
+        } else if let Some(projected) = self
             .flow_intersection_property_receiver(scope, receiver, &name, true)
             .or_else(|| self.type_parameter_member_receiver(scope, receiver_ty, &name))
         {
@@ -16190,7 +16175,8 @@ fun rejected(owner: Owner) { owner.hidden() }
                 crate::kotlin_version::ReferenceProfile::default(),
                 "component2",
                 Some("Box")
-            )]
+            )
+            .message]
         );
     }
 
@@ -21192,7 +21178,7 @@ fun use() {
              fun use(): Int = consume(A::missing)",
         );
 
-        assert_eq!(errors, ["unresolved reference 'missing'."]);
+        assert_eq!(errors, ["Unresolved reference 'missing'."]);
     }
 
     #[test]
@@ -21225,7 +21211,7 @@ fun use() {
             } if member.name == "exists"
                 && matches!(
                     argument_mapping.as_slice(),
-                    [AdaptedRefArgument::Value(0), AdaptedRefArgument::Vararg { values, whole_array: false }]
+                    [AdaptedRefArgument::Value(0), AdaptedRefArgument::Vararg { values, whole_array: false, .. }]
                         if values.is_empty()
                 )
         )));
@@ -21735,13 +21721,13 @@ fun use() {
         let errors = check_with_detected_features(&format!(
             "// LANGUAGE: -AllowAccessToProtectedFieldFromSuperCompanion\n{source}"
         ));
-        assert_eq!(errors, ["unresolved reference 'secret'."]);
+        assert_eq!(errors, ["Unresolved reference 'secret'."]);
     }
 
     #[test]
     fn object_self_reference_resolves() {
         // An `object` may refer to itself by name inside its own body (it resolves to the singleton).
-        // Previously this errored "unresolved reference". (Prerequisite for synthesized serializers,
+        // Previously this errored "Unresolved reference". (Prerequisite for synthesized serializers,
         // whose `$serializer` object references its own INSTANCE.)
         ok("object Baz { fun me(): Baz = Baz }");
         // And an object used as a plain value elsewhere.
@@ -21948,7 +21934,7 @@ fun use() {
 
     #[test]
     fn unresolved_reference() {
-        err_contains("fun f(): Int = q", "unresolved reference 'q'.");
+        err_contains("fun f(): Int = q", "Unresolved reference 'q'.");
     }
 
     #[test]
@@ -22220,7 +22206,8 @@ fun use() {
                 crate::kotlin_version::ReferenceProfile::default(),
                 "substring",
                 Some("Int")
-            )]
+            )
+            .message]
         );
     }
 
@@ -22431,7 +22418,8 @@ fun use() {
                 crate::kotlin_version::ReferenceProfile::default(),
                 "z",
                 Some("Point")
-            )]
+            )
+            .message]
         );
         err_contains(
             "class Point(val x: Int)\nfun f(): Point = Point()",
@@ -22439,7 +22427,7 @@ fun use() {
         );
         err_contains(
             "fun f(p: TextOnly): Int = 0",
-            "unresolved reference 'TextOnly'.",
+            "Unresolved reference 'TextOnly'.",
         );
     }
 
@@ -23673,6 +23661,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         inferred_ext_fun_rets: HashMap::default(),
         inferred_method_rets: HashMap::default(),
         operator_of_overloads: Vec::new(),
+        collection_literal_ambiguities: std::cell::RefCell::default(),
         inferred_source_member_rets: HashMap::default(),
         inferred_stable_declaration_rets: HashMap::default(),
         inferred_declaration_publications: Default::default(),
@@ -23706,6 +23695,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         selected_generic_calls: HashMap::default(),
         inferred_expression_intersections: HashMap::default(),
         selected_value_smartcasts: HashMap::default(),
+        unnarrowed_dispatch_calls: Default::default(),
         selected_numeric_conversions: HashMap::default(),
         deferred_constructor_failures: HashMap::default(),
         selected_function_value_conversions: HashMap::default(),
@@ -24711,6 +24701,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         inferred_ext_fun_rets,
         inferred_method_rets,
         operator_of_overloads: _,
+        collection_literal_ambiguities: _,
         inferred_source_member_rets,
         inferred_stable_declaration_rets,
         inferred_declaration_publications,
@@ -24731,6 +24722,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         equality_bound_parameters,
         selected_generic_calls,
         selected_value_smartcasts,
+        unnarrowed_dispatch_calls,
         selected_numeric_conversions,
         selected_function_value_conversions,
         narrowed_this_member,
@@ -25049,6 +25041,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         checked_local_supertypes,
         selected_generic_calls,
         selected_value_smartcasts,
+        unnarrowed_dispatch_calls,
         selected_numeric_conversions,
         selected_function_value_conversions,
         generated_class_names,
@@ -25234,6 +25227,9 @@ struct SelectedCallable {
     /// Position in the exact family passed to `select_callable_candidate`. A postponed call can
     /// therefore finish against the same declaration instead of selecting the overload again.
     candidate_index: Option<usize>,
+    /// Collection-literal arguments (by argument position) passed for a type variable, with the
+    /// bounds of that variable, in bound order, one per classifier that constructs literals.
+    ambiguous_literals: Vec<(usize, Vec<Ty>)>,
 }
 
 impl std::ops::Deref for SelectedCallable {
@@ -25454,7 +25450,6 @@ struct LambdaCheckMode {
 }
 
 type InnerOwnerTypeParameter = (String, String, Ty, Vec<Ty>);
-type StableReceiverCallableKey = (Ty, String, Vec<TypeName>);
 type DemandReject<'a> = &'a dyn Fn(&str, Span) -> bool;
 type FlowNarrowing = (NarrowPath, Ty);
 type DeclinedFlowNarrowing = (String, Ty);
@@ -25543,10 +25538,11 @@ struct Checker<'a> {
     /// instead of reporting an unresolved reference.
     member_bound_retries: crate::fx_hash::HashSet<(Ty, String)>,
     /// Immutable provider/member queries reused while checking one Pass-2 source unit. The key
-    /// includes lexical class access because visibility can change across nested classifier bodies.
+    /// includes lexical class access and visibility suppression, which change across declarations.
     /// Pass-1 and legacy mutable-symbol checks bypass this cache entirely.
-    stable_receiver_callable_cache:
-        std::cell::RefCell<HashMap<StableReceiverCallableKey, crate::libraries::Callables>>,
+    stable_receiver_callable_cache: std::cell::RefCell<
+        HashMap<checker_symbol_queries::StableReceiverCallableKey, crate::libraries::Callables>,
+    >,
     /// Complete function supertypes of an applied classifier. This is immutable after the Pass-1
     /// declaration index is finalized and is queried for nearly every call argument, including
     /// ordinary primitives whose answer is the same empty set each time.
@@ -25718,6 +25714,9 @@ struct Checker<'a> {
     inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
     inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
     operator_of_overloads: Vec<operator_of_declarations::OperatorOfOverload>,
+    /// Collection literals passed for a type variable, with the literal-constructing bounds of
+    /// that variable, published by the selection that won their call.
+    collection_literal_ambiguities: std::cell::RefCell<HashMap<ExprId, Vec<Ty>>>,
     inferred_source_member_rets: HashMap<crate::libraries::SourceMember, Ty>,
     inferred_stable_declaration_rets: HashMap<crate::fir::DeclarationId, Ty>,
     inferred_declaration_publications: declaration_publication::InferredDeclarationPublications,
@@ -25813,6 +25812,7 @@ struct Checker<'a> {
     inferred_expression_intersections:
         HashMap<ExprId, intersection_inference::InferredIntersection>,
     selected_value_smartcasts: HashMap<ExprId, Ty>,
+    unnarrowed_dispatch_calls: HashMap<ExprId, Ty>,
     selected_numeric_conversions: HashMap<ExprId, Ty>,
     /// A qualified call's inapplicable nested-constructor rung, kept while its later rungs select.
     deferred_constructor_failures:
@@ -27331,7 +27331,7 @@ impl<'a> Checker<'a> {
     /// Report an argument-MAPPING failure shared by every declaration named at a member call.
     ///
     /// Name lookup has already succeeded when this runs. Keeping this pass separate from overload
-    /// selection prevents a wrong call shape from degrading into "unresolved reference": if every
+    /// selection prevents a wrong call shape from degrading into "Unresolved reference": if every
     /// candidate rejects the same mapping, report that precise kotlinc diagnostic; otherwise the
     /// ordinary inapplicable-overload family remains the honest result.
     fn report_inapplicable_member_mapping_error(
@@ -27532,10 +27532,13 @@ impl<'a> Checker<'a> {
         e: ExprId,
     ) {
         if !self.error_receiver_expression_flavored(scope, operand, operand_diag_mark) {
-            self.diags.error(
-                self.span(e),
-                "unresolved reference 'not' for operator '!'.".to_string(),
+            let report = crate::diagnostic_wording::unresolved_operator_reference_on(
+                self.file.reference,
+                "not",
+                "!",
+                None,
             );
+            self.diags.report_error(self.span(e), report);
         }
     }
 
@@ -27982,10 +27985,9 @@ impl<'a> Checker<'a> {
                 }
                 let direct_prefix = plan.iter().enumerate().all(|(target, argument)| match argument {
                     AdaptedRefArgument::Value(value) => *value == target,
-                    AdaptedRefArgument::Vararg {
-                        values,
-                        whole_array: true,
-                    } => values.as_slice() == [target],
+                    AdaptedRefArgument::Vararg { values, whole_array: true, .. } => {
+                        values.as_slice() == [target]
+                    }
                     AdaptedRefArgument::Context
                     | AdaptedRefArgument::Default
                     | AdaptedRefArgument::Vararg {
@@ -27996,7 +27998,7 @@ impl<'a> Checker<'a> {
                 let vararg_collect = vararg.and_then(|index| {
                     (index + 1 == declared
                         && plan.get(index).is_some_and(|argument| {
-                            matches!(argument, AdaptedRefArgument::Vararg { values, whole_array: false }
+                            matches!(argument, AdaptedRefArgument::Vararg { values, whole_array: false, .. }
                                 if !values.is_empty())
                         })
                         && plan[..index].iter().enumerate().all(|(target, argument)| {
@@ -28010,10 +28012,9 @@ impl<'a> Checker<'a> {
                     } else {
                         match argument {
                             AdaptedRefArgument::Default => true,
-                            AdaptedRefArgument::Vararg {
-                                values,
-                                whole_array: false,
-                            } => values.is_empty(),
+                            AdaptedRefArgument::Vararg { values, whole_array: false, .. } => {
+                                values.is_empty()
+                            }
                             _ => false,
                         }
                     }
@@ -40895,7 +40896,7 @@ impl<'a> Checker<'a> {
                             ty
                         } else {
                             self.diags
-                                .error(self.span(e), format!("unresolved reference '{n}'."));
+                                .report_error(self.span(e), unresolved_reference(&n));
                             Ty::Error
                         }
                     }
@@ -41580,18 +41581,19 @@ impl<'a> Checker<'a> {
             return true;
         }
         if let Some(miss) = self.unresolved_type_segments.get(&(r.span.lo, r.span.hi)) {
-            let message = match miss {
+            match miss {
                 crate::symbol_resolver::ClassifierMiss::Unresolved(segment) => {
-                    format!("unresolved reference '{segment}'.")
+                    let report = unresolved_reference(segment);
+                    self.diags.report_error(r.span, report);
                 }
                 crate::symbol_resolver::ClassifierMiss::Ambiguous(candidates) => {
                     let resolver = self.resolver();
-                    ambiguous_classifier_message(candidates, |candidate| {
+                    let message = ambiguous_classifier_message(candidates, |candidate| {
                         resolver.classifier(candidate)
-                    })
+                    });
+                    self.diags.error(r.span, message);
                 }
-            };
-            self.diags.error(r.span, message);
+            }
             return true;
         }
         let nested = r
@@ -41762,7 +41764,7 @@ impl<'a> Checker<'a> {
                 &[],
                 operator_span,
             ) {
-                self.diags.error(
+                self.diags.report_error(
                     operator_span,
                     crate::diagnostic_wording::unresolved_operator_reference_on(
                         self.file.reference,
@@ -41895,7 +41897,7 @@ impl<'a> Checker<'a> {
                             | PropertyWriteSelection::Receiverless(_)
                             | PropertyWriteSelection::ClassifierProperty(_) => self
                                 .diags
-                                .error(self.span(e), format!("unresolved reference '{name}'.")),
+                                .report_error(self.span(e), unresolved_reference(&name)),
                         }
                         Ty::Error
                     }
@@ -42544,7 +42546,8 @@ impl<'a> Checker<'a> {
             {
                 let message =
                     self.unresolved_member_diagnostic(scope, Some(receiver), &name, safe_rt);
-                self.diags.error(self.member_name_span(e, &name), message);
+                self.diags
+                    .report_error(self.member_name_span(e, &name), message);
             }
             // Named arguments must have a checker-owned parameter-slot mapping before lowering.
             if result != Ty::Error
@@ -42821,7 +42824,7 @@ impl<'a> Checker<'a> {
             )
         }) {
             for receiver in self.implicit_receivers_before_value_binding(scope, &n) {
-                let receiver = self.implicit_intersection_property_view(receiver, &n);
+                let receiver = self.implicit_property_receiver_view(receiver, &n);
                 if let Some(ty) =
                     self.try_member_read(scope, receiver.ty, &n, self.span(e), Some(e))
                 {
@@ -42926,7 +42929,7 @@ impl<'a> Checker<'a> {
                                 continue;
                             }
                             implicit_rungs::ImplicitRung::Receiver(receiver) => {
-                                self.implicit_intersection_property_view(receiver, &n)
+                                self.implicit_property_receiver_view(receiver, &n)
                             }
                         };
                         if let Some(selected_ty) =
@@ -43113,7 +43116,7 @@ impl<'a> Checker<'a> {
                             continue;
                         }
                         implicit_rungs::ImplicitRung::Receiver(receiver) => {
-                            self.implicit_intersection_property_view(receiver, &n)
+                            self.implicit_property_receiver_view(receiver, &n)
                         }
                     };
                     if context_receiver_priority::is_context_parameter_receiver(
@@ -43250,10 +43253,8 @@ impl<'a> Checker<'a> {
                                 match self.demand_name.and_then(|demand| demand(&n)) {
                                     Some(ty) => ty,
                                     None => {
-                                        self.diags.error(
-                                            self.span(e),
-                                            format!("unresolved reference '{n}'."),
-                                        );
+                                        self.diags
+                                            .report_error(self.span(e), unresolved_reference(&n));
                                         Ty::Error
                                     }
                                 }
@@ -43289,7 +43290,7 @@ impl<'a> Checker<'a> {
                         return self.set(e, ty);
                     }
                     self.diags
-                        .error(self.span(e), format!("unresolved reference '{n}'."));
+                        .report_error(self.span(e), unresolved_reference(&n));
                     Ty::Error
                 } else if let Some(property) = self.imported_associated_property(&n) {
                     self.record_associated_property(Some(e), property, true)
@@ -43337,7 +43338,7 @@ impl<'a> Checker<'a> {
                     self.package_used_as_expression(self.span(e))
                 } else {
                     self.diags
-                        .error(self.span(e), format!("unresolved reference '{n}'."));
+                        .report_error(self.span(e), unresolved_reference(&n));
                     Ty::Error
                 }
             }
@@ -43956,12 +43957,7 @@ impl<'a> Checker<'a> {
                     let ty = self.package_used_as_expression(span);
                     return self.set(e, ty);
                 }
-                let message = crate::diagnostic_wording::unresolved_reference_on(
-                    self.file.reference,
-                    &name,
-                    None,
-                );
-                self.diags.error(span, message);
+                self.diags.report_error(span, unresolved_reference(&name));
                 return self.set(e, Ty::Error);
             }
             let diag_mark = self.diags.diags.len();
@@ -43971,10 +43967,8 @@ impl<'a> Checker<'a> {
                     return self.set(e, ty);
                 }
                 if !self.error_receiver_expression_flavored(scope, receiver, diag_mark) {
-                    self.diags.error(
-                        self.member_name_span(e, &name),
-                        format!("unresolved reference '{name}'."),
-                    );
+                    self.diags
+                        .report_error(self.member_name_span(e, &name), unresolved_reference(&name));
                 } else if matches!(
                     self.resolver().error_receiver_functions(&name),
                     crate::symbol_resolver::ErrorReceiverSelection::Absent
@@ -43987,7 +43981,11 @@ impl<'a> Checker<'a> {
             if inferred_intersection.len() > 1 {
                 rt = Ty::intersection(&inferred_intersection);
             }
-            if let Some(projected) = self
+            if let Some(declared) =
+                self.unnarrowed_explicit_property_receiver(scope, (e, receiver), rt, &name, false)
+            {
+                rt = declared;
+            } else if let Some(projected) = self
                 .flow_intersection_property_receiver(scope, receiver, &name, false)
                 .or_else(|| self.type_parameter_member_receiver(scope, rt, &name))
             {
@@ -44972,13 +44970,7 @@ impl<'a> Checker<'a> {
         }
         let mut inner_alias_receiver_mismatch = None;
         let selected = (|| {
-            let receiver_ty = receiver_ty.unboxed_primitive().unwrap_or_else(|| {
-                if internal.matches("kotlin/String") {
-                    Ty::String
-                } else {
-                    receiver_ty
-                }
-            });
+            let receiver_ty = callable_reference_lhs::unbound_ref_receiver_ty(receiver_ty);
             if receiver_ty == Ty::Error {
                 return None;
             }
@@ -45450,9 +45442,9 @@ impl<'a> Checker<'a> {
     /// revisit replaces semantic handoff data, but it is not a second source error.
     fn report_unresolved_callable_reference(&mut self, expression: ExprId, name: &str) {
         if self.silent_error_exprs.insert(expression) {
-            self.diags.error(
+            self.diags.report_error(
                 self.member_name_span(expression, name),
-                format!("unresolved reference '{name}'."),
+                unresolved_reference(name),
             );
         }
     }
@@ -49468,8 +49460,7 @@ impl<'a> Checker<'a> {
         let InheritedNestedClassifier::Found(internal) = self.select_classifier(scope, name) else {
             return None;
         };
-        self.resolver()
-            .inaccessible_classifier_access(internal)
+        self.inaccessible_classifier_reference(internal)
             .map(|access| (internal, access))
     }
 
@@ -49481,7 +49472,7 @@ impl<'a> Checker<'a> {
         if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
             return false;
         }
-        let Some(access) = self.resolver().inaccessible_classifier_access(internal) else {
+        let Some(access) = self.inaccessible_classifier_reference(internal) else {
             return false;
         };
         crate::trace_compiler!(
@@ -49513,7 +49504,7 @@ impl<'a> Checker<'a> {
         );
         // The receiver is semantically bound but unusable because that classifier access was
         // diagnosed. Preserve that provenance across cached expression reads so an enclosing
-        // member access does not add an unrelated "unresolved reference" cascade.
+        // member access does not add an unrelated "Unresolved reference" cascade.
         self.silent_error_exprs.insert(expression);
         true
     }
@@ -49572,7 +49563,7 @@ impl<'a> Checker<'a> {
         classifier: TypeName,
         selected: &SelectedCallable,
     ) {
-        if self.resolver().inaccessible_classifier_access(classifier)
+        if self.inaccessible_classifier_reference(classifier)
             == Some(crate::libraries::ClassifierAccess::PackagePrivate)
         {
             let display = self

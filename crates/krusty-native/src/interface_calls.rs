@@ -59,6 +59,31 @@ pub(super) const DEPENDENCY_IMPLEMENTATIONS_SECTION: &str =
 
 const STUB_PREFIX: &str = "kt_itf_";
 
+/// The namespace of the function protocol: how a call through a function type, `(Int) -> String`
+/// or `suspend () -> Unit`, meets the function value it is made on.
+///
+/// A function value's `invoke` is a member of no interface of any module, and no class table
+/// numbers it, because every module reads a function type alike and the physical operand count (a
+/// `suspend` one's continuation included) is the whole of what tells two apart. So the protocol is
+/// one more namespace of stubs, its member numbers being operand counts. A lambda, a callable
+/// reference, a class implementing a function type: each records the function it answers a call of
+/// each operand count with, and the link writes the stub exactly as for an interface member.
+/// Nothing is numbered per module, so nothing can disagree between two modules.
+///
+/// The namespace is spelled with a control character, which no module name has, so it cannot
+/// collide with one.
+const FUNCTION_PROTOCOL: &str = "\u{1}function";
+
+/// The stub a call through a function type of `operands` physical operands goes to.
+pub(super) fn function_stub_symbol(operands: usize) -> String {
+    stub_symbol(FUNCTION_PROTOCOL, operands as u32)
+}
+
+/// The section a type records the functions it answers the function protocol with.
+pub(super) fn function_implementations_section() -> String {
+    implementations_section(FUNCTION_PROTOCOL)
+}
+
 /// The stub a call through member `number` of `module_name`'s interfaces goes to.
 pub(super) fn stub_symbol(module_name: &str, number: u32) -> String {
     stub_in_namespace(&module_namespace(module_name), number)
@@ -131,6 +156,21 @@ mod tests {
         let symbol = stub_symbol("my-module_2", 17);
         assert_eq!(symbol, "kt_itf_my_2d_module_5f_2_17");
         assert_eq!(stub_number(&symbol), Some(17));
+    }
+
+    #[test]
+    fn the_function_protocol_is_one_namespace_of_stubs_by_operand_count() {
+        // The C runtime names these stubs by spelling, so the spelling is pinned.
+        assert_eq!(function_stub_symbol(2), "kt_itf__1_function_2");
+        assert_eq!(stub_number(&function_stub_symbol(2)), Some(2));
+        assert_eq!(
+            function_implementations_section(),
+            ".kt_interface_implementations._1_function"
+        );
+        assert_eq!(
+            recorded_stub(&function_implementations_section(), 2),
+            Some(function_stub_symbol(2))
+        );
     }
 
     #[test]

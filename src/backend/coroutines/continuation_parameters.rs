@@ -437,14 +437,39 @@ fn completed_value(ir: &mut IrFile, value: Option<ExprId>, unit: bool) -> ExprId
 
 /// Coerce the value of every `return` this body owns to `Any?`. A lambda's implementation is its
 /// own function; only a retained `inline_body`, whose returns leave this function, is walked.
+///
+/// The block of an intrinsic suspension point is such a body whose own returns do not leave this
+/// function: `suspendCoroutineUninterceptedOrReturn { ...; return value }` yields `value`, which
+/// may be `COROUTINE_SUSPENDED`, as the point's result. Completing that value as the function's
+/// `Unit` would discard the marker, so only a return that names a declaration enclosing the
+/// block is completed.
 fn coerce_returns(ir: &mut IrFile, expression: ExprId, unit: bool, visited: &mut HashSet<ExprId>) {
+    coerce_owned_returns(ir, expression, unit, false, visited);
+}
+
+fn coerce_owned_returns(
+    ir: &mut IrFile,
+    expression: ExprId,
+    unit: bool,
+    in_suspension_block: bool,
+    visited: &mut HashSet<ExprId>,
+) {
     if !visited.insert(expression) {
         return;
     }
+    let in_suspension_block =
+        in_suspension_block || ir.intrinsic_suspension_points.contains_key(&expression);
     match ir.exprs[expression as usize] {
         IrExpr::Return(value) => {
             if let Some(value) = value {
-                coerce_returns(ir, value, unit, visited);
+                coerce_owned_returns(ir, value, unit, in_suspension_block, visited);
+            }
+            let leaves_block = ir
+                .checked_return_depths
+                .get(&expression)
+                .is_some_and(|depth| *depth > 0);
+            if in_suspension_block && !leaves_block {
+                return;
             }
             let completed = completed_value(ir, value, unit);
             ir.exprs[expression as usize] = IrExpr::Return(Some(completed));
@@ -453,7 +478,7 @@ fn coerce_returns(ir: &mut IrFile, expression: ExprId, unit: bool, visited: &mut
             let mut children = Vec::new();
             for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
             for child in children {
-                coerce_returns(ir, child, unit, visited);
+                coerce_owned_returns(ir, child, unit, in_suspension_block, visited);
             }
         }
     }

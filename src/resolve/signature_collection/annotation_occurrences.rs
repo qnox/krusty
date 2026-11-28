@@ -91,10 +91,8 @@ pub(in crate::resolve) fn resolve_declaration_type_parameter_annotations(
             continue;
         }
         let Some(identity) = class_names.annotation_binding(&annotation.name) else {
-            diags.error(
-                annotation.span,
-                format!("unresolved reference '{}'.", annotation.name),
-            );
+            let report = crate::diagnostic_wording::unresolved_reference(&annotation.name);
+            diags.report_error(annotation.span, report);
             continue;
         };
         let previous = resolved.insert(key, identity);

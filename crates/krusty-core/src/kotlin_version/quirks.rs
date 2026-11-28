@@ -104,6 +104,15 @@ quirks! {
         fixed_in: Some(KotlinVersion::V2_4_20),
         defect: false,
     }
+    /// Once no visible candidate applies, the candidates the site cannot see still compete scope
+    /// level by scope level, nearest first, instead of as one visibility-error group across the
+    /// tower: under a suppressed visibility error an explicitly imported `Any.tag` takes the call
+    /// from a star-imported `String.tag`.
+    InvisibleCandidatesKeepScopeLevels {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
+    }
     /// `+UnitConversionsOnArbitraryExpressions` is known but converts no function value whose
     /// result is not `Unit` (KT-84393).
     UnitConversionRejectsNonUnitResult {
@@ -121,6 +130,14 @@ quirks! {
     /// An anonymous context parameter is unnamed in the IR, so it gets no local-variable row; its
     /// label reaches only reflection and null assertions.
     AnonymousContextParameterIsNotLocal {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
+    }
+    /// A context parameter passed on as a context argument is read at the offsets of its
+    /// declaration, so the load marks the line the declaration starts on. Later releases read it
+    /// with no offsets, which marks nothing.
+    ContextParameterLoadMarksDeclarationLine {
         since: None,
         fixed_in: Some(KotlinVersion::V2_4_20),
         defect: false,
@@ -169,6 +186,13 @@ quirks! {
         since: Some(KotlinVersion::V2_4_20),
         fixed_in: Some(KotlinVersion::V2_5_0),
         defect: true,
+    }
+    /// An interface's `$DefaultImpls` forwarder for a default it only inherits maps its body to
+    /// the interface's declaration line; later releases give it no line.
+    InheritedHolderForwarderMapsInterfaceLine {
+        since: None,
+        fixed_in: Some(KotlinVersion::V2_4_20),
+        defect: false,
     }
     /// A library compiled below language 2.3 stamps KLIB `metadata_version` `1.4.1` instead of the
     /// language level's own (read off `kotlinc-native -p library -Xmetadata-klib`).

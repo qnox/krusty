@@ -28,7 +28,9 @@ fn assert_unresolved_against_library(
             ),
             name,
             receiver,
-        ),
+        )
+        .printed(krusty::diag::DiagnosticNames::Hidden)
+        .into_owned(),
     }];
     assert_eq!(result.krusty_code, 1, "{}", result.krusty_stderr);
     assert_eq!(result.reference_code, 1, "{}", result.reference_stderr);

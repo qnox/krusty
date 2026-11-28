@@ -25,7 +25,6 @@ coroutines/stateMachine/withTypeParameter.kt
 deadCodeElimination/unusedPrimitiveAndObjectEquals.kt
 defaultArguments/noAnonymousObjectRegenerationInDefaultStub.kt
 enum/enumEntriesIntrinsicForJava.kt
-falseSmartCast.kt
 fieldsForCapturedValues/innerAndOuterThis.kt
 fieldsForCapturedValues/multipleExtensionReceivers.kt
 forLoop/forInCharSequenceWithIndex/forInStringWithIndexWithExplicitlyTypedIndexVariable.kt

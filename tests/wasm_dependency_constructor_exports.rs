@@ -419,3 +419,13 @@ fn wasm_official_dependency_anonymous_object_runs_its_inherited_interface_defaul
         "AnonymousObjectInheritedDefault",
     );
 }
+
+/// An official producer's lambda takes a value of a class private to the library's file: the
+/// lambda's header names the class as the body that creates it does.
+#[test]
+fn wasm_official_dependency_lambda_over_file_private_class_runs() {
+    run_against_official_producer(
+        include_str!("box_regressions/multimodule/dependencyLambdaOverFilePrivateClass.kt"),
+        "DependencyLambdaOverFilePrivateClass",
+    );
+}

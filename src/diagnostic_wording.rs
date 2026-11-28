@@ -8,6 +8,7 @@
 //! Each function names the kotlinc diagnostic it renders and the version that changed it: its text
 //! (kotlinc's CLI rendering, the message template with its first letter lowered) or its [`Anchor`].
 
+use crate::diag::{names, NamedMessage};
 use crate::kotlin_version::{KotlinVersion, ReferenceProfile};
 
 /// `NO_ACTUAL_FOR_EXPECT`, from IR actualization (`IrActualizationErrors`). 2.4.20 quotes the
@@ -90,6 +91,23 @@ pub fn callable_reference_receiver_mismatch(
     }
 }
 
+/// `UNRESOLVED_REFERENCE` for a name kotlinc resolves without a receiver type to report.
+pub fn unresolved_reference(name: &str) -> NamedMessage {
+    NamedMessage {
+        name: names::UNRESOLVED_REFERENCE,
+        message: format!("Unresolved reference '{name}'."),
+    }
+}
+
+/// `UNRESOLVED_IMPORT`: an import path segment that names nothing. kotlinc renders it as it renders
+/// `UNRESOLVED_REFERENCE`.
+pub fn unresolved_import(segment: &str) -> NamedMessage {
+    NamedMessage {
+        name: names::UNRESOLVED_IMPORT,
+        ..unresolved_reference(segment)
+    }
+}
+
 /// `UNRESOLVED_REFERENCE` for a name looked up on an explicit receiver expression. From 2.4.20
 /// kotlinc appends the receiver's type (`FOR_OPTIONAL_RECEIVER`) when it is a class-like type
 /// without errors; `receiver` is that rendered type, or `None` when kotlinc would omit it.
@@ -97,12 +115,16 @@ pub fn unresolved_reference_on(
     reference: ReferenceProfile,
     name: &str,
     receiver: Option<&str>,
-) -> String {
-    match receiver {
+) -> NamedMessage {
+    let message = match receiver {
         Some(receiver) if reference.at_least(KotlinVersion::V2_4_20) => {
-            format!("unresolved reference '{name}' on receiver of type '{receiver}'.")
+            format!("Unresolved reference '{name}' on receiver of type '{receiver}'.")
         }
-        _ => format!("unresolved reference '{name}'."),
+        _ => return unresolved_reference(name),
+    };
+    NamedMessage {
+        name: names::UNRESOLVED_REFERENCE,
+        message,
     }
 }
 
@@ -113,13 +135,17 @@ pub fn unresolved_operator_reference_on(
     name: &str,
     operator: &str,
     receiver: Option<&str>,
-) -> String {
-    match receiver {
+) -> NamedMessage {
+    let message = match receiver {
         Some(receiver) if reference.at_least(KotlinVersion::V2_4_20) => format!(
-            "unresolved reference '{name}' for operator '{operator}' on receiver of type \
+            "Unresolved reference '{name}' for operator '{operator}' on receiver of type \
              '{receiver}'."
         ),
-        _ => format!("unresolved reference '{name}' for operator '{operator}'."),
+        _ => format!("Unresolved reference '{name}' for operator '{operator}'."),
+    };
+    NamedMessage {
+        name: names::UNRESOLVED_REFERENCE,
+        message,
     }
 }
 

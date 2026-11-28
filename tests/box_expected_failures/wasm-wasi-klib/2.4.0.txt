@@ -164,7 +164,6 @@ constants/comparisonFalse.kt
 constants/divisionByZero.kt
 constants/float.kt
 constants/kt9532.kt
-contextParameters/contextPropertyInInterface.kt
 contextParameters/explicitPassing.kt
 contextParameters/suspendContextParemetersWithExtension.kt
 contracts/kt39374.kt
@@ -252,7 +251,6 @@ coroutines/featureIntersection/funInterface/kt49294.kt
 coroutines/featureIntersection/funInterface/kt50950.kt
 coroutines/featureIntersection/safeCallOnTwoReceivers.kt
 coroutines/featureIntersection/safeCallOnTwoReceiversLong.kt
-coroutines/featureIntersection/suspendFunctionAsSupertypeIsCheckWithArity.kt
 coroutines/featureIntersection/suspendInlineSuspendFinally.kt
 coroutines/featureIntersection/suspendOperatorPlusAssign.kt
 coroutines/featureIntersection/tailrec/controlFlowIf.kt
@@ -261,7 +259,6 @@ coroutines/featureIntersection/tailrec/realStringEscape.kt
 coroutines/featureIntersection/tailrec/realStringRepeat.kt
 coroutines/featureIntersection/tailrec/whenWithIs.kt
 coroutines/handleException.kt
-coroutines/indirectInlineUsedAsNonInline.kt
 coroutines/inlineClasses/direct/boxTypeParameterOfSuperType.kt
 coroutines/inlineClasses/direct/boxTypeParameterOfSuperTypeResult.kt
 coroutines/inlineClasses/direct/defaultStub.kt
@@ -313,7 +310,6 @@ coroutines/intrinsicSemantics/releaseIntercepted.kt
 coroutines/intrinsicSemantics/startCoroutineUninterceptedOrReturnInterception.kt
 coroutines/intrinsicSemantics/suspendCoroutineUninterceptedOrReturn.kt
 coroutines/kt21080.kt
-coroutines/kt24135.kt
 coroutines/kt28844.kt
 coroutines/kt31784.kt
 coroutines/kt42028.kt
@@ -324,7 +320,6 @@ coroutines/kt49168.kt
 coroutines/kt51530.kt
 coroutines/kt51718.kt
 coroutines/localFunctions/named/defaultArgument.kt
-coroutines/localFunctions/named/stateMachine.kt
 coroutines/longRangeInSuspendCall.kt
 coroutines/multiModule/inheritFromAnotherModule.kt
 coroutines/multiModule/inlineMultiModuleOverride.kt
@@ -337,8 +332,6 @@ coroutines/simpleException.kt
 coroutines/simpleWithDefaultValue.kt
 coroutines/stackUnwinding/rethrowInFinallyWithSuspension.kt
 coroutines/stopAfter.kt
-coroutines/suspendConversion/intersectionTypeToSubtypeConversion.kt
-coroutines/suspendConversion/subtypeOfFunctionalTypeToSuspendConversion.kt
 coroutines/suspendConversion/suspendConversionBetweenFunInterfaces.kt
 coroutines/suspendFunctionAsCoroutine/handleException.kt
 coroutines/suspendFunctionAsCoroutine/ifExpressionInsideCoroutine_1_3.kt
@@ -348,9 +341,6 @@ coroutines/suspendFunctionAsCoroutine/superCall.kt
 coroutines/suspendFunctionAsCoroutine/superCallAbstractClass.kt
 coroutines/suspendFunctionAsCoroutine/superCallInterface.kt
 coroutines/suspendFunctionAsCoroutine/superCallOverload.kt
-coroutines/suspendFunctionAsSupertype.kt
-coroutines/suspendFunctionAsSupertypeCall.kt
-coroutines/suspendFunctionAsSupertypeWithInlinedFunInKlib.kt
 coroutines/suspendFunctionTypeCall/manyParametersNoCapture.kt
 coroutines/suspensionInsideSafeCallWithElvis.kt
 coroutines/tailCallOptimizations/crossinline.kt
@@ -427,7 +417,6 @@ extensionFunctions/extensionFunctionDifferentReceivers.kt
 extensionFunctions/extensionFunctionInValueClass.kt
 extensionFunctions/extensionFunctionWithExtensionAsAReceiver.kt
 extensionFunctions/thisMethodInObjectLiteral.kt
-extensionProperties/contextPropertyInInterface.kt
 extensionProperties/extensionPropertyDifferentReceiver.kt
 extensionProperties/extensionPropertyWithExtensionAsReceiver.kt
 extensionProperties/genericContextOverride.kt
@@ -446,7 +435,6 @@ fp/remainderVsModFloat.kt
 funInterface/equality/localFunctionReferences.kt
 funInterface/funInterfaceInheritance.kt
 funInterface/funInterfaceWithSuspendMethod.kt
-funInterface/intersectionTypeToFunInterfaceConversion.kt
 funInterface/kt41670.kt
 funInterface/kt49384.kt
 funInterface/kt77685-sam.kt
@@ -567,7 +555,6 @@ ir/recursiveGeneric.kt
 ir/recursiveGeneric2.kt
 ir/serializationRegressions/anonFakeOverride.kt
 ir/serializationRegressions/useImportedMember.kt
-ir/serializationRegressions/varAsFunctionCall.kt
 jdk/noStringToCharArray.kt
 jsAstOptimizations/inlineEmptyFunction.kt
 jvm8/defaults/enable/kt55083_indyLambdaForFunInterface.kt
@@ -593,15 +580,11 @@ lower/forLoopsLowering/withIndexUInt.kt
 mangling/internalOverrideSuperCall.kt
 mangling/publicOverrideSuperCall.kt
 multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
-multiplatform/k2/basic/contextInFakeOverride.kt
 multiplatform/k2/basic/delegatedByExpectExtensionProperty.kt
 multiplatform/k2/basic/expectActualFakeOverrides2.kt
 multiplatform/k2/basic/expectActualFakeOverridesWithTypeParameters.kt
 multiplatform/k2/basic/expectActualIntersectionOverride2.kt
-multiplatform/k2/basic/expectActualOverloads.kt
-multiplatform/k2/basic/expectActualTypeParameters.kt
 multiplatform/k2/basic/expectInterfaceInSupertypes.kt
-multiplatform/k2/basic/extensionAndFakeOverride.kt
 multiplatform/k2/basic/interfaceMethodFromSuperTypeIsImplementedInOtherExpectSuperClass.kt
 multiplatform/k2/basic/localSubstitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/nameBasedDestructuringFullForm.kt
@@ -611,7 +594,6 @@ multiplatform/k2/basic/substitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/widerVisibilityInActualClassifier.kt
 multiplatform/k2/defaultArguments/kt67488.kt
 multiplatform/k2/defaultArguments/suspend.kt
-multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/iheritanceFromExpected2-2.kt
 multiplatform/k2/hmpp/inheritanceFromExpected2-3.kt

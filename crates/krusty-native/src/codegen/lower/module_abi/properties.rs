@@ -2,20 +2,23 @@
 //!
 //! The plan is keyed by the checked [`PropertyId`]. Its ABI is two hidden entry points named from
 //! that identity: a getter, and a setter for a `var`. A member takes its receiver first, carried
-//! as the declaring classifier; a package property and a companion-block property take none. The value is carried at the
-//! property's declared type, so a generic property is its erased declaration type at the boundary
-//! and a value-class property its projected value, the same in both files.
+//! as the declaring classifier; a package property and a companion-block property take none. The
+//! declared operands of an extension or context property's accessors follow, in Kotlin's order
+//! (see [`receiver_property_accessors`]), and a setter's value comes last. The value is carried at
+//! the property's declared type, so a generic property is its erased declaration type at the
+//! boundary and a value-class property its projected value, the same in both files.
 //!
 //! Only the defining file touches storage. Its entry points are the ordinary local realization of
 //! a read or a write of that property — a slot, a field, a source-written or delegated accessor, a
-//! dispatch slot of an `open` member — converted between what that realization carries and the
-//! declared type. A package property's entry point runs the file's once-only initializer first: a
+//! dispatch slot of an `open` member, an extension or context property's accessor — converted
+//! between what that realization carries and the declared type. A package property's entry point runs the file's once-only initializer first: a
 //! read observes the initialized value, and a write is not overwritten by a later initializer. A
 //! companion-block property belongs to its class, not to the file, so its entry points run only the
 //! local access, which initializes what the class needs. A using file evaluates the receiver and
 //! then the assigned value before it calls.
 
 use super::super::*;
+use krusty::backend::receiver_property_accessors::{self, ReceiverAccessors};
 use krusty::fir::{DeclarationFlags, PropertyId};
 
 /// The checked declaration facts the plan reads. A defining file reads them from its own checked
@@ -25,9 +28,9 @@ struct PropertyDeclaration {
     property: PropertyId,
     ty: Ty,
     owner: Option<Owner>,
-    /// An extension receiver or a context parameter: a property whose accessors take more than a
+    /// The context parameters, then the extension receiver: what the accessors take beyond a
     /// dispatch receiver.
-    receiver_parameters: bool,
+    parameters: Vec<Ty>,
     /// A property of its owner's `companion { }` block: a static of the owner, read and written
     /// with no receiver.
     companion_block: bool,
@@ -45,6 +48,8 @@ struct Owner {
 enum OwnerKind {
     /// A class, an object, or an enum: a receiver whose storage the declaring file lays out.
     Concrete,
+    /// A value class: a concrete receiver carried as its projected value.
+    Value,
     Interface,
     Annotation,
 }
@@ -61,10 +66,13 @@ pub(in super::super) enum PropertyPlacement {
 }
 
 /// The one ABI both files use for a module property.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(in super::super) struct PropertyAbi {
     pub(in super::super) property: PropertyId,
     pub(in super::super) placement: PropertyPlacement,
+    /// The accessors' declared operands after any dispatch receiver: the context parameters, then
+    /// the extension receiver.
+    pub(in super::super) parameters: Vec<Ty>,
     /// The declared type: what the getter returns and the setter takes.
     pub(in super::super) ty: Ty,
     pub(in super::super) writable: bool,
@@ -79,7 +87,10 @@ impl PropertyAbi {
     }
 
     fn getter_parameters(&self) -> Vec<Ty> {
-        self.receiver().into_iter().collect()
+        self.receiver()
+            .into_iter()
+            .chain(self.parameters.iter().copied())
+            .collect()
     }
 
     fn setter_parameters(&self) -> Vec<Ty> {
@@ -106,13 +117,6 @@ impl PropertyAbi {
 /// The plan for one declaration, or why another file cannot use it through this ABI.
 fn plan(declaration: &PropertyDeclaration) -> Result<PropertyAbi, Unsupported> {
     let flags = declaration.flags;
-    if declaration.receiver_parameters {
-        return Err(
-            "a cross-file property with an extension receiver or context"
-                .to_string()
-                .into(),
-        );
-    }
     if flags.has(DeclarationFlags::EXPECT) {
         return Err("a cross-file `expect` property".into());
     }
@@ -133,17 +137,25 @@ fn plan(declaration: &PropertyDeclaration) -> Result<PropertyAbi, Unsupported> {
             }
             // A classifier constant is folded at its uses and stored as a static of the
             // classifier, not as a member of its instance.
-            OwnerKind::Concrete if flags.has(DeclarationFlags::CONST) => {
+            OwnerKind::Concrete | OwnerKind::Value if flags.has(DeclarationFlags::CONST) => {
                 return Err("a cross-file classifier constant".into());
             }
-            OwnerKind::Concrete | OwnerKind::Interface => PropertyPlacement::Member {
-                owner: owner.classifier,
-            },
+            // A value class's members take the projected receiver, which the accessor entry of
+            // an extension or context property does not carry yet.
+            OwnerKind::Value if !declaration.parameters.is_empty() => {
+                return Err("a cross-file extension or context property of a value class".into());
+            }
+            OwnerKind::Concrete | OwnerKind::Value | OwnerKind::Interface => {
+                PropertyPlacement::Member {
+                    owner: owner.classifier,
+                }
+            }
         },
     };
     Ok(PropertyAbi {
         property: declaration.property,
         placement,
+        parameters: declaration.parameters.clone(),
         ty: declaration.ty,
         writable: flags.has(DeclarationFlags::MUTABLE),
     })
@@ -177,6 +189,11 @@ impl FileLowering<'_> {
                 let kind = match record.owner_kind {
                     Some(krusty::ir::IrClassifierKind::Interface) => OwnerKind::Interface,
                     Some(krusty::ir::IrClassifierKind::Annotation) => OwnerKind::Annotation,
+                    Some(krusty::ir::IrClassifierKind::Class)
+                        if self.values.is_value_class(classifier) =>
+                    {
+                        OwnerKind::Value
+                    }
                     Some(
                         krusty::ir::IrClassifierKind::Class
                         | krusty::ir::IrClassifierKind::Object
@@ -192,8 +209,6 @@ impl FileLowering<'_> {
                 Ok(Owner { classifier, kind })
             })
             .transpose()?;
-        // A block property's recorded receiver is its declaring classifier: the coordinate that
-        // associates it with the class, which its accessors do not take.
         let companion_block = matches!(
             record.placement,
             krusty::ir::IrStaticPlacement::CompanionBlock { .. }
@@ -202,8 +217,7 @@ impl FileLowering<'_> {
             property: *target,
             ty: record.ty,
             owner,
-            receiver_parameters: (record.extension_receiver.is_some() && !companion_block)
-                || !record.context_parameters.is_empty(),
+            parameters: receiver_property_accessors::record_parameters(record),
             companion_block,
             flags: record.flags,
             visibility: record.visibility,
@@ -232,6 +246,8 @@ impl FileLowering<'_> {
                     OwnerKind::Annotation
                 } else if class.is_interface {
                     OwnerKind::Interface
+                } else if self.values.is_value_class(class.fq_name) {
+                    OwnerKind::Value
                 } else {
                     OwnerKind::Concrete
                 };
@@ -241,23 +257,17 @@ impl FileLowering<'_> {
                 })
             }
         };
-        let receiver_parameters = match self.ir.local_property_layouts.get(&property) {
-            Some(IrLocalPropertyLayout::TopLevelAccessor {
-                receiver,
-                context_parameters,
-                ..
-            }) => receiver.is_some() || !context_parameters.is_empty(),
-            Some(IrLocalPropertyLayout::Member {
-                context_parameters, ..
-            }) => !context_parameters.is_empty(),
-            Some(IrLocalPropertyLayout::MemberExtension { .. }) => true,
-            Some(IrLocalPropertyLayout::TopLevelStorage { .. }) | None => false,
-        };
+        let parameters = self
+            .ir
+            .local_property_layouts
+            .get(&property)
+            .map(receiver_property_accessors::layout_parameters)
+            .unwrap_or_default();
         Some(PropertyDeclaration {
             property,
             ty: checked.ty,
             owner,
-            receiver_parameters,
+            parameters,
             companion_block: checked.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER),
             flags: checked.flags,
             visibility: checked.visibility,
@@ -299,6 +309,9 @@ impl FileLowering<'_> {
         name: &str,
     ) -> Result<LocalRealization, Unsupported> {
         let layout = self.ir.local_property_layouts.get(&abi.property);
+        if !abi.parameters.is_empty() {
+            return self.local_accessors(abi, layout, name);
+        }
         match (abi.placement, layout) {
             (
                 PropertyPlacement::Package,
@@ -338,6 +351,47 @@ impl FileLowering<'_> {
         }
     }
 
+    /// The accessors through which this file realizes an exported property that takes declared
+    /// operands, checked against the plan: the same owner, and accessors whose declared parameters
+    /// are the plan's.
+    fn local_accessors(
+        &self,
+        abi: &PropertyAbi,
+        layout: Option<&IrLocalPropertyLayout>,
+        name: &str,
+    ) -> Result<LocalRealization, Unsupported> {
+        let mismatch = || {
+            Unsupported::from(format!(
+                "internal: the module property `{name}` has no local accessors of its planned shape"
+            ))
+        };
+        let accessors = layout
+            .and_then(|layout| ReceiverAccessors::of_layout(layout).ok())
+            .ok_or_else(mismatch)?;
+        let owner = match abi.placement {
+            PropertyPlacement::Member { owner } => Some(owner),
+            PropertyPlacement::Package | PropertyPlacement::CompanionBlock => None,
+        };
+        let declared = |function: FunId, value: Option<Ty>| {
+            let mut expected = abi.parameters.clone();
+            expected.extend(value);
+            self.ir.functions[function as usize].params == expected
+        };
+        if accessors.owner != owner
+            || !declared(accessors.getter, None)
+            || accessors.setter.is_some() != abi.writable
+            || accessors
+                .setter
+                .is_some_and(|setter| !declared(setter, Some(abi.ty)))
+        {
+            return Err(mismatch());
+        }
+        Ok(LocalRealization::Accessors {
+            accessors,
+            initialize_file: abi.placement == PropertyPlacement::Package,
+        })
+    }
+
     fn define_property_getter(
         &mut self,
         abi: &PropertyAbi,
@@ -355,6 +409,21 @@ impl FileLowering<'_> {
         let name = name.to_string();
         self.emit_function(id, signature, ty, &symbol, &mut |body, params| {
             let produced = match realization {
+                LocalRealization::Accessors {
+                    accessors,
+                    initialize_file,
+                } => {
+                    if initialize_file {
+                        let init = body.func_ref(file_init);
+                        body.emit_call(init, &[])?;
+                        if body.terminated {
+                            return Ok(());
+                        }
+                    }
+                    let getter = accessors.getter;
+                    let value = body.call_accessor_entry(accessors, getter, params)?;
+                    value.map(|value| (value, body.file.ir.functions[getter as usize].ret))
+                }
                 LocalRealization::Package => {
                     let init = body.func_ref(file_init);
                     body.emit_call(init, &[])?;
@@ -405,6 +474,20 @@ impl FileLowering<'_> {
         let name = name.to_string();
         self.emit_function(id, signature, Ty::Unit, &symbol, &mut |body, params| {
             match realization {
+                LocalRealization::Accessors {
+                    accessors,
+                    initialize_file,
+                } => {
+                    if initialize_file {
+                        let init = body.func_ref(file_init);
+                        body.emit_call(init, &[])?;
+                        if body.terminated {
+                            return Ok(());
+                        }
+                    }
+                    let setter = accessors.accessor(true)?;
+                    body.call_accessor_entry(accessors, setter, params)?;
+                }
                 LocalRealization::Package => {
                     let init = body.func_ref(file_init);
                     body.emit_call(init, &[])?;
@@ -460,17 +543,46 @@ enum LocalRealization {
         index: usize,
         value_class: bool,
     },
+    /// An extension or context property: a call of its accessor, after the file initializer for
+    /// a package property.
+    Accessors {
+        accessors: ReceiverAccessors,
+        initialize_file: bool,
+    },
 }
 
 impl BodyLowering<'_, '_, '_> {
+    /// Forward an entry point's parameters to the local accessor `function`: the owner's instance
+    /// first for a member, then the declared operands (and a setter's value), which the plan
+    /// checked are the accessor's own parameters.
+    fn call_accessor_entry(
+        &mut self,
+        accessors: ReceiverAccessors,
+        function: FunId,
+        params: &[Value],
+    ) -> Result<Option<Value>, Unsupported> {
+        let (dispatch, arguments) = match accessors.owner {
+            Some(owner) => (Some((owner, params[0])), &params[1..]),
+            None => (None, params),
+        };
+        let value = self.call_receiver_accessor(function, dispatch, arguments)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        Ok(value)
+    }
+
     /// Read a property another file of this module declares, through its getter entry point.
+    /// `declared` are the context arguments, then the extension receiver, of an extension or
+    /// context property.
     pub(in super::super) fn module_property_read(
         &mut self,
         target: &PropertyId,
         receiver: Option<u32>,
+        declared: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
         let abi = self.file.imported_property(target)?;
-        let Some(arguments) = self.module_property_receiver(&abi, receiver)? else {
+        let Some(arguments) = self.module_property_operands(&abi, receiver, declared)? else {
             return Ok(None);
         };
         let id = self.file.import(
@@ -492,6 +604,7 @@ impl BodyLowering<'_, '_, '_> {
         &mut self,
         target: &PropertyId,
         receiver: Option<u32>,
+        declared: &[u32],
         value: u32,
     ) -> Result<(), Unsupported> {
         let abi = self.file.imported_property(target)?;
@@ -500,7 +613,7 @@ impl BodyLowering<'_, '_, '_> {
                 .to_string()
                 .into());
         }
-        let Some(mut arguments) = self.module_property_receiver(&abi, receiver)? else {
+        let Some(mut arguments) = self.module_property_operands(&abi, receiver, declared)? else {
             return Ok(());
         };
         let value = self.coerce(value, abi.ty)?;
@@ -521,6 +634,40 @@ impl BodyLowering<'_, '_, '_> {
         let func_ref = self.func_ref(id);
         self.emit_call(func_ref, &arguments)?;
         Ok(())
+    }
+
+    /// The operands of an entry point before a setter's value: the receiver at the declaring
+    /// classifier's carrier, then the declared operands at their declared types, evaluated in that
+    /// order. `None` when evaluating one left the block.
+    fn module_property_operands(
+        &mut self,
+        abi: &PropertyAbi,
+        receiver: Option<u32>,
+        declared: &[u32],
+    ) -> Result<Option<Vec<Value>>, Unsupported> {
+        if declared.len() != abi.parameters.len() {
+            return Err(declined!(
+                "a cross-file accessor taking {} operands for {} parameters",
+                declared.len(),
+                abi.parameters.len()
+            ));
+        }
+        let Some(mut operands) = self.module_property_receiver(abi, receiver)? else {
+            return Ok(None);
+        };
+        for (operand, ty) in declared.iter().zip(&abi.parameters) {
+            let value = self.coerce(*operand, *ty)?;
+            if self.terminated {
+                return Ok(None);
+            }
+            let Some(value) = value else {
+                return Err("a `Unit` operand of a cross-file property accessor"
+                    .to_string()
+                    .into());
+            };
+            operands.push(value);
+        }
+        Ok(Some(operands))
     }
 
     /// The receiver operand of an entry point, at the declaring classifier's carrier. `None`

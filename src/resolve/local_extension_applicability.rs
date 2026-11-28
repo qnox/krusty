@@ -347,15 +347,23 @@ impl Checker<'_> {
                         return None;
                     }
                     let expected_values = expected_values.flatten();
-                    let (value_parameters, ret) = match expected {
-                        Some(expected) => self.contextual_local_function_reference_shape(
-                            &declared,
-                            Some(receiver),
-                            expected_values.as_deref()?,
-                            expected.ret,
-                            0,
-                        )?,
-                        None => (signature.params.clone(), signature.ret),
+                    let (value_parameters, ret, call_sig) = match expected {
+                        Some(expected) => {
+                            let specialized = self.contextual_local_function_reference_shape(
+                                &declared,
+                                Some(receiver),
+                                expected_values.as_deref()?,
+                                expected.ret,
+                                0,
+                            )?;
+                            (
+                                specialized.params,
+                                specialized.ret,
+                                Some(specialized.call_sig),
+                            )
+                        }
+                        // Without an expected shape there is no adaptation to plan.
+                        None => (signature.params.clone(), signature.ret, None),
                     };
                     let parameters = if leading_receiver_in_expected {
                         let mut parameters = value_parameters.clone();
@@ -377,16 +385,9 @@ impl Checker<'_> {
                         {
                             return None;
                         }
-                        let call_sig = crate::libraries::CallSig {
-                            param_defaults: declared.param_defaults,
-                            required: declared.required,
-                            vararg: declared.vararg(),
-                            vararg_index: declared.vararg_index,
-                            ..crate::libraries::CallSig::default()
-                        };
                         let mut plan = self.callable_ref_parameter_plan(
                             &value_parameters,
-                            &call_sig,
+                            call_sig.as_ref()?,
                             expected_values.as_deref()?,
                         )?;
                         if leading_receiver_in_expected {
