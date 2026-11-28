@@ -220,6 +220,7 @@ fn defect(quirk: Quirk) -> Option<Defect> {
             fixed: Outcome::Answer("appended [1, 2, 3, 1, 2]".to_string()),
         }),
         Quirk::DelegateFailureNamesFirstRungOnly
+        | Quirk::InheritedHolderForwarderMapsInterfaceLine
         | Quirk::SuspendUnitTailCallKeepsCalleeResult
         | Quirk::AnonymousContextParameterIsNotLocal
         | Quirk::AnonymousContextOrdinalAfterHash

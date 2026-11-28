@@ -217,6 +217,16 @@ impl BodyFirChecker<'_> {
             return Ok(None);
         }
         let initializer = self.expression(receiver)?;
+        // A receiver the get and set both dispatch on unnarrowed is read without its smart cast.
+        let initializer = self
+            .unnarrowed_receiver(
+                receiver,
+                FirReceiver {
+                    value: initializer,
+                    conversion: None,
+                },
+            )?
+            .value;
         if self.is_immutable_binding_read(initializer)
             || matches!(
                 self.body
@@ -228,7 +238,15 @@ impl BodyFirChecker<'_> {
             self.expression_substitutions.insert(receiver, initializer);
             return Ok(Some(CompoundMemberReceiver::StableRead));
         }
-        let ty = self.expression_type(receiver)?;
+        let ty = match self.info.unnarrowed_dispatch_calls.get(&receiver) {
+            Some(&unnarrowed) => ResolvedTy::new(unnarrowed).map_err(|error| {
+                self.failure(
+                    self.file.expr_span(receiver),
+                    BodyCheckFailureKind::UnpublishableType(error),
+                )
+            })?,
+            None => self.expression_type(receiver)?,
+        };
         let target = self.allocate_local();
         let declaration = self.body.add_statement(FirStatement {
             origin,

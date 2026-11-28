@@ -110,10 +110,8 @@ boxingOptimization/kt5844.kt
 boxingOptimization/safeCallWithElvis.kt
 boxingOptimization/safeCallWithElvisMultipleFiles.kt
 boxingOptimization/unsignedArrayForEach.kt
-branching/when_with_try1.kt
 bridges/delegationComplex.kt
 bridges/delegationComplexWithList.kt
-bridges/diamond.kt
 bridges/fakeCovariantOverride.kt
 bridges/fakeGenericCovariantOverride.kt
 bridges/fakeOverride/abstractFakeOverride.kt
@@ -122,7 +120,6 @@ bridges/fakeOverride/fakeOverrideInheritsBridgeFromFakeOverride.kt
 bridges/fakeOverride/fakeOverrideMisleadingImplementation.kt
 bridges/fakeOverride/fakeOverrideShouldNotInheritBridgeFromAbstractDeclaration.kt
 bridges/fakeOverride/longTreeOfFakeOverrideBridgeInheritance.kt
-bridges/fakeOverrideOfTraitImpl.kt
 bridges/fakeOverrideWithSeveralSuperDeclarations.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/kt1939.kt
@@ -135,7 +132,6 @@ bridges/returnTypeSignature.kt
 bridges/special.kt
 bridges/substitutionInSuperClass/boundedTypeArguments.kt
 bridges/substitutionInSuperClass/delegation.kt
-bridges/substitutionInSuperClass/enum.kt
 bridges/test6.kt
 builtinStubMethods/extendJavaClasses/overrideAbstractSetMethod.kt
 callableReference/adaptedReferences/adaptedSecondArgArray.kt
@@ -366,7 +362,6 @@ compileKotlinAgainstKotlin/jvm8/defaults/interop/likeSpecialization.kt
 compileKotlinAgainstKotlin/jvm8/defaults/interop/newAndOldSchemes2.kt
 compileKotlinAgainstKotlin/jvm8/defaults/interop/newAndOldSchemes2Compatibility.kt
 compileKotlinAgainstKotlin/jvm8/defaults/interop/noCompatibilityAgainstEnable.kt
-compileKotlinAgainstKotlin/privateSuperType2.kt
 compileKotlinAgainstKotlin/unsignedTypesInAnnotations.kt
 constants/divisionByZero.kt
 contextParameters/arrayAccessCompositveOperators.kt
@@ -839,7 +834,6 @@ dataClasses/toString/unitComponent.kt
 dataClasses/unitComponent.kt
 deadCodeElimination/intersectingVariableRange.kt
 defaultArguments/captureInTailrec.kt
-defaultArguments/complexInheritance.kt
 defaultArguments/constructor/anonymousObjectAsDefaultParam.kt
 defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
 defaultArguments/function/defaultLambdaInline.kt
@@ -1055,7 +1049,6 @@ extensionProperties/kt9897.kt
 extensionProperties/kt9897_topLevel.kt
 fakeOverride/kt40180_2.kt
 fakeOverride/kt40180_3.kt
-fakeOverride/kt49371.kt
 fakeOverride/privateFakeOverrides0.kt
 fakeOverride/privateFakeOverrides1.kt
 finally/decrementInFinally.kt
@@ -1167,7 +1160,6 @@ inference/kt38664.kt
 inference/kt49838.kt
 inference/lastExpressionOfLambdaWithNothingConstraint.kt
 inference/noCoercionToUniForNullableLambdaReturnType.kt
-inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
 inference/pcla/callableReferenceAndCoercionToUnit.kt
 inference/pcla/callableReferencesProperCompletion.kt
@@ -1228,8 +1220,6 @@ inline/crossModuleTypeOf.kt
 inline/defaultArgsLateinitLowering.kt
 inline/defaultArgsLowering.kt
 inline/defaultArgsLoweringWithIntraModuleInliner.kt
-inline/fakeOverrideInlining.kt
-inline/fakeOverrideInliningCrossModule.kt
 inline/getClass.kt
 inline/inline16.kt
 inline/inline21.kt
@@ -1538,7 +1528,6 @@ innerNested/superConstructorCall/objectExtendsInnerOfLocalVarargAndDefault.kt
 innerNested/superConstructorCall/objectExtendsInnerOfLocalWithCapture.kt
 innerNested/superConstructorCall/objectExtendsLocalWithClosure.kt
 innerNested/superConstructorCall/objectOuterDiffersFromInnerOuter.kt
-interfaceCallsNCasts/diamond.kt
 interfaceCallsNCasts/finalMethod.kt
 intrinsics/kt10131.kt
 intrinsics/kt10131a.kt
@@ -1649,7 +1638,6 @@ multiplatform/k2/basic/expectActualTypealias.kt
 multiplatform/k2/basic/expectActualTypealiasCoercion.kt
 multiplatform/k2/basic/expectInterfaceInSupertypes2.kt
 multiplatform/k2/basic/extensionFunctionInDelegatedSam.kt
-multiplatform/k2/basic/fakeOverridesInPlatformModule.kt
 multiplatform/k2/basic/intersectionOverrideInCommonModule.kt
 multiplatform/k2/basic/intersectionOverrideWithDefaultParameterInCommonModule.kt
 multiplatform/k2/basic/kt-56329.kt
@@ -2155,8 +2143,6 @@ regressions/inaccessibleOperatorRanksBelowResolved.kt
 regressions/inapplicableFunctionValueYieldsToLaterCallLevel.kt
 regressions/inferredDeclarationOpenDependencyBranch.kt
 regressions/inferredResultCallsPastLexicalValue.kt
-regressions/inheritedDefaultDeclarationMetadata.kt
-regressions/inheritedMemberDefaultAcrossFiles.kt
 regressions/inlineAnonymousObjectAcrossFiles.kt
 regressions/inlineCallsInInitializerLambda.kt
 regressions/inlineCrossinlineLambdaAcrossFiles.kt
@@ -2273,7 +2259,6 @@ regressions/rangeEqualityThroughProgression.kt
 regressions/referenceArrayStoreEvaluatesValueBeforeBoundsCheck.kt
 regressions/rigid.kt
 regressions/runtimeArrayListInterfaceTests.kt
-regressions/runtimeExceptionConstructors.kt
 regressions/safeCallLambdaImplicitLabel.kt
 regressions/samConvertedReference.kt
 regressions/scalarTypeTests.kt
@@ -2364,8 +2349,6 @@ secondaryConstructors/enums.kt
 secondaryConstructors/localClasses.kt
 serialization/deserializedMembers.kt
 serialization/serializedDefaultArgs.kt
-smartCasts/avoidSmartCastToDerivedForPrivate.kt
-smartCasts/falseSmartCast.kt
 smartCasts/genericSet.kt
 smartCasts/implicitMemberReceiver.kt
 smartCasts/invokeRecieverSmartcastK2.kt
@@ -2404,7 +2387,6 @@ super/kt3492ClassFun.kt
 super/kt3492ClassProperty.kt
 super/kt3492TraitFun.kt
 super/kt3492TraitProperty.kt
-super/superCallToNonGenericImplThroughGenericDefaultImpls.kt
 super/superConstructor/kt18356_2.kt
 super/superConstructor/objectExtendsInner.kt
 super/superConstructor/objectExtendsLocalInner.kt
@@ -2435,20 +2417,13 @@ syntheticAccessors/protectedMemberReferenceAccessor/kt46597_crossinline_method.k
 syntheticAccessors/protectedMemberReferenceAccessor/kt46597_crossinline_property.kt
 syntheticAccessors/protectedMemberReferenceAccessor/kt46597_method.kt
 syntheticAccessors/superCallFromMultipleSubclasses.kt
-traits/diamondPropertyAccessors.kt
-traits/doubleDiamond.kt
 traits/doubleGenericDiamond.kt
-traits/indirectlyInheritPropertyGetter.kt
 traits/interfaceWithNonAbstractFunIndirect.kt
 traits/interfaceWithNonAbstractFunIndirectGeneric.kt
 traits/kt2399.kt
-traits/kt5393.kt
-traits/kt5393_property.kt
 traits/multiple.kt
 traits/receiverOfIntersectionType.kt
 traits/traitImplDelegationWithCovariantOverride.kt
-traits/traitImplDiamond.kt
-traits/traitImplGenericDelegation.kt
 traits/traitWithPrivateExtension.kt
 traits/traitWithPrivateMember.kt
 traits/traitWithPrivateMemberAccessFromLambda.kt

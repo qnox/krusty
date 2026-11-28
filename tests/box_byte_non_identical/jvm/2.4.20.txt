@@ -107,7 +107,6 @@ boxingOptimization/kt5844.kt
 boxingOptimization/safeCallWithElvis.kt
 boxingOptimization/safeCallWithElvisMultipleFiles.kt
 boxingOptimization/unsignedArrayForEach.kt
-branching/when_with_try1.kt
 bridges/delegationComplex.kt
 bridges/delegationComplexWithList.kt
 bridges/fakeCovariantOverride.kt
@@ -2237,7 +2236,6 @@ regressions/propertySmartCastKeepsDeclaredType.kt
 regressions/rangeEqualityThroughProgression.kt
 regressions/referenceArrayStoreEvaluatesValueBeforeBoundsCheck.kt
 regressions/runtimeArrayListInterfaceTests.kt
-regressions/runtimeExceptionConstructors.kt
 regressions/safeCallLambdaImplicitLabel.kt
 regressions/samConvertedReference.kt
 regressions/scalarTypeTests.kt
@@ -2326,8 +2324,6 @@ secondaryConstructors/enums.kt
 secondaryConstructors/localClasses.kt
 serialization/deserializedMembers.kt
 serialization/serializedDefaultArgs.kt
-smartCasts/avoidSmartCastToDerivedForPrivate.kt
-smartCasts/falseSmartCast.kt
 smartCasts/genericSet.kt
 smartCasts/implicitMemberReceiver.kt
 smartCasts/invokeRecieverSmartcastK2.kt

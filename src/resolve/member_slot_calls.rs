@@ -266,11 +266,16 @@ impl Checker<'_> {
             }
         };
 
-        let selected_receiver = self
+        let unnarrowed = self.unnarrowed_member_receiver(scope, &tower_rung, rt, &selected);
+        match unnarrowed {
+            Some(declared) => self.unnarrowed_dispatch_calls.insert(call, declared),
+            None => self.unnarrowed_dispatch_calls.remove(&call),
+        };
+        let selected_receiver = unnarrowed
             // A type parameter's lookup receiver is its complete declared bound intersection;
             // `rt` remains the source value type so the ordinary no-projection case still records
             // that value unchanged.
-            .selected_intersection_member_receiver(member_receiver, &selected)
+            .or_else(|| self.selected_intersection_member_receiver(member_receiver, &selected))
             .unwrap_or(rt);
         let flow_result = tower_rung
             .explicit_receiver
