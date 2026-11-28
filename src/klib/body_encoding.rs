@@ -59,6 +59,12 @@ impl<'t> BodyEncoder<'t> {
         self.tables.body(body.canonical().into_bytes())
     }
 
+    /// The expression `expression` of `body`, as an entry of the body table.
+    pub(super) fn expression_body(&mut self, body: &FunctionBody, expression: BodyExprId) -> u32 {
+        let expression = self.expression(body, expression);
+        self.tables.body(expression.canonical().into_bytes())
+    }
+
     fn statement(&mut self, body: &FunctionBody, statement: &BodyStatement) -> Pb {
         let mut encoded = Pb::new();
         match statement {

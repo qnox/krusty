@@ -9,19 +9,19 @@
 
 use super::body_encoding::BodyEncoder;
 use super::body_tree::{
-    constructor_body, property_accessor, supported_type, BodyKind, BodyScope, BodyStatement,
-    CallTarget, FunctionBody, ValueRef,
+    constructor_body, expression_body, function_body, property_accessor, supported_type,
+    BodyExprId, BodyKind, BodyScope, BodyStatement, CallTarget, FunctionBody, ValueRef,
 };
 use super::inline_ir::{
     prepared_function, BodyFacts, Component, DeclarationSignatures, FileWriter, PreparedFunction,
     PreparedParameter,
 };
 use super::ir_tables::{
-    lattice, symbol, CLASS_SYMBOL, CONSTRUCTOR_SYMBOL, FIELD_SYMBOL, PROPERTY_SYMBOL,
-    RECEIVER_PARAMETER_SYMBOL, VALUE_PARAMETER_SYMBOL,
+    lattice, symbol, ANONYMOUS_INITIALIZER_SYMBOL, CLASS_SYMBOL, CONSTRUCTOR_SYMBOL, FIELD_SYMBOL,
+    PROPERTY_SYMBOL, RECEIVER_PARAMETER_SYMBOL, VALUE_PARAMETER_SYMBOL,
 };
 use crate::fir::ResolvedPropertyOverrideTarget;
-use crate::ir::{CtorDelegateTarget, IrClass, IrFile, IrLocalPropertyLayout, IrProperty};
+use crate::ir::{CtorDelegateTarget, IrClass, IrExpr, IrFile, IrLocalPropertyLayout, IrProperty};
 use crate::libraries::KlibDeclarationSignature;
 use crate::metadata::id_signature::{KlibAccessorIdSignature, KlibPublicIdSignature};
 use crate::metadata::protobuf::Pb;
@@ -44,6 +44,9 @@ enum PreparedMember {
     Constructor(PreparedConstructor),
     Property(Box<PreparedProperty>),
     Function(PreparedFunction),
+    /// An `init { … }` block's statements, which run in the primary constructor with `this`
+    /// and the primary constructor's parameters in scope.
+    Initializer(FunctionBody),
 }
 
 struct PreparedConstructor {
@@ -68,8 +71,15 @@ struct PreparedProperty {
 
 struct PreparedField {
     flags: u64,
-    /// The primary-constructor parameter the field is initialized from.
-    parameter: usize,
+    initializer: FieldInitializer,
+}
+
+enum FieldInitializer {
+    /// The primary-constructor parameter a constructor-declared property is initialized from.
+    Parameter(usize),
+    /// A body property's initializer expression, evaluated with `this` and the primary
+    /// constructor's parameters in scope.
+    Expression(FunctionBody, BodyExprId),
 }
 
 /// Every class of `classes`, or `None` when one has a declaration or a body this writer does not
@@ -116,31 +126,51 @@ fn prepared_class(
     {
         return None;
     }
+    // Property initializers and `init` blocks see `this` and the primary constructor's
+    // parameters, as the primary constructor's own body does.
     let slots = std::iter::once(self_type)
         .chain(primary_parameters.iter().map(|(_, ty)| *ty))
         .collect::<Vec<_>>();
     let scope = body_scope(ir, declarations, facts, &slots);
-    let super_target = superclass_constructor(&scope, class)?;
-    members.push(PreparedMember::Constructor(PreparedConstructor {
-        signature: public(super::body_tree::constructor_target(
-            &scope,
-            class.fq_name,
-            crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
-        )?)?,
-        flags: (record.primary_constructor_flags() & VISIBILITY_BITS) | PRIMARY_CONSTRUCTOR,
-        parameters: primary_parameters.clone(),
-        primary: true,
-        body: constructor_body(&scope, super_target, &class.super_args, Some(class.fq_name))?,
-    }));
+    if class.is_interface {
+        if !primary_parameters.is_empty() || !class.secondary_ctors.is_empty() {
+            return None;
+        }
+    } else {
+        let super_target = superclass_constructor(&scope, class)?;
+        // An object's constructor is private, so no other module names it; it is nullary.
+        let signature = if class.is_object {
+            nullary_constructor(&signature, &class_name(class)?)
+        } else {
+            public(super::body_tree::constructor_target(
+                &scope,
+                class.fq_name,
+                crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+            )?)?
+        };
+        members.push(PreparedMember::Constructor(PreparedConstructor {
+            signature,
+            flags: (record.primary_constructor_flags() & VISIBILITY_BITS) | PRIMARY_CONSTRUCTOR,
+            parameters: primary_parameters.clone(),
+            primary: true,
+            body: constructor_body(&scope, super_target, &class.super_args, Some(class.fq_name))?,
+        }));
+    }
     let mut body_members = Vec::new();
     for (index, property) in class.properties.iter().enumerate() {
-        let prepared = prepared_property(ir, file_name, class, index, property, facts)?;
-        let parameter = prepared.field.parameter;
+        let prepared = prepared_property(ir, file_name, class, index, property, &scope, facts)?;
+        let parameter = match prepared.field.initializer {
+            FieldInitializer::Parameter(parameter) => Some(parameter),
+            FieldInitializer::Expression(..) => None,
+        };
         body_members.push((
-            None,
-            Some(parameter),
+            parameter.is_none().then_some(property.source_order),
+            parameter,
             PreparedMember::Property(Box::new(prepared)),
         ));
+    }
+    for (order, body) in initializers(ir, class, &scope)? {
+        body_members.push((Some(order), None, PreparedMember::Initializer(body)));
     }
     for (ordinal, constructor) in class.secondary_ctors.iter().enumerate() {
         if !constructor.prefix_params.is_empty()
@@ -226,7 +256,7 @@ fn prepared_class(
         name: class_name(class)?,
         flags: crate::metadata::declaration_flags::class_flags(ir, class),
         self_type,
-        supertypes: supertypes(class),
+        supertypes: supertypes(class)?,
         members,
     })
 }
@@ -258,9 +288,7 @@ fn ordinary_class(class: &IrClass) -> bool {
             class.declaration_context,
             Some(crate::ir::IrClassDeclarationContext::TopLevel)
         )
-        && !(class.is_interface
-            || class.is_object
-            || class.is_companion
+        && !(class.is_companion
             || class.is_enum
             || class.is_enum_entry
             || class.is_annotation
@@ -271,20 +299,17 @@ fn ordinary_class(class: &IrClass) -> bool {
             || class.is_local_class
             || class.is_anonymous_object
             || class.is_script
-            || class.is_sealed
-            || class.is_abstract)
+            || class.is_sealed)
         && class.type_params.is_empty()
         && class.captured_type_params.is_empty()
-        && class.interfaces.is_empty()
         && class.companion_class.is_none()
         && class.published_nested_classifiers.is_empty()
         && !class.applied_annotations.declares_annotations()
-        && class.init_body.is_none()
         && !class.explicit_param_stores
         && class.pre_super_param_fields.is_empty()
         && class.super_arg_prelude.is_empty()
         && class.constructor_prefix_count == 0
-        && class.has_primary_ctor
+        && (class.has_primary_ctor || class.is_interface)
         && class.bridges.is_empty()
         && class.installed_interface_overrides.is_empty()
         && class.lambda.is_none()
@@ -298,8 +323,63 @@ fn ordinary_class(class: &IrClass) -> bool {
                 && argument.capture.is_none()
                 && argument.type_param.is_none()
         })
-        && class.fields.len() == class.ctor_args.len()
-        && class.properties.len() == class.ctor_args.len()
+        && class.fields.len() == class.properties.len()
+}
+
+/// The `init { … }` blocks of `class` with their source order, once each statement of its
+/// initialization is either a body property's initializer or one of those blocks. `None` for any
+/// other statement.
+fn initializers(
+    ir: &IrFile,
+    class: &IrClass,
+    scope: &BodyScope<'_>,
+) -> Option<Vec<(u32, FunctionBody)>> {
+    let Some(body) = class.init_body else {
+        return class
+            .properties
+            .iter()
+            .all(|property| property.initializer.is_none())
+            .then(Vec::new);
+    };
+    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
+        return None;
+    };
+    let class_id = ir.class_id_by_name(class.fq_name)?;
+    let mut blocks = Vec::new();
+    let mut initialized = 0;
+    for &statement in stmts {
+        let initializes_property = match ir.expr(statement) {
+            IrExpr::SetField {
+                receiver,
+                class: owner,
+                index,
+                value,
+            } => {
+                *owner == class_id
+                    && matches!(ir.expr(*receiver), IrExpr::GetValue(0))
+                    && class.properties.iter().any(|property| {
+                        property.initializer == Some(*value)
+                            && property.backing_field == Some(*index)
+                    })
+            }
+            _ => false,
+        };
+        if initializes_property {
+            initialized += 1;
+            continue;
+        }
+        let initializer = ir
+            .checked_class_initializers
+            .iter()
+            .find(|initializer| initializer.class == class_id && initializer.body == statement)?;
+        blocks.push((initializer.source_order, function_body(scope, statement)?));
+    }
+    let declared = class
+        .properties
+        .iter()
+        .filter(|property| property.initializer.is_some())
+        .count();
+    (initialized == declared).then_some(blocks)
 }
 
 fn class_name(class: &IrClass) -> Option<String> {
@@ -309,9 +389,16 @@ fn class_name(class: &IrClass) -> Option<String> {
     }
 }
 
-/// The supertypes Kotlin records: the superclass, or `kotlin.Any` when the class names none.
-fn supertypes(class: &IrClass) -> Vec<Ty> {
-    vec![Ty::obj_name(class.superclass)]
+/// The supertypes Kotlin records: the ones the class names, or `kotlin.Any` when it names none.
+/// `None` when it names both a superclass and an interface, whose source order common IR keeps
+/// only in its supertype list.
+fn supertypes(class: &IrClass) -> Option<Vec<Ty>> {
+    let superclass = !class.superclass.matches("kotlin/Any");
+    match (superclass, class.interfaces.is_empty()) {
+        (_, true) => Some(vec![Ty::obj_name(class.superclass)]),
+        (false, false) => Some(class.interfaces.iter().map(Ty::obj_name).collect()),
+        (true, false) => None,
+    }
 }
 
 /// The superclass constructor a constructor of `class` delegates to.
@@ -328,20 +415,27 @@ fn superclass_constructor(scope: &BodyScope<'_>, class: &IrClass) -> Option<Call
 }
 
 fn any_constructor() -> KlibPublicIdSignature {
+    nullary_constructor(
+        &KlibPublicIdSignature::classifier("kotlin/Any".into()),
+        "Any",
+    )
+}
+
+/// The nullary constructor of the top-level, non-generic class `class` named `name`.
+fn nullary_constructor(class: &KlibPublicIdSignature, name: &str) -> KlibPublicIdSignature {
     use crate::metadata::id_signature::{
         callable_signature, CallableShape, ClassScope, DeclarationContainer, Placement,
     };
     use crate::metadata::semantic::KotlinType;
 
-    let package = ["kotlin".to_owned()];
     let classes = [ClassScope::<KotlinType> {
-        name: "Any",
+        name,
         type_parameters: Vec::new(),
         expect: false,
     }];
     callable_signature(
         DeclarationContainer {
-            package: &package,
+            package: class.package().segments(),
             classes: &classes,
             native_interop_library: false,
         },
@@ -356,7 +450,7 @@ fn any_constructor() -> KlibPublicIdSignature {
             placement: Placement::Ordinary,
         },
     )
-    .expect("Any has an empty signable constructor")
+    .expect("a nullary constructor of a non-generic class is signable")
 }
 
 fn public(target: CallTarget) -> Option<KlibPublicIdSignature> {
@@ -374,6 +468,7 @@ fn prepared_property(
     class: &IrClass,
     index: usize,
     property: &IrProperty,
+    scope: &BodyScope<'_>,
     facts: &BodyFacts<'_>,
 ) -> Option<PreparedProperty> {
     let modifiers = &property.modifiers;
@@ -383,7 +478,6 @@ fn prepared_property(
         || modifiers.lateinit
         || property.getter.is_some()
         || property.setter.is_some()
-        || property.initializer.is_some()
         || property.storage_ty.is_some()
         || property.delegate_field.is_some()
         || property.has_constant_initializer
@@ -401,7 +495,15 @@ fn prepared_property(
     let parameter = class
         .ctor_args
         .iter()
-        .position(|argument| argument.field_index == Some(field))?;
+        .position(|argument| argument.field_index == Some(field));
+    let initializer = match (parameter, property.initializer) {
+        (Some(parameter), None) => FieldInitializer::Parameter(parameter),
+        (None, Some(initializer)) => {
+            let (body, expression) = expression_body(scope, initializer)?;
+            FieldInitializer::Expression(body, expression)
+        }
+        _ => return None,
+    };
     let id = ir
         .local_property_layouts
         .iter()
@@ -481,7 +583,7 @@ fn prepared_property(
         type_parameters: Vec::new(),
         overridden,
         source_order: None,
-        body,
+        body: Some(body),
     };
     let getter = accessor_function(
         getter_signature,
@@ -529,7 +631,7 @@ fn prepared_property(
         field: PreparedField {
             // A backing field is private, and final unless its property is a `var`.
             flags: (1 << 1) | ((1 - is_var) << 4),
-            parameter,
+            initializer,
         },
         getter,
         setter,
@@ -650,10 +752,15 @@ impl<'w> ClassWriter<'w> {
                     this_symbol,
                     &mut primary_parameters,
                 ),
-                PreparedMember::Property(property) => self.property(property, &primary_parameters),
+                PreparedMember::Property(property) => {
+                    self.property(property, this_symbol, &primary_parameters)
+                }
                 PreparedMember::Function(function) => {
                     let (_, declaration) = self.writer.function(function, Component::Main);
                     declaration
+                }
+                PreparedMember::Initializer(body) => {
+                    self.initializer(body, this_symbol, &primary_parameters)
                 }
             };
             encoded.field_bytes(5, &member);
@@ -726,6 +833,7 @@ impl<'w> ClassWriter<'w> {
     fn property(
         &mut self,
         property: &PreparedProperty,
+        this_symbol: u64,
         primary_parameters: &[(u64, Ty)],
     ) -> Vec<u8> {
         let tables = &mut self.writer.tables;
@@ -745,18 +853,27 @@ impl<'w> ClassWriter<'w> {
         field_base.field_varint(2, u64::from(tables.string("PROPERTY_BACKING_FIELD")));
         field_base.field_varint(4, property.field.flags);
         let ty = tables.ty(property.ty, &[]);
-        let (parameter_symbol, parameter_ty) = primary_parameters[property.field.parameter];
-        // The field's initializer reads the primary-constructor parameter that declares it.
-        let mut read = Pb::new();
-        read.field_varint(1, parameter_symbol);
-        read.field_varint(
-            2,
-            u64::from(tables.string("INITIALIZE_PROPERTY_FROM_PARAMETER")),
-        );
-        let mut initializer = Pb::new();
-        initializer.field_varint(2, u64::from(tables.ty(parameter_ty, &[])));
-        initializer.field_message(6, &read);
-        let initializer = tables.body(initializer.canonical().into_bytes());
+        let initializer = match &property.field.initializer {
+            FieldInitializer::Parameter(parameter) => {
+                let (parameter_symbol, parameter_ty) = primary_parameters[*parameter];
+                // The field's initializer reads the primary-constructor parameter that declares it.
+                let mut read = Pb::new();
+                read.field_varint(1, parameter_symbol);
+                read.field_varint(
+                    2,
+                    u64::from(tables.string("INITIALIZE_PROPERTY_FROM_PARAMETER")),
+                );
+                let mut initializer = Pb::new();
+                initializer.field_varint(2, u64::from(tables.ty(parameter_ty, &[])));
+                initializer.field_message(6, &read);
+                tables.body(initializer.canonical().into_bytes())
+            }
+            FieldInitializer::Expression(body, expression) => {
+                let slots = initializer_slots(this_symbol, primary_parameters);
+                BodyEncoder::new(tables, this_symbol, &slots, &[])
+                    .expression_body(body, *expression)
+            }
+        };
         let mut field = Pb::new();
         field.field_message(1, &field_base);
         field.field_varint(2, lattice(name, ty));
@@ -775,4 +892,34 @@ impl<'w> ClassWriter<'w> {
         declaration.field_message(7, &encoded);
         declaration.canonical().into_bytes()
     }
+
+    /// An `init { … }` block as an `IrAnonymousInit`.
+    fn initializer(
+        &mut self,
+        body: &FunctionBody,
+        this_symbol: u64,
+        primary_parameters: &[(u64, Ty)],
+    ) -> Vec<u8> {
+        let tables = &mut self.writer.tables;
+        let declaration_symbol = symbol(tables.local_signature(), ANONYMOUS_INITIALIZER_SYMBOL);
+        let mut base = Pb::new();
+        base.field_varint(1, declaration_symbol);
+        base.field_varint(2, u64::from(tables.string("DEFINED")));
+        let slots = initializer_slots(this_symbol, primary_parameters);
+        let body = BodyEncoder::new(tables, declaration_symbol, &slots, &[]).block_body(body);
+        let mut encoded = Pb::new();
+        encoded.field_message(1, &base);
+        encoded.field_varint(2, u64::from(body));
+        let mut declaration = Pb::new();
+        declaration.field_message(1, &encoded);
+        declaration.canonical().into_bytes()
+    }
+}
+
+/// The value slots of a property initializer or an `init` block: the class's `this` receiver,
+/// then the primary constructor's parameters.
+fn initializer_slots(this_symbol: u64, primary_parameters: &[(u64, Ty)]) -> Vec<u64> {
+    std::iter::once(this_symbol)
+        .chain(primary_parameters.iter().map(|(symbol, _)| *symbol))
+        .collect()
 }

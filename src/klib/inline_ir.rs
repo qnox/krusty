@@ -72,7 +72,8 @@ pub(super) struct PreparedFunction {
     pub(super) overridden: Vec<CallTarget>,
     /// The declaration's place among its file's declarations, shared with classes.
     pub(super) source_order: Option<u32>,
-    pub(super) body: FunctionBody,
+    /// `None` for an abstract member.
+    pub(super) body: Option<FunctionBody>,
 }
 
 #[derive(Clone)]
@@ -199,18 +200,23 @@ pub(super) fn prepared_function(
         .copied()
         .chain(generic.params.iter().copied())
         .collect::<Vec<_>>();
-    let body = super::body_tree::function_body(
-        &BodyScope {
-            ir,
-            declarations,
-            callables: facts.callables,
-            builtins: facts.builtins,
-            exports: facts.exports,
-            parameters: &slots,
-            type_parameters: &generic.type_params,
-        },
-        declaration.body?,
-    )?;
+    // A member without a body is abstract; any other function writes its body.
+    let body = match declaration.body {
+        Some(body) => Some(super::body_tree::function_body(
+            &BodyScope {
+                ir,
+                declarations,
+                callables: facts.callables,
+                builtins: facts.builtins,
+                exports: facts.exports,
+                parameters: &slots,
+                type_parameters: &generic.type_params,
+            },
+            body,
+        )?),
+        None if dispatch_receiver.is_some() && !inline => None,
+        None => return None,
+    };
     let identities = ir.function_parameter_identities(function)?;
     if identities.len() != generic.params.len() || generic.params.len() != declaration.params.len()
     {
@@ -786,13 +792,15 @@ impl FileWriter {
             }
             physical += 1;
         }
-        let body = self.body(
-            function,
-            declaration_symbol,
-            &parameter_symbols,
-            &type_parameters,
-        );
-        function_base.field_varint(7, u64::from(body));
+        if let Some(body) = &function.body {
+            let body = self.body(
+                body,
+                declaration_symbol,
+                &parameter_symbols,
+                &type_parameters,
+            );
+            function_base.field_varint(7, u64::from(body));
+        }
         let mut function_wrapper = Pb::new();
         function_wrapper.field_message(1, &function_base);
         let overridden = function
@@ -888,7 +896,7 @@ impl FileWriter {
 
     fn body(
         &mut self,
-        function: &PreparedFunction,
+        body: &FunctionBody,
         declaration: u64,
         values: &[u64],
         parameters: &[(usize, &PreparedTypeParameter, u64)],
@@ -897,7 +905,7 @@ impl FileWriter {
             .iter()
             .map(|(_, parameter, symbol)| (parameter.ty, *symbol))
             .collect::<Vec<_>>();
-        BodyEncoder::new(&mut self.tables, declaration, values, &scope).block_body(&function.body)
+        BodyEncoder::new(&mut self.tables, declaration, values, &scope).block_body(body)
     }
 
     fn ty(&mut self, ty: Ty, parameters: &[(usize, &PreparedTypeParameter, u64)]) -> u32 {
@@ -1148,7 +1156,7 @@ mod tests {
                 }],
                 overridden: Vec::new(),
                 source_order: None,
-                body: returning(|body| {
+                body: Some(returning(|body| {
                     let argument = body.push(
                         Ty::nullable(Ty::obj("kotlin/Any")),
                         BodyKind::GetValue(ValueRef::Parameter(0)),
@@ -1161,7 +1169,7 @@ mod tests {
                             argument,
                         },
                     )
-                }),
+                })),
             },
             signature,
         )
@@ -1547,7 +1555,7 @@ mod tests {
             function.parameters[0].ty = Ty::obj("kotlin/Any");
             function.parameters[0].default_null = false;
             function.result = Ty::obj("kotlin/Any");
-            function.body = body;
+            function.body = Some(body);
             let artifacts = artifacts(&[function], Some(&fixture_main()));
             assert!(
                 artifacts

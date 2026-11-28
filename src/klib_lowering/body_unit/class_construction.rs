@@ -1003,9 +1003,7 @@ impl<'u, 's> Linker<'u, 's> {
             );
             // An interface default is declared with the class only when a call reaches it; one
             // nothing calls has no frozen declaration, and nothing dispatches to it.
-            let reached_default = !from_class
-                && contract.kind == crate::libraries::TypeKind::Object
-                && self.sources.callees.is_object_default(body);
+            let reached_default = !from_class && self.sources.callees.is_object_default(body);
             if (from_class || reached_default) && self.declared_member(body).is_none() {
                 if let Some(KlibCalleeFact::Selected(callables)) = self.sources.callees.get(body) {
                     let selected = callables[0];

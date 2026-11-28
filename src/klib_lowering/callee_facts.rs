@@ -559,6 +559,29 @@ impl<'a> KlibCalleeFacts<'a> {
         super::class_initialization::object_inherited_defaults(class, bodies, self)
     }
 
+    /// The interface defaults the class `identity` constructs inherits, with what each implements.
+    pub(crate) fn constructor_inherited_defaults(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+    ) -> Result<
+        Vec<super::class_initialization::InheritedDefault>,
+        super::decline::KlibBodyDeclineReason,
+    > {
+        match self.get(identity) {
+            Some(KlibCalleeFact::Selected(callables)) => {
+                super::class_initialization::constructor_inherited_defaults(
+                    callables[0],
+                    bodies,
+                    self,
+                )
+            }
+            _ => Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                "an initializer has no unique selected constructor declaration".to_owned(),
+            )),
+        }
+    }
+
     /// The declarations the overrides of the object or enum class `class` override.
     pub(crate) fn declared_instances_overridden_declarations(
         &self,

@@ -15,6 +15,7 @@ pub(super) const FIELD_SYMBOL: u64 = 3;
 pub(super) const VALUE_PARAMETER_SYMBOL: u64 = 4;
 pub(super) const CLASS_SYMBOL: u64 = 6;
 pub(super) const TYPE_PARAMETER_SYMBOL: u64 = 7;
+pub(super) const ANONYMOUS_INITIALIZER_SYMBOL: u64 = 9;
 pub(super) const RECEIVER_PARAMETER_SYMBOL: u64 = 11;
 pub(super) const PROPERTY_SYMBOL: u64 = 12;
 
